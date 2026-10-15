@@ -1,9 +1,12 @@
 """Canonical plan/mail readers, dispatcher receipts and read-only HTTP behavior."""
 
+import builtins
 import json
 import os
 import subprocess
+import sys
 import threading
+from contextlib import contextmanager
 from http.client import HTTPConnection
 from pathlib import Path
 
@@ -12,6 +15,7 @@ from tests.python.core.planning_support import publication_evidence
 
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.plan_store import PHASES, PlanStore
+from codex_harness.core.record_io import read_record_json, write_record_json
 from codex_harness.core.status_api import snapshot
 from codex_harness.core.status_server import create_server
 
@@ -20,6 +24,131 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" 
 
 def _mtimes(root):
     return {str(path): path.stat().st_mtime_ns for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows participating-reader serialization contract")
+@pytest.mark.parametrize("target_kind", ["request", "canonical-run", "flat-run"])
+def test_snapshot_record_reader_serializes_actual_cross_process_publication(
+    tmp_path, monkeypatch, target_kind
+):
+    run = tmp_path / "runs" / "concurrent"
+    attempt = run / "evidence" / "A" / "attempt"
+    attempt.mkdir(parents=True)
+    request = {
+        "status": "launching",
+        "startedAt": "2026-01-01T00:00:00+00:00",
+        "requirementId": "fixture-A",
+        "runId": "concurrent",
+        "bead": "A",
+    }
+    write_record_json(attempt / "request.json", request)
+    for name in ("events.jsonl", "stderr.txt"):
+        (attempt / name).write_bytes(b"")
+    record = {
+        "runId": "concurrent",
+        "status": "running",
+        "beads": {
+            "A": {
+                "status": "running",
+                "provider": "local-fixture",
+                "evidenceDir": str(attempt.parent),
+            }
+        },
+    }
+    run_path = run / "run.json" if target_kind == "flat-run" else run / "evidence" / "run.json"
+    write_record_json(run_path, record)
+    target = attempt / "request.json" if target_kind == "request" else run_path
+    publication = {**(request if target_kind == "request" else record), "writerMarker": "published"}
+    opened, release = threading.Event(), threading.Event()
+    observations, errors = [], []
+    original_open = builtins.open
+
+    @contextmanager
+    def held_handle(stream):
+        with stream:
+            opened.set()
+            if not release.wait(4):
+                raise TimeoutError("Test reader barrier was not released")
+            yield stream
+
+    def instrumented_open(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        if (
+            threading.current_thread().name == "snapshot-reader"
+            and Path(path).resolve() == target.resolve()
+        ):
+            return held_handle(stream)
+        return stream
+
+    # Both old Path.open/io.open and the frozen helper's built-in open hit the
+    # same barrier AFTER the real handle opens; publication is a separate process.
+    monkeypatch.setattr("builtins.open", instrumented_open)
+    monkeypatch.setattr("io.open", instrumented_open)
+
+    def read_snapshot():
+        try:
+            observations.append(snapshot(runs_root=tmp_path / "runs"))
+        except Exception as error:
+            errors.append(error)
+
+    reader = threading.Thread(target=read_snapshot, name="snapshot-reader")
+    reader.start()
+    writer = None
+    blocked = False
+    try:
+        assert opened.wait(4), "Supported snapshot path never opened the target record"
+        writer = subprocess.Popen(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "import json,sys; from codex_harness.core.record_io import write_record_json; "
+                "print('writer-ready',flush=True); "
+                "write_record_json(sys.argv[1],json.loads(sys.argv[2])); "
+                "print('writer-done',flush=True)",
+                str(target),
+                json.dumps(publication),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        assert writer.stdout.readline().strip() == "writer-ready"
+        try:
+            writer.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            blocked = True
+    finally:
+        release.set()
+        reader.join(timeout=6)
+        if writer is not None:
+            output, error_output = writer.communicate(timeout=6)
+    assert not reader.is_alive() and not errors
+    assert blocked, f"Writer did not serialize: exit={writer.returncode}; {error_output}"
+    assert writer.returncode == 0, error_output
+    assert "writer-done" in output
+    assert read_record_json(target)["writerMarker"] == "published"
+    assert observations[0]["runs"][0]["beads"][0]["status"] == "running"
+    assert observations[0]["runs"][0]["beads"][0]["activity"]["processLiveness"] == "unknown"
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, TimeoutError])
+def test_run_record_reader_refusal_stays_unavailable_without_fallback(
+    tmp_path, monkeypatch, error_type
+):
+    run = tmp_path / "runs" / "refused"
+    (run / "evidence").mkdir(parents=True)
+    write_record_json(run / "evidence" / "run.json", {"runId": "refused", "beads": {}})
+    before = _mtimes(tmp_path)
+
+    def refused(path):
+        raise error_type("Injected publication/read refusal")
+
+    monkeypatch.setattr("codex_harness.core.status_api.read_record_json", refused)
+    report = snapshot(runs_root=tmp_path / "runs")
+    assert report["runs"] == [{"runId": "refused", "status": "unavailable", "current": True}]
+    assert _mtimes(tmp_path) == before
 
 
 def test_attempt_activity_current_agent_observes_quiet_without_claiming_liveness(tmp_path):

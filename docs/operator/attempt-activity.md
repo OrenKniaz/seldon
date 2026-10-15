@@ -2,10 +2,19 @@
 
 `observe_attempt_activity(attempt_dir, *, now=None, no_progress_seconds=300)`
 reads the existing canonical request/result and output-file metadata. It creates
-nothing, queries no PID/process list, launches nothing, and performs no recovery.
+no files or planning state, queries no PID/process list, launches nothing, and performs no recovery.
 The status API confines these reads to the run's canonical evidence root. JSON
 records are bounded to 1 MiB; oversized, changing, malformed or unavailable
 records are unobservable. No prompts, stream contents or credentials are returned.
+
+Request/result reads participate in the frozen `record_io.open_record_read`
+contract; canonical and flat run JSON reads use `read_record_json`. Participating
+Windows readers and writers serialize before opening using a session-local
+named mutex with a five-second bound. POSIX retains ordinary atomic-replacement
+behavior. No ACL changes, permission bypass, I/O retry or fallback is added;
+permission refusals/timeouts remain unknown/unavailable. Nonparticipating readers
+can still interfere with publication. This does not make the entire multi-record
+status snapshot atomic or establish live process/cleanup proof.
 
 Each run bead gains `activity`: `state`, `recordedStatus`, nullable `isTerminal`,
 `processLiveness`, nullable `lastObservedActivityAt` and `secondsSinceActivity`,

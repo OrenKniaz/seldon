@@ -12,6 +12,7 @@ from pathlib import Path
 from codex_harness.core.attempt_activity import observe_attempt_activity
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PHASES, PlanStore
+from codex_harness.core.record_io import read_record_json
 from codex_harness.core.roundtable import findings
 from codex_harness.core.spine import SpineError
 from codex_harness.core.spine_diagrams import diagram
@@ -281,7 +282,7 @@ def _message_body(body):
 
 
 def _run(path, dependencies=None, published=None):
-    record = json.loads(path.read_text(encoding="utf-8"))
+    record = read_record_json(path)
     result = {
         key: record.get(key, UNAVAILABLE)
         for key in (

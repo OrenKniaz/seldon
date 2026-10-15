@@ -11,12 +11,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-from codex_harness.core import efficiency, graph, worker_packet
+from codex_harness.core import attempt_control, efficiency, graph, worker_packet
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.memory_promotion import (
     PromotionEvidence,
@@ -25,6 +26,7 @@ from codex_harness.core.memory_promotion import (
     promote_lesson,
 )
 from codex_harness.core.provider_launch import get_adapter
+from codex_harness.core.record_io import read_record_json, write_record_json
 from codex_harness.core.runners import resolve_runner
 from codex_harness.core.spine import requirement_file_sources
 
@@ -456,7 +458,7 @@ def _hold_permission_guard(record: dict, attempt_dir: Path) -> bool:
     result_path = attempt_dir / "result.json"
     saved = {}
     if result_path.is_file():
-        saved = json.loads(result_path.read_text(encoding="utf-8"))
+        saved = read_record_json(result_path)
         guards.append(saved.get("permissionGuard"))
     observations = (record, attempt, saved)
     did_run_provider = any(item.get("didRunProvider") is True for item in observations)
@@ -550,7 +552,8 @@ def _run_provider(
         name: effective_environment.get(name)
         for name in ("CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_CI")
     }
-    for planned in requirement_requests.values():
+    for requirement, planned in requirement_requests.items():
+        (attempt_dir / requirement).mkdir(exist_ok=True)
         planned["environmentIndicators"] = request["environmentIndicators"]
         planned["denialCapabilities"] = dict(DENIAL_CAPABILITIES)
     _write_record(attempt_dir / "request.json", request)
@@ -584,18 +587,42 @@ def _run_provider(
             "isLiveProductProof": False,
         }
         return _save_attempt_result(attempt_dir, request, requirement_requests, result, None, None)
-    request["processId"] = process.pid
-    _write_record(attempt_dir / "request.json", request)
-    for requirement, planned in requirement_requests.items():
-        directory = attempt_dir / requirement
-        directory.mkdir(exist_ok=True)
-        planned["processId"] = process.pid
-        _write_record(directory / "request.json", planned)
     timed_out = False
+    cancellation = None
     failure = None
     cleanup = {"status": "NOT_REQUESTED", "errors": []}
+    publication_path = attempt_dir / "request.json"
+    failed_request_publication = False
+    request["processId"] = process.pid
     try:
-        process.wait(timeout=timeout)
+        # Every post-spawn operation remains inside ownership of the live child.
+        _write_record(publication_path, request)
+        for requirement, planned in requirement_requests.items():
+            directory = attempt_dir / requirement
+            planned["processId"] = process.pid
+            publication_path = directory / "request.json"
+            _write_record(publication_path, planned)
+        publication_path = None
+        deadline = time.monotonic() + timeout
+        while process.poll() is None:
+            cancellation = attempt_control.consume_cancel(
+                process, attempt_dir, request, cleanup=cleanup
+            )
+            if cancellation and "cleanup" in cancellation:
+                cleanup = cancellation["cleanup"]
+            if cancellation and cancellation["status"] == "cancelled":
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(launch.command, timeout)
+            try:
+                process.wait(timeout=min(0.2, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+        if cancellation is None:
+            cancellation = attempt_control.consume_cancel(
+                process, attempt_dir, request, cleanup=cleanup
+            )
     except subprocess.TimeoutExpired as error:
         timed_out = True
         failure = {"type": type(error).__name__, "timeoutSeconds": error.timeout}
@@ -624,9 +651,14 @@ def _run_provider(
             cleanup["errors"].append(
                 {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
             )
-    except (OSError, subprocess.SubprocessError) as error:
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
         failure = {"type": type(error).__name__, "message": str(error)}
-        cleanup["status"] = "UNVERIFIED"
+        if publication_path is not None:
+            failure.update(stage="post-spawn-publication", path=str(publication_path))
+            failed_request_publication = True
+        else:
+            failure["stage"] = "attempt-control"
+        attempt_control.stop_owned(process, cleanup)
     cleanup["controllerProcessExited"] = process.poll() is not None
     streams = {}
     output_errors = []
@@ -647,7 +679,9 @@ def _run_provider(
         change_error = {"type": type(error).__name__, "message": str(error)}
     result = {
         **request,
-        "status": "timed-out"
+        "status": "cancelled"
+        if cancellation and cancellation["status"] == "cancelled"
+        else "timed-out"
         if timed_out
         else "observation-failed"
         if failure or output_error or change_error
@@ -658,15 +692,26 @@ def _run_provider(
         "changedPaths": changed,
         "failure": failure,
         "cleanup": cleanup,
+        "cancellation": cancellation,
         "outputCollectionError": output_error,
         "changeObservationError": change_error,
-        "outputComplete": failure is None and output_error is None,
+        "outputComplete": failure is None
+        and output_error is None
+        and not (cancellation and cancellation["status"] == "cancelled"),
         "didRunProvider": True,
         "isMocked": False,
         "didRunIntegratedValidation": False,
         "isLiveProductProof": False,
     }
-    return _save_attempt_result(attempt_dir, request, requirement_requests, result, stdout, stderr)
+    return _save_attempt_result(
+        attempt_dir,
+        request,
+        requirement_requests,
+        result,
+        stdout,
+        stderr,
+        update_requests=not failed_request_publication,
+    )
 
 
 def _save_attempt_result(
@@ -676,27 +721,35 @@ def _save_attempt_result(
     result: dict,
     stdout: bytes | None,
     stderr: bytes | None,
+    *,
+    update_requests: bool = True,
 ) -> dict:
     # CLI stdout is buffered telemetry, not an interceptable tool callback. Hold
     # at the first boundary we own; retain the exit code and raw events/results.
     holder = {"attempt": result}
     if _hold_permission_guard(holder, attempt_dir):
         result["statusBeforePermissionHold"] = result["status"]
-        result.update(status=holder["status"], permissionGuard=holder["permissionGuard"])
+        result["permissionGuard"] = holder["permissionGuard"]
+        # Cancellation is terminal control evidence, never clean completion.
+        # The bead/resume consumer still enforces the separate audit hold.
+        if result["status"] != "cancelled":
+            result["status"] = holder["status"]
     # Publish the result first: a crash must leave either a recoverable result
     # or a launching request, never a terminal request without its observation.
     _write_record(attempt_dir / "result.json", result)
-    request.update(status=result["status"], finishedAt=result["finishedAt"])
-    _write_record(attempt_dir / "request.json", request)
+    if update_requests:
+        request.update(status=result["status"], finishedAt=result["finishedAt"])
+        _write_record(attempt_dir / "request.json", request)
     # One process addressed all planned requirements. Bind each observation to
     # its pre-launch request, preserving the shared process and raw output.
     for requirement, planned in requirement_requests.items():
         directory = attempt_dir / requirement
         directory.mkdir(exist_ok=True)
-        planned.update(status=result["status"], finishedAt=result["finishedAt"])
-        _write_record(directory / "request.json", planned)
+        if update_requests:
+            planned.update(status=result["status"], finishedAt=result["finishedAt"])
+            _write_record(directory / "request.json", planned)
         bound_result = {**result, "requirementId": planned["requirementId"]}
-        (directory / "result.json").write_text(json.dumps(bound_result, indent=2), encoding="utf-8")
+        _write_record(directory / "result.json", bound_result)
         if stdout is not None:
             (directory / "events.jsonl").write_bytes(stdout)
         if stderr is not None:
@@ -736,9 +789,7 @@ def _validation_tool_rules(
 
 
 def _write_record(path: Path, record: dict) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    write_record_json(path, record)
 
 
 def _did_execute_real_provider(record: dict) -> bool:
@@ -793,7 +844,7 @@ def _attempt_bead(
         return record
     launch = None
     if attempt.get("recoverResult"):
-        result = json.loads((attempt_dir / "result.json").read_text(encoding="utf-8"))
+        result = read_record_json(attempt_dir / "result.json")
         attempt.update(result)
         record["didRunProvider"] = result["didRunProvider"]
     elif fake_worker is not None:
@@ -814,6 +865,8 @@ def _attempt_bead(
     if not attempt.get("recoverResult"):
         attempt_dir.mkdir()
         request = {
+            "runId": record["runId"],
+            "bead": record["bead"],
             "requirementId": f"{plan.name}-{record['bead']}:{'-'.join(bead['requirements'])}",
             "baseCommit": attempt["baseCommit"],
             "adapterCommit": _git(HARNESS_ROOT, "rev-parse", "HEAD"),
@@ -1128,7 +1181,7 @@ def run_plan(
     repo, evidence, memory = run_dir / "repo", run_dir / "evidence", run_dir / "memory-workspace"
     previous = None
     if resume_run_dir:
-        previous = json.loads((evidence / "run.json").read_text(encoding="utf-8"))
+        previous = read_record_json(evidence / "run.json")
         if (
             previous["plan"] != plan.name
             or Path(previous["repo"]).resolve() != repo
@@ -1143,6 +1196,7 @@ def run_plan(
         memory.mkdir()
     records = {
         bead_id: {
+            "runId": run_id,
             "bead": bead_id,
             "planRevision": plan.plan_revision,
             **_bead_refs(plan.beads[bead_id]),
@@ -1277,16 +1331,13 @@ def run_plan(
             old = previous["beads"].get(bead_id)
             if old is None:
                 continue
+            old_attempt = old.get("attempt") or {}
             old_evidence = Path(old.get("evidenceDir", evidence / bead_id))
             request_path, result_path = (
                 old_evidence / "attempt" / "request.json",
                 old_evidence / "attempt" / "result.json",
             )
-            request = (
-                json.loads(request_path.read_text(encoding="utf-8"))
-                if request_path.exists()
-                else {}
-            )
+            request = read_record_json(request_path) if request_path.exists() else {}
             uncertain = request.get("status") == "launching" and not result_path.exists()
             refs_match = _identity_refs(old) == _identity_refs(records[bead_id])
             # Explicit refs allow unaffected v2 beads to retain their original
@@ -1324,6 +1375,25 @@ def run_plan(
                         + str(old["permissionGuard"]["auditReason"]),
                     }
                 )
+            elif old_attempt.get("status") == "cancelled" or (
+                old_attempt.get("failure")
+                and old_attempt.get("cleanup", {}).get("stopMethod") == "owned-Popen.kill"
+            ):
+                cleanup = old_attempt.get("cleanup", {})
+                if bead_id not in retry_ids or cleanup.get("controllerProcessExited") is not True:
+                    records[bead_id] = old
+                    retained_failures.append(bead_id)
+                    record["resumeSummary"]["retained"].append(
+                        {
+                            "bead": bead_id,
+                            "reason": (
+                                "cancelled"
+                                if old_attempt.get("status") == "cancelled"
+                                else "interrupted"
+                            )
+                            + " attempt requires targeted retry and observed controller exit",
+                        }
+                    )
             elif uncertain and not relaunch_ambiguous:
                 records[bead_id] = old
                 old["status"] = "ambiguous launch"
@@ -1368,7 +1438,7 @@ def run_plan(
                 and old.get("planRevision") == plan.plan_revision
                 and refs_match
             ):
-                result = json.loads(result_path.read_text(encoding="utf-8"))
+                result = read_record_json(result_path)
                 if result["status"] == "exited" and result["exitCode"] == 0:
                     records[bead_id] = old
                     old.update(status="pending", evidenceDir=str(old_evidence))
@@ -1391,7 +1461,7 @@ def run_plan(
                 records[bead_id]["superseded"] = [*old.get("superseded", []), history]
                 for artifact in (request_path, result_path, old_evidence / "integrated.json"):
                     if artifact.exists():
-                        payload = json.loads(artifact.read_text(encoding="utf-8"))
+                        payload = read_record_json(artifact)
                         payload["disposition"] = "superseded"
                         _write_record(artifact, payload)
         for bead_id in retained_failures:
@@ -1570,7 +1640,7 @@ def run_plan(
                 if previous and not (current["attempt"] or {}).get("recoverResult"):
                     request_path = Path(current["evidenceDir"]) / "attempt" / "request.json"
                     if request_path.exists():
-                        request = json.loads(request_path.read_text(encoding="utf-8"))
+                        request = read_record_json(request_path)
                         if request.get("processId") or request.get("didLaunchMockAttempt"):
                             record["resumeSummary"]["redispatched"].append(bead_id)
                 current["finishedAt"] = _now()

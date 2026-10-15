@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from codex_harness.core.attempt_control import request_cancel
 from codex_harness.core.dispatch import STATUS_MOCK_ONLY, STATUS_VALIDATED, run_plan
 
 
@@ -18,6 +19,21 @@ def _mapping(value: str) -> tuple[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["cancel"]:
+        cancel = argparse.ArgumentParser(
+            description="Request cancellation of a selected live attempt."
+        )
+        cancel.add_argument("--run", type=Path, required=True)
+        cancel.add_argument("--bead", required=True)
+        cancel.add_argument("--started-at")
+        cancel.add_argument("--reason", default="operator cancellation")
+        selected = cancel.parse_args(argv[1:])
+        result = request_cancel(
+            selected.run, selected.bead, started_at=selected.started_at, reason=selected.reason
+        )
+        print(json.dumps({"status": "cancellation-requested", **result}, indent=2))
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)

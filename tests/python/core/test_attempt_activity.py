@@ -194,13 +194,16 @@ def test_partial_malformed_and_ambiguous_evidence_never_claims_running_or_stuck(
     assert observation["processLiveness"] == "unknown"
 
 
-def test_inaccessible_record_is_explicit_unknown_without_permissions_changes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error_type", [PermissionError, TimeoutError])
+def test_inaccessible_record_is_explicit_unknown_without_permissions_changes(
+    tmp_path, monkeypatch, error_type
+):
     attempt = tmp_path / "attempt"
     request(attempt)
 
     def unavailable(*args, **kwargs):
-        raise PermissionError("Injected unreadable record")
+        raise error_type("Injected unavailable record")
 
-    monkeypatch.setattr("pathlib.Path.open", unavailable)
+    monkeypatch.setattr("codex_harness.core.attempt_activity.open_record_read", unavailable)
     result = observe_attempt_activity(attempt)
-    assert result["stuck"] is None and "PermissionError" in result["reason"]
+    assert result["stuck"] is None and error_type.__name__ in result["reason"]

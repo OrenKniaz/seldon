@@ -8,6 +8,8 @@ import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
+from codex_harness.core.record_io import open_record_read
+
 TERMINAL_STATUSES = {"cancelled", "exited", "timed-out", "launch-failed", "observation-failed"}
 
 
@@ -34,7 +36,7 @@ def _record(root, name):
     before = path.stat()
     if not stat.S_ISREG(before.st_mode):
         raise ValueError("Attempt record is not a regular file")
-    with path.open("rb") as stream:
+    with open_record_read(path) as stream:
         data = stream.read(1024 * 1024 + 1)
     after = path.stat()
     if len(data) > 1024 * 1024 or (before.st_size, before.st_mtime_ns) != (
