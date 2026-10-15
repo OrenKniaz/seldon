@@ -2,12 +2,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-.venv/
-.p????????/
-.t????????/
-.codex-harness/
-state/
-work/
-dist/
-build/
+/.venv/
+/.codex-harness/
+/state/
+/work/
+/dist/
+/build/
 *.egg-info/
+
+# Keep short test/temp roots observable: acceptance fixtures may be non-Git products.

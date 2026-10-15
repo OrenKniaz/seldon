@@ -858,5 +858,14 @@
       "diagnostic": "fixtures/dogfood-watercli/template/watercli/cli.py:20: new blank line at EOF.",
       "disposition": "Preserved unchanged source fixture; no new whitespace introduced in generated metadata"
     }
-  ]
+  ],
+  "extractionMetadataRepair": {
+    "cause": "New ignore patterns hid plain product fixtures from inherited Git discovery",
+    "repair": "Remove test/temp-root ignore patterns; anchor generated runtime directories",
+    "sourceAndTestBlobsChanged": false,
+    "affectedExistingTests": "9 passed in 47.39s",
+    "diagnosisReceipt": "dot-seldon-ignore-regression-diagnosis-20261015.json",
+    "greenReceipt": "dot-seldon-affected-recheck-20261015.json",
+    "finalFullGate": "required before publication"
+  }
 }
