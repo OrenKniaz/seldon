@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from tests.python.core.planning_support import publication_evidence
 from tests.python.core.test_plan_store import draft_inputs, draft_intake, mock_catalog, mock_choice
+from tests.python.core.test_preflight import inject_mock_discovery
 
 from codex_harness.core.mcp_planner import PHASE_DIAGRAMS, TOOLS, PlannerServer
 from codex_harness.core.plan_store import PHASES, open_plan_store
@@ -16,6 +17,7 @@ from codex_harness.core.spine import MARKDOWN_FILES, load_spine
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
 EXPECTED_TOOLS = {
+    "harness_preflight",
     "harness_intake",
     "harness_reviewer_catalog",
     "harness_reviewer_choice",
@@ -128,6 +130,65 @@ def server(tmp_path):
 
 def start(server):
     return call(server, "harness_plan_start", idea="Split the bill fairly", name="tip-split")
+
+
+@pytest.mark.parametrize("existing_plan", [False, True])
+def test_preflight_protocol_never_opens_or_creates_plan(tmp_path, monkeypatch, existing_plan):
+    inject_mock_discovery(monkeypatch)
+    workspace = tmp_path if existing_plan else tmp_path / "absent" / "project"
+    if existing_plan:
+        with open_plan_store(workspace) as store:
+            store.upsert_node(
+                dict(
+                    id="V1",
+                    kind="vision",
+                    title="Existing plan",
+                    text="Intent",
+                    parents=[],
+                    fields={},
+                )
+            )
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Preflight must not invoke the normal status/store seam")
+
+    monkeypatch.setattr(PlannerServer, "_status", forbidden)
+    instance = PlannerServer(workspace)
+    try:
+        result = rpc(
+            instance,
+            "tools/call",
+            dict(name="harness_preflight", arguments={"providers": ["codex", "claude"]}),
+        )["result"]
+        assert not result["isError"], result
+        report = result["structuredContent"]
+        assert [row["executable"]["status"] for row in report["providers"]] == [
+            "available",
+            "missing",
+        ]
+        assert report["isMocked"] is True and report["didRunProvider"] is False
+        assert report["planDatabase"]["status"] == ("available" if existing_plan else "missing")
+        assert "authentication UNKNOWN" in result["content"][0]["text"]
+        assert "execution readiness NOT PROVEN" in result["content"][0]["text"]
+        for arguments in ({"providers": ["unsupported"]}, {"providers": []}, {"unknown": True}):
+            refused = rpc(
+                instance, "tools/call", dict(name="harness_preflight", arguments=arguments)
+            )["result"]
+            assert refused["isError"] and "Next:" in refused["content"][0]["text"]
+        assert instance.store is None
+    finally:
+        instance.close()
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
 
 
 def test_draft_tools_same_store_reopen_and_unmet_chat(tmp_path):
@@ -387,6 +448,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_resolve_findings",
             "harness_packet_view",
             "harness_readiness",
+            "harness_preflight",
             "harness_intake",
             "harness_reviewer_catalog",
             "harness_reviewer_choice",

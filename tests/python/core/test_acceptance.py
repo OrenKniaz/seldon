@@ -385,6 +385,65 @@ def test_changed_product_refuses_rebind_without_new_evidence(project, monkeypatc
     assert not output["status"]["acceptance"]["accepted"]
 
 
+@pytest.mark.parametrize("legacy", [True, False])
+def test_ancestor_only_saved_binding_cannot_carry_approval(project, tmp_path, monkeypatch, legacy):
+    """Use real canonical run/review/approval writers with the historical input preimage."""
+    import hashlib
+
+    from tests.python.core.test_product_revision_scope import git, git_parent
+
+    from codex_harness.core import acceptance
+
+    store, _ = project
+    parent = git_parent(tmp_path)
+    product = parent / "work" / "product"
+    product.mkdir(parents=True)
+    to_accept(store)
+    fix_product(product)
+
+    def old_revision(repo):
+        # The published functions incorrectly chose this ancestor HEAD and
+        # empty Git listing. This is the exact preimage witnessed by real Git.
+        assert Path(git(repo, "rev-parse", "--show-toplevel")) == parent
+        assert git(repo, "ls-files", "--cached", "--others", "--exclude-standard") == ""
+        value = {"head": git(repo, "rev-parse", "HEAD"), "files": []}
+        if legacy:
+            value["diff"] = hashlib.sha256(b"").hexdigest()
+        else:
+            value["algorithm"] = "tree-bytes-v2"
+        return acceptance._hash(value)
+
+    with monkeypatch.context() as historical:
+        historical.setattr(acceptance, "integrated_revision", old_revision)
+        run = run_acceptance(store, product, subject="product")
+        review(store, product)
+        approval = store.accept(by="user", statement="Recorded before scope repair")
+    if legacy:
+        run.pop("revisionAlgorithm")
+        store.connection.execute(
+            "UPDATE acceptance_runs SET result_json=? WHERE id=?", (json.dumps(run), run["id"])
+        )
+    counts = [
+        store.connection.execute(f"SELECT count(*) FROM acceptance_{table}").fetchone()[0]
+        for table in ("runs", "reviews", "approvals")
+    ]
+    status = store.status()["acceptance"]
+    assert status["invalidReason"] == "product-changed"
+    assert not status["accepted"] and status["approvedBy"] is None
+    assert current_run(store) is None
+    with pytest.raises(PlanStoreError) as error:
+        store.accept_rebind(product)
+    assert error.value.code == "product-changed"
+    assert counts == [
+        store.connection.execute(f"SELECT count(*) FROM acceptance_{table}").fetchone()[0]
+        for table in ("runs", "reviews", "approvals")
+    ]
+    recorded = store.connection.execute(
+        "SELECT result_json FROM acceptance_approvals WHERE id=?", (approval["id"],)
+    ).fetchone()[0]
+    assert json.loads(recorded) == approval
+
+
 @pytest.mark.parametrize("missing_bindings", [False, True])
 def test_rebind_failed_scenario_retains_only_invalid_original_approval(
     project, monkeypatch, missing_bindings

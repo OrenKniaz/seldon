@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 from tests.python.core.test_plan_store import draft_inputs, draft_intake, mock_catalog, mock_choice
+from tests.python.core.test_preflight import inject_mock_discovery
 
 from codex_harness.core.mcp_planner import PlannerServer
-from codex_harness.core.plan_cli import next_command
+from codex_harness.core.plan_cli import main, next_command
 from codex_harness.core.plan_store import open_plan_store
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -54,6 +55,57 @@ def node(id, kind="feature", parents=None, **fields):
 
 def save(path, value):
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def test_preflight_cold_missing_workspace_reports_without_creating(tmp_path, monkeypatch, capsys):
+    inject_mock_discovery(monkeypatch)
+    workspace = tmp_path / "missing" / "project"
+    assert main(["--workspace", str(workspace), "--json", "preflight", "--provider", "codex"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["data"]["workspace"]["status"] == "missing"
+    assert report["data"]["planDatabase"]["status"] == "missing"
+    assert report["data"]["executionReadiness"] == "not-proven"
+    assert report["data"]["didRunProvider"] is False
+    assert report["status"]["phase"] == "unknown"
+    assert not workspace.parent.exists()
+
+
+def test_preflight_existing_store_and_invalid_inputs_never_open_state(started, monkeypatch, capsys):
+    inject_mock_discovery(monkeypatch)
+    before = {
+        path.relative_to(started): path.read_bytes()
+        for path in started.rglob("*")
+        if path.is_file()
+    }
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Preflight must bypass normal status/store opening")
+
+    monkeypatch.setattr(PlannerServer, "_status", forbidden)
+    with pytest.raises(SystemExit) as help_exit:
+        main(["--workspace", str(started), "preflight", "--help"])
+    assert help_exit.value.code == 0
+    assert "--provider" in capsys.readouterr().out
+    for flags, code in (
+        ([], 0),
+        (["--provider", "unsupported"], 2),
+        (["--bad-option"], 2),
+        (["--provider"], 2),
+    ):
+        assert main(["--workspace", str(started), "--json", "preflight", *flags]) == code
+        report = json.loads(capsys.readouterr().out)
+        assert report["status"]["phase"] == "unknown"
+        assert report["isError"] == (code != 0)
+        assert report["next"] and "\nNext: " not in report["text"]
+        if code == 0:
+            assert report["data"]["planDatabase"]["status"] == "available"
+            assert report["data"]["isMocked"] is True
+    after = {
+        path.relative_to(started): path.read_bytes()
+        for path in started.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
 
 
 @pytest.fixture

@@ -56,15 +56,41 @@ def derive_scenarios(spine) -> list[dict]:
     return scenarios
 
 
+def _product_git_head(repo: Path) -> str | None:
+    """Use Git only when the declared product is its checkout's root.
+
+    Git discovers ancestor repositories from plain directories too. Their
+    HEAD and ignore rules cannot stand in for this product's working files.
+    A linked worktree's .git file is supported by the same root check.
+    """
+    top = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if top.returncode != 0:
+        if (repo / ".git").exists() or (repo / ".git").is_symlink():
+            raise ValueError(f"Cannot determine product Git scope: {repo}")
+        return None
+    if not top.stdout.strip() or Path(top.stdout.strip()).resolve() != repo:
+        return None
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return head.stdout.strip() if head.returncode == 0 else None
+
+
 def integrated_revision(repo) -> str:
     """Bind evidence to HEAD and actual working files, including untracked code."""
     repo = Path(repo).resolve()
     if not repo.is_dir():
         raise ValueError(f"Repository directory does not exist: {repo}")
-    git = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-    )
-    if git.returncode == 0:
+    head = _product_git_head(repo)
+    if head is not None:
         listing = subprocess.run(
             [
                 "git",
@@ -95,7 +121,7 @@ def integrated_revision(repo) -> str:
     return _hash(
         {
             "algorithm": "tree-bytes-v2",
-            "head": git.stdout.strip() if git.returncode == 0 else None,
+            "head": head,
             "files": files,
         }
     )
@@ -106,10 +132,8 @@ def _integrated_revision_v1(repo) -> str:
     repo = Path(repo).resolve()
     if not repo.is_dir():
         raise ValueError(f"Repository directory does not exist: {repo}")
-    git = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-    )
-    if git.returncode == 0:
+    head = _product_git_head(repo)
+    if head is not None:
         changes = subprocess.run(
             ["git", "-C", str(repo), "diff", "HEAD", "--binary", "--no-ext-diff", "--", "."],
             capture_output=True,
@@ -144,7 +168,7 @@ def _integrated_revision_v1(repo) -> str:
             )
     return _hash(
         {
-            "head": git.stdout.strip() if git.returncode == 0 else None,
+            "head": head,
             "diff": hashlib.sha256(changes.stdout).hexdigest() if changes else None,
             "files": files,
         }

@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
 from codex_harness.core.plan_store import PHASES, open_plan_store
+from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
 from codex_harness.core.spine import ALLOWED_PARENTS
 from codex_harness.core.spine_diagrams import diagram
 
@@ -46,6 +47,13 @@ def _tool(name: str, description: str, properties: dict, required=None) -> dict:
 
 
 TOOLS = [
+    _tool(
+        "harness_preflight",
+        "Read-only executable and workspace observations; "
+        "no provider launch or execution-ready verdict.",
+        {"providers": {"type": "array", "items": STRING, "minItems": 1}},
+        [],
+    ),
     _tool(
         "harness_intake",
         "Record draft intake. Node fields are intake.propose request fields; "
@@ -540,7 +548,9 @@ class PlannerServer:
                 body = views.review_card(self.result_data) + "\n" + body
             is_error = True
         try:
-            status = self._status()
+            status = (
+                diagnostic_status(self.workspace) if name == "harness_preflight" else self._status()
+            )
         except Exception as error:
             print(f"planner status unavailable: {type(error).__name__}", file=sys.stderr)
             status = {
@@ -585,6 +595,13 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool) -> str:
+        if name == "harness_preflight":
+            return (
+                "Correct the diagnostic input and retry harness_preflight."
+                if error
+                else "Review missing/unknown observations; "
+                "existing planning and proof gates still apply."
+            )
         if name in (
             "harness_intake",
             "harness_reviewer_catalog",
@@ -670,6 +687,9 @@ class PlannerServer:
         )
 
     def _dispatch(self, name: str, args: dict) -> str:
+        if name == "harness_preflight":
+            self.result_data = preflight_report(self.workspace, **args)
+            return render_preflight(self.result_data)
         draft_methods = {
             "harness_intake": "record_intake",
             "harness_reviewer_catalog": "record_reviewer_catalog",

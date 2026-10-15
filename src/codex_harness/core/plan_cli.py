@@ -14,6 +14,7 @@ from codex_harness.core.graph import load_plan
 from codex_harness.core.mcp_planner import TOOLS, PlannerServer, _validate
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PHASES
+from codex_harness.core.preflight import diagnostic_status
 from codex_harness.core.spine import Spine, compile_manifest
 
 TYPED_DECISION_SCHEMAS = {"dot-intake-v1", "dot-reviewer-selection-v1", "dot-wave-map-v1"}
@@ -233,6 +234,7 @@ def parser() -> argparse.ArgumentParser:
     specs = {
         "start": ("idea", "name"),
         "status": (),
+        "preflight": (),
         "show": (),
         "review": (),
         "packet": (),
@@ -295,6 +297,7 @@ def parser() -> argparse.ArgumentParser:
         "--provider", choices=["codex", "claude", "copilot"], default="codex"
     )
     commands["status"].add_argument("--brief", action="store_true")
+    commands["preflight"].add_argument("--provider", action="append", dest="providers")
     commands["impact"].add_argument("--since", help="Manifest revision or saved manifest file")
     commands["nodes"].add_argument("--kind")
     commands["card"].add_argument("--assumption", action="append", default=[])
@@ -362,6 +365,10 @@ def parser() -> argparse.ArgumentParser:
 def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
     """Standard commands go through MCP unchanged; extensions reuse core owners."""
     command = args.command
+    if command == "preflight":
+        arguments = {"providers": args.providers} if args.providers is not None else {}
+        reply = server.call_tool("harness_preflight", arguments)
+        return reply, reply.get("structuredContent")
     if command in ("intake", "reviewer-catalog", "reviewer-choice", "wave-map", "waves"):
         arguments = {} if command == "waves" else read_json(args.payload)
         reply = server.call_tool("harness_" + command.replace("-", "_"), arguments)
@@ -694,8 +701,8 @@ def _path(server: PlannerServer, value: str) -> Path:
     return path if path.is_absolute() else server.workspace / path
 
 
-def _reply(server: PlannerServer, body: str, error=False) -> dict:
-    status = server._status()
+def _reply(server: PlannerServer, body: str, error=False, *, diagnostic=False) -> dict:
+    status = diagnostic_status(server.workspace) if diagnostic else server._status()
     return {
         "isError": error,
         "content": [
@@ -746,11 +753,19 @@ def main(argv=None) -> int:
                     server,
                     f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}",
                     True,
+                    diagnostic=getattr(args, "command", None) == "preflight",
                 ),
                 None,
             )
-        status = server._status()
-        next_step = next_command(server, status)
+        if getattr(args, "command", None) == "preflight":
+            status = diagnostic_status(server.workspace)
+            next_step = (
+                "Review missing/unknown observations; "
+                "existing planning and proof gates still apply."
+            )
+        else:
+            status = server._status()
+            next_step = next_command(server, status)
         if getattr(args, "command", None) in (
             "intake",
             "reviewer-catalog",
