@@ -1,0 +1,1113 @@
+"""Real first-use subprocesses, durable gates and injected subscription reviewers."""
+
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+from tests.python.core.planning_support import publication_evidence
+from tests.python.core.test_plan_cli import cli
+
+from codex_harness.core import plan_cli
+from codex_harness.core.acceptance import (
+    _integrated_revision_v1,
+    acceptance_review,
+    current_run,
+    derive_scenarios,
+    integrated_revision,
+    run_acceptance,
+    run_scenarios,
+)
+from codex_harness.core.mcp_planner import PlannerServer
+from codex_harness.core.plan_quality import first_moment_proof
+from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
+from codex_harness.core.spine import Spine, load_spine
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_revision_hashes_flagged_tracked_bytes(tmp_path, flag):
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    git("init")
+    source = tmp_path / "app.py"
+    source.write_text("before")
+    git("add", "app.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "fixture")
+    git("update-index", flag, "app.py")
+    before = integrated_revision(tmp_path)
+    source.write_text("after")
+    assert integrated_revision(tmp_path) != before
+
+
+def test_clean_state_hides_ambient_xdg_markers(tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    (ambient / "marker").touch()
+    for key in ("XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
+        monkeypatch.setenv(key, str(ambient))
+    (tmp_path / "check.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "for key in ('XDG_STATE_HOME', 'XDG_RUNTIME_DIR'):\n"
+        "    assert not (Path(os.environ[key]) / 'marker').exists()\n"
+    )
+    scenario = {
+        "id": "clean",
+        "title": "clean",
+        "steps": ['"{python}" "{repo}/check.py"'],
+        "expect": {"exit": 0},
+    }
+    assert run_scenarios(tmp_path, [scenario])[0]["passed"]
+
+
+def test_timeout_kills_grandchild_with_inherited_pipes(tmp_path, monkeypatch):
+    original_run = subprocess.run
+    original_communicate = subprocess.Popen.communicate
+
+    def run(*args, **kwargs):
+        if kwargs.get("shell"):
+            kwargs["timeout"] = 1
+        return original_run(*args, **kwargs)
+
+    def communicate(self, *args, **kwargs):
+        if kwargs.get("timeout") == 60:
+            kwargs["timeout"] = 1
+        return original_communicate(self, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(subprocess.Popen, "communicate", communicate)
+    (tmp_path / "spawn.py").write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(4)'])\n"
+        "print('started', flush=True)\ntime.sleep(4)\n"
+    )
+    scenario = {
+        "id": "timeout",
+        "title": "timeout",
+        "steps": ['"{python}" "{repo}/spawn.py"'],
+        "expect": {"exit": 0},
+    }
+    started = time.monotonic()
+    result = run_scenarios(tmp_path, [scenario])[0]
+    assert time.monotonic() - started < 3
+    assert not result["passed"]
+    assert "started" in result["steps"][0]["stdout"]
+
+
+def test_scenario_output_is_capped_per_stream(tmp_path):
+    (tmp_path / "noisy.py").write_text(
+        "import os\nfor fd in (1,2):\n    os.write(fd, b'output:' + b'x' * 100000)\n"
+    )
+    scenario = {
+        "id": "noisy",
+        "title": "noisy",
+        "steps": ['"{python}" "{repo}/noisy.py"'],
+        "expect": {"exit": 0},
+    }
+    result = run_scenarios(tmp_path, [scenario])[0]
+    assert result["passed"]
+    for stream in ("stdout", "stderr"):
+        output = result["steps"][0][stream]
+        assert output.startswith("output:")
+        assert len(output.encode("utf-8")) <= 64 * 1024
+        assert output.endswith("\n[truncated]\n")
+
+
+def test_acceptance_invalid_after_vision_edit_and_restore(project):
+    store, repo = project
+    to_accept(store)
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    review(store, repo)
+    store.accept(by="user", statement="Accept")
+    original = store.spine().node("V1")
+    changed = json.loads(json.dumps(original))
+    changed["text"] += " changed"
+    store.upsert_node(changed)
+    store.upsert_node(original)
+    with pytest.raises(PlanStoreError) as error:
+        store.accept(by="user", statement="Accept again")
+    status = store.status()["acceptance"]
+    assert not status["accepted"]
+    assert status["invalidReason"] == "vision-unlocked"
+    assert error.value.code == "acceptance-vision-unlocked"
+
+
+def test_acceptance_review_packet_bound_labels(project):
+    from tests.python.core.test_roundtable import reviewer_stream
+
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    item = {"node_id": "V1", "severity": "note", "finding": "Review note", "suggestion": ""}
+    result = acceptance_review(
+        store,
+        repo,
+        reviewers=REVIEWERS,
+        runner=lambda launch, *args: (0, reviewer_stream(launch.cli, [item])),
+    )
+    assert result["packetBound"] is False
+    assert all(reviewer["packetBound"] is False for reviewer in result["reviewers"])
+    assert all(item["packetBound"] is False for item in store.acceptance_findings())
+    assert store.status()["acceptance"]["reviews"][0]["packetBound"] is False
+    from codex_harness.core.planner_views import review_card
+
+    text = review_card(result)
+    assert "shards 1/1; packetBound: no; 1 findings" in text
+    recorded = store.review(result["id"])
+    assert all(row["findingCounts"] == {"open": 1} for row in recorded["reviewers"])
+    assert "estimated tokens" in review_card(recorded, details=True)
+
+
+def test_accept_run_cards_keep_failed_evidence(project):
+    store, repo = project
+    server = PlannerServer(store.workspace)
+    try:
+        failed = server.call_tool("harness_accept_run", {"repo": str(repo), "subject": "product"})
+        assert failed["isError"] and not failed["structuredContent"]["passed"]
+        text = failed["content"][0]["text"]
+        assert "**0/2 passed** · product · failing:" in text and "exit 2" in text
+        fix_product(repo)
+        passed = server.call_tool("harness_accept_run", {"repo": str(repo), "subject": "oracle"})
+        assert not passed["isError"]
+        assert "**2/2 scenarios passed** · oracle dry run" in passed["content"][0]["text"]
+    finally:
+        server.close()
+
+
+def test_failed_acceptance_review_card_uses_current_failure(project, monkeypatch):
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    monkeypatch.setattr("codex_harness.core.roundtable._run", lambda *args: (7, "broken report"))
+    monkeypatch.setattr("codex_harness.core.roundtable._executable", lambda *args: "test-provider")
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool(
+            "harness_accept_review", {"repo": str(repo), "reviewers": REVIEWERS}
+        )
+        assert reply["isError"]
+        assert "shards 0/1" in reply["content"][0]["text"]
+        assert "error: Reviewer exited with code 7" in reply["content"][0]["text"]
+        store.connection.execute("DELETE FROM acceptance_runs")
+        reply = server.call_tool(
+            "harness_accept_review", {"repo": str(repo), "reviewers": REVIEWERS}
+        )
+        assert reply["isError"] and "structuredContent" not in reply
+        assert "shards 0/1" not in reply["content"][0]["text"]
+    finally:
+        server.close()
+
+
+FIXTURES = Path(__file__).resolve().parents[3] / "fixtures"
+REVIEWERS = [
+    {"name": "codex-reviewer", "provider": "codex"},
+    {"name": "claude-reviewer", "provider": "claude"},
+]
+COMMAND = '"{python}" "{repo}/tiny.py"'
+
+
+@pytest.fixture
+def project(tmp_path):
+    workspace, repo = tmp_path / "planner", tmp_path / "product"
+    workspace.mkdir()
+    repo.mkdir()
+    # A CLI with the exact water-cli defect. A fixture file in its repository
+    # must not mask failure from the fresh acceptance working directory.
+    (repo / "tiny.py").write_text(
+        "from pathlib import Path\nimport sys\n"
+        "if not Path('water.json').exists():\n"
+        "    print('Error: File not found', file=sys.stderr)\n"
+        "    sys.exit(2)\nprint('Added 250 ml.')\n",
+        encoding="utf-8",
+    )
+    (repo / "water.json").write_text("{}", encoding="utf-8")
+    with PlanStore(workspace) as store:
+        store.import_spine(FIXTURES / "dogfood-tipsplit/spine.json")
+        bead = store.spine().node("A")
+        bead["parents"].append("R6")
+        store.upsert_node(bead)
+        vision = store.spine().node("V1")
+        vision["fields"].update(
+            first_user_moment={
+                "title": "Record first glass",
+                "steps": [COMMAND],
+                "expect": {"stdout": "Added 250 ml.", "exit": 0},
+            },
+            scope_in=[
+                {
+                    "title": "Record water",
+                    "steps": [COMMAND],
+                    "expect": {"stdoutRegex": r"Added \d+ ml\.", "exit": 0},
+                }
+            ],
+        )
+        store.upsert_node(vision)
+        store.approve("vision-lock", by="user", statement="Lock this vision")
+        yield store, repo
+
+
+def to_accept(store):
+    for phase in PHASES[PHASES.index(store.phase()) + 1 :]:
+        if store.phase() in ("align", "vision-lock"):
+            store.approve(store.phase(), by="user", statement="Confirm this vision")
+        if phase == "publish":
+            publication_evidence(store)
+        if store.phase() == "publish":
+            publication_evidence(store)
+            store.publish(by="planner", export_dir=store.workspace / "plan")
+        store.advance(phase, by="planner")
+
+
+def fix_product(repo):
+    (repo / "tiny.py").write_text("print('Added 250 ml.')\n", encoding="utf-8")
+
+
+def review(store, repo, output="[]", **kwargs):
+    return acceptance_review(
+        store, repo, reviewers=REVIEWERS, runner=lambda *args: (0, output), **kwargs
+    )
+
+
+def legacy_acceptance(store, repo, monkeypatch, by="proxy:Opus"):
+    """Exercise the canonical producer/review/approval with the historical hash."""
+    to_accept(store)
+    fix_product(repo)
+    with monkeypatch.context() as legacy:
+        legacy.setattr("codex_harness.core.acceptance.integrated_revision", _integrated_revision_v1)
+        run = run_acceptance(store, repo, subject="product")
+        original_review = review(store, repo)
+        approval = store.accept(by=by, statement="Original acceptance words")
+    # Historical runs had no algorithm tag. Keep their original v1 digest.
+    run.pop("revisionAlgorithm")
+    store.connection.execute(
+        "UPDATE acceptance_runs SET result_json=? WHERE id=?", (json.dumps(run), run["id"])
+    )
+    return run, original_review, approval
+
+
+@pytest.mark.parametrize(
+    "by,surface", [("user", "store"), ("proxy:Opus", "cli"), ("opus-user-proxy", "mcp")]
+)
+def test_legacy_rebind_preserves_identity_and_review_references(project, monkeypatch, by, surface):
+    store, repo = project
+    old, original_review, original_approval = legacy_acceptance(store, repo, monkeypatch, by)
+    status = store.status()["acceptance"]
+    assert status["invalidReason"] == "revision-algorithm-upgraded"
+    assert not status["accepted"] and current_run(store) is None
+    assert "v1 product revision still matches" in status["invalidMessage"]
+    output = cli(store.workspace, "status", machine=True)
+    assert "algorithm was upgraded" in output["text"]
+    assert "accept-rebind" in output["next"]
+    if surface == "cli":
+        result = cli(store.workspace, "accept-rebind", "--repo", str(repo), machine=True)["data"]
+    elif surface == "mcp":
+        server = PlannerServer(store.workspace)
+        try:
+            status_reply = server.call_tool("harness_plan_status", {})
+            assert "algorithm was upgraded" in status_reply["content"][0]["text"]
+            assert "Next: harness_accept_rebind" in status_reply["content"][0]["text"]
+            reply = server.call_tool("harness_accept_rebind", {"repo": str(repo)})
+            assert not reply["isError"], reply
+            result = reply["structuredContent"]
+            assert reply["content"][0]["text"].endswith("Next: harness_plan_status")
+        finally:
+            server.close()
+    else:
+        result = store.accept_rebind(repo)
+    assert result["run"]["revisionAlgorithm"] == "tree-bytes-v2"
+    assert result["run"]["revision"] == integrated_revision(repo)
+    assert result["by"] == "harness" and result["reboundFrom"] == old["id"]
+    assert result["reason"] == "revision algorithm upgraded; product unchanged"
+    rebound_approval = result["approval"]
+    assert rebound_approval["by"] == by
+    assert rebound_approval["isProxy"] is original_approval["isProxy"]
+    assert rebound_approval["statement"] == original_approval["statement"]
+    assert rebound_approval["originalApprovalId"] == original_approval["id"]
+    assert rebound_approval["rebind"]["by"] == "harness"
+    assert result["reviews"][0]["originalReviewId"] == original_review["id"]
+    assert result["reviews"][0]["by"] == "harness"
+    assert "reviewers" not in result["reviews"][0]  # No invented new review.
+    status = store.status()["acceptance"]
+    assert status["accepted"] and status["invalidReason"] is None
+    assert status["approvedBy"] == by and status["isProxy"] is original_approval["isProxy"]
+    assert status["recordedUserAccepted"] is (by == "user")
+    assert status["approval"]["reboundFrom"] == old["id"]
+    persisted_review = json.loads(
+        store.connection.execute(
+            "SELECT result_json FROM acceptance_reviews WHERE id=?", (original_review["id"],)
+        ).fetchone()[0]
+    )
+    assert persisted_review == {
+        key: value for key, value in original_review.items() if key != "findings"
+    }
+    persisted_approval = json.loads(
+        store.connection.execute(
+            "SELECT result_json FROM acceptance_approvals WHERE id=?", (original_approval["id"],)
+        ).fetchone()[0]
+    )
+    assert persisted_approval == original_approval
+    with PlanStore(store.workspace) as reopened:
+        assert reopened.status()["acceptance"]["accepted"]
+        assert reopened.status()["acceptance"]["approval"] == rebound_approval
+    with pytest.raises(PlanStoreError) as error:
+        store.accept_rebind(repo)
+    assert error.value.code == "acceptance-rebind-not-required"
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_changed_product_refuses_rebind_without_new_evidence(project, monkeypatch, legacy):
+    store, repo = project
+    if legacy:
+        legacy_acceptance(store, repo, monkeypatch)
+    else:
+        to_accept(store)
+        fix_product(repo)
+        run = run_acceptance(store, repo, subject="product")
+        assert run["revisionAlgorithm"] == "tree-bytes-v2"
+        review(store, repo)
+        store.accept(by="user", statement="Accept")
+    (repo / "tiny.py").write_text("raise SystemExit(2)\n")
+    assert store.status()["acceptance"]["invalidReason"] == "product-changed"
+    counts = [
+        store.connection.execute(f"SELECT count(*) FROM acceptance_{table}").fetchone()[0]
+        for table in ("runs", "reviews", "approvals")
+    ]
+    output = cli(store.workspace, "accept-rebind", "--repo", str(repo), machine=True, code=2)
+    assert "product-changed" in output["text"] and "\nNext:" not in output["text"]
+    assert "accept-run" in output["next"]
+    assert counts == [
+        store.connection.execute(f"SELECT count(*) FROM acceptance_{table}").fetchone()[0]
+        for table in ("runs", "reviews", "approvals")
+    ]
+    assert not output["status"]["acceptance"]["accepted"]
+
+
+@pytest.mark.parametrize("missing_bindings", [False, True])
+def test_rebind_failed_scenario_retains_only_invalid_original_approval(
+    project, monkeypatch, missing_bindings
+):
+    store, repo = project
+    to_accept(store)
+    (repo / "tiny.py").write_text(
+        "import os,sys\nprint('Added 250 ml.')\nsys.exit(int(os.environ.get('REBIND_FAIL', '0')))\n"
+    )
+    with monkeypatch.context() as legacy:
+        legacy.setattr("codex_harness.core.acceptance.integrated_revision", _integrated_revision_v1)
+        old = run_acceptance(store, repo, subject="product")
+        review(store, repo)
+        approval = store.accept(by="proxy:Opus", statement="Accept")
+    old.pop("revisionAlgorithm")
+    store.connection.execute(
+        "UPDATE acceptance_runs SET result_json=? WHERE id=?", (json.dumps(old), old["id"])
+    )
+    if missing_bindings:
+        legacy_scenario_bindings(store, old)
+    monkeypatch.setenv("REBIND_FAIL", "2")
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_accept_rebind", {"repo": str(repo)})
+        assert reply["isError"]
+        text = reply["content"][0]["text"]
+        assert "acceptance-scenarios-required" in text and "Next: harness_accept_run" in text
+    finally:
+        server.close()
+    status = store.status()["acceptance"]
+    assert not status["accepted"] and status["invalidReason"] == "acceptance-scenarios-required"
+    assert status["approval"] == approval
+    assert all(item["lastResult"] == "fail" for item in status["scenarios"])
+    assert len(status["reviews"]) == 1
+    assert store.connection.execute("SELECT count(*) FROM acceptance_approvals").fetchone()[0] == 1
+    if missing_bindings:
+        assert all(item["nodeRevisionsBackfilled"] for item in store.acceptance_scenarios())
+
+
+@pytest.mark.parametrize("changed", ["plan", "scenarios", "vision"])
+def test_rebind_refuses_other_stale_bindings(project, monkeypatch, changed):
+    store, repo = project
+    legacy_acceptance(store, repo, monkeypatch)
+    if changed == "scenarios":
+        scenarios = store.acceptance_scenarios()
+        scenarios[0]["expect"] = {"stdout": "Something else"}
+        store.save_acceptance_scenarios(scenarios)
+    else:
+        node = store.spine().node("D3" if changed == "plan" else "V1")
+        node["text"] += " changed"
+        store.upsert_node(node)
+    reason = "vision-unlocked" if changed == "vision" else changed + "-changed"
+    assert store.status()["acceptance"]["invalidReason"] == reason
+    with pytest.raises(PlanStoreError) as error:
+        store.accept_rebind(repo)
+    assert error.value.code == reason and "Next:" in str(error.value)
+
+
+@pytest.mark.parametrize("when", ["during-scenarios", "after-run"])
+def test_product_change_during_rebind_never_carries_approval(project, monkeypatch, when):
+    from codex_harness.core import acceptance
+
+    store, repo = project
+    _, _, approval = legacy_acceptance(store, repo, monkeypatch)
+    method = "run_scenarios" if when == "during-scenarios" else "run_acceptance"
+    original = getattr(acceptance, method)
+
+    def changes_product(*args, **kwargs):
+        result = original(*args, **kwargs)
+        (repo / "new-code.py").write_text("print('changed')\n")
+        return result
+
+    monkeypatch.setattr(acceptance, method, changes_product)
+    with pytest.raises(PlanStoreError) as error:
+        store.accept_rebind(repo)
+    assert error.value.code == "product-changed" and "Next:" in str(error.value)
+    status = store.status()["acceptance"]
+    assert not status["accepted"] and status["approval"] == approval
+    assert len(status["reviews"]) == 1
+
+
+def test_rebind_audit_and_approval_are_atomic(project, monkeypatch):
+    import sqlite3
+
+    store, repo = project
+    _, _, approval = legacy_acceptance(store, repo, monkeypatch)
+    store.connection.execute(
+        "CREATE TRIGGER reject_rebound BEFORE INSERT ON acceptance_approvals "
+        "BEGIN SELECT RAISE(ABORT, 'approval write failed'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="approval write failed"):
+        store.accept_rebind(repo)
+    status = store.status()["acceptance"]
+    assert not status["accepted"] and status["approval"] == approval
+    assert len(status["reviews"]) == 1
+    assert not store.connection.execute(
+        "SELECT 1 FROM events WHERE kind='acceptance-rebound'"
+    ).fetchone()
+
+
+def legacy_scenario_bindings(store, old):
+    from codex_harness.core.acceptance import _hash
+
+    scenarios = store.acceptance_scenarios()
+    for item in scenarios:
+        for key in ("status", "executable", "nodeRevisions"):
+            item.pop(key, None)
+        store.connection.execute(
+            "UPDATE acceptance_scenarios SET scenario_json=? WHERE id=?",
+            (json.dumps(item), item["id"]),
+        )
+    old["scenarioRevision"] = _hash(scenarios)
+    store.connection.execute(
+        "UPDATE acceptance_runs SET result_json=? WHERE id=?", (json.dumps(old), old["id"])
+    )
+    return scenarios
+
+
+@pytest.mark.parametrize("surface", ["cli", "mcp"])
+def test_legacy_matching_scenarios_backfill_and_rebind(project, monkeypatch, surface):
+    store, repo = project
+    old, original_review, approval = legacy_acceptance(store, repo, monkeypatch)
+    scenarios = legacy_scenario_bindings(store, old)
+    status = store.status()["acceptance"]
+    assert status["invalidReason"] == "legacy-unbound" and not status["accepted"]
+    assert current_run(store) is None
+    assert "raw hash still matches" in status["invalidMessage"]
+    assert "harness_accept_rebind" in status["next"]
+    # Status projection must not back-fill stored records or rewrite the run.
+    assert all("nodeRevisions" not in item for item in scenarios)
+    assert all(
+        "nodeRevisions" not in json.loads(row[0])
+        for row in store.connection.execute("SELECT scenario_json FROM acceptance_scenarios")
+    )
+    if surface == "cli":
+        output = cli(store.workspace, "status", machine=True)
+        assert "accept-rebind" in output["next"] and "legacy scenarios" in output["text"]
+        result = cli(store.workspace, "accept-rebind", "--repo", str(repo), machine=True)["data"]
+    else:
+        server = PlannerServer(store.workspace)
+        try:
+            status_reply = server.call_tool("harness_plan_status", {})
+            assert "Next: harness_accept_rebind" in status_reply["content"][0]["text"]
+            reply = server.call_tool("harness_accept_rebind", {"repo": str(repo)})
+            assert not reply["isError"], reply
+            result = reply["structuredContent"]
+        finally:
+            server.close()
+    assert result["run"]["passed"] and result["run"]["revisionAlgorithm"] == "tree-bytes-v2"
+    assert result["approval"]["by"] == approval["by"]
+    assert result["approval"]["isProxy"] is approval["isProxy"]
+    assert result["approval"]["reboundFrom"] == old["id"]
+    assert result["reviews"][0]["originalReviewId"] == original_review["id"]
+    assert "reviewers" not in result["reviews"][0]
+    for item in store.acceptance_scenarios():
+        assert item["nodeRevisions"] == {"V1": store.spine().revision("V1")}
+        assert item["nodeRevisionsBackfilled"] is True
+        assert item["nodeRevisionsBackfilledAt"] and item["by"] == "harness"
+        assert item["executable"] and item["status"] == "planned"
+    persisted_old = json.loads(
+        store.connection.execute(
+            "SELECT result_json FROM acceptance_runs WHERE id=?", (old["id"],)
+        ).fetchone()[0]
+    )
+    assert persisted_old == old
+    assert store.status()["acceptance"]["accepted"]
+    with PlanStore(store.workspace) as reopened:
+        assert reopened.status()["acceptance"]["accepted"]
+        assert reopened.status()["acceptance"]["isProxy"] is True
+
+
+def test_legacy_mismatched_scenarios_refuse_without_backfill(project, monkeypatch):
+    store, repo = project
+    old, _, approval = legacy_acceptance(store, repo, monkeypatch)
+    scenarios = legacy_scenario_bindings(store, old)
+    scenarios[0]["expect"] = {"exit": 2}
+    store.connection.execute(
+        "UPDATE acceptance_scenarios SET scenario_json=? WHERE id=?",
+        (json.dumps(scenarios[0]), scenarios[0]["id"]),
+    )
+    assert store.status()["acceptance"]["invalidReason"] == "scenarios-changed"
+    with pytest.raises(PlanStoreError) as error:
+        store.accept_rebind(repo)
+    assert error.value.code == "scenarios-changed" and "Next:" in str(error.value)
+    assert store.status()["acceptance"]["approval"] == approval
+    assert all(
+        "nodeRevisionsBackfilled" not in json.loads(row[0])
+        for row in store.connection.execute("SELECT scenario_json FROM acceptance_scenarios")
+    )
+    assert store.connection.execute("SELECT count(*) FROM acceptance_runs").fetchone()[0] == 1
+
+
+def test_legacy_scenarios_changed_product_refuses_without_backfill(project, monkeypatch):
+    store, repo = project
+    old, _, approval = legacy_acceptance(store, repo, monkeypatch)
+    legacy_scenario_bindings(store, old)
+    (repo / "tiny.py").write_text("raise SystemExit(2)\n")
+    assert store.status()["acceptance"]["invalidReason"] == "product-changed"
+    with pytest.raises(PlanStoreError) as error:
+        store.accept_rebind(repo)
+    assert error.value.code == "product-changed"
+    assert store.status()["acceptance"]["approval"] == approval
+    assert all("nodeRevisions" not in item for item in store.acceptance_scenarios())
+
+
+def test_first_moment_watercli_gap_and_clean_link():
+    spine = load_spine(FIXTURES / "dogfood-watercli/spine.json")
+    status, evidence, advice = first_moment_proof(spine)
+    assert status == "fail"
+    assert advice == "add an e2e scenario of the first user moment from a clean install"
+    assert evidence["warnings"] and "R4" in evidence["edgeCaseIds"]
+    data = spine.to_dict()
+    test = next(node for node in data["nodes"] if node["id"] == "T_E2E")
+    test["fields"].update(firstMoment=True, cleanState=True)
+    assert first_moment_proof(Spine(data))[0] == "pass"
+    test["fields"]["cleanState"] = False
+    assert first_moment_proof(Spine(data))[0] == "fail"
+    requirement = next(node for node in data["nodes"] if node["id"] == "R11")
+    requirement["text"] += " " + spine.node("V1")["fields"]["first_user_moment"]
+    requirement["fields"]["cleanState"] = True
+    del test["fields"]["firstMoment"]
+    assert first_moment_proof(Spine(data))[0] == "pass"
+
+
+def test_derive_covers_locked_moment_and_each_scope_item(project):
+    store, _ = project
+    scenarios = derive_scenarios(store.locked_acceptance_spine())
+    assert [s["id"] for s in scenarios] == ["first-moment", "scope-1"]
+    assert all(set(s) == {"id", "title", "given", "steps", "expect"} for s in scenarios)
+    store.save_acceptance_scenarios(scenarios)
+    path = store.workspace
+    with PlanStore(path) as reopened:
+        assert all(
+            all(saved[key] == value for key, value in scenario.items())
+            for saved, scenario in zip(reopened.acceptance_scenarios(), scenarios, strict=True)
+        )
+        assert all(item["executable"] for item in reopened.acceptance_scenarios())
+    with pytest.raises(PlanStoreError, match="Cover first-moment"):
+        store.save_acceptance_scenarios(scenarios[:1])
+
+
+def test_derive_scenarios_reads_explicit_acceptance_spine_node(project):
+    store, _ = project
+    data = store.locked_acceptance_spine().to_dict()
+    fields = {
+        "given": "A clean install",
+        "steps": [COMMAND, {"command": COMMAND, "expect": {"exit": 0}}],
+        "expect": {"stdout": "Total: 0"},
+        "firstMoment": True,
+        "cleanState": True,
+    }
+    data["nodes"].append(
+        {
+            "id": "first-moment",
+            "kind": "acceptance",
+            "title": "Explicit first use",
+            "text": "Check the real first command",
+            "parents": ["V1"],
+            "fields": fields,
+        }
+    )
+    scenarios = derive_scenarios(Spine(data))
+    assert scenarios[0] == {"id": "first-moment", "title": "Explicit first use", **fields}
+    assert [scenario["id"] for scenario in scenarios] == ["first-moment", "scope-1"]
+
+
+def test_clean_state_reproduces_missing_file_failure(project):
+    store, repo = project
+    results = run_scenarios(repo, derive_scenarios(store.locked_acceptance_spine()), {})
+    assert all(not result["passed"] for result in results)
+    step = results[0]["steps"][0]
+    assert step["stdout"] == ""
+    assert step["stderr"].strip() == "Error: File not found"
+    assert step["exit"] == 2 and not step["passed"]
+    assert (repo / "water.json").read_text() == "{}"
+
+
+def test_scenarios_have_independent_home_data_and_cwd(project, monkeypatch):
+    _, repo = project
+    ambient = repo / "ambient.json"
+    ambient.write_text("secret data", encoding="utf-8")
+    monkeypatch.setenv("WATER_CLI_DATA", str(ambient))
+    (repo / "isolated.py").write_text(
+        "import os\nfrom pathlib import Path\n"
+        "assert not Path(os.environ['WATER_CLI_DATA']).exists()\n"
+        "assert not Path.home().joinpath('marker').exists()\n"
+        "assert not Path('marker').exists()\n"
+        "Path.home().joinpath('marker').touch()\nPath('marker').touch()\n"
+        "print('isolated')\n",
+        encoding="utf-8",
+    )
+    scenarios = [
+        {
+            "id": str(i),
+            "title": "Fresh state",
+            "given": "empty",
+            "steps": ['"{python}" "{repo}/isolated.py"'],
+            "expect": {"stdout": "isolated", "exit": 0},
+        }
+        for i in range(2)
+    ]
+    assert all(result["passed"] for result in run_scenarios(repo, scenarios, os.environ))
+    assert ambient.read_text() == "secret data"
+
+
+@pytest.mark.parametrize("finding_status", ["resolved", "deferred"])
+def test_gate_failure_findings_proxy_and_revision_drift(project, finding_status):
+    store, repo = project
+    to_accept(store)
+    run_acceptance(store, repo, subject="product")
+    with pytest.raises(PlanStoreError) as error:
+        store.accept(by="user", statement="Accept")
+    assert error.value.code == "acceptance-scenarios-required"
+    fix_product(repo)
+    passed = run_acceptance(store, repo, subject="product")
+    assert passed["passed"]
+    with pytest.raises(PlanStoreError) as error:
+        store.accept(by="user", statement="Accept")
+    assert error.value.code == "acceptance-review-required"
+    finding = {
+        "node_id": "V1",
+        "severity": "major",
+        "finding": "First-use gap",
+        "suggestion": "Repair the first command",
+    }
+    result = review(store, repo, json.dumps([finding]))
+    assert all(f["stage"] == "acceptance" for f in result["findings"])
+    with pytest.raises(PlanStoreError) as error:
+        store.accept(by="user", statement="Accept")
+    assert error.value.code == "acceptance-findings-open"
+    for item in store.acceptance_findings():
+        with pytest.raises(ValueError):
+            store.resolve_acceptance_finding(item["id"], status=finding_status, resolution=" ")
+        store.resolve_acceptance_finding(
+            item["id"], status=finding_status, resolution="Explicit disposition of this gap"
+        )
+    with pytest.raises(PlanStoreError, match="explicitly labelled proxy"):
+        store.accept(by="agent", statement="Looks good")
+    approval = store.accept(by="proxy:Opus", statement="Opus accepts as delegated proxy")
+    assert approval["isProxy"] is True
+    status = store.status()["acceptance"]
+    assert status["approvedBy"] == "proxy:Opus" and status["accepted"]
+    assert status["isProxy"] is True and status["realUserAccepted"] is False
+    assert store.status()["pending_gate"] is None
+    store.accept(by="user", statement="I tried it and accept")
+    status = store.status()["acceptance"]
+    assert status["realUserAccepted"] is status["recordedUserAccepted"] is True
+    assert status["humanOriginVerified"] is False
+    assert status["approvalOrigin"] == "recorded-unverified"
+    with PlanStore(store.workspace) as reopened:
+        assert reopened.status()["acceptance"]["realUserAccepted"] is True
+    (repo / "tiny.py").write_text("raise SystemExit(2)\n", encoding="utf-8")
+    assert store.status()["acceptance"]["approvedBy"] is None
+    assert store.status()["pending_gate"] is not None
+    with pytest.raises(PlanStoreError):
+        store.accept(by="user", statement="Accept stale proof")
+
+
+def test_review_packet_and_failed_or_stale_injected_runner(project):
+    store, repo = project
+    fix_product(repo)
+    run = run_acceptance(store, repo, subject="product")
+    seen = []
+
+    def runner(launch, cwd, timeout):
+        seen.append(launch)
+        assert not list(cwd.iterdir())
+        assert timeout == 900
+        assert "Does this product achieve the locked vision" in launch.stdin_text
+        assert "lockedVision" in launch.stdin_text and "renderedDocs" in launch.stdin_text
+        assert run["revision"] in launch.stdin_text
+        return 0, "[]"
+
+    result = acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+    assert len(seen) == 2 and not result["findings"]
+    with pytest.raises(ValueError, match="exited 2"):
+        acceptance_review(store, repo, reviewers=REVIEWERS, runner=lambda *args: (2, ""))
+    with pytest.raises(ValueError, match="cross-subscription"):
+        acceptance_review(store, repo, reviewers=REVIEWERS[:1], runner=runner)
+
+    def changes_repo(*args):
+        (repo / "new-code.py").write_text("print('changed')\n", encoding="utf-8")
+        return 0, "[]"
+
+    with pytest.raises(PlanStoreError, match="Rerun acceptance review"):
+        acceptance_review(store, repo, reviewers=REVIEWERS, runner=changes_repo)
+
+
+def test_empty_scenarios_and_unchecked_intermediate_step_cannot_pass(project):
+    _, repo = project
+    base = {"id": "first-moment", "title": "First moment", "given": "clean", "expect": {}}
+    assert not run_scenarios(repo, [{**base, "steps": []}], {})[0]["passed"]
+    fix_product(repo)
+    assert not run_scenarios(repo, [{**base, "steps": [COMMAND]}], {})[0]["passed"]
+    steps = [COMMAND + " --ignored", COMMAND]
+    (repo / "tiny.py").write_text("import sys\nsys.exit(2 if len(sys.argv)>1 else 0)\n")
+    result = run_scenarios(repo, [{**base, "steps": steps, "expect": {"exit": 0}}], {})[0]
+    assert not result["passed"] and len(result["steps"]) == 1
+
+
+def test_cli_and_mcp_acceptance_paths_and_next(project, monkeypatch, capsys):
+    store, repo = project
+    to_accept(store)
+    fix_product(repo)
+    output = cli(store.workspace, "accept-scenarios", "--derive", machine=True)
+    assert len(output["data"]["scenarios"]) == 2
+    output = cli(
+        store.workspace, "accept-run", "--subject", "product", "--repo", str(repo), machine=True
+    )
+    assert output["data"]["passed"]
+    monkeypatch.setattr("codex_harness.core.roundtable._run", lambda *args: (0, "[]"))
+    monkeypatch.setattr("codex_harness.core.roundtable._executable", lambda *args: "test-provider")
+    assert (
+        plan_cli.main(
+            [
+                "--workspace",
+                str(store.workspace),
+                "--json",
+                "accept-review",
+                "--repo",
+                str(repo),
+                "--reviewer",
+                json.dumps(REVIEWERS[0]),
+                "--reviewer",
+                json.dumps(REVIEWERS[1]),
+            ]
+        )
+        == 0
+    )
+    reply = json.loads(capsys.readouterr().out)
+    assert reply["data"]["stage"] == "acceptance"
+    assert "Next:" not in reply["text"] and reply["next"]
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool(
+            "harness_accept_review", {"repo": str(repo), "reviewers": REVIEWERS}
+        )
+        assert not reply["isError"], reply
+        assert "Next:" in reply["content"][0]["text"]
+        reply = server.call_tool(
+            "harness_accept", {"statement": "Proxy accepted", "by": "proxy:Opus"}
+        )
+        assert not reply["isError"] and reply["structuredContent"]["isProxy"] is True
+        assert "approved by proxy (Opus) · not your approval" in reply["content"][0]["text"]
+        reply = server.call_tool("harness_accept_scenarios", {})
+        assert not reply["isError"] and "Next:" in reply["content"][0]["text"]
+        reply = server.call_tool("harness_accept_run", {"repo": str(repo), "subject": "product"})
+        assert not reply["isError"]
+    finally:
+        server.close()
+    # The new run invalidates the previous review and approval.
+    cli(store.workspace, "accept", "--statement", "Owner accepted", "--by", "user", code=2)
+    review(store, repo)
+    output = cli(
+        store.workspace,
+        "accept",
+        "--statement",
+        "Proxy accepted",
+        "--by",
+        "proxy:Opus",
+        machine=True,
+    )
+    assert output["status"]["acceptance"]["isProxy"] is True
+    assert "approved by proxy (Opus) · not your approval" in output["text"]
+
+
+def test_status_defined_scenarios_results_and_stale_binding(project):
+    store, repo = project
+    store.save_acceptance_scenarios(derive_scenarios(store.locked_acceptance_spine()))
+    defined = store.status()["acceptance"]["scenarios"]
+    assert defined and all(item["lastResult"] == "not-run" for item in defined)
+    assert all(item["runId"] is None and item["steps"] for item in defined)
+    failed = run_acceptance(store, repo, subject="product")
+    scenarios = store.status()["acceptance"]["scenarios"]
+    assert all(item["lastResult"] == "fail" and item["runId"] == failed["id"] for item in scenarios)
+    fix_product(repo)
+    assert all(
+        item["lastResult"] == "not-run (stale)" and item["runId"] is None
+        for item in store.status()["acceptance"]["scenarios"]
+    )
+    passed = run_acceptance(store, repo, subject="product")
+    assert all(
+        item["lastResult"] == "pass" and item["runId"] == passed["id"]
+        for item in store.status()["acceptance"]["scenarios"]
+    )
+    # The workspace step log needs the executed records, not only the plan.
+    assert all(
+        item["stepResults"] and all("exit" in step for step in item["stepResults"])
+        for item in store.status()["acceptance"]["scenarios"]
+    )
+
+
+def test_acceptance_packet_includes_helpers_and_saved_scenarios(project):
+    store, repo = project
+    module = store.workspace / "template" / "tests" / "test_money.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("import acceptance_helper\n")
+    helper = module.parent / "acceptance_helper.py"
+    helper.write_text("ACCEPTANCE_HELPER_SENTINEL = True\n")
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    seen = []
+
+    def runner(launch, cwd, timeout):
+        packet = launch.stdin_text
+        seen.append(packet)
+        assert packet.startswith("## Packet contents")
+        assert "Current acceptance scenarios" in packet
+        assert "Record first glass" in packet and json.dumps(COMMAND) in packet
+        assert helper.read_text() in packet
+        assert "scenarioResults" in packet
+        return 0, "[]"
+
+    result = acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+    assert len(seen) == 2 and all(item["shards"] == 1 for item in result["reviewers"])
+
+
+def test_acceptance_every_shard_merges_binding_and_findings(project):
+    from tests.python.core.test_roundtable import reviewer_stream
+
+    store, repo = project
+    for key in ("R1", "R2"):
+        node = store.spine().node(key)
+        node["text"] += "acceptance detail " * 5000
+        store.upsert_node(node)
+    fix_product(repo)
+    run = run_acceptance(store, repo, subject="product")
+    counts = dict.fromkeys(("codex", "claude"), 0)
+
+    def runner(launch, cwd, timeout):
+        counts[launch.cli] += 1
+        assert run["revision"] in launch.stdin_text
+        assert "lockedVision" in launch.stdin_text and "scenarioResults" in launch.stdin_text
+        item = {
+            "node_id": "plan",
+            "severity": "note",
+            "finding": "Acceptance overlap",
+            "suggestion": "",
+        }
+        return 0, reviewer_stream(launch.cli, [item], uses_tools=counts[launch.cli] == 1)
+
+    result = acceptance_review(
+        store,
+        repo,
+        reviewers=REVIEWERS,
+        runner=runner,
+        token_budgets={"codex": 50_000, "claude": 50_000},
+    )
+    assert len(result["findings"]) == 2
+    assert result["packetBound"] is False
+    for record in result["reviewers"]:
+        assert record["shards"] == counts[record["provider"]] > 1
+        assert record["shardDetails"][0]["packetBound"] is False
+        assert all(item["packetBound"] for item in record["shardDetails"][1:])
+        assert all(item["estimatedTokens"] <= 50_000 for item in record["shardDetails"])
+    saved = store.connection.execute("SELECT result_json FROM acceptance_reviews").fetchone()
+    assert json.loads(saved[0])["reviewers"] == result["reviewers"]
+
+
+def test_acceptance_failed_provider_keeps_primary_diagnostic(project):
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    event = {"type": "result", "is_error": True, "result": "Prompt too long"}
+    with pytest.raises(ValueError, match="Prompt too long"):
+        acceptance_review(
+            store,
+            repo,
+            reviewers=REVIEWERS,
+            runner=lambda *args: (2, json.dumps(event), "last stderr line"),
+        )
+    row = store.connection.execute(
+        "SELECT payload_json FROM events WHERE kind='acceptance-review-failed'"
+    ).fetchone()
+    shard = json.loads(row[0])["reviewers"][0]["shardDetails"][0]
+    assert shard["primaryError"]["exitCode"] == 2
+    assert shard["primaryError"]["promptTooLong"] is True
+    assert shard["primaryError"]["stderrTail"] == "last stderr line"
+    assert Path(shard["artifactPath"]).is_file()
+    assert not store.connection.execute("SELECT 1 FROM acceptance_reviews").fetchone()
+
+
+@pytest.mark.parametrize("double_overflow", [False, True])
+def test_acceptance_overflow_retry_is_recorded(project, double_overflow):
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    calls = {"claude": 0, "codex": 0}
+
+    def runner(launch, cwd, timeout):
+        calls[launch.cli] += 1
+        if launch.cli == "claude" and (calls["claude"] == 1 or double_overflow):
+            return 2, "", "prompt is too long"
+        return 0, "[]"
+
+    if double_overflow:
+        with pytest.raises(ValueError, match="prompt is too long"):
+            acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+        event = store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='acceptance-review-failed'"
+        ).fetchone()
+        result = json.loads(event[0])
+        assert not store.connection.execute("SELECT 1 FROM acceptance_reviews").fetchone()
+    else:
+        result = acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+        saved = store.connection.execute("SELECT result_json FROM acceptance_reviews").fetchone()
+        assert json.loads(saved[0])["reviewers"] == result["reviewers"]
+    record = result["reviewers"][-1]
+    assert calls == {"codex": 1, "claude": 2}
+    assert record["reshardedFrom"]["budget"] == 150_000
+    assert record["reshardedFrom"]["newBudget"] == 75_000
+    assert record["reshardedFrom"]["newShardCount"] == record["shards"] == 1
+    assert "prompt is too long" in record["reshardedFrom"]["reason"]
+
+
+def test_acceptance_ordinary_failure_stops_before_next_shard(project, monkeypatch):
+    from codex_harness.core import roundtable
+
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    real_shards = roundtable.packet_shards
+
+    def multiple_shards(*args, **kwargs):
+        return real_shards(*args, **kwargs) * 3
+
+    monkeypatch.setattr(roundtable, "packet_shards", multiple_shards)
+    calls = []
+
+    def runner(launch, cwd, timeout):
+        calls.append(launch.cli)
+        return 1, "", "network failure"
+
+    with pytest.raises(ValueError, match="network failure"):
+        acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+    assert calls == ["codex"]
+
+
+@pytest.mark.parametrize("surface", ["cli", "mcp", "core"])
+def test_accept_run_requires_explicit_subject(project, surface):
+    store, repo = project
+    if surface == "cli":
+        reply = cli(store.workspace, "accept-run", "--repo", str(repo), machine=True, code=2)
+        assert "--subject product" in reply["next"] and "--subject oracle" in reply["next"]
+    elif surface == "mcp":
+        server = PlannerServer(store.workspace)
+        try:
+            reply = server.call_tool("harness_accept_run", {"repo": str(repo)})
+        finally:
+            server.close()
+        assert reply["isError"]
+        text = reply["content"][0]["text"].rsplit("Next: ", 1)[1]
+        assert "subject=product" in text and "subject=oracle" in text
+    else:
+        with pytest.raises(PlanStoreError, match="Next:"):
+            run_acceptance(store, repo)
+    assert store.connection.execute("SELECT count(*) FROM acceptance_runs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("subject", ["product", "oracle"])
+def test_subject_controls_proof_gate_and_rebind(project, subject):
+    from codex_harness.core.plan_quality import quality_report
+
+    store, repo = project
+    to_accept(store)
+    fix_product(repo)
+    result = cli(
+        store.workspace, "accept-run", "--repo", str(repo), "--subject", subject, machine=True
+    )["data"]
+    assert result["passed"] and result["subject"] == subject
+    status = store.status()["acceptance"]
+    assert status["lastRunSubject"] == subject
+    assert all(item["lastResultSubject"] == subject for item in status["scenarios"])
+    proof = next(
+        item for item in quality_report(store)["checks"] if item["id"] == "first-moment-proof"
+    )
+    if subject == "product":
+        assert proof["claim"] == "proved"
+        review(store, repo)
+        store.accept(by="user", statement="I accept the product")
+        assert store.status()["acceptance"]["accepted"]
+    else:
+        assert proof["claim"] == "planned"
+        assert not any(item["claim"] == "proved" for item in quality_report(store)["checks"])
+        assert all(
+            item["lastResult"] == "pass" and "dry run" in item["lastResultNote"]
+            for item in status["scenarios"]
+        )
+        assert not status["accepted"] and status["invalidReason"] == "acceptance-product-required"
+        with pytest.raises(PlanStoreError) as error:
+            store.accept(by="user", statement="Accept oracle")
+        assert error.value.code == "acceptance-product-required"
+        with pytest.raises(PlanStoreError) as error:
+            store.accept_rebind(repo)
+        assert error.value.code == "acceptance-product-required"
+
+
+@pytest.mark.parametrize("dispatch_evidence", [False, True])
+def test_legacy_subject_inference_controls_existing_acceptance(project, dispatch_evidence):
+    from codex_harness.core.acceptance import run_subject
+    from codex_harness.core.plan_quality import quality_report
+
+    store, repo = project
+    to_accept(store)
+    fix_product(repo)
+    result = run_acceptance(store, repo, subject="product")
+    review(store, repo)
+    store.accept(by="user", statement="Original product acceptance")
+    if dispatch_evidence:
+        evidence = repo.parent / "evidence"
+        evidence.mkdir()
+        (evidence / "run.json").write_text("{}")
+    result.pop("subject")
+    store.connection.execute(
+        "UPDATE acceptance_runs SET result_json=? WHERE id=?", (json.dumps(result), result["id"])
+    )
+    status = store.status()["acceptance"]
+    expected = "product" if dispatch_evidence else "oracle"
+    assert run_subject(result) == status["lastRunSubject"] == expected
+    assert status["accepted"] is dispatch_evidence
+    proof = next(
+        item for item in quality_report(store)["checks"] if item["id"] == "first-moment-proof"
+    )
+    assert (proof["claim"] == "proved") is dispatch_evidence
+    # Explicit oracle always wins over a dispatch marker.
+    assert run_subject({**result, "subject": "oracle"}) == "oracle"

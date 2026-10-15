@@ -1,0 +1,189 @@
+{
+  "schema": "codex-harness/spine-v1",
+  "name": "dogfood-tipsplit",
+  "nodes": [
+    {
+      "id": "V1",
+      "kind": "vision",
+      "title": "tip-split: vision",
+      "text": "A tiny command-line tool that splits a restaurant bill, plus tip, fairly between people, so nobody argues about the last cent.\n\nFirst user moment: `tipsplit 100.00 3 --tip 15` prints three lines that add up to exactly $115.00, with the extra cent given to the first person.\n\nOut of scope: currencies other than dollars; uneven or weighted splits; saving history.",
+      "parents": [],
+      "fields": {
+        "validation": ["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
+        "requirementFiles": ["VISION.md", "PLAN.md", "tests"]
+      }
+    },
+    {
+      "id": "D1",
+      "kind": "decision",
+      "title": "Money is integer cents everywhere",
+      "text": "tip-split amounts are integer cents everywhere; never floats (D1)",
+      "parents": ["V1"],
+      "fields": {}
+    },
+    {
+      "id": "D2",
+      "kind": "decision",
+      "title": "Fair split",
+      "text": "Shares differ by at most one cent. Leftover cents go to the first people in order.",
+      "parents": ["V1"],
+      "fields": {}
+    },
+    {
+      "id": "D3",
+      "kind": "decision",
+      "title": "Tip rounding",
+      "text": "The tip is a whole-number percentage from 0 to 100, rounded half up to the cent.",
+      "parents": ["V1"],
+      "fields": {}
+    },
+    {
+      "id": "D4",
+      "kind": "decision",
+      "title": "Input forms",
+      "text": "Amounts like `12`, `12.3`, `12.34` and `$12.34` are accepted. Negative amounts, more than two decimals and garbage are rejected.",
+      "parents": ["V1"],
+      "fields": {}
+    },
+    {
+      "id": "D5",
+      "kind": "decision",
+      "title": "Error contract",
+      "text": "Invalid input prints a one-line error to stderr and exits with code 2. Success exits with 0.",
+      "parents": ["V1"],
+      "fields": {}
+    },
+    {
+      "id": "F1",
+      "kind": "feature",
+      "title": "Money core",
+      "text": "Parse dollar amounts and split the tipped total fairly using integer cents.",
+      "parents": ["V1"],
+      "fields": {}
+    },
+    {
+      "id": "F2",
+      "kind": "feature",
+      "title": "Command line",
+      "text": "Accept a total, people and optional tip percentage; print each person's share.",
+      "parents": ["V1"],
+      "fields": {}
+    },
+    {
+      "id": "S1",
+      "kind": "story",
+      "title": "Split a bill fairly",
+      "text": "As a diner, I want shares that sum to the exact tipped total and differ by at most one cent.",
+      "parents": ["F1"],
+      "fields": {}
+    },
+    {
+      "id": "S2",
+      "kind": "story",
+      "title": "Read shares from the terminal",
+      "text": "As a diner, I want a simple command that prints dollar amounts for each person and clear errors for invalid inputs.",
+      "parents": ["F2"],
+      "fields": {}
+    },
+    {
+      "id": "R1",
+      "kind": "requirement",
+      "title": "Parse amounts (D1, D4)",
+      "text": "`parse_amount(text) -> int` returns cents: `\"12.34\"` → 1234, `\"$12\"` → 1200 and `\"12.3\"` → 1230. It raises `ValueError` for negative amounts, more than two decimals, or garbage.",
+      "parents": ["S1"],
+      "fields": {}
+    },
+    {
+      "id": "R2",
+      "kind": "requirement",
+      "title": "Fair tipped shares (D2, D3)",
+      "text": "`split(total_cents, people, tip_percent=0) -> list[int]` returns `people` shares that sum to the total plus the tip, rounded half up. Shares differ by at most 1 cent, and leftover cents go to the first people.",
+      "parents": ["S1"],
+      "fields": {}
+    },
+    {
+      "id": "R3",
+      "kind": "requirement",
+      "title": "Reject invalid split inputs",
+      "text": "`split` raises `ValueError` when `people < 1` or when `tip_percent` is not between 0 and 100.",
+      "parents": ["S1"],
+      "fields": {}
+    },
+    {
+      "id": "R4",
+      "kind": "requirement",
+      "title": "Format cents and shares (D1)",
+      "text": "`format_cents(cents) -> str` returns `\"$12.34\"`-style text. `format_shares(shares) -> list[str]` returns lines in the form `\"Person 1: $38.34\"`.",
+      "parents": ["S2"],
+      "fields": {}
+    },
+    {
+      "id": "R5",
+      "kind": "requirement",
+      "title": "Command-line success and error contract (D5)",
+      "text": "`main(argv) -> int` parses `TOTAL PEOPLE [--tip PCT]` and prints one line per person to stdout. It returns 0 on success. `cli.py` imports `from tipsplit.money import parse_amount, split` into its own namespace and calls those names, so Bead B's tests can stand in for Bead A. On invalid input it prints a one-line error to stderr and returns 2.",
+      "parents": ["S2"],
+      "fields": {}
+    },
+    {
+      "id": "R6",
+      "kind": "requirement",
+      "title": "Integrated restaurant bill",
+      "text": "`main([\"100.00\", \"3\", \"--tip\", \"15\"])` prints exactly:\n\n- `Person 1: $38.34`\n- `Person 2: $38.33`\n- `Person 3: $38.33`\n\nThey sum to $115.00. `tests/test_end_to_end.py` passes on the integrated result.",
+      "parents": ["F1", "F2"],
+      "fields": {}
+    },
+    {
+      "id": "A",
+      "kind": "bead",
+      "title": "Bead A: money core",
+      "text": "Implement the public money functions; record the D1 lesson after validation.",
+      "parents": ["R1", "R2", "R3", "D1", "D2", "D3", "D4"],
+      "fields": {
+        "ownedFiles": ["tipsplit/money.py"],
+        "proofModule": "test_money.py",
+        "dependsOn": [],
+        "provider": "codex",
+        "lessons": ["D1"]
+      }
+    },
+    {
+      "id": "B",
+      "kind": "bead",
+      "title": "Bead B: command line",
+      "text": "Implement the command line; depend on A's public functions at integration time only.",
+      "parents": ["R4", "R5", "D1", "D5"],
+      "fields": {
+        "ownedFiles": ["tipsplit/cli.py"],
+        "proofModule": "test_cli.py",
+        "dependsOn": ["A"],
+        "provider": "claude",
+        "lessons": []
+      }
+    },
+    {
+      "id": "test_money",
+      "kind": "test",
+      "title": "Money unit proof",
+      "text": "Verify parsing, fair splitting and rejected split inputs.",
+      "parents": ["R1", "R2", "R3", "A"],
+      "fields": {"module": "test_money.py", "level": "unit"}
+    },
+    {
+      "id": "test_cli",
+      "kind": "test",
+      "title": "Command-line unit proof",
+      "text": "Verify formatting, success and errors with money functions stood in for.",
+      "parents": ["R4", "R5", "B"],
+      "fields": {"module": "test_cli.py", "level": "unit"}
+    },
+    {
+      "id": "test_end_to_end",
+      "kind": "test",
+      "title": "Integrated bill proof",
+      "text": "Run the real integrated command line and verify the three shares sum to $115.00.",
+      "parents": ["R6"],
+      "fields": {"module": "test_end_to_end.py", "level": "e2e"}
+    }
+  ]
+}

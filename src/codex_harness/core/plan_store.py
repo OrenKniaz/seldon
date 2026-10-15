@@ -1,0 +1,1775 @@
+"""Transactional project planning authority; files are published projections only."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import re
+import sqlite3
+from contextlib import contextmanager
+from copy import deepcopy
+from datetime import UTC, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from uuid import uuid4
+
+from codex_harness.core import intake, waves
+from codex_harness.core.graph import load_plan
+from codex_harness.core.spine import (
+    SCHEMA,
+    Spine,
+    SpineError,
+    compile_manifest,
+    impact,
+    load_spine,
+    save_spine,
+)
+from codex_harness.core.spine_render import render_markdown
+from codex_harness.core.test_audit import ORACLE_LABEL, PROSPECTIVE_LABEL, PROSPECTIVE_WARNING
+
+
+def cluster_findings(rows: list[dict]) -> list[dict]:
+    """Read-only deterministic Jaccard components; input order breaks severity ties.
+
+    A round_id identifies the shared invocation across reviewers and shards.
+    Unbound legacy findings remain singletons rather than inventing lineage.
+    """
+    groups = {}
+    for row in sorted(rows, key=lambda row: row.get("created_at", "")):
+        key = (row.get("round_id") or row["id"], row["node_id"], row.get("stage"))
+        groups.setdefault(key, []).append(row)
+    clusters = []
+    severities = ("blocker", "major", "minor", "low", "note")
+    for group in groups.values():
+        tokens = [set(re.findall(r"[^\W_]+", row["finding"].lower())) for row in group]
+        parents = list(range(len(group)))
+
+        def root(index, parents=parents):
+            while parents[index] != index:
+                index = parents[index]
+            return index
+
+        for i, left in enumerate(tokens):
+            for j in range(i):
+                union = left | tokens[j]
+                if union and len(left & tokens[j]) / len(union) >= 0.6:
+                    parents[root(i)] = root(j)
+        components = {}
+        for i, row in enumerate(group):
+            components.setdefault(root(i), []).append(row)
+        for members in components.values():
+            canonical = min(members, key=lambda row: severities.index(row["severity"]))
+            clusters.append({**canonical, "members": members, "memberCount": len(members)})
+    return clusters
+
+
+PHASES = (
+    "align",
+    "expand",
+    "vision-lock",
+    "features",
+    "requirements",
+    "tech-stack",
+    "plan",
+    "roundtable",
+    "publish",
+    "execute",
+    "accept",
+)
+
+
+class PlanStoreError(SpineError):
+    """A stable refusal code from the planning store."""
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _nonempty(value: str, label: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise PlanStoreError("plan-input-invalid", f"{label} must be a nonempty string")
+
+
+class PlanStore:
+    """One SQLite authority per existing workspace, with revision-bound gates.
+
+    Each command takes a write reservation before reading its preimage. Successful
+    commands commit before returning; callers never need to commit. A new store
+    has no nodes until a vision is upserted or a complete spine is imported.
+    """
+
+    def __init__(self, workspace: str | Path, name: str | None = None) -> None:
+        workspace = Path(workspace).resolve()
+        if not workspace.is_dir():
+            raise PlanStoreError("plan-store-workspace-missing", str(workspace))
+        if name is not None:
+            _nonempty(name, "name")
+        self.workspace = workspace
+        self.path = workspace / ".codex-harness" / "plan.sqlite3"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(self.path, isolation_level=None)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        with self._transaction():
+            for sql in (
+                "CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+                "title TEXT NOT NULL, text TEXT NOT NULL, fields_json TEXT NOT NULL, "
+                "parents_json TEXT NOT NULL, revision TEXT NOT NULL, updated_at TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS meta (name TEXT NOT NULL, phase TEXT NOT NULL, "
+                "vision_locked_revision TEXT, published_revision TEXT)",
+                "CREATE TABLE IF NOT EXISTS clarifications (id TEXT PRIMARY KEY, "
+                "question TEXT NOT NULL, answer TEXT, status TEXT NOT NULL "
+                "CHECK(status IN ('open','answered','waived')), node_ids_json TEXT NOT NULL, "
+                "asked_at TEXT NOT NULL, answered_at TEXT)",
+                "CREATE TABLE IF NOT EXISTS assumptions (id TEXT PRIMARY KEY, text TEXT NOT NULL, "
+                "status TEXT NOT NULL CHECK(status IN ('open','confirmed','rejected')), "
+                "node_ids_json TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, gate TEXT NOT NULL, "
+                'plan_revision TEXT NOT NULL, "by" TEXT NOT NULL, statement TEXT NOT NULL, '
+                "at TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS revisions (plan_revision TEXT PRIMARY KEY, "
+                "published_at TEXT NOT NULL, snapshot_json TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "kind TEXT NOT NULL, at TEXT NOT NULL, payload_json TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS audit_runs (id TEXT PRIMARY KEY, "
+                "manifest_revision TEXT NOT NULL, passed INTEGER NOT NULL, "
+                "result_json TEXT NOT NULL, at TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS readiness_reviews (id TEXT PRIMARY KEY, "
+                "batch_id TEXT NOT NULL, manifest_revision TEXT NOT NULL, "
+                "bead_id TEXT NOT NULL, packet_hash TEXT NOT NULL, "
+                "result_json TEXT NOT NULL, at TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS acceptance_scenarios (id TEXT PRIMARY KEY, "
+                "scenario_json TEXT NOT NULL)",
+                *[
+                    f"CREATE TABLE IF NOT EXISTS acceptance_{table} (id TEXT PRIMARY KEY, "
+                    "result_json TEXT NOT NULL)"
+                    for table in ("runs", "reviews", "findings", "approvals")
+                ],
+                "CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events "
+                "BEGIN SELECT RAISE(ABORT, 'events are append-only'); END",
+                "CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events "
+                "BEGIN SELECT RAISE(ABORT, 'events are append-only'); END",
+            ):
+                self.connection.execute(sql)
+            # Additive migrations preserve existing planning databases.
+            for table, column, declaration in (
+                ("meta", "vision_lock_stale", "INTEGER NOT NULL DEFAULT 0"),
+                ("meta", "locked_vision_json", "TEXT"),
+                ("assumptions", "rationale", "TEXT"),
+                ("assumptions", "resolved_by", "TEXT"),
+            ):
+                columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
+                if column not in columns:
+                    self.connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+                    )
+            if self.connection.execute("SELECT 1 FROM meta").fetchone() is None:
+                self.connection.execute(
+                    "INSERT INTO meta (name, phase) VALUES (?, 'align')",
+                    (name if name is not None else workspace.name,),
+                )
+                self._event("opened", {"name": self._meta()["name"]})
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def __enter__(self) -> PlanStore:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    @contextmanager
+    def _transaction(self):
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def _event(self, kind: str, payload: dict) -> None:
+        self.connection.execute(
+            "INSERT INTO events (kind, at, payload_json) VALUES (?, ?, ?)",
+            (kind, _now(), _json(payload)),
+        )
+
+    def _meta(self) -> sqlite3.Row:
+        return self.connection.execute("SELECT * FROM meta").fetchone()
+
+    def _data(self) -> dict:
+        nodes = [
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "title": row["title"],
+                "text": row["text"],
+                "fields": json.loads(row["fields_json"]),
+                "parents": json.loads(row["parents_json"]),
+            }
+            for row in self.connection.execute("SELECT * FROM nodes ORDER BY id")
+        ]
+        return {"schema": SCHEMA, "name": self._meta()["name"], "nodes": nodes}
+
+    def spine(self) -> Spine:
+        self.connection.execute("BEGIN")
+        try:
+            return Spine(self._data())
+        finally:
+            self.connection.rollback()
+
+    def list_nodes(self, kind: str | None = None) -> list[dict]:
+        """Read the current nodes without writing planning truth."""
+        return [node for node in self._data()["nodes"] if kind is None or node["kind"] == kind]
+
+    def show_node(self, node_id: str, *, body: bool = False, test: str | None = None) -> dict:
+        """Inspect linked protected Python tests using AST only, never imports."""
+        if body and not test:
+            raise ValueError("--body requires --test <name>")
+        nodes = {node["id"]: node for node in self.list_nodes()}
+        node = nodes[node_id]
+        result = {
+            **node,
+            "children": sorted(key for key, child in nodes.items() if node_id in child["parents"]),
+            "testFiles": [],
+        }
+        if node["kind"] not in ("requirement", "test"):
+            return result
+        linked = {node_id}
+        while True:
+            descendants = linked | {
+                key for key, child in nodes.items() if linked.intersection(child["parents"])
+            }
+            if descendants == linked:
+                break
+            linked = descendants
+        modules = {nodes[key]["fields"]["module"] for key in linked if nodes[key]["kind"] == "test"}
+        template = (self.workspace / "template").resolve()
+        protected = set()
+        from codex_harness.core.graph import test_dir
+
+        for vision in (item for item in nodes.values() if item["kind"] == "vision"):
+            fields = vision["fields"]
+            for name in (
+                *fields.get("requirementFiles", []),
+                test_dir({"validation": fields.get("validation", [])}),
+            ):
+                path = (template / name).resolve()
+                if not path.is_relative_to(template):
+                    raise ValueError(f"Protected file outside template: {name}")
+                candidates = path.rglob("*.py") if path.is_dir() else [path]
+                for candidate in candidates:
+                    if not candidate.resolve().is_relative_to(template):
+                        raise ValueError(f"Protected file outside template: {candidate}")
+                    if candidate.suffix == ".py" and candidate.is_file():
+                        protected.add(candidate)
+        remaining = 8 * 1024
+        found = False
+        for path in sorted(protected):
+            relative = path.relative_to(template).as_posix()
+            dotted = relative[:-3].replace("/", ".")
+            if not any(
+                module in (relative, path.name, dotted, path.stem) or dotted.endswith("." + module)
+                for module in modules
+            ):
+                continue
+            source = path.read_text(encoding="utf-8-sig")
+            tree = ast.parse(source, filename=relative)
+            functions = []
+            for item in tree.body:
+                if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                    functions.append((item.name, item))
+                elif isinstance(item, ast.ClassDef):
+                    functions.extend(
+                        (f"{item.name}.{method.name}", method)
+                        for method in item.body
+                        if isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef)
+                    )
+            functions = [(name, item) for name, item in functions if item.name.startswith("test")]
+            entry = {"path": relative, "functions": [name for name, _ in functions]}
+            if body:
+                selected = [(name, item) for name, item in functions if test in (name, item.name)]
+                if len(selected) > 1:
+                    raise ValueError(f"Ambiguous test {test} in {relative}; use Class.test_name")
+                if selected:
+                    found = True
+                    name, item = selected[0]
+                    start = min([item.lineno] + [d.lineno for d in item.decorator_list])
+                    text = "".join(source.splitlines(keepends=True)[start - 1 : item.end_lineno])
+                    encoded = text.encode("utf-8")
+                    clipped = encoded[:remaining].decode("utf-8", errors="ignore")
+                    remaining -= len(clipped.encode("utf-8"))
+                    entry.update(
+                        test=name,
+                        body=clipped,
+                        truncated=len(encoded) > len(clipped.encode("utf-8")),
+                    )
+            result["testFiles"].append(entry)
+        if body and not found:
+            raise ValueError(f"Test not found in linked protected files: {test}")
+        return result
+
+    def _revision(self) -> str:
+        data = self._data()
+        if not data["nodes"]:
+            return hashlib.sha256(b"").hexdigest()
+        return Spine(data).plan_revision()
+
+    def _write_node(self, spine: Spine, node_id: str) -> None:
+        node = spine.node(node_id)
+        self._classify_vision_edit(node)
+        self.connection.execute(
+            "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            "kind=excluded.kind, title=excluded.title, text=excluded.text, "
+            "fields_json=excluded.fields_json, parents_json=excluded.parents_json, "
+            "revision=excluded.revision, updated_at=excluded.updated_at",
+            (
+                node_id,
+                node["kind"],
+                node["title"],
+                node["text"],
+                _json(node["fields"]),
+                _json(node["parents"]),
+                spine.revision(node_id),
+                _now(),
+            ),
+        )
+
+    def _classify_vision_edit(self, node: dict) -> None:
+        if node["kind"] != "vision" or not self._meta()["vision_locked_revision"]:
+            return
+        row = self.connection.execute("SELECT * FROM nodes WHERE id=?", (node["id"],)).fetchone()
+        if row is None:
+            return
+
+        def intent(fields):
+            return {
+                key: value
+                for key, value in fields.items()
+                if key not in ("validation", "requirementFiles")
+            }
+
+        if (
+            row["text"] != node["text"]
+            or row["title"] != node["title"]
+            or intent(json.loads(row["fields_json"])) != intent(node["fields"])
+        ):
+            self.connection.execute("UPDATE meta SET vision_lock_stale=1")
+            self._event("vision-lock-stale", {"id": node["id"]})
+
+    def upsert_node(self, node: dict) -> None:
+        with self._transaction():
+            data = self._data()
+            node_id = node.get("id") if isinstance(node, dict) else None
+            data["nodes"] = [item for item in data["nodes"] if item["id"] != node_id]
+            data["nodes"].append(node)
+            spine = Spine(data)
+            self._write_node(spine, node_id)
+            self._event("node-upserted", {"id": node_id, "plan_revision": spine.plan_revision()})
+
+    def _draft_preimage(self, expected_spine_revision: str) -> Spine:
+        spine = Spine(self._data())
+        if spine.plan_revision() != expected_spine_revision:
+            raise PlanStoreError(
+                "plan-spine-stale",
+                "Refresh status and reconcile against the current spine revision",
+            )
+        return spine
+
+    def _latest_draft_event(self, kind: str) -> dict | None:
+        row = self.connection.execute(
+            "SELECT payload_json FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (kind,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    @staticmethod
+    def _obligation_register(spine: Spine) -> list[dict]:
+        register = {key: True for kind in ("requirement", "acceptance") for key in spine.ids(kind)}
+        for key in spine.ids("decision"):
+            fields = spine.node(key)["fields"]
+            if fields.get("schema") == "dot-wave-map-v1":
+                for row in fields["obligations"]:
+                    register[row["id"]] = (
+                        register.get(row["id"], False) or row["requiredForFullVision"]
+                    )
+        return [
+            dict(id=key, requiredForFullVision=value) for key, value in sorted(register.items())
+        ]
+
+    def _save_draft_nodes(
+        self, before: Spine, nodes: list[dict], kind: str, provenance: dict
+    ) -> dict:
+        if len({node["id"] for node in nodes}) != len(nodes):
+            raise PlanStoreError("plan-node-duplicate", "Draft node identities must be unique")
+        merged = {key: before.node(key) for key in before.ids()}
+        for node in nodes:
+            old = merged.get(node["id"])
+            if old and (old["kind"], old["fields"].get("schema")) != (
+                node["kind"],
+                node["fields"].get("schema"),
+            ):
+                raise PlanStoreError("plan-node-identity-conflict", node["id"])
+            merged[node["id"]] = node
+        after = Spine({**before.to_dict(), "nodes": list(merged.values())})
+        changed = [
+            node
+            for node in nodes
+            if node["id"] not in before.ids() or after.node(node["id"]) != before.node(node["id"])
+        ]
+        identities = {node["id"]: after.revision(node["id"]) for node in nodes}
+        event = {"nodeRevisions": identities, **deepcopy(provenance)}
+        if changed or self._latest_draft_event(kind) != event:
+            for node in changed:
+                self._write_node(after, node["id"])
+            self._event(kind, event)
+        return {
+            "nodeRevisions": identities,
+            "spineRevision": after.plan_revision(),
+            "state": "draft",
+            "lockState": "unconfirmed",
+            "approvalGranted": False,
+        }
+
+    @staticmethod
+    def _draft_node(node: dict, kind: str, schema: str) -> dict:
+        node = deepcopy(node)
+        if not isinstance(node, dict) or node.get("kind") != kind:
+            raise PlanStoreError("plan-draft-kind-invalid", f"Expected {kind} node")
+        if not isinstance(node.get("fields"), dict):
+            raise PlanStoreError("plan-draft-fields-invalid", "Node fields must be an object")
+        if node["fields"].get("schema", schema) != schema:
+            raise PlanStoreError("plan-draft-schema-invalid", schema)
+        return node
+
+    def record_intake(self, node: dict, expected_spine_revision: str, *, baseline=None) -> dict:
+        """Fields are propose's request; baseline is null or an existing publication/revision pair.
+
+        Obligations come from the complete canonical nodes/map, never the caller's delta.
+        Supplied confirmation provenance is retained without authenticating approval.
+        """
+        with self._transaction():
+            before = self._draft_preimage(expected_spine_revision)
+            node = self._draft_node(node, "decision", "dot-intake-v1")
+            resolved = None
+            if baseline is not None:
+                if not isinstance(baseline, dict) or set(baseline) != {
+                    "publishedRevision",
+                    "spineRevision",
+                }:
+                    raise PlanStoreError(
+                        "plan-baseline-unresolved", "Supply the exact revision pair"
+                    )
+                snapshot = self._snapshot(baseline["publishedRevision"])
+                source = Spine(snapshot)
+                if source.plan_revision() != baseline["spineRevision"]:
+                    raise PlanStoreError(
+                        "plan-baseline-unresolved", "Published spine does not match"
+                    )
+                recipes = [
+                    source.node(key)["fields"]["recipe"]
+                    for key in source.ids("decision")
+                    if source.node(key)["fields"].get("schema") == "dot-intake-v1"
+                ]
+                if len(set(recipes)) > 1:
+                    raise PlanStoreError(
+                        "plan-baseline-unresolved", "Published recipe is ambiguous"
+                    )
+                resolved = {
+                    **baseline,
+                    "obligationIds": [
+                        row["id"]
+                        for row in self._obligation_register(source)
+                        if row["requiredForFullVision"]
+                    ],
+                    "recipe": recipes[0] if recipes else None,
+                }
+            node["fields"] = intake.propose(
+                node["fields"], resolved, self._obligation_register(before)
+            )
+            result = self._save_draft_nodes(
+                before, [node], "intake-recorded", {"nodeId": node["id"]}
+            )
+            return {
+                **result,
+                "intake": node["fields"],
+                "nextAction": "Record explicit reviewer choice",
+            }
+
+    def record_reviewer_catalog(self, catalog: dict, expected_spine_revision: str) -> dict:
+        """Record a supplied observation, not discovered entitlement or provider execution."""
+        with self._transaction():
+            before = self._draft_preimage(expected_spine_revision)
+            catalog = intake.validate_catalog(catalog)
+            observations = [
+                json.loads(row[0])
+                for row in self.connection.execute(
+                    "SELECT payload_json FROM events "
+                    "WHERE kind='reviewer-catalog-recorded' ORDER BY id"
+                )
+            ]
+            prior = next(
+                (row for row in observations if row["catalog"]["id"] == catalog["id"]), None
+            )
+            if prior and prior["catalog"] != catalog:
+                raise PlanStoreError("plan-observation-conflict", catalog["id"])
+            if prior is None:
+                self._event("reviewer-catalog-recorded", {"catalog": catalog})
+            return {
+                "catalog": catalog,
+                "state": "draft",
+                "approvalGranted": False,
+                "spineRevision": before.plan_revision(),
+                "nextAction": (
+                    "Choose exact observed reviewer tuples; observation is supplied evidence"
+                ),
+            }
+
+    def record_reviewer_selection(
+        self, node: dict, expected_spine_revision: str, *, author_sessions=None
+    ) -> dict:
+        """Optional author_sessions is the producer shape, retained in the selection event."""
+        with self._transaction():
+            before = self._draft_preimage(expected_spine_revision)
+            node = self._draft_node(node, "decision", "dot-reviewer-selection-v1")
+            observation = self._latest_draft_event("reviewer-catalog-recorded")
+            if observation is None:
+                raise PlanStoreError(
+                    "plan-catalog-unavailable", "Record an explicit observation first"
+                )
+            sessions = (
+                author_sessions
+                if author_sessions is not None
+                else {"implementationSessionIds": [], "reviewerSessionIds": {}}
+            )
+            assurance = intake.validate_selection(observation["catalog"], node["fields"], sessions)
+            node["fields"] = assurance["selection"]
+            result = self._save_draft_nodes(
+                before,
+                [node],
+                "reviewer-selection-recorded",
+                {"nodeId": node["id"], "authorSessions": sessions},
+            )
+            return {
+                **result,
+                **assurance,
+                "nextAction": "Resolve unmet assurance before existing review gates",
+            }
+
+    def record_wave_map(
+        self,
+        map_node: dict,
+        detail_nodes: list[dict],
+        expected_spine_revision: str,
+        *,
+        historical_measurements=None,
+    ) -> dict:
+        """Record a vision-owned decision map and child detail designs; history only appends."""
+        with self._transaction():
+            before = self._draft_preimage(expected_spine_revision)
+            map_node = self._draft_node(map_node, "decision", "dot-wave-map-v1")
+            details = [
+                self._draft_node(node, "design", "dot-wave-detail-v1") for node in detail_nodes
+            ]
+            if map_node.get("parents") != before.ids("vision") or any(
+                node.get("parents") != [map_node["id"]] for node in details
+            ):
+                raise PlanStoreError(
+                    "plan-wave-owner-invalid",
+                    "Map decision must belong to the vision; "
+                    "detail designs must belong to that map",
+                )
+            prior = self._latest_draft_event("wave-map-recorded")
+            if prior and prior["mapNodeId"] != map_node["id"]:
+                raise PlanStoreError(
+                    "plan-map-identity-conflict", "Reuse the current logical map ID"
+                )
+            old_required = {
+                row["id"]
+                for row in self._obligation_register(before)
+                if row["requiredForFullVision"]
+            }
+            proposed = {key: before.node(key) for key in before.ids()}
+            proposed.update({node["id"]: node for node in [map_node, *details]})
+            candidate = Spine({**before.to_dict(), "nodes": list(proposed.values())})
+            validated = waves.validate_map(
+                candidate, map_node["fields"], [n["fields"] for n in details], None
+            )
+            # Source IDs have producer-validated sourceRefs; required map IDs must survive.
+            prior_obligations = {
+                row["id"]
+                for key in before.ids("decision")
+                if before.node(key)["fields"].get("schema") == "dot-wave-map-v1"
+                for row in before.node(key)["fields"]["obligations"]
+            }
+            required = {
+                row["id"]
+                for row in validated["waveMap"]["obligations"]
+                if row["requiredForFullVision"]
+            }
+            if (old_required & prior_obligations) - required:
+                raise PlanStoreError(
+                    "plan-obligation-loss", "Required map obligations must survive"
+                )
+            if historical_measurements is not None and not isinstance(
+                historical_measurements, list
+            ):
+                raise PlanStoreError("plan-history-invalid", "Expected historical measurement list")
+            history = [
+                *(prior["historicalMeasurements"] if prior else []),
+                *(historical_measurements if historical_measurements is not None else []),
+            ]
+            snapshot = self._wave_snapshot(before, validated, history)
+            accounting = waves.accounting(snapshot, [], [], [])
+            observations = {}
+            normalized = {}
+            for record, projected in zip(
+                history, accounting["historicalMeasurements"], strict=True
+            ):
+                identity = record["sourceRef"]
+                if identity in observations and intake.canonical_digest(
+                    observations[identity]
+                ) != intake.canonical_digest(record):
+                    raise PlanStoreError("plan-history-observation-conflict", identity)
+                observations[identity] = record
+                normalized[identity] = projected
+            history = list(observations.values())
+            accounting["historicalMeasurements"] = list(normalized.values())
+            result = self._save_draft_nodes(
+                before,
+                [map_node, *details],
+                "wave-map-recorded",
+                {
+                    "mapNodeId": map_node["id"],
+                    "detailNodeIds": [n["id"] for n in details],
+                    "historicalMeasurements": history,
+                },
+            )
+            return {
+                **result,
+                "accounting": accounting,
+                "nextAction": "Read full draft with waves; publication and execution remain gated",
+            }
+
+    @staticmethod
+    def _wave_snapshot(spine: Spine, validated: dict, history: list) -> dict:
+        return {
+            "publicationRevision": None,
+            "productLockRevision": None,
+            "waveMap": validated["waveMap"],
+            "waveDetails": validated["waveDetails"],
+            "nodeRevisions": {key: spine.revision(key) for key in spine.ids()},
+            "selectedWaveIds": validated["waveMap"]["order"][:1],
+            "historicalMeasurements": history,
+            "beadDependencies": {
+                key: spine.node(key)["fields"]["dependsOn"] for key in spine.ids("bead")
+            },
+        }
+
+    def outcome_waves(self) -> dict:
+        """Read a consistent draft projection. No runtime evidence is bound in this slice."""
+        self.connection.execute("BEGIN")
+        try:
+            data = self._data()
+            result = {
+                "state": "unavailable",
+                "lockState": "unconfirmed",
+                "approvalGranted": False,
+                "reason": "Outcome map not recorded",
+                "intake": None,
+                "reviewerSelection": None,
+            }
+            if not data["nodes"]:
+                return result
+            spine = Spine(data)
+            nodes = {key: spine.node(key) for key in spine.ids()}
+            for kind, field in (
+                ("intake-recorded", "intake"),
+                ("reviewer-selection-recorded", "reviewerSelection"),
+            ):
+                event = self._latest_draft_event(kind)
+                if event:
+                    node = nodes.get(event["nodeId"])
+                    current = node is not None and event["nodeRevisions"][
+                        node["id"]
+                    ] == spine.revision(node["id"])
+                    item = {"node": node, "state": "draft" if current else "stale"}
+                    if current and field == "reviewerSelection":
+                        catalog = self._latest_draft_event("reviewer-catalog-recorded")
+                        try:
+                            item.update(
+                                intake.validate_selection(
+                                    catalog["catalog"], node["fields"], event["authorSessions"]
+                                )
+                            )
+                        except ValueError as error:
+                            item.update(state="stale", unmetRequirements=[str(error)])
+                    result[field] = item
+            event = self._latest_draft_event("wave-map-recorded")
+            if event is None:
+                return result
+            map_node = nodes.get(event["mapNodeId"])
+            details = [nodes.get(key) for key in event["detailNodeIds"]]
+            result.update(
+                mapNode=map_node,
+                detailNodes=details,
+                nodes=nodes,
+                nodeRevisions={key: spine.revision(key) for key in spine.ids()},
+            )
+            if map_node is None or any(node is None for node in details):
+                return {**result, "state": "stale", "reason": "Recorded map/detail node missing"}
+            try:
+                validated = waves.validate_map(
+                    spine, map_node["fields"], [n["fields"] for n in details], None
+                )
+                accounting = waves.accounting(
+                    self._wave_snapshot(spine, validated, event["historicalMeasurements"]),
+                    [],
+                    [],
+                    [],
+                )
+            except ValueError as error:
+                return {**result, "state": "stale", "reason": str(error)}
+            changed = any(
+                key not in nodes or spine.revision(key) != revision
+                for key, revision in event["nodeRevisions"].items()
+            )
+            return {
+                **result,
+                **validated,
+                "state": "stale" if changed else "draft",
+                "reason": "Map/detail changed outside its validated recording"
+                if changed
+                else "Draft only; current publication, lock and runtime evidence unavailable",
+                "accounting": accounting,
+            }
+        finally:
+            self.connection.rollback()
+
+    def remove_node(self, node_id: str) -> None:
+        with self._transaction():
+            data = self._data()
+            if not any(node["id"] == node_id for node in data["nodes"]):
+                raise PlanStoreError("plan-node-missing", node_id)
+            if any(node_id in node["parents"] for node in data["nodes"]):
+                raise PlanStoreError("plan-node-has-children", node_id)
+            data["nodes"] = [node for node in data["nodes"] if node["id"] != node_id]
+            spine = Spine(data)  # Also protects dependency and lesson references.
+            self.connection.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+            self._event("node-removed", {"id": node_id, "plan_revision": spine.plan_revision()})
+
+    def import_spine(self, path: str | Path) -> None:
+        spine = load_spine(path)
+        with self._transaction():
+            for node_id in spine.ids("vision"):
+                self._classify_vision_edit(spine.node(node_id))
+            self.connection.execute("DELETE FROM nodes")
+            self.connection.execute("UPDATE meta SET name=?", (spine.name,))
+            for node_id in spine.ids():
+                self._write_node(spine, node_id)
+            self._event("spine-imported", {"plan_revision": spine.plan_revision()})
+
+    def export_spine(self, path: str | Path) -> None:
+        save_spine(self.spine(), path)
+
+    def _node_ids(self, node_ids) -> str:
+        ids = list(node_ids)
+        known = {node["id"] for node in self._data()["nodes"]}
+        if any(not isinstance(item, str) or item not in known for item in ids):
+            raise PlanStoreError("plan-node-missing", "Unknown clarification/assumption node")
+        return _json(ids)
+
+    def ask(self, question: str, node_ids=()) -> str:
+        _nonempty(question, "question")
+        item_id = uuid4().hex
+        with self._transaction():
+            self.connection.execute(
+                "INSERT INTO clarifications VALUES (?, ?, NULL, 'open', ?, ?, NULL)",
+                (item_id, question, self._node_ids(node_ids), _now()),
+            )
+            self._event("clarification-asked", {"id": item_id, "question": question})
+        return item_id
+
+    def _resolve_question(self, item_id: str, text: str, status: str) -> None:
+        _nonempty(text, "answer/reason")
+        with self._transaction():
+            row = self.connection.execute(
+                "SELECT status FROM clarifications WHERE id=?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise PlanStoreError("plan-clarification-missing", item_id)
+            if row["status"] != "open":
+                raise PlanStoreError("plan-clarification-closed", item_id)
+            self.connection.execute(
+                "UPDATE clarifications SET answer=?, status=?, answered_at=? WHERE id=?",
+                (text, status, _now(), item_id),
+            )
+            self._event(f"clarification-{status}", {"id": item_id, "answer": text})
+
+    def answer(self, item_id: str, answer: str) -> None:
+        self._resolve_question(item_id, answer, "answered")
+
+    def waive(self, item_id: str, reason: str) -> None:
+        self._resolve_question(item_id, reason, "waived")
+
+    def add_assumption(self, text: str, node_ids=()) -> str:
+        _nonempty(text, "assumption")
+        item_id = uuid4().hex
+        with self._transaction():
+            self.connection.execute(
+                "INSERT INTO assumptions (id, text, status, node_ids_json) "
+                "VALUES (?, ?, 'open', ?)",
+                (item_id, text, self._node_ids(node_ids)),
+            )
+            self._event("assumption-added", {"id": item_id, "text": text})
+        return item_id
+
+    def _resolve_assumption(self, item_id: str, status: str, *, rationale: str, by: str) -> None:
+        _nonempty(rationale, "rationale")
+        _nonempty(by, "by")
+        if by not in ("user", "planner") and not (by.startswith("proxy:") and by[6:].strip()):
+            raise PlanStoreError("plan-input-invalid", "by must be user, planner or proxy:<name>")
+        with self._transaction():
+            row = self.connection.execute(
+                "SELECT status FROM assumptions WHERE id=?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise PlanStoreError("plan-assumption-missing", item_id)
+            if row["status"] != "open":
+                raise PlanStoreError("plan-assumption-closed", item_id)
+            self.connection.execute(
+                "UPDATE assumptions SET status=?, rationale=?, resolved_by=? WHERE id=?",
+                (status, rationale, by, item_id),
+            )
+            self._event(f"assumption-{status}", {"id": item_id, "rationale": rationale, "by": by})
+
+    def confirm_assumption(self, item_id: str, *, rationale: str, by: str = "planner") -> None:
+        self._resolve_assumption(item_id, "confirmed", rationale=rationale, by=by)
+
+    def reject_assumption(self, item_id: str, *, rationale: str, by: str = "planner") -> None:
+        self._resolve_assumption(item_id, "rejected", rationale=rationale, by=by)
+
+    def phase(self) -> str:
+        return self._meta()["phase"]
+
+    def _approve(self, gate: str, by: str, statement: str) -> str:
+        if gate not in ("align", "vision-lock"):
+            raise PlanStoreError("plan-gate-invalid", gate)
+        _nonempty(by, "by")
+        _nonempty(statement, "statement")
+        revision = Spine(self._data()).plan_revision()
+        item_id = uuid4().hex
+        self.connection.execute(
+            "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, ?)",
+            (item_id, gate, revision, by, statement, _now()),
+        )
+        self._event(
+            "approved",
+            {
+                "id": item_id,
+                "gate": gate,
+                "plan_revision": revision,
+                "by": by,
+                "statement": statement,
+            },
+        )
+
+        if gate == "vision-lock":
+            spine = Spine(self._data())
+            vision = _json(spine.node(spine.ids("vision")[0]))
+            self.connection.execute("UPDATE meta SET locked_vision_json=?", (vision,))
+            self.connection.execute("UPDATE meta SET vision_lock_stale=0")
+            if self._meta()["vision_locked_revision"]:
+                self.connection.execute("UPDATE meta SET vision_locked_revision=?", (revision,))
+        return item_id
+
+    def approve(self, gate: str, *, by: str, statement: str) -> str:
+        with self._transaction():
+            return self._approve(gate, by, statement)
+
+    def _check_approval(self, gate: str, revision: str) -> None:
+        if gate == "vision-lock" and self._meta()["vision_locked_revision"]:
+            if self._meta()["vision_lock_stale"]:
+                raise PlanStoreError("plan-approval-stale", "vision-lock needs renewed approval")
+            return
+        rows = self.connection.execute(
+            "SELECT plan_revision FROM approvals WHERE gate=?", (gate,)
+        ).fetchall()
+        if any(row["plan_revision"] == revision for row in rows):
+            return
+        code = "plan-approval-stale" if rows else "plan-approval-required"
+        raise PlanStoreError(code, f"{gate} needs approval of {revision}")
+
+    def compile_template(self, template: Path) -> dict:
+        """Materialize the canonical spine before binding protected file contents."""
+        template = Path(template)
+        if not template.is_dir():
+            raise PlanStoreError("spine-template-missing", str(template))
+        spine = self.spine()
+        for name, text in render_markdown(spine).items():
+            path = template / name
+            if path.is_symlink():
+                raise PlanStoreError("spine-requirement-path-invalid", str(path))
+            path.write_text(text, encoding="utf-8", newline="\n")
+        manifest = compile_manifest(spine, template)
+        self.check_requirement_files(manifest, template)
+        with self._transaction():
+            self._event("manifest-compiled", {"manifest": manifest, "spine": spine.to_dict()})
+        return manifest
+
+    @staticmethod
+    def check_requirement_files(manifest: dict, template: Path) -> None:
+        # compile_manifest validates protected paths before this existence check.
+        missing = [name for name in manifest["requirementFiles"] if not (template / name).exists()]
+        if missing:
+            raise PlanStoreError(
+                "plan-requirement-file-missing",
+                f"Missing requirement files in {template}: {', '.join(missing)}. "
+                "Next: restore listed requirement files, then compile --template template, "
+                "audit --oracle oracle, and quality",
+            )
+
+    def _manifest(self, spine: Spine) -> dict:
+        # A workspace-local template is the only template this store knows.
+        # Without one, publication retains the legacy spine-only revision;
+        # callers compiling elsewhere must pass their template to compile_manifest.
+        template = self.workspace / "template"
+        manifest = compile_manifest(spine, template if template.is_dir() else None)
+        if template.is_dir():
+            self.check_requirement_files(manifest, template)
+        with TemporaryDirectory(prefix="harness-plan-") as temp:
+            path = Path(temp) / "manifest.json"
+            path.write_text(_json(manifest), encoding="utf-8")
+            load_plan(path)
+        return manifest
+
+    def manifest_revision(self) -> str | None:
+        """Identity of the editable spine plus protected requirement file contents."""
+        data = self._data()
+        if not data["nodes"]:
+            return None
+        spine = Spine(data)
+        fields = spine.node(spine.ids("vision")[0])["fields"]
+        if "validation" not in fields or "requirementFiles" not in fields:
+            return None
+        template = self.workspace / "template"
+        return compile_manifest(spine, template if template.is_dir() else None)["planRevision"]
+
+    def record_audit(self, revision: str, result: dict) -> str:
+        with self._transaction():
+            if self.manifest_revision() != revision:
+                raise PlanStoreError("audit-plan-changed", "Audit the current manifest revision")
+            item_id = uuid4().hex
+            result = {**result, "id": item_id}
+            self.connection.execute(
+                "INSERT INTO audit_runs VALUES (?, ?, ?, ?, ?)",
+                (item_id, revision, int(result["ok"] is True), _json(result), _now()),
+            )
+            self._event("audit-completed", {"manifestRevision": revision, **result})
+            return item_id
+
+    def passing_audit(self, revision: str) -> dict | None:
+        rows = self.connection.execute(
+            "SELECT result_json FROM audit_runs WHERE manifest_revision=? AND passed=1 "
+            "ORDER BY at DESC, id DESC",
+            (revision,),
+        ).fetchall()
+        # A stronger audit cannot be downgraded by a later prospective check.
+        # Legacy oracle audit envelopes remain byte-identical.
+        audits = [json.loads(row[0]) for row in rows]
+        return next(
+            (
+                audit
+                for audit in audits
+                if audit.get("proofLevel", "oracle-verified") == "oracle-verified"
+            ),
+            next((audit for audit in audits if audit.get("proofLevel") == "prospective"), None),
+        )
+
+    def proof_level(self, revision: str | None = None) -> str | None:
+        audit = self.passing_audit(revision or self.manifest_revision())
+        return audit.get("proofLevel", "oracle-verified") if audit else None
+
+    def publication_current(self, revision: str | None) -> bool:
+        published = self._meta()["published_revision"]
+        if revision is None or published is None:
+            return False
+        manifest = self.published_manifest(published)
+        return manifest.get("sourceManifestRevision", published) == revision and manifest.get(
+            "proofLevel", "oracle-verified"
+        ) == self.proof_level(revision)
+
+    def rendered_docs(self) -> dict[str, str]:
+        """Display audit provenance without modifying protected template bytes."""
+        rendered = render_markdown(self.spine())
+        level = self.proof_level()
+        label = PROSPECTIVE_LABEL if level == "prospective" else ORACLE_LABEL if level else None
+        if level == "prospective":
+            label += "\n" + PROSPECTIVE_WARNING
+        readiness = self.readiness_status()
+        header = f"Worker readiness (advisory): {readiness['status']}"
+        return {
+            name: header + "\n\n" + (f"{label}\n\n{text}" if label else text)
+            for name, text in rendered.items()
+        }
+
+    def latest_review_failure(self) -> dict | None:
+        row = self.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='acceptance-review-failed' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def review(self, review_id: str) -> dict:
+        """Read recorded roundtable (round or reviewer id) or acceptance evidence."""
+        saved = self.connection.execute(
+            "SELECT result_json FROM acceptance_reviews WHERE id=?", (review_id,)
+        ).fetchone()
+        if saved:
+            result = json.loads(saved[0])
+            findings = [f for f in self.acceptance_findings() if f.get("runId") == result["runId"]]
+            result["findingCountsScope"] = "scenario run (findings do not record review ids)"
+        else:
+            exists = self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
+            ).fetchone()
+            rows = (
+                list(
+                    self.connection.execute(
+                        "SELECT * FROM review_runs WHERE round_id=? OR id=? ORDER BY rowid",
+                        (review_id, review_id),
+                    )
+                )
+                if exists
+                else []
+            )
+            if not rows:
+                raise PlanStoreError("plan-review-not-found", review_id)
+            result = {"id": review_id, "reviewers": []}
+            for saved in rows:
+                row = dict(saved)
+                for key in ("shardDetails", "reshardedFrom", "outOfPacketTools"):
+                    row[key] = json.loads(row[key]) if row.get(key) else None
+                row["name"] = row["reviewer"]
+                row["packetBound"] = (
+                    bool(row["packetBound"]) if row.get("packetBound") is not None else None
+                )
+                result["reviewers"].append(row)
+            findings = [
+                dict(f)
+                for f in self.connection.execute(
+                    "SELECT * FROM review_findings WHERE round_id=?", (rows[0]["round_id"],)
+                )
+            ]
+        for row in result["reviewers"]:
+            counts = {}
+            for finding in findings:
+                if (finding["reviewer"], finding["provider"]) == (row["name"], row["provider"]):
+                    counts[finding["status"]] = counts.get(finding["status"], 0) + 1
+            row["findingCounts"] = counts
+            row["findings"] = sum(counts.values())
+        return result
+
+    def readiness_reviews(self, revision: str | None = None) -> list[dict]:
+        query = "SELECT result_json FROM readiness_reviews"
+        params = () if revision is None else (revision,)
+        if revision is not None:
+            query += " WHERE manifest_revision=?"
+        return [
+            json.loads(row[0]) for row in self.connection.execute(query + " ORDER BY rowid", params)
+        ]
+
+    def readiness_status(self, revision: str | None = None) -> dict:
+        from codex_harness.core.readiness import readiness_status
+
+        return readiness_status(
+            self, revision if revision is not None else self.manifest_revision()
+        )
+
+    def successful_reviews(self, revision: str) -> list[dict]:
+        """Latest valid successful run per provider; failed retries never erase success."""
+        exists = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
+        ).fetchone()
+        if not exists:
+            return []
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(review_runs)")}
+        if (
+            not {"plan_revision", "provider", "exit_code", "invalid", "finished_at", "id"}
+            <= columns
+        ):
+            return []
+        latest = {}
+        for row in self.connection.execute(
+            "SELECT * FROM review_runs WHERE plan_revision=? AND exit_code=0 AND invalid=0 "
+            "ORDER BY finished_at DESC, id DESC",
+            (revision,),
+        ):
+            latest.setdefault(row["provider"], dict(row))
+        return [latest[key] for key in sorted(latest)]
+
+    def _check_evidence(self, revision: str) -> None:
+        missing = []
+        if not self.passing_audit(revision):
+            missing.append("passing audit (audit --oracle oracle)")
+        if not self.successful_reviews(revision):
+            missing.append("successful review (roundtable)")
+        if missing:
+            raise PlanStoreError(
+                "plan-publication-evidence-required",
+                f"Missing {' and '.join(missing)} for current manifest revision {revision}",
+            )
+
+    @staticmethod
+    def _check_coverage(spine: Spine, kind: str) -> None:
+        gaps = [gap for gap in spine.coverage_gaps() if gap["gap"] == f"requirement-without-{kind}"]
+        if gaps:
+            raise PlanStoreError(f"plan-requirement-without-{kind}", _json(gaps))
+
+    def _open(self, table: str) -> list[dict]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                f"SELECT * FROM {table} WHERE status='open' ORDER BY id"
+            )
+        ]
+
+    def _check_publish(self) -> None:
+        if self._open("clarifications"):
+            raise PlanStoreError("plan-clarifications-open", "Resolve open clarifications")
+
+    def advance(self, to_phase: str, *, by: str, statement: str | None = None) -> None:
+        _nonempty(by, "by")
+        with self._transaction():
+            current = self.phase()
+            if to_phase not in PHASES:
+                raise PlanStoreError("plan-phase-invalid", to_phase)
+            index, target = PHASES.index(current), PHASES.index(to_phase)
+            if target == index or target > index + 1:
+                raise PlanStoreError(
+                    "plan-phase-order", "Advance one phase or return to an earlier phase"
+                )
+            revision = self._revision()
+            if target > index:
+                if index > PHASES.index("vision-lock") and self._meta()["vision_lock_stale"]:
+                    raise PlanStoreError(
+                        "plan-approval-stale", "vision-lock needs renewed approval"
+                    )
+                spine = Spine(self._data())
+                if current in ("align", "vision-lock"):
+                    if statement is not None:
+                        self._approve(current, by, statement)
+                    self._check_approval(current, revision)
+                if current == "vision-lock":
+                    self.connection.execute("UPDATE meta SET vision_locked_revision=?", (revision,))
+                if current == "requirements":
+                    self._check_coverage(spine, "test")
+                if current == "plan":
+                    self._check_coverage(spine, "bead")
+                    self._manifest(spine)
+                if to_phase == "publish":
+                    self._check_publish()
+                    self._check_evidence(self._manifest(spine)["planRevision"])
+                if current == "publish" and not self.publication_current(
+                    self._manifest(spine)["planRevision"]
+                ):
+                    raise PlanStoreError(
+                        "plan-publication-required", "Publish the current revision before execution"
+                    )
+                if current == "publish":
+                    self._check_evidence(self.manifest_revision())
+            self.connection.execute("UPDATE meta SET phase=?", (to_phase,))
+            self._event(
+                "phase-advanced",
+                {
+                    "from": current,
+                    "to": to_phase,
+                    "by": by,
+                    "statement": statement,
+                    "plan_revision": revision,
+                },
+            )
+
+    def publish(
+        self,
+        *,
+        by: str,
+        export_dir: str | Path,
+        proof_level: str = "oracle-verified",
+        reason: str | None = None,
+    ) -> str:
+        """Freeze a content-bound manifest when workspace/template exists.
+
+        With no known template, publish the spine-only revision. Approval gates
+        and status.plan_revision continue to describe the editable spine; the
+        returned and published_revision identities describe the frozen manifest.
+        """
+        _nonempty(by, "by")
+        if proof_level not in ("oracle-verified", "prospective"):
+            raise PlanStoreError("plan-proof-level-invalid", proof_level)
+        if proof_level == "prospective" and (not isinstance(reason, str) or not reason.strip()):
+            raise PlanStoreError(
+                "plan-prospective-reason-required", "Record why no oracle is available"
+            )
+        with self._transaction():
+            if self.phase() != "publish":
+                raise PlanStoreError(
+                    "plan-publish-phase-required", "Enter publish before publishing"
+                )
+            self._check_publish()
+            spine = Spine(self._data())
+            self._check_coverage(spine, "test")
+            self._check_coverage(spine, "bead")
+            manifest = self._manifest(spine)
+            revision = manifest["planRevision"]
+            self._check_evidence(revision)
+            level = self.proof_level(revision)
+            if level != proof_level:
+                raise PlanStoreError(
+                    "plan-proof-level-required",
+                    "Prospective publication requires --proof-level prospective "
+                    '--reason "why no oracle"; '
+                    "oracle-verified publication requires a passing oracle audit.",
+                )
+            if proof_level == "prospective":
+                manifest.update(
+                    proofLevel="prospective",
+                    proofLevelReason=reason.strip(),
+                    sourceManifestRevision=revision,
+                )
+                # Proof choice is publication identity, not editable test identity.
+                revision = hashlib.sha256(_json(manifest).encode("utf-8")).hexdigest()
+                manifest["planRevision"] = revision
+            row = self.connection.execute(
+                "SELECT snapshot_json FROM revisions WHERE plan_revision=?", (revision,)
+            ).fetchone()
+            if row is None:
+                snapshot = {
+                    **spine.to_dict(),
+                    "plan_revision": revision,
+                    "published_at": _now(),
+                    "by": by,
+                    "open_assumptions": self._open("assumptions"),
+                    "manifest": manifest,
+                }
+            else:
+                snapshot = json.loads(row["snapshot_json"])
+                if Spine(snapshot).to_dict() != spine.to_dict():
+                    raise PlanStoreError(
+                        "plan-revision-conflict", "Revision already published under another name"
+                    )
+            if row is None:
+                self.connection.execute(
+                    "INSERT INTO revisions VALUES (?, ?, ?)",
+                    (revision, snapshot["published_at"], _json(snapshot)),
+                )
+                self._event("published", snapshot)
+            if self._meta()["published_revision"] != revision:
+                self.connection.execute("UPDATE meta SET published_revision=?", (revision,))
+                if row is not None:
+                    self._event("publication-selected", {"plan_revision": revision, "by": by})
+            self._export(snapshot, Path(export_dir))
+        return revision
+
+    @staticmethod
+    def _export(snapshot: dict, export_dir: Path) -> None:
+        revision = snapshot["plan_revision"]
+        files = {
+            Path("revisions") / f"{revision}.json": _json(snapshot) + "\n",
+            Path(revision) / "manifest.json": _json(snapshot["manifest"]) + "\n",
+            **{
+                Path(revision) / name: text
+                for name, text in render_markdown(Spine(snapshot)).items()
+            },
+        }
+        if snapshot["manifest"].get("proofLevel") == "prospective":
+            for name in render_markdown(Spine(snapshot)):
+                key = Path(revision) / name
+                files[key] = PROSPECTIVE_LABEL + "\n" + PROSPECTIVE_WARNING + "\n\n" + files[key]
+        # Never overwrite an immutable export. Missing views can be regenerated
+        # after an interrupted filesystem write from the same frozen snapshot.
+        for relative, content in files.items():
+            path = export_dir / relative
+            if path.exists() and path.read_text(encoding="utf-8") != content:
+                raise PlanStoreError("plan-export-conflict", str(path))
+        export_dir.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix=".plan-export-", dir=export_dir) as temp:
+            staged_files = []
+            for index, (relative, content) in enumerate(files.items()):
+                path = export_dir / relative
+                if path.exists():
+                    continue
+                staged = Path(temp) / str(index)
+                staged.write_text(content, encoding="utf-8", newline="\n")
+                staged_files.append((staged, path))
+            created = []
+            try:
+                for staged, path in staged_files:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    staged.replace(path)
+                    created.append(path)
+            except BaseException:
+                for path in reversed(created):
+                    path.unlink()
+                raise
+
+    def _snapshot(self, revision: str) -> dict:
+        row = self.connection.execute(
+            "SELECT snapshot_json FROM revisions WHERE plan_revision=?", (revision,)
+        ).fetchone()
+        if row is None:
+            raise PlanStoreError("plan-revision-missing", revision)
+        return json.loads(row["snapshot_json"])
+
+    def published_manifest(self, revision: str) -> dict:
+        return self._snapshot(revision)["manifest"]
+
+    def impact_since(self, revision: str | None = None) -> dict:
+        """Compare to a stored revision/hash prefix or a saved compiled manifest."""
+        import re
+
+        if revision is None:
+            revision = self._meta()["published_revision"]
+        baseline, before = None, None
+        if revision is not None:
+            path = Path(revision)
+            if not path.is_absolute():
+                path = self.workspace / path
+            if path.is_file():
+                load_plan(path)
+                baseline = json.loads(path.read_text(encoding="utf-8-sig"))
+                revision = baseline.get("planRevision")
+        records = {}
+        compiled_records = []
+        for row in self.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='manifest-compiled' ORDER BY id DESC"
+        ):
+            compiled = json.loads(row[0])
+            manifest, snapshot = compiled["manifest"], compiled["spine"]
+            compiled_records.append((manifest, snapshot))
+            for identity in (manifest["planRevision"], Spine(snapshot).plan_revision()):
+                records.setdefault(identity, (manifest, snapshot))
+        for row in self.connection.execute("SELECT plan_revision, snapshot_json FROM revisions"):
+            snapshot = json.loads(row[1])
+            manifest = snapshot.get("manifest")
+            for identity in (row[0], Spine(snapshot).plan_revision()):
+                records.setdefault(identity, (manifest, snapshot))
+        for row in self.connection.execute("SELECT manifest_revision, result_json FROM audit_runs"):
+            audit = json.loads(row[1])
+            records.setdefault(row[0], (audit.get("manifest"), audit.get("spine")))
+        if revision is None:
+            if not compiled_records:
+                raise PlanStoreError("plan-revision-missing", "Compile a manifest before impact")
+            baseline, snapshot = compiled_records[0]
+            before = Spine(snapshot)
+        elif baseline is None:
+            matches = [revision] if revision in records else []
+            if not matches and re.fullmatch(r"[0-9a-fA-F]{8,64}", revision):
+                matches = [key for key in records if key.startswith(revision.lower())]
+            if len(matches) != 1:
+                reason = "Ambiguous" if matches else "Unknown"
+                raise PlanStoreError(
+                    "plan-revision-ambiguous" if matches else "plan-revision-missing",
+                    f"{reason} revision {revision}. Next: use a full stored revision hash "
+                    "or a saved manifest file.",
+                )
+            revision = matches[0]
+            baseline, snapshot = records[revision]
+            if snapshot is not None:
+                before = Spine(snapshot)
+            if baseline is None and before is None:
+                current = self._manifest(self.spine())
+                if current["planRevision"] == revision:
+                    baseline = current
+                else:
+                    raise PlanStoreError(
+                        "plan-revision-missing",
+                        f"Revision {revision} is recorded by an audit "
+                        "but its baseline is unavailable. "
+                        "Next: pass the saved manifest file for that revision.",
+                    )
+        else:
+            match = next(
+                (snapshot for manifest, snapshot in compiled_records if manifest == baseline), None
+            )
+            if match is not None:
+                before = Spine(match)
+        if before is not None:
+            after = self.spine()
+            result = impact(before, after)
+            current = self._manifest(after)
+            if baseline is not None and baseline.get("requirementFilesRevision") != current.get(
+                "requirementFilesRevision"
+            ):
+                beads = set(before.ids("bead")) | set(after.ids("bead"))
+                tests = set(before.ids("test")) | set(after.ids("test"))
+                result.update(
+                    affected=sorted(set(result["affected"]) | beads | tests),
+                    affectedBeads=sorted(beads),
+                    affectedTests=sorted(tests),
+                    untouchedBeads=[],
+                    protectedFilesChanged=True,
+                )
+            return result
+        # A manifest from another planner has no local spine snapshot. Its frozen
+        # bead contexts still identify changed contracts and dependent consumers.
+        current = self._manifest(self.spine())
+        old, new = baseline["beads"], current["beads"]
+        changed = {key for key in old.keys() | new.keys() if old.get(key) != new.get(key)}
+        if baseline.get("requirementFilesRevision") != current.get("requirementFilesRevision"):
+            changed.update(old.keys() | new.keys())
+        affected = set(changed)
+        while True:
+            consumers = {
+                key
+                for graph in (old, new)
+                for key, bead in graph.items()
+                if affected.intersection(bead.get("dependsOn", []))
+            }
+            if consumers <= affected:
+                break
+            affected.update(consumers)
+        tests = {
+            bead["proofModule"]
+            for graph in (old, new)
+            for key, bead in graph.items()
+            if key in affected and bead.get("proofModule")
+        }
+        return {
+            "changed": sorted(changed),
+            "affected": sorted(affected),
+            "affectedBeads": sorted(affected),
+            "affectedTests": sorted(tests),
+            "untouchedBeads": sorted(new.keys() - affected),
+            "staleDocs": ["PLAN.md"] if changed else [],
+        }
+
+    def locked_acceptance_spine(self) -> Spine:
+        meta = self._meta()
+        if not meta["locked_vision_json"] or meta["vision_lock_stale"]:
+            raise PlanStoreError("acceptance-vision-unlocked", "Confirm the current locked vision")
+        vision = json.loads(meta["locked_vision_json"])
+        data = self._data()
+        data["nodes"] = [vision if node["kind"] == "vision" else node for node in data["nodes"]]
+        return Spine(data)
+
+    def acceptance_scenarios(self) -> list[dict]:
+        scenarios = [
+            json.loads(row[0])
+            for row in self.connection.execute(
+                "SELECT scenario_json FROM acceptance_scenarios ORDER BY id"
+            )
+        ]
+        revisions = {
+            row["id"]: row["revision"]
+            for row in self.connection.execute("SELECT id, revision FROM nodes")
+        }
+        for scenario in scenarios:
+            refs = scenario.get("nodeRevisions", {})
+            if not refs or any(revisions.get(key) != value for key, value in refs.items()):
+                scenario["status"] = "stale"
+        return scenarios
+
+    def save_acceptance_scenarios(self, scenarios: list[dict]) -> None:
+        from codex_harness.core.acceptance import derive_scenarios
+
+        with self._transaction():
+            spine = self.locked_acceptance_spine()
+            required = {item["id"] for item in derive_scenarios(spine)}
+            current = Spine(self._data())
+            ids = []
+            stored = []
+            for scenario in scenarios:
+                if (
+                    not isinstance(scenario, dict)
+                    or not all(
+                        isinstance(scenario.get(key), str) and scenario[key].strip()
+                        for key in ("id", "title", "given")
+                    )
+                    or not isinstance(scenario.get("steps"), list)
+                    or not isinstance(scenario.get("expect"), dict)
+                ):
+                    raise PlanStoreError(
+                        "acceptance-scenario-invalid", "Expected id/title/given/steps/expect"
+                    )
+                for step in scenario["steps"]:
+                    command = step.get("command") if isinstance(step, dict) else step
+                    if not isinstance(command, str) or not command.strip():
+                        raise PlanStoreError(
+                            "acceptance-scenario-invalid", "Steps require shell commands"
+                        )
+                ids.append(scenario["id"])
+                refs = set(scenario.get("nodeIds", [])) | set(spine.ids("vision"))
+                if refs - set(spine.ids()):
+                    raise PlanStoreError("plan-node-missing", "Unknown acceptance scenario node")
+                steps = scenario["steps"]
+                executable = bool(steps) and bool(
+                    scenario["expect"] or isinstance(steps[-1], dict) and steps[-1].get("expect")
+                )
+                stored.append(
+                    {
+                        **scenario,
+                        "status": "planned" if executable else "draft",
+                        "executable": executable,
+                        "nodeRevisions": {key: current.revision(key) for key in sorted(refs)},
+                    }
+                )
+            if len(set(ids)) != len(ids) or not required <= set(ids):
+                raise PlanStoreError(
+                    "acceptance-coverage-required", "Cover first-moment and every scope item"
+                )
+            self.connection.execute("DELETE FROM acceptance_scenarios")
+            self.connection.executemany(
+                "INSERT INTO acceptance_scenarios VALUES (?, ?)",
+                [(s["id"], _json(s)) for s in stored],
+            )
+            self._event("acceptance-scenarios-saved", {"ids": ids})
+
+    def acceptance_findings(self) -> list[dict]:
+        return [
+            json.loads(row[0])
+            for row in self.connection.execute(
+                "SELECT result_json FROM acceptance_findings ORDER BY rowid"
+            )
+        ]
+
+    def cluster_review_findings(self, round_id: str) -> int:
+        """Store membership inside the ingest transaction, retaining every source row."""
+        rows = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM review_findings WHERE round_id=? ORDER BY created_at, rowid",
+                (round_id,),
+            )
+        ]
+        clusters = cluster_findings(rows)
+        for cluster in clusters:
+            self.connection.executemany(
+                "UPDATE review_findings SET cluster_id=? WHERE id=?",
+                [(cluster["id"], member["id"]) for member in cluster["members"]],
+            )
+        return len(clusters)
+
+    def resolve_findings(self, dispositions: list[dict]) -> int:
+        """Validate the whole batch under one writer lock, then resolve atomically.
+
+        The 1-based item index is also the JSONL line number. Overlapping targets
+        are refused so one batch cannot assign conflicting reasons to a cluster.
+        """
+        from codex_harness.core.roundtable import _table, findings
+
+        if not isinstance(dispositions, list) or not dispositions:
+            raise ValueError("At least one finding disposition is required")
+        with self._transaction():
+            _table(self)
+            reviews = {row["id"]: row for row in findings(self, expand=True)}
+            acceptance = {row["id"]: row for row in self.acceptance_findings()}
+            errors, targets, prepared = [], set(), []
+            for line, item in enumerate(dispositions, 1):
+                if not isinstance(item, dict) or set(item) != {"id", "status", "resolution"}:
+                    errors.append(f"Line {line}: expected id, status and resolution")
+                    continue
+                item_id, status, resolution = (item[key] for key in ("id", "status", "resolution"))
+                if not isinstance(item_id, str) or item_id not in reviews | acceptance:
+                    errors.append(f"Line {line}: Unknown finding: {item_id}")
+                    continue
+                if status not in ("resolved", "rejected", "deferred"):
+                    errors.append(f"Line {line}: Invalid finding resolution status")
+                if not isinstance(resolution, str) or not resolution.strip():
+                    errors.append(f"Line {line}: A nonempty resolution is required")
+                row = reviews.get(item_id)
+                canonical_id = (row["cluster_id"] or item_id) if row else item_id
+                if canonical_id in targets:
+                    errors.append(f"Line {line}: Duplicate cluster disposition: {canonical_id}")
+                targets.add(canonical_id)
+                prepared.append((canonical_id, status, resolution, row is not None))
+            if errors:
+                raise ValueError("Invalid dispositions; no changes applied:\n" + "\n".join(errors))
+            for item_id, status, resolution, is_review in prepared:
+                if is_review:
+                    members = [
+                        row
+                        for row in reviews.values()
+                        if (row["cluster_id"] or row["id"]) == item_id
+                    ]
+                    at = _now()
+                    for member in members:
+                        self.connection.execute(
+                            "UPDATE review_findings SET status=?, resolution=?, resolved_at=? "
+                            "WHERE id=?",
+                            (status, resolution, at, member["id"]),
+                        )
+                        self._event(
+                            "finding-" + status,
+                            {
+                                "id": member["id"],
+                                "resolution": resolution,
+                                "clusteredWith": item_id if member["id"] != item_id else None,
+                            },
+                        )
+                else:
+                    finding = {**acceptance[item_id], "status": status, "resolution": resolution}
+                    self.connection.execute(
+                        "UPDATE acceptance_findings SET result_json=? WHERE id=?",
+                        (_json(finding), item_id),
+                    )
+                    self._event("acceptance-finding-resolved", finding)
+        return len(prepared)
+
+    def resolve_acceptance_finding(self, item_id, *, resolution, status="resolved") -> None:
+        self.resolve_findings([dict(id=item_id, status=status, resolution=resolution)])
+
+    def accept(self, *, by: str, statement: str) -> dict:
+        from codex_harness.core.acceptance import (
+            _latest_run,
+            _refuse,
+            run_invalid_reason,
+            run_subject,
+        )
+
+        _nonempty(by, "by")
+        _nonempty(statement, "statement")
+        is_proxy = by.startswith("proxy:") and bool(by[6:].strip()) or by == "opus-user-proxy"
+        if by != "user" and not is_proxy:
+            raise PlanStoreError(
+                "acceptance-approver-invalid", "Use user or an explicitly labelled proxy:<name>"
+            )
+        with self._transaction():
+            if self.phase() != "accept":
+                raise PlanStoreError("acceptance-phase-required", "Advance to accept first")
+            self.locked_acceptance_spine()
+            if any(item.get("status") == "stale" for item in self.acceptance_scenarios()):
+                raise PlanStoreError(
+                    "acceptance-scenarios-stale", "Review and save scenarios for the current nodes"
+                )
+            run = _latest_run(self)
+            if run is not None and run_subject(run) != "product":
+                _refuse("acceptance-product-required")
+            reason = run_invalid_reason(self, run)
+            if reason:
+                _refuse(reason, run["repo"] if run else None)
+            if not run or not run["passed"]:
+                raise PlanStoreError(
+                    "acceptance-scenarios-required",
+                    "Pass all scenarios on the current integrated revision",
+                )
+            if any(f["status"] == "open" for f in self.acceptance_findings()):
+                raise PlanStoreError("acceptance-findings-open", "Resolve open acceptance findings")
+            reviews = [
+                json.loads(row[0])
+                for row in self.connection.execute("SELECT result_json FROM acceptance_reviews")
+            ]
+            if not any(review["runId"] == run["id"] for review in reviews):
+                raise PlanStoreError(
+                    "acceptance-review-required", "Review the current scenario run"
+                )
+            approval = {
+                "id": uuid4().hex,
+                "runId": run["id"],
+                "by": by,
+                "statement": statement,
+                "isProxy": bool(is_proxy),
+            }
+            self.connection.execute(
+                "INSERT INTO acceptance_approvals VALUES (?, ?)", (approval["id"], _json(approval))
+            )
+            self._event("accepted", approval)
+            return approval
+
+    def accept_rebind(self, repo) -> dict:
+        from codex_harness.core.acceptance import rebind_acceptance
+
+        return rebind_acceptance(self, repo)
+
+    def status(self) -> dict:
+        from codex_harness.core.acceptance import acceptance_status
+        from codex_harness.core.roundtable import review_totals
+
+        self.connection.execute("BEGIN")
+        try:
+            meta = dict(self._meta())
+            meta.pop("locked_vision_json")
+            data = self._data()
+            index = PHASES.index(meta["phase"])
+            pending = {
+                "align": "approval:align",
+                "vision-lock": "approval:vision-lock",
+                "requirements": "requirements-have-tests",
+                "plan": "requirements-have-beads-and-valid-manifest",
+                "roundtable": "zero-open-clarifications",
+                "publish": "current-revision-published",
+                "accept": "acceptance:scenarios-review-approval",
+            }.get(meta["phase"])
+            revision = self._revision()
+            current_publication = self.manifest_revision()
+            up_to_date = self.publication_current(current_publication)
+            level = self.proof_level(current_publication)
+            open_clarifications = len(self._open("clarifications"))
+            if (
+                meta["phase"] == "publish"
+                and up_to_date
+                and not open_clarifications
+                and self.passing_audit(current_publication)
+                and self.successful_reviews(current_publication)
+            ):
+                pending = None
+            if meta["vision_lock_stale"] and index > PHASES.index("vision-lock"):
+                pending = "approval:vision-lock"
+            acceptance = acceptance_status(self)
+            open_findings, open_members = 0, 0
+            columns = {
+                row[1] for row in self.connection.execute("PRAGMA table_info(review_findings)")
+            }
+            if columns:
+                # Legacy rows without stored membership are individual findings.
+                cluster_key = "coalesce(cluster_id, id)" if "cluster_id" in columns else "id"
+                open_findings, open_members = self.connection.execute(
+                    f"SELECT count(DISTINCT {cluster_key}), count(*) FROM review_findings "
+                    "WHERE status='open'"
+                ).fetchone()
+            if meta["phase"] == "accept" and acceptance["accepted"]:
+                pending = None
+            return {
+                **meta,
+                "plan_revision": revision,
+                "spine_revision": revision,
+                "manifest_revision": current_publication,
+                "proofLevel": level,
+                "proofLevelLabel": PROSPECTIVE_LABEL
+                if level == "prospective"
+                else ORACLE_LABEL
+                if level
+                else "Tests not audited",
+                "publication": {
+                    "published_revision": meta["published_revision"],
+                    "current_revision": current_publication,
+                    "up_to_date": up_to_date,
+                },
+                "publishedProofLevel": self.published_manifest(meta["published_revision"]).get(
+                    "proofLevel", "oracle-verified"
+                )
+                if meta["published_revision"]
+                else None,
+                "open_clarifications": open_clarifications,
+                "open_assumptions": len(self._open("assumptions")),
+                "open_findings": open_findings,
+                "open_finding_members": open_members,
+                "pending_gate": pending,
+                "coverage_gaps": Spine(data).coverage_gaps() if data["nodes"] else [],
+                "phase_index": index + 1,
+                "acceptance": acceptance,
+                "roundtable": review_totals(self, current_publication),
+                "readiness": self.readiness_status(current_publication),
+            }
+        finally:
+            self.connection.rollback()
+
+
+def open_plan_store(workspace: str | Path, name: str | None = None) -> PlanStore:
+    return PlanStore(workspace, name)

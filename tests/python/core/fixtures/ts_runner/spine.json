@@ -1,0 +1,35 @@
+{
+  "schema": "codex-harness/spine-v1",
+  "name": "typescript-prospective",
+  "nodes": [
+    {
+      "id": "V1", "kind": "vision", "title": "TypeScript arithmetic", "text": "Add and format numbers.", "parents": [],
+      "fields": {
+        "validation": ["-m", "unittest"],
+        "requirementFiles": [],
+        "verification": {
+          "runner": "command",
+          "argv": ["node", "--test", "--test-reporter=tap", "{proof}"],
+          "listArgv": ["node", "--test", "--test-reporter=tap", "--test-skip-pattern=.*", "{proof}"],
+          "assertPatterns": ["\\bassert(\\.\\w+)?\\("],
+          "importPatterns": ["from\\s+['\"]([^'\"]+)['\"]", "require\\(['\"]([^'\"]+)['\"]\\)"],
+          "testDir": "tests",
+          "proofGlob": "*.test.ts"
+        }
+      }
+    },
+    {"id": "F", "kind": "feature", "title": "Arithmetic", "text": "Add and format.", "parents": ["V1"], "fields": {}},
+    {"id": "R_SUM", "kind": "requirement", "title": "Sum", "text": "sum(2, 3) returns 5.", "parents": ["F"], "fields": {}},
+    {"id": "R_FORMAT", "kind": "requirement", "title": "Format", "text": "format(5) returns 5 units.", "parents": ["F"], "fields": {}},
+    {
+      "id": "SUM", "kind": "bead", "title": "Implement sum", "text": "Add the numbers.", "parents": ["R_SUM"],
+      "fields": {"ownedFiles": ["src/sum.ts"], "dependsOn": [], "lessons": [], "proofModule": "tests/sum.test.ts"}
+    },
+    {
+      "id": "FORMAT", "kind": "bead", "title": "Implement format", "text": "Append units.", "parents": ["R_FORMAT"],
+      "fields": {"ownedFiles": ["src/format.ts"], "dependsOn": [], "lessons": [], "proofModule": "tests/format.test.ts"}
+    },
+    {"id": "T_SUM", "kind": "test", "title": "Sum proof", "text": "Assert the sum.", "parents": ["R_SUM", "SUM"], "fields": {"module": "tests/sum.test.ts", "level": "unit"}},
+    {"id": "T_FORMAT", "kind": "test", "title": "Format proof", "text": "Assert the formatted value.", "parents": ["R_FORMAT", "FORMAT"], "fields": {"module": "tests/format.test.ts", "level": "e2e"}}
+  ]
+}
