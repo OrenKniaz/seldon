@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from codex_harness.core.attempt_activity import observe_attempt_activity
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PHASES, PlanStore
 from codex_harness.core.roundtable import findings
@@ -311,6 +312,7 @@ def _run(path, dependencies=None, published=None):
     for bead_id, bead in record.get("beads", {}).items():
         integrated = bead.get("revalidation") or bead.get("integrated") or {}
         attempt = bead.get("attempt") or {}
+        activity = _attempt_activity(run_root, bead_id, bead)
         paths = [str(path)]
         for evidence in (
             bead.get("evidenceDir"),
@@ -325,6 +327,7 @@ def _run(path, dependencies=None, published=None):
             {
                 "id": bead_id,
                 "status": bead.get("status", UNAVAILABLE),
+                "activity": activity,
                 "provider": bead.get("provider", UNAVAILABLE),
                 "model": bead.get("model") or "unknown",
                 "specRefs": [
@@ -363,7 +366,54 @@ def _run(path, dependencies=None, published=None):
                 ],
             }
         )
+    result["activity"] = _activity_summary([bead["activity"] for bead in result["beads"]])
     return result
+
+
+def _attempt_activity(run_root, bead_id, bead):
+    try:
+        evidence_root = (run_root / "evidence").resolve()
+        directory = Path(bead.get("evidenceDir") or evidence_root / bead_id)
+        if not directory.is_absolute():
+            directory = run_root / directory
+        directory = (directory / "attempt").resolve()
+        if not evidence_root.is_relative_to(run_root.resolve()) or not directory.is_relative_to(
+            evidence_root
+        ):
+            return observe_attempt_activity(None)
+        observation = observe_attempt_activity(directory)
+        status = bead.get("status", "")
+        if (
+            observation["isTerminal"] is not True
+            and isinstance(status, str)
+            and (status == "ambiguous launch" or status.startswith("held:"))
+        ):
+            return {
+                **observation,
+                "stuck": None,
+                "reason": "Recorded hold/ambiguous launch retained; no recovery inferred",
+            }
+        return observation
+    except (OSError, ValueError, TypeError):
+        return observe_attempt_activity(None)
+
+
+def _activity_summary(observations):
+    known = [item for item in observations if item["stuck"] is not None]
+    timestamps = [
+        item["lastObservedActivityAt"] for item in known if item["lastObservedActivityAt"]
+    ]
+    intervals = [
+        item["secondsSinceActivity"] for item in known if item["secondsSinceActivity"] is not None
+    ]
+    return {
+        "stuckCount": sum(item["stuck"] is True for item in known) if known else None,
+        "unknownCount": len(observations) - len(known),
+        "terminalCount": sum(item["isTerminal"] is True for item in known) if known else None,
+        "lastObservedActivityAt": max(timestamps) if timestamps else None,
+        "maxSecondsSinceActivity": max(intervals) if intervals else None,
+        "noProgressThresholdSeconds": 300,
+    }
 
 
 def _product_commit(repo):
@@ -567,16 +617,21 @@ def _agents(runs):
                     "model": key[1],
                     "beads": 0,
                     "active": 0,
+                    "activity": [],
                     **dict.fromkeys(metrics),
                 },
             )
             agent["beads"] += 1
-            agent["active"] += bead["status"] == "running"
+            activity = bead.get("activity") or observe_attempt_activity(None)
+            agent["activity"].append(activity)
+            agent["active"] += bead["status"] == "running" and activity["isTerminal"] is not True
             efficiency = bead["efficiency"] or {}
             for metric in metrics:
                 value = efficiency.get(metric)
                 if isinstance(value, int | float) and not isinstance(value, bool):
                     agent[metric] = (agent[metric] or 0) + value
+    for agent in groups.values():
+        agent["activity"] = _activity_summary(agent["activity"])
     return list(groups.values())
 
 

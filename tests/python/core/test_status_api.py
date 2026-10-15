@@ -1,6 +1,7 @@
 """Canonical plan/mail readers, dispatcher receipts and read-only HTTP behavior."""
 
 import json
+import os
 import subprocess
 import threading
 from http.client import HTTPConnection
@@ -19,6 +20,164 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" 
 
 def _mtimes(root):
     return {str(path): path.stat().st_mtime_ns for path in root.rglob("*") if path.is_file()}
+
+
+def test_attempt_activity_current_agent_observes_quiet_without_claiming_liveness(tmp_path):
+    run = tmp_path / "runs" / "quiet"
+    attempt = run / "evidence" / "A" / "attempt"
+    attempt.mkdir(parents=True)
+    (attempt / "request.json").write_text(
+        json.dumps(
+            {
+                "status": "launching",
+                "startedAt": "2026-01-01T00:00:00+00:00",
+                "requirementId": "fixture-A",
+                "planRevision": "fixture-revision",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name in ("events.jsonl", "stderr.txt"):
+        (attempt / name).write_text("", encoding="utf-8")
+    for path in attempt.iterdir():
+        os.utime(path, (1767225600, 1767225600))
+    (run / "evidence" / "run.json").write_text(
+        json.dumps(
+            {
+                "runId": "quiet",
+                "status": "running",
+                "beads": {
+                    "A": {
+                        "status": "running",
+                        "provider": "codex",
+                        "model": "fixture-model",
+                        "evidenceDir": str(attempt.parent),
+                        "attempt": {"startedAt": "2026-01-01T00:00:00Z"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = _mtimes(tmp_path)
+    result = snapshot(runs_root=tmp_path / "runs")
+    activity = result["runs"][0]["beads"][0]["activity"]
+    assert activity["state"] == "unknown" and activity["processLiveness"] == "unknown"
+    assert activity["stuck"] is True and activity["isTerminal"] is None
+    assert activity["secondsSinceActivity"] >= activity["noProgressThresholdSeconds"] == 300
+    assert result["currentAgents"][0]["activity"]["stuckCount"] == 1
+    assert _mtimes(tmp_path) == before
+
+
+def test_attempt_activity_terminal_receipt_overrides_lagging_run_and_unknown_counts(tmp_path):
+    run = tmp_path / "runs" / "terminal"
+    attempt = run / "evidence" / "A" / "attempt"
+    attempt.mkdir(parents=True)
+    request = dict(status="launching", startedAt="2026-01-01T00:00:00+00:00", requirementId="A")
+    (attempt / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    (attempt / "result.json").write_text(
+        json.dumps(
+            {
+                **request,
+                "status": "cancelled",
+                "finishedAt": "2026-01-01T00:00:01+00:00",
+                "cleanup": {"status": "UNVERIFIED"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = {
+        "runId": "terminal",
+        "status": "running",
+        "beads": {
+            "A": {"status": "running", "provider": "codex", "model": "fixture"},
+            "B": {"status": "running", "provider": "codex", "model": "fixture"},
+        },
+    }
+    (run / "evidence" / "run.json").write_text(json.dumps(record), encoding="utf-8")
+    before = _mtimes(tmp_path)
+    result = snapshot(runs_root=tmp_path / "runs")
+    beads = result["runs"][0]["beads"]
+    assert beads[0]["status"] == "running"  # Original run projection remains intact.
+    assert beads[0]["activity"]["recordedStatus"] == "cancelled"
+    assert beads[0]["activity"]["stuck"] is False
+    assert beads[1]["activity"]["stuck"] is None
+    assert result["currentAgents"][0]["active"] == 1  # Recorded running, not live process count.
+    summary = result["currentAgents"][0]["activity"]
+    assert summary["stuckCount"] == 0 and summary["unknownCount"] == 1
+    assert summary["terminalCount"] == 1
+    assert result["runs"][0]["activity"] == summary
+    assert _mtimes(tmp_path) == before
+    request["runId"] = "terminal"
+    (attempt / "request.json").write_text(json.dumps(request), encoding="utf-8")
+    (attempt / "result.json").write_text(
+        json.dumps(
+            {
+                **request,
+                "runId": "different-run",
+                "status": "cancelled",
+                "finishedAt": "2026-01-01T00:00:01+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = _mtimes(tmp_path)
+    mismatched = snapshot(runs_root=tmp_path / "runs")
+    assert mismatched["runs"][0]["beads"][0]["activity"]["isTerminal"] is None
+    assert mismatched["currentAgents"][0]["active"] == 2
+    assert mismatched["currentAgents"][0]["activity"]["unknownCount"] == 2
+    assert mismatched["currentAgents"][0]["activity"]["terminalCount"] is None
+    assert _mtimes(tmp_path) == before
+
+
+@pytest.mark.parametrize("status", ["held: permission guard breach", "ambiguous launch"])
+def test_attempt_activity_keeps_hold_and_ambiguous_resume_without_recovery(tmp_path, status):
+    run = tmp_path / "runs" / "held"
+    attempt = run / "evidence" / "A" / "attempt"
+    attempt.mkdir(parents=True)
+    (attempt / "request.json").write_text(
+        json.dumps({"status": "launching", "startedAt": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    for name in ("events.jsonl", "stderr.txt"):
+        (attempt / name).write_text("", encoding="utf-8")
+    (run / "evidence" / "run.json").write_text(
+        json.dumps(
+            {
+                "runId": "held",
+                "beads": {"A": {"status": status, "provider": "codex", "model": "fixture"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = _mtimes(tmp_path)
+    result = snapshot(runs_root=tmp_path / "runs")
+    bead = result["runs"][0]["beads"][0]
+    assert bead["status"] == status and bead["activity"]["stuck"] is None
+    assert result["currentAgents"][0]["activity"]["stuckCount"] is None
+    assert result["currentAgents"][0]["activity"]["unknownCount"] == 1
+    assert _mtimes(tmp_path) == before
+
+
+def test_attempt_activity_cannot_follow_record_path_outside_canonical_evidence(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "request.json").write_text("private fixture", encoding="utf-8")
+    run = tmp_path / "runs" / "escape"
+    (run / "evidence").mkdir(parents=True)
+    (run / "evidence" / "run.json").write_text(
+        json.dumps(
+            {
+                "runId": "escape",
+                "beads": {
+                    "A": {"status": "running", "evidenceDir": str(outside), "provider": "codex"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    observation = snapshot(runs_root=tmp_path / "runs")["runs"][0]["beads"][0]["activity"]
+    assert observation["state"] == "unavailable" and observation["stuck"] is None
 
 
 def _message(workspace):
@@ -574,6 +733,14 @@ def test_status_attempt_efficiency_real_shape_and_agent_aggregation(tmp_path):
             "model": "gpt-6.1-sol",
             "beads": 2,
             "active": 2,
+            "activity": {
+                "stuckCount": None,
+                "unknownCount": 2,
+                "terminalCount": None,
+                "lastObservedActivityAt": None,
+                "maxSecondsSinceActivity": None,
+                "noProgressThresholdSeconds": 300,
+            },
             **{
                 key: efficiency[key] * 2
                 for key in (
