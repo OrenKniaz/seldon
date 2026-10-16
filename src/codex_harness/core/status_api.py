@@ -6,6 +6,7 @@ import json
 import sqlite3
 import subprocess
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -126,7 +127,26 @@ def _plan(workspace):
         reviews = _read(lambda: _reviews(store))
         result["phaseHistory"] = _read(lambda: _phase_history(db))
         result["acceptanceEvidence"] = _read(lambda: _acceptance_evidence(db, result))
-        return result, reviews
+        # These canonical reads start only after status/quality transactions finish,
+        # on the same in-memory copy; never initialize another on-disk store.
+        detail = {
+            "waves": _read(store.outcome_waves),
+            "scenarios": _read(store.acceptance_scenarios),
+            "scenarioRun": _read(lambda: _latest_scenario_run(db)),
+        }
+        return result, reviews, detail
+
+
+def _latest_scenario_run(db):
+    row = db.execute(
+        "SELECT id, result_json FROM acceptance_runs ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    value = json.loads(row[1])
+    if not isinstance(value, dict) or value.get("id") != row[0]:
+        raise ValueError("Acceptance run identity differs from original record")
+    return value
 
 
 def _phase_history(db):
@@ -721,7 +741,338 @@ def snapshot(*, workspace=None, runs_root=None) -> dict:
     }
     result["verdict"] = _verdict(result["plan"], result["reviews"], current)
     result["efficiencyTrend"] = _efficiency_trend(runs, current)
+    cockpit = _read(lambda: _cockpit(result, plan[2] if isinstance(plan, tuple) else {}, current))
+    result["cockpit"] = cockpit if isinstance(cockpit, dict) else None
     return result
+
+
+def _cockpit_scenario_proof(plan, detail, ids):
+    """Scenario command checks only; canonical status already checks current bindings."""
+    run = detail.get("scenarioRun")
+    scenarios = (plan.get("acceptance") or {}).get("scenarios")
+    if not ids or not isinstance(run, dict) or not isinstance(scenarios, list):
+        return None
+    by_id = {item["id"]: item for item in scenarios}
+    if (
+        run.get("subject") != "product"
+        or run.get("isMocked") is True
+        or run.get("planRevision") != plan.get("plan_revision")
+        or run.get("revisionAlgorithm") != "tree-bytes-v2"
+        or not run.get("revision")
+        or any(
+            key not in by_id
+            or by_id[key].get("runId") != run.get("id")
+            or by_id[key].get("lastResultSubject") != "product"
+            or by_id[key].get("lastResult") not in {"pass", "fail"}
+            for key in ids
+        )
+    ):
+        return None
+    return {
+        "passed": sum(by_id[key]["lastResult"] == "pass" for key in ids),
+        "total": len(ids),
+        "runId": run["id"],
+        "subject": "product",
+        "buildRevision": run["revision"],
+        "evidenceRefs": [
+            f"acceptance_runs:{run['id']}",
+            *[f"acceptance_scenarios:{key}" for key in sorted(ids)],
+        ],
+    }
+
+
+def _cockpit_bound_run(plan, current):
+    publication = plan.get("published_revision")
+    return bool(
+        publication
+        and publication != UNAVAILABLE
+        and isinstance(current, dict)
+        and plan.get("publication", {}).get("up_to_date") is True
+        and current.get("planRevision") == publication
+    )
+
+
+def _cockpit_work(ids, plan, current):
+    counts = dict(total=len(ids), done=None, active=None, blocked=None, later=None)
+    if not _cockpit_bound_run(plan, current):
+        return counts
+    states = {}
+    for bead in current.get("beads", []):
+        status = bead.get("status")
+        category = (
+            "done"
+            if status in {"requirement-validated", "reused"}
+            else "active"
+            if status == "running" and (bead.get("activity") or {}).get("isTerminal") is not True
+            else "later"
+            if status == "pending"
+            else "blocked"
+            if isinstance(status, str)
+            and status.startswith(
+                ("blocked", "held:", "provider ", "prelaunch failed", "bead failed")
+            )
+            else None
+        )
+        states[bead["id"]] = category
+    if all(states.get(key) is not None for key in ids):
+        counts.update(
+            {
+                name: sum(states[key] == name for key in ids)
+                for name in ("done", "active", "blocked", "later")
+            }
+        )
+    return counts
+
+
+def _cockpit_waves(detail, revision):
+    projection = detail.get("waves")
+    if not isinstance(projection, dict) or projection.get("state") == "unavailable":
+        return {
+            "status": "unavailable",
+            "reason": "Waves not tracked for this plan yet",
+            "items": None,
+        }
+    plan = projection.get("waveMap")
+    items = None
+    if isinstance(plan, dict):
+        by_id = {row["id"]: row for row in plan["waves"]}
+        details = {row["waveId"]: row for row in projection.get("waveDetails", [])}
+        items = [
+            {
+                "id": key,
+                "title": by_id[key]["outcome"],
+                "outcome": by_id[key]["outcome"],
+                "phase": "draft plan",
+                "isDraft": True,
+                "itemCounts": dict(
+                    total=len(details[key]["beadIds"])
+                    if key in details and details[key]["detail"] == "detailed"
+                    else None,
+                    done=None,
+                    active=None,
+                    blocked=None,
+                    later=None,
+                ),
+            }
+            for key in plan["order"]
+        ]
+    return {
+        "status": "draft",
+        "reason": projection.get("reason"),
+        "sourceRevision": revision,
+        "items": items,
+        "projection": deepcopy(projection),
+    }
+
+
+def _cockpit(report, detail, current):
+    """Optional presentation facts. No new evidence binding or approval authority."""
+    plan = report.get("plan") if isinstance(report.get("plan"), dict) else {}
+    bound = _cockpit_bound_run(plan, current)
+    current_answers = current if bound else None
+    run_available = isinstance(current, dict) and current.get("status") != UNAVAILABLE
+    run_reason = (
+        None
+        if bound
+        else "Selected run evidence unavailable"
+        if current is not None and not run_available
+        else "No run bound to a current publication"
+        if current is None
+        else "Run facts are historical/unbound: publication is stale, absent or mismatched"
+    )
+    nodes = plan.get("spine") if isinstance(plan.get("spine"), list) else None
+    by_id = {item["id"]: item for item in nodes or []}
+    features = [item for item in nodes or [] if item["kind"] == "feature"]
+    vision = plan.get("vision") if isinstance(plan.get("vision"), dict) else None
+    scenarios = detail.get("scenarios") if isinstance(detail.get("scenarios"), list) else None
+    scenario_ids = {item["id"] for item in scenarios or []}
+    links = {}
+    for key in scenario_ids:
+        node = by_id.get(key, {})
+        parents = [
+            parent
+            for parent in node.get("parents", [])
+            if by_id.get(parent, {}).get("kind") == "feature"
+        ]
+        if node.get("kind") == "acceptance" and len(parents) == 1:
+            links[key] = parents[0]
+    requirement_reason = (
+        "Requirement validation unavailable: original current claim/spec/publication "
+        "and unmocked integration binding not established"
+    )
+
+    def proof(ids):
+        checks = _cockpit_scenario_proof(plan, detail, ids)
+        return {
+            "proof": {"productScenarios": checks, "requirementValidation": None},
+            "proofUnavailableReason": requirement_reason
+            + (
+                "; product scenario checks unavailable: no current bound product result "
+                "or unambiguous scenario linkage"
+                if checks is None
+                else ""
+            ),
+        }
+
+    def descendants(key):
+        found, pending = set(), list(by_id[key]["children"])
+        while pending:
+            child = pending.pop()
+            if child not in found:
+                found.add(child)
+                pending.extend(by_id[child]["children"])
+        return found
+
+    capabilities = [] if nodes is not None else None
+    for feature in features:
+        beads = {key for key in descendants(feature["id"]) if by_id[key]["kind"] == "bead"}
+        capabilities.append(
+            {
+                "id": feature["id"],
+                "title": feature["title"],
+                "state": feature["state"],
+                "itemIds": sorted(beads),
+                "items": _cockpit_work(beads, plan, current),
+                **proof({key for key, parent in links.items() if parent == feature["id"]}),
+            }
+        )
+    acceptance = plan.get("acceptance") if isinstance(plan.get("acceptance"), dict) else {}
+    vision_view = (
+        None
+        if vision is None
+        else {
+            "title": vision["title"],
+            "promise": vision["fields"].get("vision") or vision["detail"],
+            "acceptance": {
+                key: deepcopy(acceptance.get(key))
+                for key in (
+                    "accepted",
+                    "recordedUserAccepted",
+                    "isProxy",
+                    "approvedBy",
+                    "approvalOrigin",
+                    "humanOriginVerified",
+                    "invalidReason",
+                )
+            },
+            "items": _cockpit_work(
+                {key for key, node in by_id.items() if node["kind"] == "bead"}, plan, current
+            ),
+            "scenarioScope": None
+            if scenarios is None
+            else {"total": len(scenario_ids), "unlinkedIds": sorted(scenario_ids - links.keys())},
+            **proof(scenario_ids),
+        }
+    )
+    questions = plan.get("clarifications")
+    needs = (
+        None
+        if not isinstance(questions, list)
+        else [
+            {
+                "id": row["id"],
+                "question": row["question"],
+                "kind": "decision",
+                "whereToAnswer": "chat",
+                "refs": [f"clarifications:{row['id']}"],
+            }
+            for row in questions
+        ]
+    )
+    gate = plan.get("pending_gate")
+    if isinstance(gate, str) and (
+        gate.startswith("approval:")
+        or acceptance.get("invalidReason") == "acceptance-approval-required"
+    ):
+        needs = [
+            *(needs or []),
+            {
+                "id": gate,
+                "question": f"Recorded approval required: {gate}",
+                "kind": "acceptance" if gate.startswith("acceptance:") else "approval",
+                "whereToAnswer": "chat",
+                "refs": [f"plan:{plan.get('plan_revision')}"],
+            },
+        ]
+    reviews = report.get("reviews")
+    blocking = None if not isinstance(reviews, dict) and current_answers is None else []
+    if isinstance(reviews, dict):
+        for severity, rows in reviews.get("open", {}).items():
+            if severity in {"blocker", "critical", "major"}:
+                for row in rows:
+                    blocking.append(
+                        {
+                            "id": row["id"],
+                            "plain": row["finding"],
+                            "affectedItemIds": [row["node_id"]] if row.get("node_id") else None,
+                            "refs": [f"review-findings:{row['id']}"],
+                        }
+                    )
+    if isinstance(current_answers, dict):
+        for bead in current_answers.get("beads", []):
+            if isinstance(bead.get("status"), str) and bead["status"].startswith(
+                ("blocked", "held:", "provider ", "prelaunch failed", "bead failed")
+            ):
+                blocking.append(
+                    {
+                        "id": f"{current_answers['runId']}:{bead['id']}",
+                        "plain": bead["status"],
+                        "affectedItemIds": [bead["id"]],
+                        "refs": [f"run:{current_answers['runId']}", bead["id"]],
+                    }
+                )
+    chronicle = []
+    for event in plan.get("phaseHistory", []) if isinstance(plan.get("phaseHistory"), list) else []:
+        if event.get("passedAt"):
+            chronicle.append(
+                {
+                    "at": event["passedAt"],
+                    "text": f"Recorded phase transition: {event['phase']}",
+                    "refs": [f"phase:{event['phase']}", event.get("revision")],
+                }
+            )
+    for run in report.get("runs", []) if isinstance(report.get("runs"), list) else []:
+        for event in run.get("timeline", []):
+            chronicle.append(
+                {
+                    "text": event["text"],
+                    "historical": not _cockpit_bound_run(plan, run),
+                    "refs": [
+                        f"run:{run['runId']}",
+                        *([event["beadId"]] if event.get("beadId") else []),
+                    ],
+                }
+            )
+    return {
+        "source": {
+            "planRevision": plan.get("plan_revision"),
+            "publicationRevision": plan.get("published_revision"),
+            "reason": run_reason if plan else "Canonical plan unavailable",
+            "runBinding": {
+                "status": "current" if bound else "historical" if run_available else "unavailable",
+                "runId": (current or {}).get("runId"),
+                "reason": run_reason,
+            },
+            "areaUnavailableReason": "No canonical area grouping in the current spine contract",
+        },
+        "vision": vision_view,
+        "answers": {
+            "where": {
+                "stage": plan.get("phase"),
+                "label": "Current",
+            },
+            "blocking": blocking,
+            "needsYou": needs,
+            "reviewReadiness": deepcopy(plan.get("readiness")),
+        },
+        "areas": [] if nodes is not None else None,
+        "capabilities": capabilities,
+        "waves": _cockpit_waves(detail, plan.get("plan_revision")),
+        "crew": deepcopy(report.get("currentAgents"))
+        if bound and isinstance(report.get("currentAgents"), list)
+        else None,
+        "chronicle": chronicle if plan or isinstance(report.get("runs"), list) else None,
+    }
 
 
 def _verdict(plan, reviews, current):
