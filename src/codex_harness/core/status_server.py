@@ -6,11 +6,29 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from codex_harness.core.status_api import snapshot
 
 
 def create_server(*, workspace=None, runs_root=None, port=7480):
+    core = Path(__file__).parent
+    fixtures = core.parents[2] / "tests" / "browser" / "cockpit" / "fixtures"
+    assets = {
+        "/": (core / "cockpit.html", "text/html; charset=utf-8"),
+        "/cockpit.css": (core / "cockpit.css", "text/css; charset=utf-8"),
+        "/cockpit.js": (core / "cockpit.js", "text/javascript; charset=utf-8"),
+        "/legacy": (core / "workspace.html", "text/html; charset=utf-8"),
+        "/board": (core / "board.html", "text/html; charset=utf-8"),
+        "/fixtures/linkshelf.json": (fixtures / "public" / "linkshelf.json", "application/json"),
+        "/fixtures/linkshelf-planning.json": (
+            fixtures / "public" / "linkshelf-planning.json",
+            "application/json",
+        ),
+        "/fixtures/csv2md.json": (fixtures / "public" / "csv2md.json", "application/json"),
+        "/fixtures/synthetic.json": (fixtures / "synthetic" / "stress.json", "application/json"),
+    }
+
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, status, body, content_type):
             self.send_response(status)
@@ -25,16 +43,13 @@ def create_server(*, workspace=None, runs_root=None, port=7480):
             if self.path == "/api/status":
                 body = json.dumps(snapshot(workspace=workspace, runs_root=runs_root)).encode()
                 self._reply(200, body, "application/json; charset=utf-8")
-            elif self.path in ("/", "/board"):
-                self._reply(
-                    200,
-                    Path(__file__)
-                    .with_name("workspace.html" if self.path == "/" else "board.html")
-                    .read_bytes(),
-                    "text/html; charset=utf-8",
-                )
             else:
-                self._reply(404, b"Not found", "text/plain")
+                route = urlsplit(self.path).path
+                asset = assets.get(route) if route != "/board" or self.path == "/board" else None
+                if asset is not None and asset[0].is_file():
+                    self._reply(200, asset[0].read_bytes(), asset[1])
+                else:
+                    self._reply(404, b"Not found", "text/plain")
 
         def _reject(self):
             self._reply(405, b"Method not allowed", "text/plain")

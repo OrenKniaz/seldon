@@ -1,0 +1,405 @@
+{
+  "nodes": [
+    {
+      "id": "V1",
+      "kind": "vision",
+      "title": "linkshelf",
+      "text": "A tiny self-hosted household bookmark service: isolated personal shelves with tags, search and read-only sharing.",
+      "fields_json": "{\"assumptions\": [], \"first_user_moment\": \"From no database: linkshelf adduser alice prints a token, linkshelf serve starts, Alice POSTs a link, GET /api/links shows it, and / after token login lists it.\", \"requirementFiles\": [\"tests\"], \"scope_in\": \"CLI user provisioning and loopback HTTP server; SQLite automatic migrations and durable storage; API create/list/search/tag/delete/share/shared-with-me; token authentication and user isolation; HTML login and searchable shelf; strict validation with JSON 400 errors; standard-library-only Python 3.11+ and real-server unittest proofs.\", \"scope_out\": \"Passwords, OAuth, public internet exposure, import/export, browser extensions, multiple households.\", \"users\": \"2\u20136 household members; admin provisions named users via CLI.\", \"validation\": [\"-m\", \"unittest\", \"discover\", \"-s\", \"tests\", \"-p\"], \"vision\": \"Deliver a complete tiny self-hosted household bookmark service with isolated shelves, tags, search and read-only sharing through JSON and server-rendered HTML.\"}",
+      "parents_json": "[]",
+      "revision": "ff33496b460c2dcd6fdc6af2f8b11009b4e3726444e60b1585c999500fd80ddc",
+      "updated_at": "2026-10-14T19:22:56.358800+00:00"
+    },
+    {
+      "id": "F1",
+      "kind": "feature",
+      "title": "Durable personal shelves",
+      "text": "Each household member keeps private links with tags in SQLite, automatically created and migrated from no database.",
+      "fields_json": "{}",
+      "parents_json": "[\"V1\"]",
+      "revision": "722ba1b551c6023f8bdf43b29ce60e0f3b898f1c7a28d8279e0a97cef08ff983",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "S1",
+      "kind": "story",
+      "title": "Durable personal shelves",
+      "text": "As a household member/admin, Each household member keeps private links with tags in SQLite, automatically created and migrated from no database.",
+      "fields_json": "{}",
+      "parents_json": "[\"F1\"]",
+      "revision": "aae70f97011bcb662ba667c7c29210d3644b9c7bfa0cafb6cf36c9077829fd8c",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "F2",
+      "kind": "feature",
+      "title": "Identity and sharing",
+      "text": "Admin creates users and prints a token once; Bearer API authentication isolates users. Owners can share links read-only with a named household recipient.",
+      "fields_json": "{}",
+      "parents_json": "[\"V1\"]",
+      "revision": "d3554897179845b2a990fa0f2d0dfc83f8dbee4169d7e4806f506832eb9dc97a",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "S2",
+      "kind": "story",
+      "title": "Identity and sharing",
+      "text": "As a household member/admin, Admin creates users and prints a token once; Bearer API authentication isolates users. Owners can share links read-only with a named household recipient.",
+      "fields_json": "{}",
+      "parents_json": "[\"F2\"]",
+      "revision": "b97aaca5a93b3bba60e1aa863a4b3d27f930d5374441a474a9f89861a383fe07",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "F3",
+      "kind": "feature",
+      "title": "Searchable JSON API",
+      "text": "Authenticated create/list/search/tag/delete plus share and shared-with-me routes with exact validation and JSON errors.",
+      "fields_json": "{}",
+      "parents_json": "[\"V1\"]",
+      "revision": "f367139bb8126c6a0fb6942025cbabbf69964330fbcbf23c669060f528072556",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "S3",
+      "kind": "story",
+      "title": "Searchable JSON API",
+      "text": "As a household member/admin, Authenticated create/list/search/tag/delete plus share and shared-with-me routes with exact validation and JSON errors.",
+      "fields_json": "{}",
+      "parents_json": "[\"F3\"]",
+      "revision": "dc4ec83cabe71d27543d018cda8ccdc5ee608f2d8360967db8b0ab714a43c90c",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "F4",
+      "kind": "feature",
+      "title": "Readable HTML shelf",
+      "text": "Cookie token login redirects to one server-rendered page with personal links and a working search box, safe escaped content.",
+      "fields_json": "{}",
+      "parents_json": "[\"V1\"]",
+      "revision": "8aa2bb63b5f4009a649660f68e0e8a20b50bc4efd4698a6bc859fca181947466",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "S4",
+      "kind": "story",
+      "title": "Readable HTML shelf",
+      "text": "As a household member/admin, Cookie token login redirects to one server-rendered page with personal links and a working search box, safe escaped content.",
+      "fields_json": "{}",
+      "parents_json": "[\"F4\"]",
+      "revision": "39c662849132e4f90e40e08aec3a48756174d1ed429260abf1a3c9ab268b15bc",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "F5",
+      "kind": "feature",
+      "title": "Local CLI and first use",
+      "text": "Python 3.11+ stdlib only; adduser and loopback serve CLI; default path/port, automatic migrations, clean-state first moment and real HTTP proofs.",
+      "fields_json": "{}",
+      "parents_json": "[\"V1\"]",
+      "revision": "1d34e5de13015800f24affd2b07f395728c9493956db667206996c0c0aa67ed9",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "S5",
+      "kind": "story",
+      "title": "Local CLI and first use",
+      "text": "As a household member/admin, Python 3.11+ stdlib only; adduser and loopback serve CLI; default path/port, automatic migrations, clean-state first moment and real HTTP proofs.",
+      "fields_json": "{}",
+      "parents_json": "[\"F5\"]",
+      "revision": "ade8518a28468ed220b97f6d6902a853075a60d1869b551d818ce298abbf05db",
+      "updated_at": "2026-10-14T19:23:52.289835+00:00"
+    },
+    {
+      "id": "R1",
+      "kind": "requirement",
+      "title": "Durability and automatic migrations",
+      "text": "Storage(path) migrates on construction, even from no DB; creates users with unique names and digest-only tokens, persists and reloads links/tags/shares, enables foreign keys. create/list/set_tags/delete/share/shared are transactionally committed; order is descending link id (creation order). Default DB path is resolved in CLI from LINKSHELF_DB or ./linkshelf.db. Schema v1 initializes absent files or existing empty v0 SQLite files; repeat starts on v1 preserve rows and version. There is no historical pre-v1 populated schema to upgrade. Shares use database-level ON DELETE CASCADE with foreign_keys enabled. Storage.user_digests() returns a Python list of two-element tuples (user_id: int, digest: str), where digest is SHA256 hex; empty storage returns []. It includes all persisted users exactly once and never returns a dict or plaintext token. Row order is not a contract. The B1 protected storage proof must assert this exact shape and values after reopening the database.",
+      "fields_json": "{}",
+      "parents_json": "[\"S1\"]",
+      "revision": "068b5cd642b922b27e97f8e4e17194fd290c767574c0d853a839e2e58a47f17f",
+      "updated_at": "2026-10-14T19:47:49.342868+00:00"
+    },
+    {
+      "id": "R2",
+      "kind": "requirement",
+      "title": "Token identities",
+      "text": "auth.new_token() uses secrets.token_urlsafe(32); digest(token) is SHA256 hex; authenticate(store,token) returns user id or None using hmac.compare_digest against store.user_digests(). No token is persisted in plaintext. CLI adduser prints only the token once after success; duplicate/invalid names fail without replacing the token. Username and share-recipient identity is case-sensitive ASCII [a-z0-9-]{1,30}; no normalization or implicit aliases. authenticate consumes the R1 list[(user_id: int, digest: str)] contract directly, comparing digests with hmac.compare_digest and returning the matching integer user id or None. B2 closure must run tests/test_auth.py against real B1 Storage in a fresh temporary database, including an empty store, two distinct users, reopened persistence, valid tokens, and wrong/empty/None tokens; fake-store proof alone is insufficient.",
+      "fields_json": "{}",
+      "parents_json": "[\"S2\"]",
+      "revision": "265b59224c6fe67ff2a47384646cc3f46cca5361d3bc1fee77df39a5be07084c",
+      "updated_at": "2026-10-14T19:47:49.343882+00:00"
+    },
+    {
+      "id": "R3",
+      "kind": "requirement",
+      "title": "Isolation and read-only sharing",
+      "text": "Storage list only own links; shared lists only explicitly shared links. Only owner may tag/delete/share an id, otherwise KeyError -> JSON 404. Owner shares by existing username; duplicate share is idempotent, unknown recipient -> 400. Recipient cannot edit/delete/reshare; deletion cascades shares. All HTTP API routes require Bearer; missing/invalid token 401, including empty token and query/cookie-only API auth.",
+      "fields_json": "{}",
+      "parents_json": "[\"S2\"]",
+      "revision": "3b5d3097b9594c6596319524cff23c914c4a51bb9b903d2cee0c169780abbe18",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "R4",
+      "kind": "requirement",
+      "title": "JSON routes and search",
+      "text": "POST /api/links accepts {title,url,tags?} -> 201 link. GET /api/links?q= returns array of own links; case-insensitive substring over title, URL and each tag, literal substrings not SQL wildcards; newest first. PATCH /api/links/{id} accepts exactly {tags:[...]} -> 200 updated link. DELETE -> 200 {deleted:true}. POST /api/links/{id}/share accepts exactly {user:name} -> 200 {shared:true}; GET /api/shared?q= -> array. Unknown routes 404, unsupported methods 405 JSON. Link object {id,title,url,tags}; tags default empty. All errors {error:string}.",
+      "fields_json": "{}",
+      "parents_json": "[\"S3\"]",
+      "revision": "4b39468d3c87962e7047af18feb3b03cf7c1da24df1fe5f0b40c7d95b900a067",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "R5",
+      "kind": "requirement",
+      "title": "Input validation never leaks 500",
+      "text": "Create body must be object with exactly title,url and optional tags. Title string 1-200 characters and not whitespace-only; URL string http/https with a hostname and no whitespace/control characters; tags array max 10 strings each full-match [a-z0-9-]{1,30}. Reject malformed JSON, nonobject bodies, wrong field types, unknown/missing fields, invalid lengths and invalid tags with JSON 400; no write on invalid request. PATCH and share enforce exact keys/types too. Bounded request body 65536 bytes; invalid Content-Length/UTF8 ->400. Exactly 65536 bytes is allowed if valid; greater is 400. Missing, duplicate, nonnumeric, zero or negative Content-Length and any Transfer-Encoding are unsupported framing and return JSON 400 before reading. Do not wait for an oversized body.",
+      "fields_json": "{}",
+      "parents_json": "[\"S3\"]",
+      "revision": "6f456505c811acb203ad019490f813f66a262d9d01ef9d4778593b8b6d29afcd",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "R6",
+      "kind": "requirement",
+      "title": "HTML login and searchable personal shelf",
+      "text": "GET /login?token=valid authenticates, sets linkshelf_token cookie HttpOnly; SameSite=Strict; Path=/ and redirects 303 to /. Invalid login 401. GET / reads valid cookie, otherwise 401 with login guidance, shows only own links, search form method GET input q and applies identical search. Escape title,url,tags,q. HTML content type UTF-8. API mutations never accept cookie-only auth. Never log token query values or cookies/Authorization. Login and HTML responses carry Cache-Control: no-store and Referrer-Policy: no-referrer; captured server stdout/stderr must not contain tokens.",
+      "fields_json": "{}",
+      "parents_json": "[\"S4\"]",
+      "revision": "7f81016f391a5176f82dad5809dec34d507551a8137d0e05e5dda19a6983c42f",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "R7",
+      "kind": "requirement",
+      "title": "Runnable local first moment",
+      "text": "Provide root linkshelf.py main(argv=None) and linkshelf plus linkshelf.cmd launchers; python linkshelf.py adduser <name> and serve --port N (default 8765) work from unrelated cwd. adduser and serve create/migrate missing database; serve binds 127.0.0.1 only, supports port 0 and flushes a READY http://127.0.0.1:<actual-port> line. CLI main returns exit status and rejects duplicate/invalid user cleanly. Real subprocess first moment uses no DB, creates Alice, starts server, POST/GET/login/HTML, terminates and reaps server in finally.",
+      "fields_json": "{}",
+      "parents_json": "[\"S5\"]",
+      "revision": "3a63a8b1d0dba3f9c62d7aa0aa82910a586f70f5ec50e638576dc3ed6a5a95a2",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "T1",
+      "kind": "test",
+      "title": "Proof R1",
+      "text": "Observe success and consequential failure for R1",
+      "fields_json": "{\"level\": \"unit\", \"module\": \"test_storage.py\"}",
+      "parents_json": "[\"R1\"]",
+      "revision": "07334c6db0861f4cca9d1c9d2cb8fcf846b20b3667cd0ada3e32ea7d14204251",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "T2",
+      "kind": "test",
+      "title": "Proof R2",
+      "text": "Protected token proof plus real B1 Storage -> B2 authenticate contract integration in tests/test_auth.py. Assert exact list-of-tuples producer shape, both integer identities, persisted reopen, empty storage and invalid credentials with no synthetic Storage substitute.",
+      "fields_json": "{\"consumerBead\": \"B2\", \"crossBead\": true, \"level\": \"unit\", \"module\": \"test_auth.py\", \"producerBead\": \"B1\"}",
+      "parents_json": "[\"B2\", \"R1\", \"R2\"]",
+      "revision": "7f3a2f6cd894f293a4db744b6024ec8268fc9886a2cfc69b10a2c261d43c4507",
+      "updated_at": "2026-10-14T19:47:49.343882+00:00"
+    },
+    {
+      "id": "T3",
+      "kind": "test",
+      "title": "Proof R3",
+      "text": "Observe success and consequential failure for R3",
+      "fields_json": "{\"level\": \"unit\", \"module\": \"test_api.py\"}",
+      "parents_json": "[\"R3\"]",
+      "revision": "732d271588ba14bc8dd04e3e7dcc6f279460eade0f4e4500f6ce359bf90e1d1b",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "T4",
+      "kind": "test",
+      "title": "Proof R4",
+      "text": "Observe success and consequential failure for R4",
+      "fields_json": "{\"level\": \"unit\", \"module\": \"test_api.py\"}",
+      "parents_json": "[\"R4\"]",
+      "revision": "5266f6360fe2390f12a831c2c3be4046dcae195c720fce5f7da48fb80bb594b4",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "T5",
+      "kind": "test",
+      "title": "Proof R5",
+      "text": "Observe success and consequential failure for R5",
+      "fields_json": "{\"level\": \"unit\", \"module\": \"test_api.py\"}",
+      "parents_json": "[\"R5\"]",
+      "revision": "d31e1aa374729ddac4dde5e4b9d5b66229810bdb48084fceea8aae43304071e2",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "T6",
+      "kind": "test",
+      "title": "Proof R6",
+      "text": "Observe success and consequential failure for R6",
+      "fields_json": "{\"level\": \"unit\", \"module\": \"test_page.py\"}",
+      "parents_json": "[\"R6\"]",
+      "revision": "d754d084d58425bf9960891320d214c96eb9285027f40d243fe0479ce5c6a355",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "T7",
+      "kind": "test",
+      "title": "Proof R7",
+      "text": "Observe success and consequential failure for R7",
+      "fields_json": "{\"level\": \"unit\", \"module\": \"test_cli.py\"}",
+      "parents_json": "[\"R7\"]",
+      "revision": "3a066b9bfad4b8e523e9c1b35cb1cdf16beab9cd1e52320b3e6288435834a43a",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "TE",
+      "kind": "test",
+      "title": "Clean-state first moment and full HTTP integration",
+      "text": "Prove actual CLI-produced users/tokens through HTTP create/list/search/tag/share/isolation/validation/login/HTML and restart durability from an empty cwd and absent database; always terminate and reap servers. All helper assertions are visible in protected test_cli.py and test_end_to_end.py; tests/acceptance.py is only an executable dispatch wrapper.",
+      "fields_json": "{\"cleanState\": true, \"firstMoment\": true, \"level\": \"e2e\", \"module\": \"test_end_to_end.py\"}",
+      "parents_json": "[\"R1\", \"R2\", \"R3\", \"R4\", \"R5\", \"R6\", \"R7\"]",
+      "revision": "9fcfd8e041efd2072c06ba63e75747e27377dd61474df6b2f98f2aeefbaac4f7",
+      "updated_at": "2026-10-14T19:30:33.166532+00:00"
+    },
+    {
+      "id": "D1",
+      "kind": "decision",
+      "title": "Runtime, interfaces and ownership?",
+      "text": "Decision D1: Runtime, interfaces and ownership?\nLinked to: V1\n- Python stdlib modular service\n  Pros: Matches explicit preference; SQLite durable storage and deterministic real HTTP proofs; no dependency installation.\n  Cons: Small custom routing and explicit validation required.\nRecommendation: Python stdlib modular service\nReply with an option name (Python stdlib modular service), or explain the change you want.\nChosen: Python stdlib modular service\nRationale: Explicit supplied preference; complete service with SQL persistence, real HTTP and no third-party runtime/test dependencies.",
+      "fields_json": "{\"chosen\": \"Python stdlib modular service\", \"options\": [{\"cons\": \"Small custom routing and explicit validation required.\", \"name\": \"Python stdlib modular service\", \"pros\": \"Matches explicit preference; SQLite durable storage and deterministic real HTTP proofs; no dependency installation.\"}], \"rationale\": \"Explicit supplied preference; complete service with SQL persistence, real HTTP and no third-party runtime/test dependencies.\", \"recommendation\": \"Python stdlib modular service\"}",
+      "parents_json": "[\"V1\"]",
+      "revision": "1b28f029f5f81e1916d45e75a5455fb79458db1868d092453da22d011b0edb0d",
+      "updated_at": "2026-10-14T19:23:54.313798+00:00"
+    },
+    {
+      "id": "B1",
+      "kind": "bead",
+      "title": "Durable SQLite shelves",
+      "text": "Implement complete schema and Storage API. Migrate idempotently with PRAGMA user_version; user/link/share constraints and cascading foreign keys. Every method enforces ownership in storage; no silent isolation bypass. Proof storage lifecycle, duplicate users, foreign mutations, share read-only and deletion cascade. Shared contracts: Storage(path) methods add_user(name,digest)->id, user_digests()->list[(id,digest)], create(owner,title,url,tags)->link, list(owner,q=\"\")->list[link], set_tags(owner,id,tags)->link, delete(owner,id)->None, share(owner,id,name)->None, shared(recipient,q=\"\")->list[link]. Unknown/foreign link raises KeyError; invalid/duplicate names or unknown recipient raises ValueError. Link dict is {id,title,url,tags}. Each method opens/closes its own SQLite connection, so threaded requests never share connections. auth.new_token/digest/authenticate(store,token). page.render(links,q=\"\")->str. server.make_server(path,port=0)->HTTPServer bound 127.0.0.1; migrates on construction, imports page only when rendering HTML. linkshelf.main(argv=None)->int; argparse adduser/serve; launchers delegate to it. Tests are protected and must never be edited. No oracle files ship into the worker template. Migration v0 empty file -> v1 schema; repeat v1 start preserves rows. shares link FK uses ON DELETE CASCADE; enable foreign keys on every connection. Recovery from run linkshelf-20261014T193858850174: correct the worker digest-to-id dict to the already-planned list of (integer id, SHA256 digest) tuples. tests/test_storage.py now pins empty/all-user/reopened user_digests shape and values. Keep all other storage behavior and ownership unchanged. D2 records the contract and rationale.",
+      "fields_json": "{\"dependsOn\": [], \"lessons\": [\"D1\", \"D2\"], \"ownedFiles\": [\"storage.py\"], \"proofModule\": \"test_storage.py\"}",
+      "parents_json": "[\"D1\", \"D2\", \"R1\", \"R3\"]",
+      "revision": "25ef6202a37f083fd07ecfabccd18ca7b38b996bdcfe81774a25cd1f54821d66",
+      "updated_at": "2026-10-14T19:47:49.343882+00:00"
+    },
+    {
+      "id": "B2",
+      "kind": "bead",
+      "title": "Token primitives",
+      "text": "Implement secure token generation, digest and constant-time authentication over the Storage interface. Authentication may remain duck-typed in implementation, but B2 now depends on B1 for closure: run the protected real Storage/authenticate contract proof in test_auth.py. A fake digest store alone cannot close this bead. Shared contracts: Storage(path) methods add_user(name,digest)->id, user_digests()->list[(id,digest)], create(owner,title,url,tags)->link, list(owner,q=\"\")->list[link], set_tags(owner,id,tags)->link, delete(owner,id)->None, share(owner,id,name)->None, shared(recipient,q=\"\")->list[link]. Unknown/foreign link raises KeyError; invalid/duplicate names or unknown recipient raises ValueError. Link dict is {id,title,url,tags}. Each method opens/closes its own SQLite connection, so threaded requests never share connections. auth.new_token/digest/authenticate(store,token). page.render(links,q=\"\")->str. server.make_server(path,port=0)->HTTPServer bound 127.0.0.1; migrates on construction, imports page only when rendering HTML. linkshelf.main(argv=None)->int; argparse adduser/serve; launchers delegate to it. Tests are protected and must never be edited. No oracle files ship into the worker template. D2 pins list[(user_id: int, SHA256 digest: str)]; do not adapt to a dict or support alternate shapes. B2 owns the cross-bead authentication proof, including real storage reopen, empty store and two-user valid/invalid identity checks; no production ownership expands beyond auth.py.",
+      "fields_json": "{\"dependsOn\": [\"B1\"], \"lessons\": [\"D1\", \"D2\"], \"ownedFiles\": [\"auth.py\"], \"proofModule\": \"test_auth.py\"}",
+      "parents_json": "[\"D1\", \"D2\", \"R2\"]",
+      "revision": "1ea1669aa9009949e3b7a4a7948bca0e68f3d50987a7981728a6ce06840315e0",
+      "updated_at": "2026-10-14T19:47:49.343882+00:00"
+    },
+    {
+      "id": "B3",
+      "kind": "bead",
+      "title": "Real HTTP JSON API",
+      "text": "Implement make_server and HTTP routing, Bearer API auth, strict JSON validation/error statuses, owner-only writes and search. HTTPServer with request-local storage calls suffices for 2-6 users. Own login and root transport; lazy-import page.render only on authenticated GET /. Cookie-only API writes denied. This permits API proof before B4 is integrated. Shared contracts: Storage(path) methods add_user(name,digest)->id, user_digests()->list[(id,digest)], create(owner,title,url,tags)->link, list(owner,q=\"\")->list[link], set_tags(owner,id,tags)->link, delete(owner,id)->None, share(owner,id,name)->None, shared(recipient,q=\"\")->list[link]. Unknown/foreign link raises KeyError; invalid/duplicate names or unknown recipient raises ValueError. Link dict is {id,title,url,tags}. Each method opens/closes its own SQLite connection, so threaded requests never share connections. auth.new_token/digest/authenticate(store,token). page.render(links,q=\"\")->str. server.make_server(path,port=0)->HTTPServer bound 127.0.0.1; migrates on construction, imports page only when rendering HTML. linkshelf.main(argv=None)->int; argparse adduser/serve; launchers delegate to it. Tests are protected and must never be edited. No oracle files ship into the worker template. Own credential-safe logs and no-store/no-referrer headers; strict request framing per R5.",
+      "fields_json": "{\"dependsOn\": [\"B1\", \"B2\"], \"lessons\": [\"D1\"], \"ownedFiles\": [\"server.py\"], \"proofModule\": \"test_api.py\"}",
+      "parents_json": "[\"D1\", \"R3\", \"R4\", \"R5\", \"R6\"]",
+      "revision": "6dd95fc24105c4f924eda3df5782b2d15d2990bac3c5cd125d982e1b150f8f93",
+      "updated_at": "2026-10-14T19:30:33.783819+00:00"
+    },
+    {
+      "id": "B4",
+      "kind": "bead",
+      "title": "Server-rendered shelf",
+      "text": "Implement pure HTML renderer with useful empty state, readable links and tags, GET search form q preserving search, all dynamic content escaped. No routing or DB writes; rendering contract makes this independent of B1/B2/B3. Shared contracts: Storage(path) methods add_user(name,digest)->id, user_digests()->list[(id,digest)], create(owner,title,url,tags)->link, list(owner,q=\"\")->list[link], set_tags(owner,id,tags)->link, delete(owner,id)->None, share(owner,id,name)->None, shared(recipient,q=\"\")->list[link]. Unknown/foreign link raises KeyError; invalid/duplicate names or unknown recipient raises ValueError. Link dict is {id,title,url,tags}. Each method opens/closes its own SQLite connection, so threaded requests never share connections. auth.new_token/digest/authenticate(store,token). page.render(links,q=\"\")->str. server.make_server(path,port=0)->HTTPServer bound 127.0.0.1; migrates on construction, imports page only when rendering HTML. linkshelf.main(argv=None)->int; argparse adduser/serve; launchers delegate to it. Tests are protected and must never be edited. No oracle files ship into the worker template.",
+      "fields_json": "{\"dependsOn\": [], \"lessons\": [\"D1\"], \"ownedFiles\": [\"page.py\"], \"proofModule\": \"test_page.py\"}",
+      "parents_json": "[\"D1\", \"R6\"]",
+      "revision": "f7e821af97b0a919f58382efbb0d971ee2ff24ec978f883541fe63f4d5732d8b",
+      "updated_at": "2026-10-14T19:30:33.783819+00:00"
+    },
+    {
+      "id": "B5",
+      "kind": "bead",
+      "title": "CLI entry and integrated first use",
+      "text": "Implement main and cross-platform launchers. Use LINKSHELF_DB/default; automatic DB creation for adduser and serve, default port 8765, loopback-only, port 0 READY line. No dependency installer; executable Unix wrapper imports main, Windows cmd invokes sibling linkshelf.py. Run test_cli.py and full test_end_to_end.py. Final integration includes cookie login, HTML search, persistence across restart, read-only sharing and JSON 400 negative paths. Shared contracts: Storage(path) methods add_user(name,digest)->id, user_digests()->list[(id,digest)], create(owner,title,url,tags)->link, list(owner,q=\"\")->list[link], set_tags(owner,id,tags)->link, delete(owner,id)->None, share(owner,id,name)->None, shared(recipient,q=\"\")->list[link]. Unknown/foreign link raises KeyError; invalid/duplicate names or unknown recipient raises ValueError. Link dict is {id,title,url,tags}. Each method opens/closes its own SQLite connection, so threaded requests never share connections. auth.new_token/digest/authenticate(store,token). page.render(links,q=\"\")->str. server.make_server(path,port=0)->HTTPServer bound 127.0.0.1; migrates on construction, imports page only when rendering HTML. linkshelf.main(argv=None)->int; argparse adduser/serve; launchers delegate to it. Tests are protected and must never be edited. No oracle files ship into the worker template.",
+      "fields_json": "{\"dependsOn\": [\"B1\", \"B2\", \"B3\", \"B4\"], \"lessons\": [\"D1\"], \"ownedFiles\": [\"linkshelf.py\", \"linkshelf\", \"linkshelf.cmd\"], \"proofModule\": \"test_cli.py\"}",
+      "parents_json": "[\"D1\", \"R6\", \"R7\"]",
+      "revision": "50f4908289e2b2df97d875206548729985855bc9871cfe4d1d8b7c6d0f494fa5",
+      "updated_at": "2026-10-14T19:30:33.783819+00:00"
+    },
+    {
+      "id": "D2",
+      "kind": "decision",
+      "title": "Storage/auth digest interface and proof ownership",
+      "text": "Retain the published list[(user_id, digest)] contract; repair B1 rather than change B2 to consume a worker-specific dict. B2 depends on B1 and owns real storage/authentication contract closure.",
+      "fields_json": "{\"chosen\": \"list[(user_id: int, digest: str)]\", \"rationale\": \"All five published bead instructions already specify this shape, and the protected auth proof expects it. A dict was an implementation deviation admitted by a missing producer assertion. Pin both producer shape and real producer-to-consumer proof before B3 resumes, while retaining independent B4 reuse.\"}",
+      "parents_json": "[\"R1\", \"R2\"]",
+      "revision": "7a27fd77fbeaa974cc90fb7c2633075c28783018716a2d1f401c6673405771a2",
+      "updated_at": "2026-10-14T19:47:49.343882+00:00"
+    }
+  ],
+  "meta": [
+    {
+      "name": "linkshelf",
+      "phase": "accept",
+      "vision_locked_revision": "9a550b6037905acfd8d0f3d5cfc7ab4961f2b15b865abd2c11ef562b35dd6a8f",
+      "published_revision": "cedb5d82250f31a208eeed0845317e863c7fdc48f03800595330b14247c61538",
+      "vision_lock_stale": 0,
+      "locked_vision_json": "{\"fields\": {\"assumptions\": [], \"first_user_moment\": \"From no database: linkshelf adduser alice prints a token, linkshelf serve starts, Alice POSTs a link, GET /api/links shows it, and / after token login lists it.\", \"requirementFiles\": [\"tests\"], \"scope_in\": \"CLI user provisioning and loopback HTTP server; SQLite automatic migrations and durable storage; API create/list/search/tag/delete/share/shared-with-me; token authentication and user isolation; HTML login and searchable shelf; strict validation with JSON 400 errors; standard-library-only Python 3.11+ and real-server unittest proofs.\", \"scope_out\": \"Passwords, OAuth, public internet exposure, import/export, browser extensions, multiple households.\", \"users\": \"2\u20136 household members; admin provisions named users via CLI.\", \"validation\": [\"-m\", \"unittest\", \"discover\", \"-s\", \"tests\", \"-p\"], \"vision\": \"Deliver a complete tiny self-hosted household bookmark service with isolated shelves, tags, search and read-only sharing through JSON and server-rendered HTML.\"}, \"id\": \"V1\", \"kind\": \"vision\", \"parents\": [], \"text\": \"A tiny self-hosted household bookmark service: isolated personal shelves with tags, search and read-only sharing.\", \"title\": \"linkshelf\"}"
+    }
+  ],
+  "acceptance_scenarios": [
+    {
+      "id": "first-moment",
+      "scenario_json": "{\"expect\": {\"exit\": 0, \"stdout\": \"PASS first-moment\"}, \"given\": \"Empty working directory and absent database; scenario provisions users and starts CLI server on port 0 itself.\", \"id\": \"first-moment\", \"steps\": [{\"command\": \"\\\"{python}\\\" \\\"{repo}/tests/acceptance.py\\\" first-moment\", \"expect\": {\"exit\": 0, \"stdout\": \"PASS first-moment\"}}], \"title\": \"Clean-state CLI to JSON to HTML and restart\", \"nodeRevisions\": {\"V1\": \"ff33496b460c2dcd6fdc6af2f8b11009b4e3726444e60b1585c999500fd80ddc\"}, \"nodeRevisionsBackfilled\": true, \"nodeRevisionsBackfilledAt\": \"2026-10-14T23:26:31.299095+00:00\", \"by\": \"harness\", \"status\": \"planned\", \"executable\": true}"
+    },
+    {
+      "id": "scope-1",
+      "scenario_json": "{\"expect\": {\"exit\": 0, \"stdout\": \"PASS scope-1\"}, \"given\": \"Empty working directory and absent database; scenario provisions users and starts CLI server on port 0 itself.\", \"id\": \"scope-1\", \"steps\": [{\"command\": \"\\\"{python}\\\" \\\"{repo}/tests/acceptance.py\\\" scope-1\", \"expect\": {\"exit\": 0, \"stdout\": \"PASS scope-1\"}}], \"title\": \"Full requested household service\", \"nodeRevisions\": {\"V1\": \"ff33496b460c2dcd6fdc6af2f8b11009b4e3726444e60b1585c999500fd80ddc\"}, \"nodeRevisionsBackfilled\": true, \"nodeRevisionsBackfilledAt\": \"2026-10-14T23:26:31.299095+00:00\", \"by\": \"harness\", \"status\": \"planned\", \"executable\": true}"
+    },
+    {
+      "id": "isolation",
+      "scenario_json": "{\"expect\": {\"exit\": 0, \"stdout\": \"PASS isolation\"}, \"given\": \"Empty working directory and absent database; scenario provisions users and starts CLI server on port 0 itself.\", \"id\": \"isolation\", \"steps\": [{\"command\": \"\\\"{python}\\\" \\\"{repo}/tests/acceptance.py\\\" isolation\", \"expect\": {\"exit\": 0, \"stdout\": \"PASS isolation\"}}], \"title\": \"Bob isolation and read-only shared links\", \"nodeRevisions\": {\"V1\": \"ff33496b460c2dcd6fdc6af2f8b11009b4e3726444e60b1585c999500fd80ddc\"}, \"nodeRevisionsBackfilled\": true, \"nodeRevisionsBackfilledAt\": \"2026-10-14T23:26:31.299095+00:00\", \"by\": \"harness\", \"status\": \"planned\", \"executable\": true}"
+    },
+    {
+      "id": "invalid-input",
+      "scenario_json": "{\"expect\": {\"exit\": 0, \"stdout\": \"PASS invalid-input\"}, \"given\": \"Empty working directory and absent database; scenario provisions users and starts CLI server on port 0 itself.\", \"id\": \"invalid-input\", \"steps\": [{\"command\": \"\\\"{python}\\\" \\\"{repo}/tests/acceptance.py\\\" invalid-input\", \"expect\": {\"exit\": 0, \"stdout\": \"PASS invalid-input\"}}], \"title\": \"Invalid input is JSON 400, never 500\", \"nodeRevisions\": {\"V1\": \"ff33496b460c2dcd6fdc6af2f8b11009b4e3726444e60b1585c999500fd80ddc\"}, \"nodeRevisionsBackfilled\": true, \"nodeRevisionsBackfilledAt\": \"2026-10-14T23:26:31.299095+00:00\", \"by\": \"harness\", \"status\": \"planned\", \"executable\": true}"
+    },
+    {
+      "id": "extended-proofs",
+      "scenario_json": "{\"expect\": {\"exit\": 0, \"stdout\": \"PASS extended-proofs\"}, \"given\": \"Fresh empty cwd and database; complete stdout including READY is checked; CLI server started on port 0 and reaped in finally.\", \"id\": \"extended-proofs\", \"steps\": [{\"command\": \"\\\"{python}\\\" -c \\\"exec('import sys,contextlib,pathlib,subprocess,threading,queue,sqlite3\\\\nsys.path.insert(0,sys.argv[1])\\\\nfrom tests.test_cli import household,cli,request,ROOT\\\\nfrom storage import Storage\\\\nimport auth\\\\nfrom unittest.mock import patch\\\\nwith patch(\\\\'secrets.token_urlsafe\\\\',return_value=\\\\'sentinel\\\\') as generate:\\\\n    assert auth.new_token()==\\\\'sentinel\\\\'\\\\n    generate.assert_called_once_with(32)\\\\n@contextlib.contextmanager\\\\ndef serve(cwd,env,tokens):\\\\n    p=subprocess.Popen([sys.executable,str(ROOT/\\\\'linkshelf.py\\\\'),\\\\'serve\\\\',\\\\'--port\\\\',\\\\'0\\\\'],cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)\\\\n    first=\\\\'\\\\'\\\\n    try:\\\\n        q=queue.Queue()\\\\n        threading.Thread(target=lambda:q.put(p.stdout.readline()),daemon=True).start()\\\\n        first=q.get(timeout=10)\\\\n        assert first.startswith(\\\\'READY http://127.0.0.1:\\\\')\\\\n        yield int(first.strip().rsplit(\\\\':\\\\',1)[1])\\\\n    finally:\\\\n        if p.poll() is None:p.terminate()\\\\n        try:out,err=p.communicate(timeout=5)\\\\n        except subprocess.TimeoutExpired:p.kill();out,err=p.communicate(timeout=5)\\\\n        assert p.poll() is not None\\\\n        assert all(t not in first+out+err for t in tokens)\\\\ndef safe_headers(headers):\\\\n    assert headers.get(\\\\'Cache-Control\\\\')==\\\\'no-store\\\\'\\\\n    assert headers.get(\\\\'Referrer-Policy\\\\')==\\\\'no-referrer\\\\'\\\\nwith household(True) as (cwd,env,a,b):\\\\n    assert cli(cwd,env,\\\\'adduser\\\\',\\\\'n\\\\'*30).returncode==0\\\\n    for name in (\\\\'ALICE\\\\',\\\\'n\\\\'*31):\\\\n        result=cli(cwd,env,\\\\'adduser\\\\',name)\\\\n        assert result.returncode!=0 and not result.stdout\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        status,link,_=request(port,\\\\'POST\\\\',\\\\'/api/links\\\\',a,{\\\\'title\\\\':\\\\'Needle\\\\',\\\\'url\\\\':\\\\'https://example.test/Original\\\\',\\\\'tags\\\\':[\\\\'original\\\\']})\\\\n        assert status==201\\\\n        path=\\\\'/api/links/\\\\'+str(link[\\\\'id\\\\'])\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=NEEDLE\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=ORIGINAL\\\\',a)[1]==[link]\\\\n        status,link,_=request(port,\\\\'PATCH\\\\',path,a,{\\\\'tags\\\\':[\\\\'updated\\\\']})\\\\n        assert status==200 and link[\\\\'tags\\\\']==[\\\\'updated\\\\']\\\\n        assert request(port,\\\\'POST\\\\',path+\\\\'/share\\\\',a,{\\\\'user\\\\':\\\\'bob\\\\'})[0]==200\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=invalid-\\\\'+a)\\\\n        assert status==401\\\\n        safe_headers(h)\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=\\\\'+a)\\\\n        assert status==303\\\\n        safe_headers(h)\\\\n        cookie=h[\\\\'Set-Cookie\\\\'].split(\\\\';\\\\')[0]\\\\n        status,html,h=request(port,\\\\'GET\\\\',\\\\'/\\\\',cookie=cookie)\\\\n        assert status==200 and \\\\'Needle\\\\' in html\\\\n        assert \\\\'charset=utf-8\\\\' in h[\\\\'Content-Type\\\\'].lower()\\\\n        safe_headers(h)\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?token=\\\\'+a)[0]==401\\\\n        c=__import__(\\\\'http.client\\\\',fromlist=[\\\\'HTTPConnection\\\\']).HTTPConnection(\\\\'127.0.0.1\\\\',port,timeout=5)\\\\n        try:\\\\n            c.request(\\\\'GET\\\\',\\\\'/api/links\\\\',headers={\\\\'Authorization\\\\':\\\\'Basic \\\\'+a})\\\\n            response=c.getresponse();response.read();assert response.status==401\\\\n        finally:c.close()\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=UPDATED\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        assert request(port,\\\\'PATCH\\\\',path,b,{\\\\'tags\\\\':[\\\\'bad\\\\']})[0]==404\\\\n        assert request(port,\\\\'DELETE\\\\',path,b)[0]==404\\\\n        db=sqlite3.connect(env[\\\\'LINKSHELF_DB\\\\'])\\\\n        try:\\\\n            db.execute(\\\\'PRAGMA foreign_keys=ON\\\\')\\\\n            keys=db.execute(\\\\'PRAGMA foreign_key_list(shares)\\\\').fetchall()\\\\n            assert any(r[2]==\\\\'links\\\\' and r[6]==\\\\'CASCADE\\\\' for r in keys)\\\\n            db.execute(\\\\'DELETE FROM links WHERE id=?\\\\',(link[\\\\'id\\\\'],));db.commit()\\\\n        finally:db.close()\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared\\\\',b)[1]==[]\\\\n    try:Storage(env[\\\\'LINKSHELF_DB\\\\']).create(-999,\\\\'orphan\\\\',\\\\'http://example.test\\\\',[])\\\\n    except sqlite3.IntegrityError:pass\\\\n    else:raise AssertionError(\\\\'Storage connection did not enforce owner foreign key\\\\')\\\\nprint(\\\\'PASS extended-proofs; CLI tokens search/tag/share/restart; full output secret checks; response headers; SQL cascade and FK; username limits; all servers reaped\\\\')')\\\" \\\"{repo}\\\"\", \"expect\": {\"exit\": 0, \"stdout\": \"PASS extended-proofs\"}}], \"title\": \"Final-review proof closures through actual CLI identities\", \"nodeRevisions\": {\"V1\": \"ff33496b460c2dcd6fdc6af2f8b11009b4e3726444e60b1585c999500fd80ddc\"}, \"nodeRevisionsBackfilled\": true, \"nodeRevisionsBackfilledAt\": \"2026-10-14T23:26:31.299095+00:00\", \"by\": \"harness\", \"status\": \"planned\", \"executable\": true}"
+    }
+  ],
+  "acceptance_runs": [
+    {
+      "id": "179c33d6a601436595c3983c07b9e165",
+      "result_json": "{\"id\": \"179c33d6a601436595c3983c07b9e165\", \"repo\": \"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\project\\\\oracle-check\", \"revision\": \"a7d901588a699761d825cb6e3e78f2bfe5ce42c335d433106db29c10a085ca91\", \"planRevision\": \"4fb63e236794c9cd2706c50d43d37ba344d78ca0318fced379f11e3f365cdcbf\", \"scenarioRevision\": \"a7cbfedbd71e73feea8f7cc212a1783107722ffe8890e489fca582edf5a3f42a\", \"results\": [{\"id\": \"extended-proofs\", \"title\": \"Final-review proof closures through actual CLI identities\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-linkshelf\\\\.venv\\\\Scripts\\\\python.exe\\\" -c \\\"exec('import sys,contextlib,pathlib,subprocess,threading,queue,sqlite3\\\\nsys.path.insert(0,sys.argv[1])\\\\nfrom tests.test_cli import household,cli,request,ROOT\\\\nfrom storage import Storage\\\\nimport auth\\\\nfrom unittest.mock import patch\\\\nwith patch(\\\\'secrets.token_urlsafe\\\\',return_value=\\\\'sentinel\\\\') as generate:\\\\n    assert auth.new_token()==\\\\'sentinel\\\\'\\\\n    generate.assert_called_once_with(32)\\\\n@contextlib.contextmanager\\\\ndef serve(cwd,env,tokens):\\\\n    p=subprocess.Popen([sys.executable,str(ROOT/\\\\'linkshelf.py\\\\'),\\\\'serve\\\\',\\\\'--port\\\\',\\\\'0\\\\'],cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)\\\\n    first=\\\\'\\\\'\\\\n    try:\\\\n        q=queue.Queue()\\\\n        threading.Thread(target=lambda:q.put(p.stdout.readline()),daemon=True).start()\\\\n        first=q.get(timeout=10)\\\\n        assert first.startswith(\\\\'READY http://127.0.0.1:\\\\')\\\\n        yield int(first.strip().rsplit(\\\\':\\\\',1)[1])\\\\n    finally:\\\\n        if p.poll() is None:p.terminate()\\\\n        try:out,err=p.communicate(timeout=5)\\\\n        except subprocess.TimeoutExpired:p.kill();out,err=p.communicate(timeout=5)\\\\n        assert p.poll() is not None\\\\n        assert all(t not in first+out+err for t in tokens)\\\\ndef safe_headers(headers):\\\\n    assert headers.get(\\\\'Cache-Control\\\\')==\\\\'no-store\\\\'\\\\n    assert headers.get(\\\\'Referrer-Policy\\\\')==\\\\'no-referrer\\\\'\\\\nwith household(True) as (cwd,env,a,b):\\\\n    assert cli(cwd,env,\\\\'adduser\\\\',\\\\'n\\\\'*30).returncode==0\\\\n    for name in (\\\\'ALICE\\\\',\\\\'n\\\\'*31):\\\\n        result=cli(cwd,env,\\\\'adduser\\\\',name)\\\\n        assert result.returncode!=0 and not result.stdout\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        status,link,_=request(port,\\\\'POST\\\\',\\\\'/api/links\\\\',a,{\\\\'title\\\\':\\\\'Needle\\\\',\\\\'url\\\\':\\\\'https://example.test/Original\\\\',\\\\'tags\\\\':[\\\\'original\\\\']})\\\\n        assert status==201\\\\n        path=\\\\'/api/links/\\\\'+str(link[\\\\'id\\\\'])\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=NEEDLE\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=ORIGINAL\\\\',a)[1]==[link]\\\\n        status,link,_=request(port,\\\\'PATCH\\\\',path,a,{\\\\'tags\\\\':[\\\\'updated\\\\']})\\\\n        assert status==200 and link[\\\\'tags\\\\']==[\\\\'updated\\\\']\\\\n        assert request(port,\\\\'POST\\\\',path+\\\\'/share\\\\',a,{\\\\'user\\\\':\\\\'bob\\\\'})[0]==200\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=invalid-\\\\'+a)\\\\n        assert status==401\\\\n        safe_headers(h)\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=\\\\'+a)\\\\n        assert status==303\\\\n        safe_headers(h)\\\\n        cookie=h[\\\\'Set-Cookie\\\\'].split(\\\\';\\\\')[0]\\\\n        status,html,h=request(port,\\\\'GET\\\\',\\\\'/\\\\',cookie=cookie)\\\\n        assert status==200 and \\\\'Needle\\\\' in html\\\\n        assert \\\\'charset=utf-8\\\\' in h[\\\\'Content-Type\\\\'].lower()\\\\n        safe_headers(h)\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?token=\\\\'+a)[0]==401\\\\n        c=__import__(\\\\'http.client\\\\',fromlist=[\\\\'HTTPConnection\\\\']).HTTPConnection(\\\\'127.0.0.1\\\\',port,timeout=5)\\\\n        try:\\\\n            c.request(\\\\'GET\\\\',\\\\'/api/links\\\\',headers={\\\\'Authorization\\\\':\\\\'Basic \\\\'+a})\\\\n            response=c.getresponse();response.read();assert response.status==401\\\\n        finally:c.close()\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=UPDATED\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        assert request(port,\\\\'PATCH\\\\',path,b,{\\\\'tags\\\\':[\\\\'bad\\\\']})[0]==404\\\\n        assert request(port,\\\\'DELETE\\\\',path,b)[0]==404\\\\n        db=sqlite3.connect(env[\\\\'LINKSHELF_DB\\\\'])\\\\n        try:\\\\n            db.execute(\\\\'PRAGMA foreign_keys=ON\\\\')\\\\n            keys=db.execute(\\\\'PRAGMA foreign_key_list(shares)\\\\').fetchall()\\\\n            assert any(r[2]==\\\\'links\\\\' and r[6]==\\\\'CASCADE\\\\' for r in keys)\\\\n            db.execute(\\\\'DELETE FROM links WHERE id=?\\\\',(link[\\\\'id\\\\'],));db.commit()\\\\n        finally:db.close()\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared\\\\',b)[1]==[]\\\\n    try:Storage(env[\\\\'LINKSHELF_DB\\\\']).create(-999,\\\\'orphan\\\\',\\\\'http://example.test\\\\',[])\\\\n    except sqlite3.IntegrityError:pass\\\\n    else:raise AssertionError(\\\\'Storage connection did not enforce owner foreign key\\\\')\\\\nprint(\\\\'PASS extended-proofs; CLI tokens search/tag/share/restart; full output secret checks; response headers; SQL cascade and FK; username limits; all servers reaped\\\\')')\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\project\\\\oracle-check\\\"\", \"stdout\": \"PASS extended-proofs; CLI tokens search/tag/share/restart; full output secret checks; response headers; SQL cascade and FK; username limits; all servers reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"first-moment\", \"title\": \"Clean-state CLI to JSON to HTML and restart\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-linkshelf\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\project\\\\oracle-check/tests/acceptance.py\\\" first-moment\", \"stdout\": \"PASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"invalid-input\", \"title\": \"Invalid input is JSON 400, never 500\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-linkshelf\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\project\\\\oracle-check/tests/acceptance.py\\\" invalid-input\", \"stdout\": \"PASS invalid-input; JSON 400 and no partial writes; server reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"isolation\", \"title\": \"Bob isolation and read-only shared links\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-linkshelf\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\project\\\\oracle-check/tests/acceptance.py\\\" isolation\", \"stdout\": \"PASS isolation; owner-only mutation and read-only shares; server reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"scope-1\", \"title\": \"Full requested household service\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-linkshelf\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\project\\\\oracle-check/tests/acceptance.py\\\" scope-1\", \"stdout\": \"PASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\nPASS isolation; owner-only mutation and read-only shares; server reaped\\nPASS invalid-input; JSON 400 and no partial writes; server reaped\\nPASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\nPASS invalid-input; JSON 400 and no partial writes; server reaped\\nPASS isolation; owner-only mutation and read-only shares; server reaped\\nPASS scope-1; full executable requirement suite; all servers reaped\\n\", \"stderr\": \".............\\n----------------------------------------------------------------------\\nRan 13 tests in 25.328s\\n\\nOK\\n\", \"exit\": 0, \"passed\": true}], \"passed\": true}], \"passed\": true}"
+    },
+    {
+      "id": "3643146df8be471fbfd75b5eb3cdb947",
+      "result_json": "{\"id\": \"3643146df8be471fbfd75b5eb3cdb947\", \"repo\": \"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo\", \"revision\": \"5045190c12c950780a155ade1aecef1e922fb696a28e5789da8ee96ad30fb0ec\", \"planRevision\": \"9a550b6037905acfd8d0f3d5cfc7ab4961f2b15b865abd2c11ef562b35dd6a8f\", \"scenarioRevision\": \"faa9ed77640cc1bdb2bf74817a2937403c7311ebe0c0e167cbbdd604cca64ca2\", \"results\": [{\"id\": \"first-moment\", \"title\": \"From no database: linkshelf adduser alice prints a token, linkshelf serve starts, Alice POSTs a link, GET /api/links shows it, and / after token login lists it.\", \"steps\": [], \"passed\": false, \"error\": \"No executable steps supplied for this vision promise\"}, {\"id\": \"scope-1\", \"title\": \"CLI user provisioning and loopback HTTP server; SQLite automatic migrations and durable storage; API create/list/search/tag/delete/share/shared-with-me; token authentication and user isolation; HTML login and searchable shelf; strict validation with JSON 400 errors; standard-library-only Python 3.11+ and real-server unittest proofs.\", \"steps\": [], \"passed\": false, \"error\": \"No executable steps supplied for this vision promise\"}], \"passed\": false}"
+    },
+    {
+      "id": "b1fbafc5894440d288304b92d30e74c7",
+      "result_json": "{\"id\": \"b1fbafc5894440d288304b92d30e74c7\", \"repo\": \"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo\", \"revision\": \"5045190c12c950780a155ade1aecef1e922fb696a28e5789da8ee96ad30fb0ec\", \"planRevision\": \"9a550b6037905acfd8d0f3d5cfc7ab4961f2b15b865abd2c11ef562b35dd6a8f\", \"scenarioRevision\": \"a7cbfedbd71e73feea8f7cc212a1783107722ffe8890e489fca582edf5a3f42a\", \"results\": [{\"id\": \"extended-proofs\", \"title\": \"Final-review proof closures through actual CLI identities\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-planfix4\\\\.venv\\\\Scripts\\\\python.exe\\\" -c \\\"exec('import sys,contextlib,pathlib,subprocess,threading,queue,sqlite3\\\\nsys.path.insert(0,sys.argv[1])\\\\nfrom tests.test_cli import household,cli,request,ROOT\\\\nfrom storage import Storage\\\\nimport auth\\\\nfrom unittest.mock import patch\\\\nwith patch(\\\\'secrets.token_urlsafe\\\\',return_value=\\\\'sentinel\\\\') as generate:\\\\n    assert auth.new_token()==\\\\'sentinel\\\\'\\\\n    generate.assert_called_once_with(32)\\\\n@contextlib.contextmanager\\\\ndef serve(cwd,env,tokens):\\\\n    p=subprocess.Popen([sys.executable,str(ROOT/\\\\'linkshelf.py\\\\'),\\\\'serve\\\\',\\\\'--port\\\\',\\\\'0\\\\'],cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)\\\\n    first=\\\\'\\\\'\\\\n    try:\\\\n        q=queue.Queue()\\\\n        threading.Thread(target=lambda:q.put(p.stdout.readline()),daemon=True).start()\\\\n        first=q.get(timeout=10)\\\\n        assert first.startswith(\\\\'READY http://127.0.0.1:\\\\')\\\\n        yield int(first.strip().rsplit(\\\\':\\\\',1)[1])\\\\n    finally:\\\\n        if p.poll() is None:p.terminate()\\\\n        try:out,err=p.communicate(timeout=5)\\\\n        except subprocess.TimeoutExpired:p.kill();out,err=p.communicate(timeout=5)\\\\n        assert p.poll() is not None\\\\n        assert all(t not in first+out+err for t in tokens)\\\\ndef safe_headers(headers):\\\\n    assert headers.get(\\\\'Cache-Control\\\\')==\\\\'no-store\\\\'\\\\n    assert headers.get(\\\\'Referrer-Policy\\\\')==\\\\'no-referrer\\\\'\\\\nwith household(True) as (cwd,env,a,b):\\\\n    assert cli(cwd,env,\\\\'adduser\\\\',\\\\'n\\\\'*30).returncode==0\\\\n    for name in (\\\\'ALICE\\\\',\\\\'n\\\\'*31):\\\\n        result=cli(cwd,env,\\\\'adduser\\\\',name)\\\\n        assert result.returncode!=0 and not result.stdout\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        status,link,_=request(port,\\\\'POST\\\\',\\\\'/api/links\\\\',a,{\\\\'title\\\\':\\\\'Needle\\\\',\\\\'url\\\\':\\\\'https://example.test/Original\\\\',\\\\'tags\\\\':[\\\\'original\\\\']})\\\\n        assert status==201\\\\n        path=\\\\'/api/links/\\\\'+str(link[\\\\'id\\\\'])\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=NEEDLE\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=ORIGINAL\\\\',a)[1]==[link]\\\\n        status,link,_=request(port,\\\\'PATCH\\\\',path,a,{\\\\'tags\\\\':[\\\\'updated\\\\']})\\\\n        assert status==200 and link[\\\\'tags\\\\']==[\\\\'updated\\\\']\\\\n        assert request(port,\\\\'POST\\\\',path+\\\\'/share\\\\',a,{\\\\'user\\\\':\\\\'bob\\\\'})[0]==200\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=invalid-\\\\'+a)\\\\n        assert status==401\\\\n        safe_headers(h)\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=\\\\'+a)\\\\n        assert status==303\\\\n        safe_headers(h)\\\\n        cookie=h[\\\\'Set-Cookie\\\\'].split(\\\\';\\\\')[0]\\\\n        status,html,h=request(port,\\\\'GET\\\\',\\\\'/\\\\',cookie=cookie)\\\\n        assert status==200 and \\\\'Needle\\\\' in html\\\\n        assert \\\\'charset=utf-8\\\\' in h[\\\\'Content-Type\\\\'].lower()\\\\n        safe_headers(h)\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?token=\\\\'+a)[0]==401\\\\n        c=__import__(\\\\'http.client\\\\',fromlist=[\\\\'HTTPConnection\\\\']).HTTPConnection(\\\\'127.0.0.1\\\\',port,timeout=5)\\\\n        try:\\\\n            c.request(\\\\'GET\\\\',\\\\'/api/links\\\\',headers={\\\\'Authorization\\\\':\\\\'Basic \\\\'+a})\\\\n            response=c.getresponse();response.read();assert response.status==401\\\\n        finally:c.close()\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=UPDATED\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        assert request(port,\\\\'PATCH\\\\',path,b,{\\\\'tags\\\\':[\\\\'bad\\\\']})[0]==404\\\\n        assert request(port,\\\\'DELETE\\\\',path,b)[0]==404\\\\n        db=sqlite3.connect(env[\\\\'LINKSHELF_DB\\\\'])\\\\n        try:\\\\n            db.execute(\\\\'PRAGMA foreign_keys=ON\\\\')\\\\n            keys=db.execute(\\\\'PRAGMA foreign_key_list(shares)\\\\').fetchall()\\\\n            assert any(r[2]==\\\\'links\\\\' and r[6]==\\\\'CASCADE\\\\' for r in keys)\\\\n            db.execute(\\\\'DELETE FROM links WHERE id=?\\\\',(link[\\\\'id\\\\'],));db.commit()\\\\n        finally:db.close()\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared\\\\',b)[1]==[]\\\\n    try:Storage(env[\\\\'LINKSHELF_DB\\\\']).create(-999,\\\\'orphan\\\\',\\\\'http://example.test\\\\',[])\\\\n    except sqlite3.IntegrityError:pass\\\\n    else:raise AssertionError(\\\\'Storage connection did not enforce owner foreign key\\\\')\\\\nprint(\\\\'PASS extended-proofs; CLI tokens search/tag/share/restart; full output secret checks; response headers; SQL cascade and FK; username limits; all servers reaped\\\\')')\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo\\\"\", \"stdout\": \"PASS extended-proofs; CLI tokens search/tag/share/restart; full output secret checks; response headers; SQL cascade and FK; username limits; all servers reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"first-moment\", \"title\": \"Clean-state CLI to JSON to HTML and restart\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-planfix4\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" first-moment\", \"stdout\": \"PASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"invalid-input\", \"title\": \"Invalid input is JSON 400, never 500\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-planfix4\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" invalid-input\", \"stdout\": \"PASS invalid-input; JSON 400 and no partial writes; server reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"isolation\", \"title\": \"Bob isolation and read-only shared links\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-planfix4\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" isolation\", \"stdout\": \"PASS isolation; owner-only mutation and read-only shares; server reaped\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"scope-1\", \"title\": \"Full requested household service\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-planfix4\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" scope-1\", \"stdout\": \"PASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\nPASS isolation; owner-only mutation and read-only shares; server reaped\\nPASS invalid-input; JSON 400 and no partial writes; server reaped\\nPASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\nPASS invalid-input; JSON 400 and no partial writes; server reaped\\nPASS isolation; owner-only mutation and read-only shares; server reaped\\nPASS scope-1; full executable requirement suite; all servers reaped\\n\", \"stderr\": \"...............\\n----------------------------------------------------------------------\\nRan 15 tests in 13.854s\\n\\nOK\\n\", \"exit\": 0, \"passed\": true}], \"passed\": true}], \"passed\": true}"
+    },
+    {
+      "id": "5f01a088ab544d87a44ccf1122984203",
+      "result_json": "{\"id\": \"5f01a088ab544d87a44ccf1122984203\", \"repo\": \"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo\", \"revision\": \"c5cd67f7a390a4daede983a7f1b17cda665cc65e8454d76e5d7a81ca1977f624\", \"revisionAlgorithm\": \"tree-bytes-v2\", \"planRevision\": \"9a550b6037905acfd8d0f3d5cfc7ab4961f2b15b865abd2c11ef562b35dd6a8f\", \"scenarioRevision\": \"c27d7c38ebc8f8454524f40e47a284f0f55dfb68882e52af284264e5028192ce\", \"results\": [{\"id\": \"extended-proofs\", \"title\": \"Final-review proof closures through actual CLI identities\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-rebind\\\\.venv\\\\Scripts\\\\python.exe\\\" -c \\\"exec('import sys,contextlib,pathlib,subprocess,threading,queue,sqlite3\\\\nsys.path.insert(0,sys.argv[1])\\\\nfrom tests.test_cli import household,cli,request,ROOT\\\\nfrom storage import Storage\\\\nimport auth\\\\nfrom unittest.mock import patch\\\\nwith patch(\\\\'secrets.token_urlsafe\\\\',return_value=\\\\'sentinel\\\\') as generate:\\\\n    assert auth.new_token()==\\\\'sentinel\\\\'\\\\n    generate.assert_called_once_with(32)\\\\n@contextlib.contextmanager\\\\ndef serve(cwd,env,tokens):\\\\n    p=subprocess.Popen([sys.executable,str(ROOT/\\\\'linkshelf.py\\\\'),\\\\'serve\\\\',\\\\'--port\\\\',\\\\'0\\\\'],cwd=cwd,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)\\\\n    first=\\\\'\\\\'\\\\n    try:\\\\n        q=queue.Queue()\\\\n        threading.Thread(target=lambda:q.put(p.stdout.readline()),daemon=True).start()\\\\n        first=q.get(timeout=10)\\\\n        assert first.startswith(\\\\'READY http://127.0.0.1:\\\\')\\\\n        yield int(first.strip().rsplit(\\\\':\\\\',1)[1])\\\\n    finally:\\\\n        if p.poll() is None:p.terminate()\\\\n        try:out,err=p.communicate(timeout=5)\\\\n        except subprocess.TimeoutExpired:p.kill();out,err=p.communicate(timeout=5)\\\\n        assert p.poll() is not None\\\\n        assert all(t not in first+out+err for t in tokens)\\\\ndef safe_headers(headers):\\\\n    assert headers.get(\\\\'Cache-Control\\\\')==\\\\'no-store\\\\'\\\\n    assert headers.get(\\\\'Referrer-Policy\\\\')==\\\\'no-referrer\\\\'\\\\nwith household(True) as (cwd,env,a,b):\\\\n    assert cli(cwd,env,\\\\'adduser\\\\',\\\\'n\\\\'*30).returncode==0\\\\n    for name in (\\\\'ALICE\\\\',\\\\'n\\\\'*31):\\\\n        result=cli(cwd,env,\\\\'adduser\\\\',name)\\\\n        assert result.returncode!=0 and not result.stdout\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        status,link,_=request(port,\\\\'POST\\\\',\\\\'/api/links\\\\',a,{\\\\'title\\\\':\\\\'Needle\\\\',\\\\'url\\\\':\\\\'https://example.test/Original\\\\',\\\\'tags\\\\':[\\\\'original\\\\']})\\\\n        assert status==201\\\\n        path=\\\\'/api/links/\\\\'+str(link[\\\\'id\\\\'])\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=NEEDLE\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=ORIGINAL\\\\',a)[1]==[link]\\\\n        status,link,_=request(port,\\\\'PATCH\\\\',path,a,{\\\\'tags\\\\':[\\\\'updated\\\\']})\\\\n        assert status==200 and link[\\\\'tags\\\\']==[\\\\'updated\\\\']\\\\n        assert request(port,\\\\'POST\\\\',path+\\\\'/share\\\\',a,{\\\\'user\\\\':\\\\'bob\\\\'})[0]==200\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=invalid-\\\\'+a)\\\\n        assert status==401\\\\n        safe_headers(h)\\\\n        status,_,h=request(port,\\\\'GET\\\\',\\\\'/login?token=\\\\'+a)\\\\n        assert status==303\\\\n        safe_headers(h)\\\\n        cookie=h[\\\\'Set-Cookie\\\\'].split(\\\\';\\\\')[0]\\\\n        status,html,h=request(port,\\\\'GET\\\\',\\\\'/\\\\',cookie=cookie)\\\\n        assert status==200 and \\\\'Needle\\\\' in html\\\\n        assert \\\\'charset=utf-8\\\\' in h[\\\\'Content-Type\\\\'].lower()\\\\n        safe_headers(h)\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?token=\\\\'+a)[0]==401\\\\n        c=__import__(\\\\'http.client\\\\',fromlist=[\\\\'HTTPConnection\\\\']).HTTPConnection(\\\\'127.0.0.1\\\\',port,timeout=5)\\\\n        try:\\\\n            c.request(\\\\'GET\\\\',\\\\'/api/links\\\\',headers={\\\\'Authorization\\\\':\\\\'Basic \\\\'+a})\\\\n            response=c.getresponse();response.read();assert response.status==401\\\\n        finally:c.close()\\\\n    with serve(cwd,env,(a,b)) as port:\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/links?q=UPDATED\\\\',a)[1]==[link]\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared?q=UPDATED\\\\',b)[1]==[link]\\\\n        assert request(port,\\\\'PATCH\\\\',path,b,{\\\\'tags\\\\':[\\\\'bad\\\\']})[0]==404\\\\n        assert request(port,\\\\'DELETE\\\\',path,b)[0]==404\\\\n        db=sqlite3.connect(env[\\\\'LINKSHELF_DB\\\\'])\\\\n        try:\\\\n            db.execute(\\\\'PRAGMA foreign_keys=ON\\\\')\\\\n            keys=db.execute(\\\\'PRAGMA foreign_key_list(shares)\\\\').fetchall()\\\\n            assert any(r[2]==\\\\'links\\\\' and r[6]==\\\\'CASCADE\\\\' for r in keys)\\\\n            db.execute(\\\\'DELETE FROM links WHERE id=?\\\\',(link[\\\\'id\\\\'],));db.commit()\\\\n        finally:db.close()\\\\n        assert request(port,\\\\'GET\\\\',\\\\'/api/shared\\\\',b)[1]==[]\\\\n    try:Storage(env[\\\\'LINKSHELF_DB\\\\']).create(-999,\\\\'orphan\\\\',\\\\'http://example.test\\\\',[])\\\\n    except sqlite3.IntegrityError:pass\\\\n    else:raise AssertionError(\\\\'Storage connection did not enforce owner foreign key\\\\')\\\\nprint(\\\\'PASS extended-proofs; CLI tokens search/tag/share/restart; full output secret checks; response headers; SQL cascade and FK; username limits; all servers reaped\\\\')')\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo\\\"\", \"stdout\": \"PASS extended-proofs; CLI tokens search/tag/share/restart; full output secret checks; response headers; SQL cascade and FK; username limits; all servers reaped\\r\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"first-moment\", \"title\": \"Clean-state CLI to JSON to HTML and restart\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-rebind\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" first-moment\", \"stdout\": \"PASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\r\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"invalid-input\", \"title\": \"Invalid input is JSON 400, never 500\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-rebind\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" invalid-input\", \"stdout\": \"PASS invalid-input; JSON 400 and no partial writes; server reaped\\r\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"isolation\", \"title\": \"Bob isolation and read-only shared links\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-rebind\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" isolation\", \"stdout\": \"PASS isolation; owner-only mutation and read-only shares; server reaped\\r\\n\", \"stderr\": \"\", \"exit\": 0, \"passed\": true}], \"passed\": true}, {\"id\": \"scope-1\", \"title\": \"Full requested household service\", \"steps\": [{\"command\": \"\\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\v3-rebind\\\\.venv\\\\Scripts\\\\python.exe\\\" \\\"C:\\\\Users\\\\oren\\\\claude-worktrees\\\\_runs\\\\linkshelf\\\\runs\\\\linkshelf-20261014T193858850174\\\\repo/tests/acceptance.py\\\" scope-1\", \"stdout\": \"PASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\r\\nPASS isolation; owner-only mutation and read-only shares; server reaped\\r\\nPASS invalid-input; JSON 400 and no partial writes; server reaped\\r\\nPASS first-moment; clean-state CLI/API/HTML/search/restart; server reaped\\r\\nPASS invalid-input; JSON 400 and no partial writes; server reaped\\r\\nPASS isolation; owner-only mutation and read-only shares; server reaped\\r\\nPASS scope-1; full executable requirement suite; all servers reaped\\r\\n\", \"stderr\": \"...............\\r\\n----------------------------------------------------------------------\\r\\nRan 15 tests in 11.267s\\r\\n\\r\\nOK\\r\\n\", \"exit\": 0, \"passed\": true}], \"passed\": true}], \"passed\": true}"
+    }
+  ],
+  "acceptance_reviews": [
+    {
+      "id": "4c2691d5fc7843438890d203346fb197",
+      "result_json": "{\"id\": \"4c2691d5fc7843438890d203346fb197\", \"stage\": \"acceptance\", \"runId\": \"b1fbafc5894440d288304b92d30e74c7\", \"reviewers\": [{\"name\": \"codex-reviewer\", \"provider\": \"codex\", \"model\": \"gpt-6.1-sol\", \"effort\": \"medium\"}, {\"name\": \"claude-reviewer\", \"provider\": \"claude\", \"model\": \"claude-haiku-4-5-20251001\"}], \"isMocked\": false}"
+    },
+    {
+      "id": "ba00bab494354061bcbc3a17d6195ec7",
+      "result_json": "{\"id\": \"ba00bab494354061bcbc3a17d6195ec7\", \"stage\": \"acceptance\", \"runId\": \"5f01a088ab544d87a44ccf1122984203\", \"originalReviewId\": \"4c2691d5fc7843438890d203346fb197\", \"reboundFrom\": \"b1fbafc5894440d288304b92d30e74c7\", \"reason\": \"revision algorithm upgraded; product unchanged\", \"by\": \"harness\"}"
+    }
+  ],
+  "acceptance_findings": [],
+  "acceptance_approvals": [
+    {
+      "id": "556c217a20144074b117974f183ac6a7",
+      "result_json": "{\"by\": \"opus-user-proxy\", \"id\": \"556c217a20144074b117974f183ac6a7\", \"isProxy\": true, \"runId\": \"b1fbafc5894440d288304b92d30e74c7\", \"statement\": \"Opus (user proxy): accepted for the dogfood only. 5/5 clean-state scenarios (first use, isolation/read-only sharing, invalid input, extended proofs) pass on integrated run linkshelf-20261014T193858850174 (acceptance run b1fbafc5) after a planner replan and targeted resume; cross-provider acceptance review returned no findings. Not a real-user acceptance; Oren has not reviewed this product.\"}"
+    },
+    {
+      "id": "124fabbbe487419a9d57aa99d36ebdec",
+      "result_json": "{\"by\": \"opus-user-proxy\", \"id\": \"124fabbbe487419a9d57aa99d36ebdec\", \"isProxy\": true, \"runId\": \"5f01a088ab544d87a44ccf1122984203\", \"statement\": \"Opus (user proxy): accepted for the dogfood only. 5/5 clean-state scenarios (first use, isolation/read-only sharing, invalid input, extended proofs) pass on integrated run linkshelf-20261014T193858850174 (acceptance run b1fbafc5) after a planner replan and targeted resume; cross-provider acceptance review returned no findings. Not a real-user acceptance; Oren has not reviewed this product.\", \"originalApprovalId\": \"556c217a20144074b117974f183ac6a7\", \"reboundFrom\": \"b1fbafc5894440d288304b92d30e74c7\", \"reason\": \"revision algorithm upgraded; product unchanged\", \"rebind\": {\"reboundFrom\": \"b1fbafc5894440d288304b92d30e74c7\", \"reason\": \"revision algorithm upgraded; product unchanged\", \"by\": \"harness\"}}"
+    }
+  ]
+}
