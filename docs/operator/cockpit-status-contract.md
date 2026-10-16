@@ -43,6 +43,14 @@ Proof units are separate:
   by the existing projected run. A completed/validated status or claim string
   cannot populate this unit.
 
+Optional `vision.proofAccounting` adds a revision-aware requirement/evidence map
+from original published membership, canonical claims and receipts. See
+[proof accounting](proof-accounting.md) for exact identity, invalidation and
+missing-producer semantics. Matching content at an earlier claim and a later
+candidate is reported separately from admitted execution. Genuine assignment/
+runtime admission is still unavailable, so this map grants no work-item credit
+or whole-vision acceptance. Existing scenario and approval fields stay intact.
+
 Global scenario checks include every stored canonical scenario. Per-capability
 checks join an actual scenario ID to an acceptance node with exactly one feature
 parent. Unlinked or ambiguous scenarios remain in `vision.scenarioScope` and the

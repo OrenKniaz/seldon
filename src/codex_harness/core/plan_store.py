@@ -1773,3 +1773,41 @@ class PlanStore:
 
 def open_plan_store(workspace: str | Path, name: str | None = None) -> PlanStore:
     return PlanStore(workspace, name)
+
+
+class _ReadOnlyPlanStore(PlanStore):
+    def _manifest(self, spine: Spine) -> dict:
+        # Same canonical compiler/inputs, without _manifest's temporary-file validation.
+        template = self.workspace / "template"
+        manifest = compile_manifest(spine, template if template.is_dir() else None)
+        if template.is_dir():
+            self.check_requirement_files(manifest, template)
+        return manifest
+
+
+@contextmanager
+def open_plan_store_readonly(workspace: str | Path):
+    """Snapshot an existing store without initialization, migration or sidecar creation."""
+    workspace = Path(workspace).resolve()
+    path = workspace / ".codex-harness/plan.sqlite3"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    wal = Path(str(path) + "-wal")
+    active = wal.is_file() and wal.stat().st_size > 0
+    if active and not Path(str(path) + "-shm").is_file():
+        raise OSError("WAL index unavailable")
+    source = sqlite3.connect(
+        path.as_uri() + ("?mode=ro" if active else "?mode=ro&immutable=1"), uri=True
+    )
+    memory = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        source.backup(memory)
+        source.close()
+        memory.row_factory = sqlite3.Row
+        memory.execute("PRAGMA query_only=ON")
+        store = _ReadOnlyPlanStore.__new__(_ReadOnlyPlanStore)
+        store.workspace, store.path, store.connection = workspace, path, memory
+        yield store
+    finally:
+        source.close()
+        memory.close()

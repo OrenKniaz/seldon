@@ -10,6 +10,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
+from codex_harness.core import proof_accounting
 from codex_harness.core.attempt_activity import observe_attempt_activity
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PHASES, PlanStore
@@ -133,6 +134,7 @@ def _plan(workspace):
             "waves": _read(store.outcome_waves),
             "scenarios": _read(store.acceptance_scenarios),
             "scenarioRun": _read(lambda: _latest_scenario_run(db)),
+            "proofPlan": _read(lambda: proof_accounting.plan_context(store)),
         }
         return result, reviews, detail
 
@@ -741,6 +743,16 @@ def snapshot(*, workspace=None, runs_root=None) -> dict:
     }
     result["verdict"] = _verdict(result["plan"], result["reviews"], current)
     result["efficiencyTrend"] = _efficiency_trend(runs, current)
+    if isinstance(plan, tuple):
+        observed = _read(
+            lambda: proof_accounting.observe(
+                plan[2].get("proofPlan"),
+                run_path=(current or {}).get("evidencePaths", [None])[0],
+                runs_root=runs_root,
+                publication_current=plan[0].get("publication", {}).get("up_to_date") is True,
+            )
+        )
+        plan[2]["proofAccounting"] = observed if isinstance(observed, dict) else None
     cockpit = _read(lambda: _cockpit(result, plan[2] if isinstance(plan, tuple) else {}, current))
     result["cockpit"] = cockpit if isinstance(cockpit, dict) else None
     return result
@@ -961,6 +973,7 @@ def _cockpit(report, detail, current):
             "scenarioScope": None
             if scenarios is None
             else {"total": len(scenario_ids), "unlinkedIds": sorted(scenario_ids - links.keys())},
+            "proofAccounting": detail.get("proofAccounting"),
             **proof(scenario_ids),
         }
     )

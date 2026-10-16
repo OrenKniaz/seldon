@@ -256,6 +256,7 @@ def parser() -> argparse.ArgumentParser:
         "waves": (),
         "diagram": ("kind",),
         "impact": (),
+        "supervision-report": ("run",),
         "render": (),
         "roundtable": (),
         "readiness": (),
@@ -299,6 +300,9 @@ def parser() -> argparse.ArgumentParser:
     commands["status"].add_argument("--brief", action="store_true")
     commands["preflight"].add_argument("--provider", action="append", dest="providers")
     commands["impact"].add_argument("--since", help="Manifest revision or saved manifest file")
+    commands["supervision-report"].add_argument("--baseline-run")
+    commands["supervision-report"].add_argument("--forecast")
+    commands["supervision-report"].add_argument("--interventions")
     commands["nodes"].add_argument("--kind")
     commands["card"].add_argument("--assumption", action="append", default=[])
     commands["accept-run"].add_argument("--subject", choices=["product", "oracle"])
@@ -733,6 +737,21 @@ def main(argv=None) -> int:
         )
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    if getattr(args, "command", None) == "supervision-report":
+        from codex_harness.core.supervision import report
+
+        if parse_error is not None:
+            print(json.dumps({"isError": True, "error": str(parse_error), "data": None}))
+            return 2
+        data = report(
+            args.workspace,
+            args.run,
+            baseline_run=args.baseline_run,
+            forecast=args.forecast,
+            intervention_log=args.interventions,
+        )
+        print(json.dumps({"isError": False, "data": data}, ensure_ascii=False))
+        return 0
     server = PlannerServer(args.workspace)
     try:
         try:
