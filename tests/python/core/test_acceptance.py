@@ -209,6 +209,143 @@ REVIEWERS = [
 COMMAND = '"{python}" "{repo}/tiny.py"'
 
 
+# Rejected historical Claude output, preserved only as source-regression input.
+# Object file SHA256: 9b118672af0d80dca9c721c4e709028c1cef6c5bd94adb14fac29039182ba818
+REJECTED_HISTORICAL_CLAUDE_OBJECTS = [
+    {
+        "finding": "The default data file is ./water.json relative to the current "
+        "directory. A first-time user who runs the CLI from a different folder "
+        "gets a new empty file. They will see 0 ml (0%) and may think their "
+        "data was lost. This matches the locked spec but works against "
+        "'reliably'. No scenario covers it, and no success or error message "
+        "names the file in use.",
+        "node_id": "R2",
+        "severity": "minor",
+        "suggestion": [
+            "Document the cwd-relative default and WATER_CLI_DATA prominently, "
+            "for example in usage/help text.",
+            "Include the data file path in error messages.",
+            "Consider an opt-in way to show the active data path, such as a "
+            "`path` command or a note in --help.",
+        ],
+    },
+    {
+        "finding": "The read-only failure surfaces a raw OS message. Example: `Error: "
+        "[WinError 5] Access is denied: '...\\.water.json.afm1ur_v.tmp' -> "
+        "'water.json'`. Exit code, stderr prefix, byte preservation and temp "
+        "cleanup all pass. But the message exposes an internal temp-file name "
+        "and does not say that the data file cannot be written.",
+        "node_id": "R4",
+        "severity": "minor",
+        "suggestion": [
+            "Wrap OSError on save in a friendly message, such as 'Cannot write "
+            "<data file>: file is read-only or access denied'.",
+            "Do not mention the temp file in the message.",
+        ],
+    },
+    {
+        "finding": "Schema and corruption errors such as 'Data must contain goal and "
+        "entries' and 'Entries must be a list' do not name the file or say "
+        "what the user should do. A first-time user hitting corruption gets no "
+        "recovery path. Not overwriting is correct, but there is no guidance "
+        "such as 'fix or delete <path>'.",
+        "node_id": "R2",
+        "severity": "minor",
+        "suggestion": [
+            "Prefix errors with the data file path.",
+            "Add a short hint to repair or move the file.",
+        ],
+    },
+    {
+        "finding": "Concurrent invocations are explicitly unsupported. Read-modify-write "
+        "is not serialized, so two terminals or a scripted shortcut running "
+        "`add` at once can silently lose an entry. This conflicts with "
+        "'reliably' and 'no silent data loss', and it is only a plan "
+        "assumption. Nothing is surfaced to the user.",
+        "node_id": "R2",
+        "severity": "minor",
+        "suggestion": [
+            "State the single-invocation limitation in user-facing docs or help.",
+            "Optionally add a simple lock file or retry guard.",
+            "Optionally add a scenario that documents the limitation.",
+        ],
+    },
+    {
+        "finding": "The evidence does not show what a first-time user sees on discovery "
+        "paths: no command, `--help`, an unknown command, or running on Python "
+        "older than 3.11. The scenarios cover the happy path and specific bad "
+        "values only. Beyond the one-line outputs, there is no README or usage "
+        "text in the packet.",
+        "node_id": "R4",
+        "severity": "minor",
+        "suggestion": [
+            "Add a scenario for no-args and --help output with exit code and no traceback.",
+            "Add a scenario for an unknown command.",
+            "Add a short Python 3.11+ requirement or version check message.",
+            "Ship a README with the five commands and the data-file behavior.",
+        ],
+    },
+    {
+        "finding": "Edge amounts are not exercised. These include huge or exponent values "
+        "(`1e400`, `1e9999999`), very large integers, and values just under "
+        "0.5 ml. Hostile or accidental input could produce a very large stored "
+        "entry, slow parsing, or an unclear error. The spec only says to "
+        "reject nonfinite, nonpositive, unknown-unit and zero-rounding values.",
+        "node_id": "R1",
+        "severity": "minor",
+        "suggestion": [
+            "Add an upper bound or a bounded-exponent check in parse_amount.",
+            "Add tests for large and exponent inputs that expect a clean exit 2.",
+        ],
+    },
+    {
+        "finding": "The percentage rounding rule 'general-number, one decimal max' is "
+        "under-specified. In scope-1, 489/2000 is exactly 24.45 and displays "
+        "as 24.4%. That is correct for float formatting but looks like a "
+        "round-down. The scenarios do not distinguish half-up from float "
+        "behavior at other boundaries.",
+        "node_id": "R4",
+        "severity": "minor",
+        "suggestion": [
+            "Define the percentage rounding mode explicitly.",
+            "Add a boundary test for it.",
+        ],
+    },
+    {
+        "finding": "The messages `Undid last entry` and `Added N ml` give limited "
+        "feedback. Undo does not say which amount was removed. A user who "
+        "added several drinks cannot confirm what was reverted without running "
+        "`today`. Undo is also limited to today's entries, so a late-night "
+        "correction after midnight reports 'Nothing to undo'.",
+        "node_id": "R4",
+        "severity": "note",
+        "suggestion": [
+            "Optionally print the removed amount, for example 'Undid last entry (300 ml)'.",
+            "Document the today-only undo scope.",
+        ],
+    },
+    {
+        "finding": "The packet has limited independent evidence. The implementation is "
+        "not included, only stubs and protected tests. Judgment rests on "
+        "harness-run scenario output. The read-only atomic-replace scenario "
+        "asserts os.name=='nt' and demonstrates only the Windows failure path. "
+        "Failure injection elsewhere is mocked. Passing scenarios all use the "
+        "same installed copy and the default-cwd data file. Deleted-file "
+        "detection is out of scope by design: an absent file reads as empty, "
+        "which is a documented limitation.",
+        "node_id": "V1",
+        "severity": "note",
+        "suggestion": [
+            "Treat the vision as met for the first-moment flow: today shows 0 "
+            "ml (0%) and then 250 ml (12.5%).",
+            "Treat reliability on non-Windows platforms and under midnight rollover as unverified.",
+            "Optionally add a POSIX read-only-directory scenario.",
+            "Optionally add a day-rollover scenario with injected time.",
+        ],
+    },
+]
+
+
 @pytest.fixture
 def project(tmp_path):
     workspace, repo = tmp_path / "planner", tmp_path / "product"
@@ -961,6 +1098,133 @@ def test_acceptance_packet_includes_helpers_and_saved_scenarios(project):
     assert len(seen) == 2 and all(item["shards"] == 1 for item in result["reviewers"])
 
 
+def assert_strict_response_contract(packet, known):
+    assert 'have exactly {"node_id", "severity", "finding", "suggestion"}' in packet
+    assert "All values are strings; finding must be nonempty." in packet
+    assert "Severity is blocker, major, minor or note." in packet
+    assert 'node_id must be one of the ids below, or "plan" for plan-wide findings.' in packet
+    assert "Use [] if there are no findings." in packet
+    allowed = packet.split("Allowed node ids: ", 1)[1].splitlines()[0]
+    assert json.loads(allowed)
+    assert set(json.loads(allowed)) <= set(known)
+
+
+def test_acceptance_response_contract_matches_strict_parser(project):
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    seen = []
+
+    def runner(launch, cwd, timeout):
+        seen.append(launch.cli)
+        assert_strict_response_contract(launch.stdin_text, store.spine().ids())
+        assert "suggestion must be one string" in launch.stdin_text
+        assert "an empty string may mean no suggested fix" in launch.stdin_text
+        return 0, "[]"  # Explicit mocked unit output, not provider evidence.
+
+    result = acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+    assert seen == ["codex", "claude"]
+    assert all(record["shards"] == 1 for record in result["reviewers"])
+    assert result["isMocked"] is True and result["findings"] == []
+
+
+def test_acceptance_actual_array_suggestions_fail_closed_and_preserve_diagnostics(project):
+    from tests.python.core.test_roundtable import reviewer_stream
+
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    # Synthetic rollback sentinel, not the historical Codex response.
+    sentinel = {
+        "node_id": "plan",
+        "severity": "note",
+        "finding": "Synthetic rollback sentinel",
+        "suggestion": "",
+    }
+    outputs = {
+        "codex": reviewer_stream("codex", [sentinel], uses_tools=False),
+        "claude": reviewer_stream("claude", REJECTED_HISTORICAL_CLAUDE_OBJECTS, uses_tools=False),
+    }
+    stderr = "Synthetic retained diagnostic stderr\n"
+    calls = []
+
+    def runner(launch, cwd, timeout):
+        calls.append(launch.cli)
+        return 0, outputs[launch.cli], stderr
+
+    with pytest.raises(ValueError, match="Finding fields must be strings"):
+        acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+    assert calls == ["codex", "claude"]
+    rows = store.connection.execute(
+        "SELECT payload_json FROM events WHERE kind='acceptance-review-failed'"
+    ).fetchall()
+    assert len(rows) == 1
+    failed = json.loads(rows[0][0])
+    assert failed["isMocked"] is True
+    assert [record["provider"] for record in failed["reviewers"]] == calls
+    shards = [record["shardDetails"] for record in failed["reviewers"]]
+    assert all(len(items) == 1 for items in shards)
+    shards = [items[0] for items in shards]
+    assert [item["exitCode"] for item in shards] == [0, 0]
+    assert [item["invalid"] for item in shards] == [0, 9]
+    expected = [
+        {"status": "rejected-unparsed", "reason": "Finding fields must be strings", "finding": item}
+        for item in REJECTED_HISTORICAL_CLAUDE_OBJECTS
+    ]
+    assert len(expected) == 9
+    assert shards[1]["rejected"] == expected
+    artifact = json.loads(Path(shards[1]["artifactPath"]).read_text(encoding="utf-8"))
+    assert artifact["exitCode"] == 0 and artifact["rejected"] == expected
+    assert artifact["stdout"] == outputs["claude"] and artifact["stderr"] == stderr
+    for table in ("acceptance_reviews", "acceptance_findings", "acceptance_approvals"):
+        assert store.connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+    status = store.status()["acceptance"]
+    assert not status["accepted"] and status["invalidReason"] == "acceptance-review-required"
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_acceptance_string_suggestion_and_empty_array_contract_controls(project, empty):
+    from tests.python.core.test_roundtable import reviewer_stream
+
+    from codex_harness.core.roundtable import _invalid_reason
+
+    store, repo = project
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    # Separate synthetic controls; never normalize the rejected historical objects.
+    items = (
+        []
+        if empty
+        else [
+            {"node_id": "V1", "severity": "note", "finding": "Synthetic note", "suggestion": ""},
+            {
+                "node_id": "plan",
+                "severity": "minor",
+                "finding": "Synthetic gap",
+                "suggestion": "Fix it",
+            },
+        ]
+    )
+    assert all(_invalid_reason(item, set(store.spine().ids()) | {"plan"}) is None for item in items)
+    calls = []
+
+    def runner(launch, cwd, timeout):
+        calls.append(launch.cli)
+        return 0, reviewer_stream(launch.cli, items, uses_tools=False)
+
+    result = acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+    assert calls == ["codex", "claude"]
+    assert result["isMocked"] is True and result["packetBound"] is True
+    assert len(result["findings"]) == len(items) * 2
+    for provider in calls:
+        admitted = [item for item in result["findings"] if item["provider"] == provider]
+        assert [
+            {key: item[key] for key in source} for item, source in zip(admitted, items, strict=True)
+        ] == items
+        assert all(item["status"] == "open" for item in admitted)
+    assert store.acceptance_findings() == result["findings"]
+
+
 def test_acceptance_every_shard_merges_binding_and_findings(project):
     from tests.python.core.test_roundtable import reviewer_stream
 
@@ -975,6 +1239,7 @@ def test_acceptance_every_shard_merges_binding_and_findings(project):
 
     def runner(launch, cwd, timeout):
         counts[launch.cli] += 1
+        assert_strict_response_contract(launch.stdin_text, store.spine().ids())
         assert run["revision"] in launch.stdin_text
         assert "lockedVision" in launch.stdin_text and "scenarioResults" in launch.stdin_text
         item = {

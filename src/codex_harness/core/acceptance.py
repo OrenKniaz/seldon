@@ -635,10 +635,15 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
         "independent live product review.\n\n"
     )
     packet = (
-        included_header
-        + QUESTION
-        + "\nReview only this packet; return a JSON array with node_id, severity "
-        "(blocker, major, minor or note), finding, suggestion (empty array when no gaps).\n"
+        included_header + QUESTION + "\nReview only this packet. "
+        "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
+        'have exactly {"node_id", "severity", "finding", "suggestion"}. All values are '
+        "strings; finding must be nonempty. Severity is blocker, major, minor or note. "
+        'node_id must be one of the ids below, or "plan" for plan-wide findings. '
+        "suggestion must be one string; an empty string may mean no suggested fix. "
+        "Use [] if there are no findings.\nAllowed node ids: "
+        + json.dumps(spine.ids(), ensure_ascii=False)
+        + "\n"
         + json.dumps(
             {
                 "lockedVision": spine.node(spine.ids("vision")[0]),
