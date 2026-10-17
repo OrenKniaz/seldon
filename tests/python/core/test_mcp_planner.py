@@ -635,3 +635,169 @@ def test_stdio_subprocess_protocol_and_recovery(tmp_path):
     for reply in replies[3:5]:
         assert reply["result"]["content"][0]["text"].startswith("Harness Plan Mode: ")
     assert "planner tool failed:" in result.stderr
+
+
+def confirmation_rpc(server, **arguments):
+    """Retain the actual synthetic wire exchange in the private scenario fixture."""
+    request = dict(
+        jsonrpc="2.0",
+        id=41,
+        method="tools/call",
+        params=dict(name="harness_advance", arguments=arguments),
+    )
+    response = server.handle_line(json.dumps(request, ensure_ascii=False))
+    with (server.workspace / "confirmation-wire.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(dict(request=request, response=response), ensure_ascii=False) + "\n"
+        )
+    return response["result"]
+
+
+def mcp_wave_plan(workspace):
+    from tests.python.core.test_wave_refine import cli, setup_wave
+
+    setup_wave(workspace)
+    cli(workspace, "compile", "--template", "template", "--out", "manifest.json")
+    server = PlannerServer(workspace)
+    try:
+        for target in PHASES[1 : PHASES.index("plan") + 1]:
+            current = server._store().phase()
+            if current in ("align", "vision-lock"):
+                call(
+                    server,
+                    "harness_record_confirmation",
+                    gate=current,
+                    user_statement="Synthetic earlier vision confirmation",
+                )
+            call(server, "harness_advance", to_phase=target)
+        return server
+    except BaseException:
+        server.close()
+        raise
+
+
+def test_advance_advertises_optional_confirmation_transport(server):
+    tools = rpc(server, "tools/list")["result"]["tools"]
+    advance = next(tool for tool in tools if tool["name"] == "harness_advance")
+    schema = advance["inputSchema"]
+    assert set(schema["properties"]) == {"to_phase", "user_statement", "by"}
+    assert schema["required"] == ["to_phase"]
+    assert schema["properties"]["user_statement"]["type"] == "string"
+    assert "plan" in advance["description"] and "proxy:" in advance["description"]
+
+
+@pytest.mark.parametrize("actor", [None, "user", "proxy:synthetic-Δ"])
+def test_mcp_wave_confirmation_exact_event_lock_and_projection(tmp_path, actor):
+    from codex_harness.core.waves import product_digest
+
+    server = mcp_wave_plan(tmp_path / "wave")
+    workspace = server.workspace
+    statement = "  Synthetic approval: café Δ\r\nW1 now; W2 retained.  "
+    try:
+        before = server.store.spine().plan_revision()
+        vision_lock = server.store._meta()["locked_vision_json"]
+        args = dict(to_phase="roundtable", user_statement=statement)
+        if actor is not None:
+            args["by"] = actor
+        result = confirmation_rpc(server, **args)
+        assert not result["isError"], result
+        assert server.store.phase() == "roundtable"
+        row = server.store.connection.execute(
+            "SELECT id, payload_json FROM events WHERE kind='phase-advanced' ORDER BY id DESC"
+        ).fetchone()
+        event = json.loads(row["payload_json"])
+        lock = server.store.wave_product_lock()
+        assert event["from"] == "plan" and event["to"] == "roundtable"
+        assert event["by"] == lock["confirmedBy"] == (actor or "user")
+        assert event["statement"] == lock["statement"] == statement
+        assert lock["sourceRef"] == f"plan-event:{row['id']}"
+        assert lock["spineRevision"] == event["plan_revision"] == before
+        assert lock["spine"] == server.store.spine().to_dict()
+        assert lock["mapNodeId"] == "MAP"
+        assert lock["waveMapRevision"] == server.store.spine().revision("MAP")
+        proxy = actor is not None and actor.startswith("proxy:")
+        assert lock["isProxy"] is proxy
+        assert lock["confirmationOrigin"] == ("proxy" if proxy else "user")
+        projected = rpc(server, "tools/call", dict(name="harness_waves"))["result"]
+        data = projected["structuredContent"]
+        assert not projected["isError"] and data["waveProductLock"] == lock
+        assert lock["digest"] == product_digest(
+            server.store.spine(),
+            data["mapNode"]["fields"],
+            [node["fields"] for node in data["detailNodes"]],
+        )
+        assert [node["fields"]["detail"] for node in data["detailNodes"]] == ["detailed", "sketch"]
+        assert server.store._meta()["locked_vision_json"] == vision_lock
+    finally:
+        server.close()
+    with open_plan_store(workspace) as reopened:
+        assert reopened.wave_product_lock() == lock
+
+
+def test_mcp_bare_wave_advance_keeps_planner_and_no_historical_lock(tmp_path):
+    server = mcp_wave_plan(tmp_path / "bare")
+    try:
+        assert server.store.outcome_waves()["waveProductLock"] is None
+        result = confirmation_rpc(server, to_phase="roundtable")
+        assert not result["isError"], result
+        event = server.store._latest_draft_event("phase-advanced")
+        assert event["by"] == "planner" and event["statement"] is None
+        assert "waveProductLock" not in event
+        assert server.store.outcome_waves()["waveProductLock"] is None
+        server.close()
+        projected = rpc(server, "tools/call", dict(name="harness_waves"))["result"]
+        assert projected["structuredContent"]["waveProductLock"] is None
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        dict(by="user"),
+        dict(by="proxy:synthetic"),
+        dict(user_statement=""),
+        dict(user_statement=" \r\n\t ", by="user"),
+        dict(user_statement="synthetic", by="planner"),
+        dict(user_statement="synthetic", by="proxy:"),
+        dict(user_statement="synthetic", by="proxy:  "),
+        dict(user_statement="synthetic", by="opus-user-proxy"),
+        dict(user_statement="synthetic", by="worker:synthetic"),
+        dict(user_statement=None),
+        dict(user_statement=17),
+        dict(user_statement="synthetic", by=None),
+        dict(to_phase="tech-stack", user_statement="synthetic"),
+        dict(to_phase="plan", user_statement="synthetic"),
+    ],
+)
+def test_mcp_wave_confirmation_refuses_without_mutation(tmp_path, arguments):
+    server = mcp_wave_plan(tmp_path / "refused")
+    try:
+        before = server.store.status()
+        events = list(server.store.connection.execute("SELECT * FROM events"))
+        args = dict(to_phase="roundtable") | arguments
+        result = confirmation_rpc(server, **args)
+        assert result["isError"], result
+        assert server.store.status() == before
+        assert list(server.store.connection.execute("SELECT * FROM events")) == events
+        assert server.store.outcome_waves()["waveProductLock"] is None
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("gate,target", [("align", "expand"), ("vision-lock", "features")])
+def test_mcp_advance_confirmation_cannot_substitute_vision_gate(server, gate, target):
+    start(server)
+    if gate == "vision-lock":
+        call(server, "harness_record_confirmation", gate="align", user_statement="Synthetic align")
+        call(server, "harness_advance", to_phase="expand")
+        call(server, "harness_advance", to_phase="vision-lock")
+    before = server.store.status()
+    events = list(server.store.connection.execute("SELECT * FROM events"))
+    result = confirmation_rpc(server, to_phase=target, user_statement="Synthetic misplaced words")
+    assert result["isError"], result
+    assert server.store.status() == before
+    assert list(server.store.connection.execute("SELECT * FROM events")) == events
+    assert not server.store.connection.execute(
+        "SELECT * FROM approvals WHERE gate=?", (gate,)
+    ).fetchall()

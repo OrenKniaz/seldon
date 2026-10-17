@@ -248,7 +248,14 @@ TOOLS = [
         "Call ONLY with the user's own words after they confirmed. Never invent approval.",
         {"gate": {"type": "string", "enum": ["align", "vision-lock"]}, "user_statement": STRING},
     ),
-    _tool("harness_advance", "Advance one phase; never skip a gate.", {"to_phase": STRING}),
+    _tool(
+        "harness_advance",
+        "Advance one phase; never skip a gate. Only for plan -> roundtable, carry the user's "
+        "exact supplied confirmation words in user_statement, with optional by=user or "
+        "proxy:<name>. Supplied words default to user; a bare advance remains planner-origin.",
+        {"to_phase": STRING, "user_statement": STRING, "by": STRING},
+        ["to_phase"],
+    ),
     _tool(
         "harness_upsert_node",
         "Save a canonical spine node. Bead fields require ownedFiles, proofModule, "
@@ -898,7 +905,17 @@ class PlannerServer:
             }
             return f"Recorded {args['gate']}: {views.approval_label('user')}"
         if name == "harness_advance":
-            store.advance(args["to_phase"], by="planner")
+            by, statement = "planner", None
+            if "user_statement" in args or "by" in args:
+                if store.phase() != "plan" or args["to_phase"] != "roundtable":
+                    raise ValueError("Confirmation fields require plan -> roundtable")
+                statement = args.get("user_statement")
+                if not isinstance(statement, str) or not statement.strip():
+                    raise ValueError("Confirmation requires nonblank user_statement")
+                by = args.get("by", "user")
+                if by != "user" and not (by.startswith("proxy:") and by[6:].strip()):
+                    raise ValueError("Confirmation by must be user or proxy:<name>")
+            store.advance(args["to_phase"], by=by, statement=statement)
             body = f"Entered {args['to_phase']} planning phase."
             kind = PHASE_DIAGRAMS.get(args["to_phase"])
             if kind:
