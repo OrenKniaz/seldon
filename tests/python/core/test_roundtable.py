@@ -27,6 +27,12 @@ REVIEWERS = [
 ]
 
 
+QUALITY_SNAPSHOT_NOTICE = (
+    "Quality snapshot captured before this review request. Missing or stale "
+    "review evidence describes the pre-request gate, not failure of this "
+    "requested review attempt. Open findings and unmet gates still require action.\n\n"
+)
+
 DEFAULT_RUNNER = roundtable._run
 
 
@@ -608,6 +614,46 @@ def test_packet_documents_dag_quality_fields_and_instructions(store):
     assert list(store.connection.iterdump()) == before
 
 
+@pytest.mark.parametrize("evidence_state", ["missing", "stale", "open-finding"])
+def test_packet_quality_snapshot_is_pre_review_without_changing_gates(store, evidence_state):
+    from codex_harness.core.plan_quality import render_quality_card
+
+    if evidence_state != "missing":
+        run(
+            store,
+            json.dumps([finding("R1", "blocker")]) if evidence_state == "open-finding" else "[]",
+        )
+    if evidence_state == "stale":
+        requirement = store.spine().node("R1")
+        requirement["text"] += " Clarified after the previous review."
+        store.upsert_node(requirement)
+    report = quality_report(store)
+    review_check = next(item for item in report["checks"] if item["id"] == "roundtable")
+    assert review_check["status"] == "fail"
+    if evidence_state == "stale":
+        assert review_check["evidence"]["stale"] is True
+    revision, before = store.manifest_revision(), list(store.connection.iterdump())
+
+    packet = review_packet(store)
+
+    notice = packet.split("## Planned proof (oracle-verified), not a worker build\n\n", 1)[1]
+    notice = notice.split("Planner quality:", 1)[0]
+    assert "before this review request" in notice
+    assert "not failure of this requested review attempt" in notice
+    assert "Open findings and unmet gates still require action" in notice
+    assert render_quality_card(report) in packet
+    assert quality_report(store) == report
+    assert store.manifest_revision() == revision
+    assert not store.successful_reviews(revision)
+    if evidence_state == "open-finding":
+        with pytest.raises(PlanStoreError) as caught:
+            store._check_publish()
+        assert caught.value.code == "plan-findings-open"
+    else:
+        store._check_publish()
+    assert list(store.connection.iterdump()) == before
+
+
 @pytest.mark.parametrize("status", ["resolved", "rejected"])
 @pytest.mark.parametrize("resolution", ["", "   ", None])
 def test_resolution_reason_required(store, status, resolution):
@@ -1016,6 +1062,7 @@ def test_small_packet_has_only_header_and_scenario_section_added(store):
     restored = packet.removeprefix(roundtable.INCLUDED_HEADER).replace(
         roundtable._scenario_section([]) + "\n", "", 1
     )
+    restored = restored.replace(QUALITY_SNAPSHOT_NOTICE, "", 1)
     assert restored.encode() == "\n".join(sections).encode()
     for provider in roundtable.PROVIDER_TOKEN_BUDGETS:
         shards = roundtable.packet_shards(store, provider, report=report)

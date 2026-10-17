@@ -190,7 +190,11 @@ def _packet(spine, report: dict, test_bodies: str = "", scenarios=()) -> str:
         sections.append(f"## {name}\n\n{documents[name]}")
     sections.append(f"## Bead DAG\n\n```mermaid\n{bead_dag(spine)}```\n")
     sections.append(
-        "## Planned proof (oracle-verified), not a worker build\n\n" + render_quality_card(report)
+        "## Planned proof (oracle-verified), not a worker build\n\n"
+        "Quality snapshot captured before this review request. Missing or stale "
+        "review evidence describes the pre-request gate, not failure of this "
+        "requested review attempt. Open findings and unmet gates still require action.\n\n"
+        + render_quality_card(report)
     )
     sections.append(test_bodies)
     sections.append(_scenario_section(scenarios))
