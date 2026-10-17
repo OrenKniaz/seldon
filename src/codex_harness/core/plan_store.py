@@ -2058,6 +2058,53 @@ class PlanStore:
     def resolve_acceptance_finding(self, item_id, *, resolution, status="resolved") -> None:
         self.resolve_findings([dict(id=item_id, status=status, resolution=resolution)])
 
+    def acceptance_review_guard(self, run_id: str) -> str | None:
+        """Share acceptance/status admission; unknown or synthetic reviews earn no credit."""
+        if self._open("clarifications"):
+            return "plan-clarifications-open"
+
+        def native_reviewer(reviewer):
+            if not isinstance(reviewer, dict):
+                return False
+            details = reviewer.get("shardDetails")
+            count = reviewer.get("shards")
+            return (
+                isinstance(reviewer.get("provider"), str)
+                and bool(reviewer["provider"].strip())
+                and type(count) is int
+                and count > 0
+                and isinstance(details, list)
+                and len(details) == count
+                and all(
+                    isinstance(shard, dict)
+                    and shard.get("isMocked") is False
+                    and shard.get("didRunProvider") is True
+                    and type(shard.get("exitCode")) is int
+                    and shard["exitCode"] == 0
+                    and type(shard.get("invalid")) is int
+                    and shard["invalid"] == 0
+                    for shard in details
+                )
+            )
+
+        for row in self.connection.execute("SELECT result_json FROM acceptance_reviews"):
+            review = json.loads(row[0])
+            if (
+                not isinstance(review, dict)
+                or review.get("runId") != run_id
+                or review.get("isMocked") is not False
+            ):
+                continue
+            reviewers = review.get("reviewers")
+            if (
+                isinstance(reviewers, list)
+                and reviewers
+                and all(native_reviewer(reviewer) for reviewer in reviewers)
+                and len({reviewer["provider"] for reviewer in reviewers}) >= 2
+            ):
+                return None
+        return "acceptance-review-required"
+
     def accept(self, *, by: str, statement: str) -> dict:
         from codex_harness.core.acceptance import (
             _latest_run,
@@ -2094,14 +2141,14 @@ class PlanStore:
                 )
             if any(f["status"] == "open" for f in self.acceptance_findings()):
                 raise PlanStoreError("acceptance-findings-open", "Resolve open acceptance findings")
-            reviews = [
-                json.loads(row[0])
-                for row in self.connection.execute("SELECT result_json FROM acceptance_reviews")
-            ]
-            if not any(review["runId"] == run["id"] for review in reviews):
-                raise PlanStoreError(
-                    "acceptance-review-required", "Review the current scenario run"
+            review_guard = self.acceptance_review_guard(run["id"])
+            if review_guard:
+                message = (
+                    "Resolve open clarifications"
+                    if review_guard == "plan-clarifications-open"
+                    else "Review the current scenario run with native cross-subscription evidence"
                 )
+                raise PlanStoreError(review_guard, message)
             approval = {
                 "id": uuid4().hex,
                 "runId": run["id"],
