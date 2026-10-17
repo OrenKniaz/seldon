@@ -1,5 +1,8 @@
 """Host-side promotion of validated lessons into confirmed project memory."""
 
+import hashlib
+import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +39,7 @@ def promote_lesson(
     author: str,
     provider: str,
     model: str,
+    recovery_identity: str | None = None,
 ) -> str:
     """Record an unverified lesson after the host's integrated validation passes.
 
@@ -52,11 +56,43 @@ def promote_lesson(
     tags = ["lesson"]
     if evidence.decision_id:
         tags.append(evidence.decision_id)
-    entry = ProjectMemoryStore(workspace_root).add(
-        f"{text.strip()} [evidence: commit={commit[:12]} receipt={receipt}]",
+    content = f"{text.strip()} [evidence: commit={commit[:12]} receipt={receipt}]"
+    provenance = Provenance(author=author, provider=provider, model=model, commit=commit)
+    store = ProjectMemoryStore(workspace_root)
+    if recovery_identity is not None:
+        token = hashlib.sha256(
+            json.dumps(
+                [
+                    recovery_identity,
+                    text.strip(),
+                    commit,
+                    receipt,
+                    evidence.decision_id,
+                    author,
+                    provider,
+                    model,
+                ],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        content += f" [promotion: {token}]"
+        entries = store.search(token, include_superseded=True, limit=100)
+        originals = [entry for entry in entries if entry.supersedes is None]
+        if originals:
+            if len(originals) != 1 or any(
+                entry.text != content
+                or entry.tags != tuple(dict.fromkeys(tag.strip().lower() for tag in tags))
+                or entry.provenance != provenance
+                or entry.status != "unverified"
+                for entry in originals
+            ):
+                raise MemoryPromotionError("memory-promotion-recovery-mismatch", token)
+            return originals[0].id
+    entry = store.add(
+        content,
         tags=tags,
         status="unverified",
-        provenance=Provenance(author=author, provider=provider, model=model, commit=commit),
+        provenance=provenance,
     )
     return entry.id
 
@@ -68,6 +104,7 @@ def confirm_lesson(
     by: str,
     provider: str | None = None,
     model: str | None = None,
+    recover: bool = False,
 ) -> None:
     """Confirm through the store only when the confirmer is a different identity."""
     store = ProjectMemoryStore(workspace_root)
@@ -76,6 +113,32 @@ def confirm_lesson(
         raise MemoryPromotionError(
             "memory-self-confirmation-refused", "a lesson's author cannot confirm their own lesson"
         )
+    marker = re.search(r"\[promotion: ([0-9a-f]{64})\]$", original.text)
+    if recover and marker and original.superseded:
+        successors = [
+            entry
+            for entry in store.search(marker[1], include_superseded=True, limit=100)
+            if entry.supersedes == entry_id
+        ]
+        if len(successors) == 1:
+            entry = successors[0]
+            if (
+                entry.status == "confirmed"
+                and entry.text == original.text
+                and entry.tags == original.tags
+                and entry.provenance
+                == Provenance(
+                    author=by.strip(),
+                    provider=provider,
+                    model=model,
+                    run_id=original.provenance.run_id,
+                    bead_id=original.provenance.bead_id,
+                    turn_id=original.provenance.turn_id,
+                    commit=original.provenance.commit,
+                )
+            ):
+                return
+        raise MemoryPromotionError("memory-confirmation-recovery-mismatch", entry_id)
     store.confirm(entry_id, by=by, provider=provider, model=model)
 
 

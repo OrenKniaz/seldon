@@ -274,7 +274,7 @@ def test_cancelled_incomplete_telemetry_retains_audit_hold(tmp_path):
 def test_selected_cancel_preserves_completed_work_and_requires_targeted_resume(
     tmp_path, monkeypatch
 ):
-    from tests.python.core.test_dispatch import _tiny_plan
+    from tests.python.core.test_dispatch import _bind_protected, _tiny_plan
 
     from codex_harness.core.attempt_control import request_cancel
 
@@ -293,6 +293,7 @@ def test_selected_cancel_preserves_completed_work_and_requires_targeted_resume(
         (plan / "template/tests/test_A.py").read_text().replace("from A import", "from C import")
     )
     manifest_path.write_text(json.dumps(manifest))
+    _bind_protected(plan)
     launched = []
 
     class LocalAdapter:

@@ -198,11 +198,12 @@ def test_synthetic_observation_refusal_after_stop_cannot_trigger_second_stop(tmp
 
 
 def test_post_spawn_refusal_with_unobserved_exit_cannot_relaunch_on_resume(tmp_path, monkeypatch):
-    from tests.python.core.test_dispatch import _tiny_plan
+    from tests.python.core.test_dispatch import _bind_protected, _tiny_plan
 
     from codex_harness.core.provider_launch import ProviderNormalLaunch
 
     plan = _tiny_plan(tmp_path, dependent=True)
+    _bind_protected(plan)
     stops, failed = [], []
     write = dispatch._write_record
 

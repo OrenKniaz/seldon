@@ -342,12 +342,13 @@ def test_failed_popen_has_no_original(tmp_path, monkeypatch):
 
 
 def local_run(tmp_path, monkeypatch, *, crash=False):
-    from tests.python.core.test_dispatch import _tiny_plan
+    from tests.python.core.test_dispatch import _bind_protected, _tiny_plan
     from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
 
     from codex_harness.core.provider_launch import ProviderNormalLaunch
 
     plan = _tiny_plan(tmp_path)
+    _bind_protected(plan)
 
     class LocalAdapter:
         def provider_normal_command(self, *, prompt, **kwargs):

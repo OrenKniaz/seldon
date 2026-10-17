@@ -14,7 +14,13 @@ from codex_harness.core import dispatch
 from codex_harness.core.dispatch import STATUS_MOCK_ONLY, _git, run_plan
 from codex_harness.core.graph import load_plan
 from codex_harness.core.mail import Mailbox
-from codex_harness.core.spine import Spine, compile_manifest, load_spine, save_spine
+from codex_harness.core.spine import (
+    Spine,
+    compile_manifest,
+    load_spine,
+    requirement_files_revision,
+    save_spine,
+)
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit"
 
@@ -305,6 +311,9 @@ def _plan(tmp_path: Path) -> Path:
             {"id": requirement, "revision": "b" * 64} for requirement in bead["requirements"]
         ]
     manifest["integration"]["requirementRefs"] = [{"id": "R6", "revision": "b" * 64}]
+    manifest["requirementFilesRevision"] = requirement_files_revision(
+        plan / "template", manifest["requirementFiles"]
+    )
     (plan / "sample.json").write_text(json.dumps(manifest))
     return plan
 

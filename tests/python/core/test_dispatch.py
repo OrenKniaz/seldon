@@ -24,10 +24,20 @@ from codex_harness.core.dispatch import (
 from codex_harness.core.graph import load_plan
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.project_memory import ProjectMemoryStore
+from codex_harness.core.spine import requirement_files_revision
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "fixtures" / "dogfood-tipsplit"
 D1 = "tip-split amounts are integer cents everywhere; never floats (D1)"
+
+
+def _bind_protected(plan: Path) -> None:
+    path = plan / "sample.json"
+    manifest = json.loads(path.read_text())
+    manifest["requirementFilesRevision"] = requirement_files_revision(
+        plan / "template", manifest["requirementFiles"]
+    )
+    path.write_text(json.dumps(manifest))
 
 
 def test_tipsplit_verification_identity_matches_pre_change_bytes(tmp_path):
@@ -114,6 +124,7 @@ def test_failure_mail_is_delivered_once_per_event_including_resume(tmp_path):
     def failed_worker(worktree):
         (worktree / "A.py").write_text("VALUE = 2\n")
 
+    _bind_protected(plan)
     record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": failed_worker})
     mailbox = Mailbox(record["memoryWorkspace"])
     messages = mailbox.inbox("planner")
@@ -207,6 +218,7 @@ def test_dispatch_worker_blocker_is_forwarded_once_with_spec_refs(tmp_path, sign
             assert _changed_paths(worktree) == []
         (directory / "events.jsonl").write_text(json.dumps(event))
 
+    _bind_protected(plan)
     record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": blocked})
     a = record["beads"]["A"]
     assert a["status"] == "blocked: worker reported"
@@ -246,6 +258,7 @@ def test_dispatch_no_change_stores_report_and_attempt_efficiency(tmp_path):
         directory = worktree.parent / "evidence/A/attempt"
         (directory / "events.jsonl").write_text(json.dumps(event))
 
+    _bind_protected(plan)
     record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": unchanged})
     a = record["beads"]["A"]
     assert a["status"] == "rejected: no source change"
@@ -264,6 +277,7 @@ def test_dispatch_block_marker_beyond_report_cap_is_observed(tmp_path):
         event = {"type": "item.completed", "item": {"type": "agent_message", "text": report}}
         (worktree.parent / "evidence/A/attempt/events.jsonl").write_text(json.dumps(event))
 
+    _bind_protected(plan)
     record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": unchanged})
     assert record["beads"]["A"]["status"] == "blocked: worker reported"
     assert len(record["beads"]["A"]["workerReport"]) == 4000
@@ -579,7 +593,11 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
     spawned = []
 
     def observe_spawn(command, *args, **kwargs):
-        if command[0] == sys.executable and "-c" in command:
+        if (
+            command[0] == sys.executable
+            and "-c" in command
+            and command[command.index("-c") + 1].startswith("from pathlib import Path; Path(")
+        ):
             worktree = Path(kwargs["cwd"])
             bead_id = worktree.name.removeprefix("bead-")
             attempt = worktree.parent / "evidence" / bead_id / "attempt"
@@ -593,6 +611,7 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
         return popen(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", observe_spawn)
+    _bind_protected(plan)
     record = run_plan(
         plan, work_root=tmp_path / "runs", provider_for={"A": "scripted", "B": "scripted"}
     )

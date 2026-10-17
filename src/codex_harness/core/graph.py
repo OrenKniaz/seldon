@@ -44,6 +44,7 @@ class Plan:
     integration_proof_module: str | None
     plan_revision: str | None = None
     verification: Mapping | None = None
+    requirement_files_revision: str | None = None
 
 
 def _string(value: object) -> str:
@@ -212,6 +213,9 @@ def load_plan(path: Path) -> Plan:
                 ).encode("utf-8")
             ).hexdigest(),
             verification=manifest.get("verification"),
+            requirement_files_revision=_revision(manifest["requirementFilesRevision"])
+            if "requirementFilesRevision" in manifest
+            else None,
         )
         if "verification" in manifest:
             from codex_harness.core.runners import resolve_runner

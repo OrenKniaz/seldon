@@ -387,6 +387,21 @@ def requirement_file_sources(template_dir: str | Path, names: list[str]) -> dict
     return dict(sorted(sources.items()))
 
 
+def requirement_files_revision(template_dir: str | Path, names: list[str]) -> str:
+    """Canonical published protected-file identity, including directory membership."""
+    sources = requirement_file_sources(template_dir, names)
+    file_revisions = [
+        (
+            name,
+            hashlib.sha256(
+                path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            ).hexdigest(),
+        )
+        for name, path in sources.items()
+    ]
+    return _hash(_canonical(file_revisions))
+
+
 def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> dict:
     from codex_harness.core.wave_refine import execution_scope
 
@@ -452,17 +467,7 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         manifest["verification"] = root["verification"]
         resolve_runner(manifest)
     if template_dir is not None:
-        sources = requirement_file_sources(template_dir, manifest["requirementFiles"])
-        file_revisions = [
-            (
-                name,
-                hashlib.sha256(
-                    path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-                ).hexdigest(),
-            )
-            for name, path in sources.items()
-        ]
-        revision = _hash(_canonical(file_revisions))
+        revision = requirement_files_revision(template_dir, manifest["requirementFiles"])
         manifest["requirementFilesRevision"] = revision
         manifest["planRevision"] = _hash(f"{spine.plan_revision()}:{revision}")
     if scope:

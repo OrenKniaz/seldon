@@ -25,10 +25,16 @@ from codex_harness.core.memory_promotion import (
     memory_prompt_for,
     promote_lesson,
 )
+from codex_harness.core.package_provenance import adapter_provenance
 from codex_harness.core.provider_launch import get_adapter
 from codex_harness.core.record_io import read_record_json, write_record_json
-from codex_harness.core.runners import resolve_runner
-from codex_harness.core.spine import requirement_file_sources
+from codex_harness.core.runners import resolve_runner, validate_proof
+from codex_harness.core.spine import (
+    compile_manifest,
+    load_spine,
+    requirement_file_sources,
+    requirement_files_revision,
+)
 
 STATUS_VALIDATED = "plan-validated"
 STATUS_VALIDATED_NO_INTEGRATION = "plan-validated (no integration proof declared)"
@@ -144,23 +150,27 @@ def _requirement_ids(repo: Path, names: list[str]) -> dict[str, str]:
     return {name: _git(repo, "rev-parse", f"HEAD:{name}") for name in names}
 
 
+def _verify_requirement_files(
+    plan: graph.Plan, manifest: dict, root: Path, *, source_fixture: bool = False
+) -> None:
+    expected = plan.requirement_files_revision
+    if expected is None:
+        if source_fixture:
+            if "planRevision" not in manifest:
+                return  # Legacy static sample inputs, explicitly executed as mocks.
+            source = plan.root / "spine.json"
+            if (
+                source.is_file()
+                and compile_manifest(load_spine(source))["planRevision"] == plan.plan_revision
+            ):
+                return  # Exact source-only compiler identity, never a composite publication.
+        raise ValueError("published requirement files revision is missing")
+    if requirement_files_revision(root, list(plan.requirement_files)) != expected:
+        raise ValueError("protected requirement files revision mismatch")
+
+
 def _validate(cwd: Path, manifest: dict, module: str) -> dict[str, object]:
-    runner = resolve_runner(manifest)
-    command = []
-    try:
-        runner.proof_paths(cwd)
-        command = runner.argv_for(module)
-        result = subprocess.run(
-            command, cwd=cwd / runner.cwd, capture_output=True, text=True, timeout=120
-        )
-    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
-        return {"module": module, "command": command, "passed": False, "output": str(error)}
-    return {
-        "module": module,
-        "command": command,
-        "passed": runner.passed(result.returncode),
-        "output": (result.stderr or result.stdout)[-2000:],
-    }
+    return validate_proof(cwd, manifest, module)
 
 
 def _content_identity(repo: Path, commit: str, names) -> str:
@@ -865,6 +875,8 @@ def _completed_attempt_identity_error(record: dict, request: dict, result: dict)
         for key in ("provider", "model", "effort", "ownedFiles")
         if request.get("mode") == "provider-normal" or key in request or key in result
     )
+    if "adapterProvenance" in request or "adapterProvenance" in result:
+        fields += ("adapterProvenance",)
     for field in fields:
         if field not in request or field not in result or request[field] != result[field]:
             return f"request/result {field}"
@@ -964,7 +976,7 @@ def _attempt_bead(
             "bead": record["bead"],
             "requirementId": f"{plan.name}-{record['bead']}:{'-'.join(bead['requirements'])}",
             "baseCommit": attempt["baseCommit"],
-            "adapterCommit": _git(HARNESS_ROOT, "rev-parse", "HEAD"),
+            **adapter_provenance(),
             "executableSha256": _file_sha256(record["executable"] or launch.command[0])
             if launch
             else None,
@@ -1096,6 +1108,123 @@ def _attempt_bead(
     return record
 
 
+def _integration_candidate(record: dict, bead: dict, repo: Path) -> tuple[str, Path, dict]:
+    """Resume only the candidate staged for this exact completed attempt."""
+    worker = Path(record["attempt"]["cwd"]).resolve()
+    root = repo.parent / f"candidate-{worker.name}"
+    ref = f"candidate/{record['bead']}/{worker.name}"
+    state_path = Path(record["evidenceDir"]) / "integration-state.json"
+    identity = {
+        "runId": record["runId"],
+        "bead": record["bead"],
+        "planRevision": record["planRevision"],
+        "requirementRefs": record["requirementRefs"],
+        "specRefs": record.get("specRefs"),
+        "attemptDirectory": str((state_path.parent / "attempt").resolve()),
+        "workerWorktree": str(worker),
+        "attemptBase": record["attempt"]["baseCommit"],
+        "packetSha256": hashlib.sha256(record["prompt"].encode()).hexdigest(),
+        "ownedFiles": bead["ownedFiles"],
+        "candidateRef": ref,
+        "candidateWorktree": str(root.resolve()),
+        "receiptPath": str((state_path.parent / "integrated.json").resolve()),
+    }
+    branches = _git(repo, "for-each-ref", "--format=%(refname:short)", f"refs/heads/{ref}")
+    if state_path.exists():
+        state = read_record_json(state_path)
+        if any(state.get(key) != value for key, value in identity.items()):
+            raise ValueError("integration recovery identity mismatch")
+    else:
+        if branches or root.exists():
+            raise ValueError("integration recovery candidate has no bound state")
+        _git(worker, "add", "--", *bead["ownedFiles"])
+        state = {
+            **identity,
+            "baseIntegration": _git(repo, "rev-parse", "HEAD"),
+            "workerTree": _git(worker, "write-tree"),
+        }
+        _write_record(state_path, state)
+    worker_head = _git(worker, "rev-parse", "HEAD")
+    if "workerCommit" not in state:
+        if worker_head == state["attemptBase"]:
+            if _git(worker, "write-tree") != state["workerTree"]:
+                raise ValueError("integration recovery worker tree mismatch")
+            worker_head = _commit(
+                worker,
+                f"{bead['title']} (worker change, committed by Harness)\n\n"
+                f"Harness-Plan-Revision: {record['planRevision']}\n"
+                f"Harness-Requirements: {_refs_text(record['requirementRefs'])}"
+                + (
+                    "\nHarness-Spec-Revision: "
+                    + hashlib.sha256(
+                        json.dumps(
+                            record["specRefs"], sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if "specRefs" in record
+                    else ""
+                ),
+            )
+        if _git(worker, "rev-parse", "HEAD^{tree}") != state["workerTree"] or _git(
+            worker, "rev-list", "--parents", "-n", "1", worker_head
+        ).split()[1:] != [state["attemptBase"]]:
+            raise ValueError("integration recovery worker commit mismatch")
+        state["workerCommit"] = worker_head
+        state["candidateTree"] = _git(
+            repo, "merge-tree", "--write-tree", state["baseIntegration"], worker_head
+        ).splitlines()[0]
+        _write_record(state_path, state)
+    if (
+        worker_head != state["workerCommit"]
+        or _git(worker, "rev-parse", "HEAD^{tree}") != state["workerTree"]
+        or _git(worker, "status", "--porcelain")
+    ):
+        raise ValueError("integration recovery worker changed")
+    if not branches:
+        if root.exists() or _git(repo, "rev-parse", "HEAD") != state["baseIntegration"]:
+            raise ValueError("integration recovery base mismatch")
+        _git(repo, "worktree", "add", "-q", "-b", ref, str(root), state["baseIntegration"])
+    registrations = _git(repo, "worktree", "list", "--porcelain").split("\n\n")
+    if not any(
+        f"worktree {root.resolve().as_posix()}" in block.splitlines()
+        and f"branch refs/heads/{ref}" in block.splitlines()
+        for block in registrations
+    ):
+        raise ValueError("integration recovery worktree mismatch")
+    if _git(root, "status", "--porcelain"):
+        raise ValueError("integration recovery candidate is dirty")
+    candidate = _git(root, "rev-parse", "HEAD")
+    if candidate == state["baseIntegration"] and "candidateCommit" not in state:
+        _git(
+            root,
+            "-c",
+            "user.name=Harness Sample",
+            "-c",
+            "user.email=sample@harness.invalid",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            f"Integrate {bead['title']}",
+            state["workerCommit"],
+        )
+        candidate = _git(root, "rev-parse", "HEAD")
+    if (
+        _git(root, "rev-list", "--parents", "-n", "1", candidate).split()[1:]
+        != [state["baseIntegration"], state["workerCommit"]]
+        or _git(root, "rev-parse", "HEAD^{tree}") != state["candidateTree"]
+        or state.get("candidateCommit", candidate) != candidate
+        or _git(repo, "rev-parse", ref) != candidate
+    ):
+        raise ValueError("integration recovery candidate mismatch")
+    head = _git(repo, "rev-parse", "HEAD")
+    if head != state["baseIntegration"]:
+        _git(repo, "merge-base", "--is-ancestor", candidate, "HEAD")
+    state["candidateCommit"] = candidate
+    _write_record(state_path, state)
+    return state["workerCommit"], root, state
+
+
 def _integrate_bead(
     record: dict,
     bead: dict,
@@ -1113,6 +1242,10 @@ def _integrate_bead(
         return
     worktree = Path(record["attempt"]["cwd"])
     current_plan = graph.load_plan(manifest_path)
+    _verify_requirement_files(
+        current_plan, manifest, current_plan.root / "template", source_fixture=record["isMocked"]
+    )
+    _verify_requirement_files(current_plan, manifest, repo, source_fixture=record["isMocked"])
     current_bead = current_plan.beads.get(record["bead"])
     if (
         current_plan.plan_revision != record["planRevision"]
@@ -1133,40 +1266,10 @@ def _integrate_bead(
         record["attempt"]["changedPaths"] = changed_paths
         changed = bool(changed_paths)
         record["guard"]["passed"] = changed
+    binding = None
     if changed:
-        bead_commit = _commit(
-            worktree,
-            f"{bead['title']} (worker change, committed by Harness)\n\n"
-            f"Harness-Plan-Revision: {record['planRevision']}\n"
-            f"Harness-Requirements: {_refs_text(record['requirementRefs'])}"
-            + (
-                "\nHarness-Spec-Revision: "
-                + hashlib.sha256(
-                    json.dumps(record["specRefs"], sort_keys=True, separators=(",", ":")).encode(
-                        "utf-8"
-                    )
-                ).hexdigest()
-                if "specRefs" in record
-                else ""
-            ),
-        )
-        attempt_id = worktree.name
-        candidate_ref = f"candidate/{record['bead']}/{attempt_id}"
-        validation_root = repo.parent / f"candidate-{attempt_id}"
-        _git(repo, "worktree", "add", "-q", "-b", candidate_ref, str(validation_root), "HEAD")
-        _git(
-            validation_root,
-            "-c",
-            "user.name=Harness Sample",
-            "-c",
-            "user.email=sample@harness.invalid",
-            "merge",
-            "-q",
-            "--no-ff",
-            "-m",
-            f"Integrate {bead['title']}",
-            bead_commit,
-        )
+        bead_commit, validation_root, binding = _integration_candidate(record, bead, repo)
+        candidate_ref = binding["candidateRef"]
     integration_commit = _git(validation_root, "rev-parse", "HEAD")
     record["candidate"] = {
         "ref": candidate_ref,
@@ -1174,24 +1277,51 @@ def _integrate_bead(
         "tree": _git(validation_root, "rev-parse", "HEAD^{tree}"),
         "validated": False,
     }
-    validation = _validate(validation_root, manifest, bead["proofModule"])
+    if receipt.exists() and binding is not None:
+        integrated = read_record_json(receipt)
+        claim = integrated.get("claim", {})
+        inputs = _claim_inputs(validation_root, current_plan, record["bead"], integration_commit)
+        if (
+            integrated.get("recoveryBinding") != binding
+            or integrated.get("beadCommit") != bead_commit
+            or integrated.get("integrationCommit") != integration_commit
+            or integrated.get("root") != str(validation_root)
+            or integrated.get("receiptPath") != str(receipt)
+            or integrated.get("planRevision") != record["planRevision"]
+            or integrated.get("requirementRefs") != record["requirementRefs"]
+            or integrated.get("specRefs") != record.get("specRefs")
+            or any(claim.get(key) != value for key, value in inputs.items())
+            or claim.get("candidateCommit") != integration_commit
+            or claim.get("candidateTree") != record["candidate"]["tree"]
+            or claim.get("passed") != integrated.get("validation", {}).get("passed")
+        ):
+            raise ValueError("integration recovery receipt mismatch")
+        record["integrated"] = integrated
+        validation = integrated["validation"]
+    else:
+        validation = _validate(validation_root, manifest, bead["proofModule"])
+        record["integrated"] = {
+            "beadCommit": bead_commit,
+            "integrationCommit": integration_commit,
+            "root": str(validation_root),
+            "candidate": {**record["candidate"], "validated": validation["passed"]},
+            "validation": validation,
+            "receiptPath": str(receipt),
+            "planRevision": record["planRevision"],
+            "requirementRefs": record["requirementRefs"],
+            **_spec_binding(record),
+            "claim": _claim(
+                validation_root,
+                current_plan,
+                record["bead"],
+                integration_commit,
+                validation["passed"],
+            ),
+            **({"recoveryBinding": binding} if binding is not None else {}),
+        }
+        _write_record(receipt, record["integrated"])
     record["didRunIntegratedValidation"] = True
     record["candidate"]["validated"] = validation["passed"]
-    record["integrated"] = {
-        "beadCommit": bead_commit,
-        "integrationCommit": integration_commit,
-        "root": str(validation_root),
-        "candidate": record["candidate"],
-        "validation": validation,
-        "receiptPath": str(receipt),
-        "planRevision": record["planRevision"],
-        "requirementRefs": record["requirementRefs"],
-        **_spec_binding(record),
-        "claim": _claim(
-            validation_root, current_plan, record["bead"], integration_commit, validation["passed"]
-        ),
-    }
-    _write_record(receipt, record["integrated"])
     if not validation["passed"]:
         record["status"] = (
             "integrated validation failed" if changed else "rejected: no source change"
@@ -1200,7 +1330,9 @@ def _integrate_bead(
     if not changed:
         record["status"] = "already-satisfied"
         return
-    _git(repo, "merge", "-q", "--ff-only", integration_commit)
+    if _git(repo, "rev-parse", "HEAD") == binding["baseIntegration"]:
+        _git(repo, "merge", "-q", "--ff-only", integration_commit)
+    record["lessonsPromoted"] = []
     for lesson in bead.get("lessons", []):
         entry_id = promote_lesson(
             memory,
@@ -1209,10 +1341,11 @@ def _integrate_bead(
             author=f"worker:{record['bead']}:{record['provider']}",
             provider=record["provider"],
             model=record["model"] or "unknown",
+            recovery_identity=json.dumps(binding, sort_keys=True),
         )
         promoted = {**lesson, "entryId": entry_id, "confirmed": False}
         record["lessonsPromoted"].append(promoted)
-        confirm_lesson(memory, entry_id, by=confirmer)
+        confirm_lesson(memory, entry_id, by=confirmer, recover=True)
         promoted["confirmed"] = True
     record["status"] = STATUS_MOCK_ONLY if record["isMocked"] else "requirement-validated"
 
@@ -1254,6 +1387,8 @@ def run_plan(
     if manifest_path.is_dir():
         manifest_path /= "sample.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_fixture = mock_provider is not None or set(plan.beads).issubset(fake_workers or {})
+    _verify_requirement_files(plan, manifest, plan.root / "template", source_fixture=source_fixture)
     order = graph.topological_order(plan)
     retry_ids = {item.strip() for item in retry_blocked.split(",")} if retry_blocked else set()
     if retry_ids and not resume_run_dir:
@@ -1406,6 +1541,7 @@ def run_plan(
             record["planUpdate"] = previous["planUpdate"]
     else:
         shutil.copytree(plan.root / "template", repo)
+        _verify_requirement_files(plan, manifest, repo, source_fixture=source_fixture)
         _git(repo, "init", "-q", "-b", "integration")
         _git(repo, "add", "-A")
         baseline = _commit(repo, "Sample baseline: documented requirement and fixed validation")
@@ -1420,6 +1556,7 @@ def run_plan(
                 for bead_id in order
             },
         }
+    _verify_requirement_files(plan, manifest, repo, source_fixture=source_fixture)
     done: set[str] = set()
     terminal: set[str] = set()
     running: dict[str, Future] = {}
@@ -1449,6 +1586,28 @@ def run_plan(
                 request = read_record_json(request_path) if request_path.exists() else {}
             except (OSError, ValueError):
                 request = {}
+            # run.json may still be the pre-launch checkpoint after process death.
+            # Project completed fields only after exact request/result and selected
+            # worktree/base/packet checks; real process originals are still checked below.
+            minimal_fields = {
+                "cwd",
+                "baseCommit",
+                "startedAt",
+                "planRevision",
+                "requirementRefs",
+                "specRefs",
+            }
+            if result_path.exists() and old_attempt and set(old_attempt).issubset(minimal_fields):
+                result = read_record_json(result_path)
+                projection = {
+                    **old,
+                    "attempt": {
+                        key: value for key, value in old_attempt.items() if key != "startedAt"
+                    },
+                }
+                if _completed_attempt_identity_error(projection, request, result) is None:
+                    old["attempt"] = old_attempt = {**old_attempt, **result}
+                    old["didRunProvider"] = result.get("didRunProvider", False)
             uncertain = request.get("status") == "launching" and not result_path.exists()
             refs_match = _identity_refs(old) == _identity_refs(records[bead_id])
             # Explicit refs allow unaffected v2 beads to retain their original
@@ -1547,7 +1706,12 @@ def run_plan(
                             ),
                         }
                     )
-            elif validated and identity_matches:
+            elif (
+                validated
+                and identity_matches
+                and old.get("status")
+                in {STATUS_MOCK_ONLY, "requirement-validated", "already-satisfied", "reused"}
+            ):
                 _git(repo, "merge-base", "--is-ancestor", integrated["integrationCommit"], "HEAD")
                 # This reuses implementation only. Claims are checked after the
                 # dependencies have reached their current integration candidate.
@@ -1556,7 +1720,13 @@ def run_plan(
             elif (
                 not uncertain
                 and result_path.exists()
-                and not integrated
+                and (
+                    not integrated
+                    or (
+                        (old_evidence / "integration-state.json").exists()
+                        and old.get("status", "").startswith("bead failed:")
+                    )
+                )
                 and old.get("planRevision") == plan.plan_revision
                 and refs_match
             ):
