@@ -1,4 +1,4 @@
-"""Canonical verification argv, protected inputs and exit-only verdict policy."""
+"""Canonical verification argv, protected inputs and observed proof verdicts."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _unittest_observer():
     import unittest
     from pathlib import Path
 
-    report, directory, pattern, owned_json = sys.argv[1:]
+    report, argv_json, owned_json = sys.argv[1:]
     root = Path.cwd().resolve()
     owned = {str((root / name).resolve()) for name in json.loads(owned_json)}
 
@@ -136,9 +136,8 @@ def _unittest_observer():
             "line": code.co_firstlineno,
         }
 
-    suite = unittest.defaultTestLoader.discover(directory, pattern=pattern)
-    count = suite.countTestCases()
-    result = Observed(unittest.TextTestRunner(stream=sys.stderr).stream, True, 2)
+    result = None
+    count = 0
 
     def trace(frame, event, arg):
         filename = frame.f_code.co_filename
@@ -155,12 +154,30 @@ def _unittest_observer():
                 current["lines"].append(location(frame))
         return trace
 
-    sys.settrace(trace)
-    try:
-        suite.run(result)
-    finally:
-        sys.settrace(None)
-    result.printErrors()
+    class ObservedRunner(unittest.TextTestRunner):
+        resultclass = Observed
+
+        def _makeResult(self):
+            nonlocal result
+            result = super()._makeResult()
+            return result
+
+        def run(self, suite):
+            nonlocal count
+            count = suite.countTestCases()
+            sys.settrace(trace)
+            try:
+                return super().run(suite)
+            finally:
+                sys.settrace(None)
+
+    # Delegate argument parsing, selection, failfast and buffering to unittest.
+    unittest.TestProgram(
+        module=None,
+        argv=["unittest", *json.loads(argv_json)],
+        testRunner=ObservedRunner,
+        exit=False,
+    )
     Path(report).write_text(
         json.dumps({"selected": count, "testsRun": result.testsRun, "tests": result.records}),
         encoding="utf-8",
@@ -171,9 +188,15 @@ def _unittest_observer():
 def observe_unittest(repo: Path, runner: Runner, module: str, owned: tuple[str, ...]) -> dict:
     """Execute discovery with controller-owned callbacks and a separate result channel.
 
-    This is prospective diagnostic execution only. Ordinary verification retains
-    its exact configured argv and exit policy.
+    The native unittest parser applies configured discovery and runner options.
     """
+    argv = list(runner.argv_for(module))[1:]
+    # Only interpreter bytecode suppression precedes the supported module entry.
+    if argv[:1] == ["-B"]:
+        argv.pop(0)
+    if argv[:2] != ["-m", "unittest"]:
+        raise ValueError("Controller observations require python -m unittest")
+    argv = argv[2:]
     sources = {*runner.proof_paths(repo), *(repo / name for name in owned)}
     before = {path: path.read_bytes() for path in sources if path.is_file()}
     with TemporaryDirectory(prefix="harness-observation-") as temp:
@@ -184,8 +207,7 @@ def observe_unittest(repo: Path, runner: Runner, module: str, owned: tuple[str, 
             "-c",
             inspect.getsource(_unittest_observer) + "\n_unittest_observer()\n",
             str(report),
-            runner.test_dir,
-            _pattern(module),
+            json.dumps(argv),
             json.dumps(owned),
         ]
         result = subprocess.run(
@@ -460,3 +482,107 @@ def _resolve_runner(manifest: Mapping) -> Runner:
         if executable and Path(executable).suffix.lower() in {".cmd", ".bat"}:
             _cmd_safe((executable, *runner.list_argv, runner.cwd, *proofs))
     return runner
+
+
+def validate_proof(
+    repo: Path, manifest: Mapping | Plan, module: str, *, owned_files: tuple[str, ...] = ()
+) -> dict:
+    """Require useful observed unittest execution, or command exit success."""
+    runner = resolve_runner(manifest)
+    command = []
+    try:
+        runner.proof_paths(repo)
+        command = runner.argv_for(module)
+        if runner.name == "unittest":
+            result = observe_unittest(repo, runner, module, owned_files)
+            observations = result["observations"]
+            records = observations.get("tests", [])
+            observed = sum(
+                bool(record.get("events"))
+                and (
+                    not any(event.get("kind") == "skip" for event in record["events"])
+                    or any(event.get("kind") == "subtest-success" for event in record["events"])
+                )
+                for record in records
+            )
+            successful = sum(
+                any(
+                    event.get("kind") in {"success", "subtest-success"}
+                    for event in record.get("events", [])
+                )
+                and not any(
+                    event.get("kind")
+                    in {
+                        "expected-failure",
+                        "unexpected-success",
+                        "failure",
+                        "error",
+                        "subtest-error",
+                    }
+                    for event in record["events"]
+                )
+                for record in records
+            )
+            tests_run = observations.get("testsRun")
+            valid = (
+                not observations.get("reason")
+                and type(tests_run) is int
+                and tests_run == len(records)
+                and type(observations.get("selected")) is int
+                and observations["selected"] >= tests_run
+            )
+            return {
+                "module": module,
+                **result,
+                "configuredCommand": command,
+                "selectedTests": observations.get("selected"),
+                "testsRun": tests_run,
+                "successfulTests": successful,
+                "nonSkippedTestsRun": observed,
+                "passed": bool(result["passed"] and valid and observed > 0 and successful > 0),
+            }
+        result = subprocess.run(
+            command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120
+        )
+        return {
+            "module": module,
+            "command": command,
+            "passed": runner.passed(result.returncode),
+            "exitCode": result.returncode,
+            "output": result.stdout + result.stderr,
+            "observations": None,
+            "selectedTests": None,
+            "successfulTests": None,
+            "testsRun": None,
+            "nonSkippedTestsRun": None,
+        }
+    except subprocess.TimeoutExpired as error:
+        output = "".join(
+            value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
+            for value in (error.stdout, error.stderr)
+        )
+        return {
+            "module": module,
+            "command": command,
+            "passed": False,
+            "exitCode": None,
+            "output": output + "\nProof timed out after 120 seconds",
+            "observations": {"tests": [], "reason": "Proof execution timed out"},
+            "selectedTests": None,
+            "successfulTests": None,
+            "testsRun": None,
+            "nonSkippedTestsRun": 0,
+        }
+    except (OSError, ValueError) as error:
+        return {
+            "module": module,
+            "command": command,
+            "passed": False,
+            "exitCode": None,
+            "output": str(error),
+            "observations": {"tests": [], "reason": str(error)},
+            "selectedTests": None,
+            "successfulTests": None,
+            "testsRun": None,
+            "nonSkippedTestsRun": 0,
+        }

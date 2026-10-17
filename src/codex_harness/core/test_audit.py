@@ -23,7 +23,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core.graph import load_plan, topological_order
-from codex_harness.core.runners import Runner, observe_unittest, resolve_runner
+from codex_harness.core.runners import Runner, resolve_runner, validate_proof
 from codex_harness.core.spine import (
     Spine,
     compile_manifest,
@@ -749,7 +749,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                 )
                 proof["failureProvenance"] = provenance
                 proofs.append({"bead": bead_id, **proof})
-                if proof["passed"]:
+                if runner.passed(proof["exitCode"]):
                     fail("prospective-vacuous-proof", bead_id, proof["module"], proof["output"])
                 elif proof["exitCode"] is None or proof["exitCode"] < 0:
                     fail(
@@ -804,55 +804,7 @@ def _proof(
     record_execution: bool = False,
     owned_files: tuple[str, ...] | None = None,
 ) -> dict:
-    runner = resolve_runner(manifest)
-    command = []
-    observation_reason = None
-    try:
-        runner.proof_paths(repo)
-        command = runner.argv_for(module)
-        if record_execution and owned_files is not None and runner.name == "unittest":
-            supported = ("-m", "unittest", "discover", "-s", runner.test_dir, "-p")
-            if tuple(arg for arg in runner.argv if arg != "-B") == supported:
-                return {"module": module, **observe_unittest(repo, runner, module, owned_files)}
-            observation_reason = (
-                "Configured unittest argv is unsupported by controller observations; "
-                "the exact configured command ran, but its red outcome remains unproved."
-            )
-        result = subprocess.run(
-            command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120
-        )
-        return {
-            "module": module,
-            "command": command,
-            "passed": runner.passed(result.returncode),
-            "output": result.stdout + result.stderr,
-            **({"exitCode": result.returncode} if record_execution else {}),
-            **(
-                {"observations": {"tests": [], "reason": observation_reason}}
-                if observation_reason
-                else {}
-            ),
-        }
-    except subprocess.TimeoutExpired as error:
-        output = "".join(
-            value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
-            for value in (error.stdout, error.stderr)
-        )
-        return {
-            "module": module,
-            "command": command,
-            "passed": False,
-            "output": output + "\nProof timed out after 120 seconds",
-            **({"exitCode": None} if record_execution else {}),
-        }
-    except (OSError, ValueError) as error:
-        return {
-            "module": module,
-            "command": command,
-            "passed": False,
-            "output": str(error),
-            **({"exitCode": None} if record_execution else {}),
-        }
+    return validate_proof(repo, manifest, module, owned_files=owned_files or ())
 
 
 def audit_revised_tests(
