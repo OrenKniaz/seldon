@@ -1,10 +1,11 @@
-"""Real first-use subprocesses, durable gates and injected subscription reviewers."""
+"""Local scenarios, MOCKED reviews and SOURCE-ONLY approval counterfactuals."""
 
 import json
 import os
 import subprocess
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from tests.python.core.planning_support import publication_evidence
@@ -120,7 +121,7 @@ def test_acceptance_invalid_after_vision_edit_and_restore(project):
     to_accept(store)
     fix_product(repo)
     run_acceptance(store, repo, subject="product")
-    review(store, repo)
+    source_only_native_review(store, repo)
     store.accept(by="user", statement="Accept")
     original = store.spine().node("V1")
     changed = json.loads(json.dumps(original))
@@ -408,14 +409,44 @@ def review(store, repo, output="[]", **kwargs):
     )
 
 
+def source_only_native_review(store, repo):
+    """Fresh native-shaped guard fixture, never a provider run or relabelled mock."""
+    run = current_run(store)
+    assert run and run["passed"] and Path(run["repo"]) == Path(repo).resolve()
+    evidence = {
+        "id": "source-only-counterfactual-" + uuid4().hex,
+        "stage": "acceptance",
+        "runId": run["id"],
+        "isMocked": False,
+        "sourceOnlyCounterfactual": True,
+        "packetBound": False,
+        "reviewers": [
+            {
+                "provider": provider,
+                "shards": 1,
+                "shardDetails": [
+                    {"isMocked": False, "didRunProvider": True, "exitCode": 0, "invalid": 0}
+                ],
+            }
+            for provider in ("codex", "claude")
+        ],
+    }
+    # These flags describe the counterfactual schema under test. No existing
+    # injected review is rewritten and no admission guard is replaced.
+    store.connection.execute(
+        "INSERT INTO acceptance_reviews VALUES (?, ?)", (evidence["id"], json.dumps(evidence))
+    )
+    return {**evidence, "findings": []}
+
+
 def legacy_acceptance(store, repo, monkeypatch, by="proxy:Opus"):
-    """Exercise the canonical producer/review/approval with the historical hash."""
+    """Canonical run/approval with SOURCE-ONLY review and the historical hash."""
     to_accept(store)
     fix_product(repo)
     with monkeypatch.context() as legacy:
         legacy.setattr("codex_harness.core.acceptance.integrated_revision", _integrated_revision_v1)
         run = run_acceptance(store, repo, subject="product")
-        original_review = review(store, repo)
+        original_review = source_only_native_review(store, repo)
         approval = store.accept(by=by, statement="Original acceptance words")
     # Historical runs had no algorithm tag. Keep their original v1 digest.
     run.pop("revisionAlgorithm")
@@ -504,7 +535,7 @@ def test_changed_product_refuses_rebind_without_new_evidence(project, monkeypatc
         fix_product(repo)
         run = run_acceptance(store, repo, subject="product")
         assert run["revisionAlgorithm"] == "tree-bytes-v2"
-        review(store, repo)
+        source_only_native_review(store, repo)
         store.accept(by="user", statement="Accept")
     (repo / "tiny.py").write_text("raise SystemExit(2)\n")
     assert store.status()["acceptance"]["invalidReason"] == "product-changed"
@@ -553,7 +584,7 @@ def test_ancestor_only_saved_binding_cannot_carry_approval(project, tmp_path, mo
     with monkeypatch.context() as historical:
         historical.setattr(acceptance, "integrated_revision", old_revision)
         run = run_acceptance(store, product, subject="product")
-        review(store, product)
+        source_only_native_review(store, product)
         approval = store.accept(by="user", statement="Recorded before scope repair")
     if legacy:
         run.pop("revisionAlgorithm")
@@ -593,7 +624,7 @@ def test_rebind_failed_scenario_retains_only_invalid_original_approval(
     with monkeypatch.context() as legacy:
         legacy.setattr("codex_harness.core.acceptance.integrated_revision", _integrated_revision_v1)
         old = run_acceptance(store, repo, subject="product")
-        review(store, repo)
+        source_only_native_review(store, repo)
         approval = store.accept(by="proxy:Opus", statement="Accept")
     old.pop("revisionAlgorithm")
     store.connection.execute(
@@ -917,6 +948,12 @@ def test_gate_failure_findings_proxy_and_revision_drift(project, finding_status)
         store.resolve_acceptance_finding(
             item["id"], status=finding_status, resolution="Explicit disposition of this gap"
         )
+    # Disposing findings cannot turn the injected review into native evidence.
+    assert result["isMocked"] is True
+    with pytest.raises(PlanStoreError) as error:
+        store.accept(by="proxy:Opus", statement="SOURCE-ONLY mocked review must refuse")
+    assert error.value.code == "acceptance-review-required"
+    source_only_native_review(store, repo)
     with pytest.raises(PlanStoreError, match="explicitly labelled proxy"):
         store.accept(by="agent", statement="Looks good")
     approval = store.accept(by="proxy:Opus", statement="Opus accepts as delegated proxy")
@@ -982,6 +1019,8 @@ def test_empty_scenarios_and_unchecked_intermediate_step_cannot_pass(project):
 
 
 def test_cli_and_mcp_acceptance_paths_and_next(project, monkeypatch, capsys):
+    # The low-level _run facade below is a SOURCE-ONLY native-shaped producer
+    # control; these calls never launch subscriptions or prove actual acceptance.
     store, repo = project
     to_accept(store)
     fix_product(repo)
@@ -1033,7 +1072,7 @@ def test_cli_and_mcp_acceptance_paths_and_next(project, monkeypatch, capsys):
         server.close()
     # The new run invalidates the previous review and approval.
     cli(store.workspace, "accept", "--statement", "Owner accepted", "--by", "user", code=2)
-    review(store, repo)
+    source_only_native_review(store, repo)
     output = cli(
         store.workspace,
         "accept",
@@ -1387,7 +1426,7 @@ def test_subject_controls_proof_gate_and_rebind(project, subject):
     )
     if subject == "product":
         assert proof["claim"] == "proved"
-        review(store, repo)
+        source_only_native_review(store, repo)
         store.accept(by="user", statement="I accept the product")
         assert store.status()["acceptance"]["accepted"]
     else:
@@ -1415,7 +1454,7 @@ def test_legacy_subject_inference_controls_existing_acceptance(project, dispatch
     to_accept(store)
     fix_product(repo)
     result = run_acceptance(store, repo, subject="product")
-    review(store, repo)
+    source_only_native_review(store, repo)
     store.accept(by="user", statement="Original product acceptance")
     if dispatch_evidence:
         evidence = repo.parent / "evidence"
