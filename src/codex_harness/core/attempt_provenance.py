@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from codex_harness.core.record_io import open_record_read, write_record_json_once
 
 SCHEMA = "seldon/local-process-provenance-v1"
+SCHEMA_V2 = "seldon/local-process-provenance-v2"
 FILENAME = "process-provenance.json"
 FIELDS = (
     "runId",
@@ -58,6 +59,28 @@ def identity_from_request(request: Mapping, *, process_id: int, process_observed
         for key in FIELDS
         if key not in {"processId", "processObservedAt"}
     }
+    if "adapterProvenance" in request:
+        source = request["adapterProvenance"]
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"schema", "origin", "distribution", "version", "pythonSourceSha256"}
+            or source["schema"] != "seldon/adapter-source-v1"
+            or source["origin"] not in {"source-tree", "installed-package"}
+            or source["distribution"] != "seldon"
+            or (source["version"] is not None and not isinstance(source["version"], str))
+            or not isinstance(source["pythonSourceSha256"], str)
+            or len(source["pythonSourceSha256"]) != 64
+            or any(c not in "0123456789abcdef" for c in source["pythonSourceSha256"])
+            or (
+                request["adapterCommit"] is not None
+                and (not isinstance(request["adapterCommit"], str) or not request["adapterCommit"])
+            )
+            or (source["origin"] == "installed-package" and request["adapterCommit"] is not None)
+        ):
+            raise ValueError("adapterProvenance invalid")
+        identity["adapterProvenance"] = copy.deepcopy(source)
+    elif not isinstance(request["adapterCommit"], str) or not request["adapterCommit"]:
+        raise ValueError("adapterCommit unavailable")
     if type(process_id) is not int or process_id <= 0:
         raise ValueError("processId must be a positive owned child PID")
     if not isinstance(process_observed_at, str) or not process_observed_at:
@@ -82,7 +105,6 @@ def identity_from_request(request: Mapping, *, process_id: int, process_observed
         "planRevision",
         "cwd",
         "baseCommit",
-        "adapterCommit",
         "provider",
         "startedAt",
     ):
@@ -106,7 +128,7 @@ def publish(
     attempt_dir: Path, request: Mapping, *, process_id: int, process_observed_at: str
 ) -> dict:
     original = {
-        "schema": SCHEMA,
+        "schema": SCHEMA_V2 if "adapterProvenance" in request else SCHEMA,
         "identity": identity_from_request(
             request, process_id=process_id, process_observed_at=process_observed_at
         ),
@@ -149,6 +171,13 @@ def read_and_compare(
         return {"state": state, "code": code, "path": str(path), "digest": digest}
 
     try:
+        if ("adapterProvenance" in request or "adapterProvenance" in response) and (
+            ("adapterProvenance" in request) != ("adapterProvenance" in response)
+            or request.get("adapterProvenance") != response.get("adapterProvenance")
+        ):
+            return observation(
+                "mismatch", "attempt-provenance-identity-mismatch:result:adapterProvenance"
+            )
         if _mock_consistent(request, response, record):
             return observation("source-only", "mock-source-only")
         if not path.resolve().is_relative_to(Path(attempt_dir).resolve()):
@@ -164,21 +193,29 @@ def read_and_compare(
         if len(raw) > 1024 * 1024:
             return observation("mismatch", "attempt-provenance-oversized")
         envelope = json.loads(raw)
-        if not isinstance(envelope, dict) or envelope.get("schema") != SCHEMA:
+        if not isinstance(envelope, dict) or envelope.get("schema") not in {SCHEMA, SCHEMA_V2}:
             return observation("unavailable", "attempt-provenance-schema-unavailable")
+        schema = envelope["schema"]
+        extra_fields = {"adapterProvenance"} if schema == SCHEMA_V2 else set()
         identity = envelope.get("identity")
-        if not isinstance(identity, dict) or set(identity) != set(FIELDS) | {
+        if not isinstance(identity, dict) or set(identity) != set(FIELDS) | extra_fields | {
             "packetUtf8Sha256",
             "commandSha256",
             "attemptDirectory",
         }:
             return observation("unavailable", "attempt-provenance-schema-incomplete")
-        digest = _digest({"schema": SCHEMA, "identity": identity})
+        digest = _digest({"schema": schema, "identity": identity})
         if set(envelope) != {"schema", "identity", "digest"} or envelope.get("digest") != digest:
             return observation("mismatch", "attempt-provenance-digest-mismatch")
         if identity["attemptDirectory"] != str(Path(attempt_dir).resolve()):
             return observation("mismatch", "attempt-provenance-attempt-directory-mismatch", digest)
         for label, value in (("request", request), ("result", response)):
+            if ("adapterProvenance" in value) != (schema == SCHEMA_V2):
+                return observation(
+                    "mismatch",
+                    f"attempt-provenance-identity-mismatch:{label}:adapterProvenance",
+                    digest,
+                )
             projected = identity_from_request(
                 value, process_id=value["processId"], process_observed_at=value["processObservedAt"]
             )
@@ -215,11 +252,18 @@ def read_and_compare(
                 "mismatch", "attempt-provenance-identity-mismatch:record:prompt", digest
             )
         attempt = record.get("attempt") or {}
+        if ("adapterProvenance" in attempt or "adapterProvenance" in identity) and (
+            ("adapterProvenance" in attempt) != ("adapterProvenance" in identity)
+            or attempt.get("adapterProvenance") != identity.get("adapterProvenance")
+        ):
+            return observation(
+                "mismatch", "attempt-provenance-identity-mismatch:attempt:adapterProvenance", digest
+            )
         if not all(key in attempt for key in ("cwd", "baseCommit")):
             return observation(
                 "unavailable", "attempt-provenance-selected-worktree-unavailable", digest
             )
-        for key in FIELDS:
+        for key in (*FIELDS, *extra_fields):
             if key in attempt:
                 value = str(Path(attempt[key]).resolve()) if key == "cwd" else attempt[key]
                 if value != identity[key]:
