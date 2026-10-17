@@ -49,7 +49,7 @@ def test_clusters_cross_reviewers_persist_and_canonical_resolution(store):
     assert all(row["memberCount"] == 2 for row in clusters)
     canonical = next(row for row in clusters if row["node_id"] == "R1")
     assert canonical["provider"] == "claude" and canonical["severity"] == "major"
-    assert check(store)["status"] == "warn"  # Open clusters still block.
+    assert check(store)["status"] == "fail"  # Open clusters and mocked reviews block.
     assert store.status()["open_findings"] == 2
     assert store.status()["open_finding_members"] == 4
     resolve_finding(store, canonical["id"], status="deferred", resolution="Next revision")
@@ -143,7 +143,7 @@ def test_template_round_trip_and_expansion(store):
     assert not findings(store, "open")
     assert len(findings(store, expand=True)) == 4
     assert store.status()["open_findings"] == store.status()["open_finding_members"] == 0
-    assert check(store)["status"] == "pass"
+    assert check(store)["status"] == "fail"  # Dispositions do not grant mocks real credit.
     empty = subprocess.run(
         [*command, "findings", "--template"], capture_output=True, text=True, check=True
     )
@@ -414,7 +414,8 @@ def test_two_providers_store_columns_quality_resolutions_and_event(store, tmp_pa
     assert all(not cwd.exists() for cwd in seen)
     assert len(set(seen)) == 2
     assert result["planRevision"] == store.spine().plan_revision()
-    assert result["crossSubscription"] is True
+    assert result["crossSubscription"] is False
+    assert result["isMocked"] and not result["didRunProvider"]
     assert result["findings"] == 2 and result["invalid"] == 0
     assert [item["exitCode"] for item in result["reviewers"]] == [0, 0]
     rows = findings(store)
@@ -459,7 +460,7 @@ def test_two_providers_store_columns_quality_resolutions_and_event(store, tmp_pa
         assert record["exit_code"] == 0
         assert record["findings"] == 1 and record["invalid"] == 0
         assert record["started_at"] <= record["finished_at"]
-    assert check(store)["status"] == "warn"
+    assert check(store)["status"] == "fail"
     event = store.connection.execute(
         "SELECT payload_json FROM events WHERE kind='roundtable-completed'"
     ).fetchone()
@@ -468,7 +469,7 @@ def test_two_providers_store_columns_quality_resolutions_and_event(store, tmp_pa
         assert findings(reopened) == rows
         for row in rows:
             resolve_finding(reopened, row["id"], resolution="Added real verification")
-        assert check(reopened)["status"] == "pass"
+        assert check(reopened)["status"] == "fail"  # Findings addressed, reviews still mocked.
         assert len(findings(reopened, "resolved")) == 2
         assert not findings(reopened, "open")
         assert all(row["resolved_at"] for row in findings(reopened))
@@ -649,8 +650,9 @@ def test_failed_reviewer_does_not_insert_findings_and_next_reviewer_runs(store, 
     assert [row["provider"] for row in findings(store)] == ["claude"]
     resolve_finding(store, findings(store)[0]["id"], resolution="Added verification")
     evidence = check(store)["evidence"]
-    assert evidence["reviewers"] == ["claude-reviewer"]
-    assert evidence["providers"] == ["claude"]
+    assert evidence["reviewers"] == []
+    assert evidence["providers"] == []
+    assert result["isMocked"] and not result["didRunProvider"]
     assert check(store)["status"] == "fail"
     runs = list(store.connection.execute("SELECT * FROM review_runs ORDER BY started_at"))
     assert len(runs) == 2
@@ -690,11 +692,12 @@ def test_event_failure_rolls_back_findings(store, monkeypatch):
     assert not store.connection.execute("SELECT 1 FROM review_runs").fetchone()
 
 
-def test_zero_findings_still_records_review_event_and_quality_warn(store):
+def test_zero_findings_records_mock_review_without_quality_credit(store):
     result = run(store, "No problems\n[]\nDone")
     assert result["findings"] == result["invalid"] == 0
-    assert check(store)["status"] == "warn"
-    assert check(store)["evidence"]["reviewerCount"] == 1
+    assert check(store)["status"] == "fail"
+    assert check(store)["evidence"]["reviewerCount"] == 0
+    assert result["isMocked"] and not result["didRunProvider"]
     row = store.connection.execute("SELECT * FROM review_runs").fetchone()
     assert row["findings"] == row["invalid"] == row["exit_code"] == 0
     assert store.connection.execute(
@@ -775,7 +778,7 @@ def test_deferred_cli_mcp_persistence_gate_and_warning(store):
     finally:
         server.close()
     assert len(findings(store, "deferred")) == 2
-    assert check(store)["status"] == "pass"
+    assert check(store)["status"] == "fail"  # Deferred findings do not make mocks real.
     warning = next(c for c in quality_report(store)["checks"] if c["id"] == "deferred-findings")
     assert warning["status"] == "warn"
     assert warning["evidence"]["count"] == 2

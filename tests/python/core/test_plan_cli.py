@@ -215,7 +215,7 @@ def test_review_cli_malformed_fields_and_typed_map_decision_handling(tmp_path):
         server.close()
 
 
-def test_guide_example_start_to_publish(tmp_path):
+def test_guide_example_stops_at_synthetic_review_gate(tmp_path):
     workspace = tmp_path / "project"
     workspace.mkdir()  # Guide replay starts in a non-git project.
     guide = GUIDE.read_text(encoding="utf-8")
@@ -275,19 +275,23 @@ def test_guide_example_start_to_publish(tmp_path):
         args = shlex.split(line.replace("<Q>", question or "<Q>"))
         if args[0] == "roundtable":
             args += ["--test-only-review-output", str(tmp_path / "response.json")]
-        output = cli(workspace, *args, cwd=tmp_path)
+        if args == ["advance", "--to", "publish"]:
+            refused = cli(workspace, *args, cwd=tmp_path, code=2)
+            assert "successful review" in refused
+            break  # Injected guide replay stops at the real review gate.
+        output = cli(workspace, *args, cwd=tmp_path, code=2 if args == ["quality"] else 0)
         if args[0] == "ask":
             question = re.search(r"Question id: (\w+)", output)[1]
         if args[0] == "audit":
             assert "Test audit: PASS" in output
             assert "Integration not checked" not in output
     status = cli(workspace, "status", machine=True)["status"]
-    assert status["phase"] == "publish" and status["publication"]["up_to_date"]
-    manifest = json.loads((workspace / "manifest.json").read_text())
-    assert list(manifest["beads"]) == ["A", "B"]
-    published = workspace / "plan" / status["published_revision"] / "manifest.json"
-    assert json.loads(published.read_text())["planRevision"] == manifest["planRevision"]
-    assert "advance --to execute" in cli(workspace, "status")
+    assert status["phase"] == "roundtable" and not status["publication"]["up_to_date"]
+    with open_plan_store(workspace) as store:
+        assert not store.successful_reviews(store.manifest_revision())
+        rows = list(store.connection.execute("SELECT isMocked, didRunProvider FROM review_runs"))
+        assert rows and all(row["isMocked"] == 1 and row["didRunProvider"] == 0 for row in rows)
+    assert "roundtable" in cli(workspace, "status")
     # Audit rejects contradictory tests through the real oracle path.
     proof = tests / "test_two.py"
     proof.write_text(proof.read_text().replace("twice(2), 6", "twice(2), 99"))

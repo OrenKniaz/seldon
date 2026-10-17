@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.python.core.planning_support import source_controller_roundtable
 from tests.python.core.test_plan_cli import cli
 
 from codex_harness.core import plan_cli, roundtable
@@ -76,11 +77,12 @@ def project(tmp_path, monkeypatch):
         yield store
 
 
-def review(store, reviewers=REVIEWERS, runner=None, **kwargs):
-    return roundtable.run_roundtable(
+def review(store, reviewers=REVIEWERS, process_stub=None, **kwargs):
+    """Controller-path source simulation for coverage/retry mechanics, not provider proof."""
+    return source_controller_roundtable(
         store,
         reviewers=reviewers,
-        runner=runner or (lambda *args: (0, "[]")),
+        process_stub=process_stub or (lambda *args: (0, "[]")),
         executable_for=lambda provider: provider,
         **kwargs,
     )
@@ -143,7 +145,7 @@ def test_gap3_retry_keeps_other_providers_success_for_same_revision(project):
     project.connection.execute("UPDATE meta SET phase='roundtable'")
     first = review(
         project,
-        runner=lambda launch, *args: (7, "", "launch failed")
+        process_stub=lambda launch, *args: (7, "", "launch failed")
         if launch.cli == "codex"
         else (0, "[]", ""),
     )

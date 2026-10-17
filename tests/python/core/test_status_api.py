@@ -395,7 +395,7 @@ def test_snapshot_canonical_readers_and_dispatcher_shape(tmp_path):
     plan = result["plan"]
     assert {key: plan[key] for key in expected} == expected
     assert plan["acceptance"] == expected["acceptance"]
-    assert plan["reviewRecorded"] is True
+    assert plan["reviewRecorded"] is False  # Injected fixture reviews earn no real credit.
     assert plan["latestPublishedRevision"] == revision
     assert plan["latestPublishedRevisionShort"] == revision[:12]
     assert plan["shortRevisions"]["plan_revision"] == expected["plan_revision"][:12]

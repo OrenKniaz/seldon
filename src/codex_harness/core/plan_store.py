@@ -1435,6 +1435,8 @@ class PlanStore:
                 row = dict(saved)
                 for key in ("shardDetails", "reshardedFrom", "outOfPacketTools"):
                     row[key] = json.loads(row[key]) if row.get(key) else None
+                for key in ("isMocked", "didRunProvider"):
+                    row[key] = bool(row[key]) if row.get(key) is not None else None
                 row["name"] = row["reviewer"]
                 row["packetBound"] = (
                     bool(row["packetBound"]) if row.get("packetBound") is not None else None
@@ -1472,7 +1474,7 @@ class PlanStore:
         )
 
     def successful_reviews(self, revision: str) -> list[dict]:
-        """Latest valid successful run per provider; failed retries never erase success."""
+        """Latest explicitly real successful run per provider; unknown history is excluded."""
         exists = self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
         ).fetchone()
@@ -1480,14 +1482,23 @@ class PlanStore:
             return []
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(review_runs)")}
         if (
-            not {"plan_revision", "provider", "exit_code", "invalid", "finished_at", "id"}
+            not {
+                "plan_revision",
+                "provider",
+                "exit_code",
+                "invalid",
+                "finished_at",
+                "id",
+                "isMocked",
+                "didRunProvider",
+            }
             <= columns
         ):
             return []
         latest = {}
         for row in self.connection.execute(
             "SELECT * FROM review_runs WHERE plan_revision=? AND exit_code=0 AND invalid=0 "
-            "ORDER BY finished_at DESC, id DESC",
+            "AND isMocked=0 AND didRunProvider=1 ORDER BY finished_at DESC, id DESC",
             (revision,),
         ):
             latest.setdefault(row["provider"], dict(row))
@@ -1525,6 +1536,12 @@ class PlanStore:
         ]
 
     def _check_publish(self) -> None:
+        from codex_harness.core.roundtable import findings
+
+        if self._meta()["vision_lock_stale"]:
+            self._check_approval("vision-lock", self._revision())
+        if any(row.get("stage", "roundtable") != "readiness" for row in findings(self, "open")):
+            raise PlanStoreError("plan-findings-open", "Resolve open roundtable findings")
         if self._open("clarifications"):
             raise PlanStoreError("plan-clarifications-open", "Resolve open clarifications")
 
@@ -1567,6 +1584,7 @@ class PlanStore:
                         "plan-publication-required", "Publish the current revision before execution"
                     )
                 if current == "publish":
+                    self._check_publish()
                     self._check_evidence(self.manifest_revision())
             self.connection.execute("UPDATE meta SET phase=?", (to_phase,))
             wave_lock = None

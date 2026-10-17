@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import publication_evidence
+from tests.python.core.planning_support import publication_evidence, source_controller_roundtable
 
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PHASES, open_plan_store
-from codex_harness.core.roundtable import findings, resolve_finding, run_roundtable
+from codex_harness.core.roundtable import findings, resolve_finding
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
 
@@ -84,7 +84,7 @@ def test_published_real_store_all_statuses_and_read_only(store, tmp_path):
         "concurrency-ownership": "pass",
         "cross-bead-contract": "warn",
         "worker-readiness": "not-yet",
-        "roundtable": "pass",
+        "roundtable": "fail",
         "deferred-findings": "pass",
         "audit": "pass",
         "proof-level": "pass",
@@ -92,7 +92,7 @@ def test_published_real_store_all_statuses_and_read_only(store, tmp_path):
         "repeatable": "pass",
         "published-context": "pass",
     }
-    assert report["score"] == 96
+    assert report["score"] == 88
     assert quality_report(store) == report
     assert list(store.connection.iterdump()) == before
 
@@ -124,7 +124,7 @@ def test_open_assumption_at_publish(store, tmp_path):
     result = checks(store)["guesswork"]
     assert result["status"] == "warn"
     assert result["evidence"]["assumptions"] == [{"id": item, "text": "Dollars only"}]
-    assert quality_report(store)["score"] == 92
+    assert quality_report(store)["score"] == 85
     store.confirm_assumption(item, rationale="Test confirms the assumption")
     assert checks(store)["guesswork"]["status"] == "pass"
 
@@ -219,10 +219,10 @@ FINDING = {
 @pytest.mark.parametrize("status", ["resolved", "rejected"])
 def test_clean_reviewer_counts_with_addressed_finding(store, status):
     advance(store, "roundtable")
-    result = run_roundtable(
+    result = source_controller_roundtable(
         store,
         reviewers=REVIEWERS,
-        runner=lambda launch, cwd, timeout: (
+        process_stub=lambda launch, cwd, timeout: (
             0,
             json.dumps([FINDING] if launch.cli == "codex" else []),
         ),
@@ -252,10 +252,10 @@ def test_clean_reviewer_counts_with_addressed_finding(store, status):
 @pytest.mark.parametrize("open_finding", [False, True])
 def test_requirement_edit_makes_roundtable_stale_until_reviewed(store, open_finding):
     advance(store, "roundtable")
-    reviewed = run_roundtable(
+    reviewed = source_controller_roundtable(
         store,
         reviewers=REVIEWERS,
-        runner=lambda launch, cwd, timeout: (
+        process_stub=lambda launch, cwd, timeout: (
             0,
             json.dumps([FINDING] if open_finding and launch.cli == "codex" else []),
         ),
@@ -273,21 +273,23 @@ def test_requirement_edit_makes_roundtable_stale_until_reviewed(store, open_find
     assert check["evidence"]["stale"] is True
     assert check["evidence"]["reviewerCount"] == 0
     assert check["evidence"]["open"] == int(open_finding)
-    run_roundtable(store, reviewers=REVIEWERS, runner=lambda launch, cwd, timeout: (0, "[]"))
+    source_controller_roundtable(
+        store, reviewers=REVIEWERS, process_stub=lambda launch, cwd, timeout: (0, "[]")
+    )
     assert checks(store)["roundtable"]["status"] == ("warn" if open_finding else "pass")
 
 
 def test_latest_round_excludes_old_reviewers(store):
     advance(store, "roundtable")
-    first = run_roundtable(
-        store, reviewers=REVIEWERS, runner=lambda launch, cwd, timeout: (0, "[]")
+    first = source_controller_roundtable(
+        store, reviewers=REVIEWERS, process_stub=lambda launch, cwd, timeout: (0, "[]")
     )
     assert checks(store)["roundtable"]["status"] == "pass"
     node = store.spine().node("R1")
     node["text"] += " Clarified verification"
     store.upsert_node(node)
-    latest = run_roundtable(
-        store, reviewers=REVIEWERS[:1], runner=lambda launch, cwd, timeout: (0, "[]")
+    latest = source_controller_roundtable(
+        store, reviewers=REVIEWERS[:1], process_stub=lambda launch, cwd, timeout: (0, "[]")
     )
     assert latest["planRevision"] != first["planRevision"]
     check = checks(store)["roundtable"]
@@ -299,16 +301,16 @@ def test_latest_round_excludes_old_reviewers(store):
 
 def test_open_finding_from_older_round_blocks_clean_latest_round(store):
     advance(store, "roundtable")
-    first = run_roundtable(
+    first = source_controller_roundtable(
         store,
         reviewers=REVIEWERS[:1],
-        runner=lambda launch, cwd, timeout: (0, json.dumps([FINDING])),
+        process_stub=lambda launch, cwd, timeout: (0, json.dumps([FINDING])),
     )
     node = store.spine().node("R1")
     node["text"] += " Later revision"
     store.upsert_node(node)
-    latest = run_roundtable(
-        store, reviewers=REVIEWERS, runner=lambda launch, cwd, timeout: (0, "[]")
+    latest = source_controller_roundtable(
+        store, reviewers=REVIEWERS, process_stub=lambda launch, cwd, timeout: (0, "[]")
     )
     row = findings(store)[0]
     assert row["round_id"] == first["roundId"]
@@ -351,7 +353,7 @@ def test_card_is_deterministic_compact_and_limits_advice(store, tmp_path):
         check["advice"] = f"Advice {index}"
     card = render_quality_card(report)
     assert card == render_quality_card(json.loads(json.dumps(report)))
-    assert "96/100" in card
+    assert "88/100" in card
     assert len(card.splitlines()) == 18
     assert "Advice 2" in card and "Advice 3" not in card
 

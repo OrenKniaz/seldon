@@ -1,7 +1,15 @@
-"""Publication prerequisites produced by real proof execution; reviews are injected."""
+"""Source-only export mechanics fixtures, never end-to-end review-backed publication.
 
+The test-local evidence double retains real audit and mocked-review assertions.
+It never patches stale approval, clarification or finding admission guards.
+"""
+
+from contextlib import contextmanager
 from pathlib import Path
+from types import MethodType
+from unittest.mock import patch
 
+from codex_harness.core.plan_store import PlanStore
 from codex_harness.core.roundtable import run_roundtable
 from codex_harness.core.spine import compile_manifest
 from codex_harness.core.test_audit import audit_revised_tests
@@ -9,7 +17,28 @@ from codex_harness.core.test_audit import audit_revised_tests
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
 
 
+def _source_only_evidence_gate(store, revision):
+    assert store.passing_audit(revision), "Source export mechanics still require a passing audit"
+    rows = list(
+        store.connection.execute(
+            "SELECT isMocked, didRunProvider FROM review_runs WHERE plan_revision=? "
+            "AND exit_code=0 AND invalid=0",
+            (revision,),
+        )
+    )
+    assert rows and all(row["isMocked"] == 1 and row["didRunProvider"] == 0 for row in rows)
+    assert not store.successful_reviews(revision), "Synthetic evidence must never earn real credit"
+
+
+@contextmanager
+def source_only_publication():
+    """Scope CLI export/phase mechanics to synthetic evidence; retain all other gates."""
+    with patch.object(PlanStore, "_check_evidence", _source_only_evidence_gate):
+        yield
+
+
 def publication_evidence(store):
+    """Prepare synthetic reviews and double only this store's evidence gate until close."""
     revision = store.manifest_revision()
     if not store.passing_audit(revision):
         template = store.workspace / "template"
@@ -28,7 +57,18 @@ def publication_evidence(store):
         )
         assert result["ok"], result
         store.record_audit(revision, result)
-    if not store.successful_reviews(revision):
+    exists = store.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
+    ).fetchone()
+    recorded = (
+        exists
+        and store.connection.execute(
+            "SELECT 1 FROM review_runs WHERE plan_revision=? AND isMocked=1 "
+            "AND didRunProvider=0 AND exit_code=0 AND invalid=0",
+            (revision,),
+        ).fetchone()
+    )
+    if not recorded:
         run_roundtable(
             store,
             reviewers=[
@@ -38,3 +78,17 @@ def publication_evidence(store):
             runner=lambda *args: (0, "[]"),
             executable_for=lambda provider: provider,
         )
+
+    store._check_evidence = MethodType(_source_only_evidence_gate, store)
+
+
+def source_controller_roundtable(store, *, process_stub, **kwargs):
+    """Simulate the controller API branch; this does not prove actual provider execution.
+
+    Unlike runner injection this exercises the production launch consumer. Existing
+    synthetic database rows are never relabeled or granted real-review credit.
+    """
+    from codex_harness.core import roundtable
+
+    with patch.object(roundtable, "_run", process_stub):
+        return roundtable.run_roundtable(store, **kwargs)

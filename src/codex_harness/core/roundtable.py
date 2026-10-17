@@ -97,6 +97,8 @@ def _table(store: PlanStore) -> None:
                 store.connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
     columns = {row[1] for row in store.connection.execute("PRAGMA table_info(review_runs)")}
     for name, kind in (
+        ("isMocked", "INTEGER"),
+        ("didRunProvider", "INTEGER"),
         ("shards", "INTEGER"),
         ("shardDetails", "TEXT"),
         ("truncatedNodes", "TEXT"),
@@ -560,13 +562,16 @@ def _launch_review(reviewer, packet, executable, *, instructions=None):
 def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout):
     """Capture and persist provider errors before attempting temporary-dir cleanup."""
     record = {key: value for key, value in shard.items() if key != "packet"}
-    record.update(exitCode=None, rejected=[], invalid=0)
+    record.update(
+        exitCode=None, rejected=[], invalid=0, isMocked=runner is not None, didRunProvider=False
+    )
     launch, output, stderr, directory = None, "", "", None
     items = []
     try:
         launch = _launch_review(reviewer, shard["packet"], executable)
         directory = TemporaryDirectory(prefix="harness-roundtable-")
-        response = (runner or _run)(launch, Path(directory.name), timeout)
+        response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
+        record["didRunProvider"] = runner is None
         record["exitCode"], output = response[:2]
         stderr = response[2] if len(response) > 2 else ""
         if record["exitCode"] != 0:
@@ -865,7 +870,8 @@ def run_roundtable(
     """Run provider-normal reviews, then atomically store findings and the result.
 
     The injected runner receives (launch, empty temporary cwd, timeout). Stale
-    reviews are refused if the canonical plan changes before persistence.
+    reviews are refused if the canonical plan changes before persistence. Injected
+    callbacks are always mocked and cannot earn provider-execution credit.
     """
     spine = store.spine()
     revision = store.manifest_revision()
@@ -999,6 +1005,10 @@ def run_roundtable(
             )
         )
         record["packetBound"] = not record["outOfPacketTools"]
+        record["isMocked"] = runner is not None
+        record["didRunProvider"] = bool(record["shardDetails"]) and all(
+            shard["didRunProvider"] for shard in record["shardDetails"]
+        )
         for item in merged:
             pending.append((uuid4().hex, reviewer["name"], provider, revision, item, _now()))
         record["findings"] = len(merged)
@@ -1024,6 +1034,8 @@ def run_roundtable(
                 json.dumps(record["shardDetails"]),
                 json.dumps(record["truncatedNodes"]),
                 json.dumps(record.get("reshardedFrom")),
+                record["isMocked"],
+                record["didRunProvider"],
             )
         )
     with store._transaction():
@@ -1034,8 +1046,8 @@ def run_roundtable(
             "INSERT INTO review_runs "
             "(id, round_id, plan_revision, reviewer, provider, model, exit_code, "
             "findings, invalid, started_at, finished_at, packetBound, outOfPacketTools, "
-            "shards, shardDetails, truncatedNodes, reshardedFrom) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "shards, shardDetails, truncatedNodes, reshardedFrom, isMocked, didRunProvider) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             runs,
         )
         for item_id, reviewer, provider, revision, item, at in pending:
@@ -1065,6 +1077,10 @@ def run_roundtable(
         result["packetBound"] = all(item["packetBound"] for item in result["reviewers"])
         result["outOfPacketTools"] = sorted(
             {tool for item in result["reviewers"] for tool in item["outOfPacketTools"]}
+        )
+        result["isMocked"] = runner is not None
+        result["didRunProvider"] = bool(result["reviewers"]) and all(
+            item["didRunProvider"] for item in result["reviewers"]
         )
         result["successfulReviews"] = store.successful_reviews(revision)
         result["crossSubscription"] = len(result["successfulReviews"]) > 1

@@ -163,6 +163,14 @@ def plan_confirmation(workspace, by="user", statement="Synthetic displayed two-w
 
 
 def publish(workspace):
+    """Exercise source-only export mechanics; synthetic reviews earn no real credit."""
+    from tests.python.core.planning_support import source_only_publication
+
+    with source_only_publication():
+        return _publish_source_only(workspace)
+
+
+def _publish_source_only(workspace):
     manifest = cli(workspace, "compile", "--template", "template", "--out", "manifest.json")["data"]
     cli(workspace, "audit", "--oracle", "reference", "--baseline", "template")
     response = workspace / "source-only-review.json"

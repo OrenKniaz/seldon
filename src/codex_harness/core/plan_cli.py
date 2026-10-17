@@ -141,6 +141,15 @@ def next_command(server: PlannerServer, status: dict) -> str:
         )
         return " then ".join(cmd(f'answer --id {row[0]} --text "<answer>"') for row in rows)
     if gate == "current-revision-published":
+        opened = [
+            item
+            for item in roundtable.findings(store, "open")
+            if item.get("stage", "roundtable") != "readiness"
+        ]
+        if opened:
+            return " then ".join(
+                cmd(f'resolve --id {item["id"]} --resolution "<fix or reason>"') for item in opened
+            )
         if not store.passing_audit(status["manifest_revision"]):
             return cmd("audit --oracle oracle")
         if not store.successful_reviews(status["manifest_revision"]):
