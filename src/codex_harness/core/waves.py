@@ -499,44 +499,7 @@ def validate_map(
             _text(product_lock["sourceRef"]) and _sha(product_lock["digest"]),
             "Invalid product lock",
         )
-        referenced = set().union(*source_ids.values())
-        referenced.update(contract["specRef"]["id"] for contract in contracts.values())
-        for wave in waves.values():
-            for key in (
-                "requirementIds",
-                "featureIds",
-                "storyIds",
-                "designIds",
-                "riskIds",
-                "exitScenarioIds",
-            ):
-                referenced.update(wave[key])
-        map_body = _canonical(plan)
-        owners = {
-            key
-            for key in spine.ids("decision")
-            if _canonical(spine.node(key)["fields"]) == map_body
-        }
-        detail_bodies = {_canonical(value) for value in detail_values}
-        revisions = {}
-        for key in spine.ids():
-            value = spine.node(key)
-            if value["kind"] in {"bead", "test"}:
-                continue
-            is_carrier = (
-                value["kind"] == "design"
-                and key not in referenced
-                and not spine.children(key)
-                and len(value["parents"]) == 1
-                and value["parents"][0] in owners
-                and _canonical(value["fields"]) in detail_bodies
-            )
-            if is_carrier:
-                value["fields"] = {}
-                revisions[key] = _hash(_canonical(value))
-            else:
-                revisions[key] = spine.revision(key)
-        digest = _hash(_canonical({"nodeRevisions": revisions, "waveMap": plan}))
+        digest = product_digest(spine, plan, detail_values)
         lock_state = "current" if product_lock["digest"] == digest else "stale"
     return {
         "waveMap": plan,
@@ -546,6 +509,49 @@ def validate_map(
         "detailedBeadIds": sorted(beads),
         "lockState": lock_state,
     }
+
+
+def product_digest(spine: Spine, plan: dict, detail_values: list[dict]) -> str:
+    """Export the existing protected-product projection without granting approval."""
+    contracts = {row["id"]: row for row in plan["contracts"]}
+    waves = {row["id"]: row for row in plan["waves"]}
+    referenced = {ref["id"] for row in plan["obligations"] for ref in row["sourceRefs"]}
+    referenced.update(contract["specRef"]["id"] for contract in contracts.values())
+    for wave in waves.values():
+        for key in (
+            "requirementIds",
+            "featureIds",
+            "storyIds",
+            "designIds",
+            "riskIds",
+            "exitScenarioIds",
+        ):
+            referenced.update(wave[key])
+    map_body = _canonical(plan)
+    owners = {
+        key for key in spine.ids("decision") if _canonical(spine.node(key)["fields"]) == map_body
+    }
+    detail_bodies = {_canonical(value) for value in detail_values}
+    revisions = {}
+    for key in spine.ids():
+        value = spine.node(key)
+        if value["kind"] in {"bead", "test"}:
+            continue
+        is_carrier = (
+            value["kind"] == "design"
+            and key not in referenced
+            and not spine.children(key)
+            and len(value["parents"]) == 1
+            and value["parents"][0] in owners
+            and _canonical(value["fields"]) in detail_bodies
+        )
+        if is_carrier:
+            value["fields"] = {}
+            revisions[key] = _hash(_canonical(value))
+        else:
+            revisions[key] = spine.revision(key)
+    digest = _hash(_canonical({"nodeRevisions": revisions, "waveMap": plan}))
+    return digest
 
 
 def _bound(envelope: object, snapshot: dict) -> bool:

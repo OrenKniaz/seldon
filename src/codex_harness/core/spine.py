@@ -388,6 +388,9 @@ def requirement_file_sources(template_dir: str | Path, names: list[str]) -> dict
 
 
 def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> dict:
+    from codex_harness.core.wave_refine import execution_scope
+
+    scope = execution_scope(spine, template_dir)
     root = spine.node(spine.ids("vision")[0])["fields"]
     if not all(_strings(root.get(key)) for key in ("validation", "requirementFiles")):
         raise SpineError("spine-schema-invalid", "Vision requires validation and requirementFiles")
@@ -427,6 +430,11 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
             "proofModule": spine.node(test_id)["fields"]["module"],
             "requirements": [ref["id"] for ref in requirement_refs(spine, test_id)],
         }
+    if scope:
+        integration = {
+            "proofModule": scope["boundaryIntegrationModule"],
+            "requirements": scope["inScopeRequirementIds"],
+        }
     manifest = {
         "schema": "codex-harness/provider-sample-v1",
         "sample": spine.name,
@@ -457,6 +465,17 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         revision = _hash(_canonical(file_revisions))
         manifest["requirementFilesRevision"] = revision
         manifest["planRevision"] = _hash(f"{spine.plan_revision()}:{revision}")
+    if scope:
+        manifest["waveScope"] = scope
+        manifest["planRevision"] = _hash(
+            _canonical(
+                {
+                    "algorithm": "wave-scope-v1",
+                    "compiledRevision": manifest["planRevision"],
+                    "waveScope": scope,
+                }
+            )
+        )
     return manifest
 
 

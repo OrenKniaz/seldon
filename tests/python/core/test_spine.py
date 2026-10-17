@@ -429,7 +429,23 @@ def test_rendering_is_deterministic_and_complete() -> None:
 
 def test_cli_render_compile_and_impact(tmp_path: Path) -> None:
     prefix = [sys.executable, "-B", "-m", "codex_harness.core.spine"]
-    source = FIXTURE / "spine.json"
+
+    def snapshot(root: Path) -> dict[str, bytes | None]:
+        return {
+            path.relative_to(root).as_posix(): path.read_bytes() if path.is_file() else None
+            for path in sorted(root.rglob("*"))
+        }
+
+    repository_before = snapshot(FIXTURE)
+    reference = tmp_path / "reference"
+    shutil.copytree(FIXTURE, reference)
+    for name in MARKDOWN_FILES:
+        path = reference / "template" / name
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    reference_before = snapshot(reference)
+    workspace = tmp_path / "workspace"
+    shutil.copytree(reference, workspace)
+    source = workspace / "spine.json"
     outdir, manifest = tmp_path / "docs", tmp_path / "sample.json"
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     subprocess.run([*prefix, "render", str(source), str(outdir)], check=True, env=env)
@@ -437,6 +453,10 @@ def test_cli_render_compile_and_impact(tmp_path: Path) -> None:
         render_markdown(load_spine(source))
     )
     subprocess.run([*prefix, "compile", str(source), str(manifest)], check=True, env=env)
+    assert {name: (workspace / "template" / name).read_bytes() for name in MARKDOWN_FILES} == {
+        name: content.encode("utf-8")
+        for name, content in render_markdown(load_spine(source)).items()
+    }
     assert _without_refs(load_plan(manifest).beads) == _without_refs(load_plan(FIXTURE).beads)
     result = subprocess.run(
         [*prefix, "impact", str(source), str(source)],
@@ -456,6 +476,8 @@ def test_cli_render_compile_and_impact(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "spine-schema-invalid" in result.stderr
+    assert snapshot(FIXTURE) == repository_before
+    assert snapshot(reference) == reference_before
 
 
 def test_compile_requirement_content_revision_is_line_ending_neutral(tmp_path: Path) -> None:

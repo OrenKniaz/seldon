@@ -138,6 +138,34 @@ def draft_inputs(store):
     )
 
 
+@pytest.mark.parametrize("by,available", [("proxy:synthetic-reviewer", True), ("planner", False)])
+def test_wave_lock_requires_new_plan_confirmation_and_retains_origin(tmp_path, by, available):
+    from tests.python.core.test_wave_refine import cli, plan_confirmation, setup_wave
+
+    workspace = setup_wave(tmp_path / "confirmation")
+    with open_plan_store(workspace) as store:
+        with pytest.raises(ValueError, match="actual displayed-plan confirmation"):
+            store.wave_product_lock()
+    projected = plan_confirmation(workspace, by=by)
+    with open_plan_store(workspace) as store:
+        if not available:
+            assert projected is None
+            with pytest.raises(ValueError, match="actual displayed-plan confirmation"):
+                store.wave_product_lock()
+        else:
+            lock = store.wave_product_lock()
+            assert lock == projected
+            assert lock["confirmedBy"] == by and lock["isProxy"] is True
+            assert lock["confirmationOrigin"] == "proxy"
+            assert lock["statement"] == "Synthetic displayed two-wave plan approval"
+            locked_vision = store._meta()["locked_vision_json"]
+    if available:
+        waves_projection = cli(workspace, "waves")["data"]
+        assert waves_projection["waveProductLock"] == lock
+        with open_plan_store(workspace) as store:
+            assert store._meta()["locked_vision_json"] == locked_vision
+
+
 def draft_intake():
     return draft_node(
         "INTAKE",

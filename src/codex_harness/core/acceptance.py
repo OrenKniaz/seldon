@@ -362,6 +362,32 @@ def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
     return result
 
 
+def run_wave_exits(store, run_dir, through_wave_id) -> dict:
+    """Fresh cumulative exits on the current clean scoped integration candidate."""
+    from codex_harness.core.wave_refine import digest, need
+
+    binding = store.wave_boundary_context(run_dir, through_wave_id, require_exit=False)
+    results = run_scenarios(binding["repo"], binding["scenarios"])
+    with store._transaction():
+        need(
+            binding == store.wave_boundary_context(run_dir, through_wave_id, require_exit=False),
+            "Candidate/publication/scenarios changed during exits",
+            "wave-exits-stale",
+        )
+        result = dict(
+            schema="dot-wave-cumulative-exit-v1",
+            binding=binding,
+            **{k: v for k, v in binding.items() if k != "scenarios"},
+            results=results,
+            passed=bool(results) and all(r["passed"] for r in results),
+            executionKind="canonical-clean-scenarios-v1",
+            sourceRefs=[binding["runSourceRef"], binding["productLockSource"]],
+        )
+        result["id"] = digest(result)
+        store._event("wave-cumulative-exit", result)
+    return result
+
+
 def _latest_run(store) -> dict | None:
     row = store.connection.execute(
         "SELECT result_json FROM acceptance_runs ORDER BY rowid DESC LIMIT 1"

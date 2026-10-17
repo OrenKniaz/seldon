@@ -254,6 +254,8 @@ def parser() -> argparse.ArgumentParser:
         "reviewer-choice": ("json",),
         "wave-map": ("json",),
         "waves": (),
+        "wave-exit": ("run", "through"),
+        "refine-wave": (),
         "diagram": ("kind",),
         "impact": (),
         "supervision-report": ("run",),
@@ -310,6 +312,15 @@ def parser() -> argparse.ArgumentParser:
     commands["accept-scenarios"].add_argument("--input", help="Scenario list JSON or @file")
     commands["accept-review"].add_argument("--reviewer", action="append", default=[])
     commands["confirm"].add_argument("--by", default="user")
+    commands["advance"].add_argument("--by", default="planner")
+    commands["advance"].add_argument("--statement")
+    commands["refine-wave"].add_argument("wave_id")
+    commands["refine-wave"].add_argument("--run")
+    commands["refine-wave"].add_argument("--expected-spine")
+    action = commands["refine-wave"].add_mutually_exclusive_group(required=True)
+    action.add_argument("--prepare", action="store_true")
+    action.add_argument("--response")
+    action.add_argument("--apply")
     commands["resolve-assumption"].add_argument("--by", required=True)
     commands["ask"].add_argument("--node", action="append", default=[])
     group = commands["resolve-assumption"].add_mutually_exclusive_group(required=True)
@@ -369,6 +380,78 @@ def parser() -> argparse.ArgumentParser:
 def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
     """Standard commands go through MCP unchanged; extensions reuse core owners."""
     command = args.command
+    if command == "advance" and (args.statement is not None or args.by != "planner"):
+        if args.to != "roundtable" or server._store().phase() != "plan":
+            raise ValueError("Explicit plan confirmation belongs to plan -> roundtable")
+        store = server._store()
+        store.advance(args.to, by=args.by, statement=args.statement)
+        try:
+            data = store.wave_product_lock()
+        except ValueError:
+            data = None
+        return _reply(server, "Advanced to roundtable with supplied confirmation provenance"), data
+    if command in ("wave-exit", "refine-wave"):
+        from codex_harness.core.acceptance import run_wave_exits
+        from codex_harness.core.wave_refine import MAX_RESPONSE_BYTES, need, parse_json
+
+        store = server._store()
+        if command == "wave-exit":
+            data = run_wave_exits(store, _path(server, args.run), args.through)
+        elif args.prepare:
+            need(args.run is not None, "--run is required for prepare")
+            data = store.prepare_wave_refinement(args.wave_id, _path(server, args.run))
+        elif args.response:
+            need(
+                args.expected_spine is not None
+                and args.run is not None
+                and args.response.startswith("@"),
+                "Response requires @path, --run and --expected-spine",
+            )
+            with _path(server, args.response[1:]).open("rb") as stream:
+                raw = stream.read(MAX_RESPONSE_BYTES + 1)
+            response = parse_json(raw)
+            context = store.wave_refinement_context(args.wave_id, _path(server, args.run))
+            need(
+                response.get("contextDigest") == context["contextDigest"],
+                "Response context mismatch",
+                "wave-context-stale",
+            )
+            recorded = store.record_wave_refinement(
+                args.expected_spine, context["contextDigest"], raw
+            )
+            data = {
+                key: recorded[key]
+                for key in (
+                    "proposalId",
+                    "state",
+                    "contextDigest",
+                    "responseRawSha256",
+                    "readiness",
+                    "review",
+                    "publication",
+                    "completedRealDelta",
+                )
+            }
+            data.update(
+                schema="dot-wave-refinement-record-receipt-v1",
+                responseSourceRef=str(_path(server, args.response[1:]).resolve()),
+                sourceRef=f"wave-refinement-proposal:{recorded['proposalId']}",
+                proposedNodeIds=sorted(n["id"] for n in recorded["proposedNodes"]),
+                unrefinedSketchIds=recorded["unrefinedSketchIds"],
+                questionCount=len(recorded["questions"]),
+                cardClassifications=[c["classification"] for c in recorded["cards"]],
+                proposedNodes=recorded["proposedNodes"],
+                proposedDetail=recorded["proposedDetail"],
+                cards=recorded["cards"],
+                questions=recorded["questions"],
+                impact=recorded["impact"],
+            )
+        else:
+            need(args.expected_spine is not None, "--expected-spine is required")
+            data = store.apply_wave_refinement(
+                args.apply, args.expected_spine, wave_id=args.wave_id
+            )
+        return _reply(server, json.dumps(data, ensure_ascii=False)), data
     if command == "preflight":
         arguments = {"providers": args.providers} if args.providers is not None else {}
         reply = server.call_tool("harness_preflight", arguments)

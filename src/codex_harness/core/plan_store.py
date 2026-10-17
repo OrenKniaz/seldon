@@ -657,6 +657,371 @@ class PlanStore:
                 "nextAction": "Read full draft with waves; publication and execution remain gated",
             }
 
+    def wave_product_lock(self) -> dict:
+        """Resolve only an original map-containing explicit plan confirmation."""
+        from codex_harness.core.wave_refine import need, wave_values
+
+        spine = Spine(self._data())
+        values = wave_values(spine)
+        need(values is not None, "No wave map", "wave-product-lock-unavailable")
+        owner, details, _ = values
+        current = waves.product_digest(spine, owner["fields"], [n["fields"] for n in details])
+        publication = self._meta()["published_revision"]
+        retained = self._snapshot(publication).get("waveProductLock") if publication else None
+        preferred = (
+            retained["sourceRef"]
+            if retained
+            and retained["digest"] == current
+            and retained["waveMapRevision"] == spine.revision(owner["id"])
+            else None
+        )
+        rows = list(
+            self.connection.execute(
+                "SELECT id, payload_json FROM events WHERE kind='phase-advanced' ORDER BY id DESC"
+            )
+        )
+        rows.sort(key=lambda row: f"plan-event:{row['id']}" != preferred)
+        for row in rows:
+            event = json.loads(row["payload_json"])
+            lock = event.get("waveProductLock")
+            if lock and event["from"] == "plan" and event["to"] == "roundtable":
+                original = Spine(lock["spine"])
+                original_values = wave_values(original)
+                need(
+                    original_values is not None
+                    and lock["spineRevision"] == event["plan_revision"] == original.plan_revision()
+                    and lock["statement"] == event["statement"]
+                    and bool(lock["statement"].strip())
+                    and lock["confirmedBy"] == event["by"],
+                    "Confirmation source mismatch",
+                    "wave-product-lock-unavailable",
+                )
+                need(
+                    lock["digest"]
+                    == waves.product_digest(
+                        original,
+                        original_values[0]["fields"],
+                        [n["fields"] for n in original_values[1]],
+                    ),
+                    "Confirmation digest mismatch",
+                    "wave-product-lock-unavailable",
+                )
+                need(
+                    lock["digest"] == current
+                    and lock["waveMapRevision"] == spine.revision(owner["id"]),
+                    "Protected product changed",
+                    "wave-product-lock-stale",
+                )
+                return {**lock, "sourceRef": f"plan-event:{row['id']}"}
+        raise PlanStoreError(
+            "wave-product-lock-unavailable",
+            "Record actual displayed-plan confirmation at plan -> roundtable",
+        )
+
+    def wave_boundary_context(self, run_dir, through_wave_id=None, *, require_exit=True) -> dict:
+        """Consume the integration owner's verdict once; no producer verification."""
+        from codex_harness.core.acceptance import integrated_revision
+        from codex_harness.core.dispatch import _changed_claim_inputs, _claim_inputs
+        from codex_harness.core.wave_refine import digest, git, need, wave_values
+
+        spine = Spine(self._data())
+        manifest = self._manifest(spine)
+        scope = manifest.get("waveScope")
+        need(scope is not None, "Scoped wave publication required", "wave-scope-unavailable")
+        need(
+            through_wave_id in (None, scope["throughWaveId"]),
+            "Select the canonical current boundary",
+            "wave-scope-mismatch",
+        )
+        publication = self._meta()["published_revision"]
+        need(
+            self.publication_current(manifest["planRevision"]),
+            "Publish the current scope",
+            "wave-publication-stale",
+        )
+        lock = self.wave_product_lock()
+        snapshot = self._snapshot(publication)
+        need(
+            snapshot.get("waveProductLock") == lock and snapshot["manifest"] == manifest,
+            "Publication binding changed",
+            "wave-publication-stale",
+        )
+        run_dir = Path(run_dir).resolve()
+        run_path = run_dir / "evidence/run.json"
+        need(
+            run_path.is_file()
+            and not run_path.is_symlink()
+            and run_path.resolve().is_relative_to(run_dir),
+            "Canonical run evidence required",
+            "wave-integration-unavailable",
+        )
+        with run_path.open("rb") as stream:
+            raw = stream.read(16 * 1024 * 1024 + 1)
+        need(len(raw) <= 16 * 1024 * 1024, "Run record exceeds bound")
+        run = json.loads(raw.decode("utf-8"))
+        repo = (run_dir / "repo").resolve()
+        need(
+            run.get("schema") == "codex-harness/plan-run-v1"
+            and Path(run.get("repo", "")).resolve() == repo
+            and repo.is_relative_to(run_dir)
+            and git(repo, "rev-parse", "--show-toplevel").replace("\\", "/").lower()
+            == repo.as_posix().lower(),
+            "Foreign run/repository",
+            "wave-integration-mismatch",
+        )
+        need(
+            run.get("planRevision") == publication,
+            "Run belongs to another publication",
+            "wave-integration-stale",
+        )
+        verdict = run.get("integrationValidation") or {}
+        claim = verdict.get("claim") or {}
+        head, tree = git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD^{tree}")
+        need(
+            not git(repo, "status", "--porcelain", "--untracked-files=all"),
+            "Candidate must be clean",
+            "wave-candidate-dirty",
+        )
+        need(
+            verdict.get("passed") is True
+            and claim.get("passed") is True
+            and claim.get("bead") == "integration"
+            and claim in run.get("claims", [])
+            and claim.get("proofModule") == scope["boundaryIntegrationModule"],
+            "Missing/failed/mismatched integration verdict",
+            "wave-integration-unavailable",
+        )
+        need(
+            head == verdict.get("integrationCommit") == claim.get("candidateCommit")
+            and tree == verdict.get("candidateTree") == claim.get("candidateTree"),
+            "Integration candidate changed",
+            "wave-candidate-stale",
+        )
+        with TemporaryDirectory(prefix="wave-verdict-") as temp:
+            path = Path(temp) / "manifest.json"
+            path.write_text(_json(manifest), encoding="utf-8")
+            plan = load_plan(path)
+            need(
+                not _changed_claim_inputs(claim, _claim_inputs(repo, plan, "integration", head)),
+                "Integration inputs invalidated",
+                "wave-integration-stale",
+            )
+        values = wave_values(spine)
+        ids = sorted(
+            {
+                sid
+                for w in values[0]["fields"]["waves"]
+                if w["id"] in scope["waveIds"]
+                for sid in w["exitScenarioIds"]
+            }
+        )
+        scenarios = [s for s in self.acceptance_scenarios() if s["id"] in ids]
+        need(
+            {s["id"] for s in scenarios} == set(ids)
+            and all(
+                s.get("executable") is True
+                and s.get("status") != "stale"
+                and s.get("nodeRevisions", {}).get(s["id"]) == spine.revision(s["id"])
+                for s in scenarios
+            ),
+            "Current executable bound cumulative scenarios required",
+            "wave-exits-unavailable",
+        )
+        result = dict(
+            publicationRevision=publication,
+            productLockRevision=lock["digest"],
+            productLockSource=lock["sourceRef"],
+            waveMapRevision=scope["waveMapRevision"],
+            nodeRevisions={k: spine.revision(k) for k in spine.ids()},
+            throughWaveId=scope["throughWaveId"],
+            waveIds=scope["waveIds"],
+            scenarioIds=ids,
+            scenarioRevision=digest(scenarios),
+            scenarios=scenarios,
+            runSourceRef=str(run_path),
+            runSha256=hashlib.sha256(raw).hexdigest(),
+            integrationVerdictDigest=digest(verdict),
+            repo=str(repo),
+            candidateCommit=head,
+            candidateTree=tree,
+            productBytesRevision=integrated_revision(repo),
+            evidenceClass="source-test-only"
+            if run.get("isMocked") is True
+            else "local-integration-only",
+            isMocked=run.get("isMocked"),
+            didExecuteRealProvider=run.get("didExecuteRealProvider"),
+        )
+        if require_exit:
+            exits = self._latest_draft_event("wave-cumulative-exit")
+            need(
+                exits is not None
+                and exits.get("passed") is True
+                and exits.get("binding") == result,
+                "Fresh passing cumulative exits required",
+                "wave-exits-stale",
+            )
+            result["cumulativeExitDigest"] = digest(exits)
+        return result
+
+    def wave_refinement_context(self, wave_id, run_dir) -> dict:
+        from codex_harness.core.wave_refine import (
+            MAX_CONTEXT_BYTES,
+            digest,
+            extract_interfaces,
+            need,
+            wave_values,
+        )
+
+        spine = Spine(self._data())
+        boundary = self.wave_boundary_context(run_dir)
+        owner, details, _ = wave_values(spine)
+        order = owner["fields"]["order"]
+        index = order.index(boundary["throughWaveId"]) + 1
+        need(
+            index < len(order) and order[index] == wave_id,
+            "Refine the next canonical wave",
+            "wave-target-invalid",
+        )
+        target = next(n for n in details if n["fields"]["waveId"] == wave_id)
+        need(
+            target["fields"]["detail"] == "sketch",
+            "Target must contain genuine sketches",
+            "wave-target-invalid",
+        )
+        producers = {k for s in target["fields"]["sketches"] for k in s["pendingProducerIds"]}
+        paths = [p for key in producers for p in spine.node(key)["fields"]["ownedFiles"]]
+        body = dict(
+            schema="dot-wave-refinement-context-v1",
+            spineRevision=spine.plan_revision(),
+            targetWaveId=wave_id,
+            targetDetail=target,
+            productLock=self.wave_product_lock(),
+            boundary=boundary,
+            requiredObligations=owner["fields"]["obligations"],
+            interfaces=extract_interfaces(boundary["repo"], boundary["candidateCommit"], paths),
+        )
+        need(
+            len(_json(body).encode("utf-8")) <= MAX_CONTEXT_BYTES,
+            "Refinement context exceeds size bound",
+            "wave-interface-unavailable",
+        )
+        return {**body, "contextDigest": digest(body)}
+
+    def record_wave_refinement(
+        self, expected_spine_revision, context_digest, captured_response: bytes
+    ) -> dict:
+        from codex_harness.core.wave_refine import need, proposal
+
+        with self._transaction():
+            spine = self._draft_preimage(expected_spine_revision)
+            # Contexts are canonical recorded observations, never caller-supplied authority.
+            saved = self._latest_draft_event("wave-refinement-prepared")
+            need(
+                saved is not None and saved["contextDigest"] == context_digest,
+                "Prepare current context first",
+                "wave-context-stale",
+            )
+            context = self.wave_refinement_context(
+                saved["targetWaveId"], Path(saved["boundary"]["runSourceRef"]).parent.parent
+            )
+            need(context == saved, "Context sources changed", "wave-context-stale")
+            result = proposal(spine, context, captured_response)
+            self._event("wave-refinement-recorded", result)
+            return result
+
+    def prepare_wave_refinement(self, wave_id, run_dir) -> dict:
+        with self._transaction():
+            context = self.wave_refinement_context(wave_id, run_dir)
+            self._event("wave-refinement-prepared", context)
+            return context
+
+    def apply_wave_refinement(self, proposal_id, expected_spine_revision, *, wave_id=None) -> dict:
+        from codex_harness.core.wave_refine import digest, need, wave_values
+
+        with self._transaction():
+            records = [
+                json.loads(row[0])
+                for row in self.connection.execute(
+                    "SELECT payload_json FROM events WHERE kind='wave-refinement-recorded'"
+                )
+            ]
+            matches = [r for r in records if r["proposalId"] == proposal_id]
+            need(
+                bool(matches) and all(r == matches[0] for r in matches),
+                "Unknown/conflicting proposal",
+                "wave-proposal-unavailable",
+            )
+            result = matches[0]
+            need(
+                wave_id in (None, result["context"]["targetWaveId"]),
+                "Proposal target mismatch",
+                "wave-target-invalid",
+            )
+            need(
+                digest({k: v for k, v in result.items() if k != "proposalId"}) == proposal_id,
+                "Proposal content changed",
+            )
+            applied = [
+                json.loads(row[0])
+                for row in self.connection.execute(
+                    "SELECT payload_json FROM events WHERE kind='wave-refinement-applied'"
+                )
+            ]
+            prior = next((r for r in applied if r["proposalId"] == proposal_id), None)
+            if prior:
+                need(
+                    expected_spine_revision == result["context"]["spineRevision"]
+                    and Spine(self._data()).plan_revision() == prior["spineRevision"],
+                    "Applied draft changed",
+                    "wave-context-stale",
+                )
+                return prior
+            before = self._draft_preimage(expected_spine_revision)
+            need(
+                result["state"] == "complete" and result["proposedDetail"] is not None,
+                "Whole target must resolve before apply",
+                "wave-proposal-unapplied",
+            )
+            saved = result["context"]
+            context = self.wave_refinement_context(
+                saved["targetWaveId"], Path(saved["boundary"]["runSourceRef"]).parent.parent
+            )
+            need(context == saved, "Context sources changed", "wave-context-stale")
+            nodes = [*result["proposedNodes"], result["proposedDetail"]]
+            replaced = {n["id"] for n in nodes}
+            after = Spine(
+                {
+                    **before.to_dict(),
+                    "nodes": [before.node(k) for k in before.ids() if k not in replaced] + nodes,
+                }
+            )
+            owner, details, _ = wave_values(after)
+            need(
+                waves.product_digest(after, owner["fields"], [n["fields"] for n in details])
+                == context["productLock"]["digest"],
+                "Protected product contradiction",
+                "wave-proposal-unapplied",
+            )
+            self._check_coverage(after, "bead")
+            self._check_coverage(after, "test")
+            # Canonical compiler/graph validate candidate structure before any writes.
+            self._manifest(after)
+            for node in nodes:
+                self._write_node(after, node["id"])
+            receipt = dict(
+                proposalId=proposal_id,
+                spineRevision=after.plan_revision(),
+                editedNodeIds=sorted(replaced),
+                impact=result["impact"],
+                state="draft",
+                readiness="not-run",
+                review="required",
+                publication="required",
+                completedRealDelta=0,
+            )
+            self._event("wave-refinement-applied", receipt)
+            return receipt
+
     @staticmethod
     def _wave_snapshot(spine: Spine, validated: dict, history: list) -> dict:
         return {
@@ -740,6 +1105,17 @@ class PlanStore:
                 key not in nodes or spine.revision(key) != revision
                 for key, revision in event["nodeRevisions"].items()
             )
+            applied = self._latest_draft_event("wave-refinement-applied")
+            if applied and applied["spineRevision"] == spine.plan_revision():
+                changed = False
+            try:
+                lock = self.wave_product_lock()
+            except ValueError:
+                lock = None
+            try:
+                scope = compile_manifest(spine).get("waveScope")
+            except ValueError:
+                scope = None
             return {
                 **result,
                 **validated,
@@ -748,6 +1124,9 @@ class PlanStore:
                 if changed
                 else "Draft only; current publication, lock and runtime evidence unavailable",
                 "accounting": accounting,
+                "waveProductLock": lock,
+                "lockState": "current" if lock else validated["lockState"],
+                "executionScope": scope,
             }
         finally:
             self.connection.rollback()
@@ -1128,7 +1507,12 @@ class PlanStore:
 
     @staticmethod
     def _check_coverage(spine: Spine, kind: str) -> None:
+        from codex_harness.core.wave_refine import execution_scope
+
+        scope = execution_scope(spine)
         gaps = [gap for gap in spine.coverage_gaps() if gap["gap"] == f"requirement-without-{kind}"]
+        if scope:
+            gaps = [gap for gap in gaps if gap["id"] in scope["inScopeRequirementIds"]]
         if gaps:
             raise PlanStoreError(f"plan-requirement-without-{kind}", _json(gaps))
 
@@ -1185,6 +1569,34 @@ class PlanStore:
                 if current == "publish":
                     self._check_evidence(self.manifest_revision())
             self.connection.execute("UPDATE meta SET phase=?", (to_phase,))
+            wave_lock = None
+            if (
+                current == "plan"
+                and to_phase == "roundtable"
+                and isinstance(statement, str)
+                and statement.strip()
+            ):
+                from codex_harness.core.wave_refine import wave_values
+
+                is_proxy = (
+                    by.startswith("proxy:") and bool(by[6:].strip()) or by == "opus-user-proxy"
+                )
+                values = wave_values(Spine(self._data()))
+                if values and (by == "user" or is_proxy):
+                    owner, details, _ = values
+                    wave_lock = dict(
+                        digest=waves.product_digest(
+                            spine, owner["fields"], [n["fields"] for n in details]
+                        ),
+                        mapNodeId=owner["id"],
+                        waveMapRevision=spine.revision(owner["id"]),
+                        spineRevision=spine.plan_revision(),
+                        spine=spine.to_dict(),
+                        confirmedBy=by,
+                        confirmationOrigin="proxy" if is_proxy else "user",
+                        isProxy=bool(is_proxy),
+                        statement=statement,
+                    )
             self._event(
                 "phase-advanced",
                 {
@@ -1193,6 +1605,7 @@ class PlanStore:
                     "by": by,
                     "statement": statement,
                     "plan_revision": revision,
+                    **({"waveProductLock": wave_lock} if wave_lock else {}),
                 },
             )
 
@@ -1227,6 +1640,7 @@ class PlanStore:
             self._check_coverage(spine, "test")
             self._check_coverage(spine, "bead")
             manifest = self._manifest(spine)
+            wave_lock = self.wave_product_lock() if manifest.get("waveScope") else None
             revision = manifest["planRevision"]
             self._check_evidence(revision)
             level = self.proof_level(revision)
@@ -1257,6 +1671,7 @@ class PlanStore:
                     "by": by,
                     "open_assumptions": self._open("assumptions"),
                     "manifest": manifest,
+                    **({"waveProductLock": wave_lock} if wave_lock else {}),
                 }
             else:
                 snapshot = json.loads(row["snapshot_json"])
