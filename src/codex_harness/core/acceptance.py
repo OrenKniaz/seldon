@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
@@ -190,6 +191,41 @@ def _matches(actual: dict, expect: dict) -> bool:
     return True
 
 
+def _cleanup_timed_out_process(process) -> str:
+    """Bound tree termination and owned-parent reaping by one cleanup deadline."""
+    deadline = time.monotonic() + 1.7
+    issues = []
+    try:
+        if os.name == "nt":
+            killed = subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=min(1.2, max(0, deadline - time.monotonic())),
+                check=False,
+            )
+            if killed.returncode:
+                issues.append(
+                    f"Process tree cleanup uncertain: taskkill exited {killed.returncode}."
+                )
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    except (OSError, subprocess.TimeoutExpired) as error:
+        issues.append(f"Process tree cleanup uncertain: {error}.")
+    # A tree-kill result alone does not establish that the owned parent exited.
+    try:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=min(1.7, max(0, deadline - time.monotonic())))
+    except (OSError, subprocess.TimeoutExpired) as error:
+        issues.append(f"Process cleanup incomplete: {error}.")
+    if process.returncode is None:
+        issues.append("Owned process exit was not observed; cleanup remains uncertain.")
+    return "\n".join(issues)
+
+
 def run_scenarios(repo, scenarios, env=None) -> list[dict]:
     """Run trusted planner commands, with isolated cwd/HOME/data for each scenario.
 
@@ -256,6 +292,7 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
                     scenario.get("expect", {}) if index == len(steps) - 1 else {"exit": 0}
                 )
                 timed_out = False
+                cleanup_uncertainty = ""
                 # Files avoid pipe backpressure and inherited-pipe waits. Only bounded
                 # output is read into memory, even when the command is very noisy.
                 with TemporaryFile() as stdout, TemporaryFile() as stderr:
@@ -276,25 +313,21 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
                         process.communicate(timeout=60)
                     except subprocess.TimeoutExpired:
                         timed_out = True
-                        if os.name == "nt":
-                            subprocess.run(
-                                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                                capture_output=True,
-                                timeout=1.9,
-                                check=False,
-                            )
-                        else:
-                            try:
-                                os.killpg(process.pid, signal.SIGKILL)
-                            except ProcessLookupError:
-                                pass
-                        process.communicate(timeout=0.05)
+                        cleanup_uncertainty = _cleanup_timed_out_process(process)
                     record = {
                         "command": command,
                         "stdout": _bounded_output(stdout),
-                        "stderr": _bounded_output(stderr, "\nStep timed out" if timed_out else ""),
+                        "stderr": _bounded_output(
+                            stderr,
+                            "\nStep timed out"
+                            + ("\n" + cleanup_uncertainty if cleanup_uncertainty else "")
+                            if timed_out
+                            else "",
+                        ),
                         "exit": None if timed_out else process.returncode,
                     }
+                    if cleanup_uncertainty:
+                        record["cleanupUncertainty"] = cleanup_uncertainty
                     record["passed"] = not timed_out and _matches(record, expect)
                 result["steps"].append(record)
                 if not record["passed"]:

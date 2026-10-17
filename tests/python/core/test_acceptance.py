@@ -1435,3 +1435,81 @@ def test_legacy_subject_inference_controls_existing_acceptance(project, dispatch
     assert (proof["claim"] == "proved") is dispatch_evidence
     # Explicit oracle always wins over a dispatch marker.
     assert run_subject({**result, "subject": "oracle"}) == "oracle"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows taskkill cleanup contract")
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "delayed-reap",
+        "secondary-timeout",
+        "taskkill-timeout",
+        "taskkill-failure",
+        "taskkill-oserror",
+    ],
+)
+def test_timeout_cleanup_records_failure(mode, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from codex_harness.core import acceptance
+
+    instances = []
+    clock = [0.0]
+    monkeypatch.setattr(acceptance, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class Process:
+        pid = 424242
+        returncode = None
+
+        def __init__(self, command, **kwargs):
+            self.command = command
+            kwargs["stdout"].write(b"started\n")
+            kwargs["stderr"].write(b"partial stderr\n")
+            self.calls = []
+            self.killed = False
+            instances.append(self)
+
+        def communicate(self, timeout):
+            self.calls.append(timeout)
+            if timeout == 60 or mode == "secondary-timeout" or timeout <= 0.05:
+                raise subprocess.TimeoutExpired(self.command, timeout)
+            self.returncode = -9
+            return None, None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+
+    def tree_kill(command, **kwargs):
+        assert 0 < kwargs["timeout"] <= 1.2
+        clock[0] += kwargs["timeout"]
+        assert command[:4] == ["taskkill", "/T", "/F", "/PID"]
+        if mode == "taskkill-timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if mode == "taskkill-oserror":
+            raise OSError("tree-kill unavailable")
+        return subprocess.CompletedProcess(command, 1 if mode == "taskkill-failure" else 0)
+
+    monkeypatch.setattr(subprocess, "Popen", Process)
+    monkeypatch.setattr(subprocess, "run", tree_kill)
+    result = run_scenarios(
+        tmp_path, [{"id": "timeout", "title": "timeout", "steps": ["bounded fake"]}]
+    )[0]
+    assert not result["passed"]
+    step = result["steps"][0]
+    assert not step["passed"] and step["exit"] is None
+    assert "started" in step["stdout"] and "partial stderr" in step["stderr"]
+    assert "timed out" in step["stderr"]
+    assert len(instances) == 1
+    assert instances[0].killed
+    if mode == "secondary-timeout":
+        assert "exit was not observed" in step["cleanupUncertainty"]
+    elif mode.startswith("taskkill-"):
+        assert "Process tree cleanup uncertain" in step["cleanupUncertainty"]
+    else:
+        assert "cleanupUncertainty" not in step
+    assert len(instances[0].calls) == 2
+    assert 0.05 < instances[0].calls[1] <= 0.5
+    assert clock[0] + instances[0].calls[1] <= 1.7
