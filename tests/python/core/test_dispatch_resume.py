@@ -625,6 +625,37 @@ def test_dispatch_stale_attempt_is_never_merged(tmp_path: Path, change: str) -> 
     assert _git(Path(record["repo"]), "rev-list", "--merges", "HEAD") == ""
 
 
+@pytest.mark.parametrize("field", ["runId", "bead", "planRevision", "prompt"])
+def test_dispatch_resume_refuses_foreign_completed_result(tmp_path, monkeypatch, field):
+    plan = _plan(tmp_path)
+    integrate = dispatch._integrate_bead
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("controller stopped before merge")
+
+    monkeypatch.setattr(dispatch, "_integrate_bead", crash)
+    first = run_plan(plan, work_root=tmp_path / "runs", mock_provider="reference")
+    monkeypatch.setattr(dispatch, "_integrate_bead", integrate)
+    attempt_dir = Path(first["beads"]["A"]["evidenceDir"]) / "attempt"
+    result = dispatch.read_record_json(attempt_dir / "result.json")
+    result[field] = "foreign-identity"
+    dispatch._write_record(attempt_dir / "result.json", result)
+    resumed = run_plan(
+        plan,
+        work_root=tmp_path / "unused",
+        resume_run_dir=_run_dir(first),
+        mock_provider="reference",
+        fake_workers={"A": lambda path: pytest.fail("invalid result relaunched")},
+    )
+    bead = resumed["beads"]["A"]
+    assert bead["status"].startswith("rejected: attempt identity mismatch")
+    assert bead["integrated"] is None
+    assert not bead["didRunIntegratedValidation"]
+    assert not bead["attempt"].get("recoverResult")
+    assert _git(Path(resumed["repo"]), "rev-parse", "HEAD") == first["baseline"]["commit"]
+    assert not (attempt_dir.parent / "retry-1").exists()
+
+
 def test_dispatch_resume_completed_attempt_without_duplicate_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -652,6 +683,67 @@ def test_dispatch_resume_completed_attempt_without_duplicate_worker(
     assert {"bead": "A", "reason": "completed attempt recovered without relaunch"} in resumed[
         "resumeSummary"
     ]["retained"]
+
+
+def test_completed_attempt_checks_original_request_and_rechecks_before_use(tmp_path, monkeypatch):
+    plan = _plan(tmp_path)
+    integrate = dispatch._integrate_bead
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("controller stopped before merge")
+
+    monkeypatch.setattr(dispatch, "_integrate_bead", crash)
+    first = run_plan(plan, work_root=tmp_path / "runs", mock_provider="reference")
+    monkeypatch.setattr(dispatch, "_integrate_bead", integrate)
+    bead = first["beads"]["A"]
+    attempt_dir = Path(bead["evidenceDir"]) / "attempt"
+    request = dispatch.read_record_json(attempt_dir / "request.json")
+    result = dispatch.read_record_json(attempt_dir / "result.json")
+    assert dispatch._completed_attempt_identity_error(bead, request, result) is None
+    # Use the actual dispatch-generated request/result shape, not a new admission schema.
+    for field in request.keys() - {"status", "didLaunchMockAttempt", "finishedAt"}:
+        changed = {**result, field: "foreign-value"}
+        assert dispatch._completed_attempt_identity_error(bead, request, changed), field
+    assert (
+        dispatch._completed_attempt_identity_error(
+            bead, request, {**result, "finishedAt": "later-completion-observation"}
+        )
+        is None
+    )
+    from codex_harness.core.provider_launch import get_adapter
+
+    launch = get_adapter("codex").provider_normal_command(prompt=request["prompt"]).to_payload()
+    normal = {**request, "mode": "provider-normal", "launch": launch, "command": launch["command"]}
+    normal_record = {**bead, "attempt": {**bead["attempt"], **normal}}
+    assert dispatch._completed_attempt_identity_error(normal_record, normal, normal) is None
+    missing = {key: value for key, value in result.items() if key != "cwd"}
+    assert dispatch._completed_attempt_identity_error(bead, request, missing)
+    changed_request = {**request, "bead": "different-bead"}
+    assert dispatch._completed_attempt_identity_error(bead, changed_request, changed_request)
+    changed_attempt = {**bead, "attempt": {**bead["attempt"], "baseCommit": "different-base"}}
+    assert dispatch._completed_attempt_identity_error(changed_attempt, request, result)
+
+    attempt_bead = dispatch._attempt_bead
+
+    def substitute_after_resume_check(*args, **kwargs):
+        dispatch._write_record(attempt_dir / "result.json", {**result, "runId": "foreign-run"})
+        return attempt_bead(*args, **kwargs)
+
+    monkeypatch.setattr(dispatch, "_attempt_bead", substitute_after_resume_check)
+    resumed = run_plan(
+        plan,
+        work_root=tmp_path / "unused",
+        resume_run_dir=_run_dir(first),
+        mock_provider="reference",
+        fake_workers={"A": lambda path: pytest.fail("substituted result relaunched")},
+    )
+    recovered = resumed["beads"]["A"]
+    assert recovered["status"].startswith("rejected: attempt identity mismatch")
+    assert recovered["integrated"] is None
+    assert not recovered["attempt"].get("recoverResult")
+    assert resumed["resumeSummary"]["redispatched"] == []
+    assert dispatch.read_record_json(attempt_dir / "result.json")["runId"] == "foreign-run"
+    assert _git(Path(resumed["repo"]), "rev-parse", "HEAD") == first["baseline"]["commit"]
 
 
 @pytest.mark.parametrize("legacy", [False, True])

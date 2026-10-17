@@ -827,6 +827,42 @@ def _requirement_validation(
     return entry
 
 
+def _completed_attempt_identity_error(record: dict, request: dict, result: dict) -> str | None:
+    """Check original local attribution, not genuine live runtime admission."""
+    fields = (
+        "runId",
+        "bead",
+        "requirementId",
+        "baseCommit",
+        "adapterCommit",
+        "executableSha256",
+        "cwd",
+        "launch",
+        "command",
+        "mode",
+        "prompt",
+        "planRevision",
+        "requirementRefs",
+        "startedAt",
+    )
+    for field in fields:
+        if field not in request or field not in result or request[field] != result[field]:
+            return f"request/result {field}"
+    if request.get("specRefs") != result.get("specRefs"):
+        return "request/result specRefs"
+    for field in ("runId", "bead", "prompt", "planRevision", "requirementRefs", "specRefs"):
+        if request.get(field) != record.get(field):
+            return f"request/run {field}"
+    attempt = record.get("attempt") or {}
+    for field in fields:
+        if field in attempt and request[field] != attempt[field]:
+            return f"request/attempt {field}"
+    for field in ("cwd", "baseCommit"):
+        if field not in attempt:
+            return f"attempt missing {field}"
+    return None
+
+
 def _attempt_bead(
     record: dict,
     bead: dict,
@@ -844,7 +880,13 @@ def _attempt_bead(
         return record
     launch = None
     if attempt.get("recoverResult"):
+        request = read_record_json(attempt_dir / "request.json")
         result = read_record_json(attempt_dir / "result.json")
+        mismatch = _completed_attempt_identity_error(record, request, result)
+        if mismatch:
+            record["status"] = f"rejected: attempt identity mismatch ({mismatch})"
+            attempt.pop("recoverResult", None)
+            return record
         attempt.update(result)
         record["didRunProvider"] = result["didRunProvider"]
     elif fake_worker is not None:
@@ -1439,6 +1481,17 @@ def run_plan(
                 and refs_match
             ):
                 result = read_record_json(result_path)
+                mismatch = _completed_attempt_identity_error(old, request, result)
+                if mismatch:
+                    records[bead_id] = old
+                    old["status"] = f"rejected: attempt identity mismatch ({mismatch})"
+                    old_attempt.pop("recoverResult", None)
+                    old["candidate"]["validated"] = False
+                    retained_failures.append(bead_id)
+                    record["resumeSummary"]["retained"].append(
+                        {"bead": bead_id, "reason": old["status"]}
+                    )
+                    continue
                 if result["status"] == "exited" and result["exitCode"] == 0:
                     records[bead_id] = old
                     old.update(status="pending", evidenceDir=str(old_evidence))
@@ -1620,6 +1673,7 @@ def run_plan(
                     bead_id for bead_id in order if bead_id in running and running[bead_id].done()
                 )
                 current = records[bead_id]
+                recovering_completed_attempt = bool((current["attempt"] or {}).get("recoverResult"))
                 try:
                     current.update(running.pop(bead_id).result())
                     if current["status"] == "running":
@@ -1637,7 +1691,7 @@ def run_plan(
                     # A worker exception fails its bead, preserving independent
                     # work and the failure in the same run's evidence.
                     current["status"] = f"bead failed: {type(error).__name__}: {error}"
-                if previous and not (current["attempt"] or {}).get("recoverResult"):
+                if previous and not recovering_completed_attempt:
                     request_path = Path(current["evidenceDir"]) / "attempt" / "request.json"
                     if request_path.exists():
                         request = read_record_json(request_path)

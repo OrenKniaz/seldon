@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import sleep
 from typing import BinaryIO
 
 
@@ -77,8 +78,32 @@ def read_record_json(path: str | os.PathLike[str]):
         return json.loads(stream.read().decode("utf-8"))
 
 
+def _replace_record(temporary: Path, destination: Path) -> None:
+    """Retry only bounded Windows replacement refusals under the caller's guard."""
+    delays = (0.01, 0.02, 0.04)
+    for attempt in range(len(delays) + 1):
+        try:
+            temporary.replace(destination)
+            return
+        except PermissionError as error:
+            if (
+                os.name != "nt"
+                or getattr(error, "winerror", None) not in (5, 32)
+                or attempt == len(delays)
+            ):
+                raise
+            sleep(delays[attempt])
+
+
 def write_record_json(path: str | os.PathLike[str], record: dict) -> None:
-    """Publish one complete JSON record; preserve refusal and its temporary file."""
+    """Publish a complete record; retain the old record and new temp on refusal.
+
+    Under the existing guard, retry replacement of the same closed, fsynced temp
+    only for Windows PermissionError codes 5 and 32, with at most four attempts.
+    Backoff requests total at most 70 ms; this is not a wall-time guarantee.
+    Other I/O is not retried. Persistent refusal propagates with the temp retained.
+    This bounds a known sharing failure class, not an established historical cause.
+    """
     path = Path(path)
     with _record_guard(path):
         with NamedTemporaryFile(
@@ -88,4 +113,4 @@ def write_record_json(path: str | os.PathLike[str], record: dict) -> None:
             stream.flush()
             os.fsync(stream.fileno())
             temporary = Path(stream.name)
-        temporary.replace(path)
+        _replace_record(temporary, path)
