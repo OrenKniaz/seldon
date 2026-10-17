@@ -1709,8 +1709,7 @@ def run_plan(
             elif (
                 validated
                 and identity_matches
-                and old.get("status")
-                in {STATUS_MOCK_ONLY, "requirement-validated", "already-satisfied", "reused"}
+                and not old.get("status", "").startswith("bead failed:")
             ):
                 _git(repo, "merge-base", "--is-ancestor", integrated["integrationCommit"], "HEAD")
                 # This reuses implementation only. Claims are checked after the
