@@ -357,12 +357,13 @@ def report(workspace, run_dir, *, baseline_run=None, forecast=None, intervention
     result["actual"].update(
         actualWorkerRedispatchedBeads=None,
         redispatchEvidenceState=(
-            "Recorded dispatch bookkeeping; execution/admission is not established by these labels"
+            "Recorded dispatch bookkeeping; actual-worker execution is not established "
+            "by these labels"
         ),
     )
     need(
-        "worker-admission-runtime",
-        "Original admitted assignment/runtime binding is required for actual-worker redispatch; "
+        "actual-worker-proof-unavailable",
+        "Actual-worker redispatch is not established by local provenance or dispatch bookkeeping; "
         "summary, PID and didExecuteRealProvider labels alone are insufficient",
     )
     try:

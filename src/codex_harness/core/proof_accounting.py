@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from types import MappingProxyType
 
+from codex_harness.core import attempt_provenance
 from codex_harness.core.dispatch import _changed_claim_inputs, _claim_inputs, _git
 from codex_harness.core.graph import Bead, Plan
 from codex_harness.core.record_io import open_record_read
@@ -165,7 +166,7 @@ def _claim_observation(claim, bead, plan, repo, evidence, current_commit):
 
 
 def observe(context, *, run_path=None, runs_root=None, publication_current=False):
-    """Account original facts; this release has no genuine runtime-admission producer.
+    """Account originals; local provenance alone does not establish actual-worker proof.
 
     Consequently requirementValidation remains null even if local claim bytes match.
     No caller flag, synthetic record or injected validator can authorize positive credit.
@@ -185,10 +186,10 @@ def observe(context, *, run_path=None, runs_root=None, publication_current=False
         if value not in result["missingDependencies"]:
             result["missingDependencies"].append(value)
 
-    # This is an explicit producer gap, not a new approval/lease registry.
+    # Actual-worker/product evidence is separate from local consistency.
     missing(
-        "runtime-admission-unavailable",
-        "No canonical original binds a thin attempt to its genuine live assignment/runtime",
+        "actual-worker-proof-unavailable",
+        "Actual-worker validation is not established by local provenance/claim correspondence",
     )
     if not isinstance(context, dict):
         missing("plan-original-unavailable", "Canonical plan SQLite snapshot unavailable")
@@ -365,6 +366,21 @@ def observe(context, *, run_path=None, runs_root=None, publication_current=False
                 if request.get("planRevision") != bead.get("planRevision"):
                     raise ValueError("attempt-source-publication-mismatch")
                 observation["attemptPublicationRevision"] = request.get("planRevision")
+                local = attempt_provenance.read_and_compare(
+                    directory / "attempt",
+                    request,
+                    response,
+                    record=bead,
+                    expected_owned_files=plan.beads[bead_id].owned_files,
+                )
+                observation["localProcessProvenance"] = local
+                observation["attemptEligible"] = local["state"] == "consistent"
+                if local["state"] not in {"consistent", "source-only"}:
+                    missing(
+                        local["code"],
+                        f"{bead_id}: local process provenance {local['state']}",
+                        [local["path"]],
+                    )
                 if (
                     request.get("mode") != "provider-normal"
                     or record.get("isMocked") is not False
@@ -393,8 +409,8 @@ def observe(context, *, run_path=None, runs_root=None, publication_current=False
                 row["reasons"].append(f"claim-original-unavailable:{bead_id}")
         row["claimIds"] = sorted(set(row["claimIds"]) - {None})
         row["evidenceRefs"] = sorted(set(row["evidenceRefs"]))
-        row["reasons"].append("runtime-admission-unavailable")
+        row["reasons"].append("actual-worker-proof-unavailable")
     result["reason"] = (
-        "Genuine live assignment/runtime admission unavailable; no validated work-item credit"
+        "Actual-worker validation not established by local provenance/claim correspondence"
     )
     return result

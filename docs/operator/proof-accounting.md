@@ -59,14 +59,26 @@ reported, not retried through another path.
 
 `missingDependencies` gives explicit `code`, `description` and `refs`, including
 missing publication, run/candidate, original claim/receipt, attempt originals and
-stale bindings. `reason` explains unavailable overall observation. The retained
-capability audit still records a producer gap: there is no canonical original
-binding a thin attempt to its genuine live assignment/runtime. This release
-therefore always reports `runtime-admission-unavailable`, never emits a
+stale bindings. `reason` explains unavailable overall observation.
+
+For provider-normal attempts, `localProcessProvenance` compares the controller's
+create-once `attempt/process-provenance.json` with the selected attempt and its
+request/result originals. It binds the original plan, packet bytes, ownership,
+launch configuration, owned child PID and locally observed start facts.
+Missing, foreign, changed or incomplete originals cannot establish consistent
+local provenance; legacy provider records are not sealed retroactively.
+Consistent mock records retain their source-only labels.
+
+This is participating local provenance, not same-user authentication, current
+PID liveness or sandbox attestation. The [October 16 scope decision](../decisions/2026-10-16-basic-security-port-scope.md)
+backlogs stronger assignment/admission identity. No external host service or
+lease/token registry is a prerequisite for this local observation.
+
+Local provenance and claim correspondence alone do not establish actual-worker
+validation. The reader reports `actual-worker-proof-unavailable`, never emits a
 `bound-evidence` row, and keeps `requirementValidation` null. A supplied
 `didExecuteRealProvider`, validated status, matching local receipt, mock, oracle
-or unmocked-shaped fixture cannot fill that gap. Implementing genuine admission
-is a separate producer dependency, not a new authority in this reader.
+or unmocked-shaped fixture cannot supply actual worker or whole-vision proof.
 
 Requirement rows, unique work-item validation, product scenario checks and
 acceptance are separate units. All unlinked/ambiguous scenarios remain in the

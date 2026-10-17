@@ -548,6 +548,8 @@ def test_dispatch_no_change_requires_current_head_proof(tmp_path, satisfied, wor
 def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: bool
 ) -> None:
+    from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
+
     from codex_harness.core.provider_launch import ProviderNormalLaunch
 
     plan = _tiny_plan(tmp_path)
@@ -572,6 +574,7 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
             )
 
     monkeypatch.setattr("codex_harness.core.dispatch.get_adapter", lambda name: ScriptedAdapter())
+    source_only_packet_renderer(monkeypatch)
     popen = subprocess.Popen
     spawned = []
 
@@ -590,7 +593,9 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
         return popen(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", observe_spawn)
-    record = run_plan(plan, work_root=tmp_path / "runs")
+    record = run_plan(
+        plan, work_root=tmp_path / "runs", provider_for={"A": "scripted", "B": "scripted"}
+    )
     assert sorted(spawned) == ["A", "B"]
     assert record["status"] == (STATUS_VALIDATED if declared else STATUS_VALIDATED_NO_INTEGRATION)
     assert record["isLiveProductProof"] is False

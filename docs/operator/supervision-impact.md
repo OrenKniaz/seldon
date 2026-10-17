@@ -41,8 +41,9 @@ do not establish semantic progress.
 
 `actual` keeps the original resume and claim summaries with evidence references.
 Redispatch bookkeeping includes mocked source attempts; it is not verified real
-worker execution. `actualWorkerRedispatchedBeads` remains null until an original
-admitted assignment/runtime binding exists. A consumer can be reused while a
+worker execution. `actualWorkerRedispatchedBeads` remains null because local
+process provenance and bookkeeping alone do not establish actual-worker
+redispatch. A consumer can be reused while a
 fresh claim records its proof revalidation. Revalidation is an attempt, not a
 claim of success. Historical revalidation rows without a fresh claim are not
 counted again. Retained IDs are deduplicated, checked against original Git
@@ -88,8 +89,10 @@ Other optional prediction dimensions are `changedPaths`, `invalidatedClaimIds`,
 `retainedClaimIds` and `docPaths`. An absent dimension stays null. For each
 available dimension, misses are original observations absent from the forecast;
 extras are forecast items absent from those observations. There is no whole
-vision score or perfect-prediction fallback. Bound records still do not prove
-independent runtime admission. Current producers do not automatically freeze
+vision score or perfect-prediction fallback. Matching local process provenance
+does not itself prove actual worker completion or a supervision improvement.
+Stronger authenticated assignment identity is [backlogged](../decisions/2026-10-16-basic-security-port-scope.md),
+not a prerequisite for the current local observation. Current producers do not automatically freeze
 forecasts, and resumed-run evidence may lack a suitable pre-outcome baseline
 artifact; that is an explicit producer dependency.
 

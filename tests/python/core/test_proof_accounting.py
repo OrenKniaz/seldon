@@ -84,7 +84,7 @@ def test_real_mock_claim(local_claim):
     assert row["bindingState"] == "unavailable"
     assert row["claimObservations"][0]["currentInputsState"] == "current"
     codes = {x["code"] for x in observed["missingDependencies"]}
-    assert "runtime-admission-unavailable" in codes
+    assert "actual-worker-proof-unavailable" in codes
     assert "mock-or-unproved-runtime" in codes
     assert "claim-binding-unproved" not in codes
     assert observed["source"]["candidateCommit"] != "2466c25955900c0d43dca702149a1c83bfd9dc1a"
@@ -95,6 +95,28 @@ def test_real_mock_claim(local_claim):
     assert projection["proofAccounting"]["requirements"][0]["claimIds"] == [
         bead_claim(record)["claimId"]
     ]
+
+
+def test_provider_shaped_legacy_cannot_get_local_provenance_eligibility(local_claim):
+    """Mutable labels on a source fixture cannot create a Popen original."""
+    _, _, record, _, path = local_claim
+    bead = record["beads"]["A"]
+    directory = Path(bead["evidenceDir"]) / "attempt"
+    for name in ("request.json", "result.json"):
+        value = read_record_json(directory / name)
+        value.update(mode="provider-normal", isMocked=False, didRunProvider=True)
+        write_record_json(directory / name, value)
+    bead.update(isMocked=False, didRunProvider=True)
+    bead["attempt"].update(mode="provider-normal", isMocked=False, didRunProvider=True)
+    record["isMocked"] = False
+    write_record_json(path, record)
+    observed = accounting(local_claim)
+    claim = observed["requirements"][0]["claimObservations"][0]
+    assert claim["currentInputsState"] == "current"  # Preserve actual source correspondence.
+    assert claim["attemptEligible"] is False
+    assert claim["localProcessProvenance"]["code"] == "attempt-provenance-unavailable"
+    assert "attempt-provenance-unavailable" in {x["code"] for x in observed["missingDependencies"]}
+    assert observed["requirements"][0]["bindingState"] == "unavailable"
 
 
 @pytest.mark.parametrize("change", ["unrelated", "source", "tests", "dependency"])

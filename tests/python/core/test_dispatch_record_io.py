@@ -9,7 +9,11 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from tests.python.core.test_dispatch_cancel import local_attempt, wait_for_request
+from tests.python.core.test_dispatch_cancel import (
+    local_attempt,
+    source_only_packet_renderer,
+    wait_for_request,
+)
 
 from codex_harness.core import attempt_control, dispatch
 from codex_harness.core.record_io import open_record_read, read_record_json
@@ -235,10 +239,15 @@ def test_post_spawn_refusal_with_unobserved_exit_cannot_relaunch_on_resume(tmp_p
         raise PermissionError("synthetic owned-stop refusal")
 
     monkeypatch.setattr(dispatch, "get_adapter", lambda name: LocalAdapter())
+    source_only_packet_renderer(monkeypatch)
     monkeypatch.setattr(dispatch, "_write_record", refuse_publication)
     monkeypatch.setattr(subprocess.Popen, "kill", refuse_stop)
     try:
-        first = dispatch.run_plan(plan, work_root=tmp_path / "runs")
+        first = dispatch.run_plan(
+            plan,
+            work_root=tmp_path / "runs",
+            provider_for={"A": "local-process-test", "B": "local-process-test"},
+        )
         a = first["beads"]["A"]
         assert a["attempt"]["failure"]["stage"] == "post-spawn-publication"
         assert a["attempt"]["cleanup"]["controllerProcessExited"] is False

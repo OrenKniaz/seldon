@@ -459,9 +459,19 @@ def test_mocked_cli_buffer_can_execute_internally_but_cannot_complete(tmp_path, 
 
     monkeypatch.setattr(dispatch.subprocess, "Popen", BufferedProvider)
     monkeypatch.setattr(dispatch, "_changed_paths", lambda cwd: [])
-    launch = SimpleNamespace(command=("mock-provider",), environment={})
+    from tests.python.core.test_attempt_provenance import originals
+
+    from codex_harness.core.provider_launch import ProviderNormalLaunch
+
+    request, _, _ = originals(tmp_path)
+    launch = ProviderNormalLaunch(
+        cli="local-process-test",
+        command=("mock-provider",),
+        protections=("Source-only fake Popen buffer; no provider or real process.",),
+    )
+    request.update(command=list(launch.command), launch=launch.to_payload())
     result = dispatch._run_provider(
-        launch, tmp_path, tmp_path, {}, 1, {"R": {"requirementId": "R"}}
+        launch, tmp_path, tmp_path, request, 1, {"R": {**request, "requirementId": "R"}}
     )
     assert result["status"] == dispatch.STATUS_PERMISSION_HELD
     assert result["permissionGuard"]["didPreventFurtherToolExecution"] is False

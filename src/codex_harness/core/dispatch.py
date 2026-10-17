@@ -17,7 +17,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-from codex_harness.core import attempt_control, efficiency, graph, worker_packet
+from codex_harness.core import attempt_control, attempt_provenance, efficiency, graph, worker_packet
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.memory_promotion import (
     PromotionEvidence,
@@ -35,6 +35,7 @@ STATUS_VALIDATED_NO_INTEGRATION = "plan-validated (no integration proof declared
 STATUS_MOCK_ONLY = "source-test-only (mocked provider)"
 STATUS_PERMISSION_HELD = "held: permission guard"
 STATUS_AUDIT_HELD = "held: denial audit inconclusive"
+STATUS_PROVENANCE_HELD = "held: local process provenance"
 DENIAL_HELD_STATUSES = {STATUS_PERMISSION_HELD, STATUS_AUDIT_HELD}
 DENIAL_CAPABILITIES = {
     "port": "provider-normal-headless-cli",
@@ -594,12 +595,26 @@ def _run_provider(
     publication_path = attempt_dir / "request.json"
     failed_request_publication = False
     request["processId"] = process.pid
+    request["processObservedAt"] = _now()
     try:
         # Every post-spawn operation remains inside ownership of the live child.
+        publication_path = attempt_dir / attempt_provenance.FILENAME
+        if request["command"] != list(launch.command) or request["launch"] != launch.to_payload():
+            raise ValueError("actual Popen command/launch differs from request")
+        original = attempt_provenance.publish(
+            attempt_dir,
+            request,
+            process_id=process.pid,
+            process_observed_at=request["processObservedAt"],
+        )
+        request["processProvenanceDigest"] = original["digest"]
+        publication_path = attempt_dir / "request.json"
         _write_record(publication_path, request)
         for requirement, planned in requirement_requests.items():
             directory = attempt_dir / requirement
             planned["processId"] = process.pid
+            planned["processObservedAt"] = request["processObservedAt"]
+            planned["processProvenanceDigest"] = original["digest"]
             publication_path = directory / "request.json"
             _write_record(publication_path, planned)
         publication_path = None
@@ -651,7 +666,7 @@ def _run_provider(
             cleanup["errors"].append(
                 {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
             )
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
         failure = {"type": type(error).__name__, "message": str(error)}
         if publication_path is not None:
             failure.update(stage="post-spawn-publication", path=str(publication_path))
@@ -845,6 +860,11 @@ def _completed_attempt_identity_error(record: dict, request: dict, result: dict)
         "requirementRefs",
         "startedAt",
     )
+    fields += tuple(
+        key
+        for key in ("provider", "model", "effort", "ownedFiles")
+        if request.get("mode") == "provider-normal" or key in request or key in result
+    )
     for field in fields:
         if field not in request or field not in result or request[field] != result[field]:
             return f"request/result {field}"
@@ -861,6 +881,37 @@ def _completed_attempt_identity_error(record: dict, request: dict, result: dict)
         if field not in attempt:
             return f"attempt missing {field}"
     return None
+
+
+def _check_attempt_provenance(
+    record: dict, request: dict | None = None, result: dict | None = None, owned_files=None
+) -> bool:
+    directory = Path(record["evidenceDir"]) / "attempt"
+    try:
+        request = read_record_json(directory / "request.json") if request is None else request
+        result = read_record_json(directory / "result.json") if result is None else result
+    except (OSError, ValueError) as error:
+        observation = {
+            "state": "unavailable",
+            "code": "attempt-provenance-unavailable",
+            "path": str(directory / attempt_provenance.FILENAME),
+            "detail": f"{type(error).__name__}: {error}",
+        }
+    else:
+        observation = attempt_provenance.read_and_compare(
+            directory,
+            request,
+            result,
+            record=record,
+            expected_owned_files=owned_files,
+        )
+    record["localProcessProvenance"] = observation
+    if observation["state"] in {"consistent", "source-only"}:
+        return True
+    record.update(status=STATUS_PROVENANCE_HELD, reused=False)
+    record["candidate"]["validated"] = False
+    record["attempt"].pop("recoverResult", None)
+    return False
 
 
 def _attempt_bead(
@@ -886,6 +937,8 @@ def _attempt_bead(
         if mismatch:
             record["status"] = f"rejected: attempt identity mismatch ({mismatch})"
             attempt.pop("recoverResult", None)
+            return record
+        if not _check_attempt_provenance(record, request, result, bead["ownedFiles"]):
             return record
         attempt.update(result)
         record["didRunProvider"] = result["didRunProvider"]
@@ -919,9 +972,14 @@ def _attempt_bead(
             "launch": launch.to_payload() if launch else {"command": [attempt["mode"]]},
             "command": list(launch.command) if launch else [attempt["mode"]],
             "mode": attempt["mode"],
+            "provider": record["provider"],
+            "model": record["model"],
+            "effort": record["effort"],
+            "ownedFiles": attempt_provenance.normalized_owned(bead["ownedFiles"]),
             "prompt": record["prompt"],
             "planRevision": record["planRevision"],
             "requirementRefs": record["requirementRefs"],
+            "specRefs": record.get("specRefs"),
             **_spec_binding(record),
             "startedAt": _now(),
             "status": "launching",
@@ -980,6 +1038,12 @@ def _attempt_bead(
             return record
         attempt.update(result)
         record["didRunProvider"] = result["didRunProvider"]
+        # Check the original again after execution; mutable result labels alone
+        # cannot restore a missing or changed controller observation.
+        if result.get("status") == "exited" and not _check_attempt_provenance(
+            record, request, result, bead["ownedFiles"]
+        ):
+            return record
     _observe_attempt(record, worktree, attempt_dir)
     if record["status"] in DENIAL_HELD_STATUSES:
         return record
@@ -1044,6 +1108,8 @@ def _integrate_bead(
     manifest_path: Path,
 ) -> None:
     if _hold_permission_guard(record, Path(record["evidenceDir"]) / "attempt"):
+        return
+    if not _check_attempt_provenance(record, owned_files=bead["ownedFiles"]):
         return
     worktree = Path(record["attempt"]["cwd"])
     current_plan = graph.load_plan(manifest_path)
@@ -1379,7 +1445,10 @@ def run_plan(
                 old_evidence / "attempt" / "request.json",
                 old_evidence / "attempt" / "result.json",
             )
-            request = read_record_json(request_path) if request_path.exists() else {}
+            try:
+                request = read_record_json(request_path) if request_path.exists() else {}
+            except (OSError, ValueError):
+                request = {}
             uncertain = request.get("status") == "launching" and not result_path.exists()
             refs_match = _identity_refs(old) == _identity_refs(records[bead_id])
             # Explicit refs allow unaffected v2 beads to retain their original
@@ -1443,6 +1512,17 @@ def run_plan(
                 record["resumeSummary"]["retained"].append(
                     {"bead": bead_id, "reason": "ambiguous launch requires explicit relaunch"}
                 )
+            elif (validated or result_path.exists()) and not _check_attempt_provenance(
+                old, owned_files=plan.beads[bead_id].owned_files
+            ):
+                # Targeted retry creates a new attempt namespace, never repairs
+                # an old original. Cancellation/denial/ambiguous holds above win.
+                if bead_id not in retry_ids:
+                    records[bead_id] = old
+                    retained_failures.append(bead_id)
+                    record["resumeSummary"]["retained"].append(
+                        {"bead": bead_id, "reason": old["localProcessProvenance"]["code"]}
+                    )
             elif old.get("status") == "blocked: worker reported" or "blocker" in old:
                 fresh_prompt = worker_packet.build_packet(
                     plan,
@@ -1530,7 +1610,7 @@ def run_plan(
                 current["requirementRefs"],
                 current.get("specRefs"),
             )
-            if current["status"] in DENIAL_HELD_STATUSES:
+            if current["status"] in DENIAL_HELD_STATUSES | {STATUS_PROVENANCE_HELD}:
                 record["requirementValidation"][order.index(bead_id)]["passed"] = False
             if current.get("reused"):
                 record["requirementValidation"][order.index(bead_id)]["reused"] = True
@@ -1552,6 +1632,9 @@ def run_plan(
     def prove_reused_bead(bead_id):
         current = records[bead_id]
         if _hold_permission_guard(current, Path(current["evidenceDir"]) / "attempt"):
+            record["requirementValidation"][order.index(bead_id)]["passed"] = False
+            return False
+        if not _check_attempt_provenance(current, owned_files=plan.beads[bead_id].owned_files):
             record["requirementValidation"][order.index(bead_id)]["passed"] = False
             return False
         commit = _git(repo, "rev-parse", "HEAD")

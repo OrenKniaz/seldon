@@ -6,14 +6,13 @@ The complete [accepted North Star v3](<docs/architecture/October 12 Source of tr
 
 ## Retained open obligations
 
-These requirements remain open; this extraction does not waive them.
+The [October 16 port decision](docs/decisions/2026-10-16-basic-security-port-scope.md)
+sets the current basic-security scope. Deferred items remain visible in the
+capability audit; they are not gates for local implementation.
 
-- [ ] Bind each actual thin attempt to its genuine live assignment and runtime.
-- [ ] Validate authorization and mutate dynamic file claims atomically, including release/reacquire.
-- [ ] Bind attributable mail to sender, recipient and run; establish revocation across stores.
-- [ ] Authenticate localhost view-only access.
+- [ ] Bind controller-observed launches to exact local plan, packet and attempt originals; refuse mismatched recovery.
 - [ ] Expose supported cancellation with truthful terminal state and recovery.
-- [ ] Prove live stall/crash/interleaving recovery and claim-expiry behavior.
+- [ ] Prove basic live stall/crash recovery without lost work.
 - [ ] Provide minimal health and supported-provider readiness diagnostics.
 - [ ] Produce authorized actual-worker, integrated and locked-vision acceptance evidence.
 

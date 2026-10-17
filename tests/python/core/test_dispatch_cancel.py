@@ -14,6 +14,18 @@ from codex_harness.core.provider_launch import ProviderNormalLaunch
 from codex_harness.core.record_io import read_record_json
 
 
+def source_only_packet_renderer(monkeypatch):
+    """Reuse supported packet prose while retaining an explicit local CLI identity."""
+    build = dispatch.worker_packet.build_packet
+
+    def local_packet(*args, provider, **kwargs):
+        return build(*args, provider="codex", **kwargs) + (
+            "\nSOURCE-ONLY local Python process fixture; no supported provider executes.\n"
+        )
+
+    monkeypatch.setattr(dispatch.worker_packet, "build_packet", local_packet)
+
+
 def wait_for_request(path, future=None):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -62,6 +74,21 @@ def local_attempt(tmp_path, *, seconds=3, terminal=True):
             f"import time; print({event!r}, flush=True); time.sleep({seconds})",
         ),
         protections=("Explicit local process fixture; no provider runs.",),
+    )
+    request.update(
+        provider="local-process-test",
+        model=None,
+        effort=None,
+        ownedFiles=["local.py"],
+        planRevision="a" * 64,
+        requirementRefs=[],
+        specRefs=None,
+        adapterCommit="b" * 40,
+        executableSha256=dispatch._file_sha256(sys.executable),
+        prompt="Source-only local child fixture λ\r\n",
+        mode="provider-normal",
+        command=list(launch.command),
+        launch=launch.to_payload(),
     )
     return run, cwd, attempt, request, launch
 
@@ -286,9 +313,17 @@ def test_selected_cancel_preserves_completed_work_and_requires_targeted_resume(
             )
 
     monkeypatch.setattr(dispatch, "get_adapter", lambda name: LocalAdapter())
+    source_only_packet_renderer(monkeypatch)
     runs = tmp_path / "runs"
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(dispatch.run_plan, plan, work_root=runs, max_parallel=2, timeout=25)
+        future = pool.submit(
+            dispatch.run_plan,
+            plan,
+            work_root=runs,
+            max_parallel=2,
+            timeout=25,
+            provider_for={key: "local-process-test" for key in ("A", "B", "C")},
+        )
         deadline = time.monotonic() + 25
         run = None
         while time.monotonic() < deadline:
@@ -313,7 +348,13 @@ def test_selected_cancel_preserves_completed_work_and_requires_targeted_resume(
     persisted = read_record_json(Path(a["evidenceDir"]) / "attempt/RA/result.json")
     assert persisted["status"] == "cancelled"
 
-    retained = dispatch.run_plan(plan, work_root=runs, resume_run_dir=run, max_parallel=2)
+    retained = dispatch.run_plan(
+        plan,
+        work_root=runs,
+        resume_run_dir=run,
+        max_parallel=2,
+        provider_for={key: "local-process-test" for key in ("A", "B", "C")},
+    )
     assert retained["beads"]["A"]["attempt"]["status"] == "cancelled"
     assert sorted(launched) == ["A", "C"]
     resumed = dispatch.run_plan(

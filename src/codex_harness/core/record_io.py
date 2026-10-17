@@ -114,3 +114,28 @@ def write_record_json(path: str | os.PathLike[str], record: dict) -> None:
             os.fsync(stream.fileno())
             temporary = Path(stream.name)
         _replace_record(temporary, path)
+
+
+def write_record_json_once(path: str | os.PathLike[str], record: dict) -> None:
+    """Create complete JSON once; refuse existing destinations without retries.
+
+    Hard-link publication requires filesystem support. On refusal the closed,
+    fsynced temporary and any existing original are retained. This participating
+    writer protocol is not OS immutability or same-user authentication.
+    """
+    path = Path(path)
+    with _record_guard(path):
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as stream:
+            json.dump(record, stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+            temporary = Path(stream.name)
+        os.link(temporary, path)
+        try:
+            temporary.unlink()
+        except OSError:
+            # The original was published. An extra temporary link is harmless;
+            # never report failed creation and stop a child after success.
+            pass
