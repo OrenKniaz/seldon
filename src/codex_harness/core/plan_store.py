@@ -2087,13 +2087,73 @@ class PlanStore:
                 )
             )
 
+        def original_review(review):
+            # Rebind carries a reference, never a newly executed review. Follow only
+            # links recorded by the existing rebind producer, preserving originals.
+            seen = set()
+            while isinstance(review, dict) and "originalReviewId" in review:
+                review_id = review.get("id")
+                if not isinstance(review_id, str) or review_id in seen:
+                    return None
+                seen.add(review_id)
+                current_id, previous_id = review.get("runId"), review.get("reboundFrom")
+                if (
+                    not isinstance(previous_id, str)
+                    or current_id == previous_id
+                    or review.get("by") != "harness"
+                    or review.get("stage") != "acceptance"
+                    or review.get("reason") != "revision algorithm upgraded; product unchanged"
+                    or "reviewers" in review
+                    or "isMocked" in review
+                ):
+                    return None
+                runs = []
+                for identity in (current_id, previous_id):
+                    saved = self.connection.execute(
+                        "SELECT result_json FROM acceptance_runs WHERE id=?", (identity,)
+                    ).fetchone()
+                    runs.append(json.loads(saved[0]) if saved else None)
+                if (
+                    any(not isinstance(run, dict) or run.get("passed") is not True for run in runs)
+                    or runs[0].get("id") != current_id
+                    or runs[1].get("id") != previous_id
+                    or runs[0].get("repo") != runs[1].get("repo")
+                    or runs[0].get("planRevision") != runs[1].get("planRevision")
+                ):
+                    return None
+                receipts = (
+                    json.loads(row[0])
+                    for row in self.connection.execute(
+                        "SELECT payload_json FROM events WHERE kind='acceptance-rebound'"
+                    )
+                )
+                if not any(
+                    receipt.get("run") == runs[0]
+                    and receipt.get("reboundFrom") == previous_id
+                    and receipt.get("by") == "harness"
+                    and review in receipt.get("reviews", [])
+                    for receipt in receipts
+                ):
+                    return None
+                original_id = review.get("originalReviewId")
+                saved = self.connection.execute(
+                    "SELECT result_json FROM acceptance_reviews WHERE id=?", (original_id,)
+                ).fetchone()
+                review = json.loads(saved[0]) if saved else None
+                if (
+                    not isinstance(review, dict)
+                    or review.get("id") != original_id
+                    or review.get("runId") != previous_id
+                ):
+                    return None
+            return review
+
         for row in self.connection.execute("SELECT result_json FROM acceptance_reviews"):
             review = json.loads(row[0])
-            if (
-                not isinstance(review, dict)
-                or review.get("runId") != run_id
-                or review.get("isMocked") is not False
-            ):
+            if not isinstance(review, dict) or review.get("runId") != run_id:
+                continue
+            review = original_review(review)
+            if not isinstance(review, dict) or review.get("isMocked") is not False:
                 continue
             reviewers = review.get("reviewers")
             if (
