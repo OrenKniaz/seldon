@@ -286,3 +286,197 @@ def test_packet_has_open_questions_and_closed_hashes_without_closed_bodies(proje
                     "closed"
                 ]
                 assert row["finding"] not in packet and row["resolution"] not in packet
+
+
+def test_lossless_commands_reference_templates_in_actual_review_packet(project):
+    store, repo = project
+    run = candidate(store, repo)
+    original = json.loads(json.dumps(run))
+    stored_before = store.connection.execute(
+        "SELECT result_json FROM acceptance_runs WHERE id=?", (run["id"],)
+    ).fetchone()[0]
+    packets = []
+    acceptance_review(
+        store,
+        repo,
+        reviewers=REVIEWERS,
+        runner=lambda launch, *_: (packets.append(launch.stdin_text) or 0, "[]"),
+    )
+    scenarios = {row["id"]: row for row in store.acceptance_scenarios()}
+    for packet in packets:
+        start = packet.index("\n", packet.index("\nAllowed node ids: ") + 1) + 1
+        body, _ = json.JSONDecoder().raw_decode(packet[start:])
+        projected = body["scenarioResults"]
+        assert "commandReference" in projected["results"][0]["steps"][0]
+        start = packet.index("{", packet.index("## Command reconstruction bindings"))
+        bindings, _ = json.JSONDecoder().raw_decode(packet[start:])
+        assert acceptance._hash(run) in packet
+        assert "NOT independently observed environment or process identity" in packet
+        assert roundtable._scenario_section(store.acceptance_scenarios()) in packet
+        for observed, rendered in zip(run["results"], projected["results"], strict=True):
+            assert {k: v for k, v in observed.items() if k != "steps"} == {
+                k: v for k, v in rendered.items() if k != "steps"
+            }
+            for index, (old, new) in enumerate(
+                zip(observed["steps"], rendered["steps"], strict=True)
+            ):
+                ref = new["commandReference"]
+                assert ref["scenarioId"] == observed["id"] and ref["step"] == index + 1
+                template = scenarios[observed["id"]]["steps"][index]
+                template = template if isinstance(template, str) else template["command"]
+                expanded = template
+                for name in ("repo", "home", "data", "python"):
+                    if name in bindings[ref["bindingRef"]]:
+                        expanded = expanded.replace(
+                            "{" + name + "}", bindings[ref["bindingRef"]][name]
+                        )
+                assert expanded.encode("utf-8") == old["command"].encode("utf-8")
+                assert ref["templateSha256"] == hashlib.sha256(template.encode("utf-8")).hexdigest()
+                assert (
+                    ref["expandedSha256"]
+                    == hashlib.sha256(old["command"].encode("utf-8")).hexdigest()
+                )
+                assert {k: v for k, v in old.items() if k != "command"} == {
+                    k: v for k, v in new.items() if k != "commandReference"
+                }
+    assert run == original
+    assert (
+        store.connection.execute(
+            "SELECT result_json FROM acceptance_runs WHERE id=?", (run["id"],)
+        ).fetchone()[0]
+        == stored_before
+    )
+
+
+def projection_fixture(template):
+    """Pure source-only strings; failed commands below are never executed."""
+    substitutions = {"python": "C:/Pythön/python.exe", "repo": "C:/prøject"}
+    expanded = template
+    for name in ("repo", "home", "data", "python"):
+        if name in substitutions:
+            expanded = expanded.replace("{" + name + "}", substitutions[name])
+    run = {
+        "id": "source-only-run",
+        "repo": substitutions["repo"],
+        "passed": False,
+        "opaqueMetadata": {"preserve": [1, "é"]},
+        "results": [
+            {
+                "id": "scenario",
+                "passed": False,
+                "error": "preserve scenario error",
+                "steps": [
+                    {
+                        "command": expanded,
+                        "stdout": "output\r\né",
+                        "stderr": "failure\r\n",
+                        "exit": 2,
+                        "passed": False,
+                        "error": "preserve step error",
+                        "opaqueMetadata": ["do not omit", 3],
+                    }
+                ],
+            }
+        ],
+    }
+    return run, [{"id": "scenario", "steps": [template]}]
+
+
+def test_projection_preserves_unicode_crlf_failures_and_pools_repeated_bindings():
+    template = '"{python}" -c "print(\'é\')"\r\n"{repo}" "{repo}"'
+    run, scenarios = projection_fixture(template)
+    run["results"][0]["steps"] *= 2
+    scenarios[0]["steps"] *= 2
+    run = json.loads(json.dumps(run))  # Persisted JSON contains distinct step records.
+    original = json.loads(json.dumps(run))
+    before = acceptance._hash(run)
+    projected, bindings = acceptance._project_run_commands(run, scenarios)
+    assert len(bindings) == 1 and run == original and acceptance._hash(run) == before
+    assert {k: v for k, v in projected.items() if k != "results"} == {
+        k: v for k, v in run.items() if k != "results"
+    }
+    for index, step in enumerate(projected["results"][0]["steps"]):
+        ref = step["commandReference"]
+        assert ref["scenarioId"] == "scenario" and ref["step"] == index + 1
+        rebuilt = template
+        for name in ("repo", "home", "data", "python"):
+            if name in bindings[ref["bindingRef"]]:
+                rebuilt = rebuilt.replace("{" + name + "}", bindings[ref["bindingRef"]][name])
+        assert rebuilt.encode("utf-8") == original["results"][0]["steps"][index]["command"].encode(
+            "utf-8"
+        )
+        assert ref["templateSha256"] == hashlib.sha256(template.encode("utf-8")).hexdigest()
+        assert ref["expandedSha256"] == hashlib.sha256(rebuilt.encode("utf-8")).hexdigest()
+        assert {k: v for k, v in step.items() if k != "commandReference"} == {
+            k: v for k, v in original["results"][0]["steps"][index].items() if k != "command"
+        }
+    assert projected["results"][0]["error"] == "preserve scenario error"
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["home", "data", "adjacent", "mismatch", "missing", "duplicate", "metadata", "unmatched"],
+)
+def test_unsupported_or_ambiguous_command_reference_falls_back_to_raw(case):
+    template = '"{python}" "{repo}"'
+    if case in ("home", "data"):
+        template += " {" + case + "}"
+    elif case == "adjacent":
+        template += " {repo}{python}"
+    elif case == "unmatched":
+        template = "not-a-leading-python-template"
+    run, scenarios = projection_fixture(template)
+    if case == "mismatch":
+        run["results"][0]["steps"][0]["command"] += " unexpected"
+    elif case == "missing":
+        scenarios = []
+    elif case == "duplicate":
+        scenarios *= 2
+    elif case == "metadata":
+        run["results"][0]["steps"][0]["commandReference"] = {"legacyMetadata": "retain me"}
+    original = json.loads(json.dumps(run))
+    projected, bindings = acceptance._project_run_commands(run, scenarios)
+    assert bindings == {} and projected == original and run == original
+
+
+def test_truncated_planned_scenario_refuses_before_any_reviewer(project):
+    store, repo = project
+    candidate(store, repo)
+    scenarios = store.acceptance_scenarios()
+    scenarios[0]["title"] = "large planned title " * 30_000
+    store.save_acceptance_scenarios(scenarios)
+    run_acceptance(store, repo, subject="product")
+    calls = []
+    with pytest.raises(ValueError, match="Command references require complete planned scenarios"):
+        acceptance_review(
+            store,
+            repo,
+            reviewers=REVIEWERS,
+            runner=lambda *_: calls.append(True),
+            token_budgets={"codex": 100_000, "claude": 100_000},
+        )
+    assert calls == []
+    assert store.connection.execute("SELECT COUNT(*) FROM acceptance_reviews").fetchone()[0] == 0
+
+
+def test_context_overflow_retry_uses_full_recorded_commands(project):
+    store, repo = project
+    run = candidate(store, repo)
+    seen = {"codex": [], "claude": []}
+
+    def runner(launch, *_):
+        seen[launch.cli].append(launch.stdin_text)
+        if launch.cli == "codex" and len(seen[launch.cli]) == 1:
+            return 2, "", "prompt is too long"
+        return 0, "[]"
+
+    result = acceptance_review(store, repo, reviewers=REVIEWERS, runner=runner)
+    assert len(seen["codex"]) == 2 and len(seen["claude"]) == 1
+    for index, packet in enumerate(seen["codex"]):
+        start = packet.index("\n", packet.index("\nAllowed node ids: ") + 1) + 1
+        body, _ = json.JSONDecoder().raw_decode(packet[start:])
+        step = body["scenarioResults"]["results"][0]["steps"][0]
+        assert ("commandReference" in step) is (index == 0)
+        if index:
+            assert step == run["results"][0]["steps"][0]
+    assert result["isMocked"] is True

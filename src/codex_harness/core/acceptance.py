@@ -7,6 +7,7 @@ before they can execute; prose is never silently converted into a passing test.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -788,6 +789,64 @@ def _candidate_evidence(store, repo, run):
     }
 
 
+def _project_run_commands(run, scenarios):
+    """Lossless packet view only; bindings reconstruct strings, not process identity."""
+    ids = [row["id"] for row in scenarios]
+    result_ids = [row["id"] for row in run["results"]]
+    if len(ids) != len(set(ids)) or len(result_ids) != len(set(result_ids)):
+        return run, {}
+    templates = {row["id"]: row for row in scenarios}
+    view, bindings, binding_ids = copy.deepcopy(run), {}, {}
+    for result in view["results"]:
+        planned = templates.get(result["id"], {}).get("steps", [])
+        for index, step in enumerate(result["steps"]):
+            if index >= len(planned) or "commandReference" in step:
+                continue
+            template = planned[index]
+            template = template if isinstance(template, str) else template.get("command")
+            expanded = step.get("command")
+            if not isinstance(template, str) or not isinstance(expanded, str):
+                continue
+            tokens = set(re.findall(r"\{(repo|home|data|python)\}", template))
+            if (
+                not template.startswith('"{python}"')
+                or not expanded.startswith('"')
+                or tokens - {"repo", "python"}
+                or re.search(
+                    r"\{(?:repo|home|data|python)\}\{(?:repo|home|data|python)\}", template
+                )
+            ):
+                continue
+            end = expanded.find('"', 1)
+            python = expanded[1:end] if end > 1 else ""
+            if not python or "\n" in python or "\r" in python:
+                continue
+            substitutions = {"python": python}
+            if "repo" in tokens:
+                if not isinstance(run.get("repo"), str):
+                    continue
+                substitutions["repo"] = run["repo"]
+            reconstructed = template
+            for name in ("repo", "home", "data", "python"):
+                if name in substitutions:
+                    reconstructed = reconstructed.replace("{" + name + "}", substitutions[name])
+            if reconstructed.encode("utf-8") != expanded.encode("utf-8"):
+                continue
+            key = json.dumps(substitutions, sort_keys=True, ensure_ascii=False)
+            if key not in binding_ids:
+                binding_ids[key] = "B" + str(len(bindings) + 1)
+                bindings[binding_ids[key]] = substitutions
+            step.pop("command")
+            step["commandReference"] = {
+                "scenarioId": result["id"],
+                "step": index + 1,
+                "templateSha256": hashlib.sha256(template.encode("utf-8")).hexdigest(),
+                "expandedSha256": hashlib.sha256(expanded.encode("utf-8")).hexdigest(),
+                "bindingRef": binding_ids[key],
+            }
+    return view, bindings
+
+
 def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets=None) -> dict:
     spine = store.locked_acceptance_spine()
     run = current_run(store)
@@ -836,9 +895,67 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
             ensure_ascii=False,
         )
     )
-    packet += "\n" + roundtable._scenario_section(store.acceptance_scenarios())
+    scenarios = store.acceptance_scenarios()
+    scenario_section = roundtable._scenario_section(scenarios)
+    packet += "\n" + scenario_section
     if (store.workspace / "template").is_dir():
         packet += "\n" + roundtable._test_bodies(store)
+    context = (
+        QUESTION
+        + "\n"
+        + json.dumps(
+            {"lockedVision": spine.node(spine.ids("vision")[0]), "scenarioResults": run},
+            ensure_ascii=False,
+        )
+    )
+    projected, bindings = _project_run_commands(run, scenarios)
+    dossiers = {}
+    raw_run = json.dumps(run, ensure_ascii=False)
+    if bindings and packet.count(raw_run) == context.count(raw_run) == 1:
+        binding_section = (
+            "## Command reconstruction bindings\n\n"
+            + json.dumps(bindings, ensure_ascii=False, sort_keys=True)
+            + "\n\n"
+        )
+        projected_header = (
+            included_header
+            + binding_section
+            + (
+                "Recorded commandReference fields are lossless references to the unique scenarioId "
+                "and one-based step in the untruncated planned scenario commands "
+                "included in this packet. "
+                "Hashes are SHA256 of exact UTF8 strings. Apply literal substitutions in "
+                "repo,home,data,python order. Bindings reconstruct recorded strings only; they are "
+                "NOT independently observed environment or process identity. "
+                "All other recorded fields "
+                "and outputs are unchanged. Original run canonical hash "
+                + _hash(run)
+                + " (sha256-json-sort_keys-default-utf8).\n"
+            )
+        )
+        projected_run = json.dumps(projected, ensure_ascii=False)
+        projected_packet = projected_header + packet[len(included_header) :].replace(
+            raw_run, projected_run
+        )
+        projected_context = context.replace(raw_run, projected_run)
+        for reviewer in selected:
+            provider = reviewer["provider"]
+            shards = roundtable.packet_shards(
+                store,
+                provider,
+                token_budget=(token_budgets or {}).get(provider),
+                packet=projected_packet,
+                included_header=projected_header,
+                context=projected_context,
+            )
+            if not all(
+                scenario_section in shard["packet"] and binding_section in shard["packet"]
+                for shard in shards
+            ):
+                raise ValueError(
+                    "Command references require complete planned scenarios in every shard"
+                )
+            dossiers[provider] = shards
     if current_run(store) != run:
         raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
     result = {
@@ -866,14 +983,12 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
             timeout=900,
             stop_on_invalid=True,
             token_budget=(token_budgets or {}).get(provider),
+            shards=dossiers.get(provider),
             packet=packet,
             included_header=included_header,
-            context=QUESTION
-            + "\n"
-            + json.dumps(
-                {"lockedVision": spine.node(spine.ids("vision")[0]), "scenarioResults": run},
-                ensure_ascii=False,
-            ),
+            # A context-overflow retry uses the original recorded commands;
+            # it can never carry aliases into a truncated template dossier.
+            context=context,
         ):
             if shard_record["invalid"]:
                 # Persist diagnostic evidence (already saved before cleanup), but
