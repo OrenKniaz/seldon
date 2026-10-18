@@ -1587,7 +1587,12 @@ class PlanStore:
                         self.approve(current, by=by, statement=statement)
                     self._check_approval(current, revision)
                 if current == "vision-lock":
-                    self.connection.execute("UPDATE meta SET vision_locked_revision=?", (revision,))
+                    # Re-entering an unchanged lock reuses its original native grant;
+                    # metadata/subordinate revisions are not newly approved revisions.
+                    grant = self._approval_credit(current, revision)
+                    self.connection.execute(
+                        "UPDATE meta SET vision_locked_revision=?", (grant["plan_revision"],)
+                    )
                 if current == "requirements":
                     self._check_coverage(spine, "test")
                 if current == "plan":

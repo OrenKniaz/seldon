@@ -663,12 +663,17 @@ def test_cached_legacy_lock_remains_readable_but_cannot_advance_or_publish(store
 def test_native_lock_survives_subordinate_and_verification_metadata_changes(store):
     _to(store, "features")
     original = store.status()["approval"]["approval_id"]
+    original_revision = store.status()["vision_locked_revision"]
     node = store.spine().node("D3")
     node["text"] += " A subordinate clarification."
     store.upsert_node(node)
     vision = store.spine().node("V1")
     vision["fields"]["validation"].append("-v")
     store.upsert_node(vision)
+    assert store.status()["approval"]["approval_id"] == original
+    store.advance("vision-lock", by="planner")
+    store.advance("features", by="planner")
+    assert store.status()["vision_locked_revision"] == original_revision
     assert store.status()["approval"]["approval_id"] == original
     store.advance("requirements", by="planner")
 
