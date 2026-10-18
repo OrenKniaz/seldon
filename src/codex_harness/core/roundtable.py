@@ -604,14 +604,27 @@ def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout
 
             output, stderr = decoded(error.stdout), decoded(error.stderr)
         result_errors = []
+        overflow_evidence = [stderr, str(error)]
         for line in output.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                if record["exitCode"] not in (None, 0):
+                    overflow_evidence.append(line)
                 continue
             if isinstance(event, dict) and event.get("type") == "result" and event.get("is_error"):
                 result_errors.append(event)
-        error_text = stderr + "\n" + output + "\n" + str(error)
+            if isinstance(event, dict) and (
+                event.get("type") == "error"
+                or (event.get("type") == "result" and event.get("is_error"))
+            ):
+                # Successful text and usage metadata are not provider errors.
+                overflow_evidence.extend(
+                    json.dumps(event[key], ensure_ascii=False)
+                    for key in ("message", "error", "result", "errors")
+                    if key in event
+                )
+        error_text = "\n".join(overflow_evidence)
         reason = str(error)
         if result_errors:
             reason += ": " + json.dumps(result_errors[-1], ensure_ascii=False)
@@ -626,7 +639,7 @@ def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout
             "promptTooLong": bool(
                 re.search(
                     r"prompt.{0,30}too (?:long|large)|"
-                    r"context.{0,40}(?:exceed|limit|length|window)|"
+                    r"context.{0,40}(?:exceed|overflow|too (?:long|large)|limit reached)|"
                     r"maximum.{0,30}(?:context|tokens)|too many tokens",
                     error_text,
                     re.IGNORECASE,
