@@ -65,6 +65,7 @@ def test_audit_failure_exit(project, machine):
 
 
 def test_publish_entry_uses_publication_gate(project):
+    test_planner_replay_gaps.confirmed_vision(project)
     project.connection.execute("UPDATE meta SET phase='roundtable'")
     result = cli(project.workspace, "advance", "--to", "publish", code=2, machine=True)
     assert "plan-publication-evidence-required" in result["text"]
@@ -293,11 +294,11 @@ def test_status_acceptance_once_and_brief(project):
     assert len(brief.splitlines()) <= 7
 
 
-def test_guide_v8_contract():
+def test_guide_v9_contract():
     guide = (Path(__file__).resolve().parents[3] / "docs/operator/planner-guide.md").read_text(
         encoding="utf-8"
     )
-    assert "(v8," in guide and len(guide.splitlines()) <= 140
+    assert "(v9," in guide and len(guide.splitlines()) <= 140
     for token in (
         "--body --test <name>",
         "planned",
@@ -305,5 +306,11 @@ def test_guide_v8_contract():
         "impact --since",
         "--by",
         "cross-bead",
+        "harness_record_confirmation gate=align",
+        "harness_record_confirmation gate=vision-lock",
+        "client `elicitation` capability",
+        "conditions block credit",
+        "plan-confirmation-origin-unavailable",
+        "Plan-to-roundtable confirmation remains unchanged",
     ):
         assert token in guide

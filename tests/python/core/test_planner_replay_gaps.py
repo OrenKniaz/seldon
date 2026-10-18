@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import source_controller_roundtable
+from tests.python.core.planning_support import source_controller_roundtable, source_only_vision_lock
 from tests.python.core.test_plan_cli import cli
 
 from codex_harness.core import plan_cli, roundtable
@@ -94,6 +94,26 @@ def audit(store):
 
 def check(store, name):
     return next(item for item in quality_report(store)["checks"] if item["id"] == name)
+
+
+def confirmed_vision(store):
+    """Complete this source fixture's card and pass real gates with a synthetic client form.
+
+    This is neither human approval nor native-transport/provider evidence. Call it
+    only for cases testing downstream behavior after the alignment/vision gates.
+    """
+    node = store.spine().node("V1")
+    node["fields"].update(
+        vision="A tiny offline command-line tool that returns 42.",
+        users="One person using the local command line.",
+        scope_out="Network services and graphical interfaces.",
+        assumptions=[],
+    )
+    store.upsert_node(node)
+    source_only_vision_lock(
+        store, statement="SOURCE-ONLY approve the complete Answer fixture card."
+    )
+    store.advance("features", by="source-test")
 
 
 def test_gap1_non_git_project_audits_template_oracle_and_integration(project):
@@ -220,6 +240,7 @@ def test_gap7_vision_lock_journey_uses_vision_before_stories(project):
 
 
 def test_gap8_decision_records_choice_and_rationale_before_next_phase(project):
+    confirmed_vision(project)
     project.connection.execute("UPDATE meta SET phase='tech-stack'")
     card = dict(
         id="D1",
@@ -260,6 +281,7 @@ def test_gap9_status_explains_spine_manifest_and_published_revisions(project):
 
 
 def test_gap10_quality_and_publish_require_current_audit_and_review(project):
+    confirmed_vision(project)
     project.connection.execute("UPDATE meta SET phase='publish'")
     assert check(project, "audit")["status"] == "fail"
     assert check(project, "roundtable")["status"] == "fail"
