@@ -1,4 +1,4 @@
-# Headless planner guide (v8, 2026-10-15)
+# Planner guide (v9, 2026-10-18)
 **What a finished plan leads to.** The user's full vision is delivered for real, never a mocked or basic version. Every requirement traces from vision to code to a passing proof. Docs are generated from the plan and never stale. Workers can verify their own work from the plan alone. A final review confirms the product achieves the locked vision, while the user supervises as little as possible. Efficiency never replaces quality: ask the questions the vision genuinely needs, and never invent the user's intent.
 **Read only this guide and the user's project.** Never read Harness source or Harness design docs.
 **Recovery ladder when stuck:**
@@ -8,7 +8,7 @@
 4. Only then a bounded search.
 
 In PowerShell define `function p { uv run --no-sync --frozen --offline python -m codex_harness.core.plan_cli --workspace "$W" @args }`.
-Set `$W` to an existing project directory. Every text reply ends with the next command; replace angle-bracket values.
+Set `$W` to an existing project directory. Every text reply ends with the next action; replace angle-bracket values.
 `--json` returns one JSON object (`text`, `status`, `data`, `next`, `isError`); its **text** ends with `Next:`. Creations return `data.id`.
 For `node`/`decision`, use global `--json` before the subcommand or `--machine-json` after it: their local `--json` is input.
 `p show <node-id> [--body --test <name>]` reads node detail, links and protected test functions; named source is capped at 8 KB.
@@ -18,18 +18,20 @@ Scope alone is never a reason to reject.
 Success exits 0; input/gate/audit refusal or any failing quality check exits 2. `p status` resumes without changing truth.
 | Phase | Commands in order (`p` prefix); exit gate |
 | --- | --- |
-| align | `start --idea "..." --name "..."`; `card --vision "..." --users "..." --first-moment "..." --scope-in "..." --scope-out "..." [--assumption "..."]`; `confirm --gate align --statement "user's words"`; `advance --to expand`. Current-revision approval. |
+| align | `start --idea "..." --name "..."`; `card --vision "..." --users "..." --first-moment "..." --scope-in "..." --scope-out "..." [--assumption "..."]`; native MCP `harness_record_confirmation gate=align`; `advance --to expand`. Fresh displayed-gate/revision response. |
 | expand | `ask --question "..." [--node V1]`; `answer --id Q --text "..."`; `assume --text "..."`; `resolve-assumption --id A --confirmed --rationale "reason" --by planner` (or `--rejected`); `--by` is required: `user`, `planner` or `proxy:<name>`. `node --json "@uplifts.jsonl"`; `advance --to vision-lock`. Capture accepted/rejected/deferred ideas. |
-| vision-lock | `diagram --kind user-journey`; `confirm --gate vision-lock --statement "user's words"`; `advance --to features`. Current-revision approval. |
+| vision-lock | `diagram --kind user-journey`; native MCP `harness_record_confirmation gate=vision-lock`; `advance --to features`. Fresh displayed-gate/revision response. |
 | features | `node --json "@features.jsonl"`; `diagram --kind feature-map`; `advance --to requirements`. Features/stories mapped; no additional store gate. |
 | requirements | `node --json "@requirements.jsonl"`; `advance --to tech-stack`. Every requirement has a test descendant. |
 | tech-stack | `decision --json "@decision.json"`; `decision --id D1 --choose "<option>" --rationale "<reason>"`; `diagram --kind decision-map`; `advance --to plan`. Decisions recorded; no additional store gate. |
 | plan | `node --json "@beads.jsonl"`; `compile --template template --out manifest.json`; `diagram --kind bead-dag`; `advance --to roundtable`. Compile renders spine docs into the template and checks every listed requirement file; requirement-to-bead coverage and valid manifest. |
 | roundtable | `roundtable [--reviewer "@reviewer.json" ...] [--max-rounds 2]`; `findings`; `resolve --id F --resolution "fix/reason" [--resolved | --deferred | --rejected]` (`--deferred` for real gaps not fixed now; `--rejected` only for wrong findings); `audit --oracle oracle`; `quality`; `advance --to publish`. Open questions block exit; audit/review must match the manifest before publication. |
-| publish | `render [--out plan/docs]`; `publish`; `advance --to execute`. Every listed requirement file must exist in the template; passing current-manifest audit and successful review required; current manifest must be published. |
-| execute | `status`; `impact` after edits; `advance --to accept` only after actual workers/proofs are assessed. CLI does not execute workers; store adds no proof gate. |
+| publish | `render [--out plan/docs]`; `publish`; `worker-start --expected-revision <published_revision> --workers @workers.json`. Matching template, audit, reviews and publication required. Workers implement; the planner steers. |
+| execute | `worker-status --job-id <job-id>`; `status`; `impact` after edits; `advance --to accept` only after actual workers/integrated proofs are assessed. Product checks alone do not prove worker delivery. |
 | accept | `accept-scenarios --derive`; `accept-run --subject product --repo <dir>`; `accept-review --repo <dir>`; resolve findings; `accept --statement "actual words" --by user`. All scenarios pass at the current integrated revision, no open acceptance findings. |
 
+Native confirmation requires MCP2025-06-18, client `elicitation` capability and initialization. The server displays the full stored card and collects explicit approval, complete words and conditions; conditions block credit. Decline, cancel, timeout, disconnect or changed revision grant none. Client support is conditional, not established by source tests. CLI quotes/`--by` labels refuse with `plan-confirmation-origin-unavailable`; they cannot substitute for the native response. Plan-to-roundtable confirmation remains unchanged.
+`workers.json` is an array of exact `{bead,provider,model,effort}` objects, one per published bead, using approved existing capacity and canonical provider names. MCP equivalents are `harness_worker_start expected_revision=<revision> workers=<array>` and `harness_worker_status job_id=<id>`. Starts return one durable job per publication; reconnect/status never relaunches. Missing terminal evidence and current liveness remain unknown. No retry, install or permission expansion is implied.
 Nodes require `id`, `kind`, `title`, `text`, `parents` (id array), and `fields` (object).
 `accept-run` requires `--subject product|oracle`: only product runs prove delivery, satisfy acceptance, or permit rebind; oracle runs are scenarios verified against the reference implementation (dry run). Legacy runs without a subject are product only when `<repo>/../evidence/run.json` exists; otherwise oracle.
 Acceptance: `accept-scenarios` lists; `--input @scenarios.json` saves `{id,title,given,steps,expect}` for `first-moment` and every `scope-N`; optional `nodeIds` bind other spine nodes. Steps are shell strings or `{command,expect}`; `expect` supports `stdout`/`stderr`, `stdoutRegex`/`stderrRegex`, and `exit` (default 0). Prose-only `--derive` results are `draft`, `executable: false`: supply steps and expectations. Edits retain scenarios and mark changed node references `stale`; save reviewed scenarios to refresh them.
@@ -68,9 +70,7 @@ The oracle directory supplies every affected owned file; audit overlays protecte
 After publication, affected beads come from the published-to-current spine impact; HEAD must be the intended integration baseline.
 An integration test proves the complete user path; absent integration proof is reported explicitly. Failing modules show the first 40 output lines and a full-output artifact under `state/runs`.
 Use `remove-node --id X` only without children/references. `impact --since <manifest-revision|file>` predicts before publication; bare `impact` uses publication or the last compiled revision. After edits run `impact`, `compile`, `audit`, `quality`; return to an earlier phase and reapprove when needed.
-After vision lock, V1 edits limited to `fields.validation` and `fields.requirementFiles` keep the lock. Edits to V1 text or understanding-card fields stale the lock; `confirm --gate vision-lock` renews approval before further advance.
-For delegated proxy answers use `confirm ... --by opus-user-proxy --statement "Opus (user proxy): ..."`.
-Never label proxy words as owner approval; genuine user confirmation uses default `--by user` and the user's actual words.
+After vision lock, V1 edits limited to `fields.validation` and `fields.requirementFiles` keep the lock. Edits to V1 text or understanding-card fields stale it; native `harness_record_confirmation gate=vision-lock` renews the displayed understanding before further advance. A client-reported response is not natural-person authentication; never relabel proxy or quoted words as owner approval.
 Worked mini example: **26 CLI calls**, two beads (B depends on A). Save these files in the checkout (CLI JSON inputs use cwd).
 Create project `template/tests_cli` with `test_one.py`, `test_two.py`, `test_end_to_end.py` using unittest assertions:
 `from mini_one import inc; assert inc(2) == 3`; `from mini_two import twice; assert twice(2) == 6`; integration asserts `twice(inc(1)) == 6`.
@@ -99,17 +99,17 @@ Save `beads.jsonl`:
 Decisions may include `chosen` and `rationale`, or record them with `decision --id D1 --choose Python --rationale "Stdlib meets the scope"`.
 Save `decision.json`: `{"id":"D1","question":"Runtime?","options":[{"name":"Python","pros":"Stdlib","cons":"Requires Python"}],"recommendation":"Python","parents":["V1"]}`.
 Save `codex-reviewer.json`: `{"name":"codex-reviewer","provider":"codex","model":"gpt-6.1-sol","effort":"medium"}` and `claude-reviewer.json`: `{"name":"claude-reviewer","provider":"claude"}`.
-Run in order; replace `<Q>` with the id printed by `ask`. Example confirmations below are **proxy** confirmations only.
+Run in order; replace `<Q>` with the id printed by `ask`. At each native step, review and answer the full displayed card; no quoted CLI approval is available.
 ```powershell
 p start --idea "Increment then double" --name Mini
 p card --vision "Increment then double" --users "CLI user" --first-moment "Get 6" --scope-in "Two functions" --scope-out GUI
-p confirm --gate align --by opus-user-proxy --statement "Opus (user proxy): Confirm the supplied mini scope."
+# Native MCP: harness_record_confirmation gate=align; answer the displayed card.
 p advance --to expand
 p ask --question "Use Python stdlib?" --node V1
 p answer --id "<Q>" --text "Yes, per the supplied mini scope."
 p advance --to vision-lock
 p diagram --kind user-journey
-p confirm --gate vision-lock --by opus-user-proxy --statement "Opus (user proxy): Lock the supplied mini scope."
+# Native MCP: harness_record_confirmation gate=vision-lock; answer the displayed card.
 p advance --to features
 p node --json "@features.jsonl"
 p diagram --kind feature-map

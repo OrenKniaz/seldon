@@ -55,6 +55,8 @@ EXPECTED_TOOLS = {
     "harness_impact",
     "harness_render",
     "harness_publish",
+    "harness_worker_start",
+    "harness_worker_status",
 }
 
 
@@ -69,6 +71,359 @@ def rpc(server, method, params=None, request_id=1):
             }
         )
     )
+
+
+def native_confirmation_result(
+    server, gate, statement="Synthetic native client response", **content
+):
+    """Exercise the actual correlated wire bridge; this synthetic client is not a human."""
+    rpc(
+        server, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}}
+    )
+    server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+    outbound = rpc(
+        server,
+        "tools/call",
+        {"name": "harness_record_confirmation", "arguments": {"gate": gate}},
+        71,
+    )
+    assert outbound["method"] == "elicitation/create", outbound
+    response = server.handle_line(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": outbound["id"],
+                "result": {
+                    "action": "accept",
+                    "content": {
+                        "approve": True,
+                        "statement": statement,
+                        "conditions": "",
+                        **content,
+                    },
+                },
+            }
+        )
+    )
+    assert response["id"] == 71
+    return response["result"]
+
+
+def native_confirm(server, gate, statement="Synthetic native client response"):
+    result = native_confirmation_result(server, gate, statement)
+    assert not result["isError"], result
+    return result["content"][0]["text"]
+
+
+def begin_native(server, *, initialized=True, version="2025-06-18", capabilities=None):
+    rpc(
+        server,
+        "initialize",
+        {
+            "protocolVersion": version,
+            "capabilities": {"elicitation": {}} if capabilities is None else capabilities,
+        },
+    )
+    if initialized:
+        server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+    return rpc(
+        server,
+        "tools/call",
+        {
+            "name": "harness_record_confirmation",
+            "arguments": {"gate": "align"},
+        },
+        94,
+    )
+
+
+def answer_native(server, wire_id, *, action="accept", **content):
+    return server.handle_line(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": wire_id,
+                "result": {"action": action, **({"content": content} if content else {})},
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("case", ["no-capability", "old-version", "not-initialized", "direct-call"])
+def test_native_confirmation_requires_negotiated_ready_client(server, case):
+    start(server)
+    if case == "direct-call":
+        result = server.call_tool("harness_record_confirmation", {"gate": "align"})
+    else:
+        result = begin_native(
+            server,
+            initialized=case != "not-initialized",
+            version="2025-03-26" if case == "old-version" else "2025-06-18",
+            capabilities={} if case == "no-capability" else None,
+        )["result"]
+    assert result["isError"]
+    assert "plan-confirmation-origin-unavailable" in result["content"][0]["text"]
+    assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+    assert server._pending_confirmation is None
+
+
+@pytest.mark.parametrize("version", ["2025-06-18", "future"])
+def test_native_response_correlation_replay_and_full_words(server, version):
+    start(server)
+    outbound = begin_native(server, version=version)
+    assert outbound["method"] == "elicitation/create" and outbound["id"] != 94
+    assert server.store.status()["plan_revision"] in outbound["params"]["message"]
+    assert "Scope in:" in outbound["params"]["message"]
+    assert "default" not in outbound["params"]["requestedSchema"]["properties"]["approve"]
+    assert (
+        answer_native(server, "invented-id", approve=True, statement="Forged", conditions="")
+        is None
+    )
+    assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+    words = "Exact complete response. " + "Long native response. " * 100
+    result = answer_native(server, outbound["id"], approve=True, statement=words, conditions="")
+    assert result["id"] == 94 and not result["result"]["isError"]
+    data = result["result"]["structuredContent"]
+    assert data["state"] == "approved" and data["content"]["statement"] == words
+    assert data["provenance"] == "mcp-client-elicitation" and not data["human_identity_verified"]
+    assert (
+        answer_native(server, outbound["id"], approve=True, statement=words, conditions="") is None
+    )
+    assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 1
+    call(server, "harness_advance", to_phase="expand")
+
+
+@pytest.mark.parametrize(
+    "case", ["decline", "cancel", "conditional", "negative", "stale", "invalid"]
+)
+def test_native_nonapproval_response_never_grants_gate(server, case):
+    start(server)
+    outbound = begin_native(server)
+    content = dict(
+        approve=case != "negative", statement="Yes, but first review my conditions", conditions=""
+    )
+    if case == "conditional":
+        content["conditions"] = "First give me the reviewer digest."
+    if case == "stale":
+        node = server.store.spine().node("V1")
+        node["text"] += " New material scope."
+        server.store.upsert_node(node)
+    if case == "invalid":
+        content["verified"] = True
+    result = answer_native(
+        server,
+        outbound["id"],
+        action=case if case in {"decline", "cancel"} else "accept",
+        **({} if case in {"decline", "cancel"} else content),
+    )["result"]
+    assert result["isError"]
+    assert result["structuredContent"]["state"] != "approved"
+    if case == "conditional":
+        assert result["structuredContent"]["content"] == content
+    assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+    assert server._pending_confirmation is None
+    call(server, "harness_advance", to_phase="expand", error=True)
+
+
+@pytest.mark.parametrize("case", ["timeout", "disconnect", "client-cancel"])
+def test_native_pending_lifetime_never_promotes_missing_response(server, case):
+    start(server)
+    outbound = begin_native(server)
+    workspace = server.workspace
+    if case == "timeout":
+        server._pending_confirmation["deadline"] = -1
+        responses = server.expire_confirmation()
+        assert responses[0]["method"] == "notifications/cancelled"
+        assert responses[1]["id"] == 94 and responses[1]["result"]["isError"]
+    elif case == "disconnect":
+        server.close()
+    else:
+        assert (
+            server.handle_line(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/cancelled",
+                        "params": {"requestId": 94},
+                    }
+                )
+            )
+            is None
+        )
+    assert server._pending_confirmation is None
+    assert (
+        answer_native(server, outbound["id"], approve=True, statement="Late", conditions="") is None
+    )
+    with open_plan_store(workspace) as store:
+        assert store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+        event = store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='confirmation-responded' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert json.loads(event[0])["action"] == "cancel"
+
+
+def test_native_quoted_or_forged_tool_arguments_cannot_complete_response(server):
+    start(server)
+    for arguments in (
+        {"gate": "align", "user_statement": "Earlier words"},
+        {"gate": "align", "verified": True},
+        {"gate": "align", "response_id": "invented", "origin": "human"},
+    ):
+        result = rpc(
+            server,
+            "tools/call",
+            {
+                "name": "harness_record_confirmation",
+                "arguments": arguments,
+            },
+        )["result"]
+        assert result["isError"]
+    assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+
+
+def test_worker_mcp_start_status_reconnect_preserve_one_admission(tmp_path, monkeypatch):
+    """Real job persistence with explicit process/store doubles; no workers launched."""
+    from types import SimpleNamespace
+
+    from tests.python.core.test_planner_jobs import SourceOnlyStore
+
+    from codex_harness.core import planner_jobs
+
+    store, launches = SourceOnlyStore(tmp_path), []
+    monkeypatch.setattr(
+        planner_jobs.subprocess,
+        "Popen",
+        lambda *a, **k: (launches.append((a, k)) or SimpleNamespace(pid=321)),
+    )
+    workers = [
+        dict(bead=key, provider="codex", model="gpt-6.1-sol", effort="medium")
+        for key in store.manifest["beads"]
+    ]
+    for _ in range(2):
+        client = PlannerServer(tmp_path)
+        monkeypatch.setattr(client, "_store", lambda: store)
+        monkeypatch.setattr(
+            client,
+            "_status",
+            lambda: dict(
+                store.status(),
+                name="Source-only",
+                plan_revision=store.revision,
+                open_clarifications=0,
+                open_assumptions=0,
+            ),
+        )
+        started = rpc(
+            client,
+            "tools/call",
+            {
+                "name": "harness_worker_start",
+                "arguments": {
+                    "expected_revision": store.revision,
+                    "workers": workers,
+                    "timeout": 61,
+                    "max_parallel": 1,
+                },
+            },
+        )["result"]
+        assert not started["isError"], started
+        data = started["structuredContent"]
+        assert data["status"] == "unknown" and not data["harnessDeliveryProven"]
+        status = rpc(
+            client,
+            "tools/call",
+            {
+                "name": "harness_worker_status",
+                "arguments": {
+                    "job_id": data["jobId"],
+                },
+            },
+        )["result"]
+        assert status["structuredContent"] == data
+        assert "harness_worker_status job_id=" in status["content"][0]["text"]
+        client.close()
+    assert len(launches) == 1
+
+
+def test_native_stdio_request_response_keeps_original_tool_id(tmp_path):
+    """Actual stdio loop, deterministic wire-ID fixture, no providers or human proof."""
+    messages = [
+        dict(
+            jsonrpc="2.0",
+            id=1,
+            method="initialize",
+            params={
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"elicitation": {}},
+            },
+        ),
+        dict(jsonrpc="2.0", method="notifications/initialized"),
+        dict(
+            jsonrpc="2.0",
+            id=2,
+            method="tools/call",
+            params={
+                "name": "harness_plan_start",
+                "arguments": {"idea": "Native demo", "name": "Native demo"},
+            },
+        ),
+        dict(
+            jsonrpc="2.0",
+            id=3,
+            method="tools/call",
+            params={
+                "name": "harness_record_confirmation",
+                "arguments": {"gate": "align"},
+            },
+        ),
+        dict(
+            jsonrpc="2.0",
+            id="seldon-confirmation-fixture",
+            result={
+                "action": "accept",
+                "content": {
+                    "approve": True,
+                    "statement": "Synthetic stdio client confirms",
+                    "conditions": "",
+                },
+            },
+        ),
+        dict(
+            jsonrpc="2.0",
+            id=4,
+            method="tools/call",
+            params={
+                "name": "harness_advance",
+                "arguments": {"to_phase": "expand"},
+            },
+        ),
+    ]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            (
+                "from types import SimpleNamespace; "
+                "from codex_harness.core import mcp_planner; "
+                "mcp_planner.uuid4=lambda: SimpleNamespace(hex='fixture'); mcp_planner.main()"
+            ),
+            "--workspace",
+            str(tmp_path),
+        ],
+        input="\n".join(json.dumps(message) for message in messages) + "\n",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    replies = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [reply["id"] for reply in replies] == [1, 2, "seldon-confirmation-fixture", 3, 4]
+    assert replies[2]["method"] == "elicitation/create"
+    assert replies[3]["result"]["structuredContent"]["state"] == "approved"
+    assert not replies[4]["result"]["isError"]
 
 
 def test_mail_tools_through_line_handler_without_starting_plan(server):
@@ -349,7 +704,8 @@ def test_list_tools_and_notifications(server):
         assert "properties" in tool["inputSchema"]
         assert "required" in tool["inputSchema"]
     confirmation = next(tool for tool in tools if tool["name"] == "harness_record_confirmation")
-    assert "ONLY with the user's own words after they confirmed" in confirmation["description"]
+    assert "Requires negotiated elicitation" in confirmation["description"]
+    assert set(confirmation["inputSchema"]["properties"]) == {"gate"}
     assert server.handle_line('{"jsonrpc":"2.0","method":"notifications/initialized"}') is None
     assert rpc(server, "ping")["result"] == {}
     assert rpc(server, "unknown")["error"]["code"] == -32601
@@ -360,6 +716,8 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
 
     def run(tool_name, **args):
         seen.add(tool_name)
+        if tool_name == "harness_record_confirmation":
+            return native_confirm(server, args["gate"], args["user_statement"])
         return call(server, tool_name, **args)
 
     assert "Phase 1/11: Align" in run("harness_plan_start", idea="Split fairly", name="tip-split")
@@ -454,6 +812,8 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_reviewer_choice",
             "harness_wave_map",
             "harness_waves",
+            "harness_worker_start",
+            "harness_worker_status",
         }
     }
     decision = server.store.spine().node("D3")
@@ -476,7 +836,7 @@ def test_confirmation_missing_empty_and_stale(server):
     assert "plan-approval-required" in text and "align needs approval" in text
     assert "pending_gate: approval:align" in text
     call(server, "harness_record_confirmation", error=True, gate="align", user_statement="  ")
-    call(server, "harness_record_confirmation", gate="align", user_statement="Yes, that is right")
+    native_confirm(server, "align", "Yes, that is right")
     node = server.store.spine().node("V1")
     node["text"] += " Changed scope."
     call(server, "harness_upsert_node", node=node)
@@ -525,7 +885,7 @@ def test_malformed_lines_recover(server, line, code):
 
 def test_restart_resumes_without_overwriting_vision(server, tmp_path):
     start(server)
-    call(server, "harness_record_confirmation", gate="align", user_statement="Yes")
+    native_confirm(server, "align", "Yes")
     call(server, "harness_advance", to_phase="expand")
     before = server.store.status()
     server.close()
@@ -663,12 +1023,7 @@ def mcp_wave_plan(workspace):
         for target in PHASES[1 : PHASES.index("plan") + 1]:
             current = server._store().phase()
             if current in ("align", "vision-lock"):
-                call(
-                    server,
-                    "harness_record_confirmation",
-                    gate=current,
-                    user_statement="Synthetic earlier vision confirmation",
-                )
+                native_confirm(server, current, "Synthetic earlier vision confirmation")
             call(server, "harness_advance", to_phase=target)
         return server
     except BaseException:
@@ -789,7 +1144,7 @@ def test_mcp_wave_confirmation_refuses_without_mutation(tmp_path, arguments):
 def test_mcp_advance_confirmation_cannot_substitute_vision_gate(server, gate, target):
     start(server)
     if gate == "vision-lock":
-        call(server, "harness_record_confirmation", gate="align", user_statement="Synthetic align")
+        native_confirm(server, "align", "Synthetic align")
         call(server, "harness_advance", to_phase="expand")
         call(server, "harness_advance", to_phase="vision-lock")
     before = server.store.status()

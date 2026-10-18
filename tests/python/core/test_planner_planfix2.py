@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core import test_planner_replay_gaps
+from tests.python.core.planning_support import source_only_confirmation
 from tests.python.core.test_plan_cli import cli
 
 from codex_harness.core.mcp_planner import PlannerServer
@@ -111,9 +112,9 @@ def test_item4_created_entities_return_ids(project):
     assert project.connection.execute(
         "SELECT id FROM assumptions WHERE id=?", (assumption,)
     ).fetchone()
-    confirmation = cli(w, "confirm", "--gate", "align", "--statement", "Accepted", machine=True)[
-        "data"
-    ]["id"]
+    refused = cli(w, "confirm", "--gate", "align", "--statement", "Accepted", machine=True, code=2)
+    assert "plan-confirmation-origin-unavailable" in refused["text"]
+    confirmation = source_only_confirmation(project, "align")
     assert project.connection.execute(
         "SELECT id FROM approvals WHERE id=?", (confirmation,)
     ).fetchone()
@@ -158,7 +159,7 @@ def test_item6_metadata_keeps_lock_vision_edit_requires_reapproval(project, batc
     for gate, phase in (("align", "expand"), ("vision-lock", "features")):
         if gate == "vision-lock":
             cli(w, "advance", "--to", "vision-lock")
-        cli(w, "confirm", "--gate", gate, "--statement", "User approved")
+        source_only_confirmation(project, gate)
         cli(w, "advance", "--to", phase)
     locked = project.status()["vision_locked_revision"]
     vision = project.spine().node("V1")
@@ -178,10 +179,11 @@ def test_item6_metadata_keeps_lock_vision_edit_requires_reapproval(project, batc
     vision["text"] += " Changed vision."
     changed = edit()
     assert changed["status"]["vision_lock_stale"]
-    assert "confirm --gate vision-lock" in changed["next"] and "renewed approval" in changed["next"]
+    assert "harness_record_confirmation gate=vision-lock" in changed["next"]
+    assert "renewed client confirmation" in changed["next"]
     refused = cli(w, "advance", "--to", "tech-stack", code=2, machine=True)
     assert "plan-approval-stale" in refused["text"]
-    cli(w, "confirm", "--gate", "vision-lock", "--statement", "User accepts revised vision")
+    source_only_confirmation(project, "vision-lock")
     cli(w, "advance", "--to", "tech-stack")
     vision["fields"]["scope_in"] = "More scope"
     edit()
@@ -191,7 +193,8 @@ def test_item6_metadata_keeps_lock_vision_edit_requires_reapproval(project, batc
 
 def test_item7_cli_wording_uses_commands_mcp_keeps_tools(tmp_path):
     output = cli(tmp_path, "start", "--idea", "Tiny", "--name", "Tiny", machine=True)
-    assert "card --vision" in output["next"] and "harness_" not in json.dumps(output)
+    assert "card --vision" in output["next"]
+    assert "harness_" not in json.dumps(output).replace("harness_record_confirmation", "")
     with_server = PlannerServer(tmp_path)
     try:
         reply = with_server.call_tool("harness_plan_start", {"idea": "Tiny", "name": "Tiny"})
@@ -200,4 +203,4 @@ def test_item7_cli_wording_uses_commands_mcp_keeps_tools(tmp_path):
         with_server.close()
     error = cli(tmp_path, "impact", code=2, machine=True)
     assert "compile" in error["next"] and "audit" in error["next"]
-    assert "harness_" not in json.dumps(error)
+    assert "harness_" not in json.dumps(error).replace("harness_record_confirmation", "")

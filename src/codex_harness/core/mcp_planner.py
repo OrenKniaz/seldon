@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import queue
 import re
 import sys
+import threading
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
@@ -246,8 +250,10 @@ TOOLS = [
     ),
     _tool(
         "harness_record_confirmation",
-        "Call ONLY with the user's own words after they confirmed. Never invent approval.",
-        {"gate": {"type": "string", "enum": ["align", "vision-lock"]}, "user_statement": STRING},
+        "Ask the native MCP client to display the exact gate/revision "
+        "and collect a fresh response. "
+        "Requires negotiated elicitation; quoted tool arguments cannot approve a gate.",
+        {"gate": {"type": "string", "enum": ["align", "vision-lock"]}},
     ),
     _tool(
         "harness_advance",
@@ -337,6 +343,29 @@ TOOLS = [
             "reason": STRING,
         },
         [],
+    ),
+    _tool(
+        "harness_worker_start",
+        "Start the existing dispatcher once for the exact current publication; return a durable "
+        "job ID promptly. Workers implement the product; the planner steers. Requires permission "
+        "for the selected existing provider capacity; no automatic retry or capacity verification.",
+        {
+            "expected_revision": STRING,
+            "workers": {
+                "type": "array",
+                "minItems": 1,
+                "items": _object(dict.fromkeys(("bead", "provider", "model", "effort"), STRING)),
+            },
+            "max_parallel": {"type": "integer"},
+            "timeout": {"type": "integer"},
+        },
+        ["expected_revision", "workers"],
+    ),
+    _tool(
+        "harness_worker_status",
+        "Reattach to recorded worker-job and dispatcher evidence. Never launch or infer live "
+        "workers from an old running snapshot. Product checks alone are not worker delivery.",
+        {"job_id": STRING},
     ),
 ]
 
@@ -489,11 +518,19 @@ def show_node(store, node_id: str, *, body=False, test=None) -> dict:
 
 
 class PlannerServer:
-    def __init__(self, workspace: str | Path):
+    def __init__(self, workspace: str | Path, *, confirmation_timeout=120):
         self.workspace = Path(workspace).resolve()
         self.store = None
+        self._elicitation = False
+        self._initialized = False
+        self._pending_confirmation = None
+        self._confirmation_timeout = confirmation_timeout
 
     def close(self) -> None:
+        if self._pending_confirmation is not None:
+            self._cancel_confirmation("Client disconnected; no approval recorded")
+        self._initialized = False
+        self._elicitation = False
         if self.store is not None:
             self.store.close()
             self.store = None
@@ -603,6 +640,15 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool) -> str:
+        if name in {"harness_worker_start", "harness_worker_status"} and not error:
+            return "harness_worker_status job_id=" + self.result_data["jobId"]
+        if name == "harness_publish" and not error:
+            return (
+                "harness_worker_start expected_revision="
+                + self.result_data["id"]
+                + " workers=<explicit bead/provider/model/effort tuples>; "
+                "workers implement; the planner steers."
+            )
         if name == "harness_preflight":
             return (
                 "Correct the diagnostic input and retry harness_preflight."
@@ -901,10 +947,12 @@ class PlannerServer:
             self.result_data = {"id": "V1"}
             return views.understanding_card(**args)
         if name == "harness_record_confirmation":
-            self.result_data = {
-                "id": store.approve(args["gate"], by="user", statement=args["user_statement"])
-            }
-            return f"Recorded {args['gate']}: {views.approval_label('user')}"
+            raise ValueError(
+                "plan-confirmation-origin-unavailable: use harness_record_confirmation gate="
+                + args["gate"]
+                + " through a native MCP client with negotiated elicitation. "
+                "Quoted CLI/tool words do not establish a fresh client response."
+            )
         if name == "harness_advance":
             by, statement = "planner", None
             if "user_statement" in args or "by" in args:
@@ -1010,7 +1058,158 @@ class PlannerServer:
             )
             self.result_data = {"id": revision}
             return body
+        if name in {"harness_worker_start", "harness_worker_status"}:
+            from codex_harness.core import planner_jobs
+
+            self.result_data = (
+                planner_jobs.start_worker_job(store, **args)
+                if name == "harness_worker_start"
+                else planner_jobs.worker_job_status(self.workspace, **args)
+            )
+            return (
+                f"Worker job {self.result_data['jobId']}: {self.result_data['status']}\n"
+                + "Workers implement; the planner steers. Read original dispatch evidence before "
+                "claiming delivery. Current liveness: " + self.result_data["liveness"]
+            )
         raise ValueError(f"Unknown tool: {name}")
+
+    def _confirmation_reply(self, data, *, error=False, reason=None):
+        try:
+            status = self._status()
+        except Exception:
+            status = {
+                "name": self.workspace.name,
+                "phase": "unknown",
+                "plan_revision": "unknown",
+                "open_clarifications": "unknown",
+                "pending_gate": "status-unavailable",
+            }
+            error = True
+            reason = (
+                reason + "\n" if reason else ""
+            ) + "Canonical status unavailable; read harness_plan_status."
+        body = (
+            f"Confirmation {data['state']} for {data['gate']} / {data['plan_revision']}.\n"
+            "Origin: native MCP client response; natural-person identity is not authenticated."
+        )
+        if data.get("content") is not None:
+            body += "\nComplete submitted response:\n" + json.dumps(
+                data["content"], ensure_ascii=False
+            )
+        if reason:
+            body += "\n" + reason
+        next_step = (
+            "harness_advance to_phase=" + PHASES[PHASES.index(status["phase"]) + 1]
+            if data["state"] == "approved" and data["gate"] == status["phase"]
+            else "harness_plan_status; follow the current recorded gate."
+            if data["state"] == "approved"
+            else "Review the current understanding; retry native confirmation when ready."
+        )
+        return {
+            "isError": error,
+            "structuredContent": data,
+            "content": [{"type": "text", "text": views.response(status, body, next_step)}],
+        }
+
+    def _begin_confirmation(self, request_id, arguments):
+        from codex_harness.core.planner_confirmations import prepare_confirmation
+
+        tool = next(tool for tool in TOOLS if tool["name"] == "harness_record_confirmation")
+        _validate(arguments, tool["inputSchema"])
+        if not self._elicitation or not self._initialized:
+            raise ValueError(
+                "plan-confirmation-origin-unavailable: initialize MCP2025-06-18 with "
+                "capabilities.elicitation={}, then notifications/initialized; "
+                "a native user response is required. CLI quotes cannot replace it."
+            )
+        if self._pending_confirmation is not None:
+            raise ValueError("plan-confirmation-pending: answer or cancel the displayed request")
+        prepared = prepare_confirmation(self._store(), arguments["gate"])
+        wire_id = "seldon-confirmation-" + uuid4().hex
+        self._pending_confirmation = {
+            "wire_id": wire_id,
+            "tool_id": request_id,
+            "request": prepared,
+            "deadline": time.monotonic() + self._confirmation_timeout,
+        }
+        return {
+            "jsonrpc": "2.0",
+            "id": wire_id,
+            "method": "elicitation/create",
+            "params": {
+                "message": prepared["card"],
+                "requestedSchema": _object(
+                    {
+                        "approve": {
+                            "type": "boolean",
+                            "title": "Unconditionally approve this displayed gate and revision",
+                        },
+                        "statement": {"type": "string", "title": "Your complete response"},
+                        "conditions": {
+                            "type": "string",
+                            "title": "Conditions or changes (empty for unconditional approval)",
+                        },
+                    }
+                ),
+            },
+        }
+
+    def _finish_confirmation(self, response):
+        from codex_harness.core.planner_confirmations import complete_confirmation
+
+        pending = self._pending_confirmation
+        if pending is None or response.get("id") != pending["wire_id"]:
+            return None  # Never respond to an unknown/duplicate JSON-RPC response.
+        if time.monotonic() >= pending["deadline"]:
+            return self._cancel_confirmation("Confirmation timed out; no approval recorded")
+        self._pending_confirmation = None
+        result = response.get("result")
+        try:
+            if (
+                "error" in response
+                or not isinstance(result, dict)
+                or set(result) - {"action", "content"}
+            ):
+                raise ValueError("plan-confirmation-response-invalid")
+            outcome = complete_confirmation(
+                self._store(),
+                pending["request"]["request_id"],
+                result.get("action"),
+                result.get("content"),
+            )
+            reply = self._confirmation_reply(outcome, error=outcome["state"] != "approved")
+        except (ValueError, KeyError) as error:
+            outcome = complete_confirmation(
+                self._store(), pending["request"]["request_id"], "cancel"
+            )
+            reply = self._confirmation_reply(outcome, error=True, reason=str(error))
+        return {"jsonrpc": "2.0", "id": pending["tool_id"], "result": reply}
+
+    def _cancel_confirmation(self, reason):
+        from codex_harness.core.planner_confirmations import complete_confirmation
+
+        pending, self._pending_confirmation = self._pending_confirmation, None
+        outcome = complete_confirmation(self._store(), pending["request"]["request_id"], "cancel")
+        return {
+            "jsonrpc": "2.0",
+            "id": pending["tool_id"],
+            "result": self._confirmation_reply(outcome, error=True, reason=reason),
+        }
+
+    def expire_confirmation(self):
+        """Bound the one pending native interaction without blocking ordinary MCP calls."""
+        pending = self._pending_confirmation
+        if pending is None or time.monotonic() < pending["deadline"]:
+            return []
+        cancelled = {
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": pending["wire_id"], "reason": "Confirmation timed out"},
+        }
+        return [
+            cancelled,
+            self._cancel_confirmation("Confirmation timed out; no approval recorded"),
+        ]
 
     def handle_line(self, line: str) -> dict | None:
         try:
@@ -1019,6 +1218,8 @@ class PlannerServer:
             return _error(None, -32700, "Parse error")
         if not isinstance(request, dict):
             return _error(None, -32600, "Invalid Request")
+        if request.get("jsonrpc") == "2.0" and "method" not in request and "id" in request:
+            return self._finish_confirmation(request)
         request_id = request.get("id")
         if (
             request.get("jsonrpc") != "2.0"
@@ -1027,6 +1228,17 @@ class PlannerServer:
         ):
             return _error(None, -32600, "Invalid Request")
         if "id" not in request:
+            if request["method"] == "notifications/initialized":
+                self._initialized = self._elicitation
+            elif request["method"] == "notifications/cancelled":
+                pending = self._pending_confirmation
+                parameters = request.get("params", {})
+                if (
+                    pending is not None
+                    and isinstance(parameters, dict)
+                    and parameters.get("requestId") in (pending["tool_id"], pending["wire_id"])
+                ):
+                    self._cancel_confirmation("Client cancelled; no approval recorded")
             # Notifications never get a response and never invoke mutating tools.
             return None
         params = request.get("params", {})
@@ -1034,9 +1246,21 @@ class PlannerServer:
             return _error(request_id, -32602, "Invalid params")
         method = request["method"]
         if method == "initialize":
+            if self._pending_confirmation is not None:
+                return _error(
+                    request_id, -32600, "Cancel the pending confirmation before reinitializing"
+                )
             version = params.get("protocolVersion")
+            negotiated_version = version if version in PROTOCOL_VERSIONS else "2025-06-18"
+            capabilities = params.get("capabilities", {})
+            self._elicitation = (
+                negotiated_version == "2025-06-18"
+                and isinstance(capabilities, dict)
+                and isinstance(capabilities.get("elicitation"), dict)
+            )
+            self._initialized = False
             result = {
-                "protocolVersion": version if version in PROTOCOL_VERSIONS else "2025-06-18",
+                "protocolVersion": negotiated_version,
                 "serverInfo": {"name": "harness-planner", "version": "1.0.0"},
                 "capabilities": {"tools": {}},
             }
@@ -1045,6 +1269,30 @@ class PlannerServer:
         elif method == "tools/list":
             result = {"tools": TOOLS}
         elif method == "tools/call":
+            if params.get("name") == "harness_record_confirmation":
+                try:
+                    return self._begin_confirmation(request_id, params.get("arguments", {}))
+                except (ValueError, KeyError) as error:
+                    status = self._status()
+                    code = getattr(error, "code", "tool-input-or-operation-error")
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "isError": True,
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": views.response(
+                                        status,
+                                        f"{code}: {error}",
+                                        "Review the current gate; use a native client "
+                                        "with negotiated elicitation.",
+                                    ),
+                                }
+                            ],
+                        },
+                    }
             result = self.call_tool(params.get("name"), params.get("arguments", {}))
         else:
             return _error(request_id, -32601, "Method not found")
@@ -1067,7 +1315,29 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     server = PlannerServer(args.workspace)
     try:
-        for line in sys.stdin:
+        # Only stdin reading moves off-thread; all store/protocol mutation stays
+        # on this thread. A queue timeout bounds one pending user interaction.
+        incoming = queue.Queue()
+
+        def read_lines():
+            try:
+                for line in sys.stdin:
+                    incoming.put(line)
+            finally:
+                incoming.put(None)
+
+        threading.Thread(target=read_lines, daemon=True).start()
+        while True:
+            for response in server.expire_confirmation():
+                print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
+            pending = server._pending_confirmation
+            wait = max(0.01, pending["deadline"] - time.monotonic()) if pending else None
+            try:
+                line = incoming.get(timeout=wait)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
             response = server.handle_line(line)
             if response is not None:
                 print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)

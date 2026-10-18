@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.python.core.planning_support import source_only_confirmation
 from tests.python.core.test_plan_store import draft_inputs, draft_intake, mock_catalog, mock_choice
 from tests.python.core.test_preflight import inject_mock_discovery
 
@@ -122,6 +123,65 @@ def test_next_chain_once_in_machine_and_first_command_in_text(started):
     assert " then " in output["next"]
     text = cli(started, "status")
     assert text.rstrip().splitlines()[-1] == "Next: " + output["next"].split(" then ", 1)[0]
+
+
+def test_worker_cli_routes_exact_tuple_and_reattaches_without_launch(tmp_path, monkeypatch, capsys):
+    """Real CLI routing/job records with explicit store/Popen doubles, no providers."""
+    from types import SimpleNamespace
+
+    from tests.python.core.test_planner_jobs import SourceOnlyStore
+
+    from codex_harness.core import plan_cli, planner_jobs
+
+    store, launches = SourceOnlyStore(tmp_path), []
+    server = PlannerServer(tmp_path)
+    monkeypatch.setattr(server, "_store", lambda: store)
+    monkeypatch.setattr(
+        server,
+        "_status",
+        lambda: dict(
+            store.status(),
+            name="Source-only",
+            plan_revision=store.revision,
+            open_clarifications=0,
+            open_assumptions=0,
+            publication={"up_to_date": True},
+        ),
+    )
+    monkeypatch.setattr(plan_cli, "PlannerServer", lambda path: server)
+    monkeypatch.setattr(
+        planner_jobs.subprocess,
+        "Popen",
+        lambda *a, **k: (launches.append((a, k)) or SimpleNamespace(pid=456)),
+    )
+    workers = [
+        dict(bead=key, provider="codex", model="gpt-6.1-sol", effort="medium")
+        for key in store.manifest["beads"]
+    ]
+    prefix = ["--workspace", str(tmp_path), "--json"]
+    assert (
+        main(
+            [
+                *prefix,
+                "worker-start",
+                "--expected-revision",
+                store.revision,
+                "--workers",
+                json.dumps(workers),
+                "--max-parallel",
+                "1",
+                "--timeout",
+                "45",
+            ]
+        )
+        == 0
+    )
+    started = json.loads(capsys.readouterr().out)
+    assert started["data"]["options"] == dict(workers=workers, maxParallel=1, timeout=45)
+    assert "worker-status --job-id " + store.revision in started["next"]
+    assert main([*prefix, "worker-status", "--job-id", store.revision]) == 0
+    reattached = json.loads(capsys.readouterr().out)
+    assert reattached["data"] == started["data"] and len(launches) == 1
 
 
 def test_cli_mcp_sqlite_reopen_and_chat_draft_roundtrip(tmp_path):
@@ -268,10 +328,20 @@ def test_guide_example_stops_at_synthetic_review_gate(tmp_path):
     (oracle / "mini_two.py").write_text(
         "from mini_one import inc\ndef twice(n): return 2 * inc(n)\n", encoding="utf-8"
     )
-    commands = re.findall(r"^p (.+)$", guide, re.M)
+    commands = re.findall(
+        r"^(?:p (.+)|# Native MCP: harness_record_confirmation gate=(align|vision-lock).*)$",
+        guide,
+        re.M,
+    )
     assert len(commands) == 26
     question = None
-    for line in commands:
+    for line, gate in commands:
+        if gate:
+            # Native forms are represented by the shared explicit source-only
+            # store fixture; this CLI guide replay never claims a human response.
+            with open_plan_store(workspace) as store:
+                source_only_confirmation(store, gate)
+            continue
         args = shlex.split(line.replace("<Q>", question or "<Q>"))
         if args[0] == "roundtable":
             args += ["--test-only-review-output", str(tmp_path / "response.json")]
@@ -335,8 +405,8 @@ def test_refused_gates_next_steps_and_attribution(started):
         "--scope-out",
         "GUI",
     )
-    assert "confirm --gate align" in cli(workspace, "status").splitlines()[-1]
-    cli(
+    assert "harness_record_confirmation gate=align" in cli(workspace, "status").splitlines()[-1]
+    refusal = cli(
         workspace,
         "confirm",
         "--gate",
@@ -345,10 +415,15 @@ def test_refused_gates_next_steps_and_attribution(started):
         "opus-user-proxy",
         "--statement",
         "Opus (user proxy): Delegated test approval.",
+        code=2,
     )
+    assert "plan-confirmation-origin-unavailable" in refusal
+    with open_plan_store(workspace) as store:
+        assert store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+        source_only_confirmation(store, "align")
     assert "advance --to expand" in cli(workspace, "status").splitlines()[-1]
     with sqlite3.connect(workspace / ".codex-harness/plan.sqlite3") as db:
-        assert db.execute('SELECT "by" FROM approvals').fetchone()[0] == "opus-user-proxy"
+        assert db.execute('SELECT "by" FROM approvals').fetchone()[0] == "mcp-client-elicitation"
     cli(workspace, "node", "--json", json.dumps(node("F1")))
     assert "plan-approval-stale" in cli(workspace, "advance", "--to", "expand", code=2)
     assert "Compile a manifest before impact" in cli(workspace, "impact", code=2)
@@ -400,7 +475,8 @@ def test_questions_assumptions_render_and_findings(started):
         "--by",
         "planner",
     )
-    cli(workspace, "confirm", "--gate", "align", "--statement", "Test operator accepts.")
+    with open_plan_store(workspace) as store:
+        source_only_confirmation(store, "align")
     cli(workspace, "advance", "--to", "expand")
     cli(workspace, "render", "--out", "views")
     assert (workspace / "views/VISION.md").is_file()
