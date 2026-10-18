@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.python.core.planning_support import source_only_confirmation
 
 from codex_harness.core import roundtable
 from codex_harness.core.plan_quality import quality_report
@@ -229,7 +230,7 @@ def store(tmp_path):
         while store.phase() != "roundtable":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                store.approve(phase, by="operator", statement="I approve this exact revision")
+                source_only_confirmation(store, phase, statement="I approve this exact revision")
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
         yield store
 

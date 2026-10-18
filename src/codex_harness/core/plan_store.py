@@ -1264,24 +1264,46 @@ class PlanStore:
             vision = _json(spine.node(spine.ids("vision")[0]))
             self.connection.execute("UPDATE meta SET locked_vision_json=?", (vision,))
             self.connection.execute("UPDATE meta SET vision_lock_stale=0")
-            if self._meta()["vision_locked_revision"]:
+            if self._meta()["vision_locked_revision"] or PHASES.index(self.phase()) > PHASES.index(
+                "vision-lock"
+            ):
                 self.connection.execute("UPDATE meta SET vision_locked_revision=?", (revision,))
         return item_id
 
     def approve(self, gate: str, *, by: str, statement: str) -> str:
-        with self._transaction():
-            return self._approve(gate, by, statement)
+        if gate not in ("align", "vision-lock"):
+            raise PlanStoreError("plan-gate-invalid", gate)
+        _nonempty(by, "by")
+        _nonempty(statement, "statement")
+        raise PlanStoreError(
+            "plan-confirmation-origin-unavailable",
+            "Supplied words cannot approve a gate. Use a client supporting native MCP elicitation.",
+        )
 
-    def _check_approval(self, gate: str, revision: str) -> None:
+    def _approval_credit(self, gate: str, revision: str) -> dict | None:
+        from codex_harness.core.planner_confirmations import approval_credit
+
         if gate == "vision-lock" and self._meta()["vision_locked_revision"]:
             if self._meta()["vision_lock_stale"]:
-                raise PlanStoreError("plan-approval-stale", "vision-lock needs renewed approval")
+                return None
+            revision = self._meta()["vision_locked_revision"]
+        return approval_credit(self, gate, revision)
+
+    def _check_approval(self, gate: str, revision: str) -> None:
+        if self._approval_credit(gate, revision):
             return
+        if gate == "vision-lock" and self._meta()["vision_lock_stale"]:
+            raise PlanStoreError("plan-approval-stale", "vision-lock needs renewed approval")
         rows = self.connection.execute(
             "SELECT plan_revision FROM approvals WHERE gate=?", (gate,)
         ).fetchall()
-        if any(row["plan_revision"] == revision for row in rows):
-            return
+        if any(row["plan_revision"] == revision for row in rows) or (
+            gate == "vision-lock" and self._meta()["vision_locked_revision"]
+        ):
+            raise PlanStoreError(
+                "plan-confirmation-origin-unavailable",
+                "Historical supplied words remain recorded; obtain fresh native confirmation.",
+            )
         code = "plan-approval-stale" if rows else "plan-approval-required"
         raise PlanStoreError(code, f"{gate} needs approval of {revision}")
 
@@ -1538,8 +1560,7 @@ class PlanStore:
     def _check_publish(self) -> None:
         from codex_harness.core.roundtable import findings
 
-        if self._meta()["vision_lock_stale"]:
-            self._check_approval("vision-lock", self._revision())
+        self._check_approval("vision-lock", self._revision())
         if any(row.get("stage", "roundtable") != "readiness" for row in findings(self, "open")):
             raise PlanStoreError("plan-findings-open", "Resolve open roundtable findings")
         if self._open("clarifications"):
@@ -1558,14 +1579,12 @@ class PlanStore:
                 )
             revision = self._revision()
             if target > index:
-                if index > PHASES.index("vision-lock") and self._meta()["vision_lock_stale"]:
-                    raise PlanStoreError(
-                        "plan-approval-stale", "vision-lock needs renewed approval"
-                    )
+                if index > PHASES.index("vision-lock"):
+                    self._check_approval("vision-lock", revision)
                 spine = Spine(self._data())
                 if current in ("align", "vision-lock"):
                     if statement is not None:
-                        self._approve(current, by, statement)
+                        self.approve(current, by=by, statement=statement)
                     self._check_approval(current, revision)
                 if current == "vision-lock":
                     self.connection.execute("UPDATE meta SET vision_locked_revision=?", (revision,))
@@ -2247,6 +2266,26 @@ class PlanStore:
                 "accept": "acceptance:scenarios-review-approval",
             }.get(meta["phase"])
             revision = self._revision()
+            approval_gate = (
+                "align"
+                if meta["phase"] == "align"
+                else "vision-lock"
+                if index >= PHASES.index("vision-lock")
+                else None
+            )
+            credit = self._approval_credit(approval_gate, revision) if approval_gate else None
+            approval = (
+                None
+                if not approval_gate
+                else {
+                    "gate": approval_gate,
+                    "granted": bool(credit),
+                    "origin": "mcp-client-elicitation" if credit else "unverified-or-unavailable",
+                    "approval_id": credit["id"] if credit else None,
+                    "plan_revision": credit["plan_revision"] if credit else revision,
+                    "human_identity_verified": False,
+                }
+            )
             current_publication = self.manifest_revision()
             up_to_date = self.publication_current(current_publication)
             level = self.proof_level(current_publication)
@@ -2259,7 +2298,7 @@ class PlanStore:
                 and self.successful_reviews(current_publication)
             ):
                 pending = None
-            if meta["vision_lock_stale"] and index > PHASES.index("vision-lock"):
+            if index > PHASES.index("vision-lock") and not credit:
                 pending = "approval:vision-lock"
             acceptance = acceptance_status(self)
             open_findings, open_members = 0, 0
@@ -2273,11 +2312,12 @@ class PlanStore:
                     f"SELECT count(DISTINCT {cluster_key}), count(*) FROM review_findings "
                     "WHERE status='open'"
                 ).fetchone()
-            if meta["phase"] == "accept" and acceptance["accepted"]:
+            if meta["phase"] == "accept" and credit and acceptance["accepted"]:
                 pending = None
             return {
                 **meta,
                 "plan_revision": revision,
+                "approval": approval,
                 "spine_revision": revision,
                 "manifest_revision": current_publication,
                 "proofLevel": level,

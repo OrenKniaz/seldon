@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.python.core.planning_support import source_only_confirmation
 
 from codex_harness.core.plan_store import PlanStoreError, open_plan_store
 from codex_harness.core.planner_confirmations import complete_confirmation, prepare_confirmation
@@ -101,8 +102,8 @@ def test_stale_card_cannot_grant_gate_credit(store, change):
         node["text"] += " Changed scope."
         store.upsert_node(node)
     elif change in ("gate", "phase-roundtrip"):
-        # Historical supplied approval is setup, not native-user evidence.
-        store.advance("expand", by="operator", statement="Legacy setup")
+        source_only_confirmation(store, "align")
+        store.advance("expand", by="planner")
         if change == "gate":
             store.advance("vision-lock", by="planner")
         else:
@@ -187,3 +188,55 @@ def test_response_and_approval_commit_atomically(store, monkeypatch):
         store.connection.execute("SELECT count(*) FROM events WHERE kind='approved'").fetchone()[0]
         == 0
     )
+
+
+@pytest.mark.parametrize("action", ["pending", "conditional", "decline", "cancel"])
+def test_new_display_cannot_fall_back_to_prior_native_credit(store, action):
+    source_only_confirmation(store, "align")
+    assert store.status()["approval"]["granted"]
+    request = prepare_confirmation(store, "align")
+    if action == "conditional":
+        complete_confirmation(
+            store,
+            request["request_id"],
+            "accept",
+            answer(
+                statement="Approve this, but first show the reviewer digest.",
+                conditions="First show the reviewer digest.",
+            ),
+        )
+    elif action != "pending":
+        complete_confirmation(store, request["request_id"], action)
+    assert not store.status()["approval"]["granted"]
+    with pytest.raises(PlanStoreError):
+        store.advance("expand", by="planner")
+    assert len(approvals(store)) == 1
+
+
+def test_later_phase_vision_renewal_preserves_scope_conditions_and_evidence(store):
+    from tests.python.core.planning_support import source_only_vision_lock
+
+    source_only_vision_lock(store)
+    store.advance("features", by="planner")
+    store.advance("requirements", by="planner")
+    node = store.spine().node("V1")
+    node["text"] += " Additional scope."
+    store.upsert_node(node)
+    request = prepare_confirmation(store, "vision-lock")
+    assert request["phase"] == "requirements"
+    assert "Renew vision lock during requirements" in request["card"]
+    conditional = answer(
+        statement="Yes. But first show the digest.\n", conditions="But first show the digest.\n"
+    )
+    result = complete_confirmation(store, request["request_id"], "accept", conditional)
+    assert result["content"] == conditional and result["state"] == "conditional"
+    assert not store.status()["approval"]["granted"]
+    with pytest.raises(PlanStoreError):
+        store.advance("tech-stack", by="planner")
+    before = store.spine().to_dict()
+    source_only_confirmation(
+        store, "vision-lock", statement="I now approve the full displayed scope."
+    )
+    assert store.spine().to_dict() == before
+    store.advance("tech-stack", by="planner")
+    assert store.status()["approval"]["granted"]

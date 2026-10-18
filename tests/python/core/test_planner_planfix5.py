@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core import test_planner_replay_gaps
+from tests.python.core.planning_support import source_only_vision_lock
 from tests.python.core.test_plan_cli import cli
 from tests.python.core.test_planner_replay_gaps import review
 
@@ -22,7 +23,7 @@ def check(store, name):
 
 
 def lock(store):
-    store.approve("vision-lock", by="planner", statement="Test fixture vision")
+    source_only_vision_lock(store, statement="Test fixture vision")
 
 
 def scenarios(store):

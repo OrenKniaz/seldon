@@ -11,7 +11,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import publication_evidence
+from tests.python.core.planning_support import publication_evidence, source_only_confirmation
 
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.plan_store import PHASES, PlanStore
@@ -335,7 +335,7 @@ def test_snapshot_canonical_readers_and_dispatcher_shape(tmp_path):
         while store.phase() != "publish":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                store.approve(phase, by="operator", statement="Confirmed")
+                source_only_confirmation(store, phase, statement="Confirmed")
             if phase == "roundtable":
                 publication_evidence(store)
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
@@ -407,7 +407,7 @@ def test_snapshot_canonical_readers_and_dispatcher_shape(tmp_path):
     ]
     assert plan["phases"][2]["label"] == "Vision Lock"
     history = {item["phase"]: item for item in plan["phaseHistory"]}
-    assert history["align"]["approvedBy"] == "operator"
+    assert history["align"]["approvedBy"] == "mcp-client-elicitation"
     assert history["align"]["isProxy"] is False
     assert history["align"]["passedAt"]
     assert history["align"]["evidence"] == "Confirmed"
@@ -515,7 +515,7 @@ def test_republished_revision_selects_canonical_current_run(tmp_path):
         while store.phase() != "publish":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                store.approve(phase, by="operator", statement="Confirmed")
+                source_only_confirmation(store, phase, statement="Confirmed")
             if phase == "roundtable":
                 publication_evidence(store)
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
@@ -967,10 +967,10 @@ def test_canonical_acceptance_run_reaches_read_only_snapshot(tmp_path, subject):
             scope_in=[],
         )
         store.upsert_node(vision)
-        store.approve("align", by="operator", statement="Confirmed")
+        source_only_confirmation(store, "align", statement="Confirmed")
         store.advance("expand", by="planner")
         store.advance("vision-lock", by="planner")
-        store.approve("vision-lock", by="operator", statement="Confirmed")
+        source_only_confirmation(store, "vision-lock", statement="Confirmed")
         run = run_acceptance(store, repo, subject=subject)
         expected = store.status()["acceptance"]
         defined_steps = store.acceptance_scenarios()[0]["steps"]
@@ -1080,8 +1080,21 @@ def test_timeline_absolute_and_relative_dependency_path(tmp_path):
 def test_phase_history_proxy_and_empty_events(tmp_path):
     with PlanStore(tmp_path) as store:
         store.import_spine(FIXTURE)
-        store.approve("align", by="user-proxy", statement="Scope agreed by proxy")
-        store.advance("expand", by="planner")
+        # Reconstruct a historical supplied-words row/event solely for projection.
+        # It must remain attributable as originally recorded and earns no fresh credit.
+        with store._transaction():
+            store._approve("align", "user-proxy", "Scope agreed by proxy")
+            store.connection.execute("UPDATE meta SET phase='expand'")
+            store._event(
+                "phase-advanced",
+                {
+                    "from": "align",
+                    "to": "expand",
+                    "by": "planner",
+                    "statement": None,
+                    "plan_revision": store._revision(),
+                },
+            )
     before = _mtimes(tmp_path)
     history = snapshot(workspace=tmp_path)["plan"]["phaseHistory"]
     assert _mtimes(tmp_path) == before

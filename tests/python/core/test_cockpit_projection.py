@@ -3,7 +3,11 @@
 import json
 
 import pytest
-from tests.python.core.planning_support import source_only_publication
+from tests.python.core.planning_support import (
+    source_only_confirmation,
+    source_only_publication,
+    source_only_vision_lock,
+)
 from tests.python.core.test_plan_store import draft_inputs
 
 from codex_harness.core import status_api
@@ -96,7 +100,7 @@ def publish_local_fixture(store, root):
         while store.phase() != "publish":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                store.approve(phase, by="user", statement="Local fixture confirmation")
+                source_only_confirmation(store, phase, statement="Local fixture confirmation")
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
         return store.publish(by="planner", export_dir=store.workspace / "plan")
 
@@ -276,7 +280,7 @@ def scenario_store(tmp_path):
                 nodeIds=["X2"],
             )
         )
-        store.approve("vision-lock", by="user", statement="Fixture records this vision")
+        source_only_vision_lock(store, statement="Fixture records this vision")
         store.save_acceptance_scenarios(derive_scenarios(store.locked_acceptance_spine()))
         yield store, repo
 
@@ -383,7 +387,7 @@ def test_recorded_acceptance_and_no_decisions_do_not_become_verified_or_ready(
     with PlanStore(tmp_path) as store:
         store.upsert_node(node("V1", "vision", []))
         store.upsert_node(node("F1", "feature", ["V1"]))
-        store.approve("align", by="user", statement="Recorded fixture words")
+        source_only_confirmation(store, "align", statement="Recorded fixture words")
         store.advance("expand", by="planner")
     canonical_plan = status_api._plan
     recorded = dict(

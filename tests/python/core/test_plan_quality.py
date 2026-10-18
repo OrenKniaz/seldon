@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import publication_evidence, source_controller_roundtable
+from tests.python.core.planning_support import (
+    publication_evidence,
+    source_controller_roundtable,
+    source_only_confirmation,
+)
 
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PHASES, open_plan_store
@@ -45,7 +49,7 @@ def advance(store, target):
     while PHASES.index(store.phase()) < PHASES.index(target):
         current = store.phase()
         if current in ("align", "vision-lock"):
-            store.approve(current, by="operator", statement="I approve this exact understanding")
+            source_only_confirmation(store, current, statement="I approve this exact understanding")
         if current == "roundtable":
             publication_evidence(store)
         store.advance(PHASES[PHASES.index(current) + 1], by="planner")
