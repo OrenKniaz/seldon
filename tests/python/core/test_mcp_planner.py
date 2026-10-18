@@ -115,7 +115,9 @@ def native_confirm(server, gate, statement="Synthetic native client response"):
     return result["content"][0]["text"]
 
 
-def begin_native(server, *, initialized=True, version="2025-06-18", capabilities=None):
+def begin_native(
+    server, *, gate="align", initialized=True, version="2025-06-18", capabilities=None
+):
     rpc(
         server,
         "initialize",
@@ -131,7 +133,7 @@ def begin_native(server, *, initialized=True, version="2025-06-18", capabilities
         "tools/call",
         {
             "name": "harness_record_confirmation",
-            "arguments": {"gate": "align"},
+            "arguments": {"gate": gate},
         },
         94,
     )
@@ -191,6 +193,79 @@ def test_native_response_correlation_replay_and_full_words(server, version):
     )
     assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 1
     call(server, "harness_advance", to_phase="expand")
+
+
+@pytest.mark.parametrize("change", ["metadata", "changed-vision", "pending", "conditional"])
+def test_native_status_uses_current_credit_and_distinguishes_history(server, change):
+    """Protocol -> real store -> chat status; no providers or human identity proof."""
+    start(server)
+    native_confirm(server, "align")
+    call(server, "harness_advance", to_phase="expand")
+    call(server, "harness_advance", to_phase="vision-lock")
+    native_confirm(server, "vision-lock", "Synthetic native vision confirmation")
+    call(server, "harness_advance", to_phase="features")
+    original = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
+    original_text = original["content"][0]["text"]
+    assert original["structuredContent"]["approval"]["granted"]
+    assert "Current vision-lock approval: granted" in original_text
+    assert "native MCP client-reported response" in original_text
+    assert "natural-person identity is not authenticated" in original_text
+    assert "approved by proxy (mcp-client-elicitation)" not in original_text
+    assert "Vision lock: locked vision" in original_text
+
+    if change in {"metadata", "changed-vision"}:
+        node = server.store.spine().node("V1")
+        if change == "metadata":
+            node["fields"]["validation"] = ["-B", "-m", "unittest", "discover"]
+        else:
+            node["text"] += " A new material user outcome."
+        server.store.upsert_node(node)
+    else:
+        outbound = begin_native(server, gate="vision-lock")
+        assert outbound["method"] == "elicitation/create"
+        if change == "conditional":
+            answer_native(
+                server,
+                outbound["id"],
+                approve=True,
+                statement="Before approval, review",
+                conditions="First show the findings digest.",
+            )
+    current = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
+    status, text = current["structuredContent"], current["content"][0]["text"]
+    if change == "metadata":
+        assert status["approval"]["granted"] and not status["vision_lock_stale"]
+        assert "Vision lock: locked vision" in text
+    else:
+        assert not status["approval"]["granted"]
+        assert status["pending_gate"] == "approval:vision-lock"
+        assert "Current vision-lock approval: not granted" in text
+        assert "Vision lock: not currently granted" in text
+        assert "Vision lock: locked vision" not in text
+        assert "harness_record_confirmation gate=vision-lock" in text
+        if change != "changed-vision":
+            # Request revocation is distinct from a material content edit.
+            assert not status["vision_lock_stale"]
+    assert "Historical vision-lock record (not current approval credit)" in text
+    assert "Historical statement: Synthetic native vision confirmation" in text
+
+
+def test_native_status_keeps_legacy_statement_without_approval_credit(server):
+    start(server)
+    native_confirm(server, "align")
+    call(server, "harness_advance", to_phase="expand")
+    call(server, "harness_advance", to_phase="vision-lock")
+    # Explicit legacy fixture: a historical row is not a native client response.
+    with server.store._transaction():
+        server.store._approve("vision-lock", "proxy:historical", "Historical words remain intact")
+    result = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
+    status, text = result["structuredContent"], result["content"][0]["text"]
+    assert not status["approval"]["granted"]
+    assert "Current vision-lock approval: not granted" in text
+    assert "Vision lock: locked vision" not in text
+    assert "recorded by proxy:historical" in text
+    assert "Historical statement: Historical words remain intact" in text
+    assert "approved by you" not in text and "approved by proxy" not in text
 
 
 @pytest.mark.parametrize(
