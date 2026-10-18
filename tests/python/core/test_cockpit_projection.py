@@ -1,8 +1,9 @@
-"""Optional cockpit facts from canonical disposable stores; no providers or UI proof."""
+"""Source-only cockpit mechanics from disposable stores; no providers or UI proof."""
 
 import json
 
 import pytest
+from tests.python.core.planning_support import source_only_publication
 from tests.python.core.test_plan_store import draft_inputs
 
 from codex_harness.core import status_api
@@ -34,7 +35,7 @@ def tree(root):
 
 
 def publish_local_fixture(store, root):
-    """Real publication with local red/green commands and explicitly injected review responses."""
+    """Source-only publication mechanics with real red/green proof and injected reviews."""
     store.upsert_node(
         node(
             "V1",
@@ -89,12 +90,15 @@ def publish_local_fixture(store, root):
         runner=lambda *args: (0, "[]"),
         executable_for=lambda provider: provider,
     )
-    while store.phase() != "publish":
-        phase = store.phase()
-        if phase in ("align", "vision-lock"):
-            store.approve(phase, by="user", statement="Local fixture confirmation")
-        store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
-    return store.publish(by="planner", export_dir=store.workspace / "plan")
+    # The existing evidence double asserts passing audit, mocked review rows and
+    # no successful real review; all other publication guards remain active.
+    with source_only_publication():
+        while store.phase() != "publish":
+            phase = store.phase()
+            if phase in ("align", "vision-lock"):
+                store.approve(phase, by="user", statement="Local fixture confirmation")
+            store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
+        return store.publish(by="planner", export_dir=store.workspace / "plan")
 
 
 def test_unbound_or_stale_run_is_not_current_cockpit_blocking_or_crew(tmp_path):
