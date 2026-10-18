@@ -65,8 +65,8 @@ def test_show_body_budget_and_mcp_read_only(project):
         )
         assert not result["isError"], result
         assert result["content"][0]["text"].endswith(
-            "Next: Your call: review the understanding, then give your actual confirmation words "
-            "for align."
+            "Next: harness_record_confirmation gate=align; review the displayed understanding "
+            "and answer the native client form."
         )
         files = result["structuredContent"]["testFiles"]
         assert sum(len(file.get("body", "").encode("utf-8")) for file in files) <= 8192
@@ -96,8 +96,8 @@ def test_nodes_filter_and_mcp_parity(project):
         reply = server.call_tool("harness_nodes", {"kind": "requirement"})
         assert reply["structuredContent"] == result["data"]
         assert reply["content"][0]["text"].endswith(
-            "Next: Your call: review the understanding, then give your actual confirmation words "
-            "for align."
+            "Next: harness_record_confirmation gate=align; review the displayed understanding "
+            "and answer the native client form."
         )
     finally:
         server.close()
