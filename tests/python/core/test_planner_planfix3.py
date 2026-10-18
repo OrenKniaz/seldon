@@ -35,6 +35,7 @@ def test_compile_materializes_and_binds_docs(project):
 
 
 def test_missing_requirement_compile_audit_and_publish_refuse(project):
+    test_planner_replay_gaps.confirmed_vision(project)
     vision = project.spine().node("V1")
     vision["fields"]["requirementFiles"].append("absent.py")
     project.upsert_node(vision)
@@ -59,6 +60,7 @@ def test_missing_requirement_compile_audit_and_publish_refuse(project):
 
 
 def test_publish_rechecks_deleted_doc(project):
+    test_planner_replay_gaps.confirmed_vision(project)
     project.compile_template(project.workspace / "template")
     (project.workspace / "template/PLAN.md").unlink()
     project.connection.execute("UPDATE meta SET phase='publish'")
@@ -119,6 +121,7 @@ def test_dossier_complete_test_bodies_and_deterministic_shard_budget(project):
 
 
 def test_rendered_docs_compile_audit_review_publish_path(project):
+    test_planner_replay_gaps.confirmed_vision(project)
     for name in render_markdown(project.spine()):
         (project.workspace / "template" / name).unlink()
     cli(project.workspace, "compile", "--template", "template", "--out", "manifest.json")
