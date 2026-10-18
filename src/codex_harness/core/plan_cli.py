@@ -83,8 +83,8 @@ def next_command(server: PlannerServer, status: dict) -> str:
     store = server._store()
     if status.get("vision_lock_stale"):
         return (
-            cmd('confirm --gate vision-lock --statement "<renewed user approval>"')
-            + " (vision changed; renewed approval required)"
+            "Use native MCP harness_record_confirmation gate=vision-lock "
+            "(vision changed; renewed client confirmation required)"
         )
     if phase == "tech-stack":
         for key in store.spine().ids("decision"):
@@ -99,13 +99,10 @@ def next_command(server: PlannerServer, status: dict) -> str:
         else cmd("status")
     )
     if gate in ("approval:align", "approval:vision-lock"):
-        approved = store.connection.execute(
-            "SELECT 1 FROM approvals WHERE gate=? AND plan_revision=?",
-            (phase, status["plan_revision"]),
-        ).fetchone()
-        if approved or (gate == "approval:vision-lock" and status.get("vision_locked_revision")):
+        approval = status.get("approval") or {}
+        if approval.get("granted") and approval.get("gate") == gate.split(":", 1)[1]:
             return advance
-        confirm = cmd(f'confirm --gate {phase} --statement "<user\'s words>"')
+        confirm = f"Use native MCP harness_record_confirmation gate={gate.split(':', 1)[1]}"
         fields = store.spine().node("V1")["fields"]
         if any(
             not fields.get(key)
@@ -140,6 +137,15 @@ def next_command(server: PlannerServer, status: dict) -> str:
             "SELECT id FROM clarifications WHERE status='open' ORDER BY id"
         )
         return " then ".join(cmd(f'answer --id {row[0]} --text "<answer>"') for row in rows)
+    if phase in {"publish", "execute"} and status["publication"]["up_to_date"] and not gate:
+        return (
+            cmd(
+                "worker-start --expected-revision "
+                + status["published_revision"]
+                + ' --workers "@workers.json"'
+            )
+            + " (workers implement; the planner steers)"
+        )
     if gate == "current-revision-published":
         opened = [
             item
@@ -250,6 +256,8 @@ def parser() -> argparse.ArgumentParser:
         "nodes": (),
         "card": ("vision", "users", "first-moment", "scope-in", "scope-out"),
         "confirm": ("gate", "statement"),
+        "worker-start": ("expected-revision", "workers"),
+        "worker-status": ("job-id",),
         "advance": ("to",),
         "ask": ("question",),
         "answer": ("id", "text"),
@@ -324,6 +332,8 @@ def parser() -> argparse.ArgumentParser:
         "--resume", help="Recover a registered completed review without launching providers"
     )
     commands["confirm"].add_argument("--by", default="user")
+    commands["worker-start"].add_argument("--max-parallel", type=int, default=2)
+    commands["worker-start"].add_argument("--timeout", type=int, default=900)
     commands["advance"].add_argument("--by", default="planner")
     commands["advance"].add_argument("--statement")
     commands["refine-wave"].add_argument("wave_id")
@@ -518,6 +528,16 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
     tools = {
         "start": ("harness_plan_start", lambda: dict(idea=args.idea, name=args.name)),
         "status": ("harness_plan_status", lambda: {}),
+        "worker-start": (
+            "harness_worker_start",
+            lambda: dict(
+                expected_revision=args.expected_revision,
+                workers=read_json(args.workers),
+                max_parallel=args.max_parallel,
+                timeout=args.timeout,
+            ),
+        ),
+        "worker-status": ("harness_worker_status", lambda: dict(job_id=args.job_id)),
         "review": ("harness_review", lambda: dict(id=args.id)),
         "show": (
             "harness_show_node",
@@ -617,17 +637,11 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             return reply, reply.get("structuredContent")
         body, data = batch_nodes(server, nodes), {"id": [node["id"] for node in nodes]}
     elif command == "confirm":
-        if args.by == "user":
-            reply = server.call_tool(
-                "harness_record_confirmation", {"gate": args.gate, "user_statement": args.statement}
-            )
-            return reply, reply.get("structuredContent")
-        if args.by == "opus-user-proxy" and not args.statement.startswith("Opus (user proxy):"):
-            raise ValueError("opus-user-proxy statement must begin 'Opus (user proxy):'")
-        item_id = server._store().approve(args.gate, by=args.by, statement=args.statement)
-        body, data = (
-            f"Recorded {args.gate}: {planner_views.approval_label(args.by)}",
-            {"id": item_id},
+        raise ValueError(
+            "plan-confirmation-origin-unavailable: CLI quotes and --by labels cannot establish "
+            "a fresh native client response. Use MCP harness_record_confirmation gate="
+            + args.gate
+            + " in a client with negotiated elicitation."
         )
     else:
         store = server._store()
@@ -882,6 +896,11 @@ def main(argv=None) -> int:
         else:
             status = server._status()
             next_step = next_command(server, status)
+            if args.command in {"worker-start", "worker-status"} and data and not reply["isError"]:
+                next_step = (
+                    f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
+                    "worker-status --job-id " + data["jobId"]
+                )
         if getattr(args, "command", None) in (
             "intake",
             "reviewer-catalog",
@@ -1005,7 +1024,6 @@ def main(argv=None) -> int:
                 tool: command
                 for command, tool in (
                     ("card", "harness_understanding_card"),
-                    ("confirm", "harness_record_confirmation"),
                     ("advance", "harness_advance"),
                     ("node", "harness_upsert_node"),
                     ("remove-node", "harness_remove_node"),

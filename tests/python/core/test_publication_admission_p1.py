@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from tests.python.core.planning_support import source_only_confirmation
 from tests.python.core.test_planner_replay_gaps import REVIEWERS, audit
 from tests.python.core.test_planner_replay_gaps import project as project_fixture
 
@@ -27,7 +28,7 @@ def enter_publish(store):
     while store.phase() != "publish":
         current = store.phase()
         if current in ("align", "vision-lock"):
-            store.approve(current, by="source-test-user", statement="Approve displayed fixture")
+            source_only_confirmation(store, current, statement="Approve displayed fixture")
         store.advance(PHASES[PHASES.index(current) + 1], by="source-test-planner")
 
 
@@ -98,7 +99,7 @@ def test_already_publish_stale_vision_refused_then_renewed(project, monkeypatch,
             assert reply["isError"] and "plan-approval-stale" in str(reply)
         finally:
             server.close()
-    project.approve("vision-lock", by="source-test-user", statement="Approve clarified scope")
+    source_only_confirmation(project, "vision-lock", statement="Approve clarified scope")
     project.publish(by="source-test", export_dir=project.workspace / "plan")
 
 
@@ -126,7 +127,7 @@ def test_open_blocker_refused_at_enter_and_final_publish_then_disposition(
         while project.phase() != "roundtable":
             current = project.phase()
             if current in ("align", "vision-lock"):
-                project.approve(current, by="source-test-user", statement="Approve fixture")
+                source_only_confirmation(project, current, statement="Approve fixture")
             project.advance(PHASES[PHASES.index(current) + 1], by="source-test")
     with pytest.raises(PlanStoreError, match="open.*finding|finding.*open"):
         if boundary == "enter":

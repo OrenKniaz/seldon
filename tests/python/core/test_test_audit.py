@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import source_only_publication
+from tests.python.core.planning_support import source_only_confirmation, source_only_publication
 
 from codex_harness.core import dispatch
 from codex_harness.core.dispatch import STATUS_MOCK_ONLY, _git, run_plan
@@ -140,7 +140,7 @@ def test_prospective_publication_cli_mcp_status_and_oracle_upgrade(prospective, 
         while store.phase() != "roundtable":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                store.approve(phase, by="test", statement="Test scope confirmed")
+                source_only_confirmation(store, phase, statement="Test scope confirmed")
             store.advance(PHASES[PHASES.index(phase) + 1], by="test")
         result = subprocess.run(
             [

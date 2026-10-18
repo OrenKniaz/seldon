@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 from tests.python.core import test_planner_replay_gaps
+from tests.python.core.planning_support import source_only_confirmation
 
 from codex_harness.core import plan_cli, readiness, roundtable
 from codex_harness.core.mcp_planner import PlannerServer, packet_view
@@ -282,7 +283,7 @@ def test_readiness_is_advisory_at_publish_with_existing_gates(project, monkeypat
     while project.phase() != "publish":
         phase = project.phase()
         if phase in ("align", "vision-lock"):
-            project.approve(phase, by="user", statement="Approve this exact plan")
+            source_only_confirmation(project, phase, statement="Approve this exact plan")
         project.advance(PHASES[PHASES.index(phase) + 1], by="planner")
     report = quality_report(project)
     assert next(c for c in report["checks"] if c["id"] == "roundtable")["status"] == "pass"

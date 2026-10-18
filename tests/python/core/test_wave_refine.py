@@ -134,20 +134,15 @@ def setup_wave(workspace, *, locked=False, two_sketches=False):
 
 
 def plan_confirmation(workspace, by="user", statement="Synthetic displayed two-wave plan approval"):
+    from tests.python.core.planning_support import source_only_confirmation
+
     cli(workspace, "compile", "--template", "template", "--out", "manifest.json")
-    cli(
-        workspace, "confirm", "--gate", "align", "--statement", "Synthetic source fixture alignment"
-    )
+    with open_plan_store(workspace) as store:
+        source_only_confirmation(store, "align")
     cli(workspace, "advance", "--to", "expand")
     cli(workspace, "advance", "--to", "vision-lock")
-    cli(
-        workspace,
-        "confirm",
-        "--gate",
-        "vision-lock",
-        "--statement",
-        "Synthetic source fixture vision approval",
-    )
+    with open_plan_store(workspace) as store:
+        source_only_confirmation(store, "vision-lock")
     for phase in ("features", "requirements", "tech-stack", "plan"):
         cli(workspace, "advance", "--to", phase)
     return cli(

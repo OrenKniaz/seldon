@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import publication_evidence
+from tests.python.core.planning_support import publication_evidence, source_only_confirmation
 
 from codex_harness.core.graph import PlanError, load_plan
 from codex_harness.core.plan_store import PHASES, open_plan_store
@@ -499,7 +499,9 @@ def _to(store, phase):
     while PHASES.index(store.phase()) < PHASES.index(phase):
         current = store.phase()
         if current in ("align", "vision-lock"):
-            store.approve(current, by="operator", statement="I confirm the current understanding")
+            source_only_confirmation(
+                store, current, statement="I confirm the current understanding"
+            )
         store.advance(PHASES[PHASES.index(current) + 1], by="planner")
 
 
@@ -598,8 +600,13 @@ def test_phase_order_and_align_refusals(store, target, code):
     assert store.status() == before
 
 
-def test_inline_approval_and_return_for_replanning(store):
-    store.advance("expand", by="operator", statement="That is what I want")
+def test_inline_approval_refuses_and_native_confirmation_survives_unchanged_replanning(store):
+    _assert_code(
+        "plan-confirmation-origin-unavailable",
+        lambda: store.advance("expand", by="operator", statement="That is what I want"),
+    )
+    source_only_confirmation(store, "align", statement="That is what I want")
+    store.advance("expand", by="planner")
     assert store.phase() == "expand"
     store.advance("align", by="planner", statement="Revisit understanding")
     assert store.phase() == "align"
@@ -607,18 +614,82 @@ def test_inline_approval_and_return_for_replanning(store):
     assert store.phase() == "expand"
 
 
+def test_demo_cross_gate_and_new_revision_quoted_words_cannot_approve(store):
+    source_only_confirmation(store, "align", statement="Yes, that matches what I want.")
+    store.advance("expand", by="planner")
+    store.advance("vision-lock", by="planner")
+    _assert_code(
+        "plan-confirmation-origin-unavailable",
+        lambda: store.approve("vision-lock", by="user", statement="Yes, that matches what I want."),
+    )
+    assert not store.status()["approval"]["granted"]
+    source_only_confirmation(store, "vision-lock", statement="Fresh scoped approval.")
+    node = store.spine().node("V1")
+    node["text"] += " Revised at 09:22."
+    store.upsert_node(node)
+    _assert_code(
+        "plan-confirmation-origin-unavailable",
+        lambda: store.advance("features", by="user", statement="Fresh scoped approval."),
+    )
+    assert store.phase() == "vision-lock" and not store.status()["approval"]["granted"]
+
+
+def test_cached_legacy_lock_remains_readable_but_cannot_advance_or_publish(store):
+    with store._transaction():
+        legacy = store._approve("vision-lock", "user", "Original legacy words with conditions.")
+        store.connection.execute(
+            "UPDATE meta SET phase='features',vision_locked_revision=?", (store._revision(),)
+        )
+    before = dict(
+        store.connection.execute("SELECT * FROM approvals WHERE id=?", (legacy,)).fetchone()
+    )
+    status = store.status()
+    assert not status["approval"]["granted"]
+    assert status["pending_gate"] == "approval:vision-lock"
+    _assert_code(
+        "plan-confirmation-origin-unavailable", lambda: store.advance("requirements", by="planner")
+    )
+    _assert_code("plan-confirmation-origin-unavailable", store._check_publish)
+    assert (
+        dict(store.connection.execute("SELECT * FROM approvals WHERE id=?", (legacy,)).fetchone())
+        == before
+    )
+    source_only_confirmation(
+        store, "vision-lock", statement="Fresh native renewal of displayed scope."
+    )
+    store.advance("requirements", by="planner")
+
+
+def test_native_lock_survives_subordinate_and_verification_metadata_changes(store):
+    _to(store, "features")
+    original = store.status()["approval"]["approval_id"]
+    original_revision = store.status()["vision_locked_revision"]
+    node = store.spine().node("D3")
+    node["text"] += " A subordinate clarification."
+    store.upsert_node(node)
+    vision = store.spine().node("V1")
+    vision["fields"]["validation"].append("-v")
+    store.upsert_node(vision)
+    assert store.status()["approval"]["approval_id"] == original
+    store.advance("vision-lock", by="planner")
+    store.advance("features", by="planner")
+    assert store.status()["vision_locked_revision"] == original_revision
+    assert store.status()["approval"]["approval_id"] == original
+    store.advance("requirements", by="planner")
+
+
 @pytest.mark.parametrize("gate,target", [("align", "expand"), ("vision-lock", "features")])
 def test_revision_bound_approvals(store, gate, target):
     _to(store, gate)
     _assert_code("plan-approval-required", lambda: store.advance(target, by="planner"))
-    store.approve(gate, by="operator", statement="Confirmed")
+    source_only_confirmation(store, gate, statement="Confirmed")
     before = store.spine().plan_revision()
     node = store.spine().node("D3")
     node["text"] += " Updated."
     store.upsert_node(node)
     assert store.spine().plan_revision() != before
     _assert_code("plan-approval-stale", lambda: store.advance(target, by="planner"))
-    store.approve(gate, by="operator", statement="Confirmed revised plan")
+    source_only_confirmation(store, gate, statement="Confirmed revised plan")
     store.advance(target, by="planner")
     if gate == "vision-lock":
         assert store.status()["vision_locked_revision"] == store.spine().plan_revision()
@@ -831,7 +902,7 @@ def test_events_audit_every_command_and_are_append_only(store):
     store.confirm_assumption(confirmed, rationale="Test decision")
     rejected = store.add_assumption("Two")
     store.reject_assumption(rejected, rationale="Test decision")
-    store.approve("align", by="operator", statement="Agreed")
+    source_only_confirmation(store, "align", statement="Agreed")
     store.advance("expand", by="planner")
     kinds = [row[0] for row in store.connection.execute("SELECT kind FROM events ORDER BY id")]
     assert kinds == [
@@ -846,7 +917,9 @@ def test_events_audit_every_command_and_are_append_only(store):
         "assumption-confirmed",
         "assumption-added",
         "assumption-rejected",
+        "confirmation-requested",
         "approved",
+        "confirmation-responded",
         "phase-advanced",
     ]
     for sql in ("DELETE FROM events", "UPDATE events SET kind='fake'"):
