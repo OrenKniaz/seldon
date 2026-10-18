@@ -178,7 +178,9 @@ def _scenario_section(scenarios) -> str:
     )
 
 
-def _packet(spine, report: dict, test_bodies: str = "", scenarios=()) -> str:
+def _packet(
+    spine, report: dict, test_bodies: str = "", scenarios=(), *, scenario_section=None
+) -> str:
     sections = [
         f"Review manifest revision {report['manifestRevision']} "
         f"(spine revision {spine.plan_revision()}). Read-only review: use only this packet. "
@@ -197,7 +199,7 @@ def _packet(spine, report: dict, test_bodies: str = "", scenarios=()) -> str:
         + render_quality_card(report)
     )
     sections.append(test_bodies)
-    sections.append(_scenario_section(scenarios))
+    sections.append(_scenario_section(scenarios) if scenario_section is None else scenario_section)
     # Rendered views omit some fields; reviewers still need exact acceptance,
     # verification and design details to challenge the real vision.
     sections.append(
@@ -238,6 +240,7 @@ def packet_shards(
     report=None,
     context="",
     included_header=INCLUDED_HEADER,
+    scenario_section=None,
 ) -> list[dict]:
     """Pack complete feature slices, splitting an oversized feature only between nodes.
 
@@ -253,10 +256,20 @@ def packet_shards(
     report = quality_report(store) if report is None else report
     protected = _protected_tests(store)
     scenarios = store.acceptance_scenarios()
+    if scenario_section is not None and not isinstance(scenario_section, str):
+        raise ValueError("scenario section must be a string")
+    if scenario_section is None:
+        scenario_section = _scenario_section(scenarios)
     full = (
         packet
         if packet is not None
-        else _packet(spine, report, _test_bodies(store, protected), scenarios)
+        else _packet(
+            spine,
+            report,
+            _test_bodies(store, protected),
+            scenarios,
+            scenario_section=scenario_section,
+        )
     )
 
     def record(text, features=(), nodes=(), truncated=(), *, partial=False):
@@ -346,7 +359,7 @@ def packet_shards(
                 "\n## Planned proof (oracle-verified), not a worker build\n"
                 + render_quality_card(report),
             ),
-            ("acceptance-scenarios", "\n" + _scenario_section(scenarios)),
+            ("acceptance-scenarios", "\n" + scenario_section),
         ]
     )
     if context:

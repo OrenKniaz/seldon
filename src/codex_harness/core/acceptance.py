@@ -791,6 +791,84 @@ def _candidate_evidence(store, repo, run):
     }
 
 
+def _restore_scenario_commands(scenarios, prefixes):
+    """Validate and reconstruct a packet view; never mutate saved scenarios."""
+    restored = copy.deepcopy(scenarios)
+    for scenario in restored:
+        for step in scenario["steps"]:
+            if not isinstance(step, dict) or "plannedCommandReference" not in step:
+                continue
+            ref = step["plannedCommandReference"]
+            if (
+                "command" in step
+                or not isinstance(ref, dict)
+                or set(ref) != {"prefixRef", "suffix", "commandSha256"}
+                or any(not isinstance(value, str) for value in ref.values())
+                or ref["prefixRef"] not in prefixes
+                or not isinstance(prefixes[ref["prefixRef"]], str)
+            ):
+                raise ValueError("Invalid planned command reference")
+            command = prefixes[ref["prefixRef"]] + ref["suffix"]
+            if hashlib.sha256(command.encode("utf-8")).hexdigest() != ref["commandSha256"]:
+                raise ValueError("Planned command reference hash mismatch")
+            step.pop("plannedCommandReference")
+            step["command"] = command
+    return restored
+
+
+def _project_scenario_commands(scenarios):
+    """Factor beneficial exact prefixes, with separate packet-only binding IDs."""
+    ids = [row["id"] for row in scenarios]
+    if len(ids) != len(set(ids)) or any(
+        isinstance(step, dict) and "plannedCommandReference" in step
+        for row in scenarios
+        for step in row["steps"]
+    ):
+        return scenarios, {}
+    view, prefixes, groups = copy.deepcopy(scenarios), {}, {}
+
+    def encode(value):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    for row in view:
+        for step in row["steps"]:
+            command = step.get("command") if isinstance(step, dict) else None
+            if isinstance(command, str) and len(command) >= 128:
+                groups.setdefault(command[:128], []).append(step)
+    for key in sorted(groups):
+        steps = groups[key]
+        if len(steps) < 2:
+            continue
+        prefix = os.path.commonprefix([step["command"] for step in steps])
+        binding_id = "PC" + str(len(prefixes) + 1)
+        projected = []
+        for step in steps:
+            command = step["command"]
+            projected.append(
+                {
+                    **{key: value for key, value in step.items() if key != "command"},
+                    "plannedCommandReference": {
+                        "prefixRef": binding_id,
+                        "suffix": command[len(prefix) :],
+                        "commandSha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+                    },
+                }
+            )
+        # Reserve more than the shared instructions cost; small dossiers retain
+        # their existing representation byte for byte.
+        if len(encode(steps)) - len(encode(projected)) - len(encode({binding_id: prefix})) < 2048:
+            continue
+        prefixes[binding_id] = prefix
+        for step, replacement in zip(steps, projected, strict=True):
+            step.clear()
+            step.update(replacement)
+    if not prefixes:
+        return scenarios, {}
+    if _restore_scenario_commands(view, prefixes) != scenarios:
+        raise ValueError("Planned command projection did not reconstruct exact scenarios")
+    return view, prefixes
+
+
 def _project_run_commands(run, scenarios):
     """Lossless packet view only; bindings reconstruct strings, not process identity."""
     ids = [row["id"] for row in scenarios]
@@ -884,6 +962,26 @@ def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
         + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
         + "\n\n"
     )
+    scenarios = store.acceptance_scenarios()
+    planned_view, prefixes = _project_scenario_commands(scenarios)
+    prefix_section = ""
+    if prefixes:
+        prefix_section = (
+            "## Planned command prefix bindings\n\n"
+            + json.dumps(prefixes, ensure_ascii=False, sort_keys=True)
+            + "\n\n"
+            "Reconstruct each plannedCommandReference by literal UTF8 prefixRef binding + "
+            "suffix concatenation, then verify commandSha256. Concatenate BEFORE decoding "
+            "any encoded program. Existing recorded commandReference fields use that complete "
+            "reconstructed planned template: verify templateSha256, then apply their existing "
+            "repo,home,data,python literal substitutions in that order and verify expandedSha256. "
+            "These bindings reconstruct strings, NOT independently observed process identity. "
+            "All scenario fields, expectations and proof source bodies are retained. "
+            "Original scenario canonical hash "
+            + _hash(scenarios)
+            + " (sha256-json-sort_keys-default-utf8).\n\n"
+        )
+        included_header += prefix_section
     packet = (
         included_header + QUESTION + "\nReview only this packet. "
         "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
@@ -903,8 +1001,7 @@ def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
             ensure_ascii=False,
         )
     )
-    scenarios = store.acceptance_scenarios()
-    scenario_section = roundtable._scenario_section(scenarios)
+    scenario_section = roundtable._scenario_section(planned_view)
     packet += "\n" + scenario_section
     if (store.workspace / "template").is_dir():
         packet += "\n" + roundtable._test_bodies(store)
@@ -955,6 +1052,7 @@ def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
                 packet=projected_packet,
                 included_header=projected_header,
                 context=projected_context,
+                scenario_section=scenario_section,
             )
             if not all(
                 scenario_section in shard["packet"] and binding_section in shard["packet"]
@@ -974,7 +1072,14 @@ def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
                 packet=packet,
                 included_header=included_header,
                 context=context,
+                scenario_section=scenario_section,
             )
+    if prefixes and not all(
+        scenario_section in shard["packet"] and prefix_section in shard["packet"]
+        for shards in dossiers.values()
+        for shard in shards
+    ):
+        raise ValueError("Planned command references require complete bindings and scenarios")
     if current_run(store) != run or recovery.identities(store, repo, run) != original_identity:
         raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
     return run, selected, dossiers, evidence, packet, included_header, context, original_identity
