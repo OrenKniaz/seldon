@@ -36,23 +36,13 @@ Acceptance: `accept-scenarios` lists; `--input @scenarios.json` saves `{id,title
 Use `{repo}`, `{python}`, `{home}`, `{data}` in commands. Each scenario starts in an empty cwd with fresh HOME/data, never a seeded fixture. Vision fields can supply structured `first_user_moment`/`scope_in` items or `acceptance` entries with these ids.
 `accept-review --reviewer @codex-reviewer.json --reviewer @claude-reviewer.json` uses normal subscriptions; its findings appear in `findings` and use `resolve`. A code/scenario change requires a fresh run and review. `accept-rebind --repo <dir>` reruns all scenarios for `revision-algorithm-upgraded` or `legacy-unbound` (matching raw hash; audited node-binding back-fill); passing unchanged v1 products retain reviews/approval by references, preserving approver and proxy identity. Product, plan, scenario or vision changes require fresh acceptance.
 
-Interrupted ordinary acceptance reviews retain their registered attempt and sealed original
-packets/returns under `.codex-harness/acceptance-review-attempts/`. Find attempt IDs in the
-interruption error or the plan status JSON's `acceptance.reviewAttempts`; counts describe
-stored returns, not eligibility. Use `accept-review --repo <same-dir> --resume <id>` (MCP:
-`harness_accept_review` with `repo` and `resume`) to recover the existing aggregate without
-launching providers. All original slots must be complete, valid, nonmocked and bound to
-the same source, candidate, context and observed native model/session. Unknown telemetry,
-tool/error events, missing protected bodies, overflow reshards, stale or changed receipts
-refuse recovery. No missing work is automatically relaunched. Do not move or edit originals.
-Repeated successful resume returns the same review/findings and preserves dispositions.
-External saved reviews without an original Harness registration cannot be imported.
-Recovery leaves questions, findings, phase and user approval gates in force.
+Interrupted ordinary acceptance reviews retain their registered attempt and sealed original packets/returns under `.codex-harness/acceptance-review-attempts/`. Find attempt IDs in the interruption error or status JSON's `acceptance.reviewAttempts`; stored-return counts do not imply eligibility. Recover the existing aggregate without launching providers with `accept-review --repo <same-dir> --resume <id>` (MCP: `harness_accept_review` with `repo` and `resume`). Every original slot must be complete, valid, nonmocked and bound to the same source, candidate, context and observed native model/session.
+
+Unknown telemetry, tool/error events, missing protected bodies, overflow reshards, stale or changed receipts refuse recovery. Missing work is never automatically relaunched; do not move or edit originals. Repeated successful resume returns the same review/findings and preserves dispositions. External saved reviews without original Harness registration cannot be imported. Questions, findings, phase and user approval gates remain in force.
 Delegated acceptance uses `--by proxy:<name>` (or `opus-user-proxy`); status records `isProxy: true`, never real-user acceptance. Only record actual user words with `--by user`.
 Quality distinguishes **planned vs proved** with `evidence: planned|executed`: a clean-state first-moment scenario or linked e2e (`firstMoment: true`, `cleanState: true`) is planned; only a passing current acceptance result is proved. Draft/stale scenarios are not planned. Missing-file cases must not defeat first use.
 Explicit `acceptance` spine nodes need a schema change by the spine owner; until then use vision fields or the scenario table through `accept-scenarios --input`.
-`node --json` accepts a literal object, `"@file.json"`, or `"@file.jsonl"` (atomic batch; order independent).
-Parents must exist and have these kinds; a vision is unique. Nonvision nodes should retain an intent chain.
+`node --json` accepts a literal object, `"@file.json"`, or `"@file.jsonl"` (atomic batch; order independent). Parents must exist and have these kinds; a vision is unique. Nonvision nodes should retain an intent chain.
 
 | Kind | Allowed parent kinds |
 | --- | --- |
@@ -69,19 +59,16 @@ Bead fields: disjoint `ownedFiles`, `dependsOn` bead ids (acyclic), `proofModule
 Link tests to requirement ids through `parents`; test fields are `module` and `level` (`unit` or one `e2e` integration test).
 Vision fields must include `validation` (Python arguments preceding the module) and protected `requirementFiles` paths.
 TypeScript command runner example: `"verification":{"runner":"command","argv":["node","--test","{proof}"],"testDir":"tests","proofGlob":"*.test.ts"}`; see [verification runners](../architecture/verification-runners.md).
-Put executable requirement tests in `<workspace>/template`; assert observable results, including meaningful failures.
-Put importable implementation stubs there too, failing with `NotImplementedError`; workers own implementation, never protected tests.
+Put executable requirement tests in `<workspace>/template`; assert observable results, including meaningful failures. Include importable implementation stubs failing with `NotImplementedError`; workers own implementation, never protected tests.
 `audit --prospective` checks unittest collection, red stubs, assertions/imports and requirement traceability without an oracle; it does not prove satisfiability. Unsupported command collection contracts refuse honestly.
 Publish that choice explicitly: `publish --proof-level prospective --reason "why no oracle"`; the prospective label remains visible. Workers must block impossible protected tests with evidence.
 Prospective quality warns: integrated worker validation and clean-state acceptance are the first real proof. A later oracle audit upgrades the proof level; republish the stronger snapshot.
-`audit --oracle oracle` defaults to Git HEAD when available; otherwise it copies the template and checks every oracle bead plus integration.
-Use `--baseline template` explicitly or `--baseline-ref <git-ref>`; output records the baseline. Repair the reported proof, then retry audit.
+`audit --oracle oracle` defaults to Git HEAD when available; otherwise it copies the template and checks every oracle bead plus integration. Use `--baseline template` explicitly or `--baseline-ref <git-ref>`; output records the baseline. Repair the reported proof, then retry audit.
 The oracle directory supplies every affected owned file; audit overlays protected tests and oracle into temporary copies.
 After publication, affected beads come from the published-to-current spine impact; HEAD must be the intended integration baseline.
 An integration test proves the complete user path; absent integration proof is reported explicitly. Failing modules show the first 40 output lines and a full-output artifact under `state/runs`.
 Use `remove-node --id X` only without children/references. `impact --since <manifest-revision|file>` predicts before publication; bare `impact` uses publication or the last compiled revision. After edits run `impact`, `compile`, `audit`, `quality`; return to an earlier phase and reapprove when needed.
-After vision lock, V1 edits limited to `fields.validation` and `fields.requirementFiles` keep the lock.
-Edits to V1 text or understanding-card fields stale the lock; `confirm --gate vision-lock` renews approval before further advance.
+After vision lock, V1 edits limited to `fields.validation` and `fields.requirementFiles` keep the lock. Edits to V1 text or understanding-card fields stale the lock; `confirm --gate vision-lock` renews approval before further advance.
 For delegated proxy answers use `confirm ... --by opus-user-proxy --statement "Opus (user proxy): ..."`.
 Never label proxy words as owner approval; genuine user confirmation uses default `--by user` and the user's actual words.
 Worked mini example: **26 CLI calls**, two beads (B depends on A). Save these files in the checkout (CLI JSON inputs use cwd).
