@@ -537,6 +537,16 @@ def _launch_review(reviewer, packet, executable, *, instructions=None):
         launch = replace(
             launch, command=(*launch.command[:-1], "--skip-git-repo-check", launch.command[-1])
         )
+    elif reviewer["provider"] == "claude":
+        launch = replace(
+            launch,
+            command=(*launch.command, "--tools", ""),
+            protections=(
+                *launch.protections,
+                "Requested review-only tool restriction: --tools with an empty list. "
+                "Effective runtime tool suppression is not verified by Harness.",
+            ),
+        )
     if instructions is not None:
         # Keep stdin byte-identical to the worker packet. Review instructions
         # belong in the provider's instruction channel, not in worker context.
