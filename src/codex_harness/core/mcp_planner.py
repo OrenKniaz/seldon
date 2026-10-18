@@ -711,9 +711,9 @@ class PlannerServer:
             return "harness_plan_start idea=<your idea> name=<plan name>"
         if gate and gate.startswith("approval:"):
             return (
-                "Your call: review the understanding, then give your actual confirmation words for "
+                "harness_record_confirmation gate="
                 + gate.split(":", 1)[1]
-                + "."
+                + "; review the displayed understanding and answer the native client form."
             )
         if status.get("open_clarifications"):
             return "Answer the open questions with harness_answer before advancing."
@@ -923,16 +923,39 @@ class PlannerServer:
             if status.get("proofLevelLabel"):
                 body += "\nProof level: " + status["proofLevelLabel"]
             body += "\nWorker readiness (advisory): " + status["readiness"]["status"]
+            approval = status.get("approval")
+            if approval:
+                granted = approval["granted"]
+                body += (
+                    f"\nCurrent {approval['gate']} approval: "
+                    + ("granted" if granted else "not granted")
+                    + "; origin: "
+                    + approval["origin"]
+                )
+                if approval["origin"] == "mcp-client-elicitation":
+                    body += (
+                        " (native MCP client-reported response; "
+                        "natural-person identity is not authenticated)"
+                    )
+                if approval["gate"] == "vision-lock":
+                    body += "\nVision lock: " + (
+                        "locked vision (current recorded native credit)"
+                        if granted
+                        else "not currently granted; fresh native response required"
+                    )
             row = store.connection.execute(
-                'SELECT "by", statement FROM approvals WHERE gate=? ORDER BY rowid DESC LIMIT 1',
+                'SELECT "by", statement, plan_revision FROM approvals '
+                "WHERE gate=? ORDER BY rowid DESC LIMIT 1",
                 ("vision-lock",),
             ).fetchone()
             if row:
-                body += "\nRecorded vision-lock statement: " + views.approval_label(row["by"])
-                body += " · " + (
-                    "stale; renewed approval required"
-                    if status.get("vision_lock_stale")
-                    else "locked vision"
+                body += (
+                    "\nHistorical vision-lock record (not current approval credit): recorded by "
+                    + views.readable(row["by"])
+                    + " for "
+                    + row["plan_revision"]
+                    + "\nHistorical statement: "
+                    + views.readable(row["statement"])
                 )
             body += "\n" + views.outcome_waves_card(store.outcome_waves())
             return body
