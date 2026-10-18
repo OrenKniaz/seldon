@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.python.core.planning_support import source_only_publication
 
 from codex_harness.core import dispatch
 from codex_harness.core.dispatch import STATUS_MOCK_ONLY, _git, run_plan
@@ -164,91 +165,99 @@ def test_prospective_publication_cli_mcp_status_and_oracle_upgrade(prospective, 
             runner=lambda *args: (0, "[]"),
             executable_for=lambda provider: provider,
         )
-        store.advance("publish", by="test")
-        for flags in ([], ["--proof-level", "prospective"], ["--reason", "No oracle"]):
-            refused_cli = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "codex_harness.core.plan_cli",
-                    "--workspace",
-                    str(tmp_path),
-                    "--json",
-                    "publish",
-                    *flags,
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
+        # Injected reviews remain MOCKED and cannot satisfy real publication.
+        assert not store.successful_reviews(manifest["planRevision"])
+        with pytest.raises(PlanStoreError, match="successful review"):
+            store.advance("publish", by="test")
+        # SOURCE-ONLY export/upgrade mechanics: the existing evidence double
+        # still requires actual audits, mocked flags and every other gate.
+        with source_only_publication():
+            store.advance("publish", by="test")
+            for flags in ([], ["--proof-level", "prospective"], ["--reason", "No oracle"]):
+                refused_cli = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "codex_harness.core.plan_cli",
+                        "--workspace",
+                        str(tmp_path),
+                        "--json",
+                        "publish",
+                        *flags,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                assert refused_cli.returncode == 2, refused_cli.stdout + refused_cli.stderr
+                assert json.loads(refused_cli.stdout)["isError"]
+            for kwargs, code in (
+                ({}, "plan-proof-level-required"),
+                ({"proof_level": "prospective"}, "plan-prospective-reason-required"),
+                ({"proof_level": "prospective", "reason": " "}, "plan-prospective-reason-required"),
+            ):
+                with pytest.raises(PlanStoreError) as caught:
+                    store.publish(by="test", export_dir=tmp_path / "plan", **kwargs)
+                assert caught.value.code == code
+            server = PlannerServer(tmp_path)
+            try:
+                refused = server.call_tool("harness_publish", {})
+                assert refused["isError"]
+                published = server.call_tool(
+                    "harness_publish",
+                    {
+                        "proof_level": "prospective",
+                        "reason": "A full reference implementation is impractical",
+                    },
+                )
+                assert not published["isError"], published
+            finally:
+                server.close()
+            revision = store.status()["published_revision"]
+            frozen = store.published_manifest(revision)
+            assert frozen["proofLevel"] == "prospective"
+            assert frozen["proofLevelReason"] == "A full reference implementation is impractical"
+            assert frozen["sourceManifestRevision"] == manifest["planRevision"]
+            assert store.status()["proofLevelLabel"] == PROSPECTIVE_LABEL
+            assert store.status()["publication"]["up_to_date"]
+            for name in store.rendered_docs():
+                assert (
+                    (tmp_path / "plan" / revision / name)
+                    .read_text(encoding="utf-8")
+                    .startswith(PROSPECTIVE_LABEL)
+                )
+            projected = snapshot(workspace=tmp_path)["plan"]
+            assert projected["proofLevel"] == "prospective"
+            assert projected["proofLevelLabel"] == PROSPECTIVE_LABEL
+            check = next(
+                check for check in quality_report(store)["checks"] if check["id"] == "proof-level"
             )
-            assert refused_cli.returncode == 2, refused_cli.stdout + refused_cli.stderr
-            assert json.loads(refused_cli.stdout)["isError"]
-        for kwargs, code in (
-            ({}, "plan-proof-level-required"),
-            ({"proof_level": "prospective"}, "plan-prospective-reason-required"),
-            ({"proof_level": "prospective", "reason": " "}, "plan-prospective-reason-required"),
-        ):
-            with pytest.raises(PlanStoreError) as caught:
-                store.publish(by="test", export_dir=tmp_path / "plan", **kwargs)
-            assert caught.value.code == code
-        server = PlannerServer(tmp_path)
-        try:
-            refused = server.call_tool("harness_publish", {})
-            assert refused["isError"]
-            published = server.call_tool(
-                "harness_publish",
-                {
-                    "proof_level": "prospective",
-                    "reason": "A full reference implementation is impractical",
-                },
+            assert check["status"] == "warn" and "first real proof" in check["advice"]
+            store.advance("execute", by="test")
+            oracle = tmp_path / "oracle"
+            oracle.mkdir()
+            (oracle / "app.py").write_text("def value(): return 42\n")
+            upgraded = audit_revised_tests(
+                repo=tmp_path,
+                base_ref="template",
+                revised_template=prospective["template"],
+                manifest=manifest,
+                impact={"affectedBeads": ["B"]},
+                oracle_dir=oracle,
             )
-            assert not published["isError"], published
-        finally:
-            server.close()
-        revision = store.status()["published_revision"]
-        frozen = store.published_manifest(revision)
-        assert frozen["proofLevel"] == "prospective"
-        assert frozen["proofLevelReason"] == "A full reference implementation is impractical"
-        assert frozen["sourceManifestRevision"] == manifest["planRevision"]
-        assert store.status()["proofLevelLabel"] == PROSPECTIVE_LABEL
-        assert store.status()["publication"]["up_to_date"]
-        for name in store.rendered_docs():
-            assert (
-                (tmp_path / "plan" / revision / name)
-                .read_text(encoding="utf-8")
-                .startswith(PROSPECTIVE_LABEL)
-            )
-        projected = snapshot(workspace=tmp_path)["plan"]
-        assert projected["proofLevel"] == "prospective"
-        assert projected["proofLevelLabel"] == PROSPECTIVE_LABEL
-        check = next(
-            check for check in quality_report(store)["checks"] if check["id"] == "proof-level"
-        )
-        assert check["status"] == "warn" and "first real proof" in check["advice"]
-        store.advance("execute", by="test")
-        oracle = tmp_path / "oracle"
-        oracle.mkdir()
-        (oracle / "app.py").write_text("def value(): return 42\n")
-        upgraded = audit_revised_tests(
-            repo=tmp_path,
-            base_ref="template",
-            revised_template=prospective["template"],
-            manifest=manifest,
-            impact={"affectedBeads": ["B"]},
-            oracle_dir=oracle,
-        )
-        assert upgraded["ok"], upgraded
-        store.record_audit(manifest["planRevision"], upgraded)
-        assert store.status()["proofLevelLabel"] == ORACLE_LABEL
-        assert not store.status()["publication"]["up_to_date"]
-        # A later prospective audit cannot silently downgrade stronger evidence.
-        store.record_audit(manifest["planRevision"], audit_prospective_tests(**prospective))
-        assert store.proof_level() == "oracle-verified"
-        store.advance("publish", by="test")
-        oracle_revision = store.publish(by="test", export_dir=tmp_path / "plan")
-        assert oracle_revision == manifest["planRevision"]
-        assert store.published_manifest(oracle_revision) == manifest  # Existing oracle bytes.
-        assert store.published_manifest(revision) == frozen  # Earlier publication stays honest.
+            assert upgraded["ok"], upgraded
+            store.record_audit(manifest["planRevision"], upgraded)
+            assert store.status()["proofLevelLabel"] == ORACLE_LABEL
+            assert not store.status()["publication"]["up_to_date"]
+            # A later prospective audit cannot silently downgrade stronger evidence.
+            store.record_audit(manifest["planRevision"], audit_prospective_tests(**prospective))
+            assert store.proof_level() == "oracle-verified"
+            store.advance("publish", by="test")
+            oracle_revision = store.publish(by="test", export_dir=tmp_path / "plan")
+            assert oracle_revision == manifest["planRevision"]
+            assert store.published_manifest(oracle_revision) == manifest  # Existing oracle bytes.
+            assert store.published_manifest(revision) == frozen  # Earlier publication stays honest.
+        assert not store.successful_reviews(manifest["planRevision"])
 
 
 @pytest.mark.parametrize("missing", ["listArgv", "assertPatterns", "importPatterns"])

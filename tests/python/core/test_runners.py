@@ -1,5 +1,6 @@
 """Standalone runner parity, actual exit signals and safe argv construction."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -14,7 +15,12 @@ from codex_harness.core.dispatch import STATUS_MOCK_ONLY, _claim_inputs, _commit
 from codex_harness.core.graph import PlanError, load_plan
 from codex_harness.core.graph import test_dir as protected_test_dir
 from codex_harness.core.runners import resolve_runner
-from codex_harness.core.spine import Spine, compile_manifest, load_spine
+from codex_harness.core.spine import (
+    Spine,
+    compile_manifest,
+    load_spine,
+    requirement_files_revision,
+)
 from codex_harness.core.test_audit import audit_revised_tests
 from codex_harness.core.worker_packet import build_packet
 
@@ -368,16 +374,32 @@ def test_command_compile_audit_dispatch_and_revalidation(command_plan, tmp_path,
 
 @pytest.mark.parametrize("tamper", [False, True])
 def test_command_report_cannot_pass_and_worker_cannot_edit_proofs(command_plan, tmp_path, tamper):
-    root, _, manifest = command_plan
+    root, spine, manifest = command_plan
     # Protection must hold even for a hand-authored manifest omitting testDir.
     manifest["requirementFiles"] = []
     (root / "sample.json").write_text(json.dumps(manifest))
 
+    calls = []
+
     def worker(repo):
+        calls.append(repo)
         (repo / "value.txt").write_text("2\n")
         if tamper:
             (repo / "proofs/unit.proof").write_text("2\n")
 
+    # A stale digest must refuse before this SOURCE-ONLY worker can run.
+    with pytest.raises(ValueError, match="protected requirement files revision mismatch"):
+        run_plan(root, work_root=tmp_path / "stale-runs", fake_workers={"A": worker})
+    assert calls == []
+
+    # Deliberate hand-authored scope, consistently identified BEFORE any worker.
+    # The runner's testDir remains protected independently of the declared list.
+    revision = requirement_files_revision(root / "template", manifest["requirementFiles"])
+    manifest["requirementFilesRevision"] = revision
+    manifest["planRevision"] = hashlib.sha256(
+        f"{spine.plan_revision()}:{revision}".encode()
+    ).hexdigest()
+    (root / "sample.json").write_text(json.dumps(manifest))
     result = run_plan(root, work_root=tmp_path / "runs", fake_workers={"A": worker})
     bead = result["beads"]["A"]
     assert result["status"].startswith("plan-failed:")
