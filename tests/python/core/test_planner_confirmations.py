@@ -33,12 +33,55 @@ def approvals(store):
 
 def test_request_card_and_response_survive_reopen_exactly(store):
     node = store.spine().node("V1")
-    node["fields"]["scope_in"] = "Complete long scope " * 90
+    node["fields"].update(
+        vision="A readable bill splitter",
+        users="People sharing dinner",
+        first_user_moment="See the exact shares",
+        scope_in="Complete long scope " * 90,
+        scope_out="No foreign currencies",
+        quality_bar="Every cent is retained",
+        done_feels_like="Everyone knows what to pay",
+        assumptions=["Only dollars", "Tip is a whole percent"],
+        customMaterialDetail={"boundaryCondition": "Preserve this full custom detail"},
+    )
     store.upsert_node(node)
     request = prepare_confirmation(store, "align")
-    assert json.loads(request["card"].split("\n\n", 1)[1]) == node
+    assert request["vision"] == node
+    for label in (
+        "Vision",
+        "Users",
+        "First moment",
+        "Scope in",
+        "Scope out",
+        "Quality",
+        "Done",
+        "Assumptions",
+    ):
+        assert f"{label}:\n" in request["card"]
+    for key in (
+        "vision",
+        "users",
+        "first_user_moment",
+        "scope_in",
+        "scope_out",
+        "quality_bar",
+        "done_feels_like",
+    ):
+        assert node["fields"][key] in request["card"]
+    assert node["text"] in request["card"]
+    assert "- Only dollars\n- Tip is a whole percent" in request["card"]
+    assert "Boundary condition:\nPreserve this full custom detail" in request["card"]
+    assert '"fields"' not in request["card"]
+    assert '"kind"' not in request["card"]
+    assert "requirementFiles" not in request["card"]
     assert request["plan_revision"] == store.spine().plan_revision()
     with open_plan_store(store.workspace) as reopened:
+        saved = json.loads(
+            reopened.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='confirmation-requested'"
+            ).fetchone()[0]
+        )
+        assert saved == request
         result = complete_confirmation(reopened, request["request_id"], "accept", answer())
     assert result["state"] == "approved"
     assert result["human_identity_verified"] is False

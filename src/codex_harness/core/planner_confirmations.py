@@ -9,6 +9,7 @@ entry points are unchanged until the bridge/store integration is applied.
 from __future__ import annotations
 
 import json
+import re
 from uuid import uuid4
 
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
@@ -16,6 +17,52 @@ from codex_harness.core.spine import Spine
 
 REQUEST = "confirmation-requested"
 RESPONSE = "confirmation-responded"
+
+
+def _label(key: str) -> str:
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", key).replace("_", " ").capitalize()
+
+
+def _readable(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join("- " + _readable(item) for item in value) or "None recorded"
+    if isinstance(value, dict):
+        return "\n\n".join(f"{_label(key)}:\n{_readable(item)}" for key, item in value.items())
+    if value is None:
+        return "Not recorded"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return str(value)
+
+
+def _understanding(vision: dict) -> str:
+    fields = vision["fields"]
+    used = {"validation", "requirementFiles", "schema"}
+    sections = [vision["title"]]
+    labels = (
+        ("Vision", ("vision",)),
+        ("Users", ("users",)),
+        ("First moment", ("first_user_moment", "firstUserMoment")),
+        ("Scope in", ("scope_in", "scopeIn")),
+        ("Scope out", ("scope_out", "scopeOut")),
+        ("Quality", ("quality_bar", "qualityBar", "quality")),
+        ("Done", ("done_feels_like", "doneFeelsLike", "done")),
+        ("Assumptions", ("assumptions",)),
+    )
+    for label, keys in labels:
+        key = next((key for key in keys if key in fields), None)
+        value = fields[key] if key else vision["text"] if label == "Vision" else None
+        sections.append(f"{label}:\n{_readable(value)}")
+        if key:
+            used.add(key)
+    if fields.get("vision") != vision["text"] and "vision" in fields:
+        sections.append("Complete vision details:\n" + vision["text"])
+    for key, value in fields.items():
+        if key not in used:
+            sections.append(f"{_label(key)}:\n{_readable(value)}")
+    return "\n\n".join(sections)
 
 
 def _records(store: PlanStore, kind: str):
@@ -44,7 +91,7 @@ def prepare_confirmation(store: PlanStore, gate: str) -> dict:
             "Review the complete recorded understanding below. Approve only this gate and "
             "revision. Retain your complete words; put any conditions or requested changes "
             "in conditions. A conditional response does not approve this gate.\n\n"
-            + json.dumps(vision, ensure_ascii=False, sort_keys=True, indent=2)
+            + _understanding(vision)
         )
         request = dict(
             request_id=uuid4().hex,
@@ -52,6 +99,7 @@ def prepare_confirmation(store: PlanStore, gate: str) -> dict:
             phase=phase,
             plan_revision=revision,
             card=card,
+            vision=vision,
         )
         store._event(REQUEST, request)
         return request
