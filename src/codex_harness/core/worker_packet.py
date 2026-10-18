@@ -635,6 +635,18 @@ def build_packet(
         "does not clear a prior denial; fresh explicit user disposition must identify "
         "the denial and authorized scope. This rule overrides the recovery ladder.\n"
         f"Tools: {tools}\n"
+        "Plugin/skill capabilities: discover only tools and skills actually exposed "
+        "through this worker runtime's supported capability discovery and current "
+        "account/subscription. Parent-session plugins do not automatically transfer "
+        "to native CLI workers. Use available capabilities only when useful for this "
+        "bead; MagicPath is an example for relevant design work, not routine coding. "
+        "Before using a connected service, verify the intended account and permissions "
+        "with supported read-only discovery; GitHub must be OrenKniaz, never fall back "
+        "to a work account. If identity or access is unavailable or uncertain, report "
+        "that limitation and do not use the capability. Discovery and use remain "
+        "subject to this packet's ownership, tool and denial rules; do not read "
+        "credentials or unrelated configuration, install plugins, add subscriptions "
+        "or paid capacity, obtain credentials, or expand permissions.\n"
         "Recovery ladder: re-read this packet; run the exact test command below; "
         "use targeted diagnostics; use a bounded search only as a last resort.",
         "## 2. Goal\n" + "\n\n".join(goal),
@@ -662,6 +674,9 @@ def build_packet(
         '"suggestedResolution": "..."}\n'
         ".harness/ is excluded from the ownership guard.",
         "## 8. Report\nReport what you changed and the checks you actually ran. "
+        "Briefly distinguish relevant capabilities discovered as available from "
+        "those actually used, and report unavailable or unverified capabilities; "
+        "say when discovery was unavailable or none were needed. "
         "End with HARNESS-RESULT: done or HARNESS-RESULT: blocked.",
     ]
 

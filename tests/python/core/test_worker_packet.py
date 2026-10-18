@@ -21,7 +21,8 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
 @pytest.mark.parametrize("fixture", ["dogfood-tipsplit", "handoff_variation", "dogfood-watercli"])
 def test_legacy_packets_match_narrative_revision_bytes(tmp_path, fixture):
     # All fixture/provider classes deliberately add the cross-route denial rule.
-    # Requirement text and untruncated source remain unchanged.
+    # Capability guidance is additive; every other byte still matches the frozen
+    # narrative-revision baseline, including requirement and source context.
     expected = json.loads(
         (Path(__file__).parent / "fixtures/legacy_packet_hashes.json").read_text()
     )
@@ -38,6 +39,27 @@ def test_legacy_packets_match_narrative_revision_bytes(tmp_path, fixture):
     for bead in plan.beads.values():
         for provider in ("codex", "claude", "copilot"):
             packet = build_packet(plan, bead, root / "template", None, provider)
+            before, guidance = packet.split("Plugin/skill capabilities: ", 1)
+            guidance, after = guidance.split("Recovery ladder:", 1)
+            assert "this worker runtime's supported capability discovery" in guidance
+            assert "current account/subscription" in guidance
+            assert "Parent-session plugins do not automatically transfer" in guidance
+            assert (
+                "MagicPath is an example for relevant design work, not routine coding" in guidance
+            )
+            assert "verify the intended account and permissions" in guidance
+            assert "GitHub must be OrenKniaz, never fall back to a work account" in guidance
+            assert "subject to this packet's ownership, tool and denial rules" in guidance
+            assert "do not read credentials or unrelated configuration" in guidance
+            assert "install plugins, add subscriptions or paid capacity" in guidance
+            assert "obtain credentials, or expand permissions" in guidance
+            packet = before + "Recovery ladder:" + after
+            before, report = packet.split("Briefly distinguish relevant capabilities", 1)
+            report, after = report.split("End with HARNESS-RESULT:", 1)
+            assert "discovered as available from those actually used" in report
+            assert "unavailable or unverified capabilities" in report
+            assert "discovery was unavailable or none were needed" in report
+            packet = before + "End with HARNESS-RESULT:" + after
             assert (
                 hashlib.sha256(packet.encode()).hexdigest()
                 == expected[f"{fixture}/{bead.id}/{provider}"]
