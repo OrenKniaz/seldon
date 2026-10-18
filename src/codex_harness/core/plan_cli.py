@@ -320,6 +320,9 @@ def parser() -> argparse.ArgumentParser:
     commands["accept-scenarios"].add_argument("--derive", action="store_true")
     commands["accept-scenarios"].add_argument("--input", help="Scenario list JSON or @file")
     commands["accept-review"].add_argument("--reviewer", action="append", default=[])
+    commands["accept-review"].add_argument(
+        "--resume", help="Recover a registered completed review without launching providers"
+    )
     commands["confirm"].add_argument("--by", default="user")
     commands["advance"].add_argument("--by", default="planner")
     commands["advance"].add_argument("--statement")
@@ -483,6 +486,8 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 arguments["subject"] = args.subject
             if command == "accept-review" and args.reviewer:
                 arguments["reviewers"] = [read_json(item) for item in args.reviewer]
+            if command == "accept-review" and args.resume is not None:
+                arguments["resume"] = args.resume
         reply = server.call_tool("harness_" + command.replace("-", "_"), arguments)
         for item in reply["content"]:
             item["text"] = item["text"].rsplit("\nNext: ", 1)[0]

@@ -573,7 +573,31 @@ def _launch_review(reviewer, packet, executable, *, instructions=None):
     return launch
 
 
-def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout):
+def _parse_review_return(store, reviewer, shard, response, *, mocked):
+    """Shared ordinary/recovery parsing and binding, without any provider invocation."""
+    record = {key: value for key, value in shard.items() if key != "packet"}
+    record.update(
+        exitCode=response[0], rejected=[], invalid=0, isMocked=mocked, didRunProvider=not mocked
+    )
+    output = response[1]
+    record.update(packet_binding(output, reviewer["provider"]))
+    if record["exitCode"] != 0:
+        raise ValueError(f"Reviewer exited with code {record['exitCode']}")
+    valid = []
+    known = {node["id"] for node in store._data()["nodes"]} | {"plan"}
+    for item in _last_array(_response(output, reviewer["provider"])):
+        reason = _invalid_reason(item, known)
+        if reason:
+            record["rejected"].append(
+                {"status": "rejected-unparsed", "reason": reason, "finding": item}
+            )
+        else:
+            valid.append({**item, "outOfShard": item["node_id"] not in {*shard["nodeIds"], "plan"}})
+    record["invalid"] = len(record["rejected"])
+    return record, valid
+
+
+def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout, capture=None):
     """Capture and persist provider errors before attempting temporary-dir cleanup."""
     record = {key: value for key, value in shard.items() if key != "packet"}
     record.update(
@@ -588,22 +612,11 @@ def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout
         record["didRunProvider"] = runner is None
         record["exitCode"], output = response[:2]
         stderr = response[2] if len(response) > 2 else ""
-        if record["exitCode"] != 0:
-            raise ValueError(f"Reviewer exited with code {record['exitCode']}")
-        items = _last_array(_response(output, reviewer["provider"]))
-        valid = []
-        for item in items:
-            reason = _invalid_reason(item, set(store.spine().ids()) | {"plan"})
-            if reason:
-                record["rejected"].append(
-                    {"status": "rejected-unparsed", "reason": reason, "finding": item}
-                )
-            else:
-                valid.append(
-                    {**item, "outOfShard": item["node_id"] not in {*shard["nodeIds"], "plan"}}
-                )
-        items = valid
-        record["invalid"] = len(record["rejected"])
+        if capture is not None:
+            capture(reviewer, shard, launch, executable, response)
+        record, items = _parse_review_return(
+            store, reviewer, shard, response, mocked=runner is not None
+        )
         if record["invalid"]:
             _diagnostic(store, result, record, launch, output, stderr)
     except (OSError, subprocess.TimeoutExpired, ValueError) as error:
@@ -691,6 +704,8 @@ def _review_dossier(
     token_budget=None,
     shards=None,
     stop_on_invalid=False,
+    capture=None,
+    abandon=None,
     **packet_options,
 ):
     """Retry the same logical invocation once, discarding superseded findings.
@@ -718,6 +733,7 @@ def _review_dossier(
                 executable=executable,
                 runner=runner,
                 timeout=timeout,
+                capture=capture,
             )
             record["shardDetails"].append(shard_record)
             completed.append((shard_record, items))
@@ -738,6 +754,10 @@ def _review_dossier(
             "shardDetails": record["shardDetails"],
             "reason": shard_record["primaryError"]["reason"],
         }
+        if abandon is not None:
+            abandon()
+            capture = None
+            abandon = None
         budget = max(1, budget // 2)
         record["reshardedFrom"]["newBudget"] = budget
         try:

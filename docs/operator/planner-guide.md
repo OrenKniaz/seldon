@@ -35,6 +35,19 @@ Nodes require `id`, `kind`, `title`, `text`, `parents` (id array), and `fields` 
 Acceptance: `accept-scenarios` lists; `--input @scenarios.json` saves `{id,title,given,steps,expect}` for `first-moment` and every `scope-N`; optional `nodeIds` bind other spine nodes. Steps are shell strings or `{command,expect}`; `expect` supports `stdout`/`stderr`, `stdoutRegex`/`stderrRegex`, and `exit` (default 0). Prose-only `--derive` results are `draft`, `executable: false`: supply steps and expectations. Edits retain scenarios and mark changed node references `stale`; save reviewed scenarios to refresh them.
 Use `{repo}`, `{python}`, `{home}`, `{data}` in commands. Each scenario starts in an empty cwd with fresh HOME/data, never a seeded fixture. Vision fields can supply structured `first_user_moment`/`scope_in` items or `acceptance` entries with these ids.
 `accept-review --reviewer @codex-reviewer.json --reviewer @claude-reviewer.json` uses normal subscriptions; its findings appear in `findings` and use `resolve`. A code/scenario change requires a fresh run and review. `accept-rebind --repo <dir>` reruns all scenarios for `revision-algorithm-upgraded` or `legacy-unbound` (matching raw hash; audited node-binding back-fill); passing unchanged v1 products retain reviews/approval by references, preserving approver and proxy identity. Product, plan, scenario or vision changes require fresh acceptance.
+
+Interrupted ordinary acceptance reviews retain their registered attempt and sealed original
+packets/returns under `.codex-harness/acceptance-review-attempts/`. Find attempt IDs in the
+interruption error or the plan status JSON's `acceptance.reviewAttempts`; counts describe
+stored returns, not eligibility. Use `accept-review --repo <same-dir> --resume <id>` (MCP:
+`harness_accept_review` with `repo` and `resume`) to recover the existing aggregate without
+launching providers. All original slots must be complete, valid, nonmocked and bound to
+the same source, candidate, context and observed native model/session. Unknown telemetry,
+tool/error events, missing protected bodies, overflow reshards, stale or changed receipts
+refuse recovery. No missing work is automatically relaunched. Do not move or edit originals.
+Repeated successful resume returns the same review/findings and preserves dispositions.
+External saved reviews without an original Harness registration cannot be imported.
+Recovery leaves questions, findings, phase and user approval gates in force.
 Delegated acceptance uses `--by proxy:<name>` (or `opus-user-proxy`); status records `isProxy: true`, never real-user acceptance. Only record actual user words with `--by user`.
 Quality distinguishes **planned vs proved** with `evidence: planned|executed`: a clean-state first-moment scenario or linked e2e (`firstMoment: true`, `cleanState: true`) is planned; only a passing current acceptance result is proved. Draft/stale scenarios are not planned. Missing-file cases must not defeat first use.
 Explicit `acceptance` spine nodes need a schema change by the spine owner; until then use vision fields or the scenario table through `accept-scenarios --input`.

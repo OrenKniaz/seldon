@@ -92,11 +92,11 @@ def protected_helpers(proofs: list[Path], root: Path, runner: Runner, requiremen
     return sorted(helpers)
 
 
-def _protected_tests(store: PlanStore) -> list[dict]:
+def _protected_tests(store: PlanStore, *, spine=None) -> list[dict]:
     template = store.workspace / "template"
     if not template.is_dir():
         return []
-    spine = store.spine()
+    spine = store.spine() if spine is None else spine
     manifest = compile_manifest(spine, template)
     sources = requirement_file_sources(template, manifest["requirementFiles"])
     selected = {}

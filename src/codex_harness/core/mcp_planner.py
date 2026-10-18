@@ -188,6 +188,7 @@ TOOLS = [
         "Cross-subscription acceptance review of the delivered product.",
         {
             "repo": STRING,
+            "resume": STRING,
             "reviewers": {
                 "type": "array",
                 "items": _object(

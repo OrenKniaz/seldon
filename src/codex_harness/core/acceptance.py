@@ -13,12 +13,14 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import time
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
 
+from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import roundtable
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
@@ -847,7 +849,7 @@ def _project_run_commands(run, scenarios):
     return view, bindings
 
 
-def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets=None) -> dict:
+def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
     spine = store.locked_acceptance_spine()
     run = current_run(store)
     if run is None or Path(run["repo"]) != Path(repo).resolve():
@@ -855,6 +857,12 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
     selected = roundtable.default_reviewers() if reviewers is None else list(reviewers)
     if len({item["provider"] for item in selected}) < 2:
         raise ValueError("Acceptance review requires cross-subscription reviewers")
+    if len({item["provider"] for item in selected}) != len(selected) or len(
+        {item["name"] for item in selected}
+    ) != len(selected):
+        raise ValueError("Acceptance reviewers/providers must be distinct")
+    original_identity = recovery.identities(store, repo, run)
+    evidence = _candidate_evidence(store, repo, run)
     included_header = (
         "## Packet contents\n\n"
         "Included: locked vision, plan context, protected tests and their template-local "
@@ -873,7 +881,7 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
         "Deferred findings are recorded gaps, not vision waivers. "
         "Assess them against the fixed locked requirements. Closed findings include only "
         "IDs, statuses, counts and full-record hashes; their full text is not included.\n"
-        + json.dumps(_candidate_evidence(store, repo, run), ensure_ascii=False, sort_keys=True)
+        + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
         + "\n\n"
     )
     packet = (
@@ -956,10 +964,211 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
                     "Command references require complete planned scenarios in every shard"
                 )
             dossiers[provider] = shards
-    if current_run(store) != run:
+    for reviewer in selected:
+        provider = reviewer["provider"]
+        if provider not in dossiers:
+            dossiers[provider] = roundtable.packet_shards(
+                store,
+                provider,
+                token_budget=(token_budgets or {}).get(provider),
+                packet=packet,
+                included_header=included_header,
+                context=context,
+            )
+    if current_run(store) != run or recovery.identities(store, repo, run) != original_identity:
         raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
+    return run, selected, dossiers, evidence, packet, included_header, context, original_identity
+
+
+def _acceptance_reviewer_findings(run, reviewer, record, parts):
+    merged = {}
+    for shard_record, items in parts:
+        for item in items:
+            roundtable._merge_finding(merged, {**item, **roundtable._binding_fields(shard_record)})
+    record["outOfPacketTools"] = list(
+        dict.fromkeys(
+            tool for shard in record["shardDetails"] for tool in shard["outOfPacketTools"]
+        )
+    )
+    record["packetBound"] = not record["outOfPacketTools"]
+    return [
+        {
+            **item,
+            "id": "AF-" + uuid4().hex,
+            "stage": "acceptance",
+            "reviewer": reviewer["name"],
+            "provider": reviewer["provider"],
+            "status": "open",
+            "resolution": "",
+            "runId": run["id"],
+        }
+        for item in merged.values()
+    ]
+
+
+def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, resumed=False):
+    result["outOfPacketTools"] = sorted(
+        {tool for item in result["reviewers"] for tool in item["outOfPacketTools"]}
+    )
+    result["packetBound"] = all(item["packetBound"] for item in result["reviewers"])
+    result.update(attempt.references(), findingIds=[item["id"] for item in pending])
+    with store._transaction():
+        if resumed:
+            saved = store.connection.execute(
+                "SELECT result_json FROM acceptance_reviews WHERE id=?", (attempt.id,)
+            ).fetchone()
+            if saved:
+                return _admitted_acceptance_review(store, repo, current_run(store), attempt, saved)
+        if (
+            current_run(store) != run
+            or recovery.identities(store, repo, run) != attempt.header["identities"]
+        ):
+            raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
+        if resumed:
+            attempt.validate(repo, run)
+        # The final event and aggregate bind immutable finding fields explicitly;
+        # later supported dispositions can change only status/resolution.
+        result["findingHashes"] = {
+            item["id"]: recovery.digest(
+                {k: v for k, v in item.items() if k not in ("status", "resolution")}
+            )
+            for item in pending
+        }
+        for finding in pending:
+            store.connection.execute(
+                "INSERT INTO acceptance_findings VALUES (?, ?)",
+                (finding["id"], json.dumps(finding)),
+            )
+        store.connection.execute(
+            "INSERT INTO acceptance_reviews VALUES (?, ?)", (result["id"], json.dumps(result))
+        )
+        store._event("acceptance-reviewed", result)
+    return {**result, "findings": pending}
+
+
+def _admitted_acceptance_review(store, repo, run, attempt, saved):
+    """Historical lookup under writer serialization, never a new admission."""
+    attempt.validate(repo, run, admitted=True)
+    result = json.loads(saved[0])
+    events = recovery._events(store, "acceptance-reviewed", attempt.id)
+    findings = {item["id"]: item for item in store.acceptance_findings()}
+    if (
+        len(events) != 1
+        or events[0][1] != result
+        or any(result.get(k) != v for k, v in attempt.references().items())
+    ):
+        raise ValueError("Admitted review membership is inconsistent")
+    members = [findings[key] for key in result["findingIds"]]
+    if any(
+        recovery.digest({k: v for k, v in item.items() if k not in ("status", "resolution")})
+        != result["findingHashes"][item["id"]]
+        for item in members
+    ):
+        raise ValueError("Admitted finding membership was changed")
+    return {**result, "findings": members}
+
+
+def _resume_acceptance_review(store, repo, attempt_id):
+    try:
+        attempt = recovery.ReviewAttempt.load(store, attempt_id)
+        run = current_run(store)
+        # Preliminary integrity check makes no context-admission claim. A winning
+        # concurrent resume may have inserted this same attempt's findings.
+        parts = attempt.validate(repo, run, admitted=True)
+        result = {
+            "id": attempt_id,
+            "stage": "acceptance",
+            "runId": run["id"],
+            "reviewers": [],
+            "isMocked": False,
+        }
+        pending = []
+        for reviewer in attempt.header["reviewers"]:
+            selected = [(record, items) for owner, record, items, _ in parts if owner == reviewer]
+            record = {
+                **reviewer,
+                "shards": len(selected),
+                "shardDetails": [part[0] for part in selected],
+                "truncatedNodes": [],
+            }
+            pending.extend(_acceptance_reviewer_findings(run, reviewer, record, selected))
+            result["reviewers"].append(record)
+        return _commit_acceptance_review(store, repo, run, result, pending, attempt, resumed=True)
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        raise recovery.refusal(error) from error
+
+
+def acceptance_review(
+    store, repo, *, reviewers=None, runner=None, token_budgets=None, resume=None
+) -> dict:
+    if resume is not None:
+        if any(value is not None for value in (reviewers, runner, token_budgets)):
+            raise ValueError("Resume uses only the original registered review settings")
+        return _resume_acceptance_review(store, repo, resume)
+    run, selected, dossiers, evidence, packet, included_header, context, original_identity = (
+        _prepare_acceptance_review(store, repo, reviewers, token_budgets)
+    )
+    executables = {
+        item["provider"]: item["provider"]
+        if runner is not None
+        else roundtable._executable(item["provider"], None)
+        for item in selected
+    }
+    for provider, executable in executables.items():
+        if not executable:
+            raise ValueError(f"Reviewer executable unavailable: {provider}")
+    attempt = recovery.ReviewAttempt.start(
+        store,
+        repo,
+        run,
+        selected,
+        dossiers,
+        executables,
+        evidence,
+        mocked=runner is not None,
+        expected_identity=original_identity,
+    )
+    try:
+        return _execute_acceptance_review(
+            store,
+            repo,
+            run,
+            selected,
+            dossiers,
+            packet,
+            included_header,
+            context,
+            executables,
+            attempt,
+            runner,
+            token_budgets,
+        )
+    except recovery.CaptureFailure as error:
+        raise recovery.refusal(error) from error
+    except sqlite3.Error as error:
+        raise PlanStoreError(
+            "acceptance-review-interrupted",
+            f"Attempt {attempt.id}: {error}. Preserve originals; use accept-review --resume "
+            f"{attempt.id} --repo {Path(repo).resolve()} to recover only completed evidence.",
+        ) from error
+
+
+def _execute_acceptance_review(
+    store,
+    repo,
+    run,
+    selected,
+    dossiers,
+    packet,
+    included_header,
+    context,
+    executables,
+    attempt,
+    runner,
+    token_budgets,
+):
     result = {
-        "id": uuid4().hex,
+        "id": attempt.id,
         "stage": "acceptance",
         "runId": run["id"],
         "reviewers": [],
@@ -968,11 +1177,9 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
     pending = []
     for reviewer in selected:
         provider = reviewer["provider"]
-        executable = provider if runner is not None else roundtable._executable(provider, None)
-        if not executable:
-            raise ValueError(f"Reviewer executable unavailable: {provider}")
+        executable = executables[provider]
         record = dict(reviewer)
-        merged = {}
+        parts = []
         for shard_record, items in roundtable._review_dossier(
             store,
             result,
@@ -989,6 +1196,8 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
             # A context-overflow retry uses the original recorded commands;
             # it can never carry aliases into a truncated template dossier.
             context=context,
+            capture=attempt.capture,
+            abandon=attempt.abandon,
         ):
             if shard_record["invalid"]:
                 # Persist diagnostic evidence (already saved before cleanup), but
@@ -999,47 +1208,10 @@ def acceptance_review(store, repo, *, reviewers=None, runner=None, token_budgets
                     f"Acceptance reviewer {reviewer['name']} exited {shard_record['exitCode']}: "
                     + shard_record["rejected"][0]["reason"]
                 )
-            for item in items:
-                roundtable._merge_finding(
-                    merged, {**item, **roundtable._binding_fields(shard_record)}
-                )
-        record["outOfPacketTools"] = list(
-            dict.fromkeys(
-                tool for shard in record["shardDetails"] for tool in shard["outOfPacketTools"]
-            )
-        )
-        record["packetBound"] = not record["outOfPacketTools"]
-        for item in merged.values():
-            pending.append(
-                {
-                    **item,
-                    "id": "AF-" + uuid4().hex,
-                    "stage": "acceptance",
-                    "reviewer": reviewer["name"],
-                    "provider": provider,
-                    "status": "open",
-                    "resolution": "",
-                    "runId": run["id"],
-                }
-            )
+            parts.append((shard_record, items))
+        pending.extend(_acceptance_reviewer_findings(run, reviewer, record, parts))
         result["reviewers"].append(record)
-    result["outOfPacketTools"] = sorted(
-        {tool for item in result["reviewers"] for tool in item["outOfPacketTools"]}
-    )
-    result["packetBound"] = all(item["packetBound"] for item in result["reviewers"])
-    with store._transaction():
-        if current_run(store) != run:
-            raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
-        for finding in pending:
-            store.connection.execute(
-                "INSERT INTO acceptance_findings VALUES (?, ?)",
-                (finding["id"], json.dumps(finding)),
-            )
-        store.connection.execute(
-            "INSERT INTO acceptance_reviews VALUES (?, ?)", (result["id"], json.dumps(result))
-        )
-        store._event("acceptance-reviewed", result)
-    return {**result, "findings": pending}
+    return _commit_acceptance_review(store, repo, run, result, pending, attempt)
 
 
 def acceptance_status(store) -> dict:
@@ -1110,6 +1282,7 @@ def acceptance_status(store) -> dict:
         else "harness_plan_status",
         "approval": approval,
         "reviews": reviews,
+        "reviewAttempts": recovery.attempt_summaries(store),
         "approvalOrigin": "recorded-unverified" if approval else None,
         "humanOriginVerified": False,
         "recordedUserAccepted": valid and not approval["isProxy"],
