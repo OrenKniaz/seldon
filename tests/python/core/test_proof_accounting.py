@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.python.core.planning_support import source_only_publication
 from tests.python.core.test_cockpit_projection import node, publish_local_fixture
 
 from codex_harness.core.dispatch import _commit, _git, run_plan
@@ -324,7 +325,7 @@ def observe_graph(context, repo):
 
 @pytest.fixture
 def resumed_claim(local_claim, tmp_path):
-    """Canonical protected-input republication and actual local resume/revalidation."""
+    """Source-only republication mechanics and actual local resume/revalidation."""
     from codex_harness.core.roundtable import run_roundtable
     from codex_harness.core.test_audit import audit_revised_tests
 
@@ -354,7 +355,9 @@ def resumed_claim(local_claim, tmp_path):
             runner=lambda *args: (0, "[]"),
             executable_for=lambda provider: provider,
         )
-        published = store.publish(by="planner", export_dir=workspace / "plan")
+        # Assert real audit and mocked-only review facts without granting real credit.
+        with source_only_publication():
+            published = store.publish(by="planner", export_dir=workspace / "plan")
         assert published != old_revision
         context = plan_context(store)
         (workspace / "sample.json").write_text(json.dumps(store.published_manifest(published)))
