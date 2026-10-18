@@ -6,6 +6,7 @@ The store double does NOT establish review-backed publication or human approval.
 
 import copy
 import json
+import os
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -131,9 +132,13 @@ def test_exact_publication_snapshot_options_and_ordinary_dispatch(fixture, monke
         workers=sorted(workers, key=lambda row: row["bead"]), maxParallel=1, timeout=73
     )
     command, launch = launches[0]
-    assert command[1:4] == ["-B", "-m", "codex_harness.core.planner_jobs"]
+    assert command[1:5] == ["-P", "-B", "-m", "codex_harness.core.planner_jobs"]
     assert command[-2:] == ["--job-id", store.revision]
     assert launch["cwd"] == store.workspace and launch["stdin"] == jobs.subprocess.DEVNULL
+    assert launch["env"] == {
+        **os.environ,
+        "PYTHONPATH": str(Path(jobs.__file__).resolve().parents[2]),
+    }
     called = []
 
     def source_dispatch(plan, **kwargs):
@@ -203,6 +208,49 @@ def test_options_cannot_be_replaced_or_partial_admission_seized(fixture):
     assert len(launches) == 1
 
 
+def test_real_child_uses_harness_entrypoint_despite_colliding_product_package(
+    tmp_path, monkeypatch
+):
+    """Real harmless child; actual empty store refuses before dispatcher/providers.
+
+    The store double admits only in the parent. The real child must enter the
+    Harness and retain that refusal, rather than run the workspace's exit-0 trap.
+    """
+    store = SourceOnlyStore(tmp_path)
+    workers = [
+        dict(bead=bead, provider="codex", model="gpt-6.1-sol", effort="medium")
+        for bead in store.manifest["beads"]
+    ]
+    collision = tmp_path / "codex_harness"
+    (collision / "core").mkdir(parents=True)
+    trap = "from pathlib import Path\nPath('wrong-entrypoint.txt').write_text('wrong')\n"
+    (collision / "__init__.py").write_text(trap)
+    (collision / "core/__init__.py").write_text("")
+    (collision / "core/planner_jobs.py").write_text(trap + "raise SystemExit(0)\n")
+    # Even an inherited explicit product path must not win over the loaded
+    # Harness package. Unrelated provider/account environment remains intact.
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("SELDON_TEST_PRESERVE_PROVIDER_ENV", "unchanged")
+    original_popen, children = jobs.subprocess.Popen, []
+
+    def observe_launch(command, **kwargs):
+        assert kwargs["env"]["SELDON_TEST_PRESERVE_PROVIDER_ENV"] == "unchanged"
+        child = original_popen(command, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", observe_launch)
+    admitted = jobs.start_worker_job(store, store.revision, workers)
+    assert len(children) == 1
+    assert children[0].wait(timeout=30) == 1
+    directory = Path(admitted["evidenceDir"])
+    terminal = read_record_json(directory / "terminal.json")
+    assert terminal["status"] == "failed"
+    assert "worker-job-current-publication-required" in terminal["error"]["message"]
+    assert not (tmp_path / "wrong-entrypoint.txt").exists()
+    assert not (directory / "runs").exists()
+
+
 def test_popen_failure_remains_unknown_and_never_relaunched(fixture, monkeypatch):
     store, _, _ = fixture
     calls = []
@@ -249,7 +297,9 @@ def test_dispatch_snapshot_is_observed_without_claiming_liveness_or_delivery(fix
         jobs.worker_job_status(store.workspace, store.revision)
 
 
-@pytest.mark.parametrize("invalid", ["duplicate", "missing", "unsupported", "empty"])
+@pytest.mark.parametrize(
+    "invalid", ["duplicate", "missing", "unsupported", "empty", "noncanonical"]
+)
 def test_worker_selection_requires_explicit_supported_tuple(fixture, invalid):
     store, workers, launches = fixture
     if invalid == "duplicate":
@@ -258,8 +308,12 @@ def test_worker_selection_requires_explicit_supported_tuple(fixture, invalid):
         workers.pop()
     elif invalid == "unsupported":
         workers[0]["provider"] = "invented-provider"
+    elif invalid == "noncanonical":
+        workers[0]["provider"] = " Codex "
     else:
         workers[0]["effort"] = ""
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError, match="provider-must-use-canonical-name" if invalid == "noncanonical" else None
+    ):
         jobs.start_worker_job(store, store.revision, workers)
     assert launches == []

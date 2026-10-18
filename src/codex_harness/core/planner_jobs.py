@@ -109,6 +109,8 @@ def _workers(manifest, workers):
         bead = worker["bead"]
         if bead not in manifest["beads"] or bead in result:
             raise ValueError("worker-job-worker-bead-invalid-or-duplicate")
+        if worker["provider"] != worker["provider"].strip().lower():
+            raise ValueError("worker-job-provider-must-use-canonical-name")
         get_adapter(worker["provider"])
         result[bead] = dict(worker)
     return [result[bead] for bead in sorted(result)]
@@ -179,6 +181,7 @@ def start_worker_job(store, expected_revision, workers, *, max_parallel=2, timeo
         write_record_json_once(directory / "request.json", request)
         command = [
             sys.executable,
+            "-P",
             "-B",
             "-m",
             "codex_harness.core.planner_jobs",
@@ -200,6 +203,11 @@ def start_worker_job(store, expected_revision, workers, *, max_parallel=2, timeo
                     stdin=subprocess.DEVNULL,
                     stdout=stdout,
                     stderr=stderr,
+                    # A product package must not replace this controller before
+                    # its publication guards run. -P removes implicit cwd; pin
+                    # only this child's import path, keeping all other provider
+                    # account/configuration environment settings unchanged.
+                    env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
                     **flags,
                 )
         write_record_json_once(
