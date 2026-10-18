@@ -936,6 +936,7 @@ def test_status_empty_spine_and_unknown_efficiency(tmp_path):
         "next": "harness_record_confirmation gate=vision-lock statement=<actual-words>",
         "approval": None,
         "reviews": [],
+        "reviewAttempts": [],
     }
     assert result["agents"] == "unavailable"
     run = tmp_path / "runs" / "run"
