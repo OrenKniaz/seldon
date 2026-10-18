@@ -12,7 +12,7 @@ import json
 import re
 from uuid import uuid4
 
-from codex_harness.core.plan_store import PlanStore, PlanStoreError
+from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 from codex_harness.core.spine import Spine
 
 REQUEST = "confirmation-requested"
@@ -72,13 +72,52 @@ def _records(store: PlanStore, kind: str):
         yield row[0], json.loads(row[1])
 
 
+def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
+    """Read original correlated records; supplied words/by fields alone earn no credit."""
+    requests = {row["request_id"]: row for _, row in _records(store, REQUEST)}
+    latest = next((row for _, row in _records(store, REQUEST) if row["gate"] == gate), None)
+    for _, response in _records(store, RESPONSE):
+        if response.get("state") != "approved" or response.get("gate") != gate:
+            continue
+        request = requests.get(response.get("request_id"))
+        content = response.get("content")
+        if (
+            not request
+            or request != latest
+            or request.get("gate") != gate
+            or response.get("phase") != request.get("phase")
+            or request.get("plan_revision") != revision
+            or response.get("plan_revision") != revision
+            or response.get("action") != "accept"
+            or response.get("provenance") != "mcp-client-elicitation"
+            or not isinstance(content, dict)
+            or content.get("approve") is not True
+            or content.get("conditions") != ""
+        ):
+            continue
+        approval = store.connection.execute(
+            "SELECT * FROM approvals WHERE id=?", (response.get("approval_id"),)
+        ).fetchone()
+        if (
+            approval
+            and approval["gate"] == gate
+            and approval["plan_revision"] == revision
+            and approval["by"] == "mcp-client-elicitation"
+            and approval["statement"] == content.get("statement")
+        ):
+            return dict(approval)
+    return None
+
+
 def prepare_confirmation(store: PlanStore, gate: str) -> dict:
     """Persist exactly what the native client will display for the current gate."""
     with store._transaction():
         if gate not in ("align", "vision-lock"):
             raise PlanStoreError("plan-gate-invalid", str(gate))
         phase = store.phase()
-        if phase != gate:
+        if phase != gate and not (
+            gate == "vision-lock" and PHASES.index(phase) > PHASES.index("vision-lock")
+        ):
             raise PlanStoreError("plan-confirmation-gate-mismatch", f"Current phase is {phase}")
         spine = Spine(store._data())
         visions = spine.ids("vision")
@@ -86,8 +125,9 @@ def prepare_confirmation(store: PlanStore, gate: str) -> dict:
             raise PlanStoreError("plan-confirmation-card-unavailable", "One vision is required")
         vision = spine.node(visions[0])
         revision = spine.plan_revision()
+        heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
         card = (
-            f"Confirm {gate} for revision {revision}.\n"
+            f"{heading} for revision {revision}.\n"
             "Review the complete recorded understanding below. Approve only this gate and "
             "revision. Retain your complete words; put any conditions or requested changes "
             "in conditions. A conditional response does not approve this gate.\n\n"

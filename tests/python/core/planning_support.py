@@ -10,11 +10,39 @@ from types import MethodType
 from unittest.mock import patch
 
 from codex_harness.core.plan_store import PlanStore
+from codex_harness.core.planner_confirmations import complete_confirmation, prepare_confirmation
 from codex_harness.core.roundtable import run_roundtable
 from codex_harness.core.spine import compile_manifest
 from codex_harness.core.test_audit import audit_revised_tests
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
+
+
+def source_only_confirmation(store, gate, *, statement="SOURCE-ONLY synthetic native response"):
+    """Exercise real gate storage with a synthetic client form, never human/runtime proof.
+
+    No production approval guard is patched; callers must be at the actual gate.
+    Native transport correlation is separately tested by the MCP bridge tests.
+    """
+    request = prepare_confirmation(store, gate)
+    result = complete_confirmation(
+        store,
+        request["request_id"],
+        "accept",
+        {"approve": True, "statement": statement, "conditions": ""},
+    )
+    assert result["state"] == "approved" and not result["human_identity_verified"]
+    return result["approval_id"]
+
+
+def source_only_vision_lock(store, *, statement="SOURCE-ONLY synthetic vision response"):
+    """Drive initial fixture alignment/lock through real phase and native-store contracts."""
+    if store.phase() == "align":
+        source_only_confirmation(store, "align")
+        store.advance("expand", by="source-test")
+    if store.phase() == "expand":
+        store.advance("vision-lock", by="source-test")
+    return source_only_confirmation(store, "vision-lock", statement=statement)
 
 
 def _source_only_evidence_gate(store, revision):

@@ -8,7 +8,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.python.core.planning_support import publication_evidence
+from tests.python.core.planning_support import (
+    publication_evidence,
+    source_only_confirmation,
+    source_only_vision_lock,
+)
 from tests.python.core.test_plan_cli import cli
 
 from codex_harness.core import plan_cli
@@ -383,14 +387,14 @@ def project(tmp_path):
             ],
         )
         store.upsert_node(vision)
-        store.approve("vision-lock", by="user", statement="Lock this vision")
+        source_only_vision_lock(store, statement="Lock this vision")
         yield store, repo
 
 
 def to_accept(store):
     for phase in PHASES[PHASES.index(store.phase()) + 1 :]:
         if store.phase() in ("align", "vision-lock"):
-            store.approve(store.phase(), by="user", statement="Confirm this vision")
+            source_only_confirmation(store, store.phase(), statement="Confirm this vision")
         if phase == "publish":
             publication_evidence(store)
         if store.phase() == "publish":
