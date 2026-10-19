@@ -1,4 +1,6 @@
-"""Pure, deterministic text projections for provider planning chats."""
+"""Text projections and read-only durable-state guidance for planning chats."""
+
+import sqlite3
 
 from codex_harness.core.plan_store import PHASES
 from codex_harness.core.spine_diagrams import _escape, _layers, _projection, diagram, text_fallback
@@ -16,6 +18,305 @@ NEXT = {
     "execute": "Follow worker progress and proof against the published revision.",
     "accept": "Review whether the delivered product achieves the locked vision.",
 }
+
+
+def review_resolution_state(store, status: dict) -> dict:
+    """Read existing canonical facts; advisory only, never a loop or admission lease."""
+    from codex_harness.core.plan_quality import quality_report
+    from codex_harness.core.roundtable import findings
+
+    def known(value):
+        return (
+            isinstance(value, str)
+            and bool(value.strip())
+            and value not in {"unknown", "unavailable"}
+        )
+
+    spine = status.get("spine_revision", status.get("plan_revision"))
+    manifest = status.get("manifest_revision")
+    state = {
+        "schemaVersion": 1,
+        "phase": status.get("phase"),
+        "spineRevision": spine if known(spine) else None,
+        "manifestRevision": manifest if known(manifest) else None,
+        "blockingOpenFindings": None,
+        "deferredFindings": None,
+        "audit": {"current": None, "proofLevel": None},
+        "review": {"current": None, "successfulReviewIds": None},
+        "budget": {"reservation": "unknown_to_product", "owner": "host_consumer"},
+        "scope": (
+            "Host-driven plan resolution/publication guidance; not worker or product acceptance."
+        ),
+    }
+
+    def action(kind, **details):
+        return {
+            "kind": kind,
+            "manifestRevision": state["manifestRevision"],
+            "findingIds": [],
+            "auditMode": state["audit"]["proofLevel"] or "unknown",
+            **details,
+        }
+
+    state["nextAction"] = action("unavailable_refresh")
+    if store is None or not known(spine) or state["phase"] not in PHASES:
+        return state
+
+    def excerpt(value):
+        if not isinstance(value, str):
+            return None, False
+        return value[:512], len(value) > 512
+
+    def relation(revision):
+        if not known(revision) or not known(manifest):
+            return "unknown"
+        return "current" if revision == manifest else "stale"
+
+    priority = None
+    try:
+        gate = status.get("pending_gate")
+        approval = status.get("approval") or {}
+        if status.get("vision_lock_stale") or (
+            isinstance(gate, str)
+            and gate.startswith("approval:")
+            and not (
+                approval.get("granted") is True and approval.get("gate") == gate.split(":", 1)[1]
+            )
+        ):
+            priority = action(
+                "existing_canonical_blocker",
+                reason="approval",
+                gate="vision-lock" if status.get("vision_lock_stale") else gate.split(":", 1)[1],
+            )
+        questions = [
+            row[0]
+            for row in store.connection.execute(
+                "SELECT id FROM clarifications WHERE status='open' ORDER BY id"
+            )
+        ]
+        if len(questions) != status.get("open_clarifications"):
+            raise ValueError("Canonical clarification state changed")
+        if priority is None and questions:
+            priority = action(
+                "existing_canonical_blocker", reason="clarifications", questionIds=questions
+            )
+        # Preserve a known canonical approval/question prerequisite even when the
+        # manifest is absent. Broken review reads must still remain unknown.
+        if priority is not None:
+            state["nextAction"] = priority
+        rows = findings(store)
+        blocking, deferred = [], []
+        for row in sorted(rows, key=lambda item: item["id"]):
+            if row.get("stage") == "readiness":
+                continue
+            if not known(row.get("id")) or not isinstance(row.get("memberIds"), list):
+                raise ValueError("Unknown recorded finding membership")
+            if row["status"] not in {"open", "deferred"}:
+                continue
+            item = {
+                "id": row["id"],
+                "recordedRevision": row.get("plan_revision"),
+                "revisionRelation": relation(row.get("plan_revision")),
+                "detailRoute": {
+                    "roundId": row.get("round_id"),
+                    "mcpTool": "harness_review",
+                    "cliCommand": "review",
+                },
+            }
+            if row["status"] == "open":
+                for public, source in (("finding", "finding"), ("suggestion", "suggestion")):
+                    item[public], item[public + "Truncated"] = excerpt(row.get(source))
+                item.update(
+                    memberIds=sorted(row["memberIds"]),
+                    nodeId=row.get("node_id"),
+                    roundId=row.get("round_id"),
+                    severity=row.get("severity"),
+                    status="open",
+                )
+                blocking.append(item)
+            else:
+                item["resolution"], item["resolutionTruncated"] = excerpt(row.get("resolution"))
+                deferred.append(item)
+        state.update(blockingOpenFindings=blocking, deferredFindings=deferred)
+        if known(manifest):
+            audit = store.passing_audit(manifest)
+            reviews = store.successful_reviews(manifest)
+            if audit is not None and not isinstance(audit, dict) or not isinstance(reviews, list):
+                raise ValueError("Unreadable current evidence")
+            state["audit"] = {
+                "current": bool(audit),
+                "proofLevel": (audit.get("proofLevel", "oracle-verified") if audit else None),
+            }
+            if state["audit"]["proofLevel"] not in {None, "prospective", "oracle-verified"}:
+                raise ValueError("Unknown recorded audit mode")
+            ids = [row["id"] for row in reviews]
+            if not all(known(item) for item in ids):
+                raise ValueError("Unknown current review identity")
+            state["review"] = {"current": bool(ids), "successfulReviewIds": sorted(ids)}
+            if state["phase"] in {"roundtable", "publish"}:
+                check = next(
+                    check
+                    for check in quality_report(store)["checks"]
+                    if check["id"] == "roundtable"
+                )
+                if check["status"] not in {"pass", "warn", "fail"}:
+                    raise ValueError("Unknown roundtable quality state")
+                advice, truncated = excerpt(check["advice"])
+                state["review"].update(
+                    qualityStatus=check["status"],
+                    advice=advice,
+                    adviceTruncated=truncated,
+                    detailRoute={
+                        "roundId": check["evidence"].get("roundId"),
+                        "mcpTool": "harness_review",
+                        "cliCommand": "review",
+                    },
+                )
+        if priority is not None:
+            pass
+        elif state["phase"] not in {"roundtable", "publish"}:
+            state["nextAction"] = action("not_applicable")
+        elif blocking:
+            state["nextAction"] = action(
+                "reconcile_findings", findingIds=[row["id"] for row in blocking]
+            )
+        elif not known(manifest):
+            state["nextAction"] = action("compile_required")
+        elif not state["audit"]["current"]:
+            state["nextAction"] = action("audit_required")
+        elif not state["review"]["current"] or state["review"].get("qualityStatus") == "fail":
+            state["nextAction"] = action("review_required")
+        elif state["phase"] == "roundtable":
+            state["nextAction"] = action("attempt_phase_advance", targetPhase="publish")
+        elif status.get("publication", {}).get("up_to_date") and not gate:
+            state["nextAction"] = action("not_applicable")
+        else:
+            state["nextAction"] = action("attempt_publication")
+        if (
+            store._revision() != spine
+            or store.phase() != state["phase"]
+            or store.manifest_revision() != manifest
+        ):
+            priority = None
+            raise ValueError("Resolution observation changed during read")
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, StopIteration):
+        state.update(
+            blockingOpenFindings=None,
+            deferredFindings=None,
+            audit={"current": None, "proofLevel": None},
+            review={"current": None, "successfulReviewIds": None},
+        )
+        state["nextAction"] = priority if priority is not None else action("unavailable_refresh")
+    return state
+
+
+def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
+    """Transport-specific wording for the same single canonical advisory action."""
+    action = state["nextAction"]
+    kind = action["kind"]
+
+    def cmd(value):
+        return cli_prefix + value if cli_prefix is not None else "existing CLI " + value
+
+    refresh = cmd("status") if cli_prefix is not None else "harness_plan_status"
+    if kind == "existing_canonical_blocker":
+        if action.get("reason") == "approval":
+            return "Use native MCP harness_record_confirmation gate=" + action["gate"]
+        return (
+            cmd("answer --id " + action["questionIds"][0] + ' --text "<actual answer>"')
+            if cli_prefix is not None
+            else "Answer the actual open questions with harness_answer."
+        )
+    if kind == "reconcile_findings":
+        ids = ", ".join(action["findingIds"][:3]) + (
+            "; more in status" if len(action["findingIds"]) > 3 else ""
+        )
+        route = (
+            cmd(
+                "resolve --id <recorded-id> --status <resolved|rejected|deferred> "
+                '--resolution "<evidence and reason>"'
+            )
+            if cli_prefix is not None
+            else (
+                "harness_resolve_findings with recorded ids, "
+                "evidence-backed dispositions and reasons"
+            )
+        )
+        return f"Inspect and repair recorded findings ({ids}); use {route}; refresh {refresh}."
+    if kind == "compile_required":
+        return (
+            cmd("compile --template <existing-template> --out <manifest.json>")
+            + "; refresh "
+            + refresh
+        )
+    if kind == "audit_required":
+        mode = action["auditMode"]
+        if mode == "prospective":
+            return cmd("audit --prospective")
+        if mode == "oracle-verified":
+            return cmd("audit --oracle <existing-reference>")
+        return (
+            "Choose the authorized audit mode: "
+            + cmd("audit --prospective")
+            + " OR "
+            + cmd("audit --oracle <existing-reference>")
+        )
+    if kind == "review_required":
+        review = state["review"]
+        if review.get("qualityStatus") == "fail" and review["current"]:
+            round_id = review["detailRoute"]["roundId"]
+            inspect = (
+                cmd("review " + round_id)
+                if cli_prefix is not None
+                else "harness_review id=" + round_id
+            )
+            return (
+                f"Inspect {inspect}: {review['advice']}; retry only the failed reviewer with "
+                + cmd("roundtable --reviewer @<failed-reviewer.json>")
+                + " within host-reserved capacity and existing round/total caps; refresh "
+                + refresh
+            )
+        return (
+            cmd("roundtable --reviewer @<reviewer.json>")
+            + " within host-reserved capacity; refresh "
+            + refresh
+        )
+    if kind == "attempt_phase_advance":
+        return (
+            (
+                cmd("advance --to publish")
+                if cli_prefix is not None
+                else "harness_advance to_phase=publish"
+            )
+            + " (attempt only; canonical gates recheck)"
+            + review_warning(state)
+        )
+    if kind == "attempt_publication":
+        prospective = action["auditMode"] == "prospective"
+        return (
+            (
+                cmd(
+                    'publish --proof-level prospective --reason "<actual no-oracle reason>"'
+                    if prospective
+                    else "publish"
+                )
+                if cli_prefix is not None
+                else "harness_publish"
+                + (
+                    " proof_level=prospective reason=<actual no-oracle reason>"
+                    if prospective
+                    else ""
+                )
+            )
+            + " (attempt only; canonical gates recheck)"
+            + review_warning(state)
+        )
+    return "Refresh " + refresh + "; canonical state or resolution scope is unavailable."
+
+
+def review_warning(state: dict) -> str:
+    review = state["review"]
+    return "; review warning: " + review["advice"] if review.get("qualityStatus") == "warn" else ""
 
 
 def _inline(value: str) -> str:

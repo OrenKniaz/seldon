@@ -554,7 +554,9 @@ class PlannerServer:
         if self.store is None and (self.workspace / ".codex-harness" / "plan.sqlite3").is_file():
             self._store()
         if self.store is not None:
-            return self.store.status()
+            status = self.store.status()
+            status["reviewResolution"] = views.review_resolution_state(self.store, status)
+            return status
         return {
             "name": self.workspace.name,
             "phase": "align",
@@ -570,6 +572,7 @@ class PlannerServer:
 
     def call_tool(self, name: str, arguments: dict) -> dict:
         self.result_data = None
+        operation_error_code = None
         try:
             tool = next((tool for tool in TOOLS if tool["name"] == name), None)
             if tool is None:
@@ -594,6 +597,7 @@ class PlannerServer:
                 and not self.result_data["passed"]
             )
         except Exception as error:
+            operation_error_code = getattr(error, "code", None)
             # Tool failures are isolated at the protocol boundary; no input/secret logs.
             print(f"planner tool failed: {type(error).__name__}", file=sys.stderr)
             body = f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}"
@@ -604,7 +608,11 @@ class PlannerServer:
             is_error = True
         try:
             status = (
-                diagnostic_status(self.workspace) if name == "harness_preflight" else self._status()
+                diagnostic_status(self.workspace)
+                if name == "harness_preflight"
+                else self.result_data
+                if name == "harness_plan_status" and not is_error
+                else self._status()
             )
         except Exception as error:
             print(f"planner status unavailable: {type(error).__name__}", file=sys.stderr)
@@ -622,7 +630,7 @@ class PlannerServer:
         acceptance = status.get("acceptance", {})
         if name == "harness_plan_status" and acceptance.get("invalidMessage"):
             body += "\nAcceptance invalid: " + acceptance["invalidMessage"]
-        next_step = self._next(name, arguments, status, is_error)
+        next_step = self._next(name, arguments, status, is_error, operation_error_code)
         if name == "harness_accept_run" and arguments.get("subject") not in ("product", "oracle"):
             next_step = (
                 "harness_accept_run repo=<integrated-repo> subject=product OR "
@@ -649,7 +657,7 @@ class PlannerServer:
             ],
         }
 
-    def _next(self, name: str, args: dict, status: dict, error: bool) -> str:
+    def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
         if name == "harness_schema":
             return "Use the documented input with actual plan IDs; follow harness_plan_status."
         if name in {"harness_worker_start", "harness_worker_status"} and not error:
@@ -687,6 +695,12 @@ class PlannerServer:
             and status["phase"] == "accept"
         ):
             return acceptance.get("next", "harness_plan_status")
+        if (
+            error
+            and status.get("reviewResolution")
+            and error_code in {"plan-findings-open", "plan-publication-evidence-required"}
+        ):
+            return views.review_resolution_next(status["reviewResolution"])
         if error:
             return (
                 "Correct the reported blocker, then retry this tool; "
@@ -729,6 +743,10 @@ class PlannerServer:
             )
         if status.get("open_clarifications"):
             return "Answer the open questions with harness_answer before advancing."
+        if status["phase"] in {"roundtable", "publish"}:
+            resolution = status.get("reviewResolution")
+            if resolution and resolution["nextAction"]["kind"] != "not_applicable":
+                return views.review_resolution_next(resolution)
         if status.get("acceptance", {}).get("accepted"):
             return (
                 "Review the recorded acceptance above; harness_plan_status shows current evidence."
@@ -922,7 +940,7 @@ class PlannerServer:
                         lines.append("[truncated: 8 KB test body budget]")
             return "\n".join(lines)
         if name == "harness_plan_status":
-            status = store.status()
+            status = self._status()
             self.result_data = status
             questions = [
                 dict(row)

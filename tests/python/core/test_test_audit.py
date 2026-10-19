@@ -77,6 +77,309 @@ def test_prospective_checks_real_stubs_without_modifying_template(prospective):
     assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
+def test_prospective_owned_module_cli_needs_no_imported_main_api(prospective):
+    """Protect real CLI red: imported-function proofs miss the child boundary."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n"
+        "    def test_cli(self):\n"
+        "        result = subprocess.run([sys.executable, '-B', '-m', 'app', 'list'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+        "        self.assertEqual(result.returncode, 0)\n"
+        "        self.assertEqual(result.stdout, '[]\\n')\n"
+        "        self.assertEqual(result.stderr, '')\n"
+    )
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    result = audit_prospective_tests(**prospective)
+    assert result["ok"], json.dumps(
+        result["redBaseline"][0]["failureProvenance"]["tests"][0], indent=2
+    )
+    proof = result["redBaseline"][0]
+    assert proof["failureProvenance"]["classification"] == "meaningful-red"
+    observed = proof["failureProvenance"]["tests"][0]
+    assert observed["classification"] == "owned-cli-stub"
+    launch = observed["moduleLaunches"][0]
+    assert launch["argv"][1:] == ["-B", "-m", "app", "list"]
+    child = launch["child"]
+    assert child["runtimePid"] == child["pid"]
+    assert child["pid"] == launch["pid"] or (
+        child["platform"] == launch["platform"] == "win32"
+        and child["runtimeParentPid"] == launch["pid"]
+        and child["launcherExecutable"] != launch["actualInterpreter"]
+    )
+    assert child["atexitObserved"] is True
+    assert child["observationStartedAtUtc"] <= child["atexitObservedAtUtc"]
+    assert launch["child"]["startup"] == "observed-equivalent-with-private-bootstrap"
+    assert launch["child"]["startupIdentity"] == launch["startupIdentity"]
+    assert launch["child"]["exception"]["type"] == "NotImplementedError"
+    assert result["proofLevel"] == "prospective" and not result["integrationChecked"]
+    assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "overwritten",
+        "unrelated",
+        "stderr-spoof",
+        "import-error",
+        "foreign-module",
+        "startup-flag",
+        "startup-env",
+        "setup-launch",
+        "sitecustomize",
+        "usercustomize",
+    ],
+)
+def test_prospective_module_cli_refuses_unattributed_failures(prospective, case):
+    """A real child is insufficient without startup, owned-stub and result lineage."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    command = "[sys.executable, '-B', '-m', 'app']"
+    extra = ""
+    assertion = "self.assertEqual(result.returncode, 0)"
+    if case == "overwritten":
+        extra = "        result = subprocess.CompletedProcess([], 0)\n"
+        assertion = "self.assertEqual(result.returncode, 1)"
+    elif case == "unrelated":
+        assertion = "self.assertEqual(1, 42)"
+    elif case == "stderr-spoof":
+        (root / "app.py").write_text(
+            "import sys\nsys.stderr.write('NotImplementedError: planned CLI')\nsys.exit(1)\n"
+        )
+    elif case == "import-error":
+        (root / "app.py").write_text("import missing_cli_dependency\n")
+    elif case == "foreign-module":
+        (root / "foreign.py").write_text("raise NotImplementedError('foreign CLI')\n")
+        command = "[sys.executable, '-m', 'foreign']"
+    elif case == "startup-flag":
+        command = "[sys.executable, '-S', '-m', 'app']"
+    elif case == "startup-env":
+        extra = ""
+    elif case in {"sitecustomize", "usercustomize"}:
+        (root / (case + ".py")).write_text("# Legitimate project startup customization.\n")
+    launch = (
+        f"subprocess.run({command}, cwd=Path(__file__).resolve().parents[1], "
+        "capture_output=True, text=True"
+    )
+    if case == "startup-env":
+        launch += ", env={**os.environ, 'PYTHONSAFEPATH': '1'}"
+    launch += ")"
+    if case == "setup-launch":
+        body = (
+            "    def setUp(self):\n        self.result = " + launch + "\n"
+            "    def test_cli(self):\n        self.assertEqual(self.result.returncode, 0)\n"
+        )
+    else:
+        body = (
+            "    def test_cli(self):\n        result = "
+            + launch
+            + "\n"
+            + extra
+            + "        "
+            + assertion
+            + "\n"
+        )
+    if case == "stderr-spoof":
+        # Validate the actual captured child stderr; unittest does not forward it.
+        body = body.replace(
+            "        self.assertEqual(result.returncode, 0)",
+            "        self.assertIn('NotImplementedError: planned CLI', result.stderr)\n"
+            "        self.assertEqual(result.returncode, 0)",
+        )
+    (root / "tests/test_app.py").write_text(
+        "import os, subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n" + body
+    )
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"], result
+    provenance = result["redBaseline"][0]["failureProvenance"]
+    assert provenance["classification"] == "unproved"
+    launch = provenance["tests"][0]["moduleLaunches"][0]
+    if case in {"sitecustomize", "usercustomize"}:
+        assert not launch.get("instrumented")
+        assert "startup customization" in launch["reason"]
+    elif case == "startup-env":
+        assert not launch.get("instrumented")
+        assert "startup environment" in launch["reason"]
+    elif case == "stderr-spoof":
+        assert not launch.get("child", {}).get("exception")
+
+
+def test_prospective_module_cli_preserves_simple_helper_result(prospective):
+    """One straight-line helper may return its actual CompletedProcess unchanged."""
+    root = prospective["template"]
+    (root / "app.py").write_text(
+        "def _entry():\n    raise NotImplementedError('planned CLI')\n"
+        "if __name__ == '__main__':\n    _entry()\n"
+    )
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "def invoke():\n"
+        "    result = subprocess.run([sys.executable, '-m', 'app'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+        "    return result\n"
+        "class Proof(unittest.TestCase):\n"
+        "    def test_cli(self):\n        result = invoke()\n"
+        "        self.assertEqual(result.returncode, 0)\n"
+    )
+    result = audit_prospective_tests(**prospective)
+    assert result["ok"], json.dumps(
+        result["redBaseline"][0]["failureProvenance"]["tests"][0], indent=2
+    )
+    assert (
+        result["redBaseline"][0]["failureProvenance"]["tests"][0]["classification"]
+        == "owned-cli-stub"
+    )
+
+
+@pytest.mark.parametrize("change", ["unknown-finder", "runtime-function", "path-hook"])
+def test_prospective_module_cli_refuses_changed_startup_identity(prospective, change):
+    """Only the exact reviewed runtime exception may extend standard startup."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    mutations = {
+        "unknown-finder": "sys.meta_path.append(UnknownFinder())",
+        "runtime-function": "_virtualenv._Finder.find_spec = replacement",
+        "path-hook": "sys.path_hooks[1] = other_hook",
+    }
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest, _virtualenv\nfrom pathlib import Path\n"
+        "class UnknownFinder:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n        return None\n"
+        "def replacement(self, fullname, path=None, target=None):\n    return None\n"
+        "def other_hook(path):\n    return None\n"
+        "class Proof(unittest.TestCase):\n    def test_cli(self):\n        "
+        + mutations[change]
+        + "\n"
+        "        result = subprocess.run([sys.executable, '-m', 'app'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+        "        self.assertEqual(result.returncode, 0)\n"
+    )
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"]
+    observed = result["redBaseline"][0]["failureProvenance"]
+    assert observed["classification"] == "unproved"
+    launch = observed["tests"][0]["moduleLaunches"][0]
+    assert not launch.get("instrumented")
+    assert any(word in launch["reason"] for word in ("finder", "hook", "function", "identity"))
+
+
+def test_prospective_module_cli_refuses_mutated_result(prospective):
+    """A field overwrite must not borrow the real child's earlier stub lineage."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n    def test_cli(self):\n"
+        "        result = subprocess.run([sys.executable, '-m', 'app'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+        "        result.returncode = 42\n"
+        "        self.assertEqual(result.returncode, 0)\n"
+    )
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"], result["findings"]
+    assert result["redBaseline"][0]["failureProvenance"]["classification"] == "unproved"
+
+
+def test_prospective_module_cli_refuses_assert_named_mutator(prospective):
+    """An assert-prefixed class helper cannot mutate the observed result."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n"
+        "    def assertMutate(self, result):\n"
+        "        setattr(result, 'returncode', 42)\n"
+        "    def test_cli(self):\n"
+        "        result = subprocess.run([sys.executable, '-m', 'app'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+        "        self.assertMutate(result)\n"
+        "        self.assertEqual(result.returncode, 0)\n"
+    )
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"], result["findings"]
+    assert result["redBaseline"][0]["failureProvenance"]["classification"] == "unproved"
+
+
+def test_prospective_module_cli_preserves_explicit_empty_environment(prospective):
+    """Explicit env={} cannot become inherited startup and instrumented proof."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n    def test_cli(self):\n"
+        "        result = subprocess.run([sys.executable, '-m', 'app'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, env={})\n"
+        "        self.assertEqual(result.returncode, 0)\n"
+    )
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"], result["findings"]
+    observed = result["redBaseline"][0]["failureProvenance"]
+    assert observed["classification"] == "unproved"
+    launch = observed["tests"][0]["moduleLaunches"][0]
+    assert not launch.get("instrumented")
+    assert "startup environment" in launch["reason"]
+
+
+@pytest.mark.parametrize(
+    "scope,mutation",
+    [
+        ("direct", "alias"),
+        ("direct", "subscript"),
+        ("direct", "setattr"),
+        ("direct", "update"),
+        ("helper", "attribute"),
+        ("helper", "alias"),
+        ("helper", "subscript"),
+        ("helper", "setattr"),
+        ("helper", "update"),
+    ],
+    ids=[
+        "direct-alias",
+        "direct-subscript",
+        "direct-setattr",
+        "direct-update",
+        "helper-attribute",
+        "helper-alias",
+        "helper-subscript",
+        "helper-setattr",
+        "helper-update",
+    ],
+)
+def test_prospective_module_cli_refuses_opaque_result_mutation(prospective, scope, mutation):
+    """Aliases and opaque mutators cannot launder an actual child into fake red."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    mutations = {
+        "attribute": "result.returncode = 42",
+        "alias": "alias = result\nalias.returncode = 42",
+        "subscript": "result.__dict__['returncode'] = 42",
+        "setattr": "setattr(result, 'returncode', 42)",
+        "update": "result.__dict__.update(returncode=42)",
+    }
+    launch = (
+        "result = subprocess.run([sys.executable, '-m', 'app'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)"
+    )
+    code = "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+    statements = launch + "\n" + mutations[mutation]
+    if scope == "helper":
+        code += "def invoke():\n" + "\n".join("    " + line for line in statements.splitlines())
+        code += "\n    return result\nclass Proof(unittest.TestCase):\n    def test_cli(self):\n"
+        code += "        result = invoke()\n"
+    else:
+        code += "class Proof(unittest.TestCase):\n    def test_cli(self):\n"
+        code += "\n".join("        " + line for line in statements.splitlines()) + "\n"
+    code += "        self.assertEqual(result.returncode, 0)\n"
+    (root / "tests/test_app.py").write_text(code)
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"], result["findings"]
+    assert result["redBaseline"][0]["failureProvenance"]["classification"] == "unproved"
+
+
 @pytest.mark.parametrize(
     "body,code",
     [

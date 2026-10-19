@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import fnmatch
+import hashlib
 import io
 import json
 import posixpath
@@ -315,6 +317,291 @@ def _expectations(
     return sites
 
 
+def _cli_expectations(tree, function):
+    """Use the existing straight-line rules for subprocess result operands only.
+
+    A module-level helper may return the same result name unchanged. This does
+    not infer tuple transformations, assertion helpers or class helper effects.
+    Runtime launch/caller evidence is still mandatory; this is not CLI credit.
+    """
+
+    def writes_fields(scope):
+        for statement in ast.walk(scope):
+            if isinstance(statement, ast.Assign):
+                targets = statement.targets
+            elif isinstance(statement, ast.AnnAssign):
+                targets = [statement.target]
+            else:
+                continue
+            if any(
+                isinstance(node, ast.Attribute | ast.Subscript)
+                for target in targets
+                for node in ast.walk(target)
+            ):
+                return True
+        return False
+
+    # Attribute/subscript writes can mutate a result through aliases while its
+    # base name retains earlier taint. This CLI subset refuses all such writes,
+    # rather than pretending to track object identity or alter imported proofs.
+    if writes_fields(function):
+        return []
+    aliases = []
+    launches, path_names = set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.extend(
+                ast.alias(name=a.asname or a.name) for a in node.names if a.name == "subprocess"
+            )
+            launches.update(
+                (a.asname or a.name) + ".run" for a in node.names if a.name == "subprocess"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            aliases.extend(
+                ast.alias(name=a.asname or a.name) for a in node.names if a.name == "run"
+            )
+            launches.update(a.asname or a.name for a in node.names if a.name == "run")
+        elif isinstance(node, ast.ImportFrom) and node.module == "pathlib":
+            path_names.update(a.asname or a.name for a in node.names if a.name == "Path")
+    if not aliases:
+        return []
+
+    def cwd_call(call):
+        if (
+            isinstance(call.func, ast.Name)
+            and call.func.id in path_names
+            and len(call.args) == 1
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == "__file__"
+            and not call.keywords
+        ):
+            return True
+        return (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "resolve"
+            and isinstance(call.func.value, ast.Call)
+            and cwd_call(call.func.value)
+            and not call.args
+            and not call.keywords
+        )
+
+    assertions = {
+        "assertEqual",
+        "assertNotEqual",
+        "assertIs",
+        "assertIsNot",
+        "assertIn",
+        "assertNotIn",
+        "assertGreater",
+        "assertGreaterEqual",
+        "assertLess",
+        "assertLessEqual",
+        "assertAlmostEqual",
+        "assertNotAlmostEqual",
+        "assertSequenceEqual",
+        "assertListEqual",
+        "assertTupleEqual",
+        "assertSetEqual",
+        "assertDictEqual",
+        "assertCountEqual",
+        "assertRegex",
+        "assertNotRegex",
+        "assertIsInstance",
+        "assertNotIsInstance",
+        "assertTrue",
+        "assertFalse",
+        "assertIsNone",
+        "assertIsNotNone",
+    }
+    overridden = {
+        n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+    def supported_calls(scope, helper_names=()):
+        # No effect inference: opaque calls can mutate aliased result objects,
+        # even when no attribute/subscript assignment appears in the proof AST.
+        for statement in scope.body:
+            calls = [n for n in ast.walk(statement) if isinstance(n, ast.Call)]
+            if not calls:
+                continue
+            value = getattr(statement, "value", None)
+            if isinstance(statement, ast.Assign | ast.AnnAssign):
+                if (
+                    not isinstance(value, ast.Call)
+                    or ast.unparse(value.func) not in launches | set(helper_names)
+                    or any(call is not value and not cwd_call(call) for call in calls)
+                ):
+                    return False
+            elif isinstance(statement, ast.Expr):
+                if (
+                    not isinstance(value, ast.Call)
+                    or not isinstance(value.func, ast.Attribute)
+                    or not isinstance(value.func.value, ast.Name)
+                    or value.func.value.id != "self"
+                    or value.func.attr not in assertions - overridden
+                    or calls != [value]
+                ):
+                    return False
+            else:
+                return False
+        return True
+
+    synthetic = copy.deepcopy(tree)
+    synthetic.body.append(ast.ImportFrom(module="_observed_cli", names=aliases, level=0))
+    helpers = {}
+    for helper in tree.body:
+        if (
+            not isinstance(helper, ast.FunctionDef)
+            or not helper.body
+            or not isinstance(helper.body[-1], ast.Return)
+            or not isinstance(helper.body[-1].value, ast.Name)
+            or writes_fields(helper)
+            or not supported_calls(helper)
+        ):
+            continue
+        probe = copy.deepcopy(helper)
+        probe.body[-1] = ast.copy_location(ast.Assert(test=helper.body[-1].value), helper.body[-1])
+        probe.body[-1].end_lineno = helper.body[-1].end_lineno
+        sites = _expectations(synthetic, probe, {"_observed_cli"})
+        if sites:
+            helpers[helper.name] = sites[0][1]
+    if not supported_calls(function, helpers):
+        return []
+    synthetic.body.append(
+        ast.ImportFrom(module="_observed_cli", names=[ast.alias(name=n) for n in helpers], level=0)
+    )
+    return [
+        (site, lines, helpers)
+        for site, lines in _expectations(synthetic, function, {"_observed_cli"})
+        if not isinstance(site, ast.With)
+    ]
+
+
+def _cli_stub_provenance(repo, owned_files, tree, function, record):
+    events = record["events"]
+    if len(events) != 1 or any(
+        events[0].get(k) != v
+        for k, v in {
+            "kind": "failure",
+            "type": "AssertionError",
+            "module": "builtins",
+            "phase": "test",
+        }.items()
+    ):
+        return False
+    frames = events[0]["frames"]
+    name, method = record["source"]["file"], record["method"]
+    indices = [i for i, f in enumerate(frames) if f["file"] == name and f["function"] == method]
+    if len(indices) != 1:
+        return False
+    failed = frames[indices[0]]
+    tail = frames[indices[0] + 1 :]
+    for site, lines, helpers in _cli_expectations(tree, function):
+        if not site.lineno <= failed["line"] <= site.end_lineno:
+            continue
+        statements = [
+            n for n in ast.walk(function) if isinstance(n, ast.stmt) and n.lineno == failed["line"]
+        ]
+        if len(statements) != 1:
+            continue
+        if isinstance(site, ast.Assert):
+            if tail:
+                continue
+        elif (
+            not tail
+            or tail[0]["function"] != site.value.func.attr
+            or any(f["file"] != str(Path(unittest.case.__file__).resolve()) for f in tail)
+        ):
+            continue
+        for launch in record.get("moduleLaunches", []):
+            child = launch.get("child", {})
+            callers = launch.get("callers", [])
+            same_pid = child.get("pid") == launch.get("pid")
+            redirector = (
+                launch.get("platform") == child.get("platform") == "win32"
+                and child.get("launcherExecutable") != launch.get("actualInterpreter")
+                and child.get("runtimeParentPid") == launch.get("pid")
+            )
+            if (
+                launch.get("phase") != "test"
+                or not launch.get("instrumented")
+                or launch.get("exitCode") is None
+                or launch["exitCode"] <= 0
+                or child.get("startup") != "observed-equivalent-with-private-bootstrap"
+                or child.get("startupIdentity") != launch.get("startupIdentity")
+                or child.get("targetModule") != launch.get("module")
+                or not (same_pid or redirector)
+                or child.get("runtimePid") != child.get("pid")
+                or child.get("atexitObserved") is not True
+                or child.get("requestedArgv") != launch["argv"]
+                or child.get("launcherExecutable") != launch["argv"][0]
+                or child.get("argv", [None])[0] != launch.get("actualInterpreter")
+                or child.get("argv", [None])[1:] != launch["argv"][1:]
+                or child.get("cwd") != launch["cwd"]
+                or not callers
+                or callers[-1]["function"] != method
+                or callers[-1]["file"] != name
+                or callers[-1]["line"] not in lines
+            ):
+                continue
+            if len(callers) == 2:
+                if callers[0]["line"] not in helpers.get(callers[0]["function"], set()):
+                    continue
+            elif len(callers) != 1:
+                continue
+            target = child.get("target")
+            owned = {str((repo / n).resolve()): n for n in owned_files}
+            exception = child.get("exception", {})
+            traceback = exception.get("frames", [])
+            if (
+                target not in owned
+                or not traceback
+                or exception.get("type") != "NotImplementedError"
+                or exception.get("module") != "builtins"
+                or exception.get("foreignTail")
+                or any(f["file"] not in owned_files for f in traceback)
+                or child.get("loadedOwned", {}).get(target)
+                != hashlib.sha256(Path(target).read_bytes()).hexdigest()
+            ):
+                continue
+            last = traceback[-1]
+            source = ast.parse((repo / last["file"]).read_text(encoding="utf-8-sig"))
+            bodies = [
+                n.body
+                for n in ast.walk(source)
+                if isinstance(n, ast.FunctionDef)
+                and n.name == last["function"]
+                and n.lineno <= last["line"] <= n.end_lineno
+            ]
+            if last["function"] == "<module>":
+                bodies = [source.body]
+            for body in bodies:
+                body = [
+                    n
+                    for n in body
+                    if not (
+                        isinstance(n, ast.Expr)
+                        and isinstance(n.value, ast.Constant)
+                        and isinstance(n.value.value, str)
+                    )
+                ]
+                if len(body) != 1 or not isinstance(body[0], ast.Raise):
+                    continue
+                raised = body[0].exc
+                constructor = raised.func if isinstance(raised, ast.Call) else raised
+                if (
+                    isinstance(constructor, ast.Name)
+                    and constructor.id == "NotImplementedError"
+                    and (
+                        not isinstance(raised, ast.Call)
+                        or not raised.keywords
+                        and all(isinstance(a, ast.Constant) for a in raised.args)
+                    )
+                ):
+                    return True
+    return False
+
+
 def _failure_provenance(
     repo: Path, runner: Runner, owned_files: tuple[str, ...], proof: dict
 ) -> dict:
@@ -529,8 +816,34 @@ def _failure_provenance(
                             )
                             reason += "deliberately raises NotImplementedError; "
                             reason += "source and traceback agree."
+        if (
+            classification == "unproved"
+            and len(functions) == 1
+            and _cli_stub_provenance(repo, owned_files, tree, functions[0], record)
+        ):
+            classification = "owned-cli-stub"
+            reason = (
+                "Instrumented same-interpreter module child reached the exact owned stub; "
+                "the selected straight-line assertion consumes its result. "
+                "Windows redirector parentage "
+                "is child-reported one-hop metadata, not independent OS-tree/tamper-proof evidence."
+            )
+        elif classification == "unproved" and record.get("moduleLaunches"):
+            reasons = [
+                launch.get("reason") or launch.get("child", {}).get("reason")
+                for launch in record["moduleLaunches"]
+            ]
+            reason = (
+                "Controlled CLI result provenance is unproved: "
+                + "; ".join(r for r in reasons if r)
+                if any(reasons)
+                else "Controlled CLI requires an actual owned stub exception and an attributable "
+                "straight-line result expectation; this helper/result/failure topology is unproved."
+            )
         results.append({**record, "classification": classification, "reason": reason})
-    meaningful = any(r["classification"] in {"owned-assertion", "owned-stub"} for r in results)
+    meaningful = any(
+        r["classification"] in {"owned-assertion", "owned-stub", "owned-cli-stub"} for r in results
+    )
     complete = seen == expected and all(r["classification"] != "unproved" for r in results)
     return dict(
         classification="meaningful-red" if meaningful and complete else "unproved",
@@ -723,13 +1036,17 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                                 module,
                                 f"{function.name} has no assertion (including skipped tests).",
                             )
-                        elif not _interface_assertion(tree, function, owned_modules):
+                        elif not (
+                            _interface_assertion(tree, function, owned_modules)
+                            or _cli_expectations(tree, function)
+                        ):
                             fail(
                                 "prospective-no-interface-assertion",
                                 requirement,
                                 module,
-                                f"{function.name} has no assertion referencing "
-                                "an imported bead-owned interface.",
+                                f"{function.name} has no supported owned-interface assertion or "
+                                "controlled Python -m result expectation. CLI helper/control-flow "
+                                "topology may be unsupported; no product main() API is required.",
                             )
         if (
             collection

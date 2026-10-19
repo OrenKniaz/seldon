@@ -146,36 +146,11 @@ def next_command(server: PlannerServer, status: dict) -> str:
             )
             + " (workers implement; the planner steers)"
         )
-    if gate == "current-revision-published":
-        opened = [
-            item
-            for item in roundtable.findings(store, "open")
-            if item.get("stage", "roundtable") != "readiness"
-        ]
-        if opened:
-            return " then ".join(
-                cmd(f'resolve --id {item["id"]} --resolution "<fix or reason>"') for item in opened
-            )
-        if not store.passing_audit(status["manifest_revision"]):
-            return cmd("audit --oracle oracle")
-        if not store.successful_reviews(status["manifest_revision"]):
-            return cmd("roundtable")
-        return (
-            cmd('publish --proof-level prospective --reason "<why no oracle>"')
-            if status["proofLevel"] == "prospective"
-            else cmd("publish")
+    if gate == "current-revision-published" or phase == "roundtable":
+        resolution = status.get("reviewResolution") or planner_views.review_resolution_state(
+            store, status
         )
-    if phase == "roundtable":
-        if not store.passing_audit(status["manifest_revision"]):
-            return cmd("audit --oracle oracle")
-        opened = roundtable.findings(store, "open")
-        if opened:
-            return " then ".join(
-                cmd(f'resolve --id {item["id"]} --resolution "<fix or reason>"') for item in opened
-            )
-        check = next(item for item in quality_report(store)["checks"] if item["id"] == "roundtable")
-        if check["status"] == "fail":
-            return cmd("roundtable") + " then " + cmd("quality") + " then " + advance
+        return planner_views.review_resolution_next(resolution, cli_prefix=prefix)
     if phase == "accept":
         acceptance = status["acceptance"]
         if acceptance["accepted"]:
@@ -894,7 +869,9 @@ def main(argv=None) -> int:
                 "existing planning and proof gates still apply."
             )
         else:
-            status = server._status()
+            status = (
+                data if args.command == "status" and isinstance(data, dict) else server._status()
+            )
             next_step = next_command(server, status)
             if args.command in {"worker-start", "worker-status"} and data and not reply["isError"]:
                 next_step = (
@@ -932,9 +909,8 @@ def main(argv=None) -> int:
                     + prefix
                     + "compile --template template --out manifest.json; "
                     + prefix
-                    + "audit --oracle oracle; "
-                    + prefix
-                    + "quality"
+                    + "audit --oracle <existing-reference> "
+                    "(or explicitly authorized --prospective); " + prefix + "quality"
                 )
             elif command == "audit":
                 baseline = (
@@ -950,7 +926,9 @@ def main(argv=None) -> int:
                     + (
                         "--prospective "
                         if getattr(args, "prospective", False)
-                        else f'--oracle "{getattr(args, "oracle", "oracle")}" '
+                        else (
+                            f'--oracle "{getattr(args, "oracle", None) or "<existing-reference>"}" '
+                        )
                     )
                     + "(inspect the reported proof failure; use --baseline template "
                     "when no Git baseline exists)"
@@ -989,9 +967,8 @@ def main(argv=None) -> int:
                     prefix
                     + "compile --template template --out manifest.json; "
                     + prefix
-                    + "audit --oracle oracle; "
-                    + prefix
-                    + "quality"
+                    + "audit --oracle <existing-reference> "
+                    "(or explicitly authorized --prospective); " + prefix + "quality"
                 )
             elif command == "roundtable" and "roundtable-total-budget-exhausted" in str(reply):
                 next_step = (
@@ -1003,14 +980,12 @@ def main(argv=None) -> int:
                     prefix + "roundtable --help (check the reported budget or input; "
                     "retry only the affected reviewer)"
                 )
-            elif command in ("publish", "advance") and "plan-publication-evidence-required" in str(
-                reply
+            elif command in ("publish", "advance") and any(
+                code in str(reply)
+                for code in ("plan-publication-evidence-required", "plan-findings-open")
             ):
-                store = server._store()
-                next_step = prefix + (
-                    "audit --oracle oracle"
-                    if not store.passing_audit(status["manifest_revision"])
-                    else "roundtable"
+                next_step = planner_views.review_resolution_next(
+                    status["reviewResolution"], cli_prefix=prefix
                 )
         cli_names = {
             "harness_plan_start": "start",

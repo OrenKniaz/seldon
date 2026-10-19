@@ -130,6 +130,70 @@ p publish
 ```
 Real roundtables launch providers normally. **Test only:** add `--test-only-review-output response.json` with explicit reviewers to inject a finding array (e.g. `[]`) instead; never treat injected reviews as live evidence.
 Review budget defaults to 2 attempts per reviewer per manifest revision; `--max-rounds N` changes it. Totals span revisions; optional `--max-total N` caps total invocations per reviewer.
+### Host-driven resolution after a review
+
+Existing MCP `harness_plan_status` and CLI `status --json` expose additive
+`reviewResolution`: revision-stamped, read-only advice with one `nextAction`.
+It does not edit, dispose of findings, run audits/reviewers, reserve model calls
+or grant permission to publish. The host planner owns the resolution cycle.
+There is no new MCP roundtable/compile/audit tool or hidden continuation callback.
+Use the existing CLI routes for those operations.
+
+Native approval prerequisites and real open clarifications come first. Otherwise
+every open non-readiness finding remains a publication blocker, including minor
+findings and findings from older revisions. Readiness remains advisory. Inspect
+the recorded review, repair the owned plan/tests, then record an evidence-backed
+resolved, rejected or deferred disposition with its reason through the existing
+resolve operations. Severity alone never chooses a disposition. Deferred findings
+remain known gaps, not implementation or acceptance credit.
+
+The projection retains all canonical blocker/member IDs and recorded revision
+relations. Finding, suggestion and deferred-reason excerpts are bounded to 512
+characters with explicit truncation flags; use the existing recorded `review`
+route for full detail. It exports no raw provider logs, packets or private fields.
+Unknown/broken reads are unknown, not zero blockers or a passing audit/review.
+
+After edits or dispositions, refresh status and compile the current template when
+needed. A manifest may legitimately equal the editable spine revision when no
+template is bound; equality does not establish missing compilation. Current audit
+and real-review evidence must match the actual manifest revision. Old evidence,
+mocked review results and changed-only developer checks cannot replace those
+canonical gates. Choose the existing authorized audit mode: `audit --prospective`
+for an authorized no-oracle plan, or `audit --oracle <existing-reference>` when a
+real reference exists. Guidance never assumes a folder named `oracle`, silently
+downgrades an oracle-verified mode or claims that a future audit will pass.
+
+Review guidance also retains the existing roundtable quality distinction. A
+successful current review remains recorded even if another attempted provider
+failed; that failure requires inspecting the recorded review's diagnostics and
+retrying only the failed reviewer within existing round/total caps and reserved
+capacity. `review.qualityStatus` and bounded `advice` preserve this recovery route
+without changing canonical admission. A single successful provider with no other
+provider attempted retains the existing cross-subscription warning rather than
+becoming a new publication requirement. Full diagnostics use `detailRoute`.
+
+Before beginning or resuming model-mediated repair, the host must reserve calls
+and a hard wall deadline covering author continuation, exact-revision audit and
+review, intended workers and later acceptance. Product budget state is explicitly
+`unknown_to_product`; recorded round counts do not prove unused capacity. For
+example, three planner calls plus one review use four of six. A repair, matching
+re-review and one worker need at least three more: seven total before additional
+acceptance work. That six-call reservation cannot complete the recovery. Stop
+held when capacity or a supported route is unavailable; retain findings and the
+required next action. Never enlarge a cap automatically or count a continuation
+as free. This guidance does not authorize a new benchmark/provider run.
+
+When exact current evidence and legitimate dispositions are present, guidance
+suggests only the normal advance/publication attempt, with the required
+prospective reason. Refresh before attempting it: concurrent edits can stale an
+observation immediately, and existing canonical mutations recheck all gates.
+This is host-driven product guidance, not a retrofit of the frozen external
+pilot's one-review-then-publish controller. That controller needs separately owned
+budget/workflow work. After workers, use existing locked-vision product acceptance
+against the actual integrated repository and report each public task obligation
+as verified, failed or unverified. Prospective publication and worker validation
+do not establish the full task or North Star acceptance.
+
 A failed reviewer writes a diagnostic artifact with command, stdout, stderr and exit code; text/JSON show its path and first stderr lines.
 Inspect that artifact, fix the reported failure, then retry only its `--reviewer`; other providers' latest successful same-revision runs remain valid.
 Windows reviewer discovery prefers the newest desktop-bundled Codex executable; explicit provider overrides are preserved.
