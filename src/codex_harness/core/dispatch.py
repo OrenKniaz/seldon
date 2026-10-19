@@ -1645,6 +1645,20 @@ def run_plan(
                         + str(old["permissionGuard"]["auditReason"]),
                     }
                 )
+            elif (
+                old_attempt.get("status") == "timed-out"
+                and old_attempt.get("cleanup", {}).get("controllerProcessExited") is not True
+            ):
+                # A terminal timeout does not establish that its owned child
+                # stopped. Retry flags cannot replace the saved exit observation.
+                records[bead_id] = old
+                retained_failures.append(bead_id)
+                record["resumeSummary"]["retained"].append(
+                    {
+                        "bead": bead_id,
+                        "reason": "timed-out attempt requires observed controller exit",
+                    }
+                )
             elif old_attempt.get("status") == "cancelled" or (
                 old_attempt.get("failure")
                 and old_attempt.get("cleanup", {}).get("stopMethod") == "owned-Popen.kill"
