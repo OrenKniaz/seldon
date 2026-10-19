@@ -23,7 +23,7 @@ async (page, {baseURL, outputDir, canonicalBaseURL, steeringOnly=false, r2Only=f
         const shared=page.locator('.review-cluster').filter({has:page.locator('summary', {hasText:'2 members'})}).first();
         await shared.locator('summary').click();
         check((await shared.innerText()).includes('Review Alpha')&&(await shared.innerText()).includes('Review Beta'),'Both recorded cluster members remain attributed');
-        for(const summary of await page.locator('.review-cluster:not([open]) summary').all())await summary.click();
+        while(await page.locator('.review-cluster:not([open]) summary').count())await page.locator('.review-cluster:not([open]) summary').first().click();
         const detail=await dialog.innerText();
         check(['resolved','rejected','deferred'].every(status=>detail.includes('Disposition: '+status)&&detail.includes('Recorded '+status+' reason')),'Recorded dispositions and reasons remain distinct');
         check(await dialog.evaluate(e=>e.scrollWidth<=e.clientWidth),'Recorded details wrap inside dialog');
