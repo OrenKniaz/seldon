@@ -6,7 +6,6 @@
 2. `p <command> --help`.
 3. Targeted diagnostics on the reported error.
 4. Only then a bounded search.
-
 In PowerShell define `function p { uv run --no-sync --frozen --offline python -m codex_harness.core.plan_cli --workspace "$W" @args }`.
 Set `$W` to an existing project directory. Every text reply ends with the next action; replace angle-bracket values.
 `--json` returns one JSON object (`text`, `status`, `data`, `next`, `isError`); its **text** ends with `Next:`. Creations return `data.id`.
@@ -29,7 +28,6 @@ Success exits 0; input/gate/audit refusal or any failing quality check exits 2. 
 | publish | `render [--out plan/docs]`; `publish`; `worker-start --expected-revision <published_revision> --workers @workers.json`. Matching template, audit, reviews and publication required. Workers implement; the planner steers. |
 | execute | `worker-status --job-id <job-id>`; `status`; `impact` after edits; `advance --to accept` only after actual workers/integrated proofs are assessed. Product checks alone do not prove worker delivery. |
 | accept | `accept-scenarios --derive`; `accept-run --subject product --repo <dir>`; `accept-review --repo <dir>`; resolve findings; `accept --statement "actual words" --by user`. All scenarios pass at the current integrated revision, no open acceptance findings. |
-
 Native confirmation requires MCP2025-06-18, client `elicitation` capability and initialization. The server displays the full stored card and collects explicit approval, complete words and conditions; conditions block credit. Decline, cancel, timeout, disconnect or changed revision grant none. Client support is conditional, not established by source tests. CLI quotes/`--by` labels refuse with `plan-confirmation-origin-unavailable`; they cannot substitute for the native response. Plan-to-roundtable confirmation remains unchanged.
 `workers.json` is an array of exact `{bead,provider,model,effort}` objects, one per published bead, using approved existing capacity and canonical provider names. MCP equivalents are `harness_worker_start expected_revision=<revision> workers=<array>` and `harness_worker_status job_id=<id>`. Starts return one durable job per publication; reconnect/status never relaunches. Missing terminal evidence and current liveness remain unknown. No retry, install or permission expansion is implied.
 Nodes require `id`, `kind`, `title`, `text`, `parents` (id array), and `fields` (object).
@@ -37,26 +35,14 @@ Nodes require `id`, `kind`, `title`, `text`, `parents` (id array), and `fields` 
 Acceptance: `accept-scenarios` lists; `--input @scenarios.json` saves `{id,title,given,steps,expect}` for `first-moment` and every `scope-N`; optional `nodeIds` bind other spine nodes. Steps are shell strings or `{command,expect}`; `expect` supports `stdout`/`stderr`, `stdoutRegex`/`stderrRegex`, and `exit` (default 0). Prose-only `--derive` results are `draft`, `executable: false`: supply steps and expectations. Edits retain scenarios and mark changed node references `stale`; save reviewed scenarios to refresh them.
 Use `{repo}`, `{python}`, `{home}`, `{data}` in commands. Each scenario starts in an empty cwd with fresh HOME/data, never a seeded fixture. Vision fields can supply structured `first_user_moment`/`scope_in` items or `acceptance` entries with these ids.
 `accept-review --reviewer @codex-reviewer.json --reviewer @claude-reviewer.json` uses normal subscriptions; its findings appear in `findings` and use `resolve`. A code/scenario change requires a fresh run and review. `accept-rebind --repo <dir>` reruns all scenarios for `revision-algorithm-upgraded` or `legacy-unbound` (matching raw hash; audited node-binding back-fill); passing unchanged v1 products retain reviews/approval by references, preserving approver and proxy identity. Product, plan, scenario or vision changes require fresh acceptance.
-
 Interrupted ordinary acceptance reviews retain their registered attempt and sealed original packets/returns under `.codex-harness/acceptance-review-attempts/`. Find attempt IDs in the interruption error or status JSON's `acceptance.reviewAttempts`; stored-return counts do not imply eligibility. Recover the existing aggregate without launching providers with `accept-review --repo <same-dir> --resume <id>` (MCP: `harness_accept_review` with `repo` and `resume`). Every original slot must be complete, valid, nonmocked and bound to the same source, candidate, context and observed native model/session.
-
 Unknown telemetry, tool/error events, missing protected bodies, overflow reshards, stale or changed receipts refuse recovery. Missing work is never automatically relaunched; do not move or edit originals. Repeated successful resume returns the same review/findings and preserves dispositions. External saved reviews without original Harness registration cannot be imported. Questions, findings, phase and user approval gates remain in force.
 Delegated acceptance uses `--by proxy:<name>` (or `opus-user-proxy`); status records `isProxy: true`, never real-user acceptance. Only record actual user words with `--by user`.
 Quality distinguishes **planned vs proved** with `evidence: planned|executed`: a clean-state first-moment scenario or linked e2e (`firstMoment: true`, `cleanState: true`) is planned; only a passing current acceptance result is proved. Draft/stale scenarios are not planned. Missing-file cases must not defeat first use.
 Explicit `acceptance` spine nodes need a schema change by the spine owner; until then use vision fields or the scenario table through `accept-scenarios --input`.
 `node --json` accepts a literal object, `"@file.json"`, or `"@file.jsonl"` (atomic batch; order independent). Parents must exist and have these kinds; a vision is unique. Nonvision nodes should retain an intent chain.
-
-| Kind | Allowed parent kinds |
-| --- | --- |
-| vision | none |
-| feature | vision |
-| story | feature |
-| requirement | story, feature |
-| decision | vision, feature, requirement |
-| design | requirement, decision |
-| bead | requirement, design, decision |
-| test | requirement, bead |
-
+Allowed parents: vision none; feature vision; story feature; requirement story/feature; decision vision/feature/requirement.
+Design parents: requirement/decision; bead parents: requirement/design/decision; test parents: requirement/bead.
 Bead fields: disjoint `ownedFiles`, `dependsOn` bead ids (acyclic), `proofModule`, and `lessons` decision ids (possibly empty). The cross-bead contract check warns unless a consumer proof imports the producer's owned module or the requirement declares `fields.contractTest`; pin the interface and make the consumer depend on the producer.
 Link tests to requirement ids through `parents`; test fields are `module` and `level` (`unit` or one `e2e` integration test).
 Vision fields must include `validation` (Python arguments preceding the module) and protected `requirementFiles` paths.
@@ -131,74 +117,24 @@ p publish
 Real roundtables launch providers normally. **Test only:** add `--test-only-review-output response.json` with explicit reviewers to inject a finding array (e.g. `[]`) instead; never treat injected reviews as live evidence.
 Review budget defaults to 2 attempts per reviewer per manifest revision; `--max-rounds N` changes it. Totals span revisions; optional `--max-total N` caps total invocations per reviewer.
 ### Host-driven resolution after a review
-
-Existing MCP `harness_plan_status` and CLI `status --json` expose additive
-`reviewResolution`: revision-stamped, read-only advice with one `nextAction`.
-It does not edit, dispose of findings, run audits/reviewers, reserve model calls
-or grant permission to publish. The host planner owns the resolution cycle.
-There is no new MCP roundtable/compile/audit tool or hidden continuation callback.
-Use the existing CLI routes for those operations.
-
-Native approval prerequisites and real open clarifications come first. Otherwise
-every open non-readiness finding remains a publication blocker, including minor
-findings and findings from older revisions. Readiness remains advisory. Inspect
-the recorded review, repair the owned plan/tests, then record an evidence-backed
-resolved, rejected or deferred disposition with its reason through the existing
-resolve operations. Severity alone never chooses a disposition. Deferred findings
-remain known gaps, not implementation or acceptance credit.
-
-The projection retains all canonical blocker/member IDs and recorded revision
-relations. Finding, suggestion and deferred-reason excerpts are bounded to 512
-characters with explicit truncation flags; use the existing recorded `review`
-route for full detail. It exports no raw provider logs, packets or private fields.
-Unknown/broken reads are unknown, not zero blockers or a passing audit/review.
-
-After edits or dispositions, refresh status and compile the current template when
-needed. A manifest may legitimately equal the editable spine revision when no
-template is bound; equality does not establish missing compilation. Current audit
-and real-review evidence must match the actual manifest revision. Old evidence,
-mocked review results and changed-only developer checks cannot replace those
-canonical gates. Choose the existing authorized audit mode: `audit --prospective`
-for an authorized no-oracle plan, or `audit --oracle <existing-reference>` when a
-real reference exists. Guidance never assumes a folder named `oracle`, silently
-downgrades an oracle-verified mode or claims that a future audit will pass.
-
-Review guidance also retains the existing roundtable quality distinction. A
-successful current review remains recorded even if another attempted provider
-failed; that failure requires inspecting the recorded review's diagnostics and
-retrying only the failed reviewer within existing round/total caps and reserved
-capacity. `review.qualityStatus` and bounded `advice` preserve this recovery route
-without changing canonical admission. A single successful provider with no other
-provider attempted retains the existing cross-subscription warning rather than
-becoming a new publication requirement. Full diagnostics use `detailRoute`.
-
-Before beginning or resuming model-mediated repair, the host must reserve calls
-and a hard wall deadline covering author continuation, exact-revision audit and
-review, intended workers and later acceptance. Product budget state is explicitly
-`unknown_to_product`; recorded round counts do not prove unused capacity. For
-example, three planner calls plus one review use four of six. A repair, matching
-re-review and one worker need at least three more: seven total before additional
-acceptance work. That six-call reservation cannot complete the recovery. Stop
-held when capacity or a supported route is unavailable; retain findings and the
-required next action. Never enlarge a cap automatically or count a continuation
-as free. This guidance does not authorize a new benchmark/provider run.
-
-When exact current evidence and legitimate dispositions are present, guidance
-suggests only the normal advance/publication attempt, with the required
-prospective reason. Refresh before attempting it: concurrent edits can stale an
-observation immediately, and existing canonical mutations recheck all gates.
-This is host-driven product guidance, not a retrofit of the frozen external
-pilot's one-review-then-publish controller. That controller needs separately owned
-budget/workflow work. After workers, use existing locked-vision product acceptance
-against the actual integrated repository and report each public task obligation
-as verified, failed or unverified. Prospective publication and worker validation
-do not establish the full task or North Star acceptance.
-
-A failed reviewer writes a diagnostic artifact with command, stdout, stderr and exit code; text/JSON show its path and first stderr lines.
-Inspect that artifact, fix the reported failure, then retry only its `--reviewer`; other providers' latest successful same-revision runs remain valid.
-Windows reviewer discovery prefers the newest desktop-bundled Codex executable; explicit provider overrides are preserved.
-Quality fails without a passing audit or successful review for the current manifest; one successful provider warns about missing cross-subscription evidence.
-`advance --to publish` and `publish` both refuse missing/stale audit or review with recovery; no `--force`. A score alone does not authorize publication.
-`spine_revision` (`plan_revision` alias) hashes editable nodes; `manifest_revision` includes protected requirement files and is unavailable until compilable.
-`published_revision` identifies the frozen worker manifest; `up_to_date` compares it to `manifest_revision`, so test edits invalidate evidence.
-At vision-lock, the journey uses `first_user_moment` and `scope_in` until stories exist. An unchosen decision's `Next:` records a choice before advancing.
+- `reviewResolution` in MCP status / CLI JSON is revision-stamped advice with one action; it grants no publication, approval or dispatch credit.
+- The host owns edits and dispositions. Use existing CLI compile/audit/roundtable routes; there is no new MCP tool or hidden provider loop.
+- Native approval and actual questions come first. All open non-readiness findings block, including minor, stale and null-stage findings.
+- Inspect the recorded review, repair the owned plan/tests, then resolve, reject or defer with evidence and reasons; severity never chooses disposition.
+- Deferred findings remain known gaps. All blocker/member IDs remain; 512-character excerpts/truncation flags and `detailRoute` lead to full review detail.
+- Unknown/broken reads remain unknown. No raw logs, packets or private fields are added. Missing-plan reads create nothing.
+- Refresh and compile after edits. Manifest/spine equality is legitimate without a bound template; never infer compilation from equality alone.
+- Audit and real-review evidence must match the current manifest. Stale/mock reviews and changed-only checks cannot substitute for canonical evidence.
+- Choose an authorized `audit --prospective` or `audit --oracle <existing-reference>`; never guess an oracle directory or silently downgrade proof.
+- `review.qualityStatus` and bounded advice retain existing quality semantics: inspect failure diagnostics and retry only the failed reviewer.
+- Use existing round/total caps and reserved capacity. One successful provider with no other attempted retains a warning, not a new admission rule.
+- Reserve calls and a hard deadline for author continuation, exact-revision audit/review, workers and later acceptance before beginning or resuming repair.
+- Budget is `unknown_to_product`: 3 planner calls + 1 review use 4/6; repair + re-review + 1 worker require 7 total, before acceptance. Six cannot finish.
+- Hold if capacity/routes are unavailable; preserve findings, never enlarge caps automatically or treat continuations as free. No benchmark launch is authorized.
+- With current evidence/dispositions, attempt normal advance/publication with any prospective reason; refresh first, as canonical mutations recheck gates.
+- This host-driven advice does not fix the frozen external pilot controller. After workers, assess actual integrated locked-vision product acceptance.
+- Report every public task obligation verified/failed/unverified; prospective publication and worker validation alone do not establish full acceptance.
+- Windows reviewer discovery prefers newest desktop-bundled Codex; explicit overrides remain. Failed reviewers expose diagnostic artifact paths, not success.
+- `spine_revision` (`plan_revision` alias) hashes editable nodes; `manifest_revision` includes protected files and is unavailable until compilable.
+- `published_revision` is the frozen worker manifest; `up_to_date` compares it with the manifest, so test edits invalidate evidence. No force bypass exists.
+- At vision-lock, journey uses `first_user_moment`/`scope_in` until stories exist. An unchosen decision's next action records a choice before advance.
