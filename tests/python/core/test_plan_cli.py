@@ -125,61 +125,74 @@ def test_next_chain_once_in_machine_and_first_command_in_text(started):
     assert text.rstrip().splitlines()[-1] == "Next: " + output["next"].split(" then ", 1)[0]
 
 
-def test_worker_cli_routes_exact_tuple_and_reattaches_without_launch(tmp_path, monkeypatch, capsys):
-    """Real CLI routing/job records with explicit store/Popen doubles, no providers."""
+@pytest.fixture
+def native_worker_project(tmp_path, monkeypatch):
+    from tests.python.core import test_planner_replay_gaps
+
+    yield from test_planner_replay_gaps.project.__wrapped__(tmp_path, monkeypatch)
+
+
+def test_worker_cli_routes_exact_tuple_and_reattaches_without_launch(
+    native_worker_project, monkeypatch, capsys
+):
+    """Canonical synthetic native original replaces the old fake store; real CLI/jobs."""
     from types import SimpleNamespace
 
-    from tests.python.core.test_planner_jobs import SourceOnlyStore
+    from tests.python.core import test_planner_resume
 
-    from codex_harness.core import plan_cli, planner_jobs
+    from codex_harness.core import planner_jobs
 
-    store, launches = SourceOnlyStore(tmp_path), []
-    server = PlannerServer(tmp_path)
-    monkeypatch.setattr(server, "_store", lambda: store)
-    monkeypatch.setattr(
-        server,
-        "_status",
-        lambda: dict(
-            store.status(),
-            name="Source-only",
-            plan_revision=store.revision,
-            open_clarifications=0,
-            open_assumptions=0,
-            publication={"up_to_date": True},
-        ),
+    store, launches = native_worker_project, []
+    options = test_planner_resume._published(store)
+    options["max_parallel"] = 1
+    options["timeout"] = 45
+    # Source-only native-store fixture, not a CLI-quoted grant or real human proof.
+    from codex_harness.core.planner_execution import complete_execution, prepare_execution
+
+    proposal = {
+        key: options[key]
+        for key in ("expected_revision", "workers", "timeout", "call_cap", "max_parallel")
+    }
+    prepared = prepare_execution(store, **proposal)
+    assert (
+        complete_execution(
+            store,
+            prepared["request_id"],
+            "accept",
+            {"approve": True, "statement": "SOURCE-ONLY native decision", "conditions": ""},
+        )["state"]
+        == "approved"
     )
-    monkeypatch.setattr(plan_cli, "PlannerServer", lambda path: server)
     monkeypatch.setattr(
         planner_jobs.subprocess,
         "Popen",
-        lambda *a, **k: (launches.append((a, k)) or SimpleNamespace(pid=456)),
+        lambda *a, **k: launches.append((a, k)) or SimpleNamespace(pid=456),
     )
-    workers = [
-        dict(bead=key, provider="codex", model="gpt-6.1-sol", effort="medium")
-        for key in store.manifest["beads"]
-    ]
-    prefix = ["--workspace", str(tmp_path), "--json"]
+    prefix = ["--workspace", str(store.workspace), "--json"]
+    workers = options["workers"]
     assert (
         main(
             [
                 *prefix,
                 "worker-start",
                 "--expected-revision",
-                store.revision,
+                options["expected_revision"],
                 "--workers",
                 json.dumps(workers),
                 "--max-parallel",
                 "1",
                 "--timeout",
                 "45",
+                "--call-cap",
+                "1",
             ]
         )
         == 0
     )
     started = json.loads(capsys.readouterr().out)
-    assert started["data"]["options"] == dict(workers=workers, maxParallel=1, timeout=45)
-    assert "worker-status --job-id " + store.revision in started["next"]
-    assert main([*prefix, "worker-status", "--job-id", store.revision]) == 0
+    assert started["data"]["options"] == dict(workers=workers, maxParallel=1, timeout=45, callCap=1)
+    assert "worker-status --job-id " + options["expected_revision"] in started["next"]
+    assert main([*prefix, "worker-status", "--job-id", options["expected_revision"]]) == 0
     reattached = json.loads(capsys.readouterr().out)
     assert reattached["data"] == started["data"] and len(launches) == 1
 

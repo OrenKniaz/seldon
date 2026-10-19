@@ -553,6 +553,8 @@ def _run_provider(
     request: dict,
     timeout: int,
     requirement_requests: dict[str, dict],
+    *,
+    execution_job=None,
 ) -> dict:
     # Stream output durably instead of waiting for pipe EOF, which descendants
     # can keep open after the controller's process has exited.
@@ -568,6 +570,9 @@ def _run_provider(
         planned["environmentIndicators"] = request["environmentIndicators"]
         planned["denialCapabilities"] = dict(DENIAL_CAPABILITIES)
     _write_record(attempt_dir / "request.json", request)
+    from codex_harness.core.provider_call_budget import claim_call
+
+    claim_call(execution_job or request.get("executionJob"), request, attempt_dir, timeout=timeout)
     try:
         with events_path.open("wb") as events_file, stderr_path.open("wb") as stderr_file:
             process = subprocess.Popen(
@@ -935,6 +940,7 @@ def _attempt_bead(
     fake_worker: Callable[[Path], None] | None,
     mock_provider: str | None,
     timeout: int,
+    execution_job=None,
 ) -> dict:
     worktree = Path(record["attempt"]["cwd"])
     attempt = record["attempt"]
@@ -1012,7 +1018,13 @@ def _attempt_bead(
         try:
             if launch is not None:
                 result = _run_provider(
-                    launch, worktree, attempt_dir, request, timeout, requirement_requests
+                    launch,
+                    worktree,
+                    attempt_dir,
+                    request,
+                    timeout,
+                    requirement_requests,
+                    execution_job=execution_job,
                 )
             else:
                 request["didLaunchMockAttempt"] = True
@@ -1367,6 +1379,8 @@ def run_plan(
     relaunch_ambiguous: bool = False,
     retry_blocked: str | None = None,
     require_denial_interception: bool = False,
+    max_provider_calls: int | None = None,
+    execution_job: str | Path | None = None,
 ) -> dict:
     """Run a validated work graph; only integrated passes release dependents.
 
@@ -1413,6 +1427,11 @@ def run_plan(
     provider_for, model_for = provider_for or {}, model_for or {}
     effort_for, executable_for = effort_for or {}, executable_for or {}
     fake_workers = fake_workers or {}
+    real_attempts = mock_provider is None and not set(plan.beads).issubset(fake_workers)
+    if real_attempts and (
+        execution_job is None or type(max_provider_calls) is not int or max_provider_calls < 1
+    ):
+        raise ValueError("provider-call-owned-native-job-required")
     for mapping in (provider_for, model_for, effort_for, executable_for, fake_workers):
         if set(mapping) - set(plan.beads):
             raise ValueError("per-bead mappings contain unknown bead ids")
@@ -1422,6 +1441,36 @@ def run_plan(
         Path(resume_run_dir).resolve() if resume_run_dir else Path(work_root).resolve() / run_id
     )
     repo, evidence, memory = run_dir / "repo", run_dir / "evidence", run_dir / "memory-workspace"
+    if real_attempts:
+        from codex_harness.core.provider_call_budget import bind_run, verify_job
+
+        approved = verify_job(execution_job)["options"]
+        if (
+            approved["maxParallel"] != max_parallel
+            or approved["timeout"] != timeout
+            or executable_for
+        ):
+            raise ValueError("provider-call-launch-options-mismatch")
+        for worker in approved["workers"]:
+            bead_id = worker["bead"]
+            if (
+                provider_for.get(bead_id, "codex") != worker["provider"]
+                or model_for.get(bead_id) != worker["model"]
+                or effort_for.get(bead_id) != worker["effort"]
+            ):
+                raise ValueError("provider-call-worker-scope-mismatch")
+
+        # Every real run is produced once by the original owned job controller.
+        # CLI real resume is held. Only this controller may claim sequential
+        # terminal-preimage recovery of its original run, without resetting cap.
+        bind_run(
+            execution_job,
+            plan.root,
+            run_dir,
+            max_provider_calls=max_provider_calls,
+            resume=resume_run_dir is not None,
+            retry_options={"retryBlocked": retry_blocked, "relaunchAmbiguous": relaunch_ambiguous},
+        )
     previous = None
     if resume_run_dir:
         previous = read_record_json(evidence / "run.json")
@@ -1924,6 +1973,7 @@ def run_plan(
                         fake_worker=fake_workers.get(bead_id),
                         mock_provider=mock_provider,
                         timeout=timeout,
+                        execution_job=execution_job,
                     )
                 except (OSError, subprocess.SubprocessError, ValueError) as error:
                     current["status"] = f"prelaunch failed: {type(error).__name__}: {error}"

@@ -8,6 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from tests.python.core.execution_support import (
+    source_execution_context,
+    source_process_observations,
+)
 
 from codex_harness.core import dispatch
 from codex_harness.core.provider_launch import ProviderNormalLaunch
@@ -16,6 +20,7 @@ from codex_harness.core.record_io import read_record_json
 
 def source_only_packet_renderer(monkeypatch):
     """Reuse supported packet prose while retaining an explicit local CLI identity."""
+    source_process_observations(monkeypatch)
     build = dispatch.worker_packet.build_packet
 
     def local_packet(*args, provider, **kwargs):
@@ -39,8 +44,21 @@ def wait_for_request(path, future=None):
     raise AssertionError("Local child request was not published")
 
 
-def local_attempt(tmp_path, *, seconds=3, terminal=True):
-    run = tmp_path / "run"
+def local_attempt(tmp_path, *, seconds=3, terminal=True, timeout=10):
+    from tests.python.core.test_dispatch import _tiny_plan
+
+    from codex_harness.core.provider_call_budget import bind_run
+
+    source = _tiny_plan(tmp_path / "local-source")
+    manifest = json.loads((source / "sample.json").read_text())
+    manifest["beads"].pop("B")
+    manifest["beads"]["A"]["ownedFiles"] = ["local.py"]
+    (source / "template/local.py").write_text("VALUE = 0\n")
+    (source / "sample.json").write_text(json.dumps(manifest))
+    context = source_execution_context(tmp_path / "canonical", source, timeout=timeout)
+    scoped_bead = json.loads((context["plan"] / "sample.json").read_text())["beads"]["A"]
+    run = context["runs"] / "local-run"
+    bind_run(context["directory"], context["plan"], run, max_provider_calls=16)
     cwd = run / "repo"
     cwd.mkdir(parents=True)
     subprocess.run(["git", "-C", str(cwd), "init", "-q"], check=True, capture_output=True)
@@ -66,23 +84,25 @@ def local_attempt(tmp_path, *, seconds=3, terminal=True):
     )
     event = json.dumps({"type": "turn.completed" if terminal else "turn.started", "isMocked": True})
     launch = ProviderNormalLaunch(
-        cli="local-process-test",
+        cli="codex",
         command=(
             sys.executable,
             "-B",
             "-c",
+            "# SOURCE-ONLY local process fixture\n"
             f"import time; print({event!r}, flush=True); time.sleep({seconds})",
         ),
         protections=("Explicit local process fixture; no provider runs.",),
     )
     request.update(
-        provider="local-process-test",
-        model=None,
-        effort=None,
+        provider="codex",
+        model="gpt-6.1-sol",
+        effort="medium",
         ownedFiles=["local.py"],
-        planRevision="a" * 64,
-        requirementRefs=[],
-        specRefs=None,
+        planRevision=context["revision"],
+        executionJob=str(context["directory"]),
+        requirementRefs=scoped_bead["requirementRefs"],
+        specRefs=scoped_bead["specRefs"],
         adapterCommit="b" * 40,
         executableSha256=dispatch._file_sha256(sys.executable),
         prompt="Source-only local child fixture λ\r\n",
@@ -303,27 +323,27 @@ def test_selected_cancel_preserves_completed_work_and_requires_targeted_resume(
             # Source writes and the explicitly mocked terminal observation finish
             # before an idle local-process tail. No actual provider turn is claimed.
             script = (
+                "# SOURCE-ONLY local process fixture\n"
                 f"from pathlib import Path; Path('{bead}.py').write_text('VALUE = 1\\n'); "
                 'import time; print(\'{"type":"turn.completed","isMocked":true}\', flush=True); '
                 + ("time.sleep(15)" if bead == "A" else "")
             )
             return ProviderNormalLaunch(
-                cli="local-process-test",
+                cli="codex",
                 command=(sys.executable, "-B", "-c", script),
                 protections=("local fixture",),
             )
 
     monkeypatch.setattr(dispatch, "get_adapter", lambda name: LocalAdapter())
     source_only_packet_renderer(monkeypatch)
-    runs = tmp_path / "runs"
+    context = source_execution_context(tmp_path / "canonical", plan, max_parallel=2, timeout=25)
+    plan, runs = context["plan"], context["runs"]
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
             dispatch.run_plan,
             plan,
             work_root=runs,
-            max_parallel=2,
-            timeout=25,
-            provider_for={key: "local-process-test" for key in ("A", "B", "C")},
+            **context["kwargs"],
         )
         deadline = time.monotonic() + 25
         run = None
@@ -353,8 +373,7 @@ def test_selected_cancel_preserves_completed_work_and_requires_targeted_resume(
         plan,
         work_root=runs,
         resume_run_dir=run,
-        max_parallel=2,
-        provider_for={key: "local-process-test" for key in ("A", "B", "C")},
+        **context["kwargs"],
     )
     assert retained["beads"]["A"]["attempt"]["status"] == "cancelled"
     assert sorted(launched) == ["A", "C"]

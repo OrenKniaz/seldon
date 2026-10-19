@@ -562,6 +562,7 @@ def test_dispatch_no_change_requires_current_head_proof(tmp_path, satisfied, wor
 def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: bool
 ) -> None:
+    from tests.python.core.execution_support import source_execution_context
     from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
 
     from codex_harness.core.provider_launch import ProviderNormalLaunch
@@ -576,13 +577,14 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
         def provider_normal_command(self, *, prompt, **kwargs):
             bead_id = "A" if "Bead A" in prompt else "B"
             return ProviderNormalLaunch(
-                cli="scripted",
+                cli="codex",
                 command=(
                     sys.executable,
                     "-c",
                     # This stand-in completes source mechanics, not a real provider turn.
                     f"from pathlib import Path; Path('{bead_id}.py').write_text('VALUE = 1\\n'); "
-                    'print(\'{"type":"turn.completed","isMocked":true}\')',
+                    'print(\'{"type":"turn.completed","isMocked":true}\')'
+                    "\n# SOURCE-ONLY local process fixture",
                 ),
                 protections=("scripted stand-in",),
             )
@@ -605,16 +607,17 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
             assert request["status"] == "launching"
             assert request["command"] == list(command)
             assert len(request["planRevision"]) == 64
-            assert request["requirementRefs"] == []
+            assert request["requirementRefs"] == canonical["beads"][bead_id]["requirementRefs"]
             assert (attempt / f"R{bead_id}" / "request.json").exists()
             spawned.append(bead_id)
         return popen(command, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", observe_spawn)
     _bind_protected(plan)
-    record = run_plan(
-        plan, work_root=tmp_path / "runs", provider_for={"A": "scripted", "B": "scripted"}
-    )
+    context = source_execution_context(tmp_path / "canonical", plan)
+    plan = context["plan"]
+    canonical = json.loads((plan / "sample.json").read_text())
+    record = run_plan(plan, work_root=context["runs"], **context["kwargs"])
     assert sorted(spawned) == ["A", "B"]
     assert record["status"] == (STATUS_VALIDATED if declared else STATUS_VALIDATED_NO_INTEGRATION)
     assert record["isLiveProductProof"] is False
@@ -634,7 +637,7 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
             "requirementRefs": [],
         }
         assert record["integrationValidation"] is None
-    saved = json.loads((tmp_path / "runs" / record["runId"] / "evidence" / "run.json").read_text())
+    saved = json.loads((context["runs"] / record["runId"] / "evidence" / "run.json").read_text())
     assert saved == record
 
 

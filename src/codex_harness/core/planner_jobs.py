@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -129,20 +130,65 @@ def _request(directory):
     return request
 
 
-def start_worker_job(store, expected_revision, workers, *, max_parallel=2, timeout=900):
+def _valid_timeout(value):
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def start_worker_job(
+    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap=None
+):
     """Admit once and return promptly; no mock, executable override or retry surface.
 
-    The caller is responsible for task-specific permission to use the selected
-    existing provider capacity. Admission never claims that capacity was verified.
+    New admissions consume the existing bridge's exact native execution original.
+    A local call ceiling is not verified subscription quota or human identity.
     """
     if type(max_parallel) is not int or max_parallel < 1:
         raise ValueError("worker-job-max-parallel-must-be-positive")
-    if type(timeout) is not int or timeout < 1:
+    if not _valid_timeout(timeout):
         raise ValueError("worker-job-timeout-must-be-positive")
+    directory = _directory(store.workspace, expected_revision)
+    if directory.is_dir():
+        if (directory / "request.json").is_file():
+            previous = _request(directory)
+            manifest = read_record_json(_inside(directory, directory / "plan/sample.json"))
+            selection = _workers(manifest, workers)
+            options = dict(
+                workers=selection,
+                maxParallel=max_parallel,
+                timeout=timeout,
+            )
+            if "callCap" in previous["options"]:
+                options["callCap"] = (
+                    previous["options"]["callCap"] if call_cap is None else call_cap
+                )
+            elif call_cap is not None:
+                raise ValueError("worker-job-publication-already-admitted-with-other-options")
+            if previous["options"] != options:
+                raise ValueError("worker-job-publication-already-admitted-with-other-options")
+        return worker_job_status(store.workspace, expected_revision)
+    from codex_harness.core.planner_execution import (
+        consume_execution,
+        execution_scope,
+        require_execution,
+    )
+
     manifest, template = _publication(store, expected_revision)
     selection = _workers(manifest, workers)
-    directory = _directory(store.workspace, expected_revision)
-    options = {"workers": selection, "maxParallel": max_parallel, "timeout": timeout}
+    scope = execution_scope(
+        store,
+        expected_revision,
+        selection,
+        max_parallel=max_parallel,
+        timeout=timeout,
+        call_cap=call_cap,
+    )
+    require_execution(store, scope)  # Missing/forged grants refuse before any namespace.
+    options = {
+        "workers": selection,
+        "maxParallel": max_parallel,
+        "timeout": timeout,
+        "callCap": call_cap,
+    }
     directory.parent.mkdir(parents=True, exist_ok=True)
     try:
         directory.mkdir()
@@ -157,6 +203,7 @@ def start_worker_job(store, expected_revision, workers, *, max_parallel=2, timeo
                 ) from None
         return worker_job_status(store.workspace, expected_revision)
     try:
+        execution_id = consume_execution(store, scope, expected_revision)
         before = _files(template)
         plan = directory / "plan"
         plan.mkdir()
@@ -176,6 +223,8 @@ def start_worker_job(store, expected_revision, workers, *, max_parallel=2, timeo
             "templateFiles": before,
             "options": options,
             "admittedAt": _now(),
+            "executionRequestId": execution_id,
+            "executionScope": scope,
         }
         request["requestDigest"] = _digest(request)
         write_record_json_once(directory / "request.json", request)
@@ -250,6 +299,13 @@ def worker_job_status(workspace, job_id):
         return {**result, "reason": "Admission incomplete; do not relaunch"}
     request = _request(directory)
     result["options"] = request["options"]
+    result["nativeApproval"] = (
+        "recorded"
+        if request.get("executionRequestId") and request.get("executionScope")
+        else "unproven"
+    )
+    result["providerCallCap"] = request["options"].get("callCap")
+    result["capacityVerified"] = False
     for name in ("started", "terminal"):
         path = directory / f"{name}.json"
         if not path.is_file():
@@ -298,7 +354,8 @@ def execute_worker_job(workspace, job_id):
     request = _request(directory)
     # Exclusive marker precedes all dispatch work. A duplicate child must stop.
     write_record_json_once(
-        directory / "started.json", {"requestDigest": request["requestDigest"], "at": _now()}
+        directory / "started.json",
+        {"requestDigest": request["requestDigest"], "at": _now(), "pid": os.getpid()},
     )
     terminal = {"requestDigest": request["requestDigest"], "status": "failed"}
     try:
@@ -324,6 +381,8 @@ def execute_worker_job(workspace, job_id):
             effort_for={row["bead"]: row["effort"] for row in workers},
             max_parallel=request["options"]["maxParallel"],
             timeout=request["options"]["timeout"],
+            max_provider_calls=request["options"]["callCap"],
+            execution_job=directory,
         )
         terminal.update(status="completed", runId=run["runId"], dispatchStatus=run["status"])
     except Exception as error:

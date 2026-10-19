@@ -48,6 +48,13 @@ def main(argv: list[str] | None = None) -> int:
         "--retry-blocked", help="On resume, retry blocked bead IDs (comma separated), or all"
     )
     args = parser.parse_args(argv)
+    if args.mock_provider is None:
+        print(
+            "Real dispatch requires native planner worker-start and its owned controller; "
+            "inspect worker-status. Direct real start/resume is held.",
+            file=sys.stderr,
+        )
+        return 2
     record = run_plan(
         args.plan,
         work_root=args.work_root,

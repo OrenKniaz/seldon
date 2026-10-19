@@ -7,56 +7,49 @@ The store double does NOT establish review-backed publication or human approval.
 import copy
 import json
 import os
-import shutil
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.python.core.execution_support import publish_source_store, source_grant
 
 from codex_harness.core import planner_jobs as jobs
 from codex_harness.core.plan_store import PlanStore
 from codex_harness.core.record_io import read_record_json, write_record_json_once
-from codex_harness.core.spine import compile_manifest, load_spine
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
 
 
-class SourceOnlyStore:
-    """Only supply the published store contract; never label synthetic evidence real."""
+class SourceOnlyStore(PlanStore):
+    """Real canonical DB plus explicit negative publication-input test mutations."""
 
     def __init__(self, workspace):
-        self.workspace = workspace
-        shutil.copytree(FIXTURE / "template", workspace / "template")
-        self.graph = load_spine(FIXTURE / "spine.json")
-        self.manifest = compile_manifest(self.graph, workspace / "template")
-        self.revision = self.manifest["planRevision"]
-        self.phase = "publish"
+        canonical, revision = publish_source_store(workspace, spine_file=FIXTURE / "spine.json")
+        self.__dict__.update(canonical.__dict__)
+        self.revision = revision
+        self.manifest = PlanStore.published_manifest(self, revision)
+        self.phase_override = None
         self.pending_gate = None
         self.current = True
-        (workspace / ".codex-harness").mkdir()
-        (workspace / ".codex-harness/plan.sqlite3").touch()
 
     def status(self):
-        return dict(
-            published_revision=self.revision, phase=self.phase, pending_gate=self.pending_gate
-        )
+        status = super().status()
+        status["published_revision"] = self.revision
+        if self.phase_override is not None:
+            status["phase"] = self.phase_override
+        if self.pending_gate is not None:
+            status["pending_gate"] = self.pending_gate
+        return status
 
     def publication_current(self, revision):
-        return self.current and revision == self.manifest_revision()
-
-    def manifest_revision(self):
-        return compile_manifest(self.graph, self.workspace / "template")["planRevision"]
+        return self.current and super().publication_current(revision)
 
     def published_manifest(self, revision):
-        assert revision == self.revision
-        return copy.deepcopy(self.manifest)
-
-    def spine(self):
-        return self.graph
-
-    check_requirement_files = staticmethod(PlanStore.check_requirement_files)
+        if hasattr(self, "manifest") and revision == self.revision:
+            return copy.deepcopy(self.manifest)
+        return super().published_manifest(revision)
 
 
 @pytest.fixture
@@ -74,19 +67,36 @@ def fixture(tmp_path, monkeypatch):
         dict(bead=bead, provider="codex", model="gpt-6.1-sol", effort="medium")
         for bead in store.manifest["beads"]
     ]
-    return store, workers, launches
+    source_grant(store, store.revision, workers)
+    yield store, workers, launches
+    store.close()
 
 
 def admit(fixture, **kwargs):
     store, workers, _ = fixture
-    return jobs.start_worker_job(store, store.revision, workers, **kwargs)
+    if not jobs._directory(store.workspace, store.revision).exists():
+        source_grant(
+            store,
+            store.revision,
+            workers,
+            max_parallel=kwargs.get("max_parallel", 2),
+            timeout=kwargs.get("timeout", 900),
+        )
+    return jobs.start_worker_job(store, store.revision, workers, call_cap=16, **kwargs)
+
+
+def _thread_start(workspace, revision, workers):
+    with PlanStore(workspace) as canonical:
+        return jobs.start_worker_job(canonical, revision, workers, call_cap=16)
 
 
 def test_reconnect_and_concurrent_start_do_not_duplicate_launch(fixture):
     store, workers, launches = fixture
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(
-            executor.map(lambda _: jobs.start_worker_job(store, store.revision, workers), range(4))
+            executor.map(
+                lambda _: _thread_start(store.workspace, store.revision, workers), range(4)
+            )
         )
     assert len(launches) == 1
     assert {result["jobId"] for result in results} == {store.revision}
@@ -107,7 +117,7 @@ def test_unpublished_stale_and_mismatched_inputs_refuse_before_launch(fixture, c
     elif case == "stale":
         store.current = False
     elif case == "phase":
-        store.phase = "roundtable"
+        store.phase_override = "roundtable"
     elif case == "gate":
         store.pending_gate = "approval:vision-lock"
     elif case == "manifest":
@@ -115,7 +125,7 @@ def test_unpublished_stale_and_mismatched_inputs_refuse_before_launch(fixture, c
     else:
         (store.workspace / "template/PLAN.md").write_text("Altered protected plan")
     with pytest.raises(ValueError, match="worker-job-"):
-        jobs.start_worker_job(store, expected, workers)
+        jobs.start_worker_job(store, expected, workers, call_cap=16)
     assert launches == []
     assert not (store.workspace / ".codex-harness/worker-jobs").exists()
 
@@ -129,7 +139,7 @@ def test_exact_publication_snapshot_options_and_ordinary_dispatch(fixture, monke
     assert read_record_json(directory / "plan/sample.json") == store.manifest
     assert jobs._files(directory / "plan/template") == jobs._files(store.workspace / "template")
     assert request["options"] == dict(
-        workers=sorted(workers, key=lambda row: row["bead"]), maxParallel=1, timeout=73
+        workers=sorted(workers, key=lambda row: row["bead"]), maxParallel=1, timeout=73, callCap=16
     )
     command, launch = launches[0]
     assert command[1:5] == ["-P", "-B", "-m", "codex_harness.core.planner_jobs"]
@@ -159,6 +169,8 @@ def test_exact_publication_snapshot_options_and_ordinary_dispatch(fixture, monke
                 effort_for={row["bead"]: row["effort"] for row in workers},
                 max_parallel=1,
                 timeout=73,
+                max_provider_calls=16,
+                execution_job=directory,
             ),
         )
     ]
@@ -204,7 +216,7 @@ def test_options_cannot_be_replaced_or_partial_admission_seized(fixture):
     directory.rmdir()
     admit(fixture)
     with pytest.raises(ValueError, match="already-admitted-with-other-options"):
-        jobs.start_worker_job(store, store.revision, workers, timeout=11)
+        jobs.start_worker_job(store, store.revision, workers, timeout=11, call_cap=16)
     assert len(launches) == 1
 
 
@@ -235,12 +247,14 @@ def test_real_child_uses_harness_entrypoint_despite_colliding_product_package(
 
     def observe_launch(command, **kwargs):
         assert kwargs["env"]["SELDON_TEST_PRESERVE_PROVIDER_ENV"] == "unchanged"
+        store.connection.execute("UPDATE meta SET published_revision=NULL")
         child = original_popen(command, **kwargs)
         children.append(child)
         return child
 
     monkeypatch.setattr(jobs.subprocess, "Popen", observe_launch)
-    admitted = jobs.start_worker_job(store, store.revision, workers)
+    source_grant(store, store.revision, workers)
+    admitted = jobs.start_worker_job(store, store.revision, workers, call_cap=16)
     assert len(children) == 1
     assert children[0].wait(timeout=30) == 1
     directory = Path(admitted["evidenceDir"])
@@ -315,5 +329,5 @@ def test_worker_selection_requires_explicit_supported_tuple(fixture, invalid):
     with pytest.raises(
         ValueError, match="provider-must-use-canonical-name" if invalid == "noncanonical" else None
     ):
-        jobs.start_worker_job(store, store.revision, workers)
+        jobs.start_worker_job(store, store.revision, workers, call_cap=16)
     assert launches == []

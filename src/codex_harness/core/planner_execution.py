@@ -1,0 +1,291 @@
+"""Local single-use worker-execution responses from the existing native bridge.
+
+Only its correlated pending-response handler calls completion. These records are
+not authentication, subscription capacity verification or protection from the
+same local user rewriting their files. Plan approval remains a separate gate.
+"""
+
+import json
+from pathlib import Path
+from uuid import uuid4
+
+from codex_harness.core.plan_quality import quality_report
+from codex_harness.core.planner_views import review_resolution_state
+
+REQUEST = "worker-execution-requested"
+RESPONSE = "worker-execution-responded"
+CONSUMED = "worker-execution-consumed"
+
+
+def _records(store, kind):
+    return [
+        json.loads(row[0])
+        for row in store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind=? ORDER BY id DESC", (kind,)
+        )
+    ]
+
+
+def _canonical_store(store):
+    databases = store.connection.execute("PRAGMA database_list").fetchall()
+    if store.connection.execute("PRAGMA query_only").fetchone()[0] or not any(
+        row[1] == "main" and row[2] and Path(row[2]).resolve() == store.path.resolve()
+        for row in databases
+    ):
+        raise ValueError("worker-execution-canonical-store-required")
+    if store.path.resolve() != (store.workspace / ".codex-harness/plan.sqlite3").resolve():
+        raise ValueError("worker-execution-canonical-store-required")
+
+
+def _control_digest(store):
+    """Raw canonical prerequisites; safe inside an existing writer transaction."""
+    from codex_harness.core.planner_jobs import _digest
+
+    originals = {}
+    for table in (
+        "meta",
+        "approvals",
+        "clarifications",
+        "audit_runs",
+        "revisions",
+        "review_runs",
+        "review_findings",
+        "events",
+    ):
+        exists = store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            originals[table] = None
+            continue
+        query = f"SELECT * FROM {table}"
+        if table == "events":
+            query += (
+                " WHERE kind NOT IN ('worker-execution-requested', "
+                "'worker-execution-responded', 'worker-execution-consumed')"
+            )
+        originals[table] = [
+            list(row) for row in store.connection.execute(query + " ORDER BY rowid")
+        ]
+    return _digest(originals)
+
+
+def execution_scope(store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap):
+    """Read canonical scope; no event, approval, launch or provider query."""
+    from codex_harness.core import planner_jobs as jobs
+
+    manifest, template = jobs._publication(store, expected_revision)
+    selected = jobs._workers(manifest, workers)
+    if type(call_cap) is not int or call_cap < len(selected) or call_cap < 1:
+        raise ValueError("worker-job-call-cap-required")
+    if type(max_parallel) is not int or max_parallel < 1 or not jobs._valid_timeout(timeout):
+        raise ValueError("worker-execution-limits-invalid")
+    status = store.status()
+    resolution = review_resolution_state(store, status)
+    check = next(c for c in quality_report(store)["checks"] if c["id"] == "roundtable")
+    if (
+        (status["vision_lock_stale"] if "vision_lock_stale" in status else False)
+        or status["open_clarifications"]
+        or resolution["blockingOpenFindings"] != []
+        or (
+            resolution["audit"]["current"] is not True
+            or resolution["review"]["current"] is not True
+            or check["status"] not in {"pass", "warn"}
+        )
+    ):
+        raise ValueError("worker-execution-canonical-prerequisite")
+    return dict(
+        workspace=str(store.workspace.resolve()),
+        publicationRevision=expected_revision,
+        spineRevision=status["spine_revision"],
+        sourceManifestRevision=status["manifest_revision"],
+        phase=status["phase"],
+        manifestDigest=jobs._digest(manifest),
+        templateFiles=jobs._files(template),
+        workers=selected,
+        maxParallel=max_parallel,
+        timeout=timeout,
+        callCap=call_cap,
+        canonicalControlDigest=_control_digest(store),
+    )
+
+
+def _recheck(store, scope):
+    """Transaction-safe: never call status/spine, which own their read transactions."""
+    from codex_harness.core import planner_jobs as jobs
+    from codex_harness.core.spine import Spine, compile_manifest
+
+    meta = store._meta()
+    current = compile_manifest(Spine(store._data()), store.workspace / "template")
+    publication = store.connection.execute(
+        "SELECT snapshot_json FROM revisions WHERE plan_revision=?", (scope["publicationRevision"],)
+    ).fetchone()
+    if (
+        str(store.workspace.resolve()) != scope["workspace"]
+        or meta["published_revision"] != scope["publicationRevision"]
+        or meta["phase"] != scope["phase"]
+        or store._revision() != scope["spineRevision"]
+        or current["planRevision"] != scope["sourceManifestRevision"]
+        or jobs._files(store.workspace / "template") != scope["templateFiles"]
+        or _control_digest(store) != scope["canonicalControlDigest"]
+        or publication is None
+        or jobs._digest(json.loads(publication[0])["manifest"]) != scope["manifestDigest"]
+    ):
+        raise ValueError("worker-execution-scope-stale")
+
+
+def prepare_execution(store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap):
+    _canonical_store(store)
+    scope = execution_scope(
+        store,
+        expected_revision,
+        workers,
+        max_parallel=max_parallel,
+        timeout=timeout,
+        call_cap=call_cap,
+    )
+    manifest = store.published_manifest(expected_revision)
+    tasks = []
+    for worker in scope["workers"]:
+        bead = manifest["beads"][worker["bead"]]
+        tasks.append(
+            f"- {worker['bead']}: {bead['title']}\n"
+            f"  {worker['provider']} / {worker['model']} / effort {worker['effort']}\n"
+            + "  Owns: "
+            + ", ".join(bead["ownedFiles"])
+        )
+    card = (
+        f"Start {len(tasks)} worker tasks for {store._meta()['name']}?\n\n"
+        + "\n".join(tasks)
+        + f"\n\nUp to {call_cap} provider attempts total, including failed or uncertain starts. "
+        + f"At most {max_parallel} tasks in parallel; "
+        f"timeout {timeout} seconds per worker attempt. "
+        "Total completion time is unknown. This local ceiling does not verify subscription quota.\n"
+        "This approves worker execution separately from plan approval. Conditions, decline, "
+        "cancel or changed scope grant no execution.\n"
+        + f"Project: {scope['workspace']}\nPublication: {expected_revision}\n"
+        + f"Protected inputs: {scope['manifestDigest']}\n"
+    )
+    request = dict(request_id=uuid4().hex, card=card, scope=scope)
+    with store._transaction():
+        _recheck(store, scope)
+        store._event(REQUEST, request)
+    return request
+
+
+def complete_execution(store, request_id, action, content=None):
+    _canonical_store(store)
+    requests = _records(store, REQUEST)
+    request = next((r for r in requests if r["request_id"] == request_id), None)
+    if request is None:
+        raise ValueError("worker-execution-request-unknown")
+    scope = request["scope"]
+    if action not in {"accept", "decline", "cancel"} or (
+        action == "accept"
+        and (
+            not isinstance(content, dict)
+            or set(content) != {"approve", "statement", "conditions"}
+            or type(content["approve"]) is not bool
+            or not isinstance(content["statement"], str)
+            or not content["statement"].strip()
+            or not isinstance(content["conditions"], str)
+        )
+    ):
+        raise ValueError("worker-execution-response-invalid")
+    try:
+        current = execution_scope(
+            store,
+            scope["publicationRevision"],
+            scope["workers"],
+            max_parallel=scope["maxParallel"],
+            timeout=scope["timeout"],
+            call_cap=scope["callCap"],
+        )
+    except ValueError:
+        current = None
+    with store._transaction():
+        if any(r["request_id"] == request_id for r in _records(store, RESPONSE)):
+            raise ValueError("worker-execution-already-responded")
+        latest = _records(store, REQUEST)[0]
+        stale = latest != request or current != scope
+        if not stale:
+            try:
+                _recheck(store, scope)
+            except ValueError:
+                stale = True
+        state = "stale" if stale else action
+        if not stale and action == "accept":
+            state = (
+                "conditional"
+                if content["conditions"]
+                else "approved"
+                if content["approve"]
+                else "declined"
+            )
+        result = dict(
+            request_id=request_id,
+            state=state,
+            scope=scope,
+            action=action,
+            content=content,
+            provenance="mcp-client-elicitation",
+            human_identity_verified=False,
+        )
+        store._event(RESPONSE, result)
+    return result
+
+
+def require_execution(store, scope):
+    _canonical_store(store)
+    requests, responses = _records(store, REQUEST), _records(store, RESPONSE)
+    if not requests:
+        raise ValueError("worker-execution-grant-required")
+    request = requests[0]
+    response = next((r for r in responses if r.get("request_id") == request["request_id"]), {})
+    content = response.get("content") or {}
+    if (
+        request.get("scope") != scope
+        or response.get("scope") != scope
+        or response.get("state") != "approved"
+        or response.get("action") != "accept"
+        or response.get("provenance") != "mcp-client-elicitation"
+        or content.get("approve") is not True
+        or content.get("conditions") != ""
+        or not isinstance(content.get("statement"), str)
+        or not content["statement"].strip()
+    ):
+        raise ValueError("worker-execution-grant-required")
+    if any(r.get("request_id") == request["request_id"] for r in _records(store, CONSUMED)):
+        raise ValueError("worker-execution-grant-consumed")
+    return request["request_id"]
+
+
+def consume_execution(store, scope, job_id):
+    _canonical_store(store)
+    with store._transaction():
+        request_id = require_execution(store, scope)
+        _recheck(store, scope)
+        store._event(CONSUMED, dict(request_id=request_id, jobId=job_id, scope=scope))
+    return request_id
+
+
+def consumed_execution(store, request_id, scope, job_id):
+    """Read the original consumption binding; later prompts do not remint it."""
+    request = next((r for r in _records(store, REQUEST) if r.get("request_id") == request_id), {})
+    response = next((r for r in _records(store, RESPONSE) if r.get("request_id") == request_id), {})
+    content = response.get("content") or {}
+    original = (
+        request.get("scope") == scope
+        and response.get("scope") == scope
+        and response.get("state") == "approved"
+        and response.get("action") == "accept"
+        and response.get("provenance") == "mcp-client-elicitation"
+        and content.get("approve") is True
+        and content.get("conditions") == ""
+        and isinstance(content.get("statement"), str)
+        and bool(content["statement"].strip())
+    )
+    return original and any(
+        r.get("request_id") == request_id and r.get("jobId") == job_id and r.get("scope") == scope
+        for r in _records(store, CONSUMED)
+    )

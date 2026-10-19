@@ -58,6 +58,7 @@ EXPECTED_TOOLS = {
     "harness_publish",
     "harness_worker_start",
     "harness_worker_status",
+    "harness_plan_resume",
 }
 
 
@@ -358,63 +359,59 @@ def test_native_quoted_or_forged_tool_arguments_cannot_complete_response(server)
     assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
 
 
-def test_worker_mcp_start_status_reconnect_preserve_one_admission(tmp_path, monkeypatch):
-    """Real job persistence with explicit process/store doubles; no workers launched."""
+@pytest.fixture
+def native_worker_project(tmp_path, monkeypatch):
+    # Real canonical store replaces the old SourceOnlyStore double because an
+    # execution grant must be written/consumed on the actual database.
+    from tests.python.core import test_planner_replay_gaps
+
+    yield from test_planner_replay_gaps.project.__wrapped__(tmp_path, monkeypatch)
+
+
+def test_worker_mcp_start_status_reconnect_preserve_one_admission(
+    native_worker_project, monkeypatch
+):
+    """Real canonical grant/job persistence; synthetic native client and process return."""
     from types import SimpleNamespace
 
-    from tests.python.core.test_planner_jobs import SourceOnlyStore
+    from tests.python.core import test_planner_resume
+    from tests.python.core.test_plan_resume_transport import (
+        approve_execution_wire,
+        execution_wire,
+        native_execution_client,
+    )
 
     from codex_harness.core import planner_jobs
 
-    store, launches = SourceOnlyStore(tmp_path), []
+    store, launches = native_worker_project, []
+    options = test_planner_resume._published(store)
     monkeypatch.setattr(
         planner_jobs.subprocess,
         "Popen",
-        lambda *a, **k: (launches.append((a, k)) or SimpleNamespace(pid=321)),
+        lambda *a, **k: launches.append((a, k)) or SimpleNamespace(pid=321),
     )
-    workers = [
-        dict(bead=key, provider="codex", model="gpt-6.1-sol", effort="medium")
-        for key in store.manifest["beads"]
-    ]
-    for _ in range(2):
-        client = PlannerServer(tmp_path)
-        monkeypatch.setattr(client, "_store", lambda: store)
-        monkeypatch.setattr(
+    for index in range(2):
+        client = PlannerServer(store.workspace)
+        native_execution_client(client)
+        response = execution_wire(
             client,
-            "_status",
-            lambda: dict(
-                store.status(),
-                name="Source-only",
-                plan_revision=store.revision,
-                open_clarifications=0,
-                open_assumptions=0,
-            ),
-        )
-        started = rpc(
-            client,
-            "tools/call",
+            "harness_worker_start",
             {
-                "name": "harness_worker_start",
-                "arguments": {
-                    "expected_revision": store.revision,
-                    "workers": workers,
-                    "timeout": 61,
-                    "max_parallel": 1,
-                },
+                "expected_revision": options["expected_revision"],
+                "workers": options["workers"],
+                "timeout": 61,
+                "max_parallel": 1,
+                "call_cap": 1,
             },
-        )["result"]
+        )
+        started = (approve_execution_wire(client, response) if index == 0 else response)["result"]
         assert not started["isError"], started
         data = started["structuredContent"]
         assert data["status"] == "unknown" and not data["harnessDeliveryProven"]
         status = rpc(
             client,
             "tools/call",
-            {
-                "name": "harness_worker_status",
-                "arguments": {
-                    "job_id": data["jobId"],
-                },
-            },
+            {"name": "harness_worker_status", "arguments": {"job_id": data["jobId"]}},
         )["result"]
         assert status["structuredContent"] == data
         assert "harness_worker_status job_id=" in status["content"][0]["text"]
@@ -798,6 +795,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
 
     assert "Phase 1/11: Align" in run("harness_plan_start", idea="Split fairly", name="tip-split")
     assert "approval:align" in run("harness_plan_status")
+    assert "Durable plan resume" in run("harness_plan_resume")
     run("harness_schema", kind="requirement")
     card = run(
         "harness_understanding_card",

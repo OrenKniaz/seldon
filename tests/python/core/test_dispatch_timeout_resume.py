@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.python.core.execution_support import source_execution_context
 from tests.python.core.test_dispatch import _bind_protected, _tiny_plan
 from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
 
@@ -29,11 +30,12 @@ def _timeout_run(tmp_path, monkeypatch, *, refuse_stop):
     class LocalAdapter:
         def provider_normal_command(self, **kwargs):
             return ProviderNormalLaunch(
-                cli="local-process-test",
+                cli="codex",
                 command=(
                     sys.executable,
                     "-B",
                     "-c",
+                    "# SOURCE-ONLY local process fixture\n"
                     "from pathlib import Path; Path('A.py').write_bytes(b'VALUE = 1\\n'); "
                     'import time; print(\'{"type":"turn.completed","isMocked":true}\', '
                     "flush=True); time.sleep(12)",
@@ -64,14 +66,15 @@ def _timeout_run(tmp_path, monkeypatch, *, refuse_stop):
 
     monkeypatch.setattr(dispatch, "get_adapter", lambda name: LocalAdapter())
     source_only_packet_renderer(monkeypatch)
+    context = source_execution_context(tmp_path / "canonical", plan, timeout=0.5)
+    plan = context["plan"]
     monkeypatch.setattr(subprocess, "Popen", tracked_popen)
     monkeypatch.setattr(subprocess, "run", timeout_stop)
     try:
         first = dispatch.run_plan(
             plan,
-            work_root=tmp_path / "runs",
-            timeout=0.5,
-            provider_for={"A": "local-process-test", "B": "local-process-test"},
+            work_root=context["runs"],
+            **context["kwargs"],
         )
         assert len(children) == 1
         a = first["beads"]["A"]

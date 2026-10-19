@@ -247,6 +247,28 @@ TOOLS = [
     ),
     _tool("harness_plan_status", "Show all phases and the canonical pending gate.", {}),
     _tool(
+        "harness_plan_resume",
+        "Inspect or reattach by default. Explicit request_execution asks the negotiated native "
+        "client to decide the exact worker proposal. Caller declarations cannot approve it; "
+        "actual native approval and shared admission remain required. Capacity is not verified.",
+        {
+            "expected_revision": STRING,
+            "workers": {
+                "type": "array",
+                "minItems": 1,
+                "items": _object(dict.fromkeys(("bead", "provider", "model", "effort"), STRING)),
+            },
+            "execution_authorized": {"type": "boolean"},
+            "request_execution": {"type": "boolean"},
+            "call_cap": {"type": "integer"},
+            "reserved_worker_calls": {"type": "integer"},
+            "deadline": STRING,
+            "max_parallel": {"type": "integer"},
+            "timeout": {"type": "integer"},
+        },
+        [],
+    ),
+    _tool(
         "harness_understanding_card",
         "Record and show understanding; ask the user to confirm before advancing.",
         {
@@ -356,7 +378,8 @@ TOOLS = [
         "harness_worker_start",
         "Start the existing dispatcher once for the exact current publication; return a durable "
         "job ID promptly. Workers implement the product; the planner steers. Requires permission "
-        "for the selected existing provider capacity; no automatic retry or capacity verification.",
+        "through a distinct exact-scope native execution decision. No automatic retry or "
+        "subscription-capacity verification; call_cap is a local worker-call ceiling.",
         {
             "expected_revision": STRING,
             "workers": {
@@ -366,8 +389,9 @@ TOOLS = [
             },
             "max_parallel": {"type": "integer"},
             "timeout": {"type": "integer"},
+            "call_cap": {"type": "integer"},
         },
-        ["expected_revision", "workers"],
+        ["expected_revision", "workers", "call_cap"],
     ),
     _tool(
         "harness_worker_status",
@@ -376,6 +400,136 @@ TOOLS = [
         {"job_id": STRING},
     ),
 ]
+
+
+def resume_status(workspace, data=None):
+    """Use the core's read-only snapshot; never reopen a writable store for a banner."""
+    if data and isinstance(data.get("canonicalStatus"), dict):
+        return data["canonicalStatus"]
+    return {
+        "name": Path(workspace).name,
+        "phase": "unknown",
+        "plan_revision": "unknown",
+        "open_clarifications": "unknown",
+        "pending_gate": "resume-state-unavailable",
+    }
+
+
+def resume_card(data):
+    """A compact observation, with complete diagnostics retained in structuredContent."""
+    state = {
+        "held": "Resume held.",
+        "reattached": "Original worker job reattached.",
+        "handoff_requested": "Worker handoff requested after native execution approval.",
+    }.get(data.get("state"), "Resume state unavailable.")
+    reasons = {
+        "plan-missing": "No saved plan exists in this workspace.",
+        "host-admission-unavailable": "Resume has no independent host admission authority.",
+        "native-execution-confirmation-required": "An exact native execution decision is required.",
+        "worker-handoff-requested": "Read original job evidence; delivery is unproved.",
+        "worker-admission-refused": "Shared worker admission was refused; inspect its originals.",
+        "planning-phase-required": "Continue the recorded planning phase before publication proof.",
+        "canonical-prerequisite": "A recorded planning or proof prerequisite needs attention.",
+        "original-job-reattached": "Read original job evidence; reconnection does not retry.",
+    }
+    lines = [
+        state
+        + " "
+        + reasons.get(data.get("reasonCode"), "Inspect the recorded state before acting.")
+    ]
+    if data.get("publishedRevision"):
+        lines.append("Current publication: " + data["publishedRevision"])
+    if data.get("nextAction", {}).get("kind") == "inspect_plan_phase":
+        lines.append("Planning phase: " + str(data["nextAction"]["phase"]) + ".")
+    job = data.get("job")
+    if job:
+        lines.append(
+            "Job " + job["jobId"] + ": recorded status " + str(job.get("status", "unknown")) + "."
+        )
+        if job.get("observedRunStatus"):
+            lines.append("Observed dispatch snapshot: " + str(job["observedRunStatus"]) + ".")
+    if data.get("observationError"):
+        lines.append(
+            "The resume observation could not be saved; original job records remain authoritative."
+        )
+    lines.append(
+        "Capacity and current liveness are unknown. "
+        "Caller reports do not grant native confirmation or prove delivery."
+    )
+    if data.get("reasonCode") == "host-admission-unavailable":
+        lines.append(
+            "Caller declarations cannot authorize a launch. "
+            "Authorized chat-to-worker handoff remains unfinished."
+        )
+    return "\n".join(lines)
+
+
+def resume_next(data=None, *, cli_prefix=None):
+    """Render only supported routes from the shared advisory action contract."""
+    data = data or {}
+    action = data.get("nextAction", {})
+    kind = action.get("kind")
+
+    def route(command, mcp):
+        return cli_prefix + command if cli_prefix is not None else mcp
+
+    if kind == "start_plan":
+        return route(
+            'start --idea "<idea>" --name "<name>"', "harness_plan_start idea=<idea> name=<name>"
+        )
+    if kind == "inspect_plan_phase":
+        return route("status", "harness_plan_status")
+    if kind == "inspect_worker_job" and action.get("jobId"):
+        return route(
+            "worker-status --job-id " + action["jobId"],
+            "harness_worker_status job_id=" + action["jobId"],
+        )
+    if kind == "host_admission_unavailable":
+        return (
+            route("status", "harness_plan_status")
+            + " (inspect only; host admission is unresolved)."
+        )
+    if kind == "request_native_execution":
+        revision = (
+            action.get("publishedRevision") or data.get("publishedRevision") or "<publication>"
+        )
+        if cli_prefix is not None:
+            return (
+                "Use a native MCP client for execution confirmation; "
+                + cli_prefix
+                + "status (inspection only; CLI declarations cannot approve)."
+            )
+        return (
+            "harness_plan_resume request_execution=true expected_revision="
+            + revision
+            + " workers=<exact bead/provider/model/effort tuples> call_cap=<local-call-ceiling>"
+            " max_parallel=<parallel-limit> timeout=<per-worker-seconds> "
+            "(opens a native decision; does not itself approve)."
+        )
+    detail = action.get("detailRoute") or {}
+    if kind == "review_required" and detail.get("roundId"):
+        return (
+            "Inspect "
+            + route("review " + detail["roundId"], "harness_review id=" + detail["roundId"])
+            + "; address the recorded failed review within authorized capacity."
+        )
+    resolution = (data.get("canonicalStatus") or {}).get("reviewResolution")
+    if resolution and kind in {
+        "existing_canonical_blocker",
+        "reconcile_findings",
+        "compile_required",
+        "audit_required",
+        "review_required",
+        "attempt_phase_advance",
+        "attempt_publication",
+    }:
+        return views.review_resolution_next(
+            {**resolution, "nextAction": action}, cli_prefix=cli_prefix
+        )
+    return (
+        route("resume", "harness_plan_resume")
+        + " (refresh the saved diagnostic; do not infer permission to launch or retry)."
+    )
 
 
 def _validate(value, schema: dict, label="arguments") -> None:
@@ -601,6 +755,10 @@ class PlannerServer:
             # Tool failures are isolated at the protocol boundary; no input/secret logs.
             print(f"planner tool failed: {type(error).__name__}", file=sys.stderr)
             body = f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}"
+            if name == "harness_worker_start" and self.result_data:
+                body += (
+                    "\nAn original worker job exists; inspect worker status, never infer a retry."
+                )
             if name == "harness_upsert_node" and isinstance(error, ValueError | KeyError):
                 body += "\n" + node_error_help(arguments)
             if name == "harness_accept_review" and self.result_data:
@@ -608,7 +766,9 @@ class PlannerServer:
             is_error = True
         try:
             status = (
-                diagnostic_status(self.workspace)
+                resume_status(self.workspace, self.result_data)
+                if name == "harness_plan_resume"
+                else diagnostic_status(self.workspace)
                 if name == "harness_preflight"
                 else self.result_data
                 if name == "harness_plan_status" and not is_error
@@ -643,7 +803,14 @@ class PlannerServer:
                 if self.result_data is not None
                 and (
                     not is_error
-                    or name in ("harness_readiness", "harness_accept_run", "harness_accept_review")
+                    or name
+                    in (
+                        "harness_readiness",
+                        "harness_accept_run",
+                        "harness_accept_review",
+                        "harness_worker_start",
+                        "harness_plan_resume",
+                    )
                 )
                 else {}
             ),
@@ -658,9 +825,15 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if name == "harness_plan_resume":
+            return resume_next(self.result_data)
         if name == "harness_schema":
             return "Use the documented input with actual plan IDs; follow harness_plan_status."
-        if name in {"harness_worker_start", "harness_worker_status"} and not error:
+        if (
+            name in {"harness_worker_start", "harness_worker_status"}
+            and self.result_data
+            and self.result_data.get("jobId")
+        ):
             return "harness_worker_status job_id=" + self.result_data["jobId"]
         if name == "harness_publish" and not error:
             return (
@@ -771,6 +944,11 @@ class PlannerServer:
         )
 
     def _dispatch(self, name: str, args: dict) -> str:
+        if name == "harness_plan_resume":
+            from codex_harness.core.planner_resume import resume_plan
+
+            self.result_data = resume_plan(self.workspace, **args)
+            return "Durable plan resume\n" + resume_card(self.result_data)
         if name == "harness_schema":
             self.result_data = schema_help(TOOLS, **args)
             return json.dumps(self.result_data, ensure_ascii=False, indent=2)
@@ -1117,17 +1295,169 @@ class PlannerServer:
         if name in {"harness_worker_start", "harness_worker_status"}:
             from codex_harness.core import planner_jobs
 
-            self.result_data = (
-                planner_jobs.start_worker_job(store, **args)
-                if name == "harness_worker_start"
-                else planner_jobs.worker_job_status(self.workspace, **args)
-            )
+            try:
+                self.result_data = (
+                    planner_jobs.start_worker_job(store, **args)
+                    if name == "harness_worker_start"
+                    else planner_jobs.worker_job_status(self.workspace, **args)
+                )
+            except Exception:
+                if name == "harness_worker_start":
+                    try:
+                        self.result_data = planner_jobs.worker_job_status(
+                            self.workspace, args["expected_revision"]
+                        )
+                    except (OSError, ValueError):
+                        pass
+                raise
             return (
                 f"Worker job {self.result_data['jobId']}: {self.result_data['status']}\n"
                 + "Workers implement; the planner steers. Read original dispatch evidence before "
                 "claiming delivery. Current liveness: " + self.result_data["liveness"]
             )
         raise ValueError(f"Unknown tool: {name}")
+
+    def _resume_reply(self, snapshot, *, error=False, reason=None):
+        body = resume_card(snapshot)
+        if reason:
+            body += "\n" + reason
+        return {
+            "isError": error,
+            "structuredContent": snapshot,
+            "content": [
+                {
+                    "type": "text",
+                    "text": views.response(
+                        resume_status(self.workspace, snapshot),
+                        body,
+                        resume_next(snapshot),
+                    ),
+                }
+            ],
+        }
+
+    def _begin_execution(self, request_id, name, arguments):
+        from codex_harness.core.plan_store import open_plan_store_readonly
+        from codex_harness.core.planner_execution import execution_scope, prepare_execution
+        from codex_harness.core.planner_resume import resume_plan
+
+        tool = next(tool for tool in TOOLS if tool["name"] == name)
+        _validate(arguments, tool["inputSchema"])
+        # Inspect before any canonical writable opening or native request event.
+        snapshot = resume_plan(self.workspace, expected_revision=arguments.get("expected_revision"))
+        if snapshot["state"] == "reattached":
+            return {"jsonrpc": "2.0", "id": request_id, "result": self.call_tool(name, arguments)}
+        if snapshot["reasonCode"] != "native-execution-confirmation-required":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": self._resume_reply(snapshot, error=name == "harness_worker_start"),
+            }
+        if not self._elicitation or not self._initialized:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": self._resume_reply(
+                    snapshot,
+                    error=True,
+                    reason="worker-execution-native-origin-required: use MCP2025-06-18 with "
+                    "elicitation and initialized notification. CLI quotes cannot approve.",
+                ),
+            }
+        if self._pending_confirmation is not None:
+            raise ValueError("worker-execution-pending: answer or cancel the displayed request")
+        if any(key not in arguments for key in ("expected_revision", "workers", "call_cap")):
+            raise ValueError("worker-execution-explicit-publication-workers-call-cap-required")
+        proposal = {key: arguments[key] for key in ("expected_revision", "workers", "call_cap")}
+        proposal.update(
+            max_parallel=arguments.get("max_parallel", 2), timeout=arguments.get("timeout", 900)
+        )
+        with open_plan_store_readonly(self.workspace) as readonly:
+            execution_scope(readonly, **proposal)
+        prepared = prepare_execution(self._store(), **proposal)
+        wire_id = "seldon-execution-" + uuid4().hex
+        self._pending_confirmation = {
+            "purpose": "execution",
+            "wire_id": wire_id,
+            "tool_id": request_id,
+            "tool_name": name,
+            "arguments": dict(arguments),
+            "request": prepared,
+            "deadline": time.monotonic() + self._confirmation_timeout,
+        }
+        return {
+            "jsonrpc": "2.0",
+            "id": wire_id,
+            "method": "elicitation/create",
+            "params": {
+                "message": prepared["card"],
+                "requestedSchema": _object(
+                    {
+                        "approve": {
+                            "type": "boolean",
+                            "title": "Approve only this exact worker execution and call ceiling",
+                        },
+                        "statement": {"type": "string", "title": "Your complete response"},
+                        "conditions": {
+                            "type": "string",
+                            "title": "Conditions or changes (empty for unconditional approval)",
+                        },
+                    }
+                ),
+            },
+        }
+
+    def _execution_outcome_reply(self, pending, outcome, *, reason=None):
+        from codex_harness.core.planner_resume import resume_plan
+
+        snapshot = resume_plan(
+            self.workspace, expected_revision=pending["arguments"].get("expected_revision")
+        )
+        snapshot = {**snapshot, "executionConfirmation": outcome}
+        return self._resume_reply(
+            snapshot,
+            error=True,
+            reason=(
+                "Execution decision "
+                + outcome["state"]
+                + ". No admission was requested by this decision."
+                + (" " + reason if reason else "")
+            ),
+        )
+
+    def _finish_execution(self, response, pending):
+        from codex_harness.core.planner_execution import complete_execution
+
+        self._pending_confirmation = None
+        result = response.get("result")
+        try:
+            if (
+                "error" in response
+                or not isinstance(result, dict)
+                or set(result) - {"action", "content"}
+            ):
+                raise ValueError("worker-execution-response-invalid")
+            outcome = complete_execution(
+                self._store(),
+                pending["request"]["request_id"],
+                result.get("action"),
+                result.get("content"),
+            )
+        except (ValueError, KeyError) as error:
+            try:
+                outcome = complete_execution(
+                    self._store(), pending["request"]["request_id"], "cancel"
+                )
+            except (ValueError, KeyError):
+                outcome = {"state": "unproved", "request_id": pending["request"]["request_id"]}
+            reply = self._execution_outcome_reply(pending, outcome, reason=str(error))
+        else:
+            if outcome["state"] == "approved":
+                reply = self.call_tool(pending["tool_name"], pending["arguments"])
+                reply = {**reply, "_meta": {"executionConfirmation": outcome}}
+            else:
+                reply = self._execution_outcome_reply(pending, outcome)
+        return {"jsonrpc": "2.0", "id": pending["tool_id"], "result": reply}
 
     def _confirmation_reply(self, data, *, error=False, reason=None):
         try:
@@ -1218,6 +1548,8 @@ class PlannerServer:
             return None  # Never respond to an unknown/duplicate JSON-RPC response.
         if time.monotonic() >= pending["deadline"]:
             return self._cancel_confirmation("Confirmation timed out; no approval recorded")
+        if pending.get("purpose") == "execution":
+            return self._finish_execution(response, pending)
         self._pending_confirmation = None
         result = response.get("result")
         try:
@@ -1245,6 +1577,15 @@ class PlannerServer:
         from codex_harness.core.planner_confirmations import complete_confirmation
 
         pending, self._pending_confirmation = self._pending_confirmation, None
+        if pending.get("purpose") == "execution":
+            from codex_harness.core.planner_execution import complete_execution
+
+            outcome = complete_execution(self._store(), pending["request"]["request_id"], "cancel")
+            return {
+                "jsonrpc": "2.0",
+                "id": pending["tool_id"],
+                "result": self._execution_outcome_reply(pending, outcome, reason=reason),
+            }
         outcome = complete_confirmation(self._store(), pending["request"]["request_id"], "cancel")
         return {
             "jsonrpc": "2.0",
@@ -1325,6 +1666,30 @@ class PlannerServer:
         elif method == "tools/list":
             result = {"tools": TOOLS}
         elif method == "tools/call":
+            name, arguments = params.get("name"), params.get("arguments", {})
+            if name == "harness_worker_start" or (
+                name == "harness_plan_resume"
+                and isinstance(arguments, dict)
+                and arguments.get("request_execution") is True
+            ):
+                try:
+                    return self._begin_execution(request_id, name, arguments)
+                except (ValueError, KeyError, TypeError) as error:
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": self._resume_reply(
+                            {
+                                "state": "held",
+                                "reasonCode": "worker-admission-refused",
+                                "canonicalStatus": None,
+                                "nextAction": {"kind": "request_native_execution"},
+                                "job": None,
+                            },
+                            error=True,
+                            reason=str(error),
+                        ),
+                    }
             if params.get("name") == "harness_record_confirmation":
                 try:
                     return self._begin_confirmation(request_id, params.get("arguments", {}))

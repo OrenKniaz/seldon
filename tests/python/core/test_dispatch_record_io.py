@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Event
 
 import pytest
+from tests.python.core.execution_support import source_execution_context
 from tests.python.core.test_dispatch_cancel import (
     local_attempt,
     source_only_packet_renderer,
@@ -27,7 +28,7 @@ from codex_harness.core.record_io import open_record_read, read_record_json
 def test_malformed_cached_observation_contains_child_and_preserves_bytes(
     tmp_path, monkeypatch, raw
 ):
-    _, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=1)
+    _, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=1, timeout=5)
     observation = attempt / "cancel-observation.json"
     observation.write_bytes(raw)
     children, stops = [], []
@@ -88,7 +89,7 @@ def test_valid_cached_observation_from_actual_producer_never_stops_twice(tmp_pat
 def test_post_spawn_publication_failure_contains_owned_child_once(
     tmp_path, monkeypatch, failed_alias, stop_error
 ):
-    _, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=1)
+    _, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=1, timeout=5)
     planned = {"RA": {**request, "requirementId": "RA"}}
     failed_path = attempt / "RA/request.json" if failed_alias else attempt / "request.json"
     writes, stops, children = [], [], []
@@ -168,7 +169,7 @@ def test_cancel_stops_owned_child_while_supported_request_reader_is_held(tmp_pat
 
 
 def test_synthetic_observation_refusal_after_stop_cannot_trigger_second_stop(tmp_path, monkeypatch):
-    run, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=1)
+    run, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=1, timeout=5)
     stops, writes = [], []
     write = attempt_control._write
 
@@ -210,11 +211,12 @@ def test_post_spawn_refusal_with_unobserved_exit_cannot_relaunch_on_resume(tmp_p
     class LocalAdapter:
         def provider_normal_command(self, **kwargs):
             return ProviderNormalLaunch(
-                cli="local-process-test",
+                cli="codex",
                 command=(
                     sys.executable,
                     "-B",
                     "-c",
+                    "# SOURCE-ONLY local process fixture\n"
                     'import time; print(\'{"type":"turn.completed","isMocked":true}\', '
                     "flush=True); time.sleep(3)",
                 ),
@@ -243,11 +245,13 @@ def test_post_spawn_refusal_with_unobserved_exit_cannot_relaunch_on_resume(tmp_p
     source_only_packet_renderer(monkeypatch)
     monkeypatch.setattr(dispatch, "_write_record", refuse_publication)
     monkeypatch.setattr(subprocess.Popen, "kill", refuse_stop)
+    context = source_execution_context(tmp_path / "canonical", plan)
+    plan = context["plan"]
     try:
         first = dispatch.run_plan(
             plan,
-            work_root=tmp_path / "runs",
-            provider_for={"A": "local-process-test", "B": "local-process-test"},
+            work_root=context["runs"],
+            **context["kwargs"],
         )
         a = first["beads"]["A"]
         assert a["attempt"]["failure"]["stage"] == "post-spawn-publication"
@@ -262,6 +266,7 @@ def test_post_spawn_refusal_with_unobserved_exit_cannot_relaunch_on_resume(tmp_p
             retry_blocked="A",
             relaunch_ambiguous=True,
             fake_workers={"A": lambda cwd: pytest.fail("Unobserved child exit allowed relaunch")},
+            **context["kwargs"],
         )
         assert resumed["beads"]["A"]["attempt"] == a["attempt"]
         assert not resumed["beads"]["A"]["candidate"]["validated"]
@@ -276,7 +281,7 @@ def test_post_spawn_refusal_with_unobserved_exit_cannot_relaunch_on_resume(tmp_p
 
 
 def test_synthetic_stop_refusal_with_natural_exit_zero_stays_cancelled(tmp_path, monkeypatch):
-    run, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=0.5)
+    run, cwd, attempt, request, launch = local_attempt(tmp_path, seconds=0.5, timeout=5)
     stops = []
 
     def refused_after_exit(child):

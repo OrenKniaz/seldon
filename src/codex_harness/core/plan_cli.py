@@ -11,7 +11,13 @@ from tempfile import TemporaryDirectory
 
 from codex_harness.core import planner_views, roundtable, test_audit
 from codex_harness.core.graph import load_plan
-from codex_harness.core.mcp_planner import TOOLS, PlannerServer, _validate
+from codex_harness.core.mcp_planner import (
+    TOOLS,
+    PlannerServer,
+    _validate,
+    resume_next,
+    resume_status,
+)
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PHASES
 from codex_harness.core.preflight import diagnostic_status
@@ -224,6 +230,7 @@ def parser() -> argparse.ArgumentParser:
     specs = {
         "start": ("idea", "name"),
         "status": (),
+        "resume": (),
         "preflight": (),
         "show": (),
         "review": (),
@@ -309,6 +316,22 @@ def parser() -> argparse.ArgumentParser:
     commands["confirm"].add_argument("--by", default="user")
     commands["worker-start"].add_argument("--max-parallel", type=int, default=2)
     commands["worker-start"].add_argument("--timeout", type=int, default=900)
+    commands["worker-start"].add_argument("--call-cap", type=int, required=True)
+    commands["resume"].add_argument("--expected-revision")
+    commands["resume"].add_argument("--request-execution", action="store_true")
+    commands["resume"].add_argument("--call-cap", type=int)
+    commands["resume"].add_argument(
+        "--workers", help="Explicit worker tuples as JSON or @JSON file"
+    )
+    commands["resume"].add_argument(
+        "--execution-authorized",
+        action="store_true",
+        help="Caller report only; cannot authorize a resume launch",
+    )
+    commands["resume"].add_argument("--reserved-worker-calls", type=int)
+    commands["resume"].add_argument("--deadline", help="Caller-reported aware ISO deadline")
+    commands["resume"].add_argument("--max-parallel", type=int, default=2)
+    commands["resume"].add_argument("--timeout", type=int, default=900)
     commands["advance"].add_argument("--by", default="planner")
     commands["advance"].add_argument("--statement")
     commands["refine-wave"].add_argument("wave_id")
@@ -503,6 +526,28 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
     tools = {
         "start": ("harness_plan_start", lambda: dict(idea=args.idea, name=args.name)),
         "status": ("harness_plan_status", lambda: {}),
+        "resume": (
+            "harness_plan_resume",
+            lambda: {
+                "execution_authorized": args.execution_authorized,
+                "request_execution": args.request_execution,
+                "max_parallel": args.max_parallel,
+                "timeout": args.timeout,
+                **(
+                    {"expected_revision": args.expected_revision}
+                    if args.expected_revision is not None
+                    else {}
+                ),
+                **({"workers": read_json(args.workers)} if args.workers is not None else {}),
+                **(
+                    {"reserved_worker_calls": args.reserved_worker_calls}
+                    if args.reserved_worker_calls is not None
+                    else {}
+                ),
+                **({"deadline": args.deadline} if args.deadline is not None else {}),
+                **({"call_cap": args.call_cap} if args.call_cap is not None else {}),
+            },
+        ),
         "worker-start": (
             "harness_worker_start",
             lambda: dict(
@@ -510,6 +555,7 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 workers=read_json(args.workers),
                 max_parallel=args.max_parallel,
                 timeout=args.timeout,
+                call_cap=args.call_cap,
             ),
         ),
         "worker-status": ("harness_worker_status", lambda: dict(job_id=args.job_id)),
@@ -791,8 +837,16 @@ def _path(server: PlannerServer, value: str) -> Path:
     return path if path.is_absolute() else server.workspace / path
 
 
-def _reply(server: PlannerServer, body: str, error=False, *, diagnostic=False) -> dict:
-    status = diagnostic_status(server.workspace) if diagnostic else server._status()
+def _reply(
+    server: PlannerServer, body: str, error=False, *, diagnostic=False, resume=False
+) -> dict:
+    status = (
+        resume_status(server.workspace)
+        if resume
+        else diagnostic_status(server.workspace)
+        if diagnostic
+        else server._status()
+    )
     return {
         "isError": error,
         "content": [
@@ -859,10 +913,19 @@ def main(argv=None) -> int:
                     f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}",
                     True,
                     diagnostic=getattr(args, "command", None) == "preflight",
+                    resume=getattr(args, "command", None) == "resume",
                 ),
                 None,
             )
-        if getattr(args, "command", None) == "preflight":
+        if getattr(args, "command", None) == "resume":
+            status = resume_status(server.workspace, data)
+            next_step = resume_next(
+                data,
+                cli_prefix=(
+                    f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
+                ),
+            )
+        elif getattr(args, "command", None) == "preflight":
             status = diagnostic_status(server.workspace)
             next_step = (
                 "Review missing/unknown observations; "
