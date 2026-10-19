@@ -17,6 +17,7 @@ from uuid import uuid4
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
 from codex_harness.core.plan_store import PHASES, open_plan_store
+from codex_harness.core.planner_schema import node_error_help, schema_help
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
 from codex_harness.core.spine import ALLOWED_PARENTS
 from codex_harness.core.spine_diagrams import diagram
@@ -51,6 +52,13 @@ def _tool(name: str, description: str, properties: dict, required=None) -> dict:
 
 
 TOOLS = [
+    _tool(
+        "harness_schema",
+        "Read existing tool input contracts and actionable canonical node examples; "
+        "does not create a plan, approve gates or establish proof.",
+        {"tool": STRING, "kind": {"type": "string", "enum": list(ALLOWED_PARENTS)}},
+        [],
+    ),
     _tool(
         "harness_preflight",
         "Read-only executable and workspace observations; "
@@ -589,6 +597,8 @@ class PlannerServer:
             # Tool failures are isolated at the protocol boundary; no input/secret logs.
             print(f"planner tool failed: {type(error).__name__}", file=sys.stderr)
             body = f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}"
+            if name == "harness_upsert_node" and isinstance(error, ValueError | KeyError):
+                body += "\n" + node_error_help(arguments)
             if name == "harness_accept_review" and self.result_data:
                 body = views.review_card(self.result_data) + "\n" + body
             is_error = True
@@ -640,6 +650,8 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool) -> str:
+        if name == "harness_schema":
+            return "Use the documented input with actual plan IDs; follow harness_plan_status."
         if name in {"harness_worker_start", "harness_worker_status"} and not error:
             return "harness_worker_status job_id=" + self.result_data["jobId"]
         if name == "harness_publish" and not error:
@@ -741,6 +753,9 @@ class PlannerServer:
         )
 
     def _dispatch(self, name: str, args: dict) -> str:
+        if name == "harness_schema":
+            self.result_data = schema_help(TOOLS, **args)
+            return json.dumps(self.result_data, ensure_ascii=False, indent=2)
         if name == "harness_preflight":
             self.result_data = preflight_report(self.workspace, **args)
             return render_preflight(self.result_data)

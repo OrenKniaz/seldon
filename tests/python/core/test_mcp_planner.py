@@ -17,6 +17,7 @@ from codex_harness.core.spine import MARKDOWN_FILES, load_spine
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
 EXPECTED_TOOLS = {
+    "harness_schema",
     "harness_preflight",
     "harness_intake",
     "harness_reviewer_catalog",
@@ -797,6 +798,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
 
     assert "Phase 1/11: Align" in run("harness_plan_start", idea="Split fairly", name="tip-split")
     assert "approval:align" in run("harness_plan_status")
+    run("harness_schema", kind="requirement")
     card = run(
         "harness_understanding_card",
         vision="Split fairly",
