@@ -179,6 +179,7 @@ def test_optional_cockpit_preserves_original_api_and_actual_store(tmp_path):
         "waves",
         "crew",
         "chronicle",
+        "recordedReviews",
     }
     assert cockpit["source"]["planRevision"] == revision
     assert cockpit["vision"]["promise"] == "A recorded promise"
@@ -187,6 +188,206 @@ def test_optional_cockpit_preserves_original_api_and_actual_store(tmp_path):
     assert cockpit["waves"]["status"] == "unavailable"
     assert "waveId" not in cockpit["answers"]["where"]
     assert tree(tmp_path) == before
+
+
+def recorded_review_snapshots(tmp_path):
+    """Real persistence, fixed injected returns; no provider or effective-model proof."""
+    from tests.python.core.test_roundtable import FIXTURE
+
+    from codex_harness.core.roundtable import findings
+
+    workspace = tmp_path / "recorded-reviews"
+    with PlanStore(workspace) as store:
+        store.import_spine(FIXTURE)
+        source_only_confirmation(store, "align", statement="Source-only confirmation")
+        store.advance("expand", by="planner")
+        reviewers = [
+            dict(name="Review Alpha", provider="codex", model="requested-alpha"),
+            dict(name="Review Beta", provider="claude", model="requested-beta"),
+        ]
+        run_roundtable(
+            store,
+            reviewers=reviewers,
+            executable_for=lambda provider: provider,
+            runner=lambda launch, *_: (0, "[]") if launch.cli == "codex" else (7, "[]"),
+        )
+        error = snapshot(workspace=workspace, runs_root=tmp_path / "absent-runs")
+        bead = store.spine().node(store.spine().ids("bead")[0])
+        bead["title"] += " revised"
+        store.upsert_node(bead)
+
+        def response(launch, *_):
+            rows = [dict(node_id="R1", severity="major", finding="Shared date boundary gap",
+                         suggestion="Specify the local date boundary")]
+            if launch.cli == "codex":
+                rows.extend(
+                    dict(node_id="R1", severity="minor", finding=text, suggestion="Record behavior")
+                    for text in ("Atomic save interrupted", "Unicode names policy", "Archive history rules")
+                )
+            return 0, json.dumps(rows)
+
+        result = run_roundtable(store, reviewers=reviewers, runner=response,
+                                executable_for=lambda provider: provider)
+        current = [row for row in findings(store) if row["round_id"] == result["roundId"]]
+        for row, disposition in zip(
+            [row for row in current if row["memberCount"] == 1],
+            ("resolved", "rejected", "deferred"), strict=True,
+        ):
+            store.resolve_findings([dict(id=row["id"], status=disposition,
+                                         resolution=f"Recorded {disposition} reason")])
+        ready = snapshot(workspace=workspace, runs_root=tmp_path / "absent-runs")
+        question = store.ask("Which timezone should the product use?", ["R1"])
+        asked = snapshot(workspace=workspace)
+        store.answer(question, "Local timezone")
+        waived = store.ask("Should old names be kept?", ["R1"])
+        store.waive(waived, "Already specified")
+        answered = snapshot(workspace=workspace, runs_root=tmp_path / "absent-runs")
+    return workspace, dict(error=error, ready=ready, asked=asked, answered=answered)
+
+
+def test_recorded_reviews_and_plain_summary_from_actual_store_are_read_only(tmp_path):
+    """Protect useful recorded detail; raw gate headlines and lost attribution were the gap.
+
+    Strongest boundary: real store/roundtable -> RO snapshot, including revision
+    change and dispositions. Injected reviewer returns are explicit source-only evidence.
+    """
+    workspace, samples = recorded_review_snapshots(tmp_path)
+    assert samples["error"]["cockpit"]["answers"]["rightNow"]["code"] == "recorded-review-error"
+    ready = samples["ready"]["cockpit"]
+    assert ready["answers"]["rightNow"]["text"] == "1 recorded review points still need a response."
+    reviews = ready["recordedReviews"]
+    assert reviews["availability"] == "available" and reviews["unboundRowCount"] == 0
+    current = next(row for row in reviews["rounds"] if row["relevance"] == "current")
+    assert current["outcome"] == "completed"
+    assert current["reviewedManifestRevision"] == samples["ready"]["plan"]["manifest_revision"]
+    assert current["reviewedManifestRevision"] != reviews["sourceRevision"]
+    assert [r["requestedModel"] for r in current["reviewers"]] == ["requested-alpha", "requested-beta"]
+    assert all(r["isMocked"] is True and r["didRunProvider"] is False for r in current["reviewers"])
+    shared = next(cluster for cluster in current["clusters"] if len(cluster["members"]) == 2)
+    assert {member["reviewer"] for member in shared["members"]} == {"Review Alpha", "Review Beta"}
+    members = [member for cluster in current["clusters"] for member in cluster["members"]]
+    assert {member["disposition"] for member in members} == {"open", "resolved", "rejected", "deferred"}
+    assert {member["reason"] for member in members if member["reason"]} == {
+        "Recorded resolved reason", "Recorded rejected reason", "Recorded deferred reason"
+    }
+    old = next(row for row in reviews["rounds"] if row["relevance"] == "historical")
+    assert old["outcome"] == "error" and old["reviewers"][0]["recordedFindingCount"] == 0
+    assert samples["asked"]["cockpit"]["answers"]["rightNow"]["code"] == "recorded-questions"
+    assert samples["asked"]["cockpit"]["answers"]["needsYou"][0]["question"] == "Which timezone should the product use?"
+    assert samples["answered"]["cockpit"]["answers"]["needsYou"] == []
+    before = tree(workspace)
+    for _ in range(2):
+        again = snapshot(workspace=workspace, runs_root=tmp_path / "absent-runs")
+        assert again["cockpit"]["recordedReviews"] == reviews
+    assert tree(workspace) == before
+    public = json.dumps(reviews)
+    assert not any(name in public for name in ("shardDetails", "stderr", "artifactPath", "processId", "request_id"))
+
+
+def test_recorded_review_partial_legacy_data_never_becomes_activity_or_known_zero(tmp_path):
+    workspace, _ = recorded_review_snapshots(tmp_path)
+    with PlanStore(workspace) as store:
+        # Explicit corrupt/legacy doubles on otherwise real records. Reservation
+        # rows are deliberately ignored; their existence is not process activity.
+        store.connection.execute("INSERT INTO review_attempts VALUES ('orphan','foreign','Reserved','codex')")
+        store.connection.execute("UPDATE review_runs SET round_id='' WHERE reviewer='Review Alpha'")
+        store.connection.execute("UPDATE review_runs SET finished_at='not-a-date', model=NULL WHERE reviewer='Review Beta'")
+        store.connection.execute("UPDATE review_findings SET cluster_id='missing-canonical'")
+    before = tree(workspace)
+    report = snapshot(workspace=workspace)
+    reviews = report["cockpit"]["recordedReviews"]
+    assert reviews["availability"] == "partial" and reviews["unboundRowCount"] == 2
+    assert all(row["clusters"] is None for row in reviews["rounds"] if row["relevance"] == "current")
+    assert all(reviewer["requestedModel"] is None for row in reviews["rounds"] for reviewer in row["reviewers"])
+    assert "Reserved" not in json.dumps(reviews)
+    assert not any(word in json.dumps(reviews) for word in ('"running"', '"pending"', '"liveness"'))
+    assert report["cockpit"]["answers"]["rightNow"]["code"] != "recorded-review-points"
+    assert tree(workspace) == before
+
+
+def test_recorded_review_conflicting_terminal_identity_stays_unknown(tmp_path):
+    workspace, samples = recorded_review_snapshots(tmp_path)
+    current = next(row for row in samples["ready"]["cockpit"]["recordedReviews"]["rounds"]
+                   if row["relevance"] == "current")
+    with PlanStore(workspace) as store:
+        events = [json.loads(row[0]) for row in store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='roundtable-completed' ORDER BY id DESC"
+        )]
+        event = next(row for row in events if row["roundId"] == current["id"])
+        contradictory = json.loads(json.dumps(event))
+        contradictory["reviewers"][0]["name"] = "Contradictory recorded reviewer"
+        # Explicit terminal-event doubles after real ingestion: a matching event
+        # must not conceal an earlier contradictory reviewer/provider identity.
+        store._event("roundtable-completed", contradictory)
+        store._event("roundtable-completed", event)
+    before = tree(workspace)
+    report = snapshot(workspace=workspace)
+    row = next(row for row in report["cockpit"]["recordedReviews"]["rounds"]
+               if row["id"] == current["id"])
+    assert row["outcome"] == "unknown"
+    assert report["cockpit"]["answers"]["rightNow"]["code"] != "recorded-review-points"
+    assert tree(workspace) == before
+
+
+def confirmation_snapshots(tmp_path):
+    """Actual negotiated bridge with a source-only wire double; no native host."""
+    from tests.python.core.test_mcp_planner import answer_native, begin_native
+
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    workspace = tmp_path / "confirmation-display"
+    server = PlannerServer(workspace)
+    try:
+        store = server._store()
+        store.upsert_node(dict(id="V1", kind="vision", title="Daily tracker understanding",
+                               text="Track habits locally", parents=[], fields={
+                                   "users": ["One local user"],
+                                   "first_user_moment": "Check off today's habit",
+                                   "internalMetadata": {"private": "never-export-this"},
+                               }))
+        before = snapshot(workspace=workspace)
+        outbound = begin_native(server)
+        request_id = server._pending_confirmation["request"]["request_id"]
+        original = tree(workspace)
+        recorded = snapshot(workspace=workspace)
+        assert tree(workspace) == original
+        assert outbound["id"] not in json.dumps(recorded) and request_id not in json.dumps(recorded)
+        answer_native(server, outbound["id"], action="cancel")
+        cancelled = snapshot(workspace=workspace)
+        begin_native(server)
+        vision = store.spine().node("V1")
+        vision["title"] = "Changed understanding"
+        store.upsert_node(vision)
+        stale = snapshot(workspace=workspace)
+        source_only_confirmation(store, "align", statement="Explicit simulated later confirmation")
+        store.advance("expand", by="planner")
+        no_prerequisite = snapshot(workspace=workspace)
+        return dict(before=before, recorded=recorded, cancelled=cancelled, stale=stale,
+                    no_prerequisite=no_prerequisite)
+    finally:
+        server.close()
+
+
+def test_existing_approval_item_enriches_only_exact_recorded_understanding(tmp_path):
+    samples = confirmation_snapshots(tmp_path)
+    original = samples["before"]["cockpit"]["answers"]["needsYou"]
+    enriched = samples["recorded"]["cockpit"]["answers"]["needsYou"]
+    assert len(original) == len(enriched) == 1 and original[0]["id"] == enriched[0]["id"]
+    assert enriched[0]["question"] == original[0]["question"]
+    understanding = enriched[0]["recordedUnderstanding"]
+    assert understanding["title"] == "Daily tracker understanding"
+    assert understanding["chatConnection"] == "unknown"
+    assert understanding["notice"] == "Recorded understanding only. The chat connection and whether a prompt is still open are unknown."
+    assert {section["label"]: section["text"] for section in understanding["sections"]} == {
+        "Vision": "Track habits locally", "Users": "- One local user",
+        "First moment": "Check off today's habit",
+    }
+    assert "never-export-this" not in json.dumps(understanding)
+    assert samples["recorded"]["plan"]["approval"]["granted"] is False
+    for state in ("before", "cancelled", "stale"):
+        needs = samples[state]["cockpit"]["answers"]["needsYou"]
+        assert len(needs) == 1 and not needs[0].get("recordedUnderstanding")
+    assert samples["no_prerequisite"]["cockpit"]["answers"]["needsYou"] == []
 
 
 def test_absent_and_malformed_sources_stay_unavailable_without_create(tmp_path):

@@ -24,8 +24,10 @@ Start with the [planner guide](docs/operator/planner-guide.md), [handoff contrac
 
 ## Verification and provenance
 
-Run `python -B -m pytest tests/python/core -q` with fresh short test/temp directories, then `python -B -m ruff check src/codex_harness/core tests/python/core scripts/run_plan.py` and `python -B -m ruff format --check src/codex_harness/core tests/python/core scripts/run_plan.py`. Windows symlink privilege skips must remain explicit.
+The user-approved October 19 release rule uses changed owning tests, all new regressions, a finite reviewed smoke set, an actual offline wheel build and the complete Ruff check/format scopes before private publication. Bind actual collection, completion, command results and independent meaningful review to the exact candidate. Use fresh isolated roots and preserve explicit Windows privilege skips. The target is ten minutes, measured; never omit or weaken checks to meet it.
+
+Run the complete `python -B -m pytest tests/python/core -q` suite asynchronously after publication against that published candidate. Its completion does not block publication. Preserve every failure/skip and track failures as repairs in the owning ledger. A fast-gate pass must never be presented as a full-suite pass or product acceptance.
 
 [PROVENANCE.md](PROVENANCE.md) and [extraction-manifest.json](extraction-manifest.json) identify the exact source objects and exclusions. Committed fixture reference code and sample planning/publication snapshots are static test inputs, never evidence of Seldon completion. Historical demo documents retain their source-era artifact paths; those runtime artifacts are not included here. Packaging/install behavior has not been certified by the source-only import/entry tests.
 
-Publication is held pending the extracted-repository gate and exact-candidate approval. No real provider run is part of this extraction.
+Private publication requires the exact-candidate fast gate and independent review above; the complete suite follows asynchronously. Publication authority, private-target/account checks and source provenance remain required. No real provider run is part of this extraction.

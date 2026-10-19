@@ -1,6 +1,6 @@
 /* Run this function in the existing Playwright session. No installs or providers.
    Browser interception below tests failure/contract states, not live product proof. */
-async (page, {baseURL, outputDir, canonicalBaseURL, steeringOnly=false, r2Only=false, r4Only=false, planSnapshot, r4bOnly=false, planFacts, contractsOnly=false} = {}) => {
+async (page, {baseURL, outputDir, canonicalBaseURL, steeringOnly=false, r2Only=false, r4Only=false, planSnapshot, r4bOnly=false, planFacts, contractsOnly=false, recordedReviewsOnly=false, recordedReviewSnapshot, recordedConfirmationSnapshot} = {}) => {
   if (!baseURL || !outputDir) throw new Error('Pass the loopback baseURL and runtime evidence directory.');
   const checks=[],shots=[],metrics=[],errors=[],requests=[];
   page.on('pageerror', e=>errors.push(e.message));
@@ -8,6 +8,54 @@ async (page, {baseURL, outputDir, canonicalBaseURL, steeringOnly=false, r2Only=f
   const check=(pass,name,detail)=>{checks.push({name,passed:!!pass,...(detail!==undefined?{detail}:{})});if(!pass)throw new Error(name+': '+JSON.stringify(detail));};
   const go=async(query='',width=1440)=>{await page.setViewportSize({width,height:900});await page.goto(baseURL+'/?'+query);await page.waitForFunction(()=>document.querySelector('#freshness').textContent!=='Not refreshed yet');};
   const capture=async(name,fullPage=false)=>{await page.mouse.move(0,0);await page.locator(':focus').evaluateAll(es=>es.forEach(e=>e.blur()));await page.screenshot({path:outputDir+'/'+name+'.png',fullPage,animations:'disabled'});shots.push(name+'.png');};
+  if(recordedReviewsOnly){
+    if(!recordedReviewSnapshot?.cockpit?.recordedReviews)throw new Error('Pass the actual disposable-store recorded review snapshot.');
+    let payload=structuredClone(recordedReviewSnapshot);
+    await page.route('**/api/status',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(payload)}));
+    try{
+      for(const width of [1440,375]){
+        await go('mode=live',width);
+        check((await page.locator('#right-now').innerText()).includes('1 recorded review points still need a response.'),'Producer plain review summary reaches header');
+        await page.locator('#recorded-reviews').focus();await page.keyboard.press('Enter');
+        const dialog=page.locator('dialog'),text=await dialog.innerText();
+        check(text.includes('Model requested: requested-alpha')&&text.includes('Model requested: requested-beta'),'Requested models retain their actual recorded meaning');
+        check(text.includes('Historical review')&&text.includes('Source-only / simulated review'),'Historical and simulated records are explicit');
+        const shared=page.locator('.review-cluster').filter({has:page.locator('summary', {hasText:'2 members'})}).first();
+        await shared.locator('summary').click();
+        check((await shared.innerText()).includes('Review Alpha')&&(await shared.innerText()).includes('Review Beta'),'Both recorded cluster members remain attributed');
+        for(const summary of await page.locator('.review-cluster:not([open]) summary').all())await summary.click();
+        const detail=await dialog.innerText();
+        check(['resolved','rejected','deferred'].every(status=>detail.includes('Disposition: '+status)&&detail.includes('Recorded '+status+' reason')),'Recorded dispositions and reasons remain distinct');
+        check(await dialog.evaluate(e=>e.scrollWidth<=e.clientWidth),'Recorded details wrap inside dialog');
+        await capture('recorded-reviews-'+width);
+        await page.keyboard.press('Escape');check(await dialog.evaluate(e=>!e.open),'Keyboard Escape closes recorded details');
+      }
+      if(recordedConfirmationSnapshot){
+        payload=structuredClone(recordedConfirmationSnapshot);await go('mode=live',375);
+        await page.locator('#needs').click();
+        const decision=await page.locator('dialog').innerText();
+        check(decision.includes('Recorded confirmation: Daily tracker understanding - answer in chat.'),'Existing approval item shows recorded title and chat direction');
+        check(decision.includes('The chat connection and whether a prompt is still open are unknown.'),'Recorded understanding never implies active connection');
+        check(await page.locator('dialog').evaluate(e=>e.scrollWidth<=e.clientWidth),'Recorded understanding wraps at 375px');
+        await capture('recorded-understanding-375');await page.keyboard.press('Escape');
+        payload=structuredClone(recordedReviewSnapshot);
+      }
+      const current=payload.cockpit.recordedReviews.rounds.find(r=>r.relevance==='current');
+      current.clusters[0].members[0].text='<img src=x onerror="window.__reviewXss=1">';
+      await go('mode=live');await page.locator('#recorded-reviews').click();
+      const hostile=page.locator('.review-cluster').first();await hostile.locator('summary').click();
+      check((await hostile.innerText()).includes('<img src=x'),'Hostile finding remains literal text');
+      check(await page.locator('dialog img, dialog script').count()===0&&await page.evaluate(()=>window.__reviewXss===undefined),'Recorded finding text never executes');
+      await page.keyboard.press('Escape');
+      payload.cockpit.recordedReviews.sourceRevision='foreign';payload.cockpit.answers.rightNow.sourceRevision='foreign';
+      await go('mode=live');await page.locator('#recorded-reviews').click();
+      check((await page.locator('dialog').innerText()).includes('Recorded review details are unavailable.'),'Foreign review projection is refused');
+      check(!(await page.locator('#right-now').innerText()).includes('1 recorded review points'),'Foreign headline is refused');
+      check(errors.length===0,'No recorded-review browser runtime errors',errors);
+      check(requests.every(r=>r.method==='GET'),'Recorded-review flow stays GET-only');
+      return {passed:true,checks,screenshots:shots,evidenceNature:'Actual disposable-store producer snapshot with simulated reviewer returns, replayed in browser. Hostile/binding mutations are explicit consumer doubles; no provider or native-host proof.'};
+    }finally{await page.unroute('**/api/status');}
+  }
   if(r4bOnly){
     if(!planFacts?.draft||!planFacts?.scenario)throw new Error('Pass DOT actual canonical draft/scenario snapshots.');
     const expect=(pass,name,detail)=>checks.push({name,passed:!!pass,...(detail!==undefined?{detail}:{})});

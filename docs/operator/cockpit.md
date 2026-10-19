@@ -74,6 +74,25 @@ The header and Vault consume `cockpit.vision.proof.productScenarios` independent
 
 ## Verification and retained limits
 
+The **Recorded reviews** button opens the existing keyboard-accessible inspector.
+It shows current-manifest and historical roundtable records separately, reviewer
+and provider, **Model requested**, original counts and recorded outcomes. Expand a
+finding cluster to see every member's text, suggestion, disposition and recorded
+reason. Missing fields stay unknown; simulated returns are prominently source-only.
+There are no review launch, disposition or approval controls. Completed results
+do not establish current reviewer activity, effective model identity or product proof.
+
+**Right now** consumes the server's revision-bound plain summary. Raw questions,
+gate details and findings remain inspectable separately. A confirmation prerequisite
+is not an observation of an active native prompt. Arbitrary chat questions and live
+reviewer counts are outside this projection. Older snapshots use qualified recorded
+status wording; failed refreshes retain the existing stale-data warning.
+An existing confirmation item can show **Recorded confirmation: title - answer
+in chat** with a small recorded understanding excerpt. Its notice explicitly says
+the chat connection and whether a prompt is still open are unknown. A stale,
+consumed or missing request leaves the original prerequisite usable without that
+excerpt. No answer or approval can be submitted from the cockpit.
+
 The new `test_cockpit_server.py` checks root/query/asset/legacy routing, byte-preserved history assets, exact source JSON passthrough, denial of non-GET and unnamed paths, missing-source no-create behavior, and a real PlanStore → status snapshot → HTTP path without source mutations. Existing backend assertions are retained.
 
 The browser function in `tests/browser/cockpit/checks.js` runs against an already available Playwright browser. Supply the preview's `baseURL` and an **external runtime** `outputDir`; it returns a structured result. It uses actual GETs for the public histories and synthetic fixture. Its explicit network interception covers optional/null/malformed/stale/live-failure contract cases; those cases are UI failure tests, not evidence of actual provider execution. Captures, check results, first-red logs, wheel outputs and candidate manifests belong outside product source.

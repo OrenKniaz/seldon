@@ -585,6 +585,7 @@ const adapter=vm.runInNewContext(prefix+'\nreturn {normalize,unit};})()',{
 const m=adapter.normalize(JSON.parse(fs.readFileSync(0,'utf8')));
 console.log(JSON.stringify({work:m.work.map(w=>({id:w.id,category:w.category})),
   blocking:m.blocking,needs:m.needs,crew:m.crew,stale:m.stale,scope:m.workScope??null,waveStatus:m.waveStatus,
+  rightNow:m.rightNow,recordedReviews:m.recordedReviews,
   earlierRuns:(m.earlierRuns||[]).map(r=>r.runId),title:m.title,promise:m.promise,
   waveIds:m.waves.map(w=>w.id),currentWave:m.currentWave??null,currentRun:m.current?.runId??null,
   globalProof:adapter.unit(m.c.vision?.proof?.productScenarios,'productScenarios',m),
@@ -602,3 +603,28 @@ console.log(JSON.stringify({work:m.work.map(w=>({id:w.id,category:w.category})),
         check=True,
     )
     return json.loads(result.stdout)
+
+
+def test_actual_recorded_review_producer_reaches_shipped_consumer(tmp_path):
+    from tests.python.core.test_cockpit_projection import (
+        confirmation_snapshots,
+        recorded_review_snapshots,
+    )
+
+    _, samples = recorded_review_snapshots(tmp_path)
+    payload = samples["ready"]
+    result = _adapter(payload)
+    assert result["rightNow"]["text"] == "1 recorded review points still need a response."
+    assert result["recordedReviews"] == payload["cockpit"]["recordedReviews"]
+    assert result["crew"] == []  # Recorded reviews do not become live worker identities.
+    payload["cockpit"]["recordedReviews"]["sourceRevision"] = "foreign"
+    payload["cockpit"]["answers"]["rightNow"]["sourceRevision"] = "foreign"
+    result = _adapter(payload)
+    assert result["recordedReviews"] is None
+    assert result["rightNow"]["code"] == "recorded-status"
+    assert result["rightNow"]["text"] == "Plan status is recorded; current activity is unknown."
+    confirmations = confirmation_snapshots(tmp_path)
+    actual = _adapter(confirmations["recorded"])
+    assert actual["needs"][0]["recordedUnderstanding"]["title"] == "Daily tracker understanding"
+    assert actual["needs"][0]["recordedUnderstanding"]["chatConnection"] == "unknown"
+    assert not _adapter(confirmations["cancelled"])["needs"][0].get("recordedUnderstanding")

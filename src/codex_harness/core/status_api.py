@@ -131,6 +131,8 @@ def _plan(workspace):
         # These canonical reads start only after status/quality transactions finish,
         # on the same in-memory copy; never initialize another on-disk store.
         detail = {
+            "recordedReviews": _read(lambda: _recorded_reviews(store, result)),
+            "recordedUnderstanding": _read(lambda: _recorded_understanding(store, result)),
             "waves": _read(store.outcome_waves),
             "scenarios": _read(store.acceptance_scenarios),
             "scenarioRun": _read(lambda: _latest_scenario_run(db)),
@@ -266,9 +268,310 @@ def _latest(db):
 
 def _reviews(store):
     groups = {}
-    for item in findings(store) + store.acceptance_findings():
+    try:
+        recorded = findings(store)
+    except StopIteration as error:
+        raise ValueError("Recorded finding membership unavailable") from error
+    for item in recorded + store.acceptance_findings():
         groups.setdefault(item["status"], {}).setdefault(item["severity"], []).append(item)
     return groups
+
+
+def _recorded_understanding(store, status):
+    """Enrich an existing prerequisite, never infer an active prompt or approval."""
+    from codex_harness.core.planner_confirmations import _understanding
+
+    gate = status.get("pending_gate")
+    if gate not in ("approval:align", "approval:vision-lock"):
+        return None
+    gate = gate.removeprefix("approval:")
+    approval = status.get("approval")
+    revision = status.get("plan_revision")
+    if not isinstance(approval, dict) or (
+        approval.get("granted") is not False or approval.get("gate") != gate
+        or approval.get("plan_revision") != revision or status.get("spine_revision") != revision
+    ):
+        return None
+    events = []
+    for row in store.connection.execute(
+        "SELECT id,kind,payload_json FROM events WHERE kind IN "
+        "('confirmation-requested','confirmation-responded','phase-advanced') ORDER BY id"
+    ):
+        value = json.loads(row["payload_json"])
+        if not isinstance(value, dict):
+            return None
+        if row["kind"] in ("confirmation-requested", "confirmation-responded") and (
+            not isinstance(value.get("request_id"), str) or not value["request_id"].strip()
+        ):
+            return None
+        events.append((row["id"], row["kind"], value))
+    requests = [(event_id, value) for event_id, kind, value in events if kind == "confirmation-requested"]
+    if not requests:
+        return None
+    event_id, request = requests[-1]
+    key = request.get("request_id")
+    if not isinstance(key, str) or not key.strip() or sum(r.get("request_id") == key for _, r in requests) != 1:
+        return None
+    if any((kind == "phase-advanced" and later > event_id) or (
+        kind == "confirmation-responded" and value.get("request_id") == key
+    ) for later, kind, value in events):
+        return None
+    if (request.get("gate") != gate or request.get("phase") != status.get("phase")
+        or request.get("plan_revision") != revision):
+        return None
+    spine = store.spine()
+    visions = spine.ids("vision")
+    if len(visions) != 1:
+        return None
+    vision = request.get("vision")
+    if not isinstance(vision, dict) or vision != spine.node(visions[0]):
+        return None
+    phase = status["phase"]
+    heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
+    expected_card = (
+        f"{heading} for revision {revision}.\n"
+        "Review the complete recorded understanding below. Approve only this gate and "
+        "revision. Retain your complete words; put any conditions or requested changes "
+        "in conditions. A conditional response does not approve this gate.\n\n"
+        + _understanding(vision)
+    )
+    if request.get("card") != expected_card or not isinstance(vision.get("title"), str):
+        return None
+    fields = vision["fields"]
+    sections = []
+    for label, aliases in (
+        ("Vision", ("vision",)), ("Users", ("users",)),
+        ("First moment", ("first_user_moment", "firstUserMoment")),
+        ("Scope in", ("scope_in", "scopeIn")), ("Scope out", ("scope_out", "scopeOut")),
+        ("Quality", ("quality_bar", "qualityBar", "quality")),
+        ("Done", ("done_feels_like", "doneFeelsLike", "done")), ("Assumptions", ("assumptions",)),
+    ):
+        key = next((name for name in aliases if name in fields), None)
+        value = fields[key] if key else vision.get("text") if label == "Vision" else None
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            value = "\n".join("- " + item for item in value)
+        if isinstance(value, str) and value:
+            sections.append({"label": label, "text": value})
+    if "vision" in fields and fields["vision"] != vision.get("text") and isinstance(vision.get("text"), str):
+        sections.append({"label": "Complete vision details", "text": vision["text"]})
+    return {
+        "title": vision["title"], "gate": gate, "sourceRevision": revision,
+        "sections": sections, "chatConnection": "unknown",
+        "notice": "Recorded understanding only. The chat connection and whether a prompt is still open are unknown.",
+    }
+
+
+def _recorded_reviews(store, status):
+    """Allowlisted completed observations from this read copy; never infer liveness."""
+    def identity(value):
+        return isinstance(value, str) and bool(value.strip()) and value != UNAVAILABLE
+
+    def count(value):
+        return value if type(value) is int and value >= 0 else None
+
+    def flag(value):
+        return bool(value) if type(value) is int and value in (0, 1) else None
+
+    def timestamp(value):
+        return value if _timestamp(value) is not None else None
+
+    result = {
+        "availability": "available",
+        "sourceRevision": status.get("plan_revision"),
+        "currentManifestRevision": status.get("manifest_revision"),
+        "reason": None,
+        "rounds": [],
+        "unboundRowCount": 0,
+    }
+    tables = {row[0] for row in store.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    if "review_runs" not in tables:
+        return result
+
+    def partial():
+        result.update(availability="partial", reason="Some recorded review details are unavailable.")
+
+    columns = {row[1] for row in store.connection.execute("PRAGMA table_info(review_runs)")}
+    allowed = (
+        "id", "round_id", "plan_revision", "reviewer", "provider", "model", "exit_code",
+        "findings", "invalid", "started_at", "finished_at", "isMocked", "didRunProvider",
+        "packetBound", "shardDetails",
+    )
+    rows = [dict(row) for row in store.connection.execute(
+        "SELECT " + ",".join(name for name in allowed if name in columns) + " FROM review_runs"
+    )] if columns.intersection(allowed) else []
+    if not {"id", "round_id", "plan_revision", "reviewer", "provider"} <= columns:
+        partial()
+    events = []
+    for row in store.connection.execute(
+        "SELECT payload_json FROM events WHERE kind='roundtable-completed' ORDER BY id"
+    ):
+        try:
+            event = json.loads(row[0])
+            if not isinstance(event, dict):
+                raise ValueError("not an event object")
+            events.append(event)
+        except (ValueError, TypeError):
+            partial()
+    try:
+        normalized = _read(lambda: findings(store, expand=True))
+    except StopIteration:
+        normalized = UNAVAILABLE  # Broken recorded canonical membership; do not repair on GET.
+    if not isinstance(normalized, list):
+        partial()
+    revisions, groups = {}, {}
+    for row in rows:
+        if not all(identity(row.get(key)) for key in (
+            "id", "round_id", "plan_revision", "reviewer", "provider"
+        )):
+            result["unboundRowCount"] += 1
+            partial()
+            continue
+        key = (row["round_id"], row["plan_revision"])
+        groups.setdefault(key, []).append(row)
+        revisions.setdefault(key[0], set()).add(key[1])
+    for (round_id, revision), members in groups.items():
+        reviewers = []
+        for row in members:
+            exit_code = row.get("exit_code") if type(row.get("exit_code")) is int else None
+            invalid = count(row.get("invalid"))
+            finished = timestamp(row.get("finished_at"))
+            error_code = "nonzero-exit" if exit_code not in (None, 0) else (
+                "invalid-return" if invalid is not None and invalid > 0 else None
+            )
+            if row.get("shardDetails"):
+                try:
+                    shards = json.loads(row["shardDetails"])
+                    if not isinstance(shards, list) or any(not isinstance(s, dict) for s in shards):
+                        raise ValueError("not recorded shard objects")
+                    if any(s.get("primaryError") for s in shards):
+                        error_code = error_code or "recorded-error"
+                except (ValueError, TypeError):
+                    partial()
+                    finished = None
+            outcome = "error" if error_code else (
+                "completed" if finished and exit_code == 0 and invalid == 0 else "unknown"
+            )
+            reviewers.append({
+                "id": row["id"], "reviewer": row["reviewer"], "provider": row["provider"],
+                "requestedModel": row.get("model") if identity(row.get("model")) else None,
+                "outcome": outcome, "exitCode": exit_code, "invalidCount": invalid,
+                "recordedFindingCount": count(row.get("findings")),
+                "startedAt": timestamp(row.get("started_at")), "finishedAt": finished,
+                "isMocked": flag(row.get("isMocked")),
+                "didRunProvider": flag(row.get("didRunProvider")),
+                "packetBound": flag(row.get("packetBound")), "errorCode": error_code,
+            })
+        conflicting = len(revisions[round_id]) != 1
+        current_manifest = result["currentManifestRevision"]
+        relevance = "unknown" if conflicting or not identity(current_manifest) else (
+            "current" if revision == current_manifest else "historical"
+        )
+        expected = {(row["reviewer"], row["provider"]) for row in members}
+        agreements = []
+        for event in events:
+            event_reviewers = event.get("reviewers")
+            if event.get("roundId") != round_id or event.get("planRevision") != revision:
+                continue
+            if not isinstance(event_reviewers, list) or not all(isinstance(r, dict) for r in event_reviewers):
+                partial()
+                agreements.append(False)
+                continue
+            observed = {(r.get("name"), r.get("provider")) for r in event_reviewers
+                        if isinstance(r.get("name"), str) and isinstance(r.get("provider"), str)}
+            agreements.append(observed == expected and len(event_reviewers) == len(members) == len(expected))
+        # Identical terminal identities add no credit. A contradiction remains
+        # unknown even if a later event repeats the stored reviewer identities.
+        agreed = bool(agreements) and all(agreements)
+        outcome = "error" if any(r["outcome"] == "error" for r in reviewers) else (
+            "completed" if agreed and not conflicting and all(r["outcome"] == "completed" for r in reviewers)
+            else "unknown"
+        )
+        clusters = None
+        if isinstance(normalized, list):
+            selected = [f for f in normalized if f.get("round_id") == round_id
+                        and f.get("plan_revision") == revision
+                        and f.get("stage", "roundtable") == "roundtable"]
+            clustered = {}
+            for finding in selected:
+                cluster_id = finding.get("cluster_id") or finding["id"]
+                clustered.setdefault(cluster_id, []).append(finding)
+            clusters = []
+            for cluster_id, cluster_members in clustered.items():
+                if not any(f["id"] == cluster_id for f in cluster_members):
+                    partial()
+                    clusters = None
+                    break
+                public_members = []
+                for finding in cluster_members:
+                    public_members.append({
+                        "id": finding["id"], "reviewer": finding["reviewer"],
+                        "provider": finding["provider"], "nodeId": finding["node_id"],
+                        "runLinkage": "recorded" if (
+                            finding["reviewer"], finding["provider"]
+                        ) in expected else "unknown",
+                        "severity": finding["severity"], "text": finding["finding"],
+                        "suggestion": finding["suggestion"],
+                        "disposition": finding["status"] if finding["status"] in (
+                            "open", "resolved", "rejected", "deferred"
+                        ) else "unknown",
+                        "reason": finding.get("resolution"),
+                        "recordedAt": timestamp(finding.get("created_at")),
+                        "dispositionAt": timestamp(finding.get("resolved_at")),
+                    })
+                clusters.append({"id": cluster_id, "canonicalMemberId": cluster_id,
+                                 "members": public_members})
+        result["rounds"].append({
+            "id": round_id, "reviewedManifestRevision": revision, "relevance": relevance,
+            "outcome": outcome, "reviewers": reviewers, "clusters": clusters,
+        })
+    result["rounds"].sort(key=lambda r: (
+        max((_timestamp(row["finishedAt"]) or float("-inf") for row in r["reviewers"]),
+            default=float("-inf")), r["id"], r["reviewedManifestRevision"]
+    ), reverse=True)
+    return result
+
+
+def _right_now(plan, reviews, blocking, bound, runs):
+    """Plain recorded facts only; no activity inferred from phase or reservations."""
+    revision = plan.get("plan_revision")
+
+    def summary(code, text, refs=()):
+        return {"code": code, "text": text, "sourceRevision": revision,
+                "refs": list(refs) or ([f"plan:{revision}"] if revision else [])}
+
+    if not revision or revision == UNAVAILABLE:
+        return summary("plan-unavailable", "Plan status is unavailable.")
+    questions = plan.get("clarifications")
+    if isinstance(questions, list) and questions:
+        return summary("recorded-questions", f"{len(questions)} recorded questions need your answer in chat.",
+                       [f"clarifications:{row['id']}" for row in questions])
+    gate = plan.get("pending_gate")
+    if isinstance(gate, str) and gate.startswith("approval:"):
+        return summary("recorded-confirmation", "Your plan needs your confirmation in chat.")
+    if isinstance(gate, str) and gate.startswith("acceptance:") and (
+        plan.get("acceptance", {}).get("invalidReason") == "acceptance-approval-required"
+    ):
+        return summary("recorded-acceptance-decision", "Your acceptance decision is needed in chat.")
+    current = [row for row in reviews.get("rounds") or [] if row["relevance"] == "current"]
+    if any(row["outcome"] == "error" for row in current):
+        return summary("recorded-review-error", "A recorded plan review ended with an error.")
+    if reviews.get("availability") == "available" and all(row["clusters"] is not None for row in current):
+        points = {cluster["id"] for row in current if row["outcome"] == "completed"
+                  for cluster in row["clusters"]
+                  if any(f["disposition"] == "open" and f["severity"] in ("blocker", "major")
+                         for f in cluster["members"])}
+        if points:
+            return summary("recorded-review-points", f"{len(points)} recorded review points still need a response.",
+                           [f"review-findings:{key}" for key in sorted(points)])
+    if blocking:
+        return summary("recorded-blockers", "Recorded blockers need attention.")
+    if bound:
+        return summary("recorded-build", "A build run is recorded; its current activity is unknown.")
+    if isinstance(runs, list):
+        return summary("no-current-build", "No current build run is linked to this plan.")
+    return summary("recorded-status", "Plan status is recorded; current activity is unknown.")
 
 
 def _inbox(workspace):
@@ -1007,6 +1310,11 @@ def _cockpit(report, detail, current):
                 "refs": [f"plan:{plan.get('plan_revision')}"],
             },
         ]
+    understanding = detail.get("recordedUnderstanding")
+    if isinstance(understanding, dict):
+        for item in needs or []:
+            if item["id"] == f"approval:{understanding['gate']}" and item["kind"] == "approval":
+                item["recordedUnderstanding"] = deepcopy(understanding)
     reviews = report.get("reviews")
     blocking = None if not isinstance(reviews, dict) and current_answers is None else []
     if isinstance(reviews, dict):
@@ -1056,6 +1364,14 @@ def _cockpit(report, detail, current):
                     ],
                 }
             )
+    recorded_reviews = detail.get("recordedReviews")
+    if not isinstance(recorded_reviews, dict):
+        recorded_reviews = {
+            "availability": "unavailable", "sourceRevision": plan.get("plan_revision"),
+            "currentManifestRevision": plan.get("manifest_revision"),
+            "reason": "Recorded review details are unavailable.",
+            "rounds": None, "unboundRowCount": None,
+        }
     return {
         "source": {
             "planRevision": plan.get("plan_revision"),
@@ -1077,6 +1393,7 @@ def _cockpit(report, detail, current):
             "blocking": blocking,
             "needsYou": needs,
             "reviewReadiness": deepcopy(plan.get("readiness")),
+            "rightNow": _right_now(plan, recorded_reviews, blocking, bound, report.get("runs")),
         },
         "areas": [] if nodes is not None else None,
         "capabilities": capabilities,
@@ -1085,6 +1402,7 @@ def _cockpit(report, detail, current):
         if bound and isinstance(report.get("currentAgents"), list)
         else None,
         "chronicle": chronicle if plan or isinstance(report.get("runs"), list) else None,
+        "recordedReviews": recorded_reviews,
     }
 
 
