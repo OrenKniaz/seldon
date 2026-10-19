@@ -197,6 +197,7 @@ def recorded_review_snapshots(tmp_path):
     from codex_harness.core.roundtable import findings
 
     workspace = tmp_path / "recorded-reviews"
+    workspace.mkdir()
     with PlanStore(workspace) as store:
         store.import_spine(FIXTURE)
         source_only_confirmation(store, "align", statement="Source-only confirmation")
@@ -217,24 +218,43 @@ def recorded_review_snapshots(tmp_path):
         store.upsert_node(bead)
 
         def response(launch, *_):
-            rows = [dict(node_id="R1", severity="major", finding="Shared date boundary gap",
-                         suggestion="Specify the local date boundary")]
+            rows = [
+                dict(
+                    node_id="R1",
+                    severity="major",
+                    finding="Shared date boundary gap",
+                    suggestion="Specify the local date boundary",
+                )
+            ]
             if launch.cli == "codex":
                 rows.extend(
                     dict(node_id="R1", severity="minor", finding=text, suggestion="Record behavior")
-                    for text in ("Atomic save interrupted", "Unicode names policy", "Archive history rules")
+                    for text in (
+                        "Atomic save interrupted",
+                        "Unicode names policy",
+                        "Archive history rules",
+                    )
                 )
             return 0, json.dumps(rows)
 
-        result = run_roundtable(store, reviewers=reviewers, runner=response,
-                                executable_for=lambda provider: provider)
+        result = run_roundtable(
+            store, reviewers=reviewers, runner=response, executable_for=lambda provider: provider
+        )
         current = [row for row in findings(store) if row["round_id"] == result["roundId"]]
         for row, disposition in zip(
             [row for row in current if row["memberCount"] == 1],
-            ("resolved", "rejected", "deferred"), strict=True,
+            ("resolved", "rejected", "deferred"),
+            strict=True,
         ):
-            store.resolve_findings([dict(id=row["id"], status=disposition,
-                                         resolution=f"Recorded {disposition} reason")])
+            store.resolve_findings(
+                [
+                    dict(
+                        id=row["id"],
+                        status=disposition,
+                        resolution=f"Recorded {disposition} reason",
+                    )
+                ]
+            )
         ready = snapshot(workspace=workspace, runs_root=tmp_path / "absent-runs")
         question = store.ask("Which timezone should the product use?", ["R1"])
         asked = snapshot(workspace=workspace)
@@ -261,19 +281,32 @@ def test_recorded_reviews_and_plain_summary_from_actual_store_are_read_only(tmp_
     assert current["outcome"] == "completed"
     assert current["reviewedManifestRevision"] == samples["ready"]["plan"]["manifest_revision"]
     assert current["reviewedManifestRevision"] != reviews["sourceRevision"]
-    assert [r["requestedModel"] for r in current["reviewers"]] == ["requested-alpha", "requested-beta"]
+    assert [r["requestedModel"] for r in current["reviewers"]] == [
+        "requested-alpha",
+        "requested-beta",
+    ]
     assert all(r["isMocked"] is True and r["didRunProvider"] is False for r in current["reviewers"])
     shared = next(cluster for cluster in current["clusters"] if len(cluster["members"]) == 2)
     assert {member["reviewer"] for member in shared["members"]} == {"Review Alpha", "Review Beta"}
     members = [member for cluster in current["clusters"] for member in cluster["members"]]
-    assert {member["disposition"] for member in members} == {"open", "resolved", "rejected", "deferred"}
+    assert {member["disposition"] for member in members} == {
+        "open",
+        "resolved",
+        "rejected",
+        "deferred",
+    }
     assert {member["reason"] for member in members if member["reason"]} == {
-        "Recorded resolved reason", "Recorded rejected reason", "Recorded deferred reason"
+        "Recorded resolved reason",
+        "Recorded rejected reason",
+        "Recorded deferred reason",
     }
     old = next(row for row in reviews["rounds"] if row["relevance"] == "historical")
     assert old["outcome"] == "error" and old["reviewers"][0]["recordedFindingCount"] == 0
     assert samples["asked"]["cockpit"]["answers"]["rightNow"]["code"] == "recorded-questions"
-    assert samples["asked"]["cockpit"]["answers"]["needsYou"][0]["question"] == "Which timezone should the product use?"
+    assert (
+        samples["asked"]["cockpit"]["answers"]["needsYou"][0]["question"]
+        == "Which timezone should the product use?"
+    )
     assert samples["answered"]["cockpit"]["answers"]["needsYou"] == []
     before = tree(workspace)
     for _ in range(2):
@@ -281,7 +314,10 @@ def test_recorded_reviews_and_plain_summary_from_actual_store_are_read_only(tmp_
         assert again["cockpit"]["recordedReviews"] == reviews
     assert tree(workspace) == before
     public = json.dumps(reviews)
-    assert not any(name in public for name in ("shardDetails", "stderr", "artifactPath", "processId", "request_id"))
+    assert not any(
+        name in public
+        for name in ("shardDetails", "stderr", "artifactPath", "processId", "request_id")
+    )
 
 
 def test_recorded_review_partial_legacy_data_never_becomes_activity_or_known_zero(tmp_path):
@@ -289,16 +325,26 @@ def test_recorded_review_partial_legacy_data_never_becomes_activity_or_known_zer
     with PlanStore(workspace) as store:
         # Explicit corrupt/legacy doubles on otherwise real records. Reservation
         # rows are deliberately ignored; their existence is not process activity.
-        store.connection.execute("INSERT INTO review_attempts VALUES ('orphan','foreign','Reserved','codex')")
+        store.connection.execute(
+            "INSERT INTO review_attempts VALUES ('orphan','foreign','Reserved','codex')"
+        )
         store.connection.execute("UPDATE review_runs SET round_id='' WHERE reviewer='Review Alpha'")
-        store.connection.execute("UPDATE review_runs SET finished_at='not-a-date', model=NULL WHERE reviewer='Review Beta'")
+        store.connection.execute(
+            "UPDATE review_runs SET finished_at='not-a-date', model=NULL WHERE reviewer='Review Beta'"
+        )
         store.connection.execute("UPDATE review_findings SET cluster_id='missing-canonical'")
     before = tree(workspace)
     report = snapshot(workspace=workspace)
     reviews = report["cockpit"]["recordedReviews"]
     assert reviews["availability"] == "partial" and reviews["unboundRowCount"] == 2
-    assert all(row["clusters"] is None for row in reviews["rounds"] if row["relevance"] == "current")
-    assert all(reviewer["requestedModel"] is None for row in reviews["rounds"] for reviewer in row["reviewers"])
+    assert all(
+        row["clusters"] is None for row in reviews["rounds"] if row["relevance"] == "current"
+    )
+    assert all(
+        reviewer["requestedModel"] is None
+        for row in reviews["rounds"]
+        for reviewer in row["reviewers"]
+    )
     assert "Reserved" not in json.dumps(reviews)
     assert not any(word in json.dumps(reviews) for word in ('"running"', '"pending"', '"liveness"'))
     assert report["cockpit"]["answers"]["rightNow"]["code"] != "recorded-review-points"
@@ -307,12 +353,18 @@ def test_recorded_review_partial_legacy_data_never_becomes_activity_or_known_zer
 
 def test_recorded_review_conflicting_terminal_identity_stays_unknown(tmp_path):
     workspace, samples = recorded_review_snapshots(tmp_path)
-    current = next(row for row in samples["ready"]["cockpit"]["recordedReviews"]["rounds"]
-                   if row["relevance"] == "current")
+    current = next(
+        row
+        for row in samples["ready"]["cockpit"]["recordedReviews"]["rounds"]
+        if row["relevance"] == "current"
+    )
     with PlanStore(workspace) as store:
-        events = [json.loads(row[0]) for row in store.connection.execute(
-            "SELECT payload_json FROM events WHERE kind='roundtable-completed' ORDER BY id DESC"
-        )]
+        events = [
+            json.loads(row[0])
+            for row in store.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='roundtable-completed' ORDER BY id DESC"
+            )
+        ]
         event = next(row for row in events if row["roundId"] == current["id"])
         contradictory = json.loads(json.dumps(event))
         contradictory["reviewers"][0]["name"] = "Contradictory recorded reviewer"
@@ -322,8 +374,9 @@ def test_recorded_review_conflicting_terminal_identity_stays_unknown(tmp_path):
         store._event("roundtable-completed", event)
     before = tree(workspace)
     report = snapshot(workspace=workspace)
-    row = next(row for row in report["cockpit"]["recordedReviews"]["rounds"]
-               if row["id"] == current["id"])
+    row = next(
+        row for row in report["cockpit"]["recordedReviews"]["rounds"] if row["id"] == current["id"]
+    )
     assert row["outcome"] == "unknown"
     assert report["cockpit"]["answers"]["rightNow"]["code"] != "recorded-review-points"
     assert tree(workspace) == before
@@ -331,26 +384,48 @@ def test_recorded_review_conflicting_terminal_identity_stays_unknown(tmp_path):
 
 def confirmation_snapshots(tmp_path):
     """Actual negotiated bridge with a source-only wire double; no native host."""
-    from tests.python.core.test_mcp_planner import answer_native, begin_native
+    from tests.python.core.test_mcp_planner import answer_native, begin_native, call
 
     from codex_harness.core.mcp_planner import PlannerServer
 
     workspace = tmp_path / "confirmation-display"
+    workspace.mkdir()
     server = PlannerServer(workspace)
     try:
+        call(server, "harness_plan_start", idea="Track habits locally", name="Daily tracker")
         store = server._store()
-        store.upsert_node(dict(id="V1", kind="vision", title="Daily tracker understanding",
-                               text="Track habits locally", parents=[], fields={
-                                   "users": ["One local user"],
-                                   "first_user_moment": "Check off today's habit",
-                                   "internalMetadata": {"private": "never-export-this"},
-                               }))
+        store.upsert_node(
+            dict(
+                id="V1",
+                kind="vision",
+                title="Daily tracker understanding",
+                text="Track habits locally",
+                parents=[],
+                fields={
+                    "users": ["One local user"],
+                    "first_user_moment": "Check off today's habit",
+                    "internalMetadata": {"private": "never-export-this"},
+                },
+            )
+        )
         before = snapshot(workspace=workspace)
         outbound = begin_native(server)
         request_id = server._pending_confirmation["request"]["request_id"]
         original = tree(workspace)
         recorded = snapshot(workspace=workspace)
-        assert tree(workspace) == original
+        observed = tree(workspace)
+        assert observed.keys() == original.keys()
+        for name, (original_bytes, original_mtime) in original.items():
+            observed_bytes, observed_mtime = observed[name]
+            assert observed_mtime == original_mtime
+            if name.replace("\\", "/") == ".codex-harness/plan.sqlite3-shm":
+                # SQLite WAL-index bytes 100..119 are reader-updated read marks:
+                # https://www.sqlite.org/walformat.html. All other bytes stay exact.
+                assert len(observed_bytes) == len(original_bytes) >= 120
+                assert observed_bytes[:100] == original_bytes[:100]
+                assert observed_bytes[120:] == original_bytes[120:]
+            else:
+                assert observed_bytes == original_bytes
         assert outbound["id"] not in json.dumps(recorded) and request_id not in json.dumps(recorded)
         answer_native(server, outbound["id"], action="cancel")
         cancelled = snapshot(workspace=workspace)
@@ -362,8 +437,13 @@ def confirmation_snapshots(tmp_path):
         source_only_confirmation(store, "align", statement="Explicit simulated later confirmation")
         store.advance("expand", by="planner")
         no_prerequisite = snapshot(workspace=workspace)
-        return dict(before=before, recorded=recorded, cancelled=cancelled, stale=stale,
-                    no_prerequisite=no_prerequisite)
+        return dict(
+            before=before,
+            recorded=recorded,
+            cancelled=cancelled,
+            stale=stale,
+            no_prerequisite=no_prerequisite,
+        )
     finally:
         server.close()
 
@@ -377,9 +457,13 @@ def test_existing_approval_item_enriches_only_exact_recorded_understanding(tmp_p
     understanding = enriched[0]["recordedUnderstanding"]
     assert understanding["title"] == "Daily tracker understanding"
     assert understanding["chatConnection"] == "unknown"
-    assert understanding["notice"] == "Recorded understanding only. The chat connection and whether a prompt is still open are unknown."
+    assert (
+        understanding["notice"]
+        == "Recorded understanding only. The chat connection and whether a prompt is still open are unknown."
+    )
     assert {section["label"]: section["text"] for section in understanding["sections"]} == {
-        "Vision": "Track habits locally", "Users": "- One local user",
+        "Vision": "Track habits locally",
+        "Users": "- One local user",
         "First moment": "Check off today's habit",
     }
     assert "never-export-this" not in json.dumps(understanding)

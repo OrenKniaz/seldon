@@ -7,6 +7,12 @@ Null means unavailable; it is not zero, agreement, readiness or permission.
 The projection creates no files/stores and launches no providers. Plan reads
 reuse the existing SQLite in-memory snapshot. Mutable run and attempt reads
 retain the participating `record_io` protocol and bounded activity observer.
+The active-confirmation fixture permits only SQLite WAL-index reader bookkeeping
+at SHM offsets 100–119, the five documented read-mark slots in the
+[SQLite WAL format](https://www.sqlite.org/walformat.html). It still requires exact
+file keys, every mtime, SHM length and all other SHM bytes, plus exact DB/WAL and
+ordinary-file bytes. This fixture-specific exception allows no logical plan,
+approval, database or WAL mutation; existing read-only tests stay unchanged.
 
 | Fact | Source and limit |
 | --- | --- |
