@@ -380,7 +380,10 @@ def _recorded_understanding(store, status):
         "sourceRevision": revision,
         "sections": sections,
         "chatConnection": "unknown",
-        "notice": "Recorded understanding only. The chat connection and whether a prompt is still open are unknown.",
+        "notice": (
+            "Recorded understanding only. The chat connection and whether a prompt "
+            "is still open are unknown."
+        ),
     }
 
 

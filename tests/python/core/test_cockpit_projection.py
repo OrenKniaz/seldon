@@ -1,6 +1,7 @@
 """Source-only cockpit mechanics from disposable stores; no providers or UI proof."""
 
 import json
+import shutil
 
 import pytest
 from tests.python.core.planning_support import (
@@ -216,6 +217,9 @@ def recorded_review_snapshots(tmp_path):
         bead = store.spine().node(store.spine().ids("bead")[0])
         bead["title"] += " revised"
         store.upsert_node(bead)
+        template = workspace / "template"
+        shutil.copytree(FIXTURE.parent / "template", template)
+        store.compile_template(template)
 
         def response(launch, *_):
             rows = [
@@ -330,7 +334,8 @@ def test_recorded_review_partial_legacy_data_never_becomes_activity_or_known_zer
         )
         store.connection.execute("UPDATE review_runs SET round_id='' WHERE reviewer='Review Alpha'")
         store.connection.execute(
-            "UPDATE review_runs SET finished_at='not-a-date', model=NULL WHERE reviewer='Review Beta'"
+            "UPDATE review_runs SET finished_at='not-a-date', model=NULL "
+            "WHERE reviewer='Review Beta'"
         )
         store.connection.execute("UPDATE review_findings SET cluster_id='missing-canonical'")
     before = tree(workspace)
@@ -457,9 +462,9 @@ def test_existing_approval_item_enriches_only_exact_recorded_understanding(tmp_p
     understanding = enriched[0]["recordedUnderstanding"]
     assert understanding["title"] == "Daily tracker understanding"
     assert understanding["chatConnection"] == "unknown"
-    assert (
-        understanding["notice"]
-        == "Recorded understanding only. The chat connection and whether a prompt is still open are unknown."
+    assert understanding["notice"] == (
+        "Recorded understanding only. The chat connection and whether a prompt "
+        "is still open are unknown."
     )
     assert {section["label"]: section["text"] for section in understanding["sections"]} == {
         "Vision": "Track habits locally",
