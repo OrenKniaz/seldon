@@ -262,7 +262,7 @@ def test_actual_local_child_publishes_after_spawn_before_result(tmp_path, monkey
 
     from codex_harness.core import attempt_provenance as provenance
 
-    _, cwd, directory, request, launch = local_attempt(tmp_path, seconds=0.01)
+    _, cwd, directory, request, launch = local_attempt(tmp_path, seconds=0.01, timeout=5)
     children = []
     popen, publish = subprocess.Popen, provenance.publish
 
@@ -301,7 +301,7 @@ def test_immutable_publication_refusal_stops_exact_owned_child_once(
 
     from codex_harness.core import attempt_provenance as provenance
 
-    _, cwd, directory, request, launch = local_attempt(tmp_path, seconds=1)
+    _, cwd, directory, request, launch = local_attempt(tmp_path, seconds=1, timeout=5)
     path = directory / provenance.FILENAME
     path.write_bytes(b"retained original")
     stops = []
@@ -330,7 +330,7 @@ def test_failed_popen_has_no_original(tmp_path, monkeypatch):
 
     from codex_harness.core import attempt_provenance as provenance
 
-    _, cwd, directory, request, launch = local_attempt(tmp_path)
+    _, cwd, directory, request, launch = local_attempt(tmp_path, timeout=5)
 
     def refuse(*args, **kwargs):
         raise OSError("source-only synthetic spawn refusal")
@@ -342,6 +342,7 @@ def test_failed_popen_has_no_original(tmp_path, monkeypatch):
 
 
 def local_run(tmp_path, monkeypatch, *, crash=False):
+    from tests.python.core.execution_support import source_execution_context
     from tests.python.core.test_dispatch import _bind_protected, _tiny_plan
     from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
 
@@ -354,11 +355,12 @@ def local_run(tmp_path, monkeypatch, *, crash=False):
         def provider_normal_command(self, *, prompt, **kwargs):
             bead = "A" if "Bead A" in prompt else "B"
             return ProviderNormalLaunch(
-                cli="local-process-test",
+                cli="codex",
                 command=(
                     sys.executable,
                     "-B",
                     "-c",
+                    "# SOURCE-ONLY local process fixture\n"
                     f"from pathlib import Path; Path('{bead}.py').write_text('VALUE = 1\\n'); "
                     'print(\'{"type":"turn.completed","isMocked":true}\')',
                 ),
@@ -374,17 +376,18 @@ def local_run(tmp_path, monkeypatch, *, crash=False):
             raise RuntimeError("source-only interruption before integration")
 
         monkeypatch.setattr(dispatch, "_integrate_bead", interrupted)
-    providers = {"A": "local-process-test", "B": "local-process-test"}
-    first = dispatch.run_plan(plan, work_root=tmp_path / "runs", provider_for=providers)
+    context = source_execution_context(tmp_path / "canonical", plan, timeout=10)
+    plan = context["plan"]
+    first = dispatch.run_plan(plan, work_root=context["runs"], **context["kwargs"])
     monkeypatch.setattr(dispatch, "_integrate_bead", integrate)
-    return plan, first, Path(first["repo"]).parent, providers
+    return plan, first, Path(first["repo"]).parent, context["kwargs"]
 
 
 @pytest.mark.parametrize("change", ["missing-result", "missing-original", "after-selection"])
 def test_integrated_reuse_reads_original_at_each_use(tmp_path, monkeypatch, change):
     from codex_harness.core import attempt_provenance as provenance
 
-    plan, first, run, providers = local_run(tmp_path, monkeypatch)
+    plan, first, run, options = local_run(tmp_path, monkeypatch)
     directory = Path(first["beads"]["A"]["evidenceDir"]) / "attempt"
     assert first["beads"]["A"]["candidate"]["validated"]
     if change == "after-selection":
@@ -402,9 +405,7 @@ def test_integrated_reuse_reads_original_at_each_use(tmp_path, monkeypatch, chan
         (
             directory / ("result.json" if change == "missing-result" else provenance.FILENAME)
         ).unlink()
-    resumed = dispatch.run_plan(
-        plan, work_root=tmp_path / "unused", resume_run_dir=run, provider_for=providers
-    )
+    resumed = dispatch.run_plan(plan, work_root=tmp_path / "unused", resume_run_dir=run, **options)
     current = resumed["beads"]["A"]
     assert current["status"] == dispatch.STATUS_PROVENANCE_HELD
     assert not current["candidate"]["validated"] and not current.get("reused")
@@ -414,7 +415,7 @@ def test_integrated_reuse_reads_original_at_each_use(tmp_path, monkeypatch, chan
 def test_completed_recovery_second_read_and_explicit_retry_namespace(tmp_path, monkeypatch):
     from codex_harness.core import attempt_provenance as provenance
 
-    plan, first, run, providers = local_run(tmp_path, monkeypatch, crash=True)
+    plan, first, run, options = local_run(tmp_path, monkeypatch, crash=True)
     directory = Path(first["beads"]["A"]["evidenceDir"]) / "attempt"
     original = (directory / provenance.FILENAME).read_bytes()
     attempt_bead = dispatch._attempt_bead
@@ -424,9 +425,7 @@ def test_completed_recovery_second_read_and_explicit_retry_namespace(tmp_path, m
         return attempt_bead(*args, **kwargs)
 
     monkeypatch.setattr(dispatch, "_attempt_bead", between)
-    held = dispatch.run_plan(
-        plan, work_root=tmp_path / "unused", resume_run_dir=run, provider_for=providers
-    )
+    held = dispatch.run_plan(plan, work_root=tmp_path / "unused", resume_run_dir=run, **options)
     assert held["beads"]["A"]["status"] == dispatch.STATUS_PROVENANCE_HELD
     assert held["resumeSummary"]["redispatched"] == []
     monkeypatch.setattr(dispatch, "_attempt_bead", attempt_bead)
@@ -435,7 +434,7 @@ def test_completed_recovery_second_read_and_explicit_retry_namespace(tmp_path, m
         work_root=tmp_path / "unused",
         resume_run_dir=run,
         retry_blocked="A",
-        provider_for=providers,
+        **options,
     )
     current = retried["beads"]["A"]
     fresh = Path(current["evidenceDir"]) / "attempt"
@@ -449,7 +448,7 @@ def test_completed_recovery_second_read_and_explicit_retry_namespace(tmp_path, m
 def test_coordinated_valid_mutable_spoof_refused_by_recovery(tmp_path, monkeypatch, field):
     from codex_harness.core import attempt_provenance as provenance
 
-    plan, first, run, providers = local_run(tmp_path, monkeypatch, crash=True)
+    plan, first, run, options = local_run(tmp_path, monkeypatch, crash=True)
     bead = first["beads"]["A"]
     directory = Path(bead["evidenceDir"]) / "attempt"
     original = (directory / provenance.FILENAME).read_bytes()
@@ -469,9 +468,7 @@ def test_coordinated_valid_mutable_spoof_refused_by_recovery(tmp_path, monkeypat
     dispatch._write_record(directory / "request.json", request)
     dispatch._write_record(directory / "result.json", response)
     dispatch._write_record(run / "evidence/run.json", first)
-    resumed = dispatch.run_plan(
-        plan, work_root=tmp_path / "unused", resume_run_dir=run, provider_for=providers
-    )
+    resumed = dispatch.run_plan(plan, work_root=tmp_path / "unused", resume_run_dir=run, **options)
     current = resumed["beads"]["A"]
     assert current["status"] == dispatch.STATUS_PROVENANCE_HELD
     assert current["localProcessProvenance"]["code"].startswith(

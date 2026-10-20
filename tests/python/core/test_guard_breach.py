@@ -457,21 +457,50 @@ def test_mocked_cli_buffer_can_execute_internally_but_cannot_complete(tmp_path, 
         def poll(self):
             return 0
 
-    monkeypatch.setattr(dispatch.subprocess, "Popen", BufferedProvider)
-    monkeypatch.setattr(dispatch, "_changed_paths", lambda cwd: [])
+    from tests.python.core.execution_support import source_execution_context
     from tests.python.core.test_attempt_provenance import originals
+    from tests.python.core.test_dispatch import _tiny_plan
 
+    from codex_harness.core.provider_call_budget import bind_run
     from codex_harness.core.provider_launch import ProviderNormalLaunch
 
-    request, _, _ = originals(tmp_path)
+    plan = _tiny_plan(tmp_path / "source")
+    manifest = json.loads((plan / "sample.json").read_text())
+    manifest["beads"].pop("B")
+    manifest["beads"]["A"]["requirements"] = ["R"]
+    (plan / "sample.json").write_text(json.dumps(manifest))
+    context = source_execution_context(tmp_path / "canonical", plan, timeout=1, call_cap=1)
+    scoped = json.loads((context["plan"] / "sample.json").read_text())["beads"]["A"]
+    run = context["runs"] / "buffered-run"
+    bind_run(context["directory"], context["plan"], run, max_provider_calls=1)
+    cwd = run / "repo"
+    cwd.mkdir(parents=True)
+    tmp_path = run / "evidence/A/attempt"
+    tmp_path.mkdir(parents=True)
+    request, _, _ = originals(cwd)
+    request.update(
+        runId=run.name,
+        bead="A",
+        provider=context["kwargs"]["provider_for"]["A"],
+        model=context["kwargs"]["model_for"]["A"],
+        effort=context["kwargs"]["effort_for"]["A"],
+        ownedFiles=scoped["ownedFiles"],
+        planRevision=context["revision"],
+        executionJob=str(context["directory"]),
+        requirementId="R",
+        requirementRefs=scoped["requirementRefs"],
+        specRefs=scoped["specRefs"],
+    )
     launch = ProviderNormalLaunch(
-        cli="local-process-test",
+        cli="codex",
         command=("mock-provider",),
         protections=("Source-only fake Popen buffer; no provider or real process.",),
     )
     request.update(command=list(launch.command), launch=launch.to_payload())
+    monkeypatch.setattr(dispatch.subprocess, "Popen", BufferedProvider)
+    monkeypatch.setattr(dispatch, "_changed_paths", lambda cwd: [])
     result = dispatch._run_provider(
-        launch, tmp_path, tmp_path, request, 1, {"R": {**request, "requirementId": "R"}}
+        launch, cwd, tmp_path, request, 1, {"R": {**request, "requirementId": "R"}}
     )
     assert result["status"] == dispatch.STATUS_PERMISSION_HELD
     assert result["permissionGuard"]["didPreventFurtherToolExecution"] is False
