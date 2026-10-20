@@ -759,6 +759,12 @@ class PlannerServer:
                 body += (
                     "\nAn original worker job exists; inspect worker status, never infer a retry."
                 )
+            if name in {"harness_intake", "harness_reviewer_catalog", "harness_reviewer_choice"}:
+                guide = schema_help(TOOLS, tool=name)
+                body += "\nOwning typed contract: " + json.dumps(guide["owningContract"])
+                body += (
+                    "\nInspect harness_schema tool=" + name + "; keep unsupported authority held."
+                )
             if name == "harness_upsert_node" and isinstance(error, ValueError | KeyError):
                 body += "\n" + node_error_help(arguments)
             if name == "harness_accept_review" and self.result_data:
@@ -796,10 +802,24 @@ class PlannerServer:
                 "harness_accept_run repo=<integrated-repo> subject=product OR "
                 "harness_accept_run repo=<reference-repo> subject=oracle"
             )
+        handoff = None
+        if (
+            is_error
+            and name in {"harness_advance", "harness_publish"}
+            and operation_error_code
+            in {
+                "plan-findings-open",
+                "plan-publication-evidence-required",
+            }
+        ):
+            handoff = views.review_author_handoff(self._store(), status)
+            body += "\n" + views.author_handoff_card(handoff)
         return {
             "isError": is_error,
             **(
-                {"structuredContent": self.result_data}
+                {"structuredContent": {"authorHandoff": handoff}}
+                if handoff is not None
+                else {"structuredContent": self.result_data}
                 if self.result_data is not None
                 and (
                     not is_error
@@ -849,6 +869,14 @@ class PlannerServer:
                 else "Review missing/unknown observations; "
                 "existing planning and proof gates still apply."
             )
+        if error and name in {
+            "harness_intake",
+            "harness_reviewer_catalog",
+            "harness_reviewer_choice",
+        }:
+            return "harness_schema tool=" + name
+        if name == "harness_waves" and self.result_data and self.result_data.get("intake") is None:
+            return "harness_schema tool=harness_intake; keep the missing intake draft unconfirmed."
         if name in (
             "harness_intake",
             "harness_reviewer_catalog",
@@ -970,8 +998,16 @@ class PlannerServer:
                 body = views.data_card("Draft recorded", self.result_data) + "\n" + body
             return body
         if name == "harness_review":
-            self.result_data = self._store().review(args["id"])
-            return views.review_card(self.result_data, details=True)
+            store = self._store()
+            self.result_data = store.review(args["id"])
+            self.result_data["findingMembers"] = views.review_finding_members(
+                store, self.result_data
+            )
+            return (
+                views.review_card(self.result_data, details=True)
+                + "\n"
+                + json.dumps(self.result_data["findingMembers"], ensure_ascii=False, indent=2)
+            )
         if name == "harness_resolve_findings":
             count = self._store().resolve_findings(args["findings"])
             self.result_data = {"dispositions": count}

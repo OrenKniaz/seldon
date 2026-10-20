@@ -147,3 +147,284 @@ def test_schema_rejects_unknown_tool_and_irrelevant_kind_without_creating_plan(t
         assert not (tmp_path / ".codex-harness").exists()
     finally:
         server.close()
+
+
+@pytest.mark.parametrize(
+    "tool,required",
+    [
+        (
+            "harness_intake",
+            {
+                "fields.required": {
+                    "requestKind",
+                    "sizeEstimate",
+                    "delta",
+                    "ambiguity",
+                    "consequence",
+                    "dependencyBreadth",
+                    "constraints",
+                    "rationale",
+                    "assumptions",
+                    "expectedSupervision",
+                    "nextGate",
+                    "reviewerDecisionId",
+                    "confirmation",
+                    "supersedes",
+                    "adaptation",
+                },
+                "fields.optional": {
+                    "schema",
+                    "dot-intake-v1",
+                    "recipe",
+                    "baseline-amendment",
+                    "coherent-plan",
+                    "outcome-waves",
+                },
+                "requestKind": {"new", "feature", "fix", "refactor", "continue"},
+                "sizeEstimate": {"S", "M", "L"},
+                "delta": {
+                    "summary",
+                    "outcome",
+                    "nodeIds",
+                    "successCriteria",
+                    "ownershipAreas",
+                    "interfaceIds",
+                },
+                "ambiguity": {"level", "reasons", "low", "material", "high"},
+                "consequence": {
+                    "level",
+                    "reversibility",
+                    "risks",
+                    "ordinary",
+                    "hard-invariant",
+                    "public-boundary",
+                },
+                "dependencyBreadth": {"producerIds", "crossWaveContracts"},
+                "constraints": {"runtime", "security", "spend", "frictionBudget"},
+                "adaptation": {
+                    "previousRecipe",
+                    "reason",
+                    "affectedObligationIds",
+                    "evidenceRefs",
+                    "authority",
+                },
+                "authorityShape": {
+                    "approvalId",
+                    "eventId",
+                    "origin",
+                    "statement",
+                    "sourceRef",
+                    "authorizedScopeDigest",
+                    "user",
+                    "standing-delegation",
+                },
+                "remainingFields": {
+                    "rationale",
+                    "expectedSupervision",
+                    "nextGate",
+                    "reviewerDecisionId",
+                    "assumptions",
+                    "confirmation",
+                    "supersedes",
+                    "adaptation",
+                    "id",
+                    "revision",
+                },
+            },
+        ),
+        (
+            "harness_reviewer_catalog",
+            {
+                "catalog": {
+                    "schema",
+                    "dot-reviewer-catalog-v1",
+                    "id",
+                    "RC-",
+                    "observedAt",
+                    "providers",
+                    "digest",
+                },
+                "provider": {
+                    "provider",
+                    "executable",
+                    "executableDigest",
+                    "version",
+                    "installed",
+                    "authentication",
+                    "discovery",
+                    "source",
+                    "choices",
+                    "reason",
+                },
+                "provider.identity": {
+                    "provider",
+                    "executable",
+                    "executableDigest",
+                    "version",
+                    "installed",
+                    "reason",
+                },
+                "provider.observations": {
+                    "authentication",
+                    "available",
+                    "unavailable",
+                    "unknown",
+                    "discovery",
+                    "observed",
+                    "unsupported",
+                    "blocked",
+                    "failed",
+                    "source",
+                    "kind",
+                    "supported-list",
+                    "provider-local-metadata",
+                    "reference",
+                    "digest",
+                    "choices",
+                },
+                "choice": {
+                    "model",
+                    "effort",
+                    "availability",
+                    "reviewPathSupported",
+                    "reason",
+                    "choiceId",
+                    "kind",
+                    "named",
+                    "value",
+                    "unsupported",
+                    "available",
+                    "unavailable",
+                    "unknown",
+                },
+                "derivedHashes": {
+                    "choiceId",
+                    "provider",
+                    "executable",
+                    "executableDigest",
+                    "version",
+                    "model",
+                    "effort",
+                    "digest",
+                },
+                "availableRule": {
+                    "installed",
+                    "executable",
+                    "version",
+                    "authentication",
+                    "discovery",
+                    "source",
+                    "unknown",
+                },
+            },
+        ),
+        (
+            "harness_reviewer_choice",
+            {
+                "fields.required": {
+                    "schema",
+                    "catalogId",
+                    "catalogDigest",
+                    "reviewers",
+                    "stages",
+                    "assurance",
+                    "confirmation",
+                    "recommendation",
+                },
+                "binding": {"dot-reviewer-selection-v1", "catalogId", "catalogDigest", "choiceId"},
+                "reviewers": {"name", "provider", "choiceId", "model", "effort"},
+                "stages": {"plan", "readiness", "wave-acceptance", "full-vision"},
+                "assurance": {
+                    "independentRequired",
+                    "minIndependentReviewers",
+                    "crossProviderRequired",
+                    "basisRefs",
+                },
+                "recommendation": {"choiceIds", "reason", "catchRateEvidenceRefs"},
+                "author_sessions": {"implementationSessionIds", "reviewerSessionIds"},
+                "authorityShape": {
+                    "approvalId",
+                    "eventId",
+                    "origin",
+                    "statement",
+                    "sourceRef",
+                    "authorizedScopeDigest",
+                    "user",
+                    "standing-delegation",
+                },
+                "draftRule": {
+                    "confirmation",
+                    "null",
+                    "reviewer-confirmation-required",
+                    "independence",
+                },
+            },
+        ),
+    ],
+)
+def test_first_typed_refusal_teaches_owner_contract_then_supported_diagnostic(
+    tmp_path, tool, required
+):
+    import re
+
+    server = PlannerServer(tmp_path)
+    try:
+        invoke(server, "harness_plan_start", idea="Preserve accepted task", name="Draft")
+        revision = server.store.spine().plan_revision()
+        events = server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        refusal = invoke(server, tool)
+        text = refusal["content"][0]["text"]
+        assert refusal["isError"] and "Owning typed contract:" in text
+        assert "harness_schema tool=" + tool in text
+        first, _ = json.JSONDecoder().raw_decode(text.split("Owning typed contract: ", 1)[1])
+        for field, terms in required.items():
+            assert field in first, (tool, field)
+            assert terms <= set(re.findall(r"[A-Za-z][A-Za-z0-9_-]*", first[field])), (tool, field)
+        guide = invoke(server, "harness_schema", tool=tool)
+        assert not guide["isError"]
+        contract = guide["structuredContent"]["owningContract"]
+        assert contract == first
+        if tool == "harness_reviewer_catalog":
+            assert "confirmation" not in contract and "confirmationRoute" not in contract
+            assert "supplied observations" in contract["discoveryRoute"]
+        else:
+            assert "null" in contract["confirmation"]
+            assert "typed-confirmation-producer-unavailable" in contract["confirmationRoute"]
+        assert "reviewer-catalog-producer-unavailable" in contract["discoveryRoute"]
+        next_tool = contract["nextTool"]
+        assert next_tool == {"name": "harness_preflight", "arguments": {}}
+        diagnostic = invoke(server, next_tool["name"], **next_tool["arguments"])
+        assert not diagnostic["isError"]
+        report = diagnostic["structuredContent"]
+        assert report["executionReadiness"] == "not-proven" and report["didRunProvider"] is False
+        assert all(p["authentication"] == "unknown" for p in report["providers"])
+        assert server.store.spine().plan_revision() == revision
+        assert (
+            server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events
+        )
+    finally:
+        server.close()
+
+
+def test_cli_missing_intake_waves_next_reaches_complete_schema_then_preflight(tmp_path, capsys):
+    from codex_harness.core.plan_cli import main
+
+    def call(*args):
+        result = main(["--workspace", str(tmp_path), "--json", *args])
+        return result, json.loads(capsys.readouterr().out)
+
+    assert call("start", "--idea", "A bounded task", "--name", "Draft")[0] == 0
+    code, missing = call("waves")
+    assert code == 0 and missing["data"]["intake"] is None
+    assert missing["next"].endswith("schema --tool harness_intake")
+    code, guide = call("schema", "--tool", "harness_intake")
+    assert code == 0
+    assert "constraints" in guide["data"]["owningContract"]
+    assert (
+        "typed-confirmation-producer-unavailable"
+        in guide["data"]["owningContract"]["confirmationRoute"]
+    )
+    assert guide["next"].endswith("preflight")
+    code, diagnostic = call("preflight")
+    assert code == 0 and diagnostic["data"]["executionReadiness"] == "not-proven"
+    assert diagnostic["data"]["didRunProvider"] is False

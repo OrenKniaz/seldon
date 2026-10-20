@@ -15,6 +15,182 @@ FIELD_RULES = {
 }
 
 
+TYPED_COMMON = {
+    "expected_spine_revision": "Exact current spine plan_revision, refreshed from "
+    "harness_plan_status; stale revisions refuse atomically.",
+    "discoveryRoute": "harness_preflight is supported executable discovery only: "
+    "authentication/effective protections remain unknown and model entitlement "
+    "is not established. Catalog/choice tools record supplied observations; no "
+    "supported public model-catalog producer is exposed here. Report "
+    "reviewer-catalog-producer-unavailable when genuine observations cannot be "
+    "acquired.",
+    "state": "DRAFT/HELD; no approval, entitlement, native execution authorization, phase "
+    "completion or provider proof is created by documentation or recording.",
+    "nextTool": {"name": "harness_preflight", "arguments": {}},
+}
+
+TYPED_CONTRACTS = {
+    "harness_intake": {
+        "node": "For node-bearing intake/choice tools only: id, kind=decision, "
+        "title, text, parents, fields. Existing plan IDs/parent kinds and "
+        "normal Spine validation still apply.",
+        "confirmation": "null for an unconfirmed draft. Non-null accepts only an "
+        "EXISTING attributable record with "
+        "approvalId/eventId/origin/statement/sourceRef/authorizedScopeDigest; "
+        "never invent these values.",
+        "authorityShape": "approvalId/statement/sourceRef: nonblank; eventId: "
+        "positive nonboolean integer; origin: "
+        "user|standing-delegation; authorizedScopeDigest: "
+        "lowercase SHA256. This describes retained provenance, "
+        "not a producer or authentication.",
+        "confirmationRoute": "Typed intake/reviewer confirmation acquisition is "
+        "not implemented by these public tools. Keep "
+        "confirmation null and report owner blocker "
+        "typed-confirmation-producer-unavailable. "
+        "harness_record_confirmation only serves align and "
+        "vision-lock; it cannot confirm these typed records.",
+        "arguments": "node, expected_spine_revision required; baseline optional "
+        "null or exact {publishedRevision, spineRevision} of an "
+        "existing published snapshot. Store derives baseline "
+        "recipe/obligations.",
+        "fields.required": "requestKind sizeEstimate delta ambiguity consequence "
+        "dependencyBreadth constraints rationale assumptions "
+        "expectedSupervision nextGate reviewerDecisionId "
+        "confirmation supersedes adaptation",
+        "fields.optional": "schema=dot-intake-v1; "
+        "recipe=baseline-amendment|coherent-plan|outcome-waves "
+        "(must meet conservative fact-derived minimum). "
+        "baseline is derived, not a request.fields key.",
+        "requestKind": "new|feature|fix|refactor|continue",
+        "sizeEstimate": "S|M|L",
+        "delta": "Exact keys summary,outcome: nonblank strings; "
+        "nodeIds,interfaceIds: arrays of strings; "
+        "successCriteria,ownershipAreas: nonempty string arrays.",
+        "ambiguity": "Exact keys level=low|material|high, reasons=string array "
+        "(nonempty unless low).",
+        "consequence": "Exact keys level=ordinary|hard-invariant|public-boundary, "
+        "reversibility=nonblank, risks=string array (nonempty "
+        "unless ordinary).",
+        "dependencyBreadth": "Exact keys producerIds,crossWaveContracts: string arrays.",
+        "constraints": "Exact keys runtime,security: string arrays; "
+        "spend,frictionBudget: nonblank strings.",
+        "remainingFields": "rationale,expectedSupervision,nextGate,reviewerDecisionId: "
+        "nonblank strings; assumptions:string array; "
+        "confirmation:null for draft; supersedes:null or "
+        "exact{id:nonblank,revision:lowercaseSHA256}; "
+        "adaptation:null for a new draft.",
+        "adaptation": "If non-null exact "
+        "previousRecipe,reason,affectedObligationIds,evidenceRefs,authority; "
+        "previousRecipe must match resolved baseline, reason "
+        "nonblank, affectedObligationIds known string IDs, "
+        "evidenceRefs nonempty strings, authority existing non-null "
+        "authorityShape. Downgrade needs adaptation; never "
+        "manufacture authority to satisfy it.",
+    },
+    "harness_reviewer_catalog": {
+        "arguments": "catalog, expected_spine_revision required.",
+        "catalog": "Exact "
+        "schema=dot-reviewer-catalog-v1,id=RC-<UUID>,observedAt=timezone-aware "
+        "ISO timestamp,providers=array; optional "
+        "digest=derived lowercase SHA256 (supplied values "
+        "must match). IDs/timestamps identify a supplied "
+        "observation, not proof that discovery occurred.",
+        "provider": "Exact "
+        "provider,executable,executableDigest,version,installed,authentication,discovery,source,choices,reason.",
+        "provider.identity": "provider/reason:nonblank; executable:null "
+        "or absolute path; executableDigest:null or "
+        "lowercaseSHA256; version:null or nonblank; "
+        "installed:null or boolean.",
+        "provider.observations": "authentication=available|unavailable|unknown; "
+        "discovery=observed|unsupported|blocked|failed|unknown; "
+        "source=null or "
+        "exact{kind:supported-list|provider-local-metadata,"
+        "reference:nonblank,digest:lowercaseSHA256}; "
+        "choices=array.",
+        "choice": "Exact "
+        "model,effort,availability,reviewPathSupported,reason; "
+        "optional derived choiceId. model must be exact "
+        "supplied model, never default/latest/auto/*-latest. "
+        "effort exact{kind:named,value:nonblank} or "
+        "{kind:unsupported}; "
+        "availability=available|unavailable|unknown; "
+        "reviewPathSupported:boolean; reason:nonblank.",
+        "derivedHashes": "choiceId hashes "
+        "provider,executable,executableDigest,version,model,effort. "
+        "digest hashes normalized catalog excluding "
+        "digest. Both computed by owning validator if "
+        "omitted; do not substitute dummy hashes.",
+        "availableRule": "availability=available requires actual "
+        "installed/executable/hash/version, "
+        "authentication available, discovery observed "
+        "and a source. Preserve unknown if evidence is "
+        "absent; providers=[] or choices=[] claims no "
+        "available reviewer.",
+    },
+    "harness_reviewer_choice": {
+        "node": "For node-bearing intake/choice tools only: id, "
+        "kind=decision, title, text, parents, fields. Existing "
+        "plan IDs/parent kinds and normal Spine validation still "
+        "apply.",
+        "confirmation": "null for an unconfirmed draft. Non-null accepts "
+        "only an EXISTING attributable record with "
+        "approvalId/eventId/origin/statement/sourceRef/authorizedScopeDigest; "
+        "never invent these values.",
+        "authorityShape": "approvalId/statement/sourceRef: nonblank; "
+        "eventId: positive nonboolean integer; origin: "
+        "user|standing-delegation; "
+        "authorizedScopeDigest: lowercase SHA256. This "
+        "describes retained provenance, not a producer "
+        "or authentication.",
+        "confirmationRoute": "Typed intake/reviewer confirmation "
+        "acquisition is not implemented by these "
+        "public tools. Keep confirmation null and "
+        "report owner blocker "
+        "typed-confirmation-producer-unavailable. "
+        "harness_record_confirmation only serves "
+        "align and vision-lock; it cannot confirm "
+        "these typed records.",
+        "arguments": "node,expected_spine_revision required; optional "
+        "author_sessions defaults to "
+        "{implementationSessionIds:[],reviewerSessionIds:{}}.",
+        "fields.required": "schema catalogId catalogDigest reviewers "
+        "stages assurance confirmation recommendation",
+        "binding": "schema=dot-reviewer-selection-v1; catalogId and "
+        "lowercaseSHA256 catalogDigest must bind exact current "
+        "recorded catalog. Reviewer choiceId must come from "
+        "its normalized catalog, not an invented digest.",
+        "reviewers": "Nonempty array of "
+        "exact{name,provider,choiceId,model,effort}; "
+        "name/provider nonblank; choiceId lowercaseSHA256 of "
+        "an existing choice; exact provider/model/effort "
+        "must match that choice. Model/effort follow catalog "
+        "rules. Reviewer names unique; selections must match "
+        "actual catalog tuples.",
+        "stages": "Nonempty string array drawn from plan|readiness|wave-acceptance|full-vision.",
+        "assurance": "Exact "
+        "independentRequired:boolean,minIndependentReviewers:nonnegative "
+        "nonboolean integer (positive if "
+        "independentRequired),crossProviderRequired:boolean,basisRefs:nonempty "
+        "string array. Preserve accepted assurance; unknown "
+        "inputs do not justify reducing it.",
+        "recommendation": "Exact choiceIds:ordered array of distinct "
+        "existing choice "
+        "hashes,reason:nonblank,catchRateEvidenceRefs:string "
+        "array; preference is not proven catch rate.",
+        "author_sessions": "Exact implementationSessionIds:string "
+        "array,reviewerSessionIds:map of reviewer "
+        "names to nonblank session IDs. "
+        "Missing/unknown independence stays unmet; "
+        "never invent session identities.",
+        "draftRule": "confirmation=null is legal draft input and yields "
+        "reviewer-confirmation-required. Unknown "
+        "availability/independence and unmet cross-provider "
+        "assurance remain explicit; recording a draft never "
+        "admits execution.",
+    },
+}
+
+
 def _node(kind, node_id, parents, fields=None, text=None):
     return {
         "id": node_id,
@@ -92,6 +268,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
         "authority": "MCP input validation and PlanStore/Spine remain authoritative; "
         "examples are planned content, not approval, proof or phase completion.",
     }
+    if tool in TYPED_CONTRACTS:
+        result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
     if tool == "harness_upsert_node":
         kind = kind or "requirement"
         if kind not in ALLOWED_PARENTS:

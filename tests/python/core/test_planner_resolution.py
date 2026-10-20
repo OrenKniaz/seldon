@@ -11,6 +11,7 @@ No live model, external controller or worker delivery is exercised.
 """
 
 import json
+import shlex
 import subprocess
 import sys
 
@@ -420,6 +421,8 @@ def test_public_repair_loop_refreshes_review_before_canonical_publication(
 
     refusal = public("advance", "--to", "publish", expected=2)
     assert "resolve" in refusal["next"]
+    assert refusal["data"]["authorHandoff"]["state"] == "author_action_required"
+    assert refusal["text"].count("**Author repair:") == 1
     original_revision = refusal["status"]["manifest_revision"]
     open_findings = public("findings")["data"]["findings"]
     assert len(open_findings) == 1 and open_findings[0]["status"] == "open"
@@ -462,3 +465,322 @@ def test_public_repair_loop_refreshes_review_before_canonical_publication(
     preserved = next(row for row in findings(project) if row["id"] == finding_id)
     assert preserved["status"] == "resolved" and preserved["resolution"]
     assert len(list(project.connection.execute("SELECT id FROM review_runs"))) == 2
+
+
+def _public_review_with_members(project, monkeypatch, capsys):
+    """Actual CLI producer response; provider processes alone are source doubles."""
+    from codex_harness.core import roundtable
+
+    _at_roundtable(project)
+    calls = []
+
+    def reviewer(*_):
+        calls.append(len(calls) + 1)
+        return 0, json.dumps(
+            [
+                dict(
+                    node_id="R1",
+                    severity="major",
+                    finding="Accepted answer is unspecified",
+                    suggestion=f"Member {calls[-1]}: preserve the answer contract " + "x" * 1300,
+                )
+            ]
+        )
+
+    monkeypatch.setattr(roundtable, "_run", reviewer)
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    reviewers = [dict(name="Alpha", provider="codex"), dict(name="Beta", provider="claude")]
+    prefix = ["--workspace", str(project.workspace), "--json"]
+    assert (
+        plan_cli.main(
+            [
+                *prefix,
+                "roundtable",
+                "--reviewer",
+                json.dumps(reviewers[0]),
+                "--reviewer",
+                json.dumps(reviewers[1]),
+                "--max-total",
+                "1",
+            ]
+        )
+        == 0
+    )
+    return json.loads(capsys.readouterr().out), calls, reviewers
+
+
+def test_roundtable_return_hands_member_repairs_to_invoking_planner(project, monkeypatch, capsys):
+    response, calls, _ = _public_review_with_members(project, monkeypatch, capsys)
+    handoff = response["data"]["authorHandoff"]
+    assert len(calls) == 2
+    assert handoff["manifestRevision"] == response["status"]["manifest_revision"]
+    assert handoff["spineRevision"] == response["status"]["spine_revision"]
+    assert handoff["clusterCount"] == 1 and handoff["memberCount"] == 2
+    assert {row["id"] for row in handoff["members"]} == {
+        row["id"] for row in findings(project, "open", expand=True)
+    }
+    assert {row["suggestion"].split(":")[0] for row in handoff["members"]} == {
+        "Member 1",
+        "Member 2",
+    }
+    assert all(row["suggestionTruncated"] for row in handoff["members"])
+    assert all(row["revisionRelation"] == "current" for row in handoff["members"])
+    assert all(len(row["memberIds"]) == 2 for row in handoff["members"])
+    assert "author repair" in response["text"].lower()
+    assert "Worker-owned product behavior" in response["text"]
+    assert "findings --expand" in handoff["details"]["cliCommand"]
+    assert "resolve" in response["next"] and "--status" not in response["next"]
+
+    # The real existing detail endpoint must actually return both full suggestions.
+    server = PlannerServer(project.workspace)
+    try:
+        route = handoff["members"][0]["detailRoute"]
+        detail = rpc(
+            server,
+            "tools/call",
+            {
+                "name": route["mcpTool"],
+                "arguments": {"id": route["roundId"]},
+            },
+        )["result"]
+        assert not detail["isError"]
+        exact = detail["structuredContent"]["findingMembers"]
+        assert {row["suggestion"] for row in exact} == {
+            row["suggestion"] for row in findings(project, expand=True)
+        }
+        assert all(row["suggestion"] in detail["content"][0]["text"] for row in exact)
+        node_route = handoff["members"][0]["nodeRoute"]
+        node = rpc(
+            server,
+            "tools/call",
+            {
+                "name": node_route["mcpTool"],
+                "arguments": {"id": node_route["id"]},
+            },
+        )["result"]
+        assert not node["isError"] and node["structuredContent"]["id"] == "R1"
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("operation", ["harness_advance", "harness_publish"])
+def test_blocked_mcp_reply_contains_bound_author_handoff(project, monkeypatch, capsys, operation):
+    _public_review_with_members(project, monkeypatch, capsys)
+    if operation == "harness_publish":
+        # Reach publish normally before a later real review exposes new blocking work.
+        for row in findings(project):
+            project.resolve_findings(
+                [
+                    dict(
+                        id=row["id"],
+                        status="rejected",
+                        resolution="Source fixture: inspect subsequent review",
+                    )
+                ]
+            )
+        _record_source_evidence(project)
+        project.advance("publish", by="source-test")
+        source_controller_roundtable(
+            project,
+            process_stub=lambda *_: (
+                0,
+                json.dumps(
+                    [
+                        dict(
+                            node_id="R1",
+                            severity="major",
+                            finding="Publication contract gap",
+                            suggestion="Repair the requirement before publication",
+                        )
+                    ]
+                ),
+            ),
+            reviewers=[dict(name="Gamma", provider="codex")],
+            executable_for=lambda *_: sys.executable,
+        )
+    requirement = project.spine().node("R1")
+    requirement["text"] += " revised author context"
+    project.upsert_node(requirement)
+    project.compile_template(project.workspace / "template")
+    before = list(project.connection.iterdump())
+    server = PlannerServer(project.workspace)
+    try:
+        result = rpc(
+            server,
+            "tools/call",
+            {
+                "name": operation,
+                "arguments": {"to_phase": "publish"} if operation == "harness_advance" else {},
+            },
+        )["result"]
+        assert result["isError"]
+        handoff = result["structuredContent"]["authorHandoff"]
+        assert handoff["manifestRevision"] == project.manifest_revision()
+        assert all(row["revisionRelation"] == "stale" for row in handoff["members"])
+        assert "author repair" in result["content"][0]["text"].lower()
+        assert "harness_resolve_findings" in result["content"][0]["text"]
+    finally:
+        server.close()
+    assert list(project.connection.iterdump()) == before
+    assert not project.status()["publication"]["up_to_date"]
+
+
+def test_exhausted_cli_review_holds_cap_without_waiver(project, monkeypatch, capsys):
+    _, calls, reviewers = _public_review_with_members(project, monkeypatch, capsys)
+    assert (
+        plan_cli.main(
+            [
+                "--workspace",
+                str(project.workspace),
+                "--json",
+                "roundtable",
+                "--reviewer",
+                json.dumps(reviewers[0]),
+                "--max-total",
+                "1",
+            ]
+        )
+        == 2
+    )
+    response = json.loads(capsys.readouterr().out)
+    assert len(calls) == 2
+    assert "1/1 total invocations" in response["text"]
+    assert "waive" not in json.dumps(response).lower()
+    assert "raising or omitting" not in json.dumps(response)
+    assert "held" in response["next"].lower()
+    assert response["data"]["authorHandoff"]["memberCount"] == 2
+
+
+def test_author_handoff_bounds_members_and_retains_exact_public_details(
+    project, monkeypatch, capsys
+):
+    from codex_harness.core import planner_views
+
+    _at_roundtable(project)
+    raw = [
+        dict(
+            node_id="R1",
+            severity="major",
+            finding="Same accepted answer contract gap",
+            suggestion=f"Member {index}: " + "z" * 1400,
+        )
+        for index in range(35)
+    ]
+    reviewed = source_controller_roundtable(
+        project,
+        process_stub=lambda *_: (0, json.dumps(raw)),
+        reviewers=[dict(name="Alpha", provider="codex")],
+        executable_for=lambda *_: sys.executable,
+    )
+    handoff = planner_views.review_author_handoff(project, project.status())
+    assert handoff["clusterCount"] == 1 and handoff["memberCount"] == 35
+    assert len(handoff["members"]) == 16 and handoff["omittedMemberCount"] == 19
+    assert all(row["membershipTruncated"] for row in handoff["members"])
+    assert all(len(row["memberIds"]) == 32 for row in handoff["members"])
+    fallback = shlex.split(handoff["details"]["cliCommand"])
+    assert fallback[0:3] == ["python", "-m", "codex_harness.core.plan_cli"]
+    retrieved = subprocess.run(
+        fallback,
+        cwd=project.workspace.parent,
+        capture_output=True,
+        text=True,
+    )
+    assert retrieved.returncode == 0, retrieved.stdout + retrieved.stderr
+    # Execute the emitted workspace/argument set, not a hardcoded known round.
+    exact_fallback = json.loads(retrieved.stdout)["data"]["findings"]
+    assert len(exact_fallback) == 35
+    assert {row["suggestion"] for row in exact_fallback} == {row["suggestion"] for row in raw}
+    assert (
+        plan_cli.main(
+            [
+                "--workspace",
+                str(project.workspace),
+                "--json",
+                "review",
+                reviewed["roundId"],
+            ]
+        )
+        == 0
+    )
+    detailed = json.loads(capsys.readouterr().out)["data"]["findingMembers"]
+    assert len(detailed) == 35
+    assert {row["suggestion"] for row in detailed} == {row["suggestion"] for row in raw}
+    assert all(len(row["memberIds"]) == 35 for row in detailed)
+
+
+def test_changed_author_handoff_read_returns_refresh_without_stale_repairs(
+    project, monkeypatch, capsys
+):
+    from codex_harness.core import planner_views, roundtable
+
+    _public_review_with_members(project, monkeypatch, capsys)
+    status = project.status()
+    actual = roundtable.findings
+    reads = []
+
+    def changed(store, *args, **kwargs):
+        reads.append(True)
+        rows = actual(store, *args, **kwargs)
+        if len(reads) == 2:
+            requirement = store.spine().node("R1")
+            requirement["text"] += " concurrent author edit"
+            store.upsert_node(requirement)
+        return rows
+
+    monkeypatch.setattr(roundtable, "findings", changed)
+    handoff = planner_views.review_author_handoff(project, status)
+    assert handoff["state"] == "refresh_required"
+    assert handoff["members"] == [] and handoff["memberCount"] is None
+    assert handoff["nextAction"]["kind"] == "unavailable_refresh"
+    assert handoff["next"] == "harness_plan_status"
+
+
+def test_disposition_during_handoff_read_invalidates_unchanged_revision(
+    project, monkeypatch, capsys
+):
+    from codex_harness.core import planner_views, roundtable
+
+    _public_review_with_members(project, monkeypatch, capsys)
+    status = project.status()
+    revision = project._revision(), project.manifest_revision(), project.phase()
+    actual = roundtable.findings
+    reads = []
+
+    def dispositioned(store, *args, **kwargs):
+        rows = actual(store, *args, **kwargs)
+        reads.append(True)
+        if len(reads) == 2:
+            # The real writer changes the review projection, not plan identity.
+            store.resolve_findings(
+                [
+                    dict(
+                        id=rows[0]["id"],
+                        status="resolved",
+                        resolution="Concurrent author disposition with recorded evidence",
+                    )
+                ]
+            )
+        return rows
+
+    monkeypatch.setattr(roundtable, "findings", dispositioned)
+    handoff = planner_views.review_author_handoff(project, status)
+    assert (project._revision(), project.manifest_revision(), project.phase()) == revision
+    assert all(row["status"] == "resolved" for row in actual(project, expand=True))
+    assert handoff["state"] == "refresh_required"
+    assert handoff["members"] == [] and handoff["memberCount"] is None
+    assert handoff["nextAction"]["kind"] == "unavailable_refresh"
+    assert handoff["next"] == "harness_plan_status"
+
+
+def test_roundtable_without_started_plan_preserves_public_error(tmp_path, monkeypatch, capsys):
+    def no_provider(*args, **kwargs):
+        pytest.fail("Missing-plan error must not launch a provider")
+
+    monkeypatch.setattr(subprocess, "Popen", no_provider)
+    assert plan_cli.main(["--workspace", str(tmp_path), "--json", "roundtable"]) == 2
+    response = json.loads(capsys.readouterr().out)
+    assert response["isError"]
+    assert "Call" in response["text"] and "start first" in response["text"]
+    assert "start --idea" in response["next"]
+    assert response["data"] is None
+    assert not (tmp_path / ".codex-harness").exists()

@@ -210,6 +210,173 @@ def review_resolution_state(store, status: dict) -> dict:
     return state
 
 
+def review_finding_members(store, review: dict) -> list[dict]:
+    """Exact recorded member details for the existing review detail endpoint."""
+    from codex_harness.core.roundtable import findings
+
+    rounds = {row["round_id"] for row in review.get("reviewers", []) if row.get("round_id")}
+    return [
+        {
+            key: row.get(key)
+            for key in (
+                "id",
+                "cluster_id",
+                "memberIds",
+                "memberCount",
+                "node_id",
+                "round_id",
+                "plan_revision",
+                "reviewer",
+                "provider",
+                "severity",
+                "status",
+                "finding",
+                "suggestion",
+                "resolution",
+            )
+        }
+        for row in findings(store, expand=True)
+        if row.get("round_id") in rounds
+    ]
+
+
+def review_author_handoff(store, status: dict, *, cli_prefix=None) -> dict:
+    """Bounded author feedback for the invoking planner; never host-session re-entry."""
+    from codex_harness.core.roundtable import findings
+
+    state = review_resolution_state(store, status)
+    result = {
+        "schema": "seldon/review-author-handoff-v1",
+        "spineRevision": state["spineRevision"],
+        "manifestRevision": state["manifestRevision"],
+        "state": "refresh_required",
+        "clusterCount": None,
+        "memberCount": None,
+        "members": [],
+        "omittedMemberCount": None,
+        "details": {
+            "cliCommand": (
+                cli_prefix
+                or f'python -m codex_harness.core.plan_cli --workspace "{store.workspace}" '
+            )
+            + "--json findings --expand",
+        },
+        "nextAction": state["nextAction"],
+        "next": review_resolution_next(state, cli_prefix=cli_prefix),
+        "scope": "Invoking planner response only; no ended-session resumption or worker proof.",
+    }
+    if state["blockingOpenFindings"] is None:
+        return result
+    try:
+        blockers = {row["id"] for row in state["blockingOpenFindings"]}
+        observed_members = findings(store, "open", expand=True)
+        rows = [row for row in observed_members if (row.get("cluster_id") or row["id"]) in blockers]
+        members = []
+        for row in sorted(rows, key=lambda item: item["id"])[:16]:
+            member = {
+                "id": row["id"],
+                "clusterId": row.get("cluster_id") or row["id"],
+                "memberIds": row["memberIds"][:32],
+                "membershipTruncated": len(row["memberIds"]) > 32,
+                "memberCount": row["memberCount"],
+                "nodeId": row.get("node_id"),
+                "nodeRoute": {
+                    "mcpTool": "harness_show_node",
+                    "id": row.get("node_id"),
+                    "next": (
+                        cli_prefix + "show " + row["node_id"]
+                        if cli_prefix is not None
+                        else "harness_show_node id=" + row["node_id"]
+                    ),
+                },
+                "recordedRevision": row.get("plan_revision"),
+                "revisionRelation": (
+                    "unknown"
+                    if not row.get("plan_revision") or not state["manifestRevision"]
+                    else "current"
+                    if row["plan_revision"] == state["manifestRevision"]
+                    else "stale"
+                ),
+                "severity": row.get("severity"),
+                "status": row["status"],
+                "detailRoute": {
+                    "mcpTool": "harness_review",
+                    "roundId": row.get("round_id"),
+                    "cliCommand": "review " + row["round_id"],
+                    "next": (
+                        cli_prefix + "review " + row["round_id"]
+                        if cli_prefix is not None
+                        else "harness_review id=" + row["round_id"]
+                    ),
+                },
+            }
+            for field in ("finding", "suggestion"):
+                value = row.get(field)
+                member[field] = value[:1024] if isinstance(value, str) else None
+                member[field + "Truncated"] = isinstance(value, str) and len(value) > 1024
+            members.append(member)
+        if (
+            store._revision() != state["spineRevision"]
+            or store.manifest_revision() != state["manifestRevision"]
+            or store.phase() != state["phase"]
+            or review_resolution_state(store, store.status()) != state
+            or findings(store, "open", expand=True) != observed_members
+        ):
+            raise ValueError("Author handoff changed during read")
+        result.update(
+            state="author_action_required" if blockers else "follow_canonical_action",
+            clusterCount=len(blockers),
+            memberCount=len(rows),
+            members=members,
+            omittedMemberCount=max(0, len(rows) - len(members)),
+        )
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+        result.update(
+            nextAction={"kind": "unavailable_refresh"},
+            next=(cli_prefix + "status") if cli_prefix is not None else "harness_plan_status",
+        )
+    return result
+
+
+def author_handoff_card(handoff: dict) -> str:
+    """Visible repair instructions and recorded member suggestions, bounded above."""
+    if handoff["state"] == "refresh_required":
+        return "Author feedback unavailable or changed; refresh current canonical status."
+    lines = [
+        "**Author repair: feedback to the invoking planner**",
+        "Bound to manifest "
+        + str(handoff["manifestRevision"])
+        + "; refresh status before acting if the plan changed.",
+        "Inspect each recorded finding; repair the affected existing plan nodes/template "
+        "within the locked vision, preserving acceptance semantics and file ownership. "
+        "Worker-owned product behavior remains for workers; do not implement it to pass an audit.",
+        "Record evidence-backed dispositions after repair or demonstrated rejection; then "
+        "follow current compile, audit, fresh roundtable and ordinary publication guidance. "
+        "Edits can stale evidence; dispositions alone do not refresh it. Locked vision changes "
+        "still require the existing native confirmation. "
+        "No launch or additional capacity is granted.",
+    ]
+    for member in handoff["members"]:
+        lines.extend(
+            [
+                f"- {member['id']} ({member['nodeId']}, {member['revisionRelation']}): "
+                + str(member["finding"]),
+                "  Recorded suggestion: " + str(member["suggestion"]),
+                "  Inspect affected node: " + member["nodeRoute"]["next"],
+                "  Exact member details: " + member["detailRoute"]["next"],
+            ]
+        )
+    if handoff["omittedMemberCount"] or any(
+        member["findingTruncated"] or member["suggestionTruncated"] or member["membershipTruncated"]
+        for member in handoff["members"]
+    ):
+        lines.append(
+            f"Bounded excerpts; {handoff['omittedMemberCount']} members omitted. "
+            "Complete recorded details: " + handoff["details"]["cliCommand"]
+        )
+    return "\n".join(lines)
+
+
 def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
     """Transport-specific wording for the same single canonical advisory action."""
     action = state["nextAction"]

@@ -232,6 +232,7 @@ def parser() -> argparse.ArgumentParser:
         "status": (),
         "resume": (),
         "preflight": (),
+        "schema": (),
         "show": (),
         "review": (),
         "packet": (),
@@ -290,6 +291,8 @@ def parser() -> argparse.ArgumentParser:
         sub.add_argument(
             "--machine-json", dest="machine", action="store_true", default=argparse.SUPPRESS
         )
+    commands["schema"].add_argument("--tool", default="harness_upsert_node")
+    commands["schema"].add_argument("--kind")
     commands["show"].add_argument("id")
     commands["review"].add_argument("id")
     commands["show"].add_argument("--body", action="store_true")
@@ -559,6 +562,10 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             ),
         ),
         "worker-status": ("harness_worker_status", lambda: dict(job_id=args.job_id)),
+        "schema": (
+            "harness_schema",
+            lambda: dict(tool=args.tool, **({"kind": args.kind} if args.kind else {})),
+        ),
         "review": ("harness_review", lambda: dict(id=args.id)),
         "show": (
             "harness_show_node",
@@ -907,10 +914,13 @@ def main(argv=None) -> int:
                     print(json.dumps(item, ensure_ascii=False))
                 return 0
         except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
+            diagnostic = f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}"
+            if getattr(error, "code", None) == "roundtable-total-budget-exhausted":
+                diagnostic = diagnostic.split(" Next:", 1)[0]
             reply, data = (
                 _reply(
                     server,
-                    f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}",
+                    diagnostic,
                     True,
                     diagnostic=getattr(args, "command", None) == "preflight",
                     resume=getattr(args, "command", None) == "resume",
@@ -956,6 +966,18 @@ def main(argv=None) -> int:
                     else "waves"
                 )
             )
+        typed_tools = {
+            "intake": "harness_intake",
+            "reviewer-catalog": "harness_reviewer_catalog",
+            "reviewer-choice": "harness_reviewer_choice",
+        }
+        prefix = f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
+        if args.command in typed_tools and reply["isError"]:
+            next_step = prefix + "schema --tool " + typed_tools[args.command]
+        elif args.command == "schema" and data and "owningContract" in data:
+            next_step = prefix + "preflight"
+        elif args.command == "waves" and data and data.get("intake") is None:
+            next_step = prefix + "schema --tool harness_intake"
         if reply["isError"]:
             prefix = f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
             command = getattr(args, "command", "status")
@@ -1035,10 +1057,12 @@ def main(argv=None) -> int:
                 )
             elif command == "roundtable" and "roundtable-total-budget-exhausted" in str(reply):
                 next_step = (
-                    "Waive the cap by raising or omitting --max-total, "
-                    "or accept the remaining findings"
+                    "Review held: the existing total-call cap is exhausted; "
+                    + prefix
+                    + "findings --expand; repair within existing author scope, "
+                    "then refresh status. No additional review launch is authorized."
                 )
-            elif command == "roundtable":
+            elif command == "roundtable" and server.store is not None:
                 next_step = (
                     prefix + "roundtable --help (check the reported budget or input; "
                     "retry only the affected reviewer)"
@@ -1077,6 +1101,29 @@ def main(argv=None) -> int:
                 )
             },
         }
+        handoff = None
+        command = getattr(args, "command", None)
+        if server.store is not None and (
+            command == "roundtable"
+            or (
+                command in {"advance", "publish"}
+                and reply["isError"]
+                and any(
+                    code in str(reply)
+                    for code in (
+                        "plan-findings-open",
+                        "plan-publication-evidence-required",
+                    )
+                )
+            )
+        ):
+            cli_prefix = f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
+            handoff = planner_views.review_author_handoff(
+                server.store,
+                status,
+                cli_prefix=cli_prefix,
+            )
+            data = {**(data or {}), "authorHandoff": handoff}
         next_step = next_step.replace("\r", " ").replace("\n", " ")
         display_next = planner_views.first_action(next_step)
         if (
@@ -1089,8 +1136,15 @@ def main(argv=None) -> int:
                 next_step.split("; ", 1)[0]
                 + "; retry only the affected reviewers with roundtable --reviewer @reviewer.json."
             )
+        body = "\n".join(item["text"] for item in reply["content"])
+        body = body.rsplit("\nNext: ", 1)[0].rstrip()
+        if handoff is not None:
+            # Mapped MCP refusals already contain the MCP transport's card;
+            # replace it with the CLI-bound projection, not a second copy.
+            body = body.split("\n**Author repair: feedback to the invoking planner**", 1)[0]
         text = (
-            "\n".join(item["text"] for item in reply["content"]).rsplit("\nNext: ", 1)[0].rstrip()
+            body
+            + ("\n" + planner_views.author_handoff_card(handoff) if handoff is not None else "")
             + "\nNext: "
             + display_next
         )
