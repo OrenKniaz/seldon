@@ -2169,7 +2169,10 @@ class PlanStore:
         current = self._manifest(self.spine())
         old, new = baseline["beads"], current["beads"]
         changed = {key for key in old.keys() | new.keys() if old.get(key) != new.get(key)}
-        if baseline.get("requirementFilesRevision") != current.get("requirementFilesRevision"):
+        protected_changed = baseline.get("requirementFilesRevision") != current.get(
+            "requirementFilesRevision"
+        )
+        if protected_changed:
             changed.update(old.keys() | new.keys())
         affected = set(changed)
         while True:
@@ -2195,6 +2198,7 @@ class PlanStore:
             "affectedTests": sorted(tests),
             "untouchedBeads": sorted(new.keys() - affected),
             "staleDocs": ["PLAN.md"] if changed else [],
+            **({"protectedFilesChanged": True} if protected_changed else {}),
         }
 
     def locked_acceptance_spine(self) -> Spine:

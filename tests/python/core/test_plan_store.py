@@ -775,6 +775,138 @@ def test_publish_gate_questions_and_assumption_register(store):
     assert assumption in {row["id"] for row in store._open("assumptions")}
 
 
+@pytest.mark.parametrize("edit", ["protected", "unchanged", "semantic"])
+def test_saved_manifest_impact_preserves_protected_reason_and_existing_sets(tmp_path, capsys, edit):
+    """Real public reporting parity; no worker or proof-reuse claim is made."""
+    from tests.python.core.test_mcp_planner import rpc
+
+    from codex_harness.core import plan_cli
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    producer = tmp_path / "producer"
+    template = producer / "template"
+    shutil.copytree(FIXTURE.parent / "template", template)
+    with open_plan_store(producer) as local:
+        local.import_spine(FIXTURE)
+        unrelated = local.spine().node("A")
+        unrelated.update(id="C", title="Unrelated C", parents=["R6"])
+        unrelated["fields"].update(
+            ownedFiles=["tipsplit/unrelated.py"],
+            proofModule="test_cli.py",
+            dependsOn=[],
+            lessons=[],
+        )
+        local.upsert_node(unrelated)
+        baseline = local.compile_template(template)
+        baseline_spine = producer / "baseline-spine.json"
+        local.export_spine(baseline_spine)
+    saved = producer / "baseline-manifest.json"
+    saved.write_text(json.dumps(baseline), encoding="utf-8")
+    foreign = tmp_path / "foreign"
+    shutil.copytree(template, foreign / "template")
+    with open_plan_store(foreign) as external:
+        external.import_spine(baseline_spine)
+        assert not external.connection.execute(
+            "SELECT 1 FROM events WHERE kind='manifest-compiled'"
+        ).fetchall()
+
+    results, traces = {}, []
+    for origin, workspace in [("local", producer), ("foreign", foreign)]:
+        with open_plan_store(workspace) as current:
+            if edit == "protected":
+                proof = workspace / "template/tests/test_money.py"
+                proof.write_bytes(proof.read_bytes() + b"\n# Changed protected proof fixture\n")
+            elif edit == "semantic":
+                bead = current.spine().node("A")
+                bead["title"] += " revised source contract"
+                current.upsert_node(bead)
+            protected_changed = (
+                compile_manifest(current.spine(), workspace / "template")[
+                    "requirementFilesRevision"
+                ]
+                != baseline["requirementFilesRevision"]
+            )
+            assert protected_changed is (edit == "protected")
+            before = list(current.connection.iterdump())
+            manifest_bytes = saved.read_bytes()
+            assert (
+                plan_cli.main(
+                    ["--workspace", str(workspace), "--json", "impact", "--since", str(saved)]
+                )
+                == 0
+            )
+            cli = json.loads(capsys.readouterr().out)
+            server = PlannerServer(workspace)
+            try:
+                mcp = rpc(
+                    server,
+                    "tools/call",
+                    {"name": "harness_impact", "arguments": {"since": str(saved)}},
+                )["result"]
+            finally:
+                server.close()
+            assert not cli["isError"] and not mcp["isError"]
+            assert cli["data"] == mcp["structuredContent"] == current.impact_since(str(saved))
+            assert list(current.connection.iterdump()) == before
+            assert saved.read_bytes() == manifest_bytes
+            result = cli["data"]
+            if edit == "unchanged":
+                expected = dict(
+                    changed=[],
+                    affected=[],
+                    affectedBeads=[],
+                    affectedTests=[],
+                    untouchedBeads=["A", "B", "C"],
+                    staleDocs=[],
+                )
+            elif edit == "protected" and origin == "local":
+                expected = dict(
+                    changed=[],
+                    affected=["A", "B", "C", "test_cli", "test_end_to_end", "test_money"],
+                    affectedBeads=["A", "B", "C"],
+                    affectedTests=["test_cli", "test_end_to_end", "test_money"],
+                    untouchedBeads=[],
+                    staleDocs=[],
+                )
+            elif edit == "protected":
+                expected = dict(
+                    changed=["A", "B", "C"],
+                    affected=["A", "B", "C"],
+                    affectedBeads=["A", "B", "C"],
+                    affectedTests=["test_cli.py", "test_money.py"],
+                    untouchedBeads=[],
+                    staleDocs=["PLAN.md"],
+                )
+            elif origin == "local":
+                expected = dict(
+                    changed=["A"],
+                    affected=["A", "test_money"],
+                    affectedBeads=["A"],
+                    affectedTests=["test_money"],
+                    untouchedBeads=["B", "C"],
+                    staleDocs=["PLAN.md", "TRACE.md"],
+                )
+            else:
+                expected = dict(
+                    changed=["A"],
+                    affected=["A", "B"],
+                    affectedBeads=["A", "B"],
+                    affectedTests=["test_cli.py", "test_money.py"],
+                    untouchedBeads=["C"],
+                    staleDocs=["PLAN.md"],
+                )
+            assert {key: result[key] for key in expected} == expected
+            results[origin] = result
+            traces.append(dict(origin=origin, edit=edit, CLI=cli, MCP=mcp, expectedSets=expected))
+    print(json.dumps({"publicImpactTraces": traces}))
+    if edit == "protected":
+        # Existing local reason is the oracle; all preexisting conservative sets above hold.
+        assert results["local"]["protectedFilesChanged"] is True
+        assert results["foreign"].get("protectedFilesChanged") is True
+    else:
+        assert all(not result.get("protectedFilesChanged", False) for result in results.values())
+
+
 def test_happy_path_publish_frozen_artifacts_idempotency_and_impact(store, tmp_path):
     _link_r6(store)
     assumption = store.add_assumption("Dollars only", ["V1"])
