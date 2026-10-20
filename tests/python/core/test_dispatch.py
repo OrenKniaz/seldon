@@ -125,7 +125,12 @@ def test_failure_mail_is_delivered_once_per_event_including_resume(tmp_path):
         (worktree / "A.py").write_text("VALUE = 2\n")
 
     _bind_protected(plan)
-    record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": failed_worker})
+    record = run_plan(
+        plan,
+        work_root=tmp_path / "runs",
+        mock_provider="reference",
+        fake_workers={"A": failed_worker},
+    )
     mailbox = Mailbox(record["memoryWorkspace"])
     messages = mailbox.inbox("planner")
     assert len(messages) == 3  # A failed, B blocked, whole plan failed: distinct events.
@@ -219,7 +224,9 @@ def test_dispatch_worker_blocker_is_forwarded_once_with_spec_refs(tmp_path, sign
         (directory / "events.jsonl").write_text(json.dumps(event))
 
     _bind_protected(plan)
-    record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": blocked})
+    record = run_plan(
+        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": blocked}
+    )
     a = record["beads"]["A"]
     assert a["status"] == "blocked: worker reported"
     assert a["workerReport"] == (
@@ -259,7 +266,9 @@ def test_dispatch_no_change_stores_report_and_attempt_efficiency(tmp_path):
         (directory / "events.jsonl").write_text(json.dumps(event))
 
     _bind_protected(plan)
-    record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": unchanged})
+    record = run_plan(
+        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": unchanged}
+    )
     a = record["beads"]["A"]
     assert a["status"] == "rejected: no source change"
     assert a["workerReport"] == report[:4000]
@@ -278,7 +287,9 @@ def test_dispatch_block_marker_beyond_report_cap_is_observed(tmp_path):
         (worktree.parent / "evidence/A/attempt/events.jsonl").write_text(json.dumps(event))
 
     _bind_protected(plan)
-    record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": unchanged})
+    record = run_plan(
+        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": unchanged}
+    )
     assert record["beads"]["A"]["status"] == "blocked: worker reported"
     assert len(record["beads"]["A"]["workerReport"]) == 4000
 

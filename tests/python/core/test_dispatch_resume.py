@@ -41,7 +41,9 @@ def test_dispatch_resume_recovers_worker_blocker_without_duplicate_mail(tmp_path
             )
         )
 
-    first = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": blocked})
+    first = run_plan(
+        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": blocked}
+    )
     mailbox = Mailbox(first["memoryWorkspace"])
     before = mailbox.inbox("planner")
     resumed = run_plan(
@@ -152,7 +154,9 @@ def test_dispatch_resume_retries_blocker_and_releases_dependent(tmp_path, monkey
         (worktree / ".harness").mkdir()
         (worktree / ".harness/blocker.json").write_text(json.dumps(blocker))
 
-    first = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": blocked})
+    first = run_plan(
+        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": blocked}
+    )
     old = first["beads"]["A"]
     old_request = Path(old["evidenceDir"]) / "attempt/request.json"
     assert json.loads(old_request.read_text())["prompt"] == old["prompt"]
@@ -210,7 +214,9 @@ def test_run_plan_cli_retry_blocked(tmp_path, flag, capsys):
         (worktree / ".harness").mkdir()
         (worktree / ".harness/blocker.json").write_text('{"reason": "fixed externally"}')
 
-    first = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": blocked})
+    first = run_plan(
+        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": blocked}
+    )
     main = runpy.run_path(str(FIXTURE.parents[1] / "scripts/run_plan.py"))["main"]
     assert (
         main(
@@ -237,14 +243,33 @@ def test_run_plan_cli_retry_blocked(tmp_path, flag, capsys):
 @pytest.mark.parametrize("failure", ["command", "spawn"])
 def test_dispatch_resume_prelaunch_failure_is_not_redispatched(tmp_path, monkeypatch, failure):
     plan = _plan(tmp_path)
-    first = run_plan(plan, work_root=tmp_path / "runs", mock_provider="noop")
 
     def fail_before_launch(*args, **kwargs):
         raise ValueError("provider command rejected before launch")
 
     if failure == "command":
+        first = run_plan(plan, work_root=tmp_path / "runs", mock_provider="noop")
         monkeypatch.setattr(dispatch, "_attempt_bead", fail_before_launch)
+        options = {"mock_provider": "reference"}
     else:
+        from tests.python.core.execution_support import source_execution_context
+
+        context = source_execution_context(tmp_path / "canonical", plan, timeout=10, call_cap=2)
+        plan = context["plan"]
+        options = context["kwargs"]
+        monkeypatch.setattr(
+            dispatch,
+            "get_adapter",
+            lambda _: SimpleNamespace(provider_normal_command=fail_before_launch),
+        )
+        # The actual owned controller binds the initial run before the builder
+        # fails. Resume must use that original, without a fabricated run binding.
+        first = run_plan(plan, work_root=context["runs"], **options)
+        assert "provider command rejected" in first["beads"]["A"]["status"]
+        original = json.loads((context["directory"] / "dispatch-run.json").read_text())
+        assert Path(original["runDir"]) == _run_dir(first)
+        budget = context["directory"] / "provider-call-budget"
+        assert not budget.exists()
         launch = SimpleNamespace(
             command=(str(tmp_path / "nonexistent-provider.exe"),),
             environment={},
@@ -255,16 +280,39 @@ def test_dispatch_resume_prelaunch_failure_is_not_redispatched(tmp_path, monkeyp
             "get_adapter",
             lambda _: SimpleNamespace(provider_normal_command=lambda **kwargs: launch),
         )
+        popen = subprocess.Popen
+        failed_spawns = []
+
+        def observe_spawn(command, *args, **kwargs):
+            if tuple(command) == launch.command:
+                failed_spawns.append(list(command))
+            return popen(command, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", observe_spawn)
     resumed = run_plan(
         plan,
         work_root=tmp_path / "unused",
         resume_run_dir=_run_dir(first),
-        mock_provider="reference" if failure == "command" else None,
+        **options,
     )
     assert (
         "provider command rejected" if failure == "command" else "provider launch-failed"
     ) in resumed["beads"]["A"]["status"]
     assert resumed["resumeSummary"]["redispatched"] == []
+    if failure == "spawn":
+        assert failed_spawns == [list(launch.command)]
+        assert resumed["runId"] == first["runId"] and resumed["repo"] == first["repo"]
+        assert json.loads((context["directory"] / "dispatch-run.json").read_text()) == original
+        assert len(list((context["directory"] / "dispatch-resume").glob("*.json"))) == 1
+        claims = list(budget.glob("*.json"))
+        assert len(claims) == 1  # A failed Popen still consumes the original finite cap.
+        attempt = Path(resumed["beads"]["A"]["evidenceDir"]) / "attempt"
+        assert Path(json.loads(claims[0].read_text())["attemptDir"]) == attempt
+        result = json.loads((attempt / "result.json").read_text())
+        assert result["status"] == "launch-failed" and result["processId"] is None
+        assert result["failure"]["type"] == "FileNotFoundError"
+        assert not result["didRunProvider"] and not result["isMocked"]
+        assert not (attempt / "process-provenance.json").exists()
 
 
 def test_dispatch_resume_efficiency_reuses_attempts_without_double_counting(tmp_path):
@@ -514,7 +562,9 @@ def test_dispatch_ambiguous_launch_requires_explicit_relaunch(tmp_path: Path) ->
         assert (worktree.parent / "evidence/A/attempt/request.json").exists()
         raise RuntimeError("crash after durable launch record")
 
-    first = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": crash})
+    first = run_plan(
+        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": crash}
+    )
     run_dir = _run_dir(first)
     request_path = run_dir / "evidence/A/attempt/request.json"
     original_request = request_path.read_text()
