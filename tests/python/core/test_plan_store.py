@@ -7,10 +7,14 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import publication_evidence, source_only_confirmation
+from tests.python.core.planning_support import (
+    publication_evidence,
+    source_controller_roundtable,
+    source_only_confirmation,
+)
 
 from codex_harness.core.graph import PlanError, load_plan
-from codex_harness.core.plan_store import PHASES, open_plan_store
+from codex_harness.core.plan_store import PHASES, PlanStoreError, open_plan_store
 from codex_harness.core.spine import MARKDOWN_FILES, SpineError, compile_manifest, load_spine
 from codex_harness.core.spine_render import render_markdown
 
@@ -1077,3 +1081,238 @@ def test_publish_binds_workspace_template_and_requires_current_publication(store
         assert reopened.published_manifest(second) == compile_manifest(reopened.spine(), template)
         assert reopened.publish(by="planner", export_dir=exports) == second
         reopened.advance("execute", by="planner")
+
+
+def _closure_policy_fixture(store, *, adopted=True, with_finding=True):
+    """Actual store/review producers with source-only process and audit envelopes."""
+    from codex_harness.core.roundtable import findings
+
+    _link_r6(store)
+    _to(store, "roundtable")
+    revision = store.manifest_revision()
+    slots = [dict(name="closure-reviewer", provider="codex", required=True)]
+    if adopted:
+        store.record_plan_review_policy(slots, revision)
+    reviewer = dict(name="closure-reviewer", provider="codex")
+    reviewed = source_controller_roundtable(
+        store,
+        reviewers=[reviewer],
+        executable_for=lambda provider: provider,
+        process_stub=lambda *_: (
+            0,
+            json.dumps(
+                [
+                    dict(
+                        node_id="R1",
+                        severity="major",
+                        finding="Accepted contract still defective",
+                        suggestion="Inspect the original requirement and product evidence",
+                    )
+                ]
+                if with_finding
+                else []
+            ),
+        ),
+    )
+    audit_id = store.record_audit(
+        revision,
+        {
+            "ok": True,
+            "isMocked": True,
+            "sourceOnly": "Bookkeeping; not real audit proof",
+        },
+    )
+    return revision, reviewer, reviewed, audit_id, findings(store)
+
+
+def _closure_declaration_fixture(store, rows, reviewed, audit_id, disposition):
+    node = store.connection.execute("SELECT revision FROM nodes WHERE id='R1'").fetchone()[0]
+    return dict(
+        schema="seldon/finding-closure-declaration-v1",
+        expectedManifestRevision=store.manifest_revision(),
+        memberIds=rows[0]["memberIds"],
+        basis={"resolved": "repair", "rejected": "counterevidence", "deferred": "defer"}[
+            disposition
+        ],
+        nodeRefs=[dict(nodeId="R1", revision=node)],
+        reviewIds=[reviewed["reviewers"][0]["id"]]
+        if "id" in reviewed["reviewers"][0]
+        else [
+            store.connection.execute(
+                "SELECT id FROM review_runs WHERE round_id=?", (reviewed["roundId"],)
+            ).fetchone()[0]
+        ],
+        auditIds=[audit_id],
+        obligationNodeIds=["R1"],
+    )
+
+
+def test_policy_writer_is_pre_attempt_immutable_and_does_not_relabel_legacy(store):
+    revision, _, _, _, _ = _closure_policy_fixture(store, adopted=False, with_finding=False)
+    original = list(store.connection.iterdump())
+    assert store.plan_review_policy_state(revision)["active"] is False
+    with pytest.raises(PlanStoreError, match="Declare roles before"):
+        store.record_plan_review_policy(
+            [
+                dict(name="closure-reviewer", provider="codex", required=False),
+                dict(name="other", provider="claude", required=True),
+            ],
+            revision,
+        )
+    assert list(store.connection.iterdump()) == original
+    assert len(store.successful_reviews(revision)) == 1
+
+
+def test_policy_roles_cannot_be_downgraded_after_required_failure(store):
+    revision, reviewer, _, _, _ = _closure_policy_fixture(store, with_finding=False)
+    source_controller_roundtable(
+        store,
+        reviewers=[reviewer],
+        executable_for=lambda provider: provider,
+        process_stub=lambda *_: (7, "SOURCE-only failed review"),
+    )
+    assert store.successful_reviews(revision) == []
+    with pytest.raises(PlanStoreError, match="Existing reviewer roles are immutable"):
+        store.record_plan_review_policy(
+            [
+                dict(name="closure-reviewer", provider="codex", required=False),
+                dict(name="other", provider="claude", required=True),
+            ],
+            revision,
+        )
+    with pytest.raises(PlanStoreError, match="Prospective review policy held") as held:
+        store._check_evidence(revision)
+    assert held.value.code == "plan-review-policy-unmet"
+
+
+def test_clean_policy_review_retains_ordinary_empty_array_credit_without_independence_claim(store):
+    revision, _, _, _, _ = _closure_policy_fixture(store, with_finding=False)
+    state = store.plan_review_policy_state(revision)
+    assert state["eligible"] is True and state["closureFindings"] == []
+    assert len(store.successful_reviews(revision)) == 1
+    assert state["producerAvailability"]["observedSeparation"] == "unavailable"
+    assert state["producerAvailability"]["targetedAssessment"] == "unavailable"
+    store._check_evidence(revision)
+
+
+@pytest.mark.parametrize("disposition", ["resolved", "rejected", "deferred"])
+def test_supported_closure_links_remain_declarations_without_independent_producer(
+    store, disposition
+):
+    revision, _, reviewed, audit_id, rows = _closure_policy_fixture(store)
+    original_node = store.connection.execute("SELECT revision FROM nodes WHERE id='R1'").fetchone()[
+        0
+    ]
+    declaration = _closure_declaration_fixture(store, rows, reviewed, audit_id, disposition)
+    reason = {
+        "resolved": "fixed",
+        "rejected": "Counterargument: compare the linked original",
+        "deferred": "Retain R1 in the locked obligation set",
+    }[disposition]
+    store.resolve_findings(
+        [dict(id=rows[0]["id"], status=disposition, resolution=reason, closure=declaration)]
+    )
+    assert (
+        store.connection.execute("SELECT revision FROM nodes WHERE id='R1'").fetchone()[0]
+        == original_node
+    )
+    state = store.plan_review_policy_state(revision)
+    assert not state["eligible"]
+    finding = state["closureFindings"][0]
+    assert finding["closure"] == "unverified" and finding["disposition"] == disposition
+    assert finding["declaration"]["basis"] == declaration["basis"]
+    assert finding["retainedObligation"] is True
+    assert finding["deferred"] is (disposition == "deferred")
+    assert "observed-separation-producer-unavailable" in finding["reasons"]
+    with pytest.raises(PlanStoreError, match="Prospective review policy held") as held:
+        store._check_evidence(revision)
+    assert held.value.code == "plan-review-policy-unmet"
+    assert store.review(reviewed["roundId"])["reviewPolicy"] == state
+    requirement = store.spine().node("R1")
+    requirement["text"] += " Same locked obligation, explicit evidence inspection pending."
+    store.upsert_node(requirement)
+    refreshed = store.plan_review_policy_state(store.manifest_revision())
+    assert "review-policy-revision-stale" in refreshed["reasons"]
+    assert refreshed["closureFindings"][0]["retainedObligation"] is True
+    assert refreshed["closureFindings"][0]["declarationBindingCurrent"] is False
+
+
+@pytest.mark.parametrize(
+    "field", ["reviewIds", "auditIds", "expectedManifestRevision", "nodeRefs", "memberIds"]
+)
+def test_fabricated_or_stale_closure_references_refuse_atomically(store, field):
+    _, _, reviewed, audit_id, rows = _closure_policy_fixture(store)
+    declaration = _closure_declaration_fixture(store, rows, reviewed, audit_id, "resolved")
+    declaration[field] = {
+        "nodeRefs": [dict(nodeId="R1", revision="f" * 64)],
+        "expectedManifestRevision": "f" * 64,
+    }.get(field, ["invented"])
+    before = list(store.connection.iterdump())
+    with pytest.raises(ValueError, match="review-closure-"):
+        store.resolve_findings(
+            [dict(id=rows[0]["id"], status="resolved", resolution="fixed", closure=declaration)]
+        )
+    assert list(store.connection.iterdump()) == before
+
+
+def test_plain_nonempty_resolution_and_legacy_empty_rereview_do_not_certify_repair(store):
+    revision, reviewer, _, _, rows = _closure_policy_fixture(store)
+    store.resolve_findings([dict(id=rows[0]["id"], status="resolved", resolution="fixed")])
+    source_controller_roundtable(
+        store,
+        reviewers=[reviewer],
+        executable_for=lambda provider: provider,
+        process_stub=lambda *_: (0, "[]"),
+    )
+    state = store.plan_review_policy_state(revision)
+    assert state["closureFindings"][0]["declaration"] is None
+    assert state["closureFindings"][0]["closure"] == "unverified"
+    with pytest.raises(PlanStoreError, match="Prospective review policy held") as held:
+        store._check_evidence(revision)
+    assert held.value.code == "plan-review-policy-unmet"
+
+
+def test_policy_stale_revision_holds_without_revoking_legacy_history(store):
+    old, _, _, _, _ = _closure_policy_fixture(store, adopted=False, with_finding=False)
+    original_runs = [tuple(row) for row in store.connection.execute("SELECT * FROM review_runs")]
+    requirement = store.spine().node("R1")
+    requirement["text"] += " Clarify the existing required output contract."
+    store.upsert_node(requirement)
+    current = store.manifest_revision()
+    assert current != old
+    store.record_plan_review_policy(
+        [
+            dict(name="closure-reviewer", provider="codex", required=True),
+        ],
+        current,
+    )
+    assert len(store.successful_reviews(old)) == 1  # historical ordinary read, no new credit
+    assert store.successful_reviews(current) == []
+    node = store.spine().node("R1")
+    node["text"] += " Preserve case in that output."
+    store.upsert_node(node)
+    newest = store.manifest_revision()
+    state = store.plan_review_policy_state(newest)
+    assert state["active"] and state["reasons"] == ["review-policy-revision-stale"]
+    with pytest.raises(PlanStoreError, match="Prospective review policy held"):
+        store._check_evidence(newest)
+    assert [
+        tuple(row) for row in store.connection.execute("SELECT * FROM review_runs")
+    ] == original_runs
+
+
+def test_existing_audit_from_wrong_revision_cannot_support_closure(store):
+    _, _, reviewed, audit_id, rows = _closure_policy_fixture(store)
+    old = store.manifest_revision()
+    requirement = store.spine().node("R1")
+    requirement["text"] += " Clarified expected output before a fresh audit."
+    store.upsert_node(requirement)
+    assert store.manifest_revision() != old
+    declaration = _closure_declaration_fixture(store, rows, reviewed, audit_id, "resolved")
+    declaration["reviewIds"] = []  # Isolate the actual stale audit record, not a missing record.
+    before = list(store.connection.iterdump())
+    with pytest.raises(ValueError, match="review-closure-record-stale-or-absent: auditIds"):
+        store.resolve_findings(
+            [dict(id=rows[0]["id"], status="resolved", resolution="fixed", closure=declaration)]
+        )
+    assert list(store.connection.iterdump()) == before

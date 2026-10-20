@@ -114,6 +114,19 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
         "open": len(unresolved),
         "openFindingIds": unresolved,
     }
+    policy = store.plan_review_policy_state(revision)
+    if policy["active"]:
+        evidence["reviewPolicy"] = policy
+        if not policy["eligible"]:
+            return (
+                "fail",
+                evidence,
+                "Prospective review policy held: "
+                + ", ".join(policy["reasons"])
+                + ". Repair required work; retry only within existing authorization. "
+                "Targeted assessment/observed-separation producers are unavailable; "
+                "author claims cannot certify closure.",
+            )
     passed = len(reviewers) >= 2 and len(providers) >= 2 and not unresolved
     advice = "" if passed else "Resolve all open findings."
     if len(providers) == 1:
@@ -122,6 +135,18 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
             "cross-subscription evidence is missing. " + advice
         )
     failed_providers = attempted - set(providers)
+    if policy["active"]:
+        # Only roles explicitly declared optional before attempts receive this
+        # disclosure. No legacy/default failure is silently made optional.
+        # Role metadata does not waive the existing quality threshold: one
+        # successful provider plus an attempted failed provider still fails.
+        if policy["optionalFailures"]:
+            advice = (
+                "Reduced assurance: optional reviews not passed: "
+                + ", ".join(policy["optionalFailures"])
+                + ". "
+                + advice
+            )
     if failed_providers:
         advice = (
             "Missing successful review from "
@@ -135,7 +160,13 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
         if unresolved:
             advice += "; resolve all open findings."
     return (
-        "pass" if passed else "fail" if not providers or failed_providers else "warn",
+        "warn"
+        if passed and policy["active"] and policy["optionalFailures"]
+        else "pass"
+        if passed
+        else "fail"
+        if not providers or failed_providers
+        else "warn",
         evidence,
         advice,
     )

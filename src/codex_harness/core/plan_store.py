@@ -1477,6 +1477,20 @@ class PlanStore:
                     counts[finding["status"]] = counts.get(finding["status"], 0) + 1
             row["findingCounts"] = counts
             row["findings"] = sum(counts.values())
+        policy = self.plan_review_policy_state(self.manifest_revision())
+        if policy["active"]:
+            result["reviewPolicy"] = policy
+        member_ids = {row["id"] for row in findings}
+        declarations = [
+            json.loads(row[0])
+            for row in self.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='finding-closure-declared' ORDER BY id"
+            )
+        ]
+        if any(member_ids.intersection(item["memberIds"]) for item in declarations):
+            result["closureDeclarations"] = [
+                item for item in declarations if member_ids.intersection(item["memberIds"])
+            ]
         return result
 
     def readiness_reviews(self, revision: str | None = None) -> list[dict]:
@@ -1494,6 +1508,251 @@ class PlanStore:
         return readiness_status(
             self, revision if revision is not None else self.manifest_revision()
         )
+
+    def record_plan_review_policy(self, slots: list[dict], expected_revision: str) -> dict:
+        """Prospective plan-stage roles only; no identity, permission or review credit.
+
+        Existing records cannot be reclassified. Model/effort and independence
+        observations require their owning producers, not supplied role metadata.
+        """
+        from codex_harness.core.roundtable import _table
+
+        if not isinstance(slots, list) or not slots:
+            raise ValueError("review-policy-slots-required")
+        names = set()
+        normalized = []
+        for slot in slots:
+            if not isinstance(slot, dict) or set(slot) != {"name", "provider", "required"}:
+                raise ValueError("review-policy-slot-requires-name-provider-required")
+            _nonempty(slot["name"], "reviewer name")
+            if slot["provider"] not in {"codex", "claude", "copilot"}:
+                raise ValueError("review-policy-provider-invalid")
+            if type(slot["required"]) is not bool or slot["name"] in names:
+                raise ValueError("review-policy-role-or-name-invalid")
+            names.add(slot["name"])
+            normalized.append(dict(slot))
+        if not any(slot["required"] for slot in normalized):
+            raise ValueError("review-policy-required-slot-missing")
+        payload = dict(
+            schema="seldon/plan-review-policy-v1",
+            manifestRevision=expected_revision,
+            stage="plan",
+            slots=sorted(normalized, key=lambda row: row["name"]),
+        )
+        with self._transaction():
+            if not expected_revision or self.manifest_revision() != expected_revision:
+                raise PlanStoreError("review-policy-revision-stale", "Compile and refresh first")
+            prior = self._plan_review_policies()
+            same = [row for row in prior if row["payload"]["manifestRevision"] == expected_revision]
+            if same:
+                if same[-1]["payload"] == payload:
+                    return payload
+                raise PlanStoreError("review-policy-fixed", "Existing reviewer roles are immutable")
+            _table(self)
+            for table in ("review_runs", "review_attempts"):
+                exists = self.connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+                if (
+                    exists
+                    and self.connection.execute(
+                        f"SELECT 1 FROM {table} WHERE plan_revision=? LIMIT 1", (expected_revision,)
+                    ).fetchone()
+                ):
+                    raise PlanStoreError(
+                        "review-policy-attempts-exist", "Declare roles before any review attempts"
+                    )
+            self._event("plan-review-policy-declared", payload)
+        return payload
+
+    def _plan_review_policies(self) -> list[dict]:
+        return [
+            dict(id=row["id"], at=row["at"], payload=json.loads(row["payload_json"]))
+            for row in self.connection.execute(
+                "SELECT id, at, payload_json FROM events "
+                "WHERE kind='plan-review-policy-declared' ORDER BY id"
+            )
+        ]
+
+    def _prospective_closure_facts(self, adopted_at: str, revision: str) -> list[dict]:
+        from codex_harness.core.roundtable import findings
+
+        declarations = [
+            json.loads(row[0])
+            for row in self.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='finding-closure-declared' ORDER BY id"
+            )
+        ]
+        result = []
+        for row in findings(self, expand=True):
+            if row.get("stage") == "readiness" or row["created_at"] < adopted_at:
+                continue
+            declaration = next(
+                (item for item in reversed(declarations) if row["id"] in item["memberIds"]), None
+            )
+            result.append(
+                dict(
+                    id=row["id"],
+                    nodeId=row["node_id"],
+                    disposition=row["status"],
+                    recordedRevision=row["plan_revision"],
+                    closure="unverified",
+                    reasons=[
+                        "targeted-assessment-producer-unavailable",
+                        "observed-separation-producer-unavailable",
+                    ],
+                    retainedObligation=True,
+                    deferred=row["status"] == "deferred",
+                    obligationVerification="unverified",
+                    declaration=declaration,
+                    declarationBindingCurrent=bool(
+                        declaration
+                        and declaration["expectedManifestRevision"] == revision
+                        and declaration["status"] == row["status"]
+                    ),
+                )
+            )
+        return result
+
+    def plan_review_policy_state(self, revision: str) -> dict:
+        """One derived prospective gate projection; legacy history keeps its old credit.
+
+        No general observed-separation, clause-witness or targeted-assessment
+        producer exists here. Author references cannot fill those gaps.
+        """
+        policies = self._plan_review_policies()
+        if not policies:
+            return {"active": False, "mode": "legacy", "eligible": None}
+        latest = policies[-1]
+        policy = latest["payload"]
+        result = dict(
+            active=True,
+            schema="seldon/plan-review-policy-state-v1",
+            stage="plan",
+            workspace=str(self.workspace),
+            policyEventId=latest["id"],
+            manifestRevision=revision,
+            declaredRevision=policy["manifestRevision"],
+            eligible=False,
+            slots=[],
+            requiredFailures=[],
+            optionalFailures=[],
+            successfulReviewIds=[],
+            closureFindings=self._prospective_closure_facts(policies[0]["at"], revision),
+            producerAvailability=dict(
+                observedSeparation="unavailable",
+                targetedAssessment="unavailable",
+                clauseWitness="unavailable",
+            ),
+            reasons=[],
+            roleBinding=(
+                "Persisted reviewer/provider only; no observed model/effort or author identity"
+            ),
+        )
+        if policy["manifestRevision"] != revision:
+            result["reasons"] = ["review-policy-revision-stale"]
+            return result
+        runs_exist = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
+        ).fetchone()
+        runs = (
+            [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM review_runs WHERE plan_revision=? "
+                    "ORDER BY finished_at DESC, rowid DESC",
+                    (revision,),
+                )
+            ]
+            if runs_exist
+            else []
+        )
+        attempts_exist = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_attempts'"
+        ).fetchone()
+        attempts = (
+            [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT rowid AS reservation_order, * FROM review_attempts "
+                    "WHERE plan_revision=? ORDER BY rowid DESC",
+                    (revision,),
+                )
+            ]
+            if attempts_exist
+            else []
+        )
+        run_ids = {row["id"] for row in runs}
+        incomplete = [row for row in attempts if row["id"] not in run_ids]
+        declared = {(slot["name"], slot["provider"]) for slot in policy["slots"]}
+        undeclared = sorted(
+            {(row["reviewer"], row["provider"]) for row in runs + incomplete} - declared
+        )
+        if undeclared:
+            result["reasons"].append("review-policy-undeclared-attempt")
+            result["unlistedReviewers"] = [
+                dict(name=name, provider=provider) for name, provider in undeclared
+            ]
+        for slot in policy["slots"]:
+            matches = [
+                row
+                for row in runs
+                if (row["reviewer"], row["provider"]) == (slot["name"], slot["provider"])
+            ]
+            pending = any(
+                (row["reviewer"], row["provider"]) == (slot["name"], slot["provider"])
+                for row in incomplete
+            )
+            reserved = [
+                row
+                for row in attempts
+                if (row["reviewer"], row["provider"]) == (slot["name"], slot["provider"])
+            ]
+            reserved_ids = {row["id"] for row in reserved}
+            # Reservations commit before launch; completion timestamps cannot order
+            # overlapping attempts. Any unresolved reservation still holds, even
+            # when an apparently newer attempt passed. Mixed provenance cannot
+            # establish ordering and also holds instead of inventing a winner.
+            ambiguous = bool(reserved and any(row["id"] not in reserved_ids for row in matches))
+            run = (
+                next((row for row in matches if row["id"] == reserved[0]["id"]), None)
+                if reserved
+                else matches[0]
+                if matches
+                else None
+            )
+            success = bool(
+                run
+                and not pending
+                and not ambiguous
+                and run["exit_code"] == 0
+                and run["invalid"] == 0
+                and run.get("isMocked") == 0
+                and run.get("didRunProvider") == 1
+                and run.get("packetBound") == 1
+            )
+            observation = dict(
+                **slot,
+                state="passed" if success else "unverified-or-failed",
+                latestReviewId=run["id"] if run else None,
+                latestAttemptId=reserved[0]["id"] if reserved else None,
+                attemptOrdering="reservation-rowid" if reserved else "legacy-completion-fallback",
+                ambiguousAttemptOrder=ambiguous,
+                incompleteAttempt=pending,
+            )
+            result["slots"].append(observation)
+            if success:
+                result["successfulReviewIds"].append(run["id"])
+            else:
+                result["requiredFailures" if slot["required"] else "optionalFailures"].append(
+                    slot["name"]
+                )
+        if result["requiredFailures"]:
+            result["reasons"].append("review-required-latest-attempt-not-passed")
+        if result["closureFindings"]:
+            result["reasons"].append("review-closure-unverified")
+        result["eligible"] = not result["reasons"]
+        return result
 
     def successful_reviews(self, revision: str) -> list[dict]:
         """Latest explicitly real successful run per provider; unknown history is excluded."""
@@ -1524,9 +1783,39 @@ class PlanStore:
             (revision,),
         ):
             latest.setdefault(row["provider"], dict(row))
-        return [latest[key] for key in sorted(latest)]
+        result = [latest[key] for key in sorted(latest)]
+        policy = self.plan_review_policy_state(revision)
+        if policy["active"] and revision == self.manifest_revision():
+            allowed = set(policy["successfulReviewIds"])
+            # Resolve latest per required/optional slot before provider aggregation;
+            # older successes cannot mask failed latest attempts after adoption.
+            eligible = [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM review_runs WHERE plan_revision=? "
+                    "ORDER BY finished_at DESC, rowid DESC",
+                    (revision,),
+                )
+                if row["id"] in allowed
+            ]
+            result = []
+            providers = set()
+            for row in eligible:
+                if row["provider"] not in providers:
+                    providers.add(row["provider"])
+                    result.append(row)
+        return result
 
     def _check_evidence(self, revision: str) -> None:
+        policy = self.plan_review_policy_state(revision)
+        if policy["active"] and not policy["eligible"]:
+            raise PlanStoreError(
+                "plan-review-policy-unmet",
+                "Prospective review policy held: "
+                + _json(policy)
+                + ". Failed required reviews need a current retry within existing authorization; "
+                "unavailable assessment/identity producers cannot be replaced by author claims.",
+            )
         missing = []
         if not self.passing_audit(revision):
             missing.append("passing audit (audit --oracle oracle)")
@@ -2013,6 +2302,86 @@ class PlanStore:
             )
         return len(clusters)
 
+    def _closure_declaration(self, closure, row, members, status):
+        """Validate links, never infer semantic truth or observed independence."""
+        required = {
+            "schema",
+            "expectedManifestRevision",
+            "memberIds",
+            "basis",
+            "nodeRefs",
+            "reviewIds",
+            "auditIds",
+            "obligationNodeIds",
+        }
+        if not isinstance(closure, dict) or set(closure) != required:
+            raise ValueError(
+                "review-closure-contract-invalid: expected " + ", ".join(sorted(required))
+            )
+        revision = self.manifest_revision()
+        if closure["schema"] != "seldon/finding-closure-declaration-v1":
+            raise ValueError("review-closure-schema-invalid")
+        if closure["expectedManifestRevision"] != revision:
+            raise ValueError("review-closure-revision-stale")
+        if closure["basis"] != {
+            "resolved": "repair",
+            "rejected": "counterevidence",
+            "deferred": "defer",
+        }.get(status):
+            raise ValueError("review-closure-basis-disposition-mismatch")
+        ids = [member["id"] for member in members]
+        if not isinstance(closure["memberIds"], list) or sorted(closure["memberIds"]) != sorted(
+            ids
+        ):
+            raise ValueError("review-closure-member-binding-invalid")
+        refs = closure["nodeRefs"]
+        if not isinstance(refs, list) or not refs:
+            raise ValueError("review-closure-node-evidence-required")
+        nodes = {}
+        for ref in refs:
+            if not isinstance(ref, dict) or set(ref) != {"nodeId", "revision"}:
+                raise ValueError("review-closure-node-reference-invalid")
+            saved = self.connection.execute(
+                "SELECT revision FROM nodes WHERE id=?", (ref["nodeId"],)
+            ).fetchone()
+            if not saved or saved[0] != ref["revision"]:
+                raise ValueError("review-closure-artifact-stale-or-absent")
+            nodes[ref["nodeId"]] = ref["revision"]
+        if row["node_id"] != "plan" and row["node_id"] not in nodes:
+            raise ValueError("review-closure-affected-node-missing")
+        for field, table, binding in (
+            ("reviewIds", "review_runs", "plan_revision"),
+            ("auditIds", "audit_runs", "manifest_revision"),
+        ):
+            values = closure[field]
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError("review-closure-record-reference-invalid")
+            for value in values:
+                saved = self.connection.execute(
+                    f"SELECT {binding} FROM {table} WHERE id=?", (value,)
+                ).fetchone()
+                if not saved or saved[0] != revision:
+                    raise ValueError("review-closure-record-stale-or-absent: " + field)
+        obligations = closure["obligationNodeIds"]
+        if not isinstance(obligations, list) or any(
+            not isinstance(value, str) for value in obligations
+        ):
+            raise ValueError("review-closure-obligation-reference-invalid")
+        for value in obligations:
+            saved = self.connection.execute(
+                "SELECT kind FROM nodes WHERE id=?", (value,)
+            ).fetchone()
+            if not saved or saved[0] not in {"requirement", "vision"}:
+                raise ValueError("review-closure-obligation-reference-invalid")
+        if status == "deferred" and not obligations:
+            raise ValueError("review-closure-deferred-obligation-required")
+        return {
+            **deepcopy(closure),
+            "status": status,
+            "closure": "unverified",
+            "reason": "Targeted assessment and observed separation producers unavailable",
+        }
+
     def resolve_findings(self, dispositions: list[dict]) -> int:
         """Validate the whole batch under one writer lock, then resolve atomically.
 
@@ -2029,7 +2398,10 @@ class PlanStore:
             acceptance = {row["id"]: row for row in self.acceptance_findings()}
             errors, targets, prepared = [], set(), []
             for line, item in enumerate(dispositions, 1):
-                if not isinstance(item, dict) or set(item) != {"id", "status", "resolution"}:
+                if not isinstance(item, dict) or set(item) not in (
+                    {"id", "status", "resolution"},
+                    {"id", "status", "resolution", "closure"},
+                ):
                     errors.append(f"Line {line}: expected id, status and resolution")
                     continue
                 item_id, status, resolution = (item[key] for key in ("id", "status", "resolution"))
@@ -2045,10 +2417,26 @@ class PlanStore:
                 if canonical_id in targets:
                     errors.append(f"Line {line}: Duplicate cluster disposition: {canonical_id}")
                 targets.add(canonical_id)
-                prepared.append((canonical_id, status, resolution, row is not None))
+                declaration = None
+                if "closure" in item:
+                    if row is None:
+                        errors.append(f"Line {line}: acceptance closure producer unavailable")
+                    else:
+                        members = [
+                            member
+                            for member in reviews.values()
+                            if (member["cluster_id"] or member["id"]) == canonical_id
+                        ]
+                        try:
+                            declaration = self._closure_declaration(
+                                item["closure"], row, members, status
+                            )
+                        except (ValueError, TypeError, KeyError) as error:
+                            errors.append(f"Line {line}: {error}")
+                prepared.append((canonical_id, status, resolution, row is not None, declaration))
             if errors:
                 raise ValueError("Invalid dispositions; no changes applied:\n" + "\n".join(errors))
-            for item_id, status, resolution, is_review in prepared:
+            for item_id, status, resolution, is_review, declaration in prepared:
                 if is_review:
                     members = [
                         row
@@ -2070,6 +2458,8 @@ class PlanStore:
                                 "clusteredWith": item_id if member["id"] != item_id else None,
                             },
                         )
+                    if declaration is not None:
+                        self._event("finding-closure-declared", declaration)
                 else:
                     finding = {**acceptance[item_id], "status": status, "resolution": resolution}
                     self.connection.execute(
@@ -2306,6 +2696,7 @@ class PlanStore:
             if index > PHASES.index("vision-lock") and not credit:
                 pending = "approval:vision-lock"
             acceptance = acceptance_status(self)
+            review_policy = self.plan_review_policy_state(current_publication)
             open_findings, open_members = 0, 0
             columns = {
                 row[1] for row in self.connection.execute("PRAGMA table_info(review_findings)")
@@ -2350,6 +2741,7 @@ class PlanStore:
                 "phase_index": index + 1,
                 "acceptance": acceptance,
                 "roundtable": review_totals(self, current_publication),
+                **({"reviewPolicy": review_policy} if review_policy["active"] else {}),
                 "readiness": self.readiness_status(current_publication),
             }
         finally:

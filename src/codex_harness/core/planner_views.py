@@ -20,6 +20,164 @@ NEXT = {
 }
 
 
+POLICY_ADOPTION_WARNING = (
+    "No supported verified finding-closure producer is available. Adopting this optional "
+    "fail-closed policy can leave quality and publication held when findings arise, even after "
+    "author repair, dispositions or a clean rereview. Ordinary policy-free work is unchanged. "
+    "Inspect --policy-schema and its limits before choosing --policy."
+)
+
+
+def plan_review_policy_contract(store) -> dict:
+    """Complete contract for the existing CLI roundtable's optional prospective input."""
+    string = {"type": "string", "minLength": 1}
+    revision = store.manifest_revision()
+    example = dict(
+        schema="seldon/plan-review-policy-v1",
+        stage="plan",
+        expectedManifestRevision=revision,
+        slots=[dict(name="reviewer", provider="codex", required=True)],
+    )
+    existing = [
+        row["payload"]
+        for row in store._plan_review_policies()
+        if row["payload"]["manifestRevision"] == revision
+    ]
+    if existing:
+        example["slots"] = existing[-1]["slots"]
+    return {
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["schema", "stage", "expectedManifestRevision", "slots"],
+            "properties": {
+                "schema": {"type": "string", "enum": ["seldon/plan-review-policy-v1"]},
+                "stage": {"type": "string", "enum": ["plan"]},
+                "expectedManifestRevision": string,
+                "slots": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["name", "provider", "required"],
+                        "properties": {
+                            "name": string,
+                            "required": {"type": "boolean"},
+                            "provider": {
+                                "type": "string",
+                                "enum": [
+                                    "codex",
+                                    "claude",
+                                    "copilot",
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "example": example,
+        "exampleFiles": {
+            "policy.json": example,
+            "reviewer.json": {
+                "name": example["slots"][0]["name"],
+                "provider": example["slots"][0]["provider"],
+            },
+        },
+        "exampleArgs": ["roundtable", "--policy", "@policy.json", "--reviewer", "@reviewer.json"],
+        "adoptionWarning": POLICY_ADOPTION_WARNING,
+        "adoption": "Explicit --policy declaration only, before attempts on this revision. "
+        "Ordinary policy-free roundtables retain legacy behavior, including latest-success "
+        "selection; automatic adoption is not implemented.",
+        "exampleUse": "Save the example with your already authorized reviewer names/providers; "
+        "pass --policy @policy.json with existing --reviewer entries to roundtable. "
+        "At least one required slot; distinct names; roles fixed before attempts. "
+        "This illustrative role choice grants no authorization or model selection.",
+        "limits": "Plan stage only. Existing counts, caps, native approval and final acceptance "
+        "unchanged. Optional metadata never waives existing quality FAIL thresholds. "
+        "Model/effort and independence are not certified by reviewer/provider roles.",
+        "unavailableProducers": [
+            "observed author/reviewer separation",
+            "targeted per-member semantic assessment",
+            "general accepted-clause witness",
+        ],
+        "closureContract": "harness_schema tool=harness_resolve_findings; existing resolve --file "
+        "or MCP array records declarations only, never verified repairs.",
+    }
+
+
+def closure_declaration_example(store) -> dict:
+    """Use real stored IDs/revisions; absent prerequisites are a hold, never placeholders."""
+    from codex_harness.core.roundtable import findings
+
+    if store is None:
+        return {"state": "held", "reason": "Start a plan; no finding/record IDs available"}
+    rows = [row for row in findings(store) if row["status"] == "open"]
+    revision = store.manifest_revision()
+    if not rows or not revision:
+        return {
+            "state": "held",
+            "reason": "A current manifest and recorded open finding are required",
+        }
+    row = rows[0]
+    node_id = row["node_id"]
+    if node_id == "plan":
+        node_id = store.spine().ids("vision")[0]
+    node = store.connection.execute("SELECT revision FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if node is None:
+        return {"state": "held", "reason": "Affected node unavailable; inspect the recorded review"}
+    return {
+        "state": "declaration-only",
+        "example": {
+            "findings": [
+                dict(
+                    id=row["id"],
+                    status="resolved",
+                    resolution="Record the actual evidence and limitations",
+                    closure=dict(
+                        schema="seldon/finding-closure-declaration-v1",
+                        expectedManifestRevision=revision,
+                        memberIds=row["memberIds"],
+                        basis="repair",
+                        nodeRefs=[dict(nodeId=node_id, revision=node[0])],
+                        reviewIds=[],
+                        auditIds=[],
+                        obligationNodeIds=[],
+                    ),
+                )
+            ]
+        },
+        "authority": "Executable declaration example, not a claim that an artifact was repaired. "
+        "Review IDs come from review details; audit IDs from actual audit results. "
+        "Obligation IDs must be existing requirement/vision nodes; they are not "
+        "general verified clauses. Counterevidence/defer basis must match disposition.",
+        "result": "unverified: targeted assessment and observed separation producers unavailable",
+    }
+
+
+def review_policy_next(policy: dict, *, cli_prefix=None) -> str:
+    """Actions over the same canonical policy facts; never a retry/identity producer."""
+    if "review-policy-revision-stale" in policy["reasons"]:
+        prefix = cli_prefix or (
+            f'python -m codex_harness.core.plan_cli --workspace "{policy["workspace"]}" '
+        )
+        return prefix + "roundtable --policy-schema"
+    if policy["closureFindings"]:
+        return (
+            "Hold: targeted per-member assessment and observed-separation producers "
+            "are unavailable; "
+            "declarations, linked records and legacy [] do not certify semantic repair. "
+            "Inspect retained findings/declarations; no automatic retry or scope waiver."
+        )
+    return (
+        "Hold: "
+        + ", ".join(policy["reasons"])
+        + "; inspect actual review details and retry only declared required slots within existing "
+        "authorization/caps. Unlisted attempts cannot be made optional after failure."
+    )
+
+
 def review_resolution_state(store, status: dict) -> dict:
     """Read existing canonical facts; advisory only, never a loop or admission lease."""
     from codex_harness.core.plan_quality import quality_report
@@ -180,6 +338,11 @@ def review_resolution_state(store, status: dict) -> dict:
             state["nextAction"] = action(
                 "reconcile_findings", findingIds=[row["id"] for row in blocking]
             )
+        elif (
+            status.get("reviewPolicy", {}).get("active") and not status["reviewPolicy"]["eligible"]
+        ):
+            state["reviewPolicy"] = status["reviewPolicy"]
+            state["nextAction"] = action("review_policy_hold")
         elif not known(manifest):
             state["nextAction"] = action("compile_required")
         elif not state["audit"]["current"]:
@@ -267,6 +430,8 @@ def review_author_handoff(store, status: dict, *, cli_prefix=None) -> dict:
     }
     if state["blockingOpenFindings"] is None:
         return result
+    if "reviewPolicy" in state:
+        result["reviewPolicy"] = state["reviewPolicy"]
     try:
         blockers = {row["id"] for row in state["blockingOpenFindings"]}
         observed_members = findings(store, "open", expand=True)
@@ -408,6 +573,8 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
             )
         )
         return f"Inspect and repair recorded findings ({ids}); use {route}; refresh {refresh}."
+    if kind == "review_policy_hold":
+        return review_policy_next(state["reviewPolicy"], cli_prefix=cli_prefix)
     if kind == "compile_required":
         return (
             cmd("compile --template <existing-template> --out <manifest.json>")

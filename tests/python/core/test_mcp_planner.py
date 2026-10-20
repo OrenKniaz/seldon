@@ -1,6 +1,7 @@
 """Real MCP -> PlanStore -> spine -> export integration, without a provider."""
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -1231,3 +1232,105 @@ def test_mcp_advance_confirmation_cannot_substitute_vision_gate(server, gate, ta
     assert not server.store.connection.execute(
         "SELECT * FROM approvals WHERE gate=?", (gate,)
     ).fetchall()
+
+
+def test_mcp_closure_schema_example_records_unverified_and_holds_publication(tmp_path, monkeypatch):
+    from tests.python.core.test_plan_store import _closure_policy_fixture
+
+    from codex_harness.core import roundtable
+
+    with open_plan_store(tmp_path) as store:
+        store.import_spine(FIXTURE)
+        revision, _, _, _, _ = _closure_policy_fixture(store)
+        original = store.spine().to_dict()
+        monkeypatch.setattr(roundtable, "_run", lambda *_: pytest.fail("No provider allowed"))
+        instance = PlannerServer(tmp_path)
+        try:
+            schema = rpc(
+                instance,
+                "tools/call",
+                {
+                    "name": "harness_schema",
+                    "arguments": {"tool": "harness_resolve_findings"},
+                },
+            )["result"]
+            assert not schema["isError"]
+            advertised = schema["structuredContent"]
+            assert (
+                "closure"
+                in advertised["inputSchema"]["properties"]["findings"]["items"]["properties"]
+            )
+            example = advertised["closureExample"]["example"]
+            invalid = json.loads(json.dumps(example))
+            invalid["findings"][0]["closure"]["reviewIds"] = ["invented-review"]
+            before = list(store.connection.iterdump())
+            rejected = rpc(
+                instance,
+                "tools/call",
+                {
+                    "name": "harness_resolve_findings",
+                    "arguments": invalid,
+                },
+            )["result"]
+            assert rejected["isError"]
+            assert "record-stale-or-absent" in rejected["content"][0]["text"]
+            assert "harness_schema tool=harness_resolve_findings" in rejected["content"][0]["text"]
+            assert list(store.connection.iterdump()) == before
+            response = rpc(
+                instance,
+                "tools/call",
+                {
+                    "name": "harness_resolve_findings",
+                    "arguments": example,
+                },
+            )["result"]
+            assert not response["isError"]
+            declared = response["structuredContent"]["closureDeclarations"][0]
+            assert declared["closure"] == "unverified" and declared["retainedObligation"] is True
+            assert store.spine().to_dict() == original and store.manifest_revision() == revision
+            blocked = rpc(
+                instance,
+                "tools/call",
+                {
+                    "name": "harness_advance",
+                    "arguments": {"to_phase": "publish"},
+                },
+            )["result"]
+            assert blocked["isError"]
+            policy = blocked["structuredContent"]["authorHandoff"]["reviewPolicy"]
+            assert policy["closureFindings"][0]["retainedObligation"] is True
+            assert policy["producerAvailability"]["targetedAssessment"] == "unavailable"
+            assert "Hold: targeted" in blocked["content"][0]["text"]
+            assert store.phase() == "roundtable" and not store.status()["publication"]["up_to_date"]
+            requirement = store.spine().node("R1")
+            requirement["text"] += " Clarify the implicated contract before fresh inspection."
+            edited = rpc(
+                instance,
+                "tools/call",
+                {
+                    "name": "harness_upsert_node",
+                    "arguments": {"node": requirement},
+                },
+            )["result"]
+            assert not edited["isError"]
+            refreshed = rpc(
+                instance,
+                "tools/call",
+                {
+                    "name": "harness_plan_status",
+                    "arguments": {},
+                },
+            )["result"]
+            emitted = refreshed["content"][0]["text"].rsplit("\nNext: ", 1)[1]
+            arguments = shlex.split(emitted)
+            assert arguments[-2:] == ["roundtable", "--policy-schema"]
+            inspected = subprocess.run(
+                arguments,
+                cwd=tmp_path.parent,
+                capture_output=True,
+                text=True,
+            )
+            assert inspected.returncode == 0, inspected.stdout + inspected.stderr
+            assert store.manifest_revision() in inspected.stdout
+        finally:
+            instance.close()

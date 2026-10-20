@@ -376,6 +376,16 @@ def parser() -> argparse.ArgumentParser:
         "--reviewer", action="append", default=[], help="Reviewer JSON or @file"
     )
     commands["roundtable"].add_argument("--max-total", type=int)
+    commands["roundtable"].add_argument(
+        "--policy",
+        help="Prospective role-policy JSON or @file; declare before any attempts. "
+        + planner_views.POLICY_ADOPTION_WARNING,
+    )
+    commands["roundtable"].add_argument(
+        "--policy-schema",
+        action="store_true",
+        help="Read full role-policy contract/example for this workspace; no reviewer launch",
+    )
     commands["findings"].add_argument("--expand", action="store_true")
     commands["findings"].add_argument("--template", action="store_true")
     resolution_target = commands["resolve"].add_mutually_exclusive_group(required=True)
@@ -677,6 +687,11 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             data = store.impact_since(args.since)
             body = planner_views.change_digest(data)
         elif command == "roundtable":
+            if args.policy_schema:
+                if args.policy is not None:
+                    raise ValueError("--policy-schema is inspection only; omit --policy")
+                data = planner_views.plan_review_policy_contract(store)
+                return _reply(server, json.dumps(data, ensure_ascii=False, indent=2)), data
             reviewers = [read_json(value) for value in args.reviewer] or None
             for reviewer in reviewers or []:
                 _validate(
@@ -700,6 +715,11 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 )
                 if reviewers is None:
                     raise ValueError("Test-only runner requires explicit --reviewer entries")
+            if args.policy is not None:
+                policy = read_json(args.policy)
+                _validate(policy, planner_views.plan_review_policy_contract(store)["inputSchema"])
+                print(planner_views.POLICY_ADOPTION_WARNING, file=sys.stderr, flush=True)
+                store.record_plan_review_policy(policy["slots"], policy["expectedManifestRevision"])
             data = roundtable.run_roundtable(
                 store,
                 reviewers=reviewers,
@@ -708,6 +728,9 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 **injection,
             )
             data["id"] = data["roundId"]
+            policy_state = store.plan_review_policy_state(store.manifest_revision())
+            if policy_state["active"]:
+                data["reviewPolicy"] = policy_state
             body = planner_views.roundtable_card(data, roundtable.findings(store))
             if (
                 not data["reviewers"]
@@ -981,7 +1004,11 @@ def main(argv=None) -> int:
         if reply["isError"]:
             prefix = f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
             command = getattr(args, "command", "status")
-            if command == "accept-run" and getattr(args, "subject", None) is None:
+            if command == "resolve" and "review-closure-" in str(reply):
+                next_step = prefix + "schema --tool harness_resolve_findings"
+            elif command == "roundtable" and "review-policy-" in str(reply):
+                next_step = prefix + "roundtable --policy-schema"
+            elif command == "accept-run" and getattr(args, "subject", None) is None:
                 next_step = (
                     prefix
                     + 'accept-run --repo "<integrated-repo>" --subject product OR '
@@ -1069,7 +1096,11 @@ def main(argv=None) -> int:
                 )
             elif command in ("publish", "advance") and any(
                 code in str(reply)
-                for code in ("plan-publication-evidence-required", "plan-findings-open")
+                for code in (
+                    "plan-publication-evidence-required",
+                    "plan-findings-open",
+                    "plan-review-policy-unmet",
+                )
             ):
                 next_step = planner_views.review_resolution_next(
                     status["reviewResolution"], cli_prefix=prefix
@@ -1105,6 +1136,7 @@ def main(argv=None) -> int:
         command = getattr(args, "command", None)
         if server.store is not None and (
             command == "roundtable"
+            and not getattr(args, "policy_schema", False)
             or (
                 command in {"advance", "publish"}
                 and reply["isError"]
@@ -1113,6 +1145,7 @@ def main(argv=None) -> int:
                     for code in (
                         "plan-findings-open",
                         "plan-publication-evidence-required",
+                        "plan-review-policy-unmet",
                     )
                 )
             )
@@ -1125,6 +1158,16 @@ def main(argv=None) -> int:
             )
             data = {**(data or {}), "authorHandoff": handoff}
         next_step = next_step.replace("\r", " ").replace("\n", " ")
+        if (
+            command == "roundtable"
+            and getattr(args, "policy_schema", False)
+            and not reply["isError"]
+        ):
+            next_step = (
+                "Read adoptionWarning and limits before deciding whether this optional policy "
+                "fits your work. Inspection has not adopted a policy; ordinary policy-free "
+                "work is unchanged. The returned exampleArgs describe optional adoption."
+            )
         display_next = planner_views.first_action(next_step)
         if (
             not args.machine

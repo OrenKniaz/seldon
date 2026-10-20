@@ -546,3 +546,178 @@ def test_questions_assumptions_render_and_findings(started):
     assert report["data"]["planRevision"] == report["status"]["plan_revision"]
     response.write_text("not a finding array")
     cli(workspace, *args, code=2)
+
+
+def test_roundtable_policy_contract_example_runs_real_parser_and_records_roles(tmp_path):
+    from tests.python.core.test_plan_store import FIXTURE, _link_r6, _to
+
+    with open_plan_store(tmp_path) as store:
+        store.import_spine(FIXTURE)
+        _link_r6(store)
+        _to(store, "roundtable")
+        before = list(store.connection.iterdump())
+        contract = cli(tmp_path, "roundtable", "--policy-schema", machine=True)["data"]
+        assert list(store.connection.iterdump()) == before
+        assert "Explicit --policy" in contract["adoption"]
+        assert "latest-success" in contract["adoption"]
+        for name, data in contract["exampleFiles"].items():
+            (tmp_path / name).write_text(json.dumps(data), encoding="utf-8")
+        response = tmp_path / "source-review.json"
+        response.write_text("[]", encoding="utf-8")
+        result = cli(
+            tmp_path,
+            *contract["exampleArgs"],
+            "--test-only-review-output",
+            str(response),
+            machine=True,
+        )
+        state = result["data"]["reviewPolicy"]
+        assert state["active"] and state["declaredRevision"] == store.manifest_revision()
+        assert state["slots"][0]["name"] == contract["example"]["slots"][0]["name"]
+        assert state["eligible"] is False  # Explicit synthetic review cannot earn native credit.
+        assert result["data"]["isMocked"] is True and result["data"]["didRunProvider"] is False
+        recorded = store._plan_review_policies()[0]["payload"]
+        assert recorded["slots"] == contract["example"]["slots"]
+        assert recorded["manifestRevision"] == contract["example"]["expectedManifestRevision"]
+        current_contract = cli(tmp_path, "roundtable", "--policy-schema", machine=True)["data"]
+        assert current_contract["example"] == contract["example"]
+
+
+def test_policy_public_help_and_schema_warn_without_adoption(tmp_path):
+    from tests.python.core.test_plan_store import FIXTURE, _link_r6, _to
+
+    with open_plan_store(tmp_path) as store:
+        store.import_spine(FIXTURE)
+        _link_r6(store)
+        _to(store, "roundtable")
+        before = list(store.connection.iterdump())
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "codex_harness.core.plan_cli",
+                "--workspace",
+                str(tmp_path),
+                "roundtable",
+                "--help",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0
+        help_text = " ".join(result.stdout.split()).lower()
+        assert "no supported verified finding-closure producer" in help_text
+        assert "quality and publication held" in help_text
+        response = cli(tmp_path, "roundtable", "--policy-schema", machine=True)
+        warning = response["data"]["adoptionWarning"]
+        assert "no supported verified finding-closure producer" in warning.lower()
+        assert "quality and publication held" in warning.lower()
+        assert "ordinary policy-free work is unchanged" in warning.lower()
+        assert "roundtable --policy @" not in response["next"]
+        assert list(store.connection.iterdump()) == before
+        assert not store._plan_review_policies()
+
+
+def test_direct_policy_warns_before_actual_writer_and_preserves_public_json(
+    tmp_path, monkeypatch, capsys
+):
+    from tests.python.core.test_plan_store import FIXTURE, _link_r6, _to
+
+    from codex_harness.core.plan_store import PlanStore
+
+    with open_plan_store(tmp_path) as store:
+        store.import_spine(FIXTURE)
+        _link_r6(store)
+        _to(store, "roundtable")
+        policy = cli(tmp_path, "roundtable", "--policy-schema", machine=True)["data"]["example"]
+        response = tmp_path / "source-only-review.json"
+        response.write_text("[]", encoding="utf-8")
+        original = PlanStore.record_plan_review_policy
+        observed = []
+
+        def writer(current, slots, revision):
+            # Actual parser/main/SQLite writer; observe warning BEFORE mutation.
+            emitted = capsys.readouterr()
+            assert "no supported verified finding-closure producer" in emitted.err.lower()
+            assert "quality and publication held" in emitted.err.lower()
+            assert not current._plan_review_policies()
+            observed.append(emitted.err)
+            return original(current, slots, revision)
+
+        monkeypatch.setattr(PlanStore, "record_plan_review_policy", writer)
+        code = main(
+            [
+                "--workspace",
+                str(tmp_path),
+                "--json",
+                "roundtable",
+                "--policy",
+                json.dumps(policy),
+                "--reviewer",
+                json.dumps({"name": "reviewer", "provider": "codex"}),
+                "--test-only-review-output",
+                str(response),
+            ]
+        )
+        output = json.loads(capsys.readouterr().out)
+        assert code == 0 and len(observed) == 1
+        assert output["data"]["reviewPolicy"]["active"]
+        assert output["data"]["isMocked"] and not output["data"]["didRunProvider"]
+        assert store._plan_review_policies()[0]["payload"]["slots"] == policy["slots"]
+
+
+@pytest.mark.parametrize("adopt", [False, True])
+def test_direct_public_policy_warning_and_ordinary_reciprocal(tmp_path, adopt):
+    from tests.python.core.test_plan_store import FIXTURE, _link_r6, _to
+
+    with open_plan_store(tmp_path) as store:
+        store.import_spine(FIXTURE)
+        _link_r6(store)
+        _to(store, "roundtable")
+        policy = cli(tmp_path, "roundtable", "--policy-schema", machine=True)["data"]["example"]
+        response = tmp_path / "source-only-review.json"
+        response.write_text("[]", encoding="utf-8")
+        args = [
+            sys.executable,
+            "-B",
+            "-m",
+            "codex_harness.core.plan_cli",
+            "--workspace",
+            str(tmp_path),
+            "--json",
+            "roundtable",
+            "--reviewer",
+            json.dumps({"name": "reviewer", "provider": "codex"}),
+            "--test-only-review-output",
+            str(response),
+        ]
+        if adopt:
+            args.extend(["--policy", json.dumps(policy)])
+        result = subprocess.run(
+            args,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = json.loads(result.stdout)["data"]
+        assert ("No supported verified finding-closure producer" in result.stderr) is adopt
+        assert ("quality and publication held" in result.stderr) is adopt
+        assert bool(store._plan_review_policies()) is adopt
+        assert data["isMocked"] and not data["didRunProvider"]
+        assert ("reviewPolicy" in data) is adopt
+        # Canonical producer reservation IDs bind the actual stored run, even
+        # with a synthetic response; no relabelling of native/provider credit.
+        rows = list(
+            store.connection.execute(
+                "SELECT a.rowid, a.id, r.id FROM review_attempts a "
+                "JOIN review_runs r ON r.id=a.id ORDER BY a.rowid"
+            )
+        )
+        assert len(rows) == 1 and rows[0][1] == rows[0][2]

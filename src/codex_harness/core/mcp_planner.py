@@ -51,6 +51,29 @@ def _tool(name: str, description: str, properties: dict, required=None) -> dict:
     }
 
 
+CLOSURE_DECLARATION_SCHEMA = _object(
+    {
+        "schema": {"type": "string", "enum": ["seldon/finding-closure-declaration-v1"]},
+        "expectedManifestRevision": STRING,
+        "memberIds": STRINGS,
+        "basis": {"type": "string", "enum": ["repair", "counterevidence", "defer"]},
+        "nodeRefs": {
+            "type": "array",
+            "minItems": 1,
+            "items": _object(
+                {
+                    "nodeId": STRING,
+                    "revision": STRING,
+                }
+            ),
+        },
+        "reviewIds": STRINGS,
+        "auditIds": STRINGS,
+        "obligationNodeIds": STRINGS,
+    }
+)
+
+
 TOOLS = [
     _tool(
         "harness_schema",
@@ -160,7 +183,9 @@ TOOLS = [
                         "id": STRING,
                         "status": {"type": "string", "enum": ["resolved", "rejected", "deferred"]},
                         "resolution": STRING,
-                    }
+                        "closure": CLOSURE_DECLARATION_SCHEMA,
+                    },
+                    ["id", "status", "resolution"],
                 ),
             },
         },
@@ -810,6 +835,7 @@ class PlannerServer:
             in {
                 "plan-findings-open",
                 "plan-publication-evidence-required",
+                "plan-review-policy-unmet",
             }
         ):
             handoff = views.review_author_handoff(self._store(), status)
@@ -845,6 +871,11 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if name == "harness_resolve_findings" and error:
+            return (
+                "harness_schema tool=harness_resolve_findings (complete declaration contract "
+                "and actual bound example; unavailable verification producers remain a hold)."
+            )
         if name == "harness_plan_resume":
             return resume_next(self.result_data)
         if name == "harness_schema":
@@ -899,7 +930,12 @@ class PlannerServer:
         if (
             error
             and status.get("reviewResolution")
-            and error_code in {"plan-findings-open", "plan-publication-evidence-required"}
+            and error_code
+            in {
+                "plan-findings-open",
+                "plan-publication-evidence-required",
+                "plan-review-policy-unmet",
+            }
         ):
             return views.review_resolution_next(status["reviewResolution"])
         if error:
@@ -979,6 +1015,13 @@ class PlannerServer:
             return "Durable plan resume\n" + resume_card(self.result_data)
         if name == "harness_schema":
             self.result_data = schema_help(TOOLS, **args)
+            if args.get("tool") == "harness_resolve_findings":
+                store = (
+                    self._store()
+                    if (self.workspace / ".codex-harness/plan.sqlite3").is_file()
+                    else None
+                )
+                self.result_data["closureExample"] = views.closure_declaration_example(store)
             return json.dumps(self.result_data, ensure_ascii=False, indent=2)
         if name == "harness_preflight":
             self.result_data = preflight_report(self.workspace, **args)
@@ -1009,8 +1052,23 @@ class PlannerServer:
                 + json.dumps(self.result_data["findingMembers"], ensure_ascii=False, indent=2)
             )
         if name == "harness_resolve_findings":
-            count = self._store().resolve_findings(args["findings"])
+            store = self._store()
+            count = store.resolve_findings(args["findings"])
             self.result_data = {"dispositions": count}
+            declarations = [row for row in args["findings"] if "closure" in row]
+            if declarations:
+                self.result_data["closureDeclarations"] = [
+                    dict(
+                        id=row["id"],
+                        closure="unverified",
+                        retainedObligation=True,
+                        reason="Targeted assessment and observed separation producers unavailable",
+                    )
+                    for row in declarations
+                ]
+                self.result_data["reviewPolicy"] = store.plan_review_policy_state(
+                    store.manifest_revision()
+                )
             return f"Dispositioned {count} finding clusters atomically"
         if name == "harness_resolve_finding":
             store = self._store()

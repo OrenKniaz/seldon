@@ -11,7 +11,7 @@ from tests.python.core.planning_support import (
 )
 
 from codex_harness.core.plan_quality import quality_report, render_quality_card
-from codex_harness.core.plan_store import PHASES, open_plan_store
+from codex_harness.core.plan_store import PHASES, PlanStoreError, open_plan_store
 from codex_harness.core.roundtable import findings, resolve_finding
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
@@ -99,6 +99,248 @@ def test_published_real_store_all_statuses_and_read_only(store, tmp_path):
     assert report["score"] == 88
     assert quality_report(store) == report
     assert list(store.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("failure", ["latest-required", "third-required"])
+def test_prospective_required_failure_cannot_hide_behind_successes(store, failure):
+    """New policy fixture; source reviewer processes are doubles, never live proof."""
+    advance(store, "roundtable")
+    revision = store.manifest_revision()
+    selected = [*REVIEWERS, dict(name="third", provider="copilot")]
+    slots = selected[:2] if failure == "latest-required" else selected
+    # Seed the proposed event shape so RED exercises the existing quality consumer,
+    # not a missing new method. The implementation's real writer is tested below.
+    store._event(
+        "plan-review-policy-declared",
+        {
+            "schema": "seldon/plan-review-policy-v1",
+            "manifestRevision": revision,
+            "stage": "plan",
+            "slots": [dict(name=x["name"], provider=x["provider"], required=True) for x in slots],
+        },
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=selected[:2],
+        process_stub=lambda *_: (0, "[]"),
+        executable_for=lambda provider: provider,
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=[selected[0] if failure == "latest-required" else selected[2]],
+        process_stub=lambda *_: (7, "source-only reviewer failure"),
+        executable_for=lambda provider: provider,
+    )
+    before = list(store.connection.iterdump())
+    assert checks(store)["roundtable"]["status"] == "fail"
+    assert list(store.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("successful", [1, 2])
+def test_predeclared_optional_failure_retains_existing_quality_thresholds(store, successful):
+    advance(store, "roundtable")
+    slots = [
+        dict(name=row["name"], provider=row["provider"], required=True)
+        for row in REVIEWERS[:successful]
+    ]
+    slots.append(dict(name="optional", provider="copilot", required=False))
+    store.record_plan_review_policy(slots, store.manifest_revision())
+    source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS[:successful],
+        process_stub=lambda *_: (0, "[]"),
+        executable_for=lambda provider: provider,
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=[dict(name="optional", provider="copilot")],
+        process_stub=lambda *_: (7, "Source-only optional failure"),
+        executable_for=lambda provider: provider,
+    )
+    check = checks(store)["roundtable"]
+    assert check["status"] == ("fail" if successful == 1 else "warn")
+    assert check["evidence"]["reviewPolicy"]["eligible"] is True
+    assert check["evidence"]["reviewPolicy"]["optionalFailures"] == ["optional"]
+
+
+def test_unlisted_attempt_is_not_silently_optional(store):
+    advance(store, "roundtable")
+    store.record_plan_review_policy(
+        [dict(name=row["name"], provider=row["provider"], required=True) for row in REVIEWERS],
+        store.manifest_revision(),
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS,
+        process_stub=lambda *_: (0, "[]"),
+        executable_for=lambda provider: provider,
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=[dict(name="unlisted", provider="copilot")],
+        process_stub=lambda *_: (7, "Source-only unlisted failure"),
+        executable_for=lambda provider: provider,
+    )
+    state = checks(store)["roundtable"]
+    assert state["status"] == "fail"
+    assert "review-policy-undeclared-attempt" in state["evidence"]["reviewPolicy"]["reasons"]
+
+
+def test_required_latest_reservation_failure_survives_reversed_completion(store):
+    """Nested source-process doubles deterministically overlap real reservations.
+
+    The older launch cannot finish until the newer launch has failed and committed.
+    No sleeps, live processes/providers or fabricated review/reservation rows.
+    """
+    advance(store, "roundtable")
+    revision = store.manifest_revision()
+    store.record_plan_review_policy(
+        [dict(name=row["name"], provider=row["provider"], required=True) for row in REVIEWERS],
+        revision,
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS[1:],
+        process_stub=lambda *_: (0, "[]"),
+        executable_for=lambda provider: provider,
+    )
+    events = []
+
+    def older_success(*_):
+        events.append("older-reserved-and-launched")
+        source_controller_roundtable(
+            store,
+            reviewers=REVIEWERS[:1],
+            process_stub=lambda *_: (7, "SOURCE-ONLY later attempt failed"),
+            executable_for=lambda provider: provider,
+            max_rounds=2,
+        )
+        events.append("later-failure-committed")
+        return 0, "[]"
+
+    source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS[:1],
+        process_stub=older_success,
+        executable_for=lambda provider: provider,
+        max_rounds=2,
+    )
+    events.append("older-success-committed")
+    rows = [
+        dict(row)
+        for row in store.connection.execute(
+            "SELECT a.rowid AS reservation_order, r.rowid AS completion_order, r.id, "
+            "r.exit_code FROM review_attempts a JOIN review_runs r ON r.id=a.id "
+            "WHERE a.reviewer=? ORDER BY a.rowid",
+            (REVIEWERS[0]["name"],),
+        )
+    ]
+    print(json.dumps(dict(sourceOnly=True, events=events, records=rows)))
+    assert [row["exit_code"] for row in rows] == [0, 7]
+    assert rows[0]["completion_order"] > rows[1]["completion_order"]
+    state = store.plan_review_policy_state(revision)
+    required = next(row for row in state["slots"] if row["name"] == REVIEWERS[0]["name"])
+    assert required["latestReviewId"] == rows[1]["id"]
+    assert required["state"] == "unverified-or-failed"
+    assert state["eligible"] is False and state["requiredFailures"] == [REVIEWERS[0]["name"]]
+    assert checks(store)["roundtable"]["status"] == "fail"
+    assert rows[0]["id"] not in {row["id"] for row in store.successful_reviews(revision)}
+    with pytest.raises(PlanStoreError) as held:
+        store._check_evidence(revision)
+    assert held.value.code == "plan-review-policy-unmet"
+
+
+def test_required_pending_reservations_hold_before_and_after_newer_success(store):
+    advance(store, "roundtable")
+    revision = store.manifest_revision()
+    store.record_plan_review_policy(
+        [dict(name=row["name"], provider=row["provider"], required=True) for row in REVIEWERS],
+        revision,
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS[1:],
+        process_stub=lambda *_: (0, "[]"),
+        executable_for=lambda provider: provider,
+    )
+    checkpoints = []
+
+    def observe_pending():
+        state = store.plan_review_policy_state(revision)
+        slot = next(row for row in state["slots"] if row["name"] == REVIEWERS[0]["name"])
+        assert slot["incompleteAttempt"] and not state["eligible"]
+        assert slot["state"] == "unverified-or-failed"
+        assert checks(store)["roundtable"]["status"] == "fail"
+        checkpoints.append(slot)
+
+    def newer_success(*_):
+        observe_pending()  # Newer attempt is incomplete; older attempt is also live.
+        return 0, "[]"
+
+    def older_success(*_):
+        source_controller_roundtable(
+            store,
+            reviewers=REVIEWERS[:1],
+            process_stub=newer_success,
+            executable_for=lambda provider: provider,
+            max_rounds=2,
+        )
+        observe_pending()  # Newer success must not clear the older live reservation.
+        return 0, "[]"
+
+    source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS[:1],
+        process_stub=older_success,
+        executable_for=lambda provider: provider,
+        max_rounds=2,
+    )
+    final = store.plan_review_policy_state(revision)
+    slot = next(row for row in final["slots"] if row["name"] == REVIEWERS[0]["name"])
+    assert len(checkpoints) == 2 and final["eligible"]
+    assert not slot["incompleteAttempt"]
+    assert slot["latestReviewId"] == checkpoints[1]["latestReviewId"]
+    assert slot["latestAttemptId"] == checkpoints[0]["latestAttemptId"]
+    assert slot["attemptOrdering"] == "reservation-rowid"
+    print(json.dumps(dict(sourceOnly=True, pendingCheckpoints=checkpoints, finalSlot=slot)))
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_policy_legacy_reservation_provenance_is_explicit_and_mixed_holds(store, mixed):
+    """Source-only old-database counterfactual; never rewrite production history."""
+    advance(store, "roundtable")
+    revision = store.manifest_revision()
+    store.record_plan_review_policy(
+        [dict(name=REVIEWERS[0]["name"], provider=REVIEWERS[0]["provider"], required=True)],
+        revision,
+    )
+    source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS[:1],
+        process_stub=lambda *_: (0, "[]"),
+        executable_for=lambda provider: provider,
+    )
+    # Characterize a database written before reservations existed. Keep actual
+    # producer run rows unchanged; only this test fixture removes the new ledger.
+    original = list(store.connection.execute("SELECT * FROM review_runs"))
+    with store._transaction():
+        store.connection.execute("DELETE FROM review_attempts")
+    assert list(store.connection.execute("SELECT * FROM review_runs")) == original
+    if mixed:
+        source_controller_roundtable(
+            store,
+            reviewers=REVIEWERS[:1],
+            process_stub=lambda *_: (0, "[]"),
+            executable_for=lambda provider: provider,
+            max_rounds=2,
+        )
+    state = store.plan_review_policy_state(revision)
+    slot = state["slots"][0]
+    assert state["eligible"] is (not mixed)
+    assert slot["ambiguousAttemptOrder"] is mixed
+    assert slot["attemptOrdering"] == (
+        "reservation-rowid" if mixed else "legacy-completion-fallback"
+    )
 
 
 def test_early_phase_and_empty_store(store, tmp_path):
