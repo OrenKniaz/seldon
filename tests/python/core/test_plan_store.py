@@ -783,7 +783,10 @@ def test_happy_path_publish_frozen_artifacts_idempotency_and_impact(store, tmp_p
     outdir = tmp_path / "exports"
     revision = store.publish(by="planner", export_dir=outdir)
     status = store.status()
-    assert status["pending_gate"] == "current-revision-published"  # Source-only reviews.
+    assert (
+        status["pending_gate"] == "successful-review-required"
+    )  # Source-only reviews earn no credit.
+    assert status["phase_gate"] == "current-revision-published"  # Retained phase-label alias.
     assert status["publication"] == {
         "published_revision": revision,
         "current_revision": revision,
@@ -792,7 +795,7 @@ def test_happy_path_publish_frozen_artifacts_idempotency_and_impact(store, tmp_p
     question = store.ask("Clarify the published scope")
     assert store.status()["pending_gate"] is not None
     store.answer(question, "No scope change")
-    assert store.status()["pending_gate"] == "current-revision-published"  # Source-only reviews.
+    assert store.status()["pending_gate"] == "successful-review-required"  # Source-only reviews.
     snapshot = json.loads((outdir / "revisions" / f"{revision}.json").read_text(encoding="utf-8"))
     assert snapshot["open_assumptions"][0]["id"] == assumption
     assert (
@@ -1054,7 +1057,7 @@ def test_publish_binds_workspace_template_and_requires_current_publication(store
     exports = tmp_path / "exports"
     first = store.publish(by="planner", export_dir=exports)
     first_manifest = store.published_manifest(first)
-    assert store.status()["pending_gate"] == "current-revision-published"  # Source-only reviews.
+    assert store.status()["pending_gate"] == "successful-review-required"  # Source-only reviews.
     assert store.status()["publication"] == {
         "published_revision": first,
         "current_revision": first,
@@ -1065,7 +1068,10 @@ def test_publish_binds_workspace_template_and_requires_current_publication(store
     proof = template / "tests/test_money.py"
     proof.write_text(proof.read_text() + "\n# revised test\n", encoding="utf-8")
     status = store.status()
-    assert status["pending_gate"] == "current-revision-published"
+    assert (
+        status["pending_gate"] == "passing-audit-required"
+    )  # The edited proof invalidates evidence.
+    assert status["phase_gate"] == "current-revision-published"
     assert status["publication"]["published_revision"] == first
     assert (
         status["publication"]["current_revision"]

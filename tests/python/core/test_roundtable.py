@@ -37,6 +37,352 @@ QUALITY_SNAPSHOT_NOTICE = (
 DEFAULT_RUNNER = roundtable._run
 
 
+def test_execution_member_response_survives_distinct_parser(store, tmp_path):
+    """Missing capability RED uses the existing parser, not a missing-function error."""
+    from codex_harness.core.runners import validate_proof
+
+    repo = tmp_path / "source-product"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "app.py").write_text("def valid_id(value): return type(value) is int\n")
+    (repo / "tests/test_ids.py").write_text(
+        "import unittest\nfrom app import valid_id\nclass Witness(unittest.TestCase):\n"
+        "    def test_bool(self):\n        self.assertFalse(valid_id(True))\n"
+        "        self.assertTrue(valid_id(7))\n"
+    )
+    manifest = {
+        "validation": ["-m", "unittest", "discover", "-s", "tests", "-p"],
+        "requirementFiles": ["tests"],
+    }
+    proof = validate_proof(repo, manifest, "test_ids.py", owned_files=("app.py",))
+    assert proof["passed"], proof
+    observed = proof["observations"]["tests"][0]["id"]
+    concern = {
+        **finding(),
+        "finding": "Boolean identifier True appears accepted",
+        "suggestion": "Reject True and accept integer 7 with an actual behavior witness",
+    }
+    run_roundtable(
+        store,
+        reviewers=REVIEWERS[:1],
+        runner=lambda *_: (0, json.dumps([concern])),
+        executable_for=lambda provider: provider,
+    )
+    member = findings(store, expand=True)[0]
+    entry = dict(
+        memberId=member["id"],
+        disposition="open",
+        judgment="supports-repair",
+        explanation="The actual bool witness rejects True in this selected source snapshot.",
+        artifactPaths=["app.py"],
+        witnessIds=[observed],
+    )
+    if hasattr(roundtable, "_prepare_execution_assessment"):
+        snapshot = roundtable._prepare_execution_assessment(
+            store,
+            member_ids=[member["id"]],
+            repo=repo,
+            manifest=manifest,
+            proof_module="test_ids.py",
+            artifact_paths=["app.py"],
+            witness_ids={member["id"]: [observed]},
+            reviewer=REVIEWERS[0],
+            executable="source-only",
+        )
+        header = roundtable._read_execution_assessment(store, snapshot)
+        payload = dict(
+            schema="seldon/execution-member-response-v1",
+            snapshotHash=header["responseBinding"],
+            members=[entry],
+        )
+        launch = roundtable._launch_review(REVIEWERS[0], header["packet"], "source-only")
+        completion_hash = roundtable._capture_execution_assessment(
+            store,
+            snapshot,
+            REVIEWERS[0],
+            {"packet": header["packet"], **header["shard"]},
+            launch,
+            "source-only",
+            (0, json.dumps(payload), ""),
+        )
+        candidate = roundtable._parse_execution_assessment(store, snapshot, completion_hash)
+    else:
+        # Characterize actual old ordinary parsing: a positive targeted member
+        # response is lost/rejected, so no targeted judgment can be preserved.
+        payload = dict(
+            schema="seldon/execution-member-response-v1", snapshotHash="baseline", members=[entry]
+        )
+        _, items = roundtable._parse_review_return(
+            store,
+            REVIEWERS[0],
+            {"nodeIds": ["R1"]},
+            (0, json.dumps(payload)),
+            mocked=True,
+        )
+        candidate = dict(members=items, closureEligible=False)
+    assert [row.get("memberId") for row in candidate["members"]] == [member["id"]]
+    assert candidate["members"][0]["judgment"] == "supports-repair"
+    assert candidate["members"][0]["evidenceState"] == "local-witness-observed"
+    assert candidate["closureEligible"] is False
+
+
+def _assessment_fixture(store, tmp_path, *, violating=False, unrelated=False, disposition="open"):
+    repo = tmp_path / "selected-source-product"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "app.py").write_text(
+        "def valid_id(value): return "
+        + ("isinstance(value, int)" if violating else "type(value) is int")
+        + "\n"
+    )
+    (repo / "tests/test_ids.py").write_text(
+        "import unittest\nfrom app import valid_id\nclass Witness(unittest.TestCase):\n"
+        "    def test_bool(self):\n        self.assertFalse(valid_id(True))\n"
+        "        self.assertTrue(valid_id(7))\n"
+    )
+    if unrelated:
+        (repo / "tests/test_ids.py").write_text(
+            "import unittest\nclass Witness(unittest.TestCase):\n"
+            "    def test_bool(self):\n        self.assertTrue(True)\n"
+        )
+    concern = {
+        **finding(),
+        "finding": "Boolean identifier True appears accepted",
+        "suggestion": "Reject True and accept integer 7 with an actual behavior witness",
+    }
+    run_roundtable(
+        store,
+        reviewers=REVIEWERS[:1],
+        runner=lambda *_: (0, json.dumps([concern])),
+        executable_for=lambda provider: provider,
+    )
+    member = findings(store, expand=True)[0]
+    if disposition != "open":
+        resolve_finding(
+            store,
+            member["id"],
+            status=disposition,
+            resolution="Actual bool witness is the proposed counterevidence/repair",
+        )
+    before = list(store.connection.iterdump())
+    snapshot = roundtable._prepare_execution_assessment(
+        store,
+        member_ids=[member["id"]],
+        repo=repo,
+        manifest={
+            "validation": ["-m", "unittest", "discover", "-s", "tests", "-p"],
+            "requirementFiles": ["tests"],
+        },
+        proof_module="test_ids.py",
+        artifact_paths=["app.py"],
+        witness_ids={member["id"]: ["test_ids.Witness.test_bool"]},
+        reviewer=REVIEWERS[0],
+        executable="source-only",
+    )
+    assert list(store.connection.iterdump()) == before
+    header = roundtable._read_execution_assessment(store, snapshot)
+    payload = json.loads(json.dumps(header["responseContract"]))
+    payload["members"][0].update(
+        judgment="supports-repair", explanation="The exact bool witness rejects True"
+    )
+    launch = roundtable._launch_review(REVIEWERS[0], header["packet"], "source-only")
+    return snapshot, header, payload, launch
+
+
+def _assessment_capture(store, snapshot, header, launch, payload, *, code=0):
+    return roundtable._capture_execution_assessment(
+        store,
+        snapshot,
+        REVIEWERS[0],
+        {"packet": header["packet"], **header["shard"]},
+        launch,
+        "source-only",
+        (code, json.dumps(payload), ""),
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "positive",
+        "violating",
+        "missing-witness",
+        "unrelated-witness",
+        "missing-artifact-reference",
+        "negative",
+        "cannot-assess",
+        "counterevidence-no-edit",
+        "deferred",
+    ],
+)
+def test_execution_assessment_actual_witness_and_hold_exits(store, tmp_path, case):
+    disposition = (
+        "rejected"
+        if case == "counterevidence-no-edit"
+        else "deferred"
+        if case == "deferred"
+        else "open"
+    )
+    snapshot, header, payload, launch = _assessment_fixture(
+        store,
+        tmp_path,
+        violating=case == "violating",
+        unrelated=case == "unrelated-witness",
+        disposition=disposition,
+    )
+    files_before = header["files"]
+    entry = payload["members"][0]
+    if case == "missing-witness":
+        entry["witnessIds"] = []
+    if case == "missing-artifact-reference":
+        entry["artifactPaths"] = []
+    if case in ("negative", "cannot-assess", "counterevidence-no-edit"):
+        entry["judgment"] = {
+            "negative": "not-satisfied",
+            "cannot-assess": "cannot-assess",
+            "counterevidence-no-edit": "supports-counterevidence",
+        }[case]
+    before = list(store.connection.iterdump())
+    digest = _assessment_capture(store, snapshot, header, launch, payload)
+    result = roundtable._parse_execution_assessment(store, snapshot, digest)
+    assert result["closureEligible"] is False and result["sourceOnly"] is True
+    assert "canonical execution/author selection" in result["holdReasons"]
+    assert result["reviewerObservation"] is None  # Source double does not invent native identity.
+    member = result["members"][0]
+    assert member["evidenceState"] == (
+        "local-witness-observed"
+        if case in ("positive", "counterevidence-no-edit")
+        else "unverified"
+    )
+    assert member["retainedObligation"] is True
+    assert member["deferredObligationHeld"] is (case == "deferred")
+    assert result["fullVisionHeld"] is True
+    assert member["originalFinding"]["finding"] == header["members"][0]["finding"]
+    assert roundtable._read_execution_assessment(store, snapshot)["files"] == files_before
+    assert list(store.connection.iterdump()) == before  # No review_runs or closure credit.
+    if case == "violating":
+        assert not header["proof"]["passed"]
+        assert "AssertionError" in header["proof"]["output"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "legacy-empty",
+        "omitted",
+        "duplicate",
+        "unknown-member",
+        "wrong-binding",
+        "fabricated-witness",
+        "wrong-disposition",
+        "extra-field",
+        "failed-review",
+    ],
+)
+def test_execution_assessment_strict_response_refusals(store, tmp_path, bad):
+    snapshot, header, payload, launch = _assessment_fixture(store, tmp_path)
+    if bad == "legacy-empty":
+        payload = []
+    elif bad == "omitted":
+        payload["members"] = []
+    elif bad == "duplicate":
+        payload["members"] *= 2
+    elif bad == "unknown-member":
+        payload["members"][0]["memberId"] = "invented"
+    elif bad == "wrong-binding":
+        payload["snapshotHash"] = "invented"
+    elif bad == "fabricated-witness":
+        payload["members"][0]["witnessIds"] = ["invented"]
+    elif bad == "wrong-disposition":
+        payload["members"][0]["disposition"] = "rejected"
+    elif bad == "extra-field":
+        payload["verified"] = True
+    digest = _assessment_capture(
+        store, snapshot, header, launch, payload, code=7 if bad == "failed-review" else 0
+    )
+    with pytest.raises(ValueError):
+        roundtable._parse_execution_assessment(store, snapshot, digest)
+
+
+@pytest.mark.parametrize(
+    "change", ["artifact", "protected-witness", "disposition", "registration", "completion"]
+)
+def test_execution_assessment_local_snapshot_races_refuse(store, tmp_path, change):
+    snapshot, header, payload, launch = _assessment_fixture(store, tmp_path)
+    digest = _assessment_capture(store, snapshot, header, launch, payload)
+    directory = roundtable._assessment_directory(store, snapshot)
+    if change == "artifact":
+        (Path(header["repo"]) / "app.py").write_text("def valid_id(value): return True\n")
+    elif change == "protected-witness":
+        (Path(header["repo"]) / "tests/test_ids.py").write_text("# lost witness\n")
+    elif change == "disposition":
+        resolve_finding(store, header["members"][0]["id"], resolution="Changed disposition")
+    else:
+        path = directory / ("registration.json" if change == "registration" else "completion.json")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["extra"] = "tampered original"
+        path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError):
+        roundtable._parse_execution_assessment(store, snapshot, digest)
+
+
+def test_execution_assessment_actual_return_hook_and_create_once(store, tmp_path):
+    snapshot, header, payload, launch = _assessment_fixture(store, tmp_path)
+    captured = []
+    before = list(store.connection.iterdump())
+
+    def capture(*args):
+        captured.append(roundtable._capture_execution_assessment(store, snapshot, *args))
+
+    record, _ = roundtable._review_shard(
+        store,
+        {"roundId": "source-only-return-hook"},
+        REVIEWERS[0],
+        {"packet": header["packet"], **header["shard"]},
+        executable="source-only",
+        runner=lambda *_: (0, json.dumps(payload), ""),
+        timeout=10,
+        capture=capture,
+    )
+    assert record["isMocked"] and not record["didRunProvider"]
+    assert len(captured) == 1
+    result = roundtable._parse_execution_assessment(store, snapshot, captured[0])
+    assert result["members"][0]["evidenceState"] == "local-witness-observed"
+    original = (roundtable._assessment_directory(store, snapshot) / "completion.json").read_bytes()
+    with pytest.raises(FileExistsError):
+        _assessment_capture(store, snapshot, header, launch, payload)
+    assert (
+        roundtable._assessment_directory(store, snapshot) / "completion.json"
+    ).read_bytes() == original
+    assert list(store.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("change", ["packet", "shard", "reviewer", "launch"])
+def test_execution_assessment_capture_requires_exact_prelaunch(store, tmp_path, change):
+    from dataclasses import replace
+
+    snapshot, header, payload, launch = _assessment_fixture(store, tmp_path)
+    shard = {"packet": header["packet"], **header["shard"]}
+    reviewer = dict(REVIEWERS[0])
+    if change == "packet":
+        shard["packet"] += "changed"
+    elif change == "shard":
+        shard["nodeIds"] = ["R2"]
+    elif change == "reviewer":
+        reviewer["name"] = "invented"
+    else:
+        launch = replace(launch, command=(*launch.command, "changed"))
+    with pytest.raises(ValueError, match="prelaunch"):
+        roundtable._capture_execution_assessment(
+            store,
+            snapshot,
+            reviewer,
+            shard,
+            launch,
+            "source-only",
+            (0, json.dumps(payload), ""),
+        )
+    assert not (roundtable._assessment_directory(store, snapshot) / "completion.json").exists()
+
+
 def clustered_review(store):
     def runner(launch, *_):
         item = finding("R1", "major" if launch.cli == "claude" else "minor")
@@ -257,26 +603,89 @@ def test_recorded_review_cli_mcp_and_read_only(store):
         store, findings(store)[0]["id"], resolution="Fixed and checked", status="resolved"
     )
     before = store.connection.total_changes
+    before_dump = list(store.connection.iterdump())
     recorded = store.review(result["roundId"])
     assert store.connection.total_changes == before
+    assert list(store.connection.iterdump()) == before_dump
     assert recorded["reviewers"][0]["findingCounts"] == {"resolved": 1}
     for row in recorded["reviewers"]:
         assert row["shardDetails"][0]["hash"]
     text = planner_views.roundtable_card(result, findings(store))
     assert all(f"{r['name']}: shards 1/1; packetBound: yes; 1 findings" in text for r in REVIEWERS)
+    # Independently derive the declared public detail contract from persisted
+    # originals, not from the formatter/projection being tested.
+    persisted = [
+        dict(row)
+        for row in store.connection.execute(
+            "SELECT * FROM review_findings WHERE round_id=? ORDER BY created_at, rowid",
+            (result["roundId"],),
+        )
+    ]
+    member_ids = {row["id"] for row in persisted}
+    assert len(persisted) == len(member_ids) == 2
+    assert {(row["reviewer"], row["provider"]) for row in persisted} == {
+        (reviewer["name"], reviewer["provider"]) for reviewer in REVIEWERS
+    }
+    assert all(
+        row["node_id"] == "R1"
+        and row["round_id"] == result["roundId"]
+        and row["plan_revision"] == result["planRevision"] == store.manifest_revision()
+        and row["finding"] == "Real verification is missing"
+        and row["suggestion"] == "Add an end-to-end proof of the requirement"
+        and row["severity"] == "major"
+        and row["status"] == "resolved"
+        and row["resolution"] == "Fixed and checked"
+        for row in persisted
+    )
+    cluster_ids = {row["cluster_id"] for row in persisted}
+    assert len(cluster_ids) == 1 and cluster_ids <= member_ids
+    member_fields = {
+        "id",
+        "cluster_id",
+        "memberIds",
+        "memberCount",
+        "node_id",
+        "round_id",
+        "plan_revision",
+        "reviewer",
+        "provider",
+        "severity",
+        "status",
+        "finding",
+        "suggestion",
+        "resolution",
+    }
+    expected_members = []
+    for row in persisted:
+        siblings = [other["id"] for other in persisted if other["cluster_id"] == row["cluster_id"]]
+        expected_members.append(
+            {
+                **{key: row[key] for key in member_fields - {"memberIds", "memberCount"}},
+                "memberIds": siblings,
+                "memberCount": len(siblings),
+            }
+        )
+    expected_public = {**recorded, "findingMembers": expected_members}
     server = PlannerServer(store.workspace)
     try:
         reply = server.call_tool("harness_review", {"id": result["roundId"]})
         assert not reply["isError"]
-        assert reply["structuredContent"] == recorded
+        public = reply["structuredContent"]
+        assert set(public) == set(recorded) | {"findingMembers"}
+        assert {key: public[key] for key in recorded} == recorded
+        assert all(set(member) == member_fields for member in public["findingMembers"])
+        assert public == expected_public
         assert "estimated tokens" in reply["content"][0]["text"]
+        assert list(store.connection.iterdump()) == before_dump
     finally:
         server.close()
     output = cli(store.workspace, "review", result["roundId"], machine=True)
-    assert output["data"] == recorded
+    assert output["data"] == expected_public == reply["structuredContent"]
+    assert list(store.connection.iterdump()) == before_dump
     text = cli(store.workspace, "review", recorded["reviewers"][0]["id"])
     assert "Findings by status: resolved: 1" in text
     cli(store.workspace, "review", "unknown", code=2)
+    assert list(store.connection.iterdump()) == before_dump
 
 
 def test_failed_review_shard_card_includes_retry_and_error(store):

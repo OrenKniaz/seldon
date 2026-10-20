@@ -2710,7 +2710,7 @@ class PlanStore:
                 ).fetchone()
             if meta["phase"] == "accept" and credit and acceptance["accepted"]:
                 pending = None
-            return {
+            status = {
                 **meta,
                 "plan_revision": revision,
                 "approval": approval,
@@ -2744,6 +2744,26 @@ class PlanStore:
                 **({"reviewPolicy": review_policy} if review_policy["active"] else {}),
                 "readiness": self.readiness_status(current_publication),
             }
+            from codex_harness.core.planner_views import review_resolution_state
+
+            resolution = review_resolution_state(self, status)
+            status["continuation"] = resolution.pop("continuation", None)
+            status["reviewResolution"] = resolution
+            # Keep the phase-label alias; the visible gate names the actual prerequisite.
+            status["phase_gate"] = pending
+            if meta["phase"] in {"roundtable", "publish"}:
+                kind = status["continuation"]["planning"]["kind"]
+                status["pending_gate"] = {
+                    "reconcile_findings": "plan-findings-open",
+                    "review_policy_hold": "plan-review-policy-unmet",
+                    "compile_required": "compile-required",
+                    "audit_required": "passing-audit-required",
+                    "review_required": "successful-review-required",
+                    "attempt_phase_advance": None,
+                    "attempt_publication": "current-revision-published",
+                    "unavailable_refresh": "continuation-unavailable",
+                }.get(kind, pending)
+            return status
         finally:
             self.connection.rollback()
 

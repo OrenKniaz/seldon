@@ -165,6 +165,371 @@ def _record_source_evidence(store):
     )
 
 
+@pytest.mark.parametrize("failed_provider", [False, True], ids=["clean", "quality-failure"])
+def test_publication_continuation_uses_configured_gate_not_worker_quality(
+    project, capsys, failed_provider
+):
+    """The real phase mutation is the oracle; review returns are SOURCE-ONLY doubles."""
+    from codex_harness.core.planner_resume import resume_plan
+
+    _at_roundtable(project)
+    project.record_audit(
+        project.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
+    )
+    for name, provider, code in [
+        ("Alpha", "codex", 0),
+        ("Beta", "claude", 1 if failed_provider else 0),
+    ]:
+        source_controller_roundtable(
+            project,
+            process_stub=lambda *_, code=code: (
+                code,
+                "SOURCE-ONLY failed review" if code else "[]",
+            ),
+            reviewers=[dict(name=name, provider=provider)],
+            executable_for=lambda provider: provider,
+            max_rounds=4,
+        )
+    before = list(project.connection.iterdump())
+    mcp, cli = _status_pair(project, capsys)
+    resumed = resume_plan(project.workspace)
+    assert list(project.connection.iterdump()) == before
+    assert "advance --to publish" in cli["next"]
+    assert "harness_advance to_phase=publish" in mcp["content"][0]["text"].split("Next:")[-1]
+    # Execute the actual shared public action, not a copied expected command.
+    prefix = ["--workspace", str(project.workspace), "--json"]
+    action = cli["status"]["continuation"]["planning"]
+    assert plan_cli.main([*prefix, *action["cliArguments"]]) == 0
+    actual = json.loads(capsys.readouterr().out)
+    assert not actual["isError"] and project.phase() == "publish"
+    print(
+        json.dumps({"beforeCLI": cli, "beforeMCP": mcp, "resume": resumed, "actualAdvance": actual})
+    )
+    for status in (mcp["structuredContent"], cli["status"], resumed["canonicalStatus"]):
+        from codex_harness.core.planner_views import continuation_projection
+
+        projection = status["continuation"]
+        assert continuation_projection(status, status["reviewResolution"]) == projection
+        assert projection["planning"]["kind"] == "attempt_phase_advance"
+        assert projection["planning"]["targetPhase"] == "publish"
+        assert projection["workerQuality"]["blocked"] is failed_provider
+        assert projection["productAcceptance"]["accepted"] is False
+    assert resumed["nextAction"]["kind"] == "attempt_phase_advance"
+    # Local SOURCE-ONLY plan export, not Git/private publication or worker proof.
+    server = PlannerServer(project.workspace)
+    try:
+        publication = rpc(
+            server,
+            "tools/call",
+            {
+                "name": "harness_publish",
+                "arguments": {
+                    "proof_level": "prospective",
+                    "reason": "SOURCE-ONLY bookkeeping audit; no executed oracle proof",
+                },
+            },
+        )["result"]
+        assert not publication["isError"], publication
+        current = server._status()
+        assert current["publication"]["up_to_date"] is True
+        assert current["pending_gate"] is None  # Actual configured publication prerequisites met.
+        assert current["continuation"]["workerQuality"]["blocked"] is failed_provider
+        if failed_provider:
+            assert current["continuation"]["recommendationScope"] == "worker-admission"
+            assert current["continuation"]["planning"]["kind"] == "not_applicable"
+            assert "harness_review" in publication["content"][0]["text"].split("Next:")[-1]
+            held = resume_plan(project.workspace)
+            assert held["nextAction"]["kind"] == "review_required"
+        print(
+            json.dumps(
+                {"sourceOnlyPublication": publication, "postPublication": current["continuation"]}
+            )
+        )
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("case", ["required-fail", "required-clean", "finding"])
+def test_continuation_policy_and_finding_actions_keep_reciprocal_success(project, capsys, case):
+    from codex_harness.core.planner_resume import resume_plan
+
+    _at_roundtable(project)
+    project.record_audit(
+        project.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
+    )
+    if case.startswith("required"):
+        project.record_plan_review_policy(
+            [
+                dict(name=name, provider=provider, required=True)
+                for name, provider in [("Alpha", "codex"), ("Beta", "claude")]
+            ],
+            project.manifest_revision(),
+        )
+    for name, provider in [("Alpha", "codex"), ("Beta", "claude")]:
+        code = 1 if case == "required-fail" and name == "Beta" else 0
+        output = (
+            json.dumps(
+                [
+                    dict(
+                        node_id="R1",
+                        severity="major",
+                        finding="SOURCE-ONLY unresolved clause",
+                        suggestion="Inspect and repair accepted requirement",
+                    )
+                ]
+            )
+            if case == "finding"
+            else "[]"
+        )
+        source_controller_roundtable(
+            project,
+            process_stub=lambda *_, code=code, output=output: (code, output),
+            reviewers=[dict(name=name, provider=provider)],
+            executable_for=lambda provider: provider,
+        )
+    mcp, cli = _status_pair(project, capsys)
+    resumed = resume_plan(project.workspace)
+    projections = [
+        mcp["structuredContent"]["continuation"],
+        cli["status"]["continuation"],
+        resumed["canonicalStatus"]["continuation"],
+    ]
+    assert projections[0] == projections[1] == projections[2]
+    action = projections[0]["planning"]
+    server = PlannerServer(project.workspace)
+    try:
+        if case == "required-clean":
+            assert action["kind"] == "attempt_phase_advance"
+            result = rpc(
+                server, "tools/call", {"name": action["mcpTool"], "arguments": action["arguments"]}
+            )["result"]
+            assert not result["isError"] and project.phase() == "publish"
+        else:
+            assert action["kind"] == (
+                "review_policy_hold" if case == "required-fail" else "reconcile_findings"
+            )
+            assert cli["status"]["pending_gate"] == (
+                "plan-review-policy-unmet" if case == "required-fail" else "plan-findings-open"
+            )
+            assert cli["status"]["phase_gate"] == "zero-open-clarifications"
+            before = list(project.connection.iterdump())
+            inspection = action["inspection"]
+            result = rpc(
+                server,
+                "tools/call",
+                {"name": inspection["mcpTool"], "arguments": inspection["arguments"]},
+            )["result"]
+            assert not result["isError"] and list(project.connection.iterdump()) == before
+            refused = rpc(
+                server,
+                "tools/call",
+                {"name": "harness_advance", "arguments": {"to_phase": "publish"}},
+            )["result"]
+            assert refused["isError"] and project.phase() == "roundtable"
+            assert (
+                "plan-review-policy-unmet" if case == "required-fail" else "plan-findings-open"
+            ) in refused["content"][0]["text"]
+        print(
+            json.dumps(
+                {
+                    "case": case,
+                    "projection": projections[0],
+                    "executedActionResult": result,
+                    "postPhase": project.phase(),
+                }
+            )
+        )
+    finally:
+        server.close()
+
+
+def test_continuation_stale_action_and_concurrent_observation_refresh(project, capsys):
+    from codex_harness.core.planner_views import review_resolution_state
+
+    _at_roundtable(project)
+    _record_source_evidence(project)
+    _, cli = _status_pair(project, capsys)
+    old_status = cli["status"]
+    action = old_status["continuation"]["planning"]
+    assert action["kind"] == "attempt_phase_advance"
+    changed = project.spine().node("R1")
+    changed["text"] += " SOURCE-ONLY concurrent changed requirement"
+    project.upsert_node(changed)
+    observed = review_resolution_state(project, old_status)
+    assert observed["nextAction"]["kind"] == "unavailable_refresh"
+    assert observed["continuation"]["classification"] == "unavailable"
+    assert (
+        plan_cli.main(["--workspace", str(project.workspace), "--json", *action["cliArguments"]])
+        == 2
+    )
+    refused = json.loads(capsys.readouterr().out)
+    assert "plan-publication-evidence-required" in refused["text"]
+    assert project.phase() == "roundtable"
+    assert refused["status"]["continuation"]["planning"]["kind"] == "audit_required"
+    print(
+        json.dumps(
+            {
+                "oldAction": action,
+                "concurrentProjection": observed["continuation"],
+                "actualRefusal": refused,
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("phase", ["roundtable", "publish"])
+def test_metadata_only_compile_prerequisite_has_precise_public_gate(project, capsys, phase):
+    """Metadata removal preserves approval, but cannot claim publication readiness."""
+    from codex_harness.core.planner_resume import resume_plan
+
+    _at_roundtable(project)
+    _record_source_evidence(project)  # SOURCE-ONLY recorded audit/review envelopes.
+    if phase == "publish":
+        project.advance("publish", by="source-test")
+    original_revision = project.manifest_revision()
+    original_approval = project.status()["approval"]
+    original_vision = project.spine().node("V1")
+    edited_vision = json.loads(json.dumps(original_vision))
+    edited_vision["fields"].pop("validation")
+    server = PlannerServer(project.workspace)
+    try:
+        changed = rpc(
+            server,
+            "tools/call",
+            {"name": "harness_upsert_node", "arguments": {"node": edited_vision}},
+        )["result"]
+        assert not changed["isError"], changed
+        before = list(project.connection.iterdump())
+        mcp, cli = _status_pair(project, capsys)
+        resumed = resume_plan(project.workspace)
+        assert list(project.connection.iterdump()) == before
+        statuses = [mcp["structuredContent"], cli["status"], resumed["canonicalStatus"]]
+        for status in statuses:
+            assert status["approval"] == original_approval
+            assert status["approval"]["granted"] is True
+            assert status["reviewResolution"]["manifestRevision"] is None
+            assert status["continuation"]["planning"]["kind"] == "compile_required"
+        assert (
+            statuses[0]["continuation"]
+            == statuses[1]["continuation"]
+            == statuses[2]["continuation"]
+        )
+        assert "compile --template" in cli["next"]
+        assert "existing CLI compile --template" in mcp["content"][0]["text"].split("Next:")[-1]
+        mutation = (
+            {"name": "harness_advance", "arguments": {"to_phase": "publish"}}
+            if phase == "roundtable"
+            else {
+                "name": "harness_publish",
+                "arguments": {"proof_level": "prospective", "reason": "SOURCE-ONLY fixture"},
+            }
+        )
+        refused = rpc(server, "tools/call", mutation)["result"]
+        assert refused["isError"] and project.phase() == phase
+        assert list(project.connection.iterdump()) == before
+        print(
+            json.dumps(
+                {
+                    "phase": phase,
+                    "missingMetadataCLI": cli,
+                    "MCP": mcp,
+                    "resume": resumed,
+                    "actualRefusal": refused,
+                }
+            ),
+            file=sys.stderr,
+        )
+        for status in statuses:
+            assert status["pending_gate"] == "compile-required"
+            assert status["phase_gate"] == (
+                "zero-open-clarifications"
+                if phase == "roundtable"
+                else "current-revision-published"
+            )
+        repaired = rpc(
+            server,
+            "tools/call",
+            {"name": "harness_upsert_node", "arguments": {"node": original_vision}},
+        )["result"]
+        assert not repaired["isError"], repaired
+        assert (
+            plan_cli.main(
+                [
+                    "--workspace",
+                    str(project.workspace),
+                    "--json",
+                    "compile",
+                    "--template",
+                    str(project.workspace / "template"),
+                    "--out",
+                    str(project.workspace / "manifest.json"),
+                ]
+            )
+            == 0
+        )
+        compiled = json.loads(capsys.readouterr().out)
+        assert not compiled["isError"] and project.manifest_revision() == original_revision
+        _, refreshed = _status_pair(project, capsys)
+        action = refreshed["status"]["continuation"]["planning"]
+        assert action["kind"] == (
+            "attempt_phase_advance" if phase == "roundtable" else "attempt_publication"
+        )
+        if phase == "publish":
+            command = shlex.split(refreshed["next"].split(" (attempt only;")[0])
+            assert command[:3] == ["python", "-m", "codex_harness.core.plan_cli"]
+            command = [
+                "SOURCE-ONLY bookkeeping audit" if token == "<actual no-oracle reason>" else token
+                for token in command[3:]
+            ]
+            assert plan_cli.main(["--json", *command]) == 0
+            actual = json.loads(capsys.readouterr().out)
+        else:
+            actual = rpc(
+                server,
+                "tools/call",
+                {"name": action["mcpTool"], "arguments": action["arguments"]},
+            )["result"]
+        assert not actual["isError"], actual
+        assert project.phase() == "publish"
+        if phase == "publish":
+            assert project.status()["publication"]["up_to_date"] is True
+        print(
+            json.dumps(
+                {
+                    "repairedCLI": refreshed,
+                    "compiled": compiled,
+                    "executedAction": actual,
+                    "postStatus": project.status(),
+                }
+            )
+        )
+    finally:
+        server.close()
+
+
+def test_continuation_missing_plan_surfaces_do_not_create_state(tmp_path, capsys):
+    from codex_harness.core.planner_resume import resume_plan
+    from codex_harness.core.planner_views import review_resolution_state
+
+    missing = tmp_path / "missing"
+    server = PlannerServer(missing)
+    try:
+        status = server._status()
+        view = review_resolution_state(None, status)
+        mcp = rpc(server, "tools/call", {"name": "harness_plan_status", "arguments": {}})["result"]
+        assert mcp["isError"] and view["nextAction"]["kind"] == "unavailable_refresh"
+        assert mcp["content"][0]["text"].split("Next:")[-1].startswith(" harness_plan_start")
+        assert plan_cli.main(["--workspace", str(missing), "--json", "status"]) == 2
+        cli = json.loads(capsys.readouterr().out)
+        resumed = resume_plan(missing)
+        assert cli["isError"] and resumed["reasonCode"] == "plan-missing"
+        assert resumed["nextAction"]["kind"] == "start_plan"
+        assert not missing.exists()
+        print(json.dumps({"missingMCP": mcp, "missingCLI": cli, "missingResume": resumed}))
+    finally:
+        server.close()
+
+
 def test_current_evidence_sequence_never_invents_an_oracle(project, capsys):
     _at_roundtable(project)
     _record_source_evidence(project)
@@ -285,16 +650,17 @@ def test_partial_review_failure_keeps_supported_retry_guidance(project, capsys):
     mcp, cli = _status_pair(project, capsys)
     for status in (mcp["structuredContent"], cli["status"]):
         state = status["reviewResolution"]
-        assert state["nextAction"]["kind"] == "review_required"
+        assert state["nextAction"]["kind"] == "attempt_phase_advance"
         assert state["review"]["current"] is True  # Existing admission fact is unchanged.
+        assert status["continuation"]["workerQuality"]["blocked"] is True
         assert state["review"]["qualityStatus"] == "fail"
         assert "claude" in state["review"]["advice"]
         assert "retry" in state["review"]["advice"]
         assert state["review"]["detailRoute"]["roundId"] == failed["roundId"]
         assert len(state["review"]["advice"]) <= 512
         assert "SOURCE-ONLY failed reviewer" not in json.dumps(state)
-    assert "harness_review" in mcp["content"][0]["text"].split("Next:")[-1]
-    assert "review" in cli["next"] and "roundtable --reviewer" in cli["next"]
+    assert "harness_advance to_phase=publish" in mcp["content"][0]["text"].split("Next:")[-1]
+    assert "advance --to publish" in cli["next"] and "review quality warning" in cli["next"]
     assert list(project.connection.iterdump()) == before
     for status in (single_mcp["structuredContent"], single_cli["status"]):
         state = status["reviewResolution"]

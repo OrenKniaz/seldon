@@ -87,6 +87,13 @@ def next_command(server: PlannerServer, status: dict) -> str:
     if phase == "unknown":
         return cmd("status")
     store = server._store()
+    projection = status.get("continuation")
+    if (
+        projection
+        and phase in {"roundtable", "publish"}
+        and projection["recommendation"]["kind"] != "not_applicable"
+    ):
+        return planner_views.review_resolution_next(status["reviewResolution"], cli_prefix=prefix)
     if status.get("vision_lock_stale"):
         return (
             "Use native MCP harness_record_confirmation gate=vision-lock "

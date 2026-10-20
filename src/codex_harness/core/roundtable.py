@@ -610,6 +610,330 @@ def _parse_review_return(store, reviewer, shard, response, *, mocked):
     return record, valid
 
 
+def _assessment_hash(value):
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _assessment_directory(store, snapshot):
+    if (
+        not isinstance(snapshot, dict)
+        or set(snapshot) != {"id", "sha256"}
+        or not isinstance(snapshot["id"], str)
+        or not re.fullmatch(r"[0-9a-f]{32}", snapshot["id"])
+    ):
+        raise ValueError("Invalid assessment snapshot handle")
+    anchor = store.path.parent.resolve()
+    path = anchor / "reviews" / "assessment-candidates" / snapshot["id"]
+    for component in (path, *list(path.parents)[:3]):
+        if component.exists() and (
+            component.is_symlink() or getattr(component.stat(), "st_file_attributes", 0) & 0x400
+        ):
+            raise ValueError("Assessment snapshot has a redirected path")
+    if not path.resolve().is_relative_to(anchor):
+        raise ValueError("Assessment snapshot escapes store")
+    return path
+
+
+def _assessment_file(repo, name):
+    path = repo / name
+    if (
+        Path(name).is_absolute()
+        or ".." in Path(name).parts
+        or not path.resolve().is_relative_to(repo)
+    ):
+        raise ValueError("Assessment source escapes selected product")
+    for component in (path, *path.parents):
+        if component == repo.parent:
+            break
+        if component.is_symlink() or getattr(component.stat(), "st_file_attributes", 0) & 0x400:
+            raise ValueError("Assessment source has a redirected path")
+    raw = path.read_bytes()
+    return dict(sha256=hashlib.sha256(raw).hexdigest(), text=raw.decode("utf-8"))
+
+
+def _read_execution_assessment(store, snapshot):
+    """Local snapshot consistency only; no canonical execution/author admission."""
+    from codex_harness.core.record_io import read_record_json
+
+    header = read_record_json(_assessment_directory(store, snapshot) / "registration.json")
+    if _assessment_hash(header) != snapshot["sha256"]:
+        raise ValueError("Assessment registration changed")
+    repo = Path(header["repo"])
+    if store.manifest_revision() != header["manifestRevision"]:
+        raise ValueError("Assessment manifest snapshot is stale")
+    rows = {row["id"]: row for row in findings(store, expand=True)}
+    if any(rows.get(row["id"]) != row for row in header["members"]):
+        raise ValueError("Assessment member/disposition snapshot is stale")
+    for name, expected in header["files"].items():
+        if _assessment_file(repo, name) != expected:
+            raise ValueError("Assessment artifact/protected witness snapshot is stale")
+    return header
+
+
+def _prepare_execution_assessment(
+    store,
+    *,
+    member_ids,
+    repo,
+    manifest,
+    proof_module,
+    artifact_paths,
+    witness_ids,
+    reviewer,
+    executable,
+):
+    """Private prerequisite packet, never a canonical execution registration.
+
+    Execute an actual local protected witness and retain its observations. The
+    missing canonical execution/author selection cannot be filled by caller flags.
+    No public launcher or ordinary review/closure credit is provided by this leaf.
+    """
+    from codex_harness.core.record_io import write_record_json_once
+    from codex_harness.core.runners import resolve_runner, validate_proof
+    from codex_harness.core.spine import requirement_file_sources
+
+    repo = Path(repo).resolve()
+    if resolve_runner(manifest).name != "unittest":
+        raise ValueError("Assessment leaf requires observed unittest witnesses")
+    rows = {row["id"]: row for row in findings(store, expand=True)}
+    if not member_ids or len(set(member_ids)) != len(member_ids) or set(member_ids) - rows.keys():
+        raise ValueError("Assessment requires exact existing local member IDs")
+    if set(witness_ids) != set(member_ids):
+        raise ValueError("Assessment witness selection must enumerate every member")
+    members = [rows[key] for key in sorted(member_ids)]
+    names = sorted(
+        set(artifact_paths)
+        | set(requirement_file_sources(repo, list(manifest.get("requirementFiles", []))))
+    )
+    if not artifact_paths:
+        raise ValueError("Assessment requires selected artifact bytes")
+    files = {name: _assessment_file(repo, name) for name in names}
+    proof = validate_proof(repo, manifest, proof_module, owned_files=tuple(artifact_paths))
+    if files != {name: _assessment_file(repo, name) for name in names}:
+        raise ValueError("Assessment sources changed while executing witness")
+    observations = proof.get("observations") or {}
+    tests = {row["id"]: row for row in observations.get("tests", [])}
+    if any(
+        not isinstance(ids, list)
+        or any(not isinstance(key, str) for key in ids)
+        or len(ids) != len(set(ids))
+        or set(ids) - tests.keys()
+        for ids in witness_ids.values()
+    ):
+        raise ValueError("Assessment witness ID was not actually observed")
+    header = dict(
+        schema="seldon/execution-assessment-snapshot-v1",
+        repo=str(repo),
+        manifestRevision=store.manifest_revision(),
+        members=members,
+        files=files,
+        artifactPaths=list(artifact_paths),
+        witnessIds=witness_ids,
+        proof=proof,
+        reviewer=reviewer,
+        sourceOnly=True,
+        shard={"nodeIds": sorted({row["node_id"] for row in members})},
+        unavailable=[
+            "canonical execution/author selection",
+            "stage-aware reservation",
+            "atomic closure consumer",
+        ],
+    )
+    header["responseBinding"] = _assessment_hash(header)
+    header["responseContract"] = dict(
+        schema="seldon/execution-member-response-v1",
+        snapshotHash=header["responseBinding"],
+        members=[
+            dict(
+                memberId=row["id"],
+                disposition=row["status"],
+                judgment="cannot-assess",
+                explanation="Explain the specific observation or gap",
+                artifactPaths=list(artifact_paths),
+                witnessIds=witness_ids[row["id"]],
+            )
+            for row in members
+        ],
+    )
+    header["responseRules"] = (
+        "Return exactly the responseContract shape and binding, every member once. "
+        "Judgment: supports-repair, supports-counterevidence, not-satisfied or cannot-assess. "
+        "Use only listed artifactPaths and that member's actually observed witnessIds. "
+        "Explain why the actual witness supports or contradicts the original concern. "
+        "Missing evidence is cannot-assess. No code edit is required for counterevidence; "
+        "deferral retains the locked obligation. This is a local snapshot, not closure approval."
+    )
+    packet = json.dumps(header, ensure_ascii=False, sort_keys=True)
+    header["packet"] = packet
+    launch = _launch_review(reviewer, packet, executable)
+    header["launch"] = dict(
+        payload=launch.to_payload(),
+        executable=executable,
+        stdinSha256=hashlib.sha256((launch.stdin_text or "").encode()).hexdigest(),
+    )
+    snapshot = dict(id=uuid4().hex, sha256=_assessment_hash(header))
+    directory = _assessment_directory(store, snapshot)
+    directory.mkdir(parents=True)
+    write_record_json_once(directory / "registration.json", header)
+    _read_execution_assessment(store, snapshot)
+    return snapshot
+
+
+def _capture_execution_assessment(store, snapshot, reviewer, shard, launch, executable, response):
+    """Existing return-hook shape; seal once, without creating a review run."""
+    from codex_harness.core.acceptance_recovery import runtime_identity
+    from codex_harness.core.record_io import write_record_json_once
+
+    header = _read_execution_assessment(store, snapshot)
+    actual = dict(
+        payload=launch.to_payload(),
+        executable=executable,
+        stdinSha256=hashlib.sha256((launch.stdin_text or "").encode()).hexdigest(),
+    )
+    if (
+        reviewer != header["reviewer"]
+        or shard["packet"] != header["packet"]
+        or {key: value for key, value in shard.items() if key != "packet"} != header["shard"]
+        or actual != header["launch"]
+    ):
+        raise ValueError("Assessment return differs from prelaunch snapshot")
+    code, output = response[:2]
+    stderr = response[2] if len(response) > 2 else ""
+    if type(code) is not int or not isinstance(output, str) or not isinstance(stderr, str):
+        raise ValueError("Assessment return requires an actual exit integer and UTF-8 text")
+    try:
+        identity = runtime_identity(reviewer["provider"], reviewer, output, stderr)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        identity = None
+    completion = dict(
+        snapshotHash=snapshot["sha256"],
+        exitCode=code,
+        stdout=output,
+        stderr=stderr,
+        reviewerObservation=identity,
+        sourceOnly=True,
+    )
+    write_record_json_once(_assessment_directory(store, snapshot) / "completion.json", completion)
+    return _assessment_hash(completion)
+
+
+def _parse_execution_assessment(store, snapshot, completion_hash):
+    """Strict per-member judgments with local witness support, never closure eligibility."""
+    from codex_harness.core.record_io import read_record_json
+
+    header = _read_execution_assessment(store, snapshot)
+    completion = read_record_json(_assessment_directory(store, snapshot) / "completion.json")
+    if (
+        _assessment_hash(completion) != completion_hash
+        or completion["snapshotHash"] != snapshot["sha256"]
+    ):
+        raise ValueError("Assessment completion has another snapshot binding")
+    if (
+        completion["exitCode"] != 0
+        or not packet_binding(completion["stdout"], header["reviewer"]["provider"])["packetBound"]
+    ):
+        raise ValueError("Assessment reviewer failed or expanded the packet")
+
+    def distinct(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate assessment JSON field")
+            result[key] = value
+        return result
+
+    body = json.loads(
+        _response(completion["stdout"], header["reviewer"]["provider"]), object_pairs_hook=distinct
+    )
+    if (
+        not isinstance(body, dict)
+        or set(body) != {"schema", "snapshotHash", "members"}
+        or body["schema"] != "seldon/execution-member-response-v1"
+        or body["snapshotHash"] != header["responseBinding"]
+        or not isinstance(body["members"], list)
+    ):
+        raise ValueError(
+            "A bound targeted member response is required; ordinary [] is insufficient"
+        )
+    expected = {row["id"]: row for row in header["members"]}
+    tests = {row["id"]: row for row in (header["proof"].get("observations") or {}).get("tests", [])}
+    seen, members = set(), []
+    for row in body["members"]:
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {"memberId", "disposition", "judgment", "explanation", "artifactPaths", "witnessIds"}
+            or not isinstance(row["memberId"], str)
+            or row["memberId"] not in expected
+            or row["memberId"] in seen
+            or row["disposition"] != expected[row["memberId"]]["status"]
+            or not isinstance(row["judgment"], str)
+            or row["judgment"]
+            not in {"supports-repair", "supports-counterevidence", "not-satisfied", "cannot-assess"}
+            or not isinstance(row["explanation"], str)
+            or not row["explanation"].strip()
+        ):
+            raise ValueError("Assessment member set/disposition/judgment is invalid")
+        key = row["memberId"]
+        seen.add(key)
+        if (
+            not isinstance(row["artifactPaths"], list)
+            or not isinstance(row["witnessIds"], list)
+            or any(not isinstance(value, str) for value in row["artifactPaths"] + row["witnessIds"])
+            or len(set(row["artifactPaths"])) != len(row["artifactPaths"])
+            or len(set(row["witnessIds"])) != len(row["witnessIds"])
+            or set(row["artifactPaths"]) - set(header["artifactPaths"])
+            or set(row["witnessIds"]) - set(header["witnessIds"][key])
+        ):
+            raise ValueError("Assessment references were not predeclared for this member")
+        supported = bool(header["proof"]["passed"] and row["artifactPaths"] and row["witnessIds"])
+        supported = supported and all(
+            any(event["kind"] == "success" for event in tests[test]["events"])
+            and not any(event["kind"] != "success" for event in tests[test]["events"])
+            and tests[test].get("source", {}).get("file") in header["files"]
+            and any(
+                call.get("file") in row["artifactPaths"] and call.get("phase") == "test"
+                for call in tests[test].get("ownedCalls", [])
+            )
+            for test in row["witnessIds"]
+        )
+        positive = row["judgment"] in {"supports-repair", "supports-counterevidence"}
+        deferred = row["disposition"] == "deferred"
+        holds = []
+        if not supported:
+            holds.append("selected-local-witness-absent-or-not-passing")
+        if not positive:
+            holds.append("reviewer-not-positive")
+        if deferred:
+            holds.append("deferred-locked-obligation")
+        members.append(
+            {
+                **row,
+                "originalFinding": expected[key],
+                "retainedObligation": True,
+                "evidenceState": "local-witness-observed"
+                if supported and positive and not deferred
+                else "unverified",
+                "deferredObligationHeld": deferred,
+                "holdReasons": holds,
+            }
+        )
+    if seen != set(expected):
+        raise ValueError("Assessment omitted a registered member")
+    return dict(
+        schema="seldon/execution-assessment-candidate-v1",
+        snapshot=snapshot,
+        members=members,
+        reviewerObservation=completion["reviewerObservation"],
+        sourceOnly=True,
+        closureEligible=False,
+        fullVisionHeld=True,
+        holdReasons=header["unavailable"],
+    )
+
+
 def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout, capture=None):
     """Capture and persist provider errors before attempting temporary-dir cleanup."""
     record = {key: value for key, value in shard.items() if key != "packet"}

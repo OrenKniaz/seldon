@@ -733,9 +733,7 @@ class PlannerServer:
         if self.store is None and (self.workspace / ".codex-harness" / "plan.sqlite3").is_file():
             self._store()
         if self.store is not None:
-            status = self.store.status()
-            status["reviewResolution"] = views.review_resolution_state(self.store, status)
-            return status
+            return self.store.status()
         return {
             "name": self.workspace.name,
             "phase": "align",
@@ -871,6 +869,8 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if status.get("pending_gate") == "harness_plan_start":
+            return "harness_plan_start idea=<your idea> name=<plan name>"
         if name == "harness_resolve_findings" and error:
             return (
                 "harness_schema tool=harness_resolve_findings (complete declaration contract "
@@ -887,6 +887,11 @@ class PlannerServer:
         ):
             return "harness_worker_status job_id=" + self.result_data["jobId"]
         if name == "harness_publish" and not error:
+            if (
+                status.get("continuation", {}).get("recommendation", {}).get("kind")
+                != "not_applicable"
+            ):
+                return views.review_resolution_next(status["reviewResolution"])
             return (
                 "harness_worker_start expected_revision="
                 + self.result_data["id"]

@@ -12,7 +12,6 @@ from uuid import uuid4
 from codex_harness.core import planner_jobs
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
-from codex_harness.core.planner_views import review_resolution_state
 from codex_harness.core.record_io import write_record_json_once
 
 SCHEMA = "seldon/planner-resume-v1"
@@ -168,8 +167,7 @@ def resume_plan(
             # temporarily unreadable or has moved on from their publication.
             try:
                 status = store.status()
-                resolution = review_resolution_state(store, status)
-                status["reviewResolution"] = resolution
+                resolution = status["reviewResolution"]
                 result.update(
                     canonicalStatus=status,
                     planRevision=status["plan_revision"],
@@ -229,6 +227,14 @@ def resume_plan(
                         ],
                     },
                 )
+                return finish()
+            # Publication continuation uses its configured prerequisites. Worker
+            # admission below still owns the separate quality/native checks.
+            if (
+                status["phase"] in {"roundtable", "publish"}
+                and resolution["nextAction"]["kind"] != "not_applicable"
+            ):
+                result["reasonCode"] = "canonical-prerequisite"
                 return finish()
             if status["phase"] not in {"roundtable", "publish", "execute"}:
                 result.update(

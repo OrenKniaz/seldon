@@ -178,9 +178,117 @@ def review_policy_next(policy: dict, *, cli_prefix=None) -> str:
     )
 
 
+def continuation_projection(status: dict, resolution: dict) -> dict:
+    """Pure publication advice over observed facts, never mutation/admission authority."""
+    action = {
+        "kind": "unavailable_refresh",
+        "manifestRevision": resolution.get("manifestRevision"),
+        "findingIds": [],
+        "auditMode": resolution.get("audit", {}).get("proofLevel") or "unknown",
+    }
+    quality = resolution.get("review", {}).get("qualityStatus")
+    result = {
+        "schemaVersion": 1,
+        "spineRevision": resolution.get("spineRevision"),
+        "manifestRevision": resolution.get("manifestRevision"),
+        "phase": status.get("phase"),
+        "planning": action,
+        "recommendation": action,
+        "recommendationScope": "planning-publication",
+        "classification": "unavailable",
+        "workerQuality": {
+            "status": quality,
+            "blocked": quality == "fail" if quality else None,
+            "scope": "Existing worker admission quality threshold; not publication authority",
+        },
+        "qualityWarnings": [resolution["review"]["advice"]] if quality in {"warn", "fail"} else [],
+        "productAcceptance": {
+            "accepted": status.get("acceptance", {}).get("accepted") is True,
+            "humanOriginVerified": status.get("acceptance", {}).get("humanOriginVerified") is True,
+            "scope": "Recorded product acceptance state; not inferred from planning or quality",
+        },
+    }
+    if resolution.get("snapshotChanged"):
+        return result
+    blocker = resolution.get("canonicalBlocker")
+    phase = status.get("phase")
+    policy = status.get("reviewPolicy", {})
+    if blocker:
+        action.update(blocker)
+    elif phase not in {"roundtable", "publish", "execute"}:
+        action["kind"] = "not_applicable"
+        result["classification"] = "outside-bounded-planning-scope"
+        return result
+    elif resolution.get("blockingOpenFindings") is None:
+        return result
+    elif resolution["blockingOpenFindings"]:
+        round_id = resolution["blockingOpenFindings"][0]["roundId"]
+        action.update(
+            kind="reconcile_findings",
+            findingIds=[row["id"] for row in resolution["blockingOpenFindings"]],
+            inspection={
+                "mcpTool": "harness_review",
+                "arguments": {"id": round_id},
+                "cliArguments": ["review", round_id],
+            },
+        )
+    elif policy.get("active") and not policy["eligible"]:
+        action["kind"] = "review_policy_hold"
+        result["classification"] = "configured-policy-hold"
+        result["unavailableProducers"] = [
+            "targeted assessment",
+            "observed separation",
+            "accepted-clause witness",
+        ]
+        round_id = resolution.get("review", {}).get("detailRoute", {}).get("roundId")
+        if round_id:
+            action["inspection"] = {
+                "mcpTool": "harness_review",
+                "arguments": {"id": round_id},
+                "cliArguments": ["review", round_id],
+            }
+        return result
+    elif not resolution.get("manifestRevision"):
+        action["kind"] = "compile_required"
+    elif resolution["audit"]["current"] is None:
+        return result
+    elif not resolution["audit"]["current"]:
+        action["kind"] = "audit_required"
+    elif resolution["review"]["current"] is None:
+        return result
+    elif not resolution["review"]["current"]:
+        action["kind"] = "review_required"
+    elif phase == "roundtable":
+        action.update(
+            kind="attempt_phase_advance",
+            targetPhase="publish",
+            mcpTool="harness_advance",
+            arguments={"to_phase": "publish"},
+            cliArguments=["advance", "--to", "publish"],
+            expectedPostState={"phase": "publish"},
+        )
+    elif phase == "publish" and not status.get("publication", {}).get("up_to_date"):
+        action["kind"] = "attempt_publication"
+    else:
+        action["kind"] = "not_applicable"
+    result["classification"] = (
+        "attempt-configured-mutation"
+        if action["kind"].startswith("attempt_")
+        else "canonical-prerequisite"
+    )
+    if (
+        action["kind"] == "not_applicable"
+        and quality == "fail"
+        and status.get("publication", {}).get("up_to_date")
+    ):
+        result["recommendation"] = {**action, "kind": "review_required"}
+        result["recommendationScope"] = "worker-admission"
+    return result
+
+
 def review_resolution_state(store, status: dict) -> dict:
     """Read existing canonical facts; advisory only, never a loop or admission lease."""
-    from codex_harness.core.plan_quality import quality_report
+    from codex_harness.core.plan_quality import _roundtable
     from codex_harness.core.roundtable import findings
 
     def known(value):
@@ -311,12 +419,9 @@ def review_resolution_state(store, status: dict) -> dict:
             if not all(known(item) for item in ids):
                 raise ValueError("Unknown current review identity")
             state["review"] = {"current": bool(ids), "successfulReviewIds": sorted(ids)}
-            if state["phase"] in {"roundtable", "publish"}:
-                check = next(
-                    check
-                    for check in quality_report(store)["checks"]
-                    if check["id"] == "roundtable"
-                )
+            if state["phase"] in {"roundtable", "publish", "execute"}:
+                quality, evidence, advice = _roundtable(store)
+                check = dict(status=quality, evidence=evidence, advice=advice)
                 if check["status"] not in {"pass", "warn", "fail"}:
                     raise ValueError("Unknown roundtable quality state")
                 advice, truncated = excerpt(check["advice"])
@@ -330,37 +435,15 @@ def review_resolution_state(store, status: dict) -> dict:
                         "cliCommand": "review",
                     },
                 )
-        if priority is not None:
-            pass
-        elif state["phase"] not in {"roundtable", "publish"}:
-            state["nextAction"] = action("not_applicable")
-        elif blocking:
-            state["nextAction"] = action(
-                "reconcile_findings", findingIds=[row["id"] for row in blocking]
-            )
-        elif (
-            status.get("reviewPolicy", {}).get("active") and not status["reviewPolicy"]["eligible"]
-        ):
+        if status.get("reviewPolicy", {}).get("active"):
             state["reviewPolicy"] = status["reviewPolicy"]
-            state["nextAction"] = action("review_policy_hold")
-        elif not known(manifest):
-            state["nextAction"] = action("compile_required")
-        elif not state["audit"]["current"]:
-            state["nextAction"] = action("audit_required")
-        elif not state["review"]["current"] or state["review"].get("qualityStatus") == "fail":
-            state["nextAction"] = action("review_required")
-        elif state["phase"] == "roundtable":
-            state["nextAction"] = action("attempt_phase_advance", targetPhase="publish")
-        elif status.get("publication", {}).get("up_to_date") and not gate:
-            state["nextAction"] = action("not_applicable")
-        else:
-            state["nextAction"] = action("attempt_publication")
         if (
             store._revision() != spine
             or store.phase() != state["phase"]
             or store.manifest_revision() != manifest
         ):
             priority = None
+            state["snapshotChanged"] = True
             raise ValueError("Resolution observation changed during read")
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, StopIteration):
         state.update(
@@ -370,6 +453,10 @@ def review_resolution_state(store, status: dict) -> dict:
             review={"current": None, "successfulReviewIds": None},
         )
         state["nextAction"] = priority if priority is not None else action("unavailable_refresh")
+    state["canonicalBlocker"] = priority
+    projection = continuation_projection(status, state)
+    state["nextAction"] = projection["recommendation"]
+    state["continuation"] = projection
     return state
 
 
@@ -648,7 +735,11 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
 
 def review_warning(state: dict) -> str:
     review = state["review"]
-    return "; review warning: " + review["advice"] if review.get("qualityStatus") == "warn" else ""
+    return (
+        "; review quality warning (worker admission remains separate): " + review["advice"]
+        if review.get("qualityStatus") in {"warn", "fail"}
+        else ""
+    )
 
 
 def _inline(value: str) -> str:
