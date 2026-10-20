@@ -1,8 +1,10 @@
 """Prospective red must come from the selected owned behavior, not a broken test."""
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,6 +59,105 @@ def candidate(tmp_path):
         }
     )
     return dict(template=root, spine=spine, manifest=compile_manifest(spine, root))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "compliant",
+        "stub",
+        "wrong-exit",
+        "extra-output",
+        "cwd-import",
+        "unsupported",
+        "guarded-stub",
+    ],
+)
+def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatch, case):
+    """Product behavior and audit attribution are separate, observable contracts."""
+    root = candidate["template"]
+    source = "import sys\nif __name__ == '__main__':\n    print('[]')\n"
+    if case in ("stub", "unsupported"):
+        source = (
+            "def _list_command():\n    raise NotImplementedError('planned list')\n"
+            "if __name__ == '__main__':\n    _list_command()\n"
+        )
+    elif case == "guarded-stub":
+        source = "if __name__ == '__main__':\n    raise NotImplementedError('planned list')\n"
+    elif case == "wrong-exit":
+        source += "    sys.exit(7)\n"
+    elif case == "extra-output":
+        source += "    print('debug output')\n"
+    elif case == "cwd-import":
+        source = "import proof_only_dependency\n" + source
+        (root / "tests/proof_only_dependency.py").write_text("# Not a product dependency\n")
+    (root / "app.py").write_text(source, encoding="utf-8")
+    launch = (
+        "result = subprocess.run([sys.executable, '-B', '-m', 'app', 'list'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+    )
+    body = "        " + launch
+    if case == "unsupported":
+        body = "        if True:\n            " + launch
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n    def test_cli(self):\n"
+        + body
+        + "        self.assertEqual(result.returncode, 0, result.stderr)\n"
+        "        self.assertEqual(result.stdout, '[]\\n')\n"
+        "        self.assertEqual(result.stderr, '')\n",
+        encoding="utf-8",
+    )
+    # Ordinary product discovery must work without the harness supplying its path.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    env = dict(os.environ)
+    assert "PYTHONPATH" not in env
+    ordinary = subprocess.run(
+        [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-p", "test_app.py"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (ordinary.returncode == 0) is (case == "compliant"), ordinary.stderr
+    if case == "wrong-exit":
+        assert "7 != 0" in ordinary.stderr
+    elif case == "extra-output":
+        assert "debug output" in ordinary.stderr
+    elif case == "cwd-import":
+        assert "ModuleNotFoundError" in ordinary.stderr
+        assert "proof_only_dependency" in ordinary.stderr
+    else:
+        assert ("NotImplementedError: planned list" in ordinary.stderr) is (case != "compliant")
+
+    audit = test_audit.audit_prospective_tests(**candidate)
+    if case == "stub":
+        assert audit["ok"], audit["findings"]
+        provenance = audit["redBaseline"][0]["failureProvenance"]
+        assert provenance["classification"] == "meaningful-red"
+        assert provenance["tests"][0]["classification"] == "owned-cli-stub"
+    else:
+        assert not audit["ok"], audit
+        expected = (
+            "prospective-vacuous-proof"
+            if case == "compliant"
+            else "prospective-no-interface-assertion"
+            if case == "unsupported"
+            else "prospective-red-unproved"
+        )
+        assert expected in {finding["code"] for finding in audit["findings"]}
+        if case == "unsupported":
+            assert any(
+                "no product main() API is required" in item["output"] for item in audit["findings"]
+            )
+        elif case != "compliant":
+            assert audit["redBaseline"][0]["failureProvenance"]["classification"] == "unproved"
+            if case == "guarded-stub":
+                observed = audit["redBaseline"][0]["failureProvenance"]["tests"][0]
+                launch = observed["moduleLaunches"][0]
+                assert launch["child"]["exception"]["type"] == "NotImplementedError"
+                assert launch["child"]["exception"]["frames"][-1]["function"] == "<module>"
 
 
 @pytest.mark.parametrize("phase", ["setUp", "tearDown", "test_value"])

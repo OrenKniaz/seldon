@@ -10,6 +10,7 @@ import pytest
 from tests.python.core.planning_support import source_only_confirmation, source_only_publication
 
 from codex_harness.core import dispatch
+from codex_harness.core.acceptance import derive_scenarios, run_scenarios
 from codex_harness.core.dispatch import STATUS_MOCK_ONLY, _git, run_plan
 from codex_harness.core.spine import Spine, compile_manifest, impact, load_spine, save_spine
 from codex_harness.core.test_audit import (
@@ -75,6 +76,49 @@ def test_prospective_checks_real_stubs_without_modifying_template(prospective):
     assert "NotImplementedError" in result["redBaseline"][0]["output"]
     assert all(item["passed"] for item in result["collection"])
     assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_structural_test_links_do_not_supply_missing_clause_witnesses(prospective):
+    """Five linked requirements still need their own executable acceptance evidence."""
+    data = prospective["spine"].to_dict()
+    clauses = [
+        "List records",
+        "Reject boolean IDs",
+        "Keep exact amounts",
+        "Reject invalid UTF-8",
+        "Preserve failed writes",
+    ]
+    requirement_ids = [f"R{index}" for index in range(1, 6)]
+    data["nodes"] = [node for node in data["nodes"] if node["id"] != "R"]
+    data["nodes"].extend(
+        dict(id=key, kind="requirement", title=clause, text=clause, parents=["F"], fields={})
+        for key, clause in zip(requirement_ids, clauses, strict=True)
+    )
+    witness = {
+        "title": clauses[0],
+        "steps": ['"{python}" -B -m app list'],
+        "expect": {"exit": 0, "stdoutRegex": r"\A\[\]\r?\n\Z", "stderrRegex": r"\A\Z"},
+    }
+    for node in data["nodes"]:
+        if node["id"] in ("B", "T"):
+            node["parents"] = requirement_ids.copy()
+        elif node["id"] == "V":
+            node["fields"].update(first_user_moment=witness, scope_in=[witness, *clauses[1:]])
+    spine = Spine(data)
+    assert spine.coverage_gaps() == []  # This checks graph links, not clause semantics.
+    assert len(spine.ids("test")) == 1
+    (prospective["template"] / "app.py").write_text("print('[]')\n", encoding="utf-8")
+    scenarios = derive_scenarios(spine)
+    results = {item["id"]: item for item in run_scenarios(prospective["template"], scenarios)}
+    assert results["first-moment"]["passed"] is True
+    assert results["scope-1"]["passed"] is True
+    for index, clause in enumerate(clauses[1:], 2):
+        result = results[f"scope-{index}"]
+        assert result["title"] == clause
+        assert result["passed"] is False
+        assert result["steps"] == []
+        assert result["error"] == "No executable steps supplied for this vision promise"
+    assert not all(item["passed"] for item in results.values())
 
 
 def test_prospective_owned_module_cli_needs_no_imported_main_api(prospective):
