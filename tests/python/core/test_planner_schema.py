@@ -1,6 +1,11 @@
 """Schema recovery at the real MCP/store boundary; no provider execution."""
 
 import json
+import os
+import subprocess
+import sys
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +23,260 @@ def invoke(server, tool_name, **arguments):
             }
         )
     )["result"]
+
+
+def typed_template(server, tool):
+    guide = invoke(server, "harness_schema", tool=tool)["structuredContent"]
+    template = deepcopy(guide["draftTemplate"])
+    assert guide["templateState"] == "unconfirmed-draft; bind prerequisites before submission"
+    assert guide["revisionBinding"] == {
+        "tool": "harness_plan_status",
+        "resultKey": "spine_revision",
+        "argument": "expected_spine_revision",
+    }
+    for node in guide["prerequisiteNodes"]:
+        assert not invoke(server, "harness_upsert_node", node=node)["isError"]
+    template["expected_spine_revision"] = invoke(server, "harness_plan_status")[
+        "structuredContent"
+    ]["spine_revision"]
+    print(json.dumps({"tool": tool, "emittedGuide": guide, "boundDraft": template}))
+    return guide, template
+
+
+def test_emitted_intake_draft_roundtrips_public_parser_and_store(tmp_path):
+    server = PlannerServer(tmp_path)
+    try:
+        invoke(server, "harness_plan_start", idea="Reject malformed parser input", name="Parser")
+        guide, payload = typed_template(server, "harness_intake")
+        assert payload["node"]["fields"]["confirmation"] is None
+        result = invoke(server, "harness_intake", **payload)
+        assert not result["isError"], result
+        recorded = result["structuredContent"]
+        print(json.dumps({"tool": "harness_intake", "request": payload, "response": result}))
+        assert recorded["state"] == "draft" and recorded["lockState"] == "unconfirmed"
+        assert recorded["approvalGranted"] is False
+        stored = server.store.spine().node(payload["node"]["id"])["fields"]
+        assert stored["confirmation"] is None and stored["recipe"] == "coherent-plan"
+        assert stored["delta"] == payload["node"]["fields"]["delta"]
+        assert "typed-confirmation-producer-unavailable" in guide["producerLimits"]
+        assert server.store.phase() == "align"
+    finally:
+        server.close()
+
+
+def test_emitted_catalog_and_choice_drafts_require_actual_supplied_bindings(tmp_path):
+    # These observations are source-only doubles, never actual discovery or entitlement.
+    from tests.python.core.test_intake import observation, selection
+
+    server = PlannerServer(tmp_path)
+    try:
+        invoke(server, "harness_plan_start", idea="Review parser behavior", name="Parser")
+        catalog_guide, payload = typed_template(server, "harness_reviewer_catalog")
+        assert payload["catalog"]["id"] is None and payload["catalog"]["observedAt"] is None
+        assert payload["catalog"]["providers"] == []
+        assert set(catalog_guide["providerTemplate"]) == {
+            "provider",
+            "executable",
+            "executableDigest",
+            "version",
+            "installed",
+            "authentication",
+            "discovery",
+            "source",
+            "choices",
+            "reason",
+        }
+        assert set(catalog_guide["catalogChoiceTemplate"]) == {
+            "model",
+            "effort",
+            "availability",
+            "reviewPathSupported",
+            "reason",
+        }
+        assert catalog_guide["providerTemplate"]["authentication"] == "unknown"
+        assert catalog_guide["catalogChoiceTemplate"]["availability"] == "unknown"
+        assert catalog_guide["effortTemplates"] == [
+            {"kind": "named", "value": None},
+            {"kind": "unsupported"},
+        ]
+        assert catalog_guide["sourceTemplates"] == [
+            {"kind": kind, "reference": None, "digest": None}
+            for kind in ("supported-list", "provider-local-metadata")
+        ]
+        assert "derived digest/choiceId" in catalog_guide["observationBindings"]
+        before = server.store.spine().plan_revision()
+        events = server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        unbound = invoke(server, "harness_reviewer_catalog", **payload)
+        print(
+            json.dumps(
+                {"tool": "harness_reviewer_catalog", "unbound": payload, "response": unbound}
+            )
+        )
+        assert unbound["isError"] and "value-text-invalid" in unbound["content"][0]["text"]
+        assert server.store.spine().plan_revision() == before
+        assert (
+            server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events
+        )
+        assert "reviewer-catalog-producer-unavailable" in catalog_guide["producerLimits"]
+        payload["catalog"] = observation()
+        result = invoke(server, "harness_reviewer_catalog", **payload)
+        assert not result["isError"], result
+        catalog = result["structuredContent"]["catalog"]
+        print(json.dumps({"sourceOnly": True, "suppliedCatalog": payload, "response": result}))
+        assert result["structuredContent"]["approvalGranted"] is False
+        assert "digest" in catalog and "choiceId" in catalog["providers"][0]["choices"][0]
+        guide, choice = typed_template(server, "harness_reviewer_choice")
+        fields = choice["node"]["fields"]
+        assert fields["catalogId"] is None and fields["catalogDigest"] is None
+        assert fields["reviewers"] == [] and fields["confirmation"] is None
+        assert guide["reviewerTemplate"]["choiceId"] is None
+        assert guide["reviewerTemplate"]["model"] is None
+        assert fields["assurance"] == {
+            "independentRequired": None,
+            "minIndependentReviewers": None,
+            "crossProviderRequired": None,
+            "basisRefs": [],
+        }
+        assert "do not reduce that policy" in guide["catalogBindings"]
+        assert (
+            "harness_record_confirmation supports only align/vision-lock" in guide["producerLimits"]
+        )
+        unbound_choice = invoke(server, "harness_reviewer_choice", **choice)
+        print(json.dumps({"unboundChoice": choice, "response": unbound_choice}))
+        assert (
+            unbound_choice["isError"]
+            and "value-text-invalid" in unbound_choice["content"][0]["text"]
+        )
+        # Bind only the exact normalized supplied catalog tuple and explicit test policy.
+        fields.update(selection(catalog))
+        fields["confirmation"] = None
+        result = invoke(server, "harness_reviewer_choice", **choice)
+        assert not result["isError"], result
+        data = result["structuredContent"]
+        print(json.dumps({"sourceOnly": True, "selection": choice, "response": result}))
+        assert data["approvalGranted"] is False and data["state"] == "draft"
+        assert any(
+            item.startswith("reviewer-confirmation-required:") for item in data["unmetRequirements"]
+        )
+        assert server.store.spine().node(choice["node"]["id"])["fields"]["confirmation"] is None
+        assert "typed-confirmation-producer-unavailable" in guide["producerLimits"]
+    finally:
+        server.close()
+
+
+def test_cli_emitted_intake_template_roundtrips_from_another_cwd(tmp_path):
+    workspace, elsewhere = tmp_path / "workspace", tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[3] / "src"))
+
+    def call(*args):
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "codex_harness.core.plan_cli",
+                "--workspace",
+                str(workspace),
+                "--json",
+                *args,
+            ],
+            cwd=elsewhere,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        print(
+            json.dumps(
+                {
+                    "argv": process.args,
+                    "cwd": str(elsewhere),
+                    "exitCode": process.returncode,
+                    "stdout": process.stdout,
+                    "stderr": process.stderr,
+                }
+            )
+        )
+        assert process.returncode == 0, process.stderr or process.stdout
+        return json.loads(process.stdout)
+
+    call("start", "--idea", "Reject malformed input", "--name", "Parser")
+    guide = call("schema", "--tool", "harness_intake")["data"]
+    for index, node in enumerate(guide["prerequisiteNodes"]):
+        path = tmp_path / f"node-{index}.json"
+        path.write_text(json.dumps(node), encoding="utf-8")
+        call("node", "--json", "@" + str(path))
+    payload = guide["draftTemplate"]
+    payload["expected_spine_revision"] = call("status")["data"]["spine_revision"]
+    path = tmp_path / "intake.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = call("intake", "--json", "@" + str(path))["data"]
+    assert result["state"] == "draft" and result["approvalGranted"] is False
+    assert result["intake"]["confirmation"] is None
+    assert call("show", payload["node"]["id"])["data"]["fields"]["confirmation"] is None
+
+
+@pytest.mark.parametrize("fault", ["missing", "enum", "origin", "revision", "digest", "source"])
+def test_typed_draft_invalid_bindings_refuse_atomically(tmp_path, fault):
+    from tests.python.core.test_intake import authority, observation
+
+    server = PlannerServer(tmp_path)
+    try:
+        invoke(server, "harness_plan_start", idea="Reject malformed input", name="Parser")
+        _, payload = typed_template(server, "harness_intake")
+        repaired = deepcopy(payload)
+        tool, expected = "harness_intake", "value-shape-invalid"
+        fields = payload["node"]["fields"]
+        if fault == "missing":
+            del fields["delta"]["successCriteria"]
+        elif fault == "enum":
+            fields["requestKind"] = "repair"
+            expected = "value-enum-invalid"
+        elif fault == "origin":
+            fields["confirmation"] = authority(origin="invented-authority")
+            expected = "value-enum-invalid"
+        elif fault == "revision":
+            # Actual previously current revision, made stale by a public edit.
+            vision = deepcopy(server.store.spine().node("V1"))
+            vision["text"] += " Changed accepted draft context."
+            assert not invoke(server, "harness_upsert_node", node=vision)["isError"]
+            expected = "plan-spine-stale"
+        else:
+            tool = "harness_reviewer_catalog"
+            _, payload = typed_template(server, tool)
+            payload["catalog"] = observation()  # Explicit source-only double.
+            repaired = deepcopy(payload)
+            if fault == "digest":
+                payload["catalog"]["digest"] = "0" * 64
+                expected = "reviewer-catalog-hash-mismatch"
+            else:
+                payload["catalog"]["providers"][0]["source"]["kind"] = "invented-origin"
+                expected = "value-enum-invalid"
+        before = server.store.spine().plan_revision()
+        events = server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        result = invoke(server, tool, **payload)
+        print(json.dumps({"fault": fault, "tool": tool, "request": payload, "response": result}))
+        assert result["isError"] and expected in result["content"][0]["text"], result
+        assert server.store.spine().plan_revision() == before
+        assert (
+            server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events
+        )
+        repaired["expected_spine_revision"] = invoke(server, "harness_plan_status")[
+            "structuredContent"
+        ]["spine_revision"]
+        retry = invoke(server, tool, **repaired)
+        print(json.dumps({"fault": fault, "repairRequest": repaired, "retryResponse": retry}))
+        assert not retry["isError"], retry
+        assert retry["structuredContent"]["state"] == "draft"
+        assert retry["structuredContent"]["approvalGranted"] is False
+        if tool == "harness_intake":
+            assert (
+                server.store.spine().node(repaired["node"]["id"])["fields"]["confirmation"] is None
+            )
+    finally:
+        server.close()
 
 
 def test_schema_discovery_before_start_has_usable_examples_without_creating_plan(tmp_path):

@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -29,6 +30,190 @@ from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_quality import first_moment_proof
 from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 from codex_harness.core.spine import Spine, load_spine
+
+
+@pytest.mark.parametrize("invalid_stream", [None, "stdout", "stderr"])
+def test_exact_output_witness_preserves_invalid_utf8_evidence(tmp_path, invalid_stream):
+    """Actual source-product child bytes must not disappear before exact matching."""
+    script = tmp_path / "output.py"
+    out = b"\xff[]\n" if invalid_stream == "stdout" else b"[]\n"
+    err = b"\xff" if invalid_stream == "stderr" else b""
+    script.write_text(f"import os\nos.write(1, {out!r})\nos.write(2, {err!r})\n")
+    raw = subprocess.run(
+        [sys.executable, "-B", str(script)],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert raw.returncode == 0 and raw.stdout == out and raw.stderr == err
+    scenario = dict(
+        id="exact-output",
+        title="Exact CLI list output",
+        steps=['"{python}" -B "{repo}/output.py"'],
+        expect={"exit": 0, "stdoutRegex": r"\A\[\]\r?\n\Z", "stderrRegex": r"\A\Z"},
+    )
+    result = run_scenarios(tmp_path, [scenario])[0]
+    assert result["passed"] is (invalid_stream is None), result
+    if invalid_stream:
+        assert "\ufffd" in result["steps"][0][invalid_stream]
+
+
+def test_invalid_output_expansion_retains_bound_and_truncation(tmp_path):
+    (tmp_path / "output.py").write_text(
+        "import os\nfor fd in (1, 2):\n    os.write(fd, b'\\xff' * 70000)\n"
+    )
+    result = run_scenarios(
+        tmp_path,
+        [
+            dict(
+                id="invalid-truncated",
+                title="Exact empty output",
+                steps=['"{python}" "{repo}/output.py"'],
+                expect={"exit": 0, "stdoutRegex": r"\A\Z", "stderrRegex": r"\A\Z"},
+            )
+        ],
+    )[0]
+    assert not result["passed"]
+    for stream in ("stdout", "stderr"):
+        value = result["steps"][0][stream]
+        assert "\ufffd" in value and value.endswith("\n[truncated]\n")
+        assert len(value.encode("utf-8")) <= 64 * 1024
+
+
+@pytest.mark.parametrize("mutant", [None, "R1", "R2", "R3", "R4", "R5"])
+def test_declared_clause_witnesses_execute_product_and_reject_violations(tmp_path, mutant):
+    """Generated source product/mutants, not delivered product or acceptance authority.
+
+    Each explicit scenario is an operator-authored witness for one stated clause.
+    Scenario IDs do not create a general requirement-to-witness verification map.
+    """
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "ledger.py").write_text(
+        f"MUTANT = {mutant!r}\n"
+        + """
+import json
+import os
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+sys.stdout.reconfigure(newline='\\n')
+sys.stderr.reconfigure(newline='\\n')
+command = sys.argv[1]
+if command == 'list':
+    print('debug' if MUTANT == 'R1' else '[]')
+elif command == 'id':
+    value = json.loads(sys.argv[2])
+    valid = isinstance(value, int) if MUTANT == 'R2' else type(value) is int
+    if not valid:
+        print('invalid id', file=sys.stderr)
+        sys.exit(2)
+    print(value)
+elif command == 'money':
+    values = sys.argv[2:]
+    print(str(sum(map(float, values))) if MUTANT == 'R3'
+          else format(sum(map(Decimal, values)), '.2f'))
+elif command == 'read':
+    try:
+        print(Path(sys.argv[2]).read_text(encoding='utf-8',
+              errors='ignore' if MUTANT == 'R4' else 'strict'), end='')
+    except UnicodeError:
+        print('invalid utf8', file=sys.stderr)
+        sys.exit(2)
+elif command == 'write':
+    target = Path(sys.argv[2])
+    staged = target.with_suffix('.tmp')
+    try:
+        if MUTANT == 'R5':
+            target.write_bytes(b'changed')
+        staged.write_bytes(b'changed')
+        # Deterministic source-fixture I/O failure before the atomic replace.
+        if os.environ.get('SOURCE_ONLY_WRITE_FAIL') == '1':
+            raise OSError('injected write failure')
+        os.replace(staged, target)
+    except OSError:
+        print('write failed', file=sys.stderr)
+        sys.exit(2)
+""",
+        encoding="utf-8",
+    )
+    (product / "witness.py").write_text(
+        """
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+clause, directory = sys.argv[1], Path(sys.argv[2])
+directory.mkdir(parents=True, exist_ok=True)
+environment = dict(os.environ)
+environment.pop('PYTHONPATH', None)
+environment['SOURCE_ONLY_WRITE_FAIL'] = '1'
+def call(*args):
+    return subprocess.run([sys.executable, '-B', '-m', 'ledger', *args],
+        cwd=Path(__file__).resolve().parent, env=environment,
+        capture_output=True, timeout=10, check=False)
+if clause == 'R1':
+    result = call('list')
+    assert (result.returncode, result.stdout, result.stderr) == (0, b'[]\\n', b''), result
+elif clause == 'R2':
+    result = call('id', 'true')
+    assert (result.returncode, result.stdout, result.stderr) == (2, b'', b'invalid id\\n'), result
+    valid = call('id', '7')
+    assert (valid.returncode, valid.stdout, valid.stderr) == (0, b'7\\n', b''), valid
+elif clause == 'R3':
+    result = call('money', '0.10', '0.20')
+    assert (result.returncode, result.stdout, result.stderr) == (0, b'0.30\\n', b''), result
+elif clause == 'R4':
+    path = directory / 'input'
+    path.write_bytes(b'\\xff')
+    result = call('read', str(path))
+    assert (result.returncode, result.stdout, result.stderr) == (2, b'', b'invalid utf8\\n'), result
+    path.write_bytes(b'valid\\n')
+    valid = call('read', str(path))
+    assert (valid.returncode, valid.stdout, valid.stderr) == (0, b'valid\\n', b''), valid
+elif clause == 'R5':
+    path = directory / 'records'
+    path.write_bytes(b'original bytes\\n')
+    result = call('write', str(path))
+    assert (result.returncode, result.stdout, result.stderr) == (2, b'', b'write failed\\n'), result
+    assert path.read_bytes() == b'original bytes\\n', path.read_bytes()
+print(json.dumps({'clause': clause, 'actualChildExit': result.returncode,
+                  'stdoutHex': result.stdout.hex(), 'stderrHex': result.stderr.hex()}))
+""",
+        encoding="utf-8",
+    )
+    clauses = {
+        "R1": "List records",
+        "R2": "Reject boolean IDs",
+        "R3": "Keep exact amounts",
+        "R4": "Reject invalid UTF-8 input",
+        "R5": "Preserve bytes after failed write",
+    }
+    scenarios = [
+        dict(
+            id=key,
+            title=title,
+            steps=[f'"{{python}}" -B "{{repo}}/witness.py" {key} "{{data}}"'],
+            expect={"exit": 0, "stdoutRegex": f'"clause": "{key}"', "stderrRegex": r"\A\Z"},
+        )
+        for key, title in clauses.items()
+    ]
+    results = run_scenarios(product, scenarios)
+    assert {row["id"]: row["passed"] for row in results} == {
+        key: key != mutant for key in clauses
+    }, results
+    for row in results:
+        assert len(row["steps"]) == 1
+        if row["id"] == mutant:
+            assert "AssertionError" in row["steps"][0]["stderr"]
+        else:
+            observed = json.loads(row["steps"][0]["stdout"])
+            assert observed["clause"] == row["id"]
+    print(json.dumps(dict(sourceOnly=True, mutant=mutant, witnesses=results)))
 
 
 @pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])

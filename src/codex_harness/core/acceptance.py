@@ -349,7 +349,16 @@ def _bounded_output(stream, suffix="") -> str:
     value = stream.read(limit + 1) + suffix.encode("utf-8")
     if len(value) > limit:
         value = value[: limit - len(marker)] + marker
-    return value.decode("utf-8", errors="ignore")
+    # Invalid child bytes are evidence, not whitespace to discard before an
+    # exact/regex expectation. Keep visible replacements without crashing the
+    # runner; the retained truncation marker likewise remains part of matching.
+    text = value.decode("utf-8", errors="replace")
+    encoded = text.encode("utf-8")
+    if len(encoded) > limit:
+        # Replacements may expand bytes. Truncate valid re-encoded text at a
+        # character boundary and keep the existing explicit truncation marker.
+        text = encoded[: limit - len(marker)].decode("utf-8", errors="ignore") + marker.decode()
+    return text
 
 
 def run_subject(run) -> str:

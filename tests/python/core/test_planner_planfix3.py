@@ -97,7 +97,11 @@ def test_totals_survive_revision_and_cli_cap(project):
         machine=True,
         code=2,
     )
-    assert "Waive" in result["next"] and "remaining findings" in result["next"]
+    assert "No additional review launch is authorized." in result["next"]
+    assert "findings --expand" in result["next"]
+    assert f'--workspace "{project.workspace}"' in result["next"]
+    assert "Waive" not in result["next"]
+    assert cli(project.workspace, "status", machine=True)["status"]["roundtable"][0]["total"] == 2
     with pytest.raises(PlanStoreError) as error:
         review(project, REVIEWERS[:1], max_total=2)
     assert error.value.code == "roundtable-total-budget-exhausted"

@@ -71,6 +71,11 @@ def candidate(tmp_path):
         "cwd-import",
         "unsupported",
         "guarded-stub",
+        "guarded-side-effect",
+        "noncanonical-guard",
+        "guarded-else",
+        "guarded-cause",
+        "guarded-dynamic-message",
     ],
 )
 def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatch, case):
@@ -84,6 +89,25 @@ def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatc
         )
     elif case == "guarded-stub":
         source = "if __name__ == '__main__':\n    raise NotImplementedError('planned list')\n"
+    elif case == "guarded-side-effect":
+        source = (
+            "if __name__ == '__main__':\n    print('side effect')\n"
+            "    raise NotImplementedError('planned list')\n"
+        )
+    elif case == "noncanonical-guard":
+        source = "if True:\n    raise NotImplementedError('planned list')\n"
+    elif case == "guarded-else":
+        source = (
+            "if __name__ == '__main__':\n    raise NotImplementedError('planned list')\n"
+            "else:\n    raise RuntimeError('different import behavior')\n"
+        )
+    elif case == "guarded-cause":
+        source = (
+            "if __name__ == '__main__':\n"
+            "    raise NotImplementedError('planned list') from RuntimeError('context')\n"
+        )
+    elif case == "guarded-dynamic-message":
+        source = "if __name__ == '__main__':\n    raise NotImplementedError(str('planned list'))\n"
     elif case == "wrong-exit":
         source += "    sys.exit(7)\n"
     elif case == "extra-output":
@@ -132,11 +156,17 @@ def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatc
         assert ("NotImplementedError: planned list" in ordinary.stderr) is (case != "compliant")
 
     audit = test_audit.audit_prospective_tests(**candidate)
-    if case == "stub":
+    if case in ("stub", "guarded-stub"):
         assert audit["ok"], audit["findings"]
         provenance = audit["redBaseline"][0]["failureProvenance"]
         assert provenance["classification"] == "meaningful-red"
         assert provenance["tests"][0]["classification"] == "owned-cli-stub"
+        if case == "guarded-stub":
+            launch = provenance["tests"][0]["moduleLaunches"][0]
+            assert launch["child"]["exception"]["type"] == "NotImplementedError"
+            assert launch["child"]["exception"]["frames"][-1]["function"] == "<module>"
+            assert launch["child"]["targetModule"] == "app"
+            assert launch["child"]["startupIdentity"] == launch["startupIdentity"]
     else:
         assert not audit["ok"], audit
         expected = (
@@ -153,11 +183,6 @@ def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatc
             )
         elif case != "compliant":
             assert audit["redBaseline"][0]["failureProvenance"]["classification"] == "unproved"
-            if case == "guarded-stub":
-                observed = audit["redBaseline"][0]["failureProvenance"]["tests"][0]
-                launch = observed["moduleLaunches"][0]
-                assert launch["child"]["exception"]["type"] == "NotImplementedError"
-                assert launch["child"]["exception"]["frames"][-1]["function"] == "<module>"
 
 
 @pytest.mark.parametrize("phase", ["setUp", "tearDown", "test_value"])

@@ -253,6 +253,166 @@ def node_example(kind):
     return examples[kind]
 
 
+def typed_draft_help(tool):
+    """Complete unconfirmed shapes; unresolved observations are never invented."""
+    result = {
+        "templateState": "unconfirmed-draft; bind prerequisites before submission",
+        "revisionBinding": {
+            "tool": "harness_plan_status",
+            "resultKey": "spine_revision",
+            "argument": "expected_spine_revision",
+        },
+        "prerequisiteNodes": [_node("vision", "V1", [])],
+        "templateUse": "In a new plan, call harness_plan_start with idea and name, then "
+        "harness_upsert_node for prerequisiteNodes in order. For an existing plan use its "
+        "actual IDs and preserve accepted intent. Fetch harness_plan_status AFTER all node "
+        "edits and copy its spine_revision to expected_spine_revision. Submit with the "
+        "named tool; CLI equivalents are status and intake/reviewer-catalog/reviewer-choice "
+        "--json @absolute-payload-file. Refresh status and retry after a stale revision. "
+        "Null bindings below must be supplied before submission; they are not valid "
+        "observations or authority. Keep confirmation null.",
+        "producerLimits": "reviewer-catalog-producer-unavailable: harness_preflight only "
+        "observes executable readiness; it does not produce a model catalog or establish "
+        "authentication/entitlement. Supply genuine retained observations or hold reviewer "
+        "selection for an owner integration decision.",
+    }
+    if tool == "harness_intake":
+        fields = {
+            "schema": "dot-intake-v1",
+            "requestKind": "new",
+            "sizeEstimate": "S",
+            "delta": {
+                "summary": "Reject malformed parser input",
+                "nodeIds": [],
+                "outcome": "Malformed input leaves existing data unchanged",
+                "successCriteria": ["Truncated JSON refuses without saving partial data"],
+                "ownershipAreas": ["parser"],
+                "interfaceIds": [],
+            },
+            "ambiguity": {"level": "low", "reasons": []},
+            "consequence": {
+                "level": "ordinary",
+                "reversibility": "Revert source change",
+                "risks": [],
+            },
+            "dependencyBreadth": {"producerIds": [], "crossWaveContracts": []},
+            "constraints": {
+                "runtime": [],
+                "security": [],
+                "spend": "No provider calls in this draft",
+                "frictionBudget": "One focused parser check",
+            },
+            "rationale": "Plan the parser rejection and rollback behavior",
+            "assumptions": [],
+            "expectedSupervision": "Review actual parser behavior before acceptance",
+            "nextGate": "Resolve explicit reviewer choice and existing planning gates",
+            "reviewerDecisionId": "RS1",
+            "confirmation": None,
+            "supersedes": None,
+            "adaptation": None,
+        }
+        result["draftTemplate"] = {
+            "node": _node("decision", "I1", ["V1"], fields),
+            "expected_spine_revision": None,
+            "baseline": None,
+        }
+    elif tool == "harness_reviewer_catalog":
+        result["draftTemplate"] = {
+            "catalog": {
+                "schema": "dot-reviewer-catalog-v1",
+                "id": None,
+                "observedAt": None,
+                "providers": [],
+            },
+            "expected_spine_revision": None,
+        }
+        result["observationBindings"] = (
+            "Supply the genuine observation's RC-UUID, timezone-aware "
+            "observedAt and providers. Empty providers claims no available reviewers. Never copy "
+            "a fabricated timestamp, model, source, executable hash or available status. Omit "
+            "derived digest/choiceId; the recorder returns the normalized values."
+        )
+        result["providerTemplate"] = {
+            "provider": None,
+            "executable": None,
+            "executableDigest": None,
+            "version": None,
+            "installed": None,
+            "authentication": "unknown",
+            "discovery": "unknown",
+            "source": None,
+            "choices": [],
+            "reason": None,
+        }
+        result["catalogChoiceTemplate"] = {
+            "model": None,
+            "effort": None,
+            "availability": "unknown",
+            "reviewPathSupported": None,
+            "reason": None,
+        }
+        result["sourceTemplates"] = [
+            {"kind": kind, "reference": None, "digest": None}
+            for kind in ("supported-list", "provider-local-metadata")
+        ]
+    else:
+        result["draftTemplate"] = {
+            "node": _node(
+                "decision",
+                "RS1",
+                ["V1"],
+                {
+                    "schema": "dot-reviewer-selection-v1",
+                    "catalogId": None,
+                    "catalogDigest": None,
+                    "reviewers": [],
+                    "stages": ["plan", "readiness", "wave-acceptance", "full-vision"],
+                    "assurance": {
+                        "independentRequired": None,
+                        "minIndependentReviewers": None,
+                        "crossProviderRequired": None,
+                        "basisRefs": [],
+                    },
+                    "confirmation": None,
+                    "recommendation": {
+                        "choiceIds": [],
+                        "reason": None,
+                        "catchRateEvidenceRefs": [],
+                    },
+                },
+            ),
+            "expected_spine_revision": None,
+            "author_sessions": {"implementationSessionIds": [], "reviewerSessionIds": {}},
+        }
+        result["reviewerTemplate"] = {
+            "name": None,
+            "provider": None,
+            "choiceId": None,
+            "model": None,
+            "effort": None,
+        }
+        result["catalogBindings"] = (
+            "First record genuine supplied observations with "
+            "harness_reviewer_catalog. Copy its returned catalog.id and catalog.digest, then "
+            "each selected provider and exact choiceId/model/effort from "
+            "catalog.providers[].choices[]. "
+            "Supply distinct reviewer names, accepted assurance policy and its actual basisRefs; "
+            "do not reduce that policy to fit available reviewers. Recommendation choiceIds must "
+            "come from that catalog. Unknown author/reviewer sessions stay unknown. No catalog "
+            "or no supported tuple means hold; an empty reviewer array is not a usable selection."
+        )
+    if tool != "harness_intake":
+        result["effortTemplates"] = [{"kind": "named", "value": None}, {"kind": "unsupported"}]
+    if tool != "harness_reviewer_catalog":
+        result["producerLimits"] += (
+            " typed-confirmation-producer-unavailable: keep confirmation "
+            "null. harness_record_confirmation supports only align/vision-lock, not typed "
+            "intake/reviewer approval. Recording these drafts grants no execution "
+            "or phase approval."
+        )
+    return result
+
+
 def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     """Return actual transport schema plus advisory help for canonical node fields."""
     contract = next((item for item in tools if item["name"] == tool), None)
@@ -270,6 +430,7 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     }
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
+        result.update(typed_draft_help(tool))
     if tool == "harness_upsert_node":
         kind = kind or "requirement"
         if kind not in ALLOWED_PARENTS:

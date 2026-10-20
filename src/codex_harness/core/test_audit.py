@@ -575,6 +575,33 @@ def _cli_stub_provenance(repo, owned_files, tree, function, record):
             ]
             if last["function"] == "<module>":
                 bodies = [source.body]
+                # Support only a canonical, otherwise inert module guard. The
+                # observed child/owned-source/exception checks above still bind
+                # this exact raise; arbitrary conditionals or side effects do
+                # not become pure stubs merely because they raise the same type.
+                module_body = [
+                    n
+                    for n in source.body
+                    if not (
+                        isinstance(n, ast.Expr)
+                        and isinstance(n.value, ast.Constant)
+                        and isinstance(n.value.value, str)
+                    )
+                ]
+                if len(module_body) == 1 and isinstance(module_body[0], ast.If):
+                    guard = module_body[0]
+                    test = guard.test
+                    if (
+                        not guard.orelse
+                        and isinstance(test, ast.Compare)
+                        and isinstance(test.left, ast.Name)
+                        and test.left.id == "__name__"
+                        and len(test.ops) == len(test.comparators) == 1
+                        and isinstance(test.ops[0], ast.Eq)
+                        and isinstance(test.comparators[0], ast.Constant)
+                        and test.comparators[0].value == "__main__"
+                    ):
+                        bodies = [guard.body]
             for body in bodies:
                 body = [
                     n
@@ -585,7 +612,11 @@ def _cli_stub_provenance(repo, owned_files, tree, function, record):
                         and isinstance(n.value.value, str)
                     )
                 ]
-                if len(body) != 1 or not isinstance(body[0], ast.Raise):
+                if (
+                    len(body) != 1
+                    or not isinstance(body[0], ast.Raise)
+                    or body[0].cause is not None
+                ):
                     continue
                 raised = body[0].exc
                 constructor = raised.func if isinstance(raised, ast.Call) else raised
@@ -838,7 +869,10 @@ def _failure_provenance(
                 + "; ".join(r for r in reasons if r)
                 if any(reasons)
                 else "Controlled CLI requires an actual owned stub exception and an attributable "
-                "straight-line result expectation; this helper/result/failure topology is unproved."
+                "straight-line result expectation. Supported pure stubs are a sole raise, "
+                "or a sole canonical if __name__ == '__main__' containing that raise without "
+                "else/side effects. Keep the intended CLI contract; assert its exit/stdout/stderr "
+                "from the product cwd. No main() API is required; other topology remains unproved."
             )
         results.append({**record, "classification": classification, "reason": reason})
     meaningful = any(
