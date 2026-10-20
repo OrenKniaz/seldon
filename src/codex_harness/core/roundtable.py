@@ -943,7 +943,9 @@ def _parse_execution_assessment(store, snapshot, completion_hash):
     )
 
 
-def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout, capture=None):
+def _review_shard(
+    store, result, reviewer, shard, *, executable, runner, timeout, capture=None, before_launch=None
+):
     """Capture and persist provider errors before attempting temporary-dir cleanup."""
     record = {key: value for key, value in shard.items() if key != "packet"}
     record.update(
@@ -951,9 +953,14 @@ def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout
     )
     launch, output, stderr, directory = None, "", "", None
     items = []
+    checking_launch = False
     try:
         launch = _launch_review(reviewer, shard["packet"], executable)
         directory = TemporaryDirectory(prefix="harness-roundtable-")
+        if before_launch is not None:
+            checking_launch = True
+            before_launch()
+            checking_launch = False
         response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
         record["didRunProvider"] = runner is None
         record["exitCode"], output = response[:2]
@@ -966,6 +973,8 @@ def _review_shard(store, result, reviewer, shard, *, executable, runner, timeout
         if record["invalid"]:
             _diagnostic(store, result, record, launch, output, stderr)
     except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        if checking_launch:
+            raise
         if isinstance(error, subprocess.TimeoutExpired):
 
             def decoded(value):
@@ -1052,6 +1061,7 @@ def _review_dossier(
     stop_on_invalid=False,
     capture=None,
     abandon=None,
+    before_launch=None,
     **packet_options,
 ):
     """Retry the same logical invocation once, discarding superseded findings.
@@ -1080,6 +1090,7 @@ def _review_dossier(
                 runner=runner,
                 timeout=timeout,
                 capture=capture,
+                **({"before_launch": before_launch} if before_launch is not None else {}),
             )
             record["shardDetails"].append(shard_record)
             completed.append((shard_record, items))

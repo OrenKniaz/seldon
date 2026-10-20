@@ -665,6 +665,68 @@ def test_first_typed_refusal_teaches_owner_contract_then_supported_diagnostic(
         server.close()
 
 
+def test_guide_acceptance_node_route_roundtrips_without_proof_credit(tmp_path, capsys):
+    from codex_harness.core.plan_cli import main
+
+    guide_path = Path(__file__).resolve().parents[3] / "docs/operator/planner-guide.md"
+    guide_text = guide_path.read_text(encoding="utf-8")
+    paragraph = next(
+        line for line in guide_text.splitlines() if line.startswith("Explicit `acceptance`")
+    )
+    trace = []
+
+    def call(*arguments):
+        command = ["--workspace", str(tmp_path), "--json", *arguments]
+        assert main(command) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert not result["isError"], result
+        trace.append(dict(command=command, response=result))
+        return result
+
+    # The currently supported parser is a positive baseline control; the guide is the defect.
+    call("start", "--idea", "Describe planned acceptance", "--name", "Acceptance contract")
+    schema = call("schema", "--kind", "acceptance")["data"]
+    assert schema["kind"] == "acceptance"
+    assert schema["allowedParentKinds"] == ["feature", "vision"]
+    for node in schema["prerequisiteNodes"]:
+        call("node", "--json", json.dumps(node))
+    payload = schema["example"]["node"]
+    path = tmp_path / "acceptance.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    call("node", "--json", "@" + str(path))
+    server = PlannerServer(tmp_path)
+    try:
+        status = invoke(server, "harness_plan_status")["structuredContent"]
+        assert server.store.spine().node(payload["id"]) == payload
+        assert payload["fields"] == {}  # The emitted example has no executable steps.
+        assert status["phase"] == "align" and status["approval"]["granted"] is False
+        assert status["acceptance"]["accepted"] is False
+        assert {
+            "id": payload["id"],
+            "gap": "acceptance scenario has no executable steps",
+        } in status["coverage_gaps"]
+        for table in ("acceptance_scenarios", "acceptance_runs", "acceptance_reviews", "approvals"):
+            assert (
+                server.store.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+            )
+        assert invoke(server, "harness_schema", kind="acceptance")["structuredContent"] == schema
+        print(
+            json.dumps(
+                dict(
+                    publicCLI=trace, persistedNode=payload, status=status, guideParagraph=paragraph
+                )
+            )
+        )
+        assert "p schema --kind acceptance" in paragraph
+        assert "p node --json @acceptance.json" in paragraph
+        assert "harness_schema" in paragraph and "harness_upsert_node" in paragraph
+        assert "not automatic" in paragraph and "proof" in paragraph
+        assert "acceptance vision/feature" in guide_text
+        assert "acceptance` spine nodes need a schema change" not in guide_text
+    finally:
+        server.close()
+
+
 def test_cli_missing_intake_waves_next_reaches_complete_schema_then_preflight(tmp_path, capsys):
     from codex_harness.core.plan_cli import main
 

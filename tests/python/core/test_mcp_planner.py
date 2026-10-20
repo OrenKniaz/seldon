@@ -17,6 +17,23 @@ from codex_harness.core.planner_views import banner, chat_diagram
 from codex_harness.core.spine import MARKDOWN_FILES, load_spine
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
+
+
+def test_public_execution_assessment_schema_and_choices_do_not_create_plan(tmp_path):
+    workspace = tmp_path / "not-started"
+    server = PlannerServer(workspace)
+    reply = server.call_tool("harness_accept_assess", {"schema": True})
+    assert not reply.get("isError"), reply
+    contract = reply["structuredContent"]
+    tool = next(item for item in TOOLS if item["name"] == "harness_accept_assess")
+    assert contract["inputSchema"] == tool["inputSchema"]
+    assert len(contract["inputSchema"]["oneOf"]) == 3
+    held = server.call_tool("harness_accept_assess", {"prepare": {}})
+    assert held["isError"]
+    assert "harness_plan_start" in held["content"][0]["text"]
+    assert not workspace.exists()
+
+
 EXPECTED_TOOLS = {
     "harness_schema",
     "harness_preflight",
@@ -36,6 +53,7 @@ EXPECTED_TOOLS = {
     "harness_accept_run",
     "harness_accept_rebind",
     "harness_accept_review",
+    "harness_accept_assess",
     "harness_accept",
     "harness_mail_send",
     "harness_mail_inbox",
@@ -61,6 +79,85 @@ EXPECTED_TOOLS = {
     "harness_worker_status",
     "harness_plan_resume",
 }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"schema": True, "prepare": {}},
+        {"schema": False},
+        {"prepare": {"extra": True}},
+        {"prepare": {"finding_ids": []}},
+        {"request": {"members": []}},
+        {"extra": True},
+    ],
+)
+def test_public_assessment_invalid_modes_teach_contract_without_writes(tmp_path, arguments):
+    workspace = tmp_path / "absent"
+    reply = PlannerServer(workspace).call_tool("harness_accept_assess", arguments)
+    assert reply["isError"]
+    assert "Owning execution assessment contract" in reply["content"][0]["text"]
+    assert reply["structuredContent"]["contract"]["inputSchema"] == next(
+        row["inputSchema"] for row in TOOLS if row["name"] == "harness_accept_assess"
+    )
+    assert not workspace.exists()
+
+
+def test_accept_phase_status_teaches_current_assessment_without_mutation(tmp_path, monkeypatch):
+    import hashlib
+
+    from tests.python.core.test_acceptance import (
+        public_assessment_repair_fixture,
+        public_current_support,
+    )
+
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        tool("harness_advance", {"to_phase": "execute"})
+        tool("harness_advance", {"to_phase": "accept"})
+        _, selected = public_current_support(fixture)
+
+        def artifacts():
+            return {
+                str(path.relative_to(store.workspace)): hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+                for path in store.workspace.rglob("*")
+                if path.is_file()
+                and ".git" not in path.parts
+                and not path.name.startswith("plan.sqlite3")
+            }
+
+        before_db = list(store.connection.iterdump())
+        before_files = artifacts()
+        before_support = store.execution_assessment_state()
+        reply = server.call_tool("harness_plan_status", {})
+        assert not reply["isError"]
+        acceptance = reply["structuredContent"]["acceptance"]
+        assert reply["structuredContent"]["phase"] == "accept"
+        assert acceptance["accepted"] is False
+        assert acceptance["invalidReason"] == "acceptance-findings-open"
+        assert acceptance["executionAssessments"]["members"][0]["registrationId"] == selected
+        next_action = reply["content"][0]["text"].rsplit("\nNext: ", 1)[1]
+        assert next_action.startswith("harness_accept_assess schema=true;"), next_action
+        assert "before fresh assessment" in next_action
+        assert "stales" in next_action
+        name, field = next_action.split(";", 1)[0].split()
+        key, value = field.split("=", 1)
+        schema = tool(name, {key: json.loads(value)})
+        assert schema["closureEligible"] is False
+        name, field = schema["acquisition"]["choices"].split(" / ", 1)[0].split()
+        key, value = field.split("=", 1)
+        prepared = tool(name, {key: json.loads(value)})
+        assert prepared["state"] == "selection_required"
+        assert af["id"] in {row["id"] for row in prepared["choices"]["findings"]}
+        assert list(store.connection.iterdump()) == before_db
+        assert artifacts() == before_files
+        assert store.execution_assessment_state() == before_support
+        assert len(calls) == 3
+    finally:
+        store.close()
 
 
 def rpc(server, method, params=None, request_id=1):

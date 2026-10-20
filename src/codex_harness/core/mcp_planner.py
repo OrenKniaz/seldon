@@ -226,6 +226,12 @@ TOOLS = [
         {
             "repo": STRING,
             "resume": STRING,
+            "execution_assessment_ids": {
+                "type": "array",
+                "items": STRING,
+                "minItems": 1,
+                "uniqueItems": True,
+            },
             "reviewers": {
                 "type": "array",
                 "items": _object(
@@ -240,6 +246,15 @@ TOOLS = [
         "harness_accept",
         "Record the user's actual acceptance words or an explicitly labelled proxy.",
         {"statement": STRING, "by": STRING},
+    ),
+    dict(
+        name="harness_accept_assess",
+        description=(
+            "Read canonical execution assessment schema/actual choices, "
+            "or explicitly invoke current AF assessment; no closure or "
+            "approval authority."
+        ),
+        inputSchema=views.execution_assessment_contract()["inputSchema"],
     ),
     _tool(
         "harness_mail_send",
@@ -565,6 +580,7 @@ def _validate(value, schema: dict, label="arguments") -> None:
         "array": isinstance(value, list),
         "boolean": type(value) is bool,
         "integer": type(value) is int,
+        "number": type(value) in (int, float),
         "null": value is None,
     }
     allowed = expected if isinstance(expected, list) else [expected]
@@ -772,6 +788,12 @@ class PlannerServer:
                 or name == "harness_accept_run"
                 and self.result_data
                 and not self.result_data["passed"]
+                or name == "harness_accept_assess"
+                and self.result_data
+                and (
+                    self.result_data.get("state") == "held"
+                    or self.result_data.get("nextAction", {}).get("kind") == "hold_or_refresh"
+                )
             )
         except Exception as error:
             operation_error_code = getattr(error, "code", None)
@@ -792,6 +814,11 @@ class PlannerServer:
                 body += "\n" + node_error_help(arguments)
             if name == "harness_accept_review" and self.result_data:
                 body = views.review_card(self.result_data) + "\n" + body
+            if name == "harness_accept_assess":
+                contract = views.execution_assessment_contract()
+                body += "\nOwning execution assessment contract: " + json.dumps(contract)
+                if self.result_data is None:
+                    self.result_data = dict(contract=contract, holdReasons=[str(error)])
             is_error = True
         try:
             status = (
@@ -852,6 +879,7 @@ class PlannerServer:
                         "harness_readiness",
                         "harness_accept_run",
                         "harness_accept_review",
+                        "harness_accept_assess",
                         "harness_worker_start",
                         "harness_plan_resume",
                     )
@@ -869,6 +897,36 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if name == "harness_accept_assess":
+            if status.get("pending_gate") == "harness_plan_start":
+                return "harness_plan_start idea=<your idea> name=<plan name>"
+            action = (self.result_data or {}).get("nextAction")
+            if action:
+                return (
+                    action["mcpTool"]
+                    + " "
+                    + json.dumps(action["arguments"])
+                    + "; "
+                    + action.get("requiredChoices", action["reason"])
+                )
+            if error:
+                return (
+                    "harness_accept_assess schema=true; inspect the complete "
+                    "owning contract and exact holdReasons; no launch is "
+                    "authorized by this refusal."
+                )
+            return (
+                "harness_accept_assess prepare={} lists actual member/bead "
+                "choices; select explicitly and supply authorized "
+                "reviewer/finite limits."
+            )
+        if name == "harness_accept_review" and status.get("acceptance", {}).get("findings"):
+            return (
+                "harness_accept_assess schema=true; preserve AF originals "
+                "and record any intended declaration before fresh "
+                "assessment. Support never clears findings or final "
+                "acceptance."
+            )
         if status.get("pending_gate") == "harness_plan_start":
             return "harness_plan_start idea=<your idea> name=<plan name>"
         if name == "harness_resolve_findings" and error:
@@ -931,6 +989,17 @@ class PlannerServer:
             or name == "harness_plan_status"
             and status["phase"] == "accept"
         ):
+            if (
+                name == "harness_plan_status"
+                and acceptance.get("invalidReason") == "acceptance-findings-open"
+            ):
+                return (
+                    "harness_accept_assess schema=true; inspect actual acquisition choices. "
+                    "Preserve AF originals; record any intended declaration "
+                    "before fresh assessment. "
+                    "A later disposition mutation stales current support; support never clears "
+                    "findings or native final acceptance."
+                )
             return acceptance.get("next", "harness_plan_status")
         if (
             error
@@ -1031,6 +1100,28 @@ class PlannerServer:
         if name == "harness_preflight":
             self.result_data = preflight_report(self.workspace, **args)
             return render_preflight(self.result_data)
+        if name == "harness_accept_assess":
+            if len(args) != 1 or not set(args).issubset({"schema", "prepare", "request"}):
+                raise ValueError(
+                    "accept-assess requires exactly one schema, prepare or request mode"
+                )
+            if args.get("schema") is True:
+                self.result_data = views.execution_assessment_contract()
+            else:
+                from codex_harness.core.acceptance import prepare_execution_assessment
+
+                store = self._store()
+                if "prepare" in args:
+                    self.result_data = prepare_execution_assessment(store, args["prepare"])
+                else:
+                    from codex_harness.core.roundtable import assess_execution_findings
+
+                    self.result_data = views.execution_assessment_result(
+                        store,
+                        assess_execution_findings(store, **args["request"]),
+                        member_ids=[row["memberId"] for row in args["request"]["members"]],
+                    )
+            return views.data_card("Execution assessment (evidence only)", self.result_data)
         draft_methods = {
             "harness_intake": "record_intake",
             "harness_reviewer_catalog": "record_reviewer_catalog",

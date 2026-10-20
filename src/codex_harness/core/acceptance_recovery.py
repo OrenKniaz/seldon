@@ -47,7 +47,7 @@ def source_identity():
     )
 
 
-def identities(store, repo, run):
+def identities(store, repo, run, *, execution_assessment_ids=None):
     """No nested BEGIN: safe both outside and inside the final writer transaction."""
     spine = Spine(store._data())
     template = store.workspace / "template"
@@ -62,7 +62,7 @@ def identities(store, repo, run):
             }
         )
         protected = {name: seal(path.read_bytes()) for name, path in sorted(paths.items())}
-    return {
+    result = {
         "source": source_identity(),
         "candidate": digest(
             {
@@ -86,6 +86,13 @@ def identities(store, repo, run):
             }
         ),
     }
+    if execution_assessment_ids is not None:
+        from codex_harness.core.acceptance import selected_execution_support
+
+        result["executionSupport"] = digest(
+            selected_execution_support(store, execution_assessment_ids, repo=repo)
+        )
+    return result
 
 
 def _executable_identity(executable):
@@ -352,6 +359,11 @@ class ReviewAttempt:
             "slots": [],
             "ineligible": _coverage(store, selected, dossiers, evidence),
         }
+        support = evidence.get("executionSupport")
+        if support is not None:
+            if digest(support) != expected_identity.get("executionSupport"):
+                raise ValueError("execution-support-preparation-raced")
+            header["executionSupport"] = support
         for reviewer in selected:
             provider = reviewer["provider"]
             for shard in dossiers[provider]:
@@ -367,7 +379,20 @@ class ReviewAttempt:
                     }
                 )
         with store._transaction():
-            if current_run(store) != run or identities(store, repo, run) != expected_identity:
+            if (
+                current_run(store) != run
+                or identities(
+                    store,
+                    repo,
+                    run,
+                    **(
+                        {"execution_assessment_ids": support["registrationIds"]}
+                        if support is not None
+                        else {}
+                    ),
+                )
+                != expected_identity
+            ):
                 raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
             if _events(store, STARTED, attempt):
                 raise ValueError("Duplicate review registration")
@@ -442,6 +467,25 @@ class ReviewAttempt:
             raise ValueError("Original Harness review registration is missing or ambiguous")
         return cls(store, rows[0][1], rows[0][0])
 
+    def check_execution_support(self):
+        """Prospective opt-in prelaunch check; no child or permission is produced."""
+        support = self.header.get("executionSupport")
+        if support is None:
+            return
+        if self.abandoned or _events(self.store, ABANDONED, self.id):
+            raise ValueError("execution-support-original-review-abandoned")
+        if _events(self.store, STARTED, self.id) != [(self.event_id, self.header)]:
+            raise ValueError("execution-support-review-registration-changed")
+        from codex_harness.core.acceptance import selected_execution_support
+
+        if (
+            selected_execution_support(
+                self.store, support["registrationIds"], repo=self.header["repo"]
+            )
+            != support
+        ):
+            raise ValueError("execution-support-review-binding-stale")
+
     def validate(self, repo, run, *, admitted=False):
         header = self.header
         if _events(self.store, STARTED, self.id) != [(self.event_id, header)]:
@@ -450,7 +494,19 @@ class ReviewAttempt:
             Path(repo).resolve()
         ):
             raise ValueError("Review registration belongs to a different project/product")
-        current = identities(self.store, repo, run)
+        support = header.get("executionSupport")
+        if support is not None and not admitted:
+            self.check_execution_support()
+        current = identities(
+            self.store,
+            repo,
+            run,
+            **(
+                {"execution_assessment_ids": support["registrationIds"]}
+                if support is not None and not admitted
+                else {}
+            ),
+        )
         if header["run"] != run or any(
             current[key] != header["identities"][key]
             for key in (("source", "candidate") if admitted else current)

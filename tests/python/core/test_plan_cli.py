@@ -21,6 +21,53 @@ ROOT = Path(__file__).resolve().parents[3]
 GUIDE = ROOT / "docs/operator/planner-guide.md"
 
 
+def test_public_execution_assessment_schema_read_is_complete_without_plan(tmp_path):
+    workspace = tmp_path / "not-started"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "codex_harness.core.plan_cli",
+            "--workspace",
+            str(workspace),
+            "--json",
+            "accept-assess",
+            "--schema",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    reply = json.loads(result.stdout)
+    contract = reply["data"]
+    assert contract["schema"] == "seldon/public-execution-assessment-v1"
+    assert set(contract["inputSchema"]["properties"]) == {"schema", "prepare", "request"}
+    request = contract["inputSchema"]["properties"]["request"]
+    assert set(request["required"]) == {
+        "members",
+        "worker_job_id",
+        "bead_id",
+        "expected_manifest_revision",
+        "expected_product_run_id",
+        "reviewer",
+        "max_rounds",
+        "max_total",
+        "timeout",
+    }
+    assert set(request["properties"]["reviewer"]["required"]) == {
+        "name",
+        "provider",
+        "model",
+        "effort",
+    }
+    assert contract["closureEligible"] is False and contract["didRunProvider"] is False
+    assert not workspace.exists()
+
+
 def cli(workspace, *args, code=0, cwd=None, machine=False):
     command = [sys.executable, "-m", "codex_harness.core.plan_cli", "--workspace", str(workspace)]
     if machine:

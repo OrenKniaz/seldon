@@ -191,7 +191,10 @@ def next_command(server: PlannerServer, status: dict) -> str:
         ):
             return cmd('accept-run --subject product --repo "<integrated-repo>"')
         if any(item["status"] == "open" for item in acceptance["findings"]):
-            return cmd("findings") + " then " + cmd('resolve --id <AF-id> --resolution "<fix>"')
+            return cmd("accept-assess --schema") + (
+                " (inspect AF originals; intended declaration precedes fresh "
+                "assessment, never blind resolve after current support)"
+            )
         from codex_harness.core.acceptance import current_run
 
         run = current_run(store)
@@ -279,6 +282,7 @@ def parser() -> argparse.ArgumentParser:
         "accept-run": ("repo",),
         "accept-rebind": ("repo",),
         "accept-review": ("repo",),
+        "accept-assess": (),
         "accept": ("statement", "by"),
     }
     commands = {}
@@ -320,6 +324,36 @@ def parser() -> argparse.ArgumentParser:
     commands["accept-scenarios"].add_argument("--derive", action="store_true")
     commands["accept-scenarios"].add_argument("--input", help="Scenario list JSON or @file")
     commands["accept-review"].add_argument("--reviewer", action="append", default=[])
+    commands["accept-review"].add_argument(
+        "--execution-assessment",
+        action="append",
+        default=[],
+        help=(
+            "Explicit current canonical registration ID; evidence input only, never native approval"
+        ),
+    )
+    assessment_modes = commands["accept-assess"].add_mutually_exclusive_group(required=True)
+    assessment_modes.add_argument(
+        "--schema",
+        action="store_true",
+        help="Complete public nested contract and acquisition routes; read-only, no plan required",
+    )
+    assessment_modes.add_argument(
+        "--prepare",
+        nargs="?",
+        const="{}",
+        help=(
+            "Selection JSON or @file (finding_ids/bead_id); omitted "
+            "selection lists actual choices; never reserves"
+        ),
+    )
+    assessment_modes.add_argument(
+        "--input",
+        help=(
+            "Complete canonical request JSON or @file; explicit "
+            "authorized reviewer/finite limits required"
+        ),
+    )
     commands["accept-review"].add_argument(
         "--resume", help="Recover a registered completed review without launching providers"
     )
@@ -500,6 +534,18 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
         arguments = {} if command == "waves" else read_json(args.payload)
         reply = server.call_tool("harness_" + command.replace("-", "_"), arguments)
         return reply, reply.get("structuredContent")
+    if command == "accept-assess":
+        arguments = (
+            {"schema": True}
+            if args.schema
+            else {"prepare": read_json(args.prepare)}
+            if args.prepare is not None
+            else {"request": read_json(args.input)}
+        )
+        reply = server.call_tool("harness_accept_assess", arguments)
+        for item in reply["content"]:
+            item["text"] = item["text"].rsplit("\nNext: ", 1)[0]
+        return reply, reply.get("structuredContent")
     if command.startswith("accept"):
         arguments = {}
         if command == "accept-scenarios":
@@ -516,6 +562,8 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 arguments["reviewers"] = [read_json(item) for item in args.reviewer]
             if command == "accept-review" and args.resume is not None:
                 arguments["resume"] = args.resume
+            if command == "accept-review" and args.execution_assessment:
+                arguments["execution_assessment_ids"] = args.execution_assessment
         reply = server.call_tool("harness_" + command.replace("-", "_"), arguments)
         for item in reply["content"]:
             item["text"] = item["text"].rsplit("\nNext: ", 1)[0]
@@ -1164,6 +1212,21 @@ def main(argv=None) -> int:
                 cli_prefix=cli_prefix,
             )
             data = {**(data or {}), "authorHandoff": handoff}
+        if getattr(args, "command", None) == "accept-assess":
+            action = (data or {}).get("nextAction")
+            if action:
+                next_step = (
+                    action["cliCommand"] + "; " + action.get("requiredChoices", action["reason"])
+                )
+            elif status.get("pending_gate") != "harness_plan_start":
+                next_step = prefix + (
+                    "accept-assess --schema"
+                    if reply["isError"]
+                    else (
+                        "accept-assess --prepare (inspect actual choices; supply "
+                        "explicit authorized reviewer/finite limits)"
+                    )
+                )
         next_step = next_step.replace("\r", " ").replace("\n", " ")
         if (
             command == "roundtable"

@@ -693,7 +693,7 @@ def rebind_acceptance(store, repo, env=None) -> dict:
     return result
 
 
-def _candidate_evidence(store, repo, run):
+def _candidate_evidence(store, repo, run, *, execution_assessment_ids=None):
     """Read explicit manifest-owned source only; never follow imports or scan the repo."""
     # Match manifest_revision's canonical inputs; packet construction does not
     # impose publication's separate protected-file completeness checks.
@@ -780,7 +780,7 @@ def _candidate_evidence(store, repo, run):
             "closedHashAlgorithm": "sha256-json-sort_keys-ensure_ascii_false-compact-utf8",
         }
 
-    return {
+    result = {
         "runId": run["id"],
         "manifestRevision": manifest["planRevision"],
         "productRevision": run["revision"],
@@ -798,6 +798,11 @@ def _candidate_evidence(store, repo, run):
             for row in store._open("clarifications")
         ],
     }
+    if execution_assessment_ids is not None:
+        result["executionSupport"] = selected_execution_support(
+            store, execution_assessment_ids, repo=repo
+        )
+    return result
 
 
 def _restore_scenario_commands(scenarios, prefixes):
@@ -936,7 +941,9 @@ def _project_run_commands(run, scenarios):
     return view, bindings
 
 
-def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
+def _prepare_acceptance_review(
+    store, repo, reviewers, token_budgets, *, execution_assessment_ids=None
+):
     spine = store.locked_acceptance_spine()
     run = current_run(store)
     if run is None or Path(run["repo"]) != Path(repo).resolve():
@@ -948,8 +955,13 @@ def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
         {item["name"] for item in selected}
     ) != len(selected):
         raise ValueError("Acceptance reviewers/providers must be distinct")
-    original_identity = recovery.identities(store, repo, run)
-    evidence = _candidate_evidence(store, repo, run)
+    support_args = (
+        {"execution_assessment_ids": execution_assessment_ids}
+        if execution_assessment_ids is not None
+        else {}
+    )
+    original_identity = recovery.identities(store, repo, run, **support_args)
+    evidence = _candidate_evidence(store, repo, run, **support_args)
     included_header = (
         "## Packet contents\n\n"
         "Included: locked vision, plan context, protected tests and their template-local "
@@ -1089,7 +1101,10 @@ def _prepare_acceptance_review(store, repo, reviewers, token_budgets):
         for shard in shards
     ):
         raise ValueError("Planned command references require complete bindings and scenarios")
-    if current_run(store) != run or recovery.identities(store, repo, run) != original_identity:
+    if (
+        current_run(store) != run
+        or recovery.identities(store, repo, run, **support_args) != original_identity
+    ):
         raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
     return run, selected, dossiers, evidence, packet, included_header, context, original_identity
 
@@ -1126,6 +1141,9 @@ def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, res
     )
     result["packetBound"] = all(item["packetBound"] for item in result["reviewers"])
     result.update(attempt.references(), findingIds=[item["id"] for item in pending])
+    support = attempt.header.get("executionSupport")
+    if support is not None:
+        result["executionSupport"] = copy.deepcopy(support)
     with store._transaction():
         if resumed:
             saved = store.connection.execute(
@@ -1135,10 +1153,20 @@ def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, res
                 return _admitted_acceptance_review(store, repo, current_run(store), attempt, saved)
         if (
             current_run(store) != run
-            or recovery.identities(store, repo, run) != attempt.header["identities"]
+            or recovery.identities(
+                store,
+                repo,
+                run,
+                **(
+                    {"execution_assessment_ids": support["registrationIds"]}
+                    if support is not None
+                    else {}
+                ),
+            )
+            != attempt.header["identities"]
         ):
             raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
-        if resumed:
+        if resumed or support is not None:
             attempt.validate(repo, run)
         # The final event and aggregate bind immutable finding fields explicitly;
         # later supported dispositions can change only status/resolution.
@@ -1170,6 +1198,8 @@ def _admitted_acceptance_review(store, repo, run, attempt, saved):
         len(events) != 1
         or events[0][1] != result
         or any(result.get(k) != v for k, v in attempt.references().items())
+        or "executionSupport" in attempt.header
+        and result.get("executionSupport") != attempt.header["executionSupport"]
     ):
         raise ValueError("Admitted review membership is inconsistent")
     members = [findings[key] for key in result["findingIds"]]
@@ -1180,6 +1210,208 @@ def _admitted_acceptance_review(store, repo, run, attempt, saved):
     ):
         raise ValueError("Admitted finding membership was changed")
     return {**result, "findings": members}
+
+
+def prepare_execution_assessment(store, selection):
+    """Read existing canonical selectors; never reserve or invent reviewer authority."""
+    from codex_harness.core import dispatch
+    from codex_harness.core.spine import Spine
+
+    if not isinstance(selection, dict) or set(selection) - {"finding_ids", "bead_id"}:
+        raise ValueError("execution-prepare-selection-invalid")
+    ids, bead = selection.get("finding_ids"), selection.get("bead_id")
+    if ids is not None and (
+        not isinstance(ids, list)
+        or not ids
+        or any(not isinstance(x, str) or not x for x in ids)
+        or len(set(ids)) != len(ids)
+    ):
+        raise ValueError("execution-prepare-members-invalid")
+    if bead is not None and (not isinstance(bead, str) or not bead):
+        raise ValueError("execution-prepare-bead-invalid")
+    revision = store.manifest_revision()
+    job = store._meta()["published_revision"]
+    manifest = store.published_manifest(job) if job else None
+    findings = store.acceptance_findings()
+    result = dict(
+        schema="seldon/execution-assessment-preparation-v1",
+        state="selection_required",
+        closureEligible=False,
+        didRunProvider=False,
+        choices=dict(findings=findings, beads=list((manifest or {}).get("beads", {}))),
+        expectedManifestRevision=revision,
+        workerJobId=job,
+        requiredChoices=[
+            "Select actual finding_ids and bead_id; no member/bead is chosen automatically",
+            (
+                "Supply explicitly authorized reviewer "
+                "name/provider/model/effort and positive finite original "
+                "limits"
+            ),
+            (
+                "Select implicated artifactPaths and relevant witnessIds "
+                "from actual observations; structural eligibility is not "
+                "semantic proof"
+            ),
+        ],
+    )
+    if ids is None or bead is None:
+        return result
+    try:
+        run = current_run(store)
+        if not run or run_subject(run) != "product":
+            raise ValueError("execution-current-product-run-required")
+        if (
+            bead not in result["choices"]["beads"]
+            or not job
+            or not store.publication_current(revision)
+        ):
+            raise ValueError("execution-current-publication-bead-required")
+        origins = read_execution_finding_origins(store, ids)
+        evidence = dispatch.read_completed_execution_evidence(
+            store.workspace, job, bead, expected_repo=run["repo"], expected_publication_revision=job
+        )
+        author = roundtable._execution_session(
+            evidence["request"], evidence["stdout"], evidence["stderr"], author=True
+        )
+        requirements = {row["id"] for row in evidence["integrated"]["requirementRefs"]}
+        if any(
+            row["finding"]["node_id"] not in requirements
+            or row["sourceRun"]["planRevision"] != run["planRevision"]
+            for row in origins
+        ):
+            raise ValueError("execution-finding-not-current-owned-requirement")
+        protected = {
+            row["name"] for row in roundtable._protected_tests(store, spine=Spine(store._data()))
+        }
+        artifacts = [
+            dict(path=name, **roundtable._assessment_file(Path(run["repo"]), name))
+            for name in evidence["ownedFiles"]
+        ]
+        witnesses = []
+        for observation in (
+            evidence["integrated"]["validation"].get("observations", {}).get("tests", [])
+        ):
+            name = observation.get("source", {}).get("file")
+            coverage = sorted(
+                {
+                    row["file"]
+                    for row in observation.get("ownedCalls", [])
+                    if row.get("phase") == "test" and row.get("file") in evidence["ownedFiles"]
+                }
+            )
+            if (
+                name in protected
+                and observation.get("events") == [{"kind": "success"}]
+                and observation.get("lines")
+                and coverage
+            ):
+                if roundtable._assessment_file(
+                    Path(run["repo"]), name
+                ) != roundtable._assessment_file(store.workspace / "template", name):
+                    raise ValueError("execution-protected-witness-source-changed")
+                witnesses.append(
+                    dict(id=observation["id"], artifactPaths=coverage, observation=observation)
+                )
+        if not witnesses:
+            raise ValueError("execution-relevant-protected-artifact-observation-required")
+        result.update(
+            state="draft_requires_explicit_choices",
+            repo=run["repo"],
+            productRunId=run["id"],
+            origins=[row["finding"] for row in origins],
+            authorObservation=author,
+            artifacts=artifacts,
+            witnesses=witnesses,
+            requestTemplate=dict(
+                members=[dict(memberId=key, artifactPaths=[], witnessIds=[]) for key in ids],
+                worker_job_id=job,
+                bead_id=bead,
+                expected_manifest_revision=revision,
+                expected_product_run_id=run["id"],
+                reviewer=None,
+                max_rounds=None,
+                max_total=None,
+                timeout=None,
+            ),
+            executable=False,
+        )
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        result.update(state="held", holdReasons=[str(error)])
+    return result
+
+
+def selected_execution_support(store, registration_ids, *, repo=None):
+    """Reconstruct exact current selected support; references cannot certify themselves."""
+    if (
+        not isinstance(registration_ids, list)
+        or not registration_ids
+        or any(not isinstance(x, str) or not x for x in registration_ids)
+        or len(set(registration_ids)) != len(registration_ids)
+    ):
+        raise ValueError("execution-support-selection-invalid")
+    state = store.execution_assessment_state()
+    by_member = {row["memberId"]: row for row in state["members"]}
+    records, seen = [], set()
+    for key in registration_ids:
+        header = roundtable._execution_header(store, key)
+        keys = [row["memberId"] for row in header["request"]["members"]]
+        if seen.intersection(keys):
+            raise ValueError("execution-support-overlapping-selection")
+        seen.update(keys)
+        members = [by_member.get(member) for member in keys]
+        if any(
+            not row
+            or row.get("registrationId") != key
+            or row.get("support") != "assessed-current"
+            or row.get("holdReasons")
+            for row in members
+        ):
+            raise ValueError("execution-selected-support-not-current")
+        context = header["context"]
+        if (
+            repo is not None
+            and Path(context["productRun"]["repo"]).resolve() != Path(repo).resolve()
+        ):
+            raise ValueError("execution-selected-support-repo-mismatch")
+        captures = roundtable._execution_events(store, "execution-assessment-captured", key)
+        consumed = roundtable._execution_events(store, "execution-assessment-consumed", key)
+        if len(captures) != 1 or len(consumed) != 1:
+            raise ValueError("execution-selected-support-originals-incomplete")
+        witness_ids = {item for row in header["request"]["members"] for item in row["witnessIds"]}
+        records.append(
+            dict(
+                registrationId=key,
+                registrationHash=roundtable._assessment_hash(header),
+                binding=header["binding"],
+                captureHash=roundtable._assessment_hash(captures[0][1]),
+                consumptionHash=roundtable._assessment_hash(consumed[0][1]),
+                request=header["request"],
+                members=members,
+                originalFindings=[row["finding"] for row in context["origins"]],
+                productRun=context["productRun"],
+                authorObservation=context["authorObservation"],
+                files=context["files"],
+                protectedObservations=[
+                    row
+                    for row in context["execution"]["integrated"]["validation"]["observations"][
+                        "tests"
+                    ]
+                    if row["id"] in witness_ids
+                ],
+            )
+        )
+    if state != store.execution_assessment_state():
+        raise ValueError("execution-selected-support-read-raced")
+    return dict(
+        schema="seldon/ordinary-review-execution-support-v1",
+        registrationIds=list(registration_ids),
+        records=records,
+        closureEligible=False,
+        scope=(
+            "Sealed evidence input only; no verified closure or native final acceptance authority"
+        ),
+    )
 
 
 def read_execution_finding_origins(store, finding_ids):
@@ -1338,14 +1570,39 @@ def _resume_acceptance_review(store, repo, attempt_id):
 
 
 def acceptance_review(
-    store, repo, *, reviewers=None, runner=None, token_budgets=None, resume=None
+    store,
+    repo,
+    *,
+    reviewers=None,
+    runner=None,
+    token_budgets=None,
+    resume=None,
+    execution_assessment_ids=None,
 ) -> dict:
     if resume is not None:
-        if any(value is not None for value in (reviewers, runner, token_budgets)):
+        if any(
+            value is not None
+            for value in (reviewers, runner, token_budgets, execution_assessment_ids)
+        ):
             raise ValueError("Resume uses only the original registered review settings")
         return _resume_acceptance_review(store, repo, resume)
+    if execution_assessment_ids is not None and reviewers is None:
+        raise ValueError(
+            "Execution support requires explicitly authorized ordinary "
+            "reviewers; supply reviewers before discovery or launch"
+        )
     run, selected, dossiers, evidence, packet, included_header, context, original_identity = (
-        _prepare_acceptance_review(store, repo, reviewers, token_budgets)
+        _prepare_acceptance_review(
+            store,
+            repo,
+            reviewers,
+            token_budgets,
+            **(
+                {"execution_assessment_ids": execution_assessment_ids}
+                if execution_assessment_ids is not None
+                else {}
+            ),
+        )
     )
     executables = {
         item["provider"]: item["provider"]
@@ -1437,6 +1694,11 @@ def _execute_acceptance_review(
             context=context,
             capture=attempt.capture,
             abandon=attempt.abandon,
+            **(
+                {"before_launch": attempt.check_execution_support}
+                if "executionSupport" in attempt.header
+                else {}
+            ),
         ):
             if shard_record["invalid"]:
                 # Persist diagnostic evidence (already saved before cleanup), but

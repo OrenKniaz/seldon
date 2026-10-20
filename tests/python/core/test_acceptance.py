@@ -32,6 +32,549 @@ from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 from codex_harness.core.spine import Spine, load_spine
 
 
+def public_assessment_repair_fixture(tmp_path, monkeypatch, *, author_metadata=True):
+    """Genuine pre-worker AF and actual changed-byte repair; SOURCE ONLY processes."""
+    import shutil
+    import tempfile
+    from types import SimpleNamespace
+
+    from tests.python.core.execution_support import publish_source_store, source_grant
+    from tests.python.core.test_acceptance_recovery import REVIEWERS, protocol
+    from tests.python.core.test_dispatch import _tiny_plan
+    from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
+
+    from codex_harness.core import dispatch, planner_jobs, record_io, roundtable
+    from codex_harness.core.provider_launch import ProviderNormalLaunch
+
+    plan = _tiny_plan(tmp_path)
+    manifest = json.loads((plan / "sample.json").read_text())
+    del manifest["beads"]["B"]
+    (plan / "sample.json").write_text(json.dumps(manifest))
+    (plan / "template/A.py").write_text("def valid_id(value): return isinstance(value, int)\n")
+    (plan / "template/tests/test_A.py").write_text(
+        "import unittest\nfrom A import valid_id\nclass Proof(unittest.TestCase):\n"
+        "    def test_bool(self):\n        self.assertFalse(valid_id(True))\n"
+        "        self.assertTrue(valid_id(7))\n"
+    )
+    (plan / "template/tests/test_B.py").unlink()
+    # Gate-local TEMP can make canonical Git worktree paths too long on Windows.
+    fixture_temp_root = None
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        assert local_appdata, "SOURCE-ONLY fixture needs an existing Windows local Temp root"
+        fixture_temp_root = Path(local_appdata) / "Temp"
+        assert fixture_temp_root.is_dir(), "SOURCE-ONLY fixture needs an existing local Temp root"
+    workspace = Path(tempfile.mkdtemp(prefix="public-af-", dir=fixture_temp_root))
+    store, revision = publish_source_store(workspace, plan)
+    server = PlannerServer(workspace)
+    calls = []
+    traces = []
+
+    def tool(name, arguments, *, error=False):
+        result = server.call_tool(name, arguments)
+        traces.append(dict(name=name, arguments=arguments, result=result))
+        assert bool(result.get("isError")) is error, result
+        return result.get("structuredContent")
+
+    source_child = tmp_path / "source-reviewer.py"
+    source_child.write_text(
+        "# Explicit SOURCE-ONLY process, never a native provider\n"
+        "import json,sys\np=json.load(sys.stdin)\n"
+        "sys.stdout.write(p['stdout'])\nsys.stderr.write(p['stderr'])\n"
+    )
+    which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name: sys.executable if name in {"codex", "claude"} else which(name)
+    )
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+
+    def review_process(launch, cwd, timeout, *, raw=False):
+        assert Path(launch.command[0]).resolve() == Path(sys.executable).resolve()
+        assert source_child.is_file(), "Never fall back to installed provider"
+        packet = launch.stdin_text
+        if packet.startswith('{"schema": "seldon/canonical-execution-packet-v1"'):
+            response = json.loads(packet)["responseContract"]
+            for member in response["members"]:
+                member.update(
+                    judgment="supports-repair",
+                    explanation="Actual protected bool rejection and integer acceptance "
+                    "observe A.py after the canonical worker repair",
+                )
+            output = protocol("codex", text=json.dumps(response))
+        else:
+            provider = "codex" if "exec" in launch.command else "claude"
+            response = (
+                [
+                    dict(
+                        node_id="RA",
+                        severity="major",
+                        finding="Boolean IDs are accepted",
+                        suggestion="Reject True while retaining integer 7",
+                    )
+                ]
+                if len(calls) < 2
+                else []
+            )
+            output = protocol(provider, text=json.dumps(response))
+        argv = [sys.executable, "-B", str(source_child)]
+        child = subprocess.run(
+            argv,
+            input=json.dumps(dict(stdout=output[1], stderr=output[2])).encode(),
+            cwd=cwd,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        import hashlib
+
+        calls.append(
+            dict(
+                argv=argv,
+                raw=raw,
+                exitCode=child.returncode,
+                packet=packet,
+                stdoutSha256=hashlib.sha256(child.stdout).hexdigest(),
+                stderrSha256=hashlib.sha256(child.stderr).hexdigest(),
+            )
+        )
+        return (
+            child.returncode,
+            child.stdout if raw else child.stdout.decode(),
+            child.stderr if raw else child.stderr.decode(),
+        )
+
+    monkeypatch.setattr(roundtable, "_run", review_process)
+    scenarios = derive_scenarios(store.locked_acceptance_spine())
+    for scenario in scenarios:
+        scenario.update(
+            steps=[
+                '"{python}" -B -c "from A import valid_id; assert not '
+                'valid_id(True); assert valid_id(7)"'
+            ],
+            expect={"exit": 0},
+            nodeIds=["RA"],
+        )
+    tool("harness_accept_scenarios", {"scenarios": scenarios})
+    broken = tmp_path / "pre-repair-product"
+    shutil.copytree(workspace / "template", broken)
+    old_bytes = (broken / "A.py").read_bytes()
+    old_run = tool("harness_accept_run", dict(repo=str(broken), subject="product"), error=True)
+    assert old_run["passed"] is False
+    original = tool("harness_accept_review", dict(repo=str(broken), reviewers=REVIEWERS))
+    assert len(calls) == 2 and original["findingIds"]
+    with pytest.raises(ValueError):
+        planner_jobs.worker_job_status(workspace, revision)
+
+    session = str(uuid4())
+    events = [
+        {"type": "thread.started", "thread_id": session},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "SOURCE ONLY"}},
+        {"type": "turn.completed"},
+    ]
+    stderr = (
+        "Codex initialized with event: SessionConfiguredEvent { "
+        f"session_id: SessionId {{ uuid: {session} }}, thread_id: ThreadId {{ uuid: {session} }}, "
+        "forked_from_id: None, parent_thread_id: None, model: "
+        '"gpt-6.1-sol", reasoning_effort: Some(Medium) }'
+    )
+    if not author_metadata:
+        stderr = ""
+    worker = tmp_path / "source-worker.py"
+    worker.write_text(
+        "# SOURCE-ONLY actual product repair child\nfrom pathlib import Path\nimport sys\n"
+        "Path('A.py').write_text('def valid_id(value): return type(value) is int\\n')\n"
+        f"print({chr(10).join(json.dumps(row) for row in events)!r})\n"
+        f"print({stderr!r},file=sys.stderr)\n"
+    )
+
+    class Adapter:
+        def provider_normal_command(self, **_kwargs):
+            assert worker.is_file() and Path(sys.executable).is_file()
+            return ProviderNormalLaunch(
+                cli="codex",
+                command=(sys.executable, "-B", str(worker)),
+                protections=("SOURCE-ONLY process double",),
+            )
+
+    monkeypatch.setattr(dispatch, "get_adapter", lambda _: Adapter())
+    source_only_packet_renderer(monkeypatch)
+    workers = [dict(bead="A", provider="codex", model="gpt-6.1-sol", effort="medium")]
+    source_grant(store, revision, workers, timeout=15, call_cap=1)
+    with monkeypatch.context() as boundary:
+        popen = planner_jobs.subprocess.Popen
+
+        def controller_handoff(command, *args, **kwargs):
+            if "codex_harness.core.planner_jobs" in command:
+                return SimpleNamespace(pid=12345)
+            return popen(command, *args, **kwargs)
+
+        boundary.setattr(planner_jobs.subprocess, "Popen", controller_handoff)
+        tool(
+            "harness_worker_start",
+            dict(expected_revision=revision, workers=workers, timeout=15, call_cap=1),
+        )
+    terminal = planner_jobs.execute_worker_job(workspace, revision)
+    assert terminal["status"] == "completed", terminal
+    job = tool("harness_worker_status", dict(job_id=revision))
+    run = record_io.read_record_json(Path(job["run"]["recordPath"]))
+    repo = Path(run["repo"])
+    assert (repo / "A.py").read_bytes() != old_bytes == (broken / "A.py").read_bytes()
+    current = tool("harness_accept_run", dict(repo=str(repo), subject="product"))
+    assert (
+        current["passed"]
+        and current["id"] != old_run["id"]
+        and current["revision"] != old_run["revision"]
+    )
+    state = tool("harness_plan_status", {})
+    af = next(row for row in state["acceptance"]["findings"] if row["provider"] == "codex")
+    (tmp_path / "public-source-process-receipts.json").write_text(
+        json.dumps(
+            dict(
+                sourceOnly=True,
+                nativeProviderCalls=0,
+                oldRun=old_run,
+                currentRun=current,
+                oldRepo=str(broken),
+                currentRepo=str(repo),
+                calls=calls,
+                traces=traces,
+            ),
+            indent=2,
+        )
+    )
+    return store, server, tool, calls, af, current, repo, REVIEWERS, tmp_path
+
+
+def test_public_assessment_repair_and_durable_ordinary_consumer(tmp_path, monkeypatch, capsys):
+    store, server, tool, calls, af, current, repo, reviewers, evidence = (
+        public_assessment_repair_fixture(tmp_path, monkeypatch)
+    )
+    try:
+        prefix = ["--workspace", str(store.workspace), "--json"]
+        assert plan_cli.main([*prefix, "accept-assess", "--schema"]) == 0
+        schema = json.loads(capsys.readouterr().out)["data"]
+        assert schema["closureEligible"] is False
+        before = list(store.connection.iterdump())
+        prepared = tool(
+            "harness_accept_assess", {"prepare": {"finding_ids": [af["id"]], "bead_id": "A"}}
+        )
+        assert list(store.connection.iterdump()) == before and len(calls) == 2
+        request = prepared["requestTemplate"]
+        assert request["expected_product_run_id"] == current["id"]
+        request.update(reviewer=reviewers[0], max_rounds=6, max_total=6, timeout=15)
+        request["members"] = [
+            dict(
+                memberId=af["id"],
+                artifactPaths=[prepared["artifacts"][0]["path"]],
+                witnessIds=[prepared["witnesses"][0]["id"]],
+            )
+        ]
+        request_file = evidence / "assessment-request.json"
+        request_file.write_text(json.dumps(request))
+        assert plan_cli.main([*prefix, "accept-assess", "--input", "@" + str(request_file)]) == 0
+        submitted = json.loads(capsys.readouterr().out)["data"]
+        assert submitted["members"][0]["support"] == "assessed-current" and len(calls) == 3
+        selected = submitted["members"][0]["registrationId"]
+        assert submitted["closureEligible"] is False
+        consumer = submitted["nextAction"]
+        assert consumer["mcpTool"] == "harness_accept_review"
+        assert consumer["arguments"]["execution_assessment_ids"] == [selected]
+        assert consumer["arguments"]["repo"] == str(repo)
+        assert "reviewers" not in consumer["arguments"], "No invented ordinary reviewer authority"
+        consumed = tool(consumer["mcpTool"], dict(consumer["arguments"], reviewers=reviewers))
+        assert consumed["executionSupport"]["registrationIds"] == [selected]
+        assert len(calls) == 5
+        assert all(
+            af["finding"] in call["packet"] and selected in call["packet"] for call in calls[-2:]
+        )
+        saved = json.loads(
+            store.connection.execute(
+                "SELECT result_json FROM acceptance_reviews WHERE id=?", (consumed["id"],)
+            ).fetchone()[0]
+        )
+        assert saved["executionSupport"] == consumed["executionSupport"]
+        assert store.acceptance_findings()[0]["status"] == "open"
+        assert store.status()["acceptance"]["accepted"] is False
+        assert (
+            store.status()["acceptance"]["executionAssessments"]["members"][0]["support"]
+            == "assessed-current"
+        )
+        (evidence / "public-consumer-final-receipt.json").write_text(
+            json.dumps(
+                dict(
+                    sourceOnly=True,
+                    nativeProviderCalls=0,
+                    calls=calls,
+                    saved=saved,
+                    assessment=submitted,
+                ),
+                indent=2,
+            )
+        )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("transport", ["mcp", "cli"])
+def test_explicit_support_enters_real_ordinary_packet_and_saved_review(
+    tmp_path, monkeypatch, capsys, transport
+):
+    """Isolate new downstream capability; existing canonical API supplies setup support."""
+    from codex_harness.core import roundtable
+
+    store, server, tool, calls, af, current, repo, reviewers, evidence = (
+        public_assessment_repair_fixture(tmp_path, monkeypatch)
+    )
+    try:
+        status = tool("harness_plan_status", {})
+        support = roundtable.assess_execution_findings(
+            store,
+            members=[
+                dict(
+                    memberId=af["id"], artifactPaths=["A.py"], witnessIds=["test_A.Proof.test_bool"]
+                )
+            ],
+            worker_job_id=status["published_revision"],
+            bead_id="A",
+            expected_manifest_revision=status["manifest_revision"],
+            expected_product_run_id=current["id"],
+            reviewer=reviewers[0],
+            max_rounds=6,
+            max_total=6,
+            timeout=15,
+        )
+        assert support["members"][0]["support"] == "assessed-current", support
+        selected = support["members"][0]["registrationId"]
+        if transport == "mcp":
+            result = tool(
+                "harness_accept_review",
+                dict(repo=str(repo), reviewers=reviewers, execution_assessment_ids=[selected]),
+            )
+        else:
+            assert (
+                plan_cli.main(
+                    [
+                        "--workspace",
+                        str(store.workspace),
+                        "--json",
+                        "accept-review",
+                        "--repo",
+                        str(repo),
+                        "--execution-assessment",
+                        selected,
+                        *[
+                            arg
+                            for reviewer in reviewers
+                            for arg in ("--reviewer", json.dumps(reviewer))
+                        ],
+                    ]
+                )
+                == 0
+            )
+            result = json.loads(capsys.readouterr().out)["data"]
+        assert result["executionSupport"]["registrationIds"] == [selected]
+        assert all(
+            af["finding"] in call["packet"] and selected in call["packet"] for call in calls[-2:]
+        )
+        saved = json.loads(
+            store.connection.execute(
+                "SELECT result_json FROM acceptance_reviews WHERE id=?", (result["id"],)
+            ).fetchone()[0]
+        )
+        assert saved["executionSupport"] == result["executionSupport"]
+    finally:
+        store.close()
+
+
+def test_public_assessment_entry_preserves_empty_acceptance_contract(tmp_path):
+    with PlanStore(tmp_path) as store:
+        before = list(store.connection.iterdump())
+        acceptance = store.status()["acceptance"]
+        assert set(acceptance) == {
+            "scenarios",
+            "lastRunSubject",
+            "findings",
+            "approvedBy",
+            "isProxy",
+            "accepted",
+            "realUserAccepted",
+            "recordedUserAccepted",
+            "humanOriginVerified",
+            "approvalOrigin",
+            "invalidReason",
+            "invalidMessage",
+            "repo",
+            "next",
+            "approval",
+            "reviews",
+            "reviewAttempts",
+            "executionAssessments",
+        }
+        assert acceptance["executionAssessments"]["members"] == []
+        assert acceptance["executionAssessments"]["closureEligible"] is False
+        assert acceptance["executionAssessments"]["fullVisionHeld"] is True
+        assert list(store.connection.iterdump()) == before
+
+
+def public_current_support(fixture):
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    prepared = tool(
+        "harness_accept_assess", {"prepare": {"finding_ids": [af["id"]], "bead_id": "A"}}
+    )
+    request = prepared["requestTemplate"]
+    artifact = next(row["path"] for row in prepared["artifacts"] if row["path"] == "A.py")
+    witness = next(row["id"] for row in prepared["witnesses"] if artifact in row["artifactPaths"])
+    request.update(
+        members=[dict(memberId=af["id"], artifactPaths=[artifact], witnessIds=[witness])],
+        reviewer=reviewers[0],
+        max_rounds=6,
+        max_total=6,
+        timeout=15,
+    )
+    support = tool("harness_accept_assess", {"request": request})
+    assert support["members"][0]["support"] == "assessed-current"
+    return request, support["members"][0]["registrationId"]
+
+
+@pytest.mark.parametrize(
+    "selected_support", [True, False], ids=["support-requires-choice", "legacy-defaults"]
+)
+def test_support_requires_explicit_ordinary_reviewers_without_discovery(
+    tmp_path, monkeypatch, selected_support
+):
+    from codex_harness.core import roundtable
+
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        _, selected = public_current_support(fixture)
+        discovery = []
+
+        def controlled_defaults():
+            discovery.append("SOURCE ONLY discovery double")
+            return reviewers
+
+        monkeypatch.setattr(roundtable, "default_reviewers", controlled_defaults)
+        before = list(store.connection.iterdump())
+        arguments = dict(repo=str(repo))
+        if selected_support:
+            arguments["execution_assessment_ids"] = [selected]
+        reply = server.call_tool("harness_accept_review", arguments)
+        if selected_support:
+            assert reply.get("isError") and "explicit" in str(reply).lower(), reply
+            assert discovery == [] and len(calls) == 3
+            assert list(store.connection.iterdump()) == before
+        else:
+            assert not reply.get("isError"), reply
+            assert len(discovery) == 1 and len(calls) == 5
+            saved = json.loads(
+                store.connection.execute(
+                    "SELECT result_json FROM acceptance_reviews WHERE id=?",
+                    (reply["structuredContent"]["id"],),
+                ).fetchone()[0]
+            )
+            assert "executionSupport" not in saved
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "case", ["unknown", "duplicate", "repo", "disposition", "later-pending", "artifact"]
+)
+def test_public_selected_support_refuses_before_ordinary_reservation(tmp_path, monkeypatch, case):
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        request, selected = public_current_support(fixture)
+        ids = [selected]
+        consumer_repo = str(repo)
+        if case == "unknown":
+            ids = ["0" * 32]
+        elif case == "duplicate":
+            ids = [selected, selected]
+        elif case == "repo":
+            consumer_repo = str(evidence / "pre-repair-product")
+        elif case == "disposition":
+            tool(
+                "harness_resolve_finding",
+                dict(
+                    id=af["id"],
+                    status="resolved",
+                    resolution="SOURCE ONLY declaration after assessment must stale it",
+                ),
+            )
+        elif case == "later-pending":
+            store.register_execution_assessment(**dict(request, timeout=16))
+        elif case == "artifact":
+            (repo / "A.py").write_text("def valid_id(value): return isinstance(value,int)\n")
+        before = list(store.connection.iterdump())
+        result = server.call_tool(
+            "harness_accept_review",
+            dict(repo=consumer_repo, reviewers=reviewers, execution_assessment_ids=ids),
+        )
+        assert result["isError"] and len(calls) == 3
+        assert list(store.connection.iterdump()) == before
+        assert (
+            store.connection.execute("SELECT count(*) FROM acceptance_reviews").fetchone()[0] == 1
+        )
+    finally:
+        store.close()
+
+
+def test_public_preparation_choices_and_targeted_refusal_do_not_spend(tmp_path, monkeypatch):
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        before = list(store.connection.iterdump())
+        choices = tool("harness_accept_assess", {"prepare": {}})
+        assert choices["state"] == "selection_required" and {
+            row["id"] for row in choices["choices"]["findings"]
+        } == {row["id"] for row in store.acceptance_findings()}
+        assert choices["choices"]["beads"] == ["A"] and "requestTemplate" not in choices
+        prepared = tool(
+            "harness_accept_assess", {"prepare": {"finding_ids": [af["id"]], "bead_id": "A"}}
+        )
+        assert prepared["executable"] is False and prepared["requestTemplate"]["reviewer"] is None
+        request = prepared["requestTemplate"]
+        request.update(
+            members=[
+                dict(memberId=af["id"], artifactPaths=["A.py"], witnessIds=["unrelated.fake.test"])
+            ],
+            reviewer=reviewers[0],
+            max_rounds=6,
+            max_total=6,
+            timeout=15,
+        )
+        held = server.call_tool("harness_accept_assess", {"request": request})
+        assert held["isError"] and "observation" in str(held["structuredContent"]["holdReasons"])
+        assert len(calls) == 2 and list(store.connection.iterdump()) == before
+    finally:
+        store.close()
+
+
+def test_missing_actual_author_telemetry_holds_public_prepare_before_capacity(
+    tmp_path, monkeypatch
+):
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch, author_metadata=False)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        before = list(store.connection.iterdump())
+        reply = server.call_tool(
+            "harness_accept_assess", {"prepare": {"finding_ids": [af["id"]], "bead_id": "A"}}
+        )
+        assert reply["isError"]
+        held = reply["structuredContent"]
+        assert held["state"] == "held" and "configuration-unavailable" in str(held["holdReasons"])
+        assert "requestTemplate" not in held and len(calls) == 2
+        assert list(store.connection.iterdump()) == before
+        assert not store.connection.execute(
+            "SELECT 1 FROM events WHERE kind='execution-assessment-reserved'"
+        ).fetchone()
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("invalid_stream", [None, "stdout", "stderr"])
 def test_exact_output_witness_preserves_invalid_utf8_evidence(tmp_path, invalid_stream):
     """Actual source-product child bytes must not disappear before exact matching."""

@@ -20,6 +20,168 @@ NEXT = {
 }
 
 
+def execution_assessment_contract():
+    """Owning public schema; drafts/observations are never launch authorization."""
+
+    def obj(properties, required=None):
+        return dict(
+            type="object",
+            properties=properties,
+            required=list(properties) if required is None else required,
+            additionalProperties=False,
+        )
+
+    string = dict(type="string", minLength=1)
+    strings = dict(type="array", items=string, minItems=1, uniqueItems=True)
+    member = obj(dict(memberId=string, artifactPaths=strings, witnessIds=strings))
+    reviewer = obj(
+        dict(name=string, provider=dict(type="string", enum=["codex"]), model=string, effort=string)
+    )
+    request = obj(
+        dict(
+            members=dict(type="array", items=member, minItems=1),
+            worker_job_id=string,
+            bead_id=string,
+            expected_manifest_revision=string,
+            expected_product_run_id=string,
+            reviewer=reviewer,
+            max_rounds=dict(type="integer", minimum=1),
+            max_total=dict(type="integer", minimum=1),
+            timeout=dict(type="number", exclusiveMinimum=0),
+        )
+    )
+    schema = obj(
+        dict(
+            schema=dict(type="boolean", enum=[True]),
+            prepare=obj(dict(finding_ids=strings, bead_id=string), []),
+            request=request,
+        ),
+        [],
+    )
+    schema["oneOf"] = [
+        dict(required=[key], maxProperties=1) for key in ("schema", "prepare", "request")
+    ]
+    return dict(
+        schema="seldon/public-execution-assessment-v1",
+        inputSchema=schema,
+        modes=dict(
+            schema="Read only; creates no plan",
+            prepare="Read actual choices and exact canonical bindings; no reservation",
+            request=(
+                "Explicit supplied reviewer/finite limits; existing "
+                "canonical preflight before reservation"
+            ),
+        ),
+        acquisition=dict(
+            findings="harness_plan_status acceptance.findings / existing CLI findings",
+            choices="harness_accept_assess prepare={} / accept-assess --prepare",
+            selection=(
+                "Explicit finding_ids and bead_id from returned choices; "
+                "select implicated artifacts and relevant witnesses"
+            ),
+            reviewer=(
+                "Supply actual authorized name/provider/model/effort; no "
+                "catalog, entitlement or configuration is inferred"
+            ),
+            limits=(
+                "Supply positive finite original "
+                "max_rounds/max_total/timeout; worker grants do not "
+                "authorize review calls"
+            ),
+        ),
+        output=dict(
+            preparation=(
+                "requestTemplate plus actual artifacts/witnesses/choices and unavailable reasons"
+            ),
+            submission=(
+                "Canonical assessed-current/unverified members, immutable "
+                "registration and bounded Next"
+            ),
+            consumer=(
+                "Explicit accept-review --execution-assessment ID seals "
+                "current support as evidence only"
+            ),
+        ),
+        limits=[
+            (
+                "Codex recognized original author/reviewer telemetry only; "
+                "unavailable observations hold before capacity"
+            ),
+            (
+                "No verified closure, ordinary credit, native approval, "
+                "default adoption or automatic relaunch"
+            ),
+            (
+                "Record any intended ordinary disposition before assessment; "
+                "later resolve stales the support"
+            ),
+        ],
+        closureEligible=False,
+        didRunProvider=False,
+    )
+
+
+def execution_assessment_result(store, result, *, member_ids=None):
+    """Public action over the canonical readback; no second gate or mutation."""
+    import json
+    from pathlib import Path
+
+    from codex_harness.core.acceptance import current_run
+
+    workspace = str(store.workspace.resolve())
+    prefix = "python -m codex_harness.core.plan_cli --workspace " + json.dumps(workspace)
+    members = result.get("members", [])
+    if member_ids is not None:
+        members = [row for row in members if row.get("memberId") in member_ids]
+    ids = list(
+        dict.fromkeys(
+            row["registrationId"] for row in members if row.get("support") == "assessed-current"
+        )
+    )
+    current = current_run(store)
+    if (
+        members
+        and (member_ids is None or len(members) == len(member_ids))
+        and all(row.get("support") == "assessed-current" for row in members)
+        and current
+    ):
+        arguments = dict(repo=str(Path(current["repo"]).resolve()), execution_assessment_ids=ids)
+        cli = prefix + " accept-review --repo " + json.dumps(arguments["repo"])
+        cli += "".join(" --execution-assessment " + json.dumps(key) for key in ids)
+        action = dict(
+            kind="ordinary_review_with_selected_support",
+            mcpTool="harness_accept_review",
+            arguments=arguments,
+            cliCommand=cli,
+            readyToInvoke=False,
+            requiredArguments=["reviewers"],
+            requiredChoices=(
+                "Supply explicitly authorized ordinary --reviewer JSON "
+                "arguments (two distinct existing providers); this is not "
+                "authorization/default selection"
+            ),
+            reason=(
+                "Fresh ordinary reviewers consume current support as "
+                "evidence; open/deferred AFs and native final acceptance "
+                "remain separate holds"
+            ),
+        )
+    else:
+        action = dict(
+            kind="hold_or_refresh",
+            mcpTool="harness_accept_assess",
+            arguments={"prepare": {}},
+            cliCommand=prefix + " accept-assess --prepare",
+            reason=(
+                "Inspect exact holdReasons and actual choices. "
+                "Repair/reacquire current originals where supported; "
+                "pending/uncertain work is observation only. Missing "
+                "telemetry has no invented producer. No automatic retry."
+            ),
+        )
+    return dict(result, nextAction=action, closureEligible=False)
+
+
 POLICY_ADOPTION_WARNING = (
     "No supported verified finding-closure producer is available. Adopting this optional "
     "fail-closed policy can leave quality and publication held when findings arise, even after "

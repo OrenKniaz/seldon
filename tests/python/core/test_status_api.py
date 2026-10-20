@@ -915,7 +915,9 @@ def test_status_spine_vision_gates_and_older_database_are_read_only(tmp_path):
 def test_status_empty_spine_and_unknown_efficiency(tmp_path):
     with PlanStore(tmp_path):
         pass
+    before = _mtimes(tmp_path)
     result = snapshot(workspace=tmp_path)
+    assert _mtimes(tmp_path) == before
     assert result["plan"]["spine"] == []
     assert result["plan"]["vision"] is None
     assert result["plan"]["reviewRecorded"] is False
@@ -937,6 +939,15 @@ def test_status_empty_spine_and_unknown_efficiency(tmp_path):
         "approval": None,
         "reviews": [],
         "reviewAttempts": [],
+        "executionAssessments": {
+            "schema": "seldon/execution-assessed-support-v1",
+            "members": [],
+            "fullVisionHeld": True,
+            "closureEligible": False,
+            "scope": (
+                "current registered AF execution support only; native final acceptance unchanged"
+            ),
+        },
     }
     assert result["agents"] == "unavailable"
     run = tmp_path / "runs" / "run"

@@ -26,6 +26,207 @@ REVIEWERS = [
 ]
 
 
+@pytest.mark.parametrize("failure", ["overflow-value", "os-error", "timeout"])
+def test_actual_shard_prelaunch_refusal_is_not_provider_error(project, monkeypatch, failure):
+    import subprocess
+
+    store, _repo = project
+    children, abandoned, directories = [], [], []
+    temporary = roundtable.TemporaryDirectory
+
+    def directory(*args, **kwargs):
+        result = temporary(*args, **kwargs)
+        directories.append(Path(result.name))
+        return result
+
+    monkeypatch.setattr(roundtable, "TemporaryDirectory", directory)
+    errors = {
+        "overflow-value": ValueError("context overflow is a local support refusal"),
+        "os-error": OSError("local support unavailable"),
+        "timeout": subprocess.TimeoutExpired("support-read", 1),
+    }
+
+    def recheck():
+        raise errors[failure]
+
+    def child(*_):
+        children.append(True)
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", "print('[]')"], capture_output=True, text=True, timeout=5
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    shards = roundtable.packet_shards(store, "codex")
+    before = list(store.connection.iterdump())
+    with pytest.raises(type(errors[failure])):
+        list(
+            roundtable._review_dossier(
+                store,
+                dict(id="local-hook", planRevision=store.manifest_revision()),
+                REVIEWERS[0],
+                {},
+                executable=sys.executable,
+                runner=child,
+                timeout=5,
+                shards=shards,
+                before_launch=recheck,
+                abandon=lambda: abandoned.append(True),
+            )
+        )
+    assert children == [] and abandoned == []
+    assert list(store.connection.iterdump()) == before
+    assert directories and all(not path.exists() for path in directories)
+
+
+@pytest.mark.parametrize("phase", ["between-shards", "overflow-retry", "all-current"])
+def test_selected_support_is_checked_at_every_real_child_boundary(tmp_path, monkeypatch, phase):
+    """SOURCE-ONLY doubled complete dossier forces two actual shards, not guard bypass."""
+    from tests.python.core.test_acceptance import (
+        public_assessment_repair_fixture,
+        public_current_support,
+    )
+
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        _request, selected = public_current_support(fixture)
+        shards = roundtable.packet_shards
+
+        def complete_source_dossiers(*args, **kwargs):
+            rows = shards(*args, **kwargs)
+            if '"executionSupport"' in kwargs.get("included_header", ""):
+                assert len(rows) == 1
+                return [dict(rows[0]), dict(rows[0])]
+            return rows
+
+        monkeypatch.setattr(roundtable, "packet_shards", complete_source_dossiers)
+        child = roundtable._run
+        ordinary = []
+
+        def observed(launch, cwd, timeout, **kwargs):
+            if '"executionSupport"' not in launch.stdin_text:
+                return child(launch, cwd, timeout, **kwargs)
+            ordinary.append(launch.stdin_text)
+            if phase == "overflow-retry" and len(ordinary) == 1:
+                import subprocess
+
+                actual = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        "import json; "
+                        "print(json.dumps({'type':'error','message':'context "
+                        "overflow: source-only boundary witness'}))",
+                    ],
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                response = (1, actual.stdout, actual.stderr)
+            else:
+                response = child(launch, cwd, timeout, **kwargs)
+            if phase != "all-current" and len(ordinary) == 1:
+                store.resolve_acceptance_finding(
+                    af["id"],
+                    resolution="SOURCE ONLY state changed after first actual child",
+                    status="resolved",
+                )
+            return response
+
+        monkeypatch.setattr(roundtable, "_run", observed)
+        reply = server.call_tool(
+            "harness_accept_review",
+            dict(repo=str(repo), reviewers=reviewers, execution_assessment_ids=[selected]),
+        )
+        started = recovery._events(store, recovery.STARTED)
+        attempt = recovery.ReviewAttempt.load(store, started[-1][1]["attemptId"])
+        captures = recovery._events(store, recovery.COMPLETED, attempt.id)
+        if phase == "all-current":
+            assert not reply["isError"], reply
+            assert len(ordinary) == len(captures) == 4
+            assert reply["structuredContent"]["executionSupport"]["registrationIds"] == [selected]
+            assert len(recovery._events(store, "acceptance-reviewed", attempt.id)) == 1
+        else:
+            assert reply["isError"], reply
+            assert len(ordinary) == len(captures) == 1
+            assert not recovery._events(store, "acceptance-reviewed", attempt.id)
+            assert len(recovery._events(store, recovery.STARTED, attempt.id)) == 1
+            assert bool(recovery._events(store, recovery.ABANDONED, attempt.id)) is (
+                phase == "overflow-retry"
+            )
+            before = len(calls)
+            resumed = server.call_tool(
+                "harness_accept_review", dict(repo=str(repo), resume=attempt.id)
+            )
+            assert resumed["isError"] and len(calls) == before and len(ordinary) == 1
+            assert not recovery._events(store, "acceptance-reviewed", attempt.id)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("point", ["registration", "commit", "admitted-history"])
+def test_support_binding_races_and_admitted_history_are_distinct(tmp_path, monkeypatch, point):
+    from tests.python.core.test_acceptance import (
+        public_assessment_repair_fixture,
+        public_current_support,
+    )
+
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        _request, selected = public_current_support(fixture)
+
+        def change():
+            store.resolve_acceptance_finding(
+                af["id"], resolution="SOURCE ONLY changed support binding", status="resolved"
+            )
+
+        if point == "registration":
+            start = recovery.ReviewAttempt.start
+
+            def registered(*args, **kwargs):
+                attempt = start(*args, **kwargs)
+                change()
+                return attempt
+
+            monkeypatch.setattr(recovery.ReviewAttempt, "start", registered)
+        elif point == "commit":
+            commit = acceptance._commit_acceptance_review
+
+            def committing(*args, **kwargs):
+                change()
+                return commit(*args, **kwargs)
+
+            monkeypatch.setattr(acceptance, "_commit_acceptance_review", committing)
+        result = server.call_tool(
+            "harness_accept_review",
+            dict(repo=str(repo), reviewers=reviewers, execution_assessment_ids=[selected]),
+        )
+        attempt_id = recovery._events(store, recovery.STARTED)[-1][1]["attemptId"]
+        if point == "admitted-history":
+            assert not result["isError"], result
+            saved = result["structuredContent"]
+            change()
+            assert store.execution_assessment_state()["members"][0]["support"] == "unverified"
+            before = len(calls)
+            resumed = tool("harness_accept_review", dict(repo=str(repo), resume=attempt_id))
+            assert resumed["executionSupport"] == saved["executionSupport"]
+            assert len(calls) == before
+        else:
+            assert result["isError"]
+            assert len(calls) == (3 if point == "registration" else 5)
+            assert not recovery._events(store, "acceptance-reviewed", attempt_id)
+            before = len(calls)
+            resumed = server.call_tool(
+                "harness_accept_review", dict(repo=str(repo), resume=attempt_id)
+            )
+            assert resumed["isError"] and len(calls) == before
+    finally:
+        store.close()
+
+
 @pytest.fixture
 def project(tmp_path):
     yield from _project.__wrapped__(tmp_path)
