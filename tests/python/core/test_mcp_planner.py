@@ -160,6 +160,147 @@ def test_accept_phase_status_teaches_current_assessment_without_mutation(tmp_pat
         store.close()
 
 
+@pytest.mark.parametrize("case", ["closed", "open", "one-provider-error"])
+def test_review_continuation_uses_current_gate_with_retained_afs(tmp_path, monkeypatch, case):
+    import hashlib
+
+    from tests.python.core.test_acceptance import (
+        public_assessment_repair_fixture,
+        public_current_support,
+    )
+
+    fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
+    store, server, tool, calls, af, current, repo, reviewers, evidence = fixture
+    try:
+        tool("harness_advance", {"to_phase": "execute"})
+        tool("harness_advance", {"to_phase": "accept"})
+        originals = store.acceptance_findings()
+        if case != "open":
+            for finding in originals:
+                tool(
+                    "harness_resolve_finding",
+                    dict(
+                        id=finding["id"],
+                        status="resolved",
+                        resolution=(
+                            "SOURCE ONLY declaration before fresh assessment; "
+                            "actual worker repaired bool IDs"
+                        ),
+                    ),
+                )
+        _, selected = public_current_support(fixture)
+        declared = store.acceptance_findings()
+        reply = server.call_tool(
+            "harness_accept_review",
+            dict(
+                repo=str(repo),
+                execution_assessment_ids=[selected],
+                reviewers=reviewers[:1] if case == "one-provider-error" else reviewers,
+            ),
+        )
+        status = store.status()
+        acceptance = status["acceptance"]
+        assert acceptance["accepted"] is False
+        assert store.acceptance_findings() == declared
+        assert [
+            {k: v for k, v in row.items() if k not in {"status", "resolution"}} for row in declared
+        ] == [
+            {k: v for k, v in row.items() if k not in {"status", "resolution"}} for row in originals
+        ]
+        next_step = reply["content"][0]["text"].rsplit("\nNext: ", 1)[1]
+        (evidence / "continuation-before-action.json").write_text(
+            json.dumps(
+                dict(
+                    sourceOnly=True,
+                    case=case,
+                    reply=reply,
+                    acceptance=acceptance,
+                    originalFindings=originals,
+                    declaredFindings=declared,
+                    callCount=len(calls),
+                ),
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if case == "closed":
+            assert not reply["isError"], reply
+            assert acceptance["invalidReason"] == "acceptance-approval-required", acceptance
+            assert acceptance["next"].startswith("harness_accept statement=")
+            assert next_step == acceptance["next"], next_step
+            name, *fields = shlex.split(next_step)
+            arguments = {field.split("=", 1)[0]: field.split("=", 1)[1] for field in fields}
+            assert set(arguments) == {"statement", "by"}
+            arguments.update(
+                statement="SOURCE ONLY explicit proxy acceptance of this repaired fixture",
+                by="proxy:source-test",
+            )
+            recorded = tool(name, arguments)
+            assert recorded["isProxy"] is True
+            after = store.status()["acceptance"]
+            assert after["accepted"] is True and after["humanOriginVerified"] is False
+            assert after["isProxy"] is True and after["approvalOrigin"] == "recorded-unverified"
+            assert (
+                store.connection.execute("SELECT count(*) FROM acceptance_approvals").fetchone()[0]
+                == 1
+            )
+            assert len(calls) == 5
+        elif case == "open":
+            assert (
+                not reply["isError"] and acceptance["invalidReason"] == "acceptance-findings-open"
+            )
+            assert next_step.startswith("harness_accept_assess schema=true;")
+            before_db = list(store.connection.iterdump())
+            before_support = store.execution_assessment_state()
+            before_a = hashlib.sha256((repo / "A.py").read_bytes()).hexdigest()
+            name, field = next_step.split(";", 1)[0].split()
+            key, value = field.split("=", 1)
+            schema = tool(name, {key: json.loads(value)})
+            name, field = schema["acquisition"]["choices"].split(" / ", 1)[0].split()
+            key, value = field.split("=", 1)
+            choices = tool(name, {key: json.loads(value)})
+            assert af["id"] in {row["id"] for row in choices["choices"]["findings"]}
+            assert list(store.connection.iterdump()) == before_db
+            assert store.execution_assessment_state() == before_support
+            assert hashlib.sha256((repo / "A.py").read_bytes()).hexdigest() == before_a
+            assert len(calls) == 5
+        else:
+            assert reply["isError"] and "cross-subscription" in reply["content"][0]["text"]
+            assert acceptance["invalidReason"] == "acceptance-review-required"
+            assert not next_step.startswith(
+                ("harness_accept_assess", "harness_accept statement=")
+            ), next_step
+            assert "reported blocker" in next_step
+            assert len(calls) == 3
+            refused = server.call_tool(
+                "harness_accept",
+                dict(
+                    statement="SOURCE ONLY cannot replace missing ordinary reviews",
+                    by="proxy:source-test",
+                ),
+            )
+            assert (
+                refused["isError"]
+                and "native cross-subscription evidence" in refused["content"][0]["text"]
+            )
+            assert store.status()["acceptance"]["accepted"] is False
+            assert (
+                store.connection.execute("SELECT count(*) FROM acceptance_approvals").fetchone()[0]
+                == 0
+            )
+            assert len(calls) == 3
+        assert store.acceptance_findings() == declared
+        assert store.execution_assessment_state()["closureEligible"] is False
+        (evidence / "continuation-final.json").write_text(
+            json.dumps(
+                dict(sourceOnly=True, case=case, calls=calls, status=store.status()), indent=2
+            ),
+            encoding="utf-8",
+        )
+    finally:
+        store.close()
+
+
 def rpc(server, method, params=None, request_id=1):
     return server.handle_line(
         json.dumps(

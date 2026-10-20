@@ -920,7 +920,14 @@ class PlannerServer:
                 "choices; select explicitly and supply authorized "
                 "reviewer/finite limits."
             )
-        if name == "harness_accept_review" and status.get("acceptance", {}).get("findings"):
+        if (
+            name == "harness_accept_review"
+            and not error
+            and status.get("acceptance", {}).get("findings")
+        ):
+            acceptance = status["acceptance"]
+            if acceptance.get("invalidReason") != "acceptance-findings-open":
+                return acceptance.get("next", "harness_plan_status")
             return (
                 "harness_accept_assess schema=true; preserve AF originals "
                 "and record any intended declaration before fresh "
