@@ -147,7 +147,8 @@ def start_worker_job(
     if not _valid_timeout(timeout):
         raise ValueError("worker-job-timeout-must-be-positive")
     directory = _directory(store.workspace, expected_revision)
-    if directory.is_dir():
+
+    def reattach():
         if (directory / "request.json").is_file():
             previous = _request(directory)
             manifest = read_record_json(_inside(directory, directory / "plan/sample.json"))
@@ -166,6 +167,9 @@ def start_worker_job(
             if previous["options"] != options:
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
         return worker_job_status(store.workspace, expected_revision)
+
+    if directory.is_dir():
+        return reattach()
     from codex_harness.core.planner_execution import (
         consume_execution,
         execution_scope,
@@ -182,7 +186,14 @@ def start_worker_job(
         timeout=timeout,
         call_cap=call_cap,
     )
-    require_execution(store, scope)  # Missing/forged grants refuse before any namespace.
+    try:
+        require_execution(store, scope)  # Missing/forged grants refuse before any namespace.
+    except ValueError as error:
+        if str(error) != "worker-execution-grant-consumed" or not directory.is_dir():
+            raise
+        # Another starter consumed this grant after our initial absence check.
+        # Reuse only its actual namespace, with the ordinary original checks.
+        return reattach()
     options = {
         "workers": selection,
         "maxParallel": max_parallel,
@@ -195,13 +206,7 @@ def start_worker_job(
     except FileExistsError:
         # A concurrent writer may not have published the original yet. Never
         # wait for it or seize its directory and launch another child.
-        if (directory / "request.json").is_file():
-            previous = _request(directory)
-            if previous["options"] != options:
-                raise ValueError(
-                    "worker-job-publication-already-admitted-with-other-options"
-                ) from None
-        return worker_job_status(store.workspace, expected_revision)
+        return reattach()
     try:
         execution_id = consume_execution(store, scope, expected_revision)
         before = _files(template)

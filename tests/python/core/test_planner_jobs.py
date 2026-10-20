@@ -7,6 +7,7 @@ The store double does NOT establish review-backed publication or human approval.
 import copy
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -106,6 +107,76 @@ def test_reconnect_and_concurrent_start_do_not_duplicate_launch(fixture):
     assert reconnected["didRunProvider"] is None
     assert admit(fixture) == reconnected
     assert len(launches) == 1
+
+
+@pytest.mark.parametrize("complete_request", [False, True])
+def test_concurrent_start_after_grant_consumption_reattaches_original(
+    fixture, monkeypatch, complete_request
+):
+    from codex_harness.core import planner_execution
+
+    store, workers, launches = fixture
+    delayed_at_grant, release_delayed = threading.Event(), threading.Event()
+    winner_consumed, release_winner = threading.Event(), threading.Event()
+    role = threading.local()
+    require = planner_execution.require_execution
+    consume = planner_execution.consume_execution
+
+    def interleaved_require(canonical, scope):
+        if role.name == "delayed":
+            delayed_at_grant.set()
+            assert release_delayed.wait(10), "winner did not reach the controlled interleaving"
+        return require(canonical, scope)
+
+    def observed_consume(canonical, scope, job_id):
+        request_id = consume(canonical, scope, job_id)
+        if role.name == "winner":
+            winner_consumed.set()
+            if not complete_request:
+                assert release_winner.wait(10), (
+                    "delayed start did not return from partial admission"
+                )
+        return request_id
+
+    def start(name):
+        role.name = name
+        return _thread_start(store.workspace, store.revision, workers)
+
+    monkeypatch.setattr(planner_execution, "require_execution", interleaved_require)
+    monkeypatch.setattr(planner_execution, "consume_execution", observed_consume)
+    directory = jobs._directory(store.workspace, store.revision)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        delayed = executor.submit(start, "delayed")
+        try:
+            assert delayed_at_grant.wait(10), "delayed start did not pass the absent-job check"
+            winner = executor.submit(start, "winner")
+            if complete_request:
+                admitted = winner.result(timeout=10)
+                request_bytes = (directory / "request.json").read_bytes()
+            else:
+                assert winner_consumed.wait(10), "winner did not consume its native grant"
+                assert not (directory / "request.json").exists()
+                assert launches == []
+            release_delayed.set()
+            reattached = delayed.result(timeout=10)
+            assert reattached["jobId"] == store.revision
+            assert reattached["status"] == reattached["liveness"] == "unknown"
+            if complete_request:
+                assert reattached == admitted
+                assert (directory / "request.json").read_bytes() == request_bytes
+            else:
+                assert reattached["reason"] == "Admission incomplete; do not relaunch"
+                assert launches == []
+                assert list(directory.iterdir()) == []
+        finally:
+            release_delayed.set()
+            release_winner.set()
+        admitted = winner.result(timeout=10)
+    assert len(launches) == 1
+    assert admitted == jobs.worker_job_status(store.workspace, store.revision)
+    consumed = planner_execution._records(store, planner_execution.CONSUMED)
+    assert len(consumed) == 1
+    assert consumed[0]["jobId"] == store.revision
 
 
 @pytest.mark.parametrize("case", ["unpublished", "stale", "phase", "gate", "manifest", "template"])

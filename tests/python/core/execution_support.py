@@ -7,13 +7,14 @@ this does not prove a human response, provider run or product acceptance.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from uuid import uuid4
 
 from tests.python.core.planning_support import source_controller_roundtable, source_only_vision_lock
 
@@ -199,9 +200,14 @@ def source_grant(store, revision, workers, *, max_parallel=2, timeout=900, call_
 
 
 def source_execution_context(workspace, plan, *, max_parallel=2, timeout=900, call_cap=16):
-    # Keep owned controller/run paths short on Windows, under this pytest
-    # basetemp. No global Git/path settings or aliases are changed.
-    workspace = Path(workspace).parent.parent / ("n-" + uuid4().hex[:8])
+    # Gate-local TEMP may be too deep for Windows Git retry merges.
+    # Retain originals for diagnosis; callers still own bounded-child cleanup.
+    temp_root = Path(tempfile.gettempdir())
+    if sys.platform == "win32" and os.environ.get("LOCALAPPDATA"):
+        user_temp = Path(os.environ["LOCALAPPDATA"]) / "Temp"
+        if user_temp.is_dir():
+            temp_root = user_temp
+    workspace = Path(tempfile.mkdtemp(prefix="n-", dir=temp_root))
     store, revision = publish_source_store(workspace, plan)
     workers = [
         dict(bead=id, provider="codex", model="gpt-6.1-sol", effort="medium")

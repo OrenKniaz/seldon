@@ -232,10 +232,8 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
             "; more in status" if len(action["findingIds"]) > 3 else ""
         )
         route = (
-            cmd(
-                "resolve --id <recorded-id> --status <resolved|rejected|deferred> "
-                '--resolution "<evidence and reason>"'
-            )
+            cmd('resolve --id <recorded-id> --resolution "<evidence and reason>"')
+            + " with exactly one of --resolved, --rejected, or --deferred"
             if cli_prefix is not None
             else (
                 "harness_resolve_findings with recorded ids, "
