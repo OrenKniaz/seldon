@@ -1322,3 +1322,53 @@ def test_existing_audit_from_wrong_revision_cannot_support_closure(store):
             [dict(id=rows[0]["id"], status="resolved", resolution="fixed", closure=declaration)]
         )
     assert list(store.connection.iterdump()) == before
+
+
+def test_execution_uncertain_older_reservation_cannot_be_cleared_without_capture(
+    tmp_path, monkeypatch
+):
+    from tests.python.core.test_roundtable import canonical_af_fixture
+
+    from codex_harness.core import roundtable
+
+    store, request, _, _, _, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    try:
+        older = store.register_execution_assessment(**dict(request, timeout=16))
+        current = roundtable.assess_execution_findings(store, **request)
+        assert len(calls) == 3
+        assert current["members"][0]["support"] == "unverified"
+        assert (
+            "execution-overlapping-incomplete-reservation" in current["members"][0]["holdReasons"]
+        )
+        before = list(store.connection.iterdump())
+        with pytest.raises(ValueError, match="capture"):
+            store.commit_execution_assessment(older["registrationId"])
+        assert list(store.connection.iterdump()) == before
+        assert store.execution_assessment_state() == current
+    finally:
+        store.close()
+
+
+def test_execution_fabricated_consumption_cannot_release_unknown_overlap(tmp_path, monkeypatch):
+    from tests.python.core.test_roundtable import canonical_af_fixture
+
+    from codex_harness.core import roundtable
+
+    store, request, _, _, _, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    try:
+        older = store.register_execution_assessment(**dict(request, timeout=16))
+        current = roundtable.assess_execution_findings(store, **request)
+        assert current["members"][0]["support"] == "unverified"
+        # Negative corruption counterfactual, not a supported event-import API.
+        # No real captured original exists to establish terminal certainty.
+        store._event(
+            "execution-assessment-consumed",
+            dict(schema=1, registrationId=older["registrationId"], captureHash=None, members=[]),
+        )
+        before = list(store.connection.iterdump())
+        state = store.execution_assessment_state()
+        assert state["members"][0]["support"] == "unverified"
+        assert "execution-overlapping-incomplete-reservation" in state["members"][0]["holdReasons"]
+        assert list(store.connection.iterdump()) == before and len(calls) == 3
+    finally:
+        store.close()

@@ -37,6 +37,737 @@ QUALITY_SNAPSHOT_NOTICE = (
 DEFAULT_RUNNER = roundtable._run
 
 
+def canonical_af_fixture(
+    tmp_path,
+    monkeypatch,
+    *,
+    unrelated=False,
+    author_metadata=True,
+    assessment_case="positive",
+    author_tools=False,
+    author_item_case=None,
+    source_only_event=False,
+    mixed_artifacts=False,
+    cover_mixed_artifacts=False,
+    select_all_members=False,
+):
+    """Source-process observations through real canonical writers/selectors only."""
+    import sys
+
+    from tests.python.core.test_acceptance_recovery import protocol
+    from tests.python.core.test_attempt_provenance import canonical_assessment_execution
+
+    from codex_harness.core import acceptance
+
+    store, revision, run, job, session = canonical_assessment_execution(
+        tmp_path,
+        monkeypatch,
+        unrelated=unrelated,
+        author_metadata=author_metadata,
+        author_tools=author_tools,
+        author_item_case=author_item_case,
+        source_only_event=source_only_event,
+        mixed_artifacts=mixed_artifacts,
+        cover_mixed_artifacts=cover_mixed_artifacts,
+    )
+    repo = Path(run["repo"])
+    scenarios = acceptance.derive_scenarios(store.locked_acceptance_spine())
+    for scenario in scenarios:
+        scenario.update(
+            steps=[
+                '"{python}" -B -c "from A import valid_id; assert not valid_id(True); '
+                'assert valid_id(7)"'
+            ],
+            expect={"exit": 0},
+            nodeIds=["RA"],
+        )
+    store.save_acceptance_scenarios(scenarios)
+    historical = acceptance.run_acceptance(store, repo, subject="product")
+    assert historical["passed"]
+    calls = []
+    targeted_count = 0
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    source_child = tmp_path / "source-reviewer.py"
+    source_child.write_text(
+        "# SOURCE-ONLY native-shaped process double; never invokes a provider\n"
+        "import json, sys, os\n"
+        "request = json.loads(sys.stdin.buffer.readline())\n"
+        "if request.get('barrier'):\n    print('SOURCE-READY', flush=True)\n"
+        "    sys.stdin.buffer.readline()\n"
+        "if request.get('invalid'): os.write(1, b'\\xff')\n"
+        "print(request['stdout'])\nprint(request['stderr'], file=sys.stderr)\n"
+    )
+
+    def source_process(launch, cwd, timeout, *, raw=False):
+        nonlocal targeted_count
+        assert Path(launch.command[0]).resolve() == Path(sys.executable).resolve()
+        assert source_child.is_file(), "Never fall back to installed provider"
+        packet = launch.stdin_text
+        if packet.startswith('{"schema": "seldon/canonical-execution-packet-v1"'):
+            targeted_count += 1
+            header = json.loads(packet)
+            response = header["responseContract"]
+            for member in response["members"]:
+                member.update(
+                    judgment="supports-counterevidence"
+                    if member["disposition"] == "rejected"
+                    else "supports-repair",
+                    explanation="The protected bool test rejects True "
+                    "and accepts 7 through this exact selected artifact.",
+                )
+            if assessment_case == "reverse-completion" and targeted_count == 2:
+                response["members"][0]["judgment"] = "not-satisfied"
+            if assessment_case in {"negative", "cannot-assess"}:
+                response["members"][0]["judgment"] = (
+                    "not-satisfied" if assessment_case == "negative" else "cannot-assess"
+                )
+            if assessment_case == "omitted":
+                response["members"] = []
+            if assessment_case == "drop-one-member":
+                response["members"].pop()
+            if assessment_case == "duplicate":
+                response["members"].append(response["members"][0])
+            if assessment_case == "fabricated-witness":
+                response["members"][0]["witnessIds"] = ["invented.test"]
+            if assessment_case == "wrong-binding":
+                response["snapshotHash"] = "0" * 64
+            output = protocol("codex", text=json.dumps(response))
+            if assessment_case == "ordinary-empty":
+                output = protocol("codex", text="[]")
+            if assessment_case == "same-session":
+                old = json.loads(output[1].splitlines()[0])["thread_id"]
+                output = (
+                    output[0],
+                    output[1].replace(old, session),
+                    output[2].replace(old, session),
+                )
+            if assessment_case == "unknown-session":
+                output = (output[0], output[1], "")
+            if assessment_case == "forked-session":
+                output = (
+                    output[0],
+                    output[1],
+                    output[2].replace(
+                        "parent_thread_id: None", f"parent_thread_id: Some({session})"
+                    ),
+                )
+            if assessment_case == "tool-reviewer":
+                lines = output[1].splitlines()
+                lines.insert(
+                    -1,
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "command_execution",
+                                "status": "completed",
+                                "exit_code": 0,
+                            },
+                        }
+                    ),
+                )
+                output = (output[0], "\n".join(lines), output[2])
+        else:
+            provider = "codex" if "exec" in launch.command else "claude"
+            output = protocol(
+                provider,
+                text=json.dumps(
+                    [
+                        {
+                            "node_id": "RA",
+                            "severity": "major",
+                            "finding": "Boolean IDs are accepted",
+                            "suggestion": (
+                                "Reject True and accept integer 7 with a protected behavior test"
+                            ),
+                        }
+                    ]
+                ),
+            )
+        executed = [sys.executable, "-B", str(source_child)]
+        barrier = raw and assessment_case == "reverse-completion" and targeted_count == 1
+        content = (
+            json.dumps(
+                {
+                    "stdout": output[1],
+                    "stderr": output[2],
+                    "invalid": raw and assessment_case == "invalid-utf8",
+                    "barrier": barrier,
+                }
+            )
+            + "\n"
+        )
+        if barrier:
+            process = subprocess.Popen(
+                executed,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+            )
+            try:
+                process.stdin.write(content.encode())
+                process.stdin.flush()
+                assert process.stdout.readline().rstrip(b"\r\n") == b"SOURCE-READY"
+                later = roundtable.assess_execution_findings(store, **dict(request, timeout=16))
+                assert later["members"][0]["support"] == "unverified"
+            finally:
+                process.stdin.write(b"release\n")
+                process.stdin.close()
+                process.stdin = None
+                stdout, stderr = process.communicate(timeout=timeout)
+            child = subprocess.CompletedProcess(executed, process.returncode, stdout, stderr)
+        else:
+            child = subprocess.run(
+                executed,
+                input=content.encode() if raw else content,
+                cwd=cwd,
+                timeout=timeout,
+                capture_output=True,
+                text=not raw,
+                check=False,
+            )
+        import hashlib
+
+        calls.append(
+            {
+                "argv": executed,
+                "returncode": child.returncode,
+                "packet": packet,
+                "rawCapture": raw,
+                "stdoutSha256": hashlib.sha256(
+                    child.stdout if raw else child.stdout.encode()
+                ).hexdigest(),
+                "stderrSha256": hashlib.sha256(
+                    child.stderr if raw else child.stderr.encode()
+                ).hexdigest(),
+            }
+        )
+        (tmp_path / "source-process-receipts.json").write_text(
+            json.dumps(
+                dict(
+                    sourceOnly=True,
+                    nativeProviderCalls=0,
+                    calls=[
+                        {key: value for key, value in call.items() if key != "packet"}
+                        for call in calls
+                    ],
+                )
+            )
+        )
+        if raw and assessment_case == "stale-disposition":
+            store.resolve_findings(
+                [
+                    dict(
+                        id=header["responseContract"]["members"][0]["memberId"],
+                        status="resolved",
+                        resolution="Concurrent supported disposition",
+                    )
+                ]
+            )
+        return child.returncode, child.stdout, child.stderr
+
+    monkeypatch.setattr(roundtable, "_run", source_process)
+    reviewers = [
+        {"name": "source-codex", "provider": "codex", "model": "source-only", "effort": "high"},
+        {"name": "source-claude", "provider": "claude", "model": "source-only"},
+    ]
+    original = acceptance.acceptance_review(store, repo, reviewers=reviewers)
+    assert original["attemptId"] and original["findingHashes"]
+    current = acceptance.run_acceptance(store, repo, subject="product")
+    assert current["id"] != historical["id"] and current["passed"]
+    member = next(row for row in store.acceptance_findings() if row["provider"] == "codex")
+    request = dict(
+        members=[
+            dict(
+                memberId=member["id"], artifactPaths=["A.py"], witnessIds=["test_A.Proof.test_bool"]
+            )
+        ],
+        worker_job_id=revision,
+        bead_id="A",
+        expected_manifest_revision=store.manifest_revision(),
+        expected_product_run_id=current["id"],
+        reviewer=reviewers[0],
+        max_rounds=6,
+        max_total=6,
+        timeout=15,
+    )
+    if mixed_artifacts:
+        request["members"][0]["artifactPaths"].append("B.py")
+    if select_all_members:
+        request["members"] = [
+            dict(memberId=row["id"], artifactPaths=["A.py"], witnessIds=["test_A.Proof.test_bool"])
+            for row in store.acceptance_findings()
+        ]
+    return store, request, original, current, run, calls, session
+
+
+def test_canonical_mixed_artifacts_each_need_specific_observation(tmp_path, monkeypatch):
+    store, request, _, _, run, calls, _ = canonical_af_fixture(
+        tmp_path, monkeypatch, mixed_artifacts=True
+    )
+    try:
+        proof = run["beads"]["A"]["integrated"]["validation"]
+        assert proof["passed"]
+        observed = proof["observations"]["tests"][0]["ownedCalls"]
+        assert {call["file"] for call in observed} == {"A.py"}
+        assert request["members"][0]["artifactPaths"] == ["A.py", "B.py"]
+        before = list(store.connection.iterdump())
+        result = roundtable.assess_execution_findings(store, **request)
+        assert result["members"] == [] and result["holdReasons"]
+        assert len(calls) == 2, "An unrelated selected artifact must hold before capacity"
+        assert list(store.connection.iterdump()) == before
+    finally:
+        store.close()
+
+
+def test_canonical_mixed_artifacts_with_actual_complete_coverage(tmp_path, monkeypatch):
+    store, request, _, _, run, calls, _ = canonical_af_fixture(
+        tmp_path, monkeypatch, mixed_artifacts=True, cover_mixed_artifacts=True
+    )
+    try:
+        proof = run["beads"]["A"]["integrated"]["validation"]
+        assert proof["passed"]
+        assert {call["file"] for call in proof["observations"]["tests"][0]["ownedCalls"]} == {
+            "A.py",
+            "B.py",
+        }
+        result = roundtable.assess_execution_findings(store, **request)
+        assert result["members"][0]["support"] == "assessed-current"
+        assert result["members"][0]["artifactPaths"] == ["A.py", "B.py"]
+        assert result == store.execution_assessment_state() and len(calls) == 3
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("drop_one", [False, True])
+def test_canonical_complete_member_set_cannot_admit_partial_success(
+    tmp_path, monkeypatch, drop_one
+):
+    store, request, _, _, _, calls, _ = canonical_af_fixture(
+        tmp_path,
+        monkeypatch,
+        select_all_members=True,
+        assessment_case="drop-one-member" if drop_one else "positive",
+    )
+    try:
+        originals = store.acceptance_findings()
+        assert len(originals) == 2
+        result = roundtable.assess_execution_findings(store, **request)
+        assert {row["memberId"] for row in result["members"]} == {row["id"] for row in originals}
+        assert {row["support"] for row in result["members"]} == {
+            "unverified" if drop_one else "assessed-current"
+        }
+        assert store.acceptance_findings() == originals and len(calls) == 3
+    finally:
+        store.close()
+
+
+def test_canonical_execution_assessment_consumes_current_af_support(tmp_path, monkeypatch):
+    from codex_harness.core.acceptance import acceptance_status
+
+    store, request, original, current, run, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    try:
+        before_reviews = store.connection.execute("SELECT count(*) FROM review_runs").fetchone()[0]
+        entry = getattr(roundtable, "assess_execution_findings", None)
+        returned = None
+        if entry is not None:
+            returned = entry(store, **request)
+        # Baseline contract absence is observed through actual existing status,
+        # never an invented successful call or a missing-function exception.
+        state = acceptance_status(store).get("executionAssessments", {"members": []})
+        assert [row["memberId"] for row in state["members"]] == [
+            request["members"][0]["memberId"]
+        ], returned
+        member = state["members"][0]
+        assert member["support"] == "assessed-current"
+        assert member["originRunId"] == original["runId"] != current["id"]
+        assert member["productRunId"] == current["id"]
+        assert member["candidateCommit"] == run["beads"]["A"]["candidate"]["commit"]
+        assert state["fullVisionHeld"] is True
+        assert store.execution_assessment_state() == state
+        assert (
+            store.connection.execute("SELECT count(*) FROM review_runs").fetchone()[0]
+            == before_reviews
+        )
+        assert len(calls) == 3 and all(call["returncode"] == 0 for call in calls)
+        capture = json.loads(
+            store.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='execution-assessment-captured'"
+            ).fetchone()[0]
+        )
+        assert capture["stdout"]["sha256"] == calls[-1]["stdoutSha256"]
+        before = list(store.connection.iterdump())
+        assert roundtable.assess_execution_findings(store, **request) == state
+        assert store.commit_execution_assessment(member["registrationId"]) == state
+        assert len(calls) == 3 and list(store.connection.iterdump()) == before
+        assert not acceptance_status(store)["accepted"]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing-author-telemetry",
+        "unrelated-proof",
+        "fabricated-af",
+        "missing-source-capture",
+        "stale-product-run",
+        "stale-manifest",
+        "oracle-current",
+        "wrong-job",
+        "old-integrated-proof",
+        "missing-artifact",
+        "external-completion",
+        "budget-exhausted",
+    ],
+)
+def test_canonical_execution_prerequisites_hold_before_capacity(tmp_path, monkeypatch, case):
+    from codex_harness.core import acceptance
+    from codex_harness.core.acceptance_recovery import ReviewAttempt
+    from codex_harness.core.dispatch import _commit, _git
+
+    store, request, original, _, run, calls, _ = canonical_af_fixture(
+        tmp_path,
+        monkeypatch,
+        unrelated=case == "unrelated-proof",
+        author_metadata=case != "missing-author-telemetry",
+    )
+    try:
+        if case == "fabricated-af":
+            request["members"][0]["memberId"] = "AF-" + "0" * 32
+        if case == "missing-source-capture":
+            attempt = ReviewAttempt.load(store, original["attemptId"])
+            (attempt.root / (attempt.header["slots"][0]["id"] + ".stdout")).unlink()
+        if case == "stale-product-run":
+            (Path(run["repo"]) / "A.py").write_text("def valid_id(value): return True\n")
+        if case == "stale-manifest":
+            request["expected_manifest_revision"] = "0" * 64
+        if case == "oracle-current":
+            current = acceptance.run_acceptance(store, run["repo"], subject="oracle")
+            request["expected_product_run_id"] = current["id"]
+        if case == "wrong-job":
+            request["worker_job_id"] = "0" * 64
+        if case == "old-integrated-proof":
+            repo = Path(run["repo"])
+            with (repo / "A.py").open("a") as source:
+                source.write("# SOURCE-ONLY subsequent integrated revision\n")
+            _git(repo, "add", "A.py")
+            _commit(repo, "SOURCE-ONLY subsequent integration without fresh proof")
+            current = acceptance.run_acceptance(store, repo, subject="product")
+            request["expected_product_run_id"] = current["id"]
+        if case == "missing-artifact":
+            request["members"][0]["artifactPaths"] = ["unowned.py"]
+        if case == "external-completion":
+            request["completed_response"] = {"native": True}
+        if case == "budget-exhausted":
+            request["max_total"] = 1  # Existing ordinary source-codex call consumes it.
+        before = list(store.connection.iterdump())
+        result = roundtable.assess_execution_findings(store, **request)
+        assert result["members"] == [] and result["holdReasons"]
+        assert result["fullVisionHeld"] and not result["closureEligible"]
+        assert len(calls) == 2, "Unsupported prerequisites must never launch a reviewer"
+        assert list(store.connection.iterdump()) == before, "No capacity reservation or credit"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "negative",
+        "cannot-assess",
+        "ordinary-empty",
+        "omitted",
+        "duplicate",
+        "fabricated-witness",
+        "wrong-binding",
+        "same-session",
+        "unknown-session",
+        "forked-session",
+        "tool-reviewer",
+        "invalid-utf8",
+        "stale-disposition",
+    ],
+)
+def test_canonical_fresh_return_refuses_credit_but_consumes_call(tmp_path, monkeypatch, case):
+    store, request, _, _, _, calls, _ = canonical_af_fixture(
+        tmp_path, monkeypatch, assessment_case=case
+    )
+    try:
+        before = next(
+            row
+            for row in roundtable.review_totals(store, store.manifest_revision())
+            if row["reviewer"] == request["reviewer"]["name"]
+        )["total"]
+        result = roundtable.assess_execution_findings(store, **request)
+        assert len(calls) == 3
+        assert len(result["members"]) == 1, result
+        assert result["members"][0]["support"] == "unverified"
+        assert result["members"][0]["holdReasons"]
+        after = next(
+            row
+            for row in roundtable.review_totals(store, store.manifest_revision())
+            if row["reviewer"] == request["reviewer"]["name"]
+        )["total"]
+        assert after == before + 1
+        assert (
+            store.connection.execute(
+                "SELECT count(*) FROM events WHERE kind='execution-assessment-consumed'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert result == store.execution_assessment_state()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("disposition", ["rejected", "deferred"])
+def test_canonical_counterevidence_and_deferred_locked_obligation(
+    tmp_path, monkeypatch, disposition
+):
+    store, request, _, _, run, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    try:
+        locked = store.locked_acceptance_spine().to_dict()
+        source = (Path(run["repo"]) / "A.py").read_bytes()
+        key = request["members"][0]["memberId"]
+        store.resolve_findings(
+            [
+                dict(
+                    id=key,
+                    status=disposition,
+                    resolution=(
+                        "The existing protected bool observation is counterevidence; "
+                        "no vision waiver"
+                    ),
+                )
+            ]
+        )
+        result = roundtable.assess_execution_findings(store, **request)
+        member = result["members"][0]
+        assert member["support"] == (
+            "assessed-current" if disposition == "rejected" else "unverified"
+        )
+        assert member["retainedObligation"] is True
+        assert member["deferredObligationHeld"] is (disposition == "deferred")
+        assert member["originalFinding"]["status"] == disposition
+        assert (Path(run["repo"]) / "A.py").read_bytes() == source
+        assert store.locked_acceptance_spine().to_dict() == locked
+        assert result["fullVisionHeld"] is True and len(calls) == 3
+    finally:
+        store.close()
+
+
+def test_canonical_execution_calls_share_ordinary_budget(tmp_path, monkeypatch):
+    store, request, _, _, _, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    try:
+        roundtable.assess_execution_findings(store, **request)
+        totals = roundtable.review_totals(store, store.manifest_revision())
+        row = next(item for item in totals if item["reviewer"] == request["reviewer"]["name"])
+        assert row["total"] == 2  # One real ordinary reservation + one execution-stage reservation.
+        with pytest.raises(PlanStoreError, match="total invocations"):
+            roundtable.run_roundtable(
+                store, reviewers=[request["reviewer"]], max_total=2, max_rounds=6
+            )
+        assert len(calls) == 3
+    finally:
+        store.close()
+
+
+def test_canonical_latest_reserved_failure_survives_older_late_success(tmp_path, monkeypatch):
+    store, request, _, _, _, calls, _ = canonical_af_fixture(
+        tmp_path, monkeypatch, assessment_case="reverse-completion"
+    )
+    try:
+        result = roundtable.assess_execution_findings(store, **request)
+        reservations = [
+            json.loads(row[0])
+            for row in store.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='execution-assessment-reserved' "
+                "ORDER BY rowid"
+            )
+        ]
+        completions = [
+            json.loads(row[0])
+            for row in store.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='execution-assessment-consumed' "
+                "ORDER BY rowid"
+            )
+        ]
+        assert len(reservations) == len(completions) == 2
+        assert [row["registrationId"] for row in completions] == [
+            row["registrationId"] for row in reversed(reservations)
+        ]
+        assert completions[0]["members"][0]["judgment"] == "not-satisfied"
+        assert completions[1]["members"][0]["judgment"] == "supports-repair"
+        assert result["members"][0]["registrationId"] == reservations[-1]["registrationId"]
+        assert result["members"][0]["support"] == "unverified"
+        assert len(calls) == 4 and result == store.execution_assessment_state()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("source_only_event", [False, True])
+def test_canonical_author_tool_shapes_and_explicit_source_only_refusal(
+    tmp_path, monkeypatch, source_only_event
+):
+    store, request, _, _, _, calls, _ = canonical_af_fixture(
+        tmp_path, monkeypatch, author_tools=True, source_only_event=source_only_event
+    )
+    try:
+        result = roundtable.assess_execution_findings(store, **request)
+        if source_only_event:
+            assert result["members"] == [] and result["holdReasons"]
+            assert len(calls) == 2
+            assert not store.connection.execute(
+                "SELECT 1 FROM events WHERE kind='execution-assessment-reserved'"
+            ).fetchone()
+        else:
+            assert result["members"][0]["support"] == "assessed-current"
+            assert len(calls) == 3
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "author_item_case",
+    [
+        "cross-kind-message",
+        "duplicate-cross-kind",
+        "duplicate-same-kind",
+        "prior-message-start",
+        "prior-message-completed",
+        "matching-start-completion",
+        "completed-only",
+        "non-tool-only-reuse",
+    ],
+)
+def test_canonical_author_tool_identity_and_terminal_consistency(
+    tmp_path, monkeypatch, author_item_case
+):
+    store, request, _, _, _, calls, _ = canonical_af_fixture(
+        tmp_path, monkeypatch, author_tools=True, author_item_case=author_item_case
+    )
+    try:
+        before = "\n".join(store.connection.iterdump())
+        result = roundtable.assess_execution_findings(store, **request)
+        if author_item_case in {
+            "matching-start-completion",
+            "completed-only",
+            "non-tool-only-reuse",
+        }:
+            assert result["members"][0]["support"] == "assessed-current"
+            assert len(calls) == 3 and calls[-1]["rawCapture"] is True
+            assert result == store.execution_assessment_state()
+        else:
+            assert result["members"] == [], "Ambiguous author tools cannot reach fresh review"
+            assert "execution-author-tool-state-inconsistent" in result["holdReasons"]
+            assert len(calls) == 2
+            assert "\n".join(store.connection.iterdump()) == before
+            assert not store.connection.execute(
+                "SELECT 1 FROM events WHERE kind='execution-assessment-reserved'"
+            ).fetchone()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "case", ["artifact", "disposition", "capture", "author-original", "unlisted-stage"]
+)
+def test_canonical_status_rechecks_actual_current_originals(tmp_path, monkeypatch, case):
+    from codex_harness.core.acceptance import acceptance_status
+
+    store, request, _, _, run, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    try:
+        supported = roundtable.assess_execution_findings(store, **request)
+        assert supported["members"][0]["support"] == "assessed-current"
+        selected = supported["members"][0]
+        if case == "artifact":
+            with (Path(run["repo"]) / "A.py").open("a") as output:
+                output.write("# current bytes changed after assessment\n")
+        if case == "disposition":
+            store.resolve_findings(
+                [
+                    dict(
+                        id=selected["memberId"],
+                        status="resolved",
+                        resolution="Later author declaration; requires a fresh assessment",
+                    )
+                ]
+            )
+        if case == "capture":
+            path = (
+                store.path.parent
+                / "reviews/execution-assessments"
+                / selected["registrationId"]
+                / "stdout"
+            )
+            with path.open("ab") as output:
+                output.write(b"\n[]")
+        if case == "author-original":
+            path = Path(run["beads"]["A"]["evidenceDir"]) / "attempt/process-provenance.json"
+            original = json.loads(path.read_text())
+            original["digest"] = "0" * 64
+            path.write_text(json.dumps(original))
+        if case == "unlisted-stage":
+            store._event("execution-assessment-captured", dict(schema=1, registrationId="0" * 32))
+        before = list(store.connection.iterdump())
+        current = acceptance_status(store)["executionAssessments"]
+        assert not any(row.get("support") == "assessed-current" for row in current["members"])
+        assert current.get("holdReasons") or all(row["holdReasons"] for row in current["members"])
+        assert current["fullVisionHeld"] and not current["closureEligible"]
+        assert list(store.connection.iterdump()) == before and len(calls) == 3
+        if case == "capture":
+            with pytest.raises(ValueError, match="changed"):
+                store.commit_execution_assessment(selected["registrationId"])
+            assert list(store.connection.iterdump()) == before
+    finally:
+        store.close()
+
+
+def test_canonical_timeout_preserves_partial_bytes_and_uncertainty(tmp_path, monkeypatch):
+    import sys
+
+    store, request, _, _, _, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    child = tmp_path / "source-timeout.py"
+    child.write_text(
+        "import sys, threading\nprint('partial source return', flush=True)\n"
+        "threading.Event().wait()\n"
+    )
+    executed = []
+
+    def timeout_process(launch, cwd, timeout, *, raw=False):
+        assert raw and Path(launch.command[0]).resolve() == Path(sys.executable).resolve()
+        command = [sys.executable, "-B", str(child)]
+        executed.append(command)
+        return subprocess.run(command, cwd=cwd, capture_output=True, timeout=0.3)
+
+    monkeypatch.setattr(roundtable, "_run", timeout_process)
+    try:
+        current = roundtable.assess_execution_findings(store, **request)
+        assert len(executed) == 1 and len(calls) == 2
+        assert current == store.execution_assessment_state()
+        assert current["members"][0]["support"] == "unverified"
+        assert any("TimeoutExpired" in reason for reason in current["members"][0]["holdReasons"])
+        row = json.loads(
+            store.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='execution-assessment-captured'"
+            ).fetchone()[0]
+        )
+        path = (
+            store.path.parent / "reviews/execution-assessments" / row["registrationId"] / "stdout"
+        )
+        assert b"partial source return" in path.read_bytes()
+        with pytest.raises(ValueError, match="terminal-observation"):
+            store.commit_execution_assessment(row["registrationId"])
+        assert not store.connection.execute(
+            "SELECT 1 FROM events WHERE kind='execution-assessment-consumed'"
+        ).fetchone()
+    finally:
+        store.close()
+
+
 def test_execution_member_response_survives_distinct_parser(store, tmp_path):
     """Missing capability RED uses the existing parser, not a missing-function error."""
     from codex_harness.core.runners import validate_proof

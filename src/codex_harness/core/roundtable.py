@@ -132,6 +132,16 @@ def review_totals(store: PlanStore, revision: str | None) -> list[dict]:
     for table in ("review_attempts", "review_runs"):
         if table in tables:
             attempts.extend(dict(row) for row in store.connection.execute(f"SELECT * FROM {table}"))
+    for _, header in _execution_reservations(store):
+        request = header["request"]
+        attempts.append(
+            dict(
+                id=header["registrationId"],
+                plan_revision=request["expected_manifest_revision"],
+                reviewer=request["reviewer"]["name"],
+                provider=request["reviewer"]["provider"],
+            )
+        )
     unique = {row["id"]: row for row in attempts}
     counts = {}
     for row in unique.values():
@@ -490,7 +500,7 @@ def default_reviewers(*, executable_for=None) -> list[dict]:
     ]
 
 
-def _run(launch, cwd: Path, timeout: int) -> tuple[int, str, str]:
+def _run(launch, cwd: Path, timeout: int, *, raw=False):
     completed = subprocess.run(
         launch.command,
         cwd=cwd,
@@ -498,11 +508,10 @@ def _run(launch, cwd: Path, timeout: int) -> tuple[int, str, str]:
         **(
             {"stdin": subprocess.DEVNULL}
             if launch.stdin_text is None
-            else {"input": launch.stdin_text}
+            else {"input": launch.stdin_text.encode("utf-8") if raw else launch.stdin_text}
         ),
         capture_output=True,
-        text=True,
-        encoding="utf-8",
+        **({} if raw else {"text": True, "encoding": "utf-8"}),
         timeout=timeout,
         check=False,
     )
@@ -1240,6 +1249,580 @@ def _invalid_reason(item, known: set[str]) -> str | None:
     return None
 
 
+def _execution_session(reviewer, output, stderr, *, author=False):
+    """Recognized local Codex telemetry only; requested flags never prove identity."""
+    if (
+        reviewer.get("provider") != "codex"
+        or not reviewer.get("model")
+        or not reviewer.get("effort")
+    ):
+        raise ValueError("execution-observed-codex-configuration-required")
+    events = [json.loads(line) for line in output.splitlines() if line.strip()]
+    if not events or any(not isinstance(row, dict) for row in events):
+        raise ValueError("execution-session-protocol-unknown")
+    sessions = [row.get("thread_id") for row in events if row.get("type") == "thread.started"]
+    if (
+        len(sessions) != 1
+        or not isinstance(sessions[0], str)
+        or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", sessions[0])
+        or sum(row.get("type") == "turn.completed" for row in events) != 1
+    ):
+        raise ValueError("execution-session-incomplete-or-ambiguous")
+    if events[0].get("type") != "thread.started" or events[-1].get("type") != "turn.completed":
+        raise ValueError("execution-session-event-order-invalid")
+    unfinished = set()
+    tool_states = {}
+    non_tool_ids = set()
+    for row in events:
+        if set(row) - {"type", "thread_id", "usage", "item"} or row.get("isMocked") is True:
+            raise ValueError("execution-session-event-shape-unsupported")
+        if "thread_id" in row and row["thread_id"] != sessions[0]:
+            raise ValueError("execution-session-mixed-thread")
+        if row.get("type") not in {
+            "thread.started",
+            "turn.started",
+            "turn.completed",
+            "item.started",
+            "item.completed",
+        }:
+            raise ValueError("execution-session-event-unsupported")
+        item = row.get("item")
+        if row["type"].startswith("item."):
+            if not isinstance(item, dict):
+                raise ValueError("execution-session-item-invalid")
+            kind = item.get("type")
+            if item.get("isMocked") is True or item.get("sourceOnly") is True:
+                raise ValueError("execution-source-only-author-unsupported")
+            if kind not in {"agent_message", "reasoning"}:
+                if not author or kind not in {"command_execution", "file_change"}:
+                    raise ValueError("execution-session-tool-or-item-unsupported")
+                if not isinstance(item.get("id"), str) or not item["id"]:
+                    raise ValueError("execution-author-tool-identity-missing")
+                fields = (
+                    {"id", "type", "status", "command", "aggregated_output", "exit_code"}
+                    if kind == "command_execution"
+                    else {"id", "type", "status", "changes"}
+                )
+                if set(item) - fields:
+                    raise ValueError("execution-author-tool-shape-unsupported")
+                if kind == "command_execution" and (
+                    not isinstance(item.get("command"), str) or not item["command"]
+                ):
+                    raise ValueError("execution-author-command-unobserved")
+                if row["type"] == "item.completed" and (
+                    item.get("status") != "completed"
+                    or kind == "command_execution"
+                    and (
+                        type(item.get("exit_code")) is not int
+                        or item["exit_code"] != 0
+                        or not isinstance(item.get("aggregated_output"), str)
+                    )
+                    or kind == "file_change"
+                    and (
+                        not isinstance(item.get("changes"), list)
+                        or any(
+                            not isinstance(change, dict)
+                            or set(change) != {"path", "kind"}
+                            or not isinstance(change["path"], str)
+                            or not change["path"]
+                            or change["kind"] not in {"add", "update", "delete"}
+                            for change in item["changes"]
+                        )
+                    )
+                ):
+                    raise ValueError("execution-author-tool-terminal-unknown")
+            elif set(item) - {"id", "type", "text"} or not isinstance(item.get("text"), str):
+                raise ValueError("execution-session-message-shape-unsupported")
+            if kind in {"command_execution", "file_change"}:
+                previous = tool_states.get(item["id"])
+                if item["id"] in non_tool_ids or (
+                    previous is not None
+                    and (previous != (kind, False) or row["type"] != "item.completed")
+                ):
+                    raise ValueError("execution-author-tool-state-inconsistent")
+                tool_states[item["id"]] = (kind, row["type"] == "item.completed")
+            elif isinstance(item.get("id"), str):
+                if item["id"] in tool_states:
+                    raise ValueError("execution-author-tool-state-inconsistent")
+                non_tool_ids.add(item["id"])
+            if row["type"] == "item.started":
+                if not isinstance(item.get("id"), str) or item["id"] in unfinished:
+                    raise ValueError("execution-session-item-start-ambiguous")
+                unfinished.add(item["id"])
+            else:
+                unfinished.discard(item.get("id"))
+    if unfinished:
+        raise ValueError("execution-session-item-return-incomplete")
+    lines = [
+        line
+        for line in stderr.splitlines()
+        if "Codex initialized with event: SessionConfiguredEvent {" in line
+    ]
+    if len(lines) != 1:
+        raise ValueError("execution-observed-session-configuration-unavailable")
+    line, session = lines[0], sessions[0]
+    for field, kind in (("session_id", "SessionId"), ("thread_id", "ThreadId")):
+        if re.findall(field + r": " + kind + r" \{ uuid: ([0-9a-f-]+) \}", line) != [session]:
+            raise ValueError("execution-observed-session-mismatch")
+    if (
+        re.findall(r'model: "([^"]+)"', line) != [reviewer["model"]]
+        or re.findall(r"reasoning_effort: Some\((\w+)\)", line) != [reviewer["effort"].capitalize()]
+        or any(field + ": None," not in line for field in ("forked_from_id", "parent_thread_id"))
+    ):
+        raise ValueError("execution-observed-model-effort-or-parent-unknown")
+    return dict(
+        provider="codex", session=session, model=reviewer["model"], effort=reviewer["effort"]
+    )
+
+
+def _execution_context(store, request):
+    from codex_harness.core import acceptance, dispatch
+    from codex_harness.core.acceptance_recovery import _executable_identity
+    from codex_harness.core.spine import Spine
+
+    members = request["members"]
+    if (
+        not isinstance(members, list)
+        or not members
+        or any(
+            not isinstance(row, dict) or set(row) != {"memberId", "artifactPaths", "witnessIds"}
+            for row in members
+        )
+        or any(not isinstance(row["memberId"], str) for row in members)
+        or len({row["memberId"] for row in members}) != len(members)
+    ):
+        raise ValueError("execution-member-selection-invalid")
+    if store.manifest_revision() != request["expected_manifest_revision"]:
+        raise ValueError("execution-manifest-stale")
+    run = acceptance.current_run(store)
+    if (
+        not run
+        or run["id"] != request["expected_product_run_id"]
+        or acceptance.run_subject(run) != "product"
+    ):
+        raise ValueError("execution-current-product-run-required")
+    if store._meta()["published_revision"] != request[
+        "worker_job_id"
+    ] or not store.publication_current(request["expected_manifest_revision"]):
+        raise ValueError("execution-publication-stale")
+    origins = acceptance.read_execution_finding_origins(store, [row["memberId"] for row in members])
+    evidence = dispatch.read_completed_execution_evidence(
+        store.workspace,
+        request["worker_job_id"],
+        request["bead_id"],
+        expected_repo=run["repo"],
+        expected_publication_revision=request["worker_job_id"],
+    )
+    author = _execution_session(
+        evidence["request"], evidence["stdout"], evidence["stderr"], author=True
+    )
+    tests = {
+        row["id"]: row for row in evidence["integrated"]["validation"]["observations"]["tests"]
+    }
+    protected = {item["name"] for item in _protected_tests(store, spine=Spine(store._data()))}
+    files = {}
+    for member, origin in zip(members, origins, strict=True):
+        if origin["sourceRun"]["planRevision"] != run["planRevision"]:
+            raise ValueError("execution-origin-requirement-revision-changed")
+        refs = [row["id"] for row in evidence["integrated"]["requirementRefs"]]
+        if origin["finding"]["node_id"] not in refs:
+            raise ValueError("execution-finding-not-owned-by-selected-bead")
+        for field in ("artifactPaths", "witnessIds"):
+            values = member[field]
+            if (
+                not isinstance(values, list)
+                or not values
+                or any(not isinstance(value, str) for value in values)
+                or len(set(values)) != len(values)
+            ):
+                raise ValueError("execution-specific-artifact-and-witness-required")
+        if set(member["artifactPaths"]) - set(evidence["ownedFiles"]):
+            raise ValueError("execution-artifact-not-owned")
+        relevant = [
+            scenario
+            for scenario in store.acceptance_scenarios()
+            if origin["finding"]["node_id"] in scenario.get("nodeIds", [])
+        ]
+        results = {row["id"]: row for row in run["results"]}
+        if not relevant or any(not results.get(row["id"], {}).get("passed") for row in relevant):
+            raise ValueError("execution-relevant-current-scenario-required")
+        for name in member["artifactPaths"]:
+            files[name] = _assessment_file(Path(run["repo"]), name)
+        covered_artifacts = set()
+        for key in member["witnessIds"]:
+            test = tests.get(key)
+            if (
+                not test
+                or test.get("source", {}).get("file") not in protected
+                or not test.get("lines")
+                or test.get("events") != [{"kind": "success"}]
+                or not any(
+                    call.get("file") in member["artifactPaths"] and call.get("phase") == "test"
+                    for call in test.get("ownedCalls", [])
+                )
+            ):
+                raise ValueError("execution-relevant-protected-artifact-observation-required")
+            name = test["source"]["file"]
+            files[name] = _assessment_file(Path(run["repo"]), name)
+            if files[name] != _assessment_file(store.workspace / "template", name):
+                raise ValueError("execution-protected-witness-source-changed")
+            covered_artifacts.update(
+                call["file"]
+                for call in test["ownedCalls"]
+                if call.get("file") in member["artifactPaths"] and call.get("phase") == "test"
+            )
+        if covered_artifacts != set(member["artifactPaths"]):
+            raise ValueError("execution-every-implicated-artifact-needs-specific-observation")
+    reviewer = request["reviewer"]
+    if (
+        not isinstance(reviewer, dict)
+        or set(reviewer) != {"name", "provider", "model", "effort"}
+        or reviewer["provider"] != "codex"
+        or any(not isinstance(value, str) or not value.strip() for value in reviewer.values())
+    ):
+        raise ValueError("execution-explicit-supported-reviewer-required")
+    executable = _executable("codex", None)
+    identity = _executable_identity(executable) if executable else None
+    if identity is None:
+        raise ValueError("execution-reviewer-executable-unavailable")
+    # Explicit positive finite limits never infer reviewer authority from worker grants.
+    import math
+
+    if (
+        any(
+            type(request[key]) is not int or request[key] < 1 for key in ("max_rounds", "max_total")
+        )
+        or type(request["timeout"]) not in (int, float)
+        or not math.isfinite(request["timeout"])
+        or request["timeout"] <= 0
+    ):
+        raise ValueError("execution-finite-review-limits-required")
+    return dict(
+        manifestRevision=store.manifest_revision(),
+        productRun=run,
+        origins=origins,
+        execution=evidence,
+        authorObservation=author,
+        files=files,
+        reviewerExecutable=identity,
+        policy=store.plan_review_policy_state(store.manifest_revision()),
+    )
+
+
+def _execution_events(store, kind, registration_id=None):
+    rows = [
+        (row[0], json.loads(row[1]))
+        for row in store.connection.execute(
+            "SELECT rowid, payload_json FROM events WHERE kind=? ORDER BY rowid", (kind,)
+        )
+    ]
+    return [
+        (key, row)
+        for key, row in rows
+        if registration_id is None or row.get("registrationId") == registration_id
+    ]
+
+
+def _execution_header(store, registration_id):
+    rows = [
+        (key, row)
+        for key, row in _execution_reservations(store)
+        if row["registrationId"] == registration_id
+    ]
+    if len(rows) != 1 or rows[0][1].get("schema") != 1:
+        raise ValueError("execution-registration-missing-or-ambiguous")
+    return rows[0][1]
+
+
+def _execution_reservations(store):
+    rows = _execution_events(store, "execution-assessment-reserved")
+    required = {"schema", "registrationId", "request", "context", "binding", "packet", "launch"}
+    if any(
+        not isinstance(row, dict)
+        or set(row) != required
+        or row["schema"] != 1
+        or not isinstance(row["registrationId"], str)
+        for _, row in rows
+    ):
+        raise ValueError("execution-reservation-provenance-unsupported")
+    ids = {row["registrationId"] for _, row in rows}
+    if len(ids) != len(rows):
+        raise ValueError("execution-reservation-order-ambiguous")
+    for kind in (
+        "execution-assessment-captured",
+        "execution-assessment-consumed",
+        "execution-assessment-observation-error",
+    ):
+        if any(
+            not isinstance(row, dict)
+            or row.get("schema") != 1
+            or row.get("registrationId") not in ids
+            for _, row in _execution_events(store, kind)
+        ):
+            raise ValueError("execution-stage-unlisted-or-mixed-provenance")
+    return rows
+
+
+def _execution_directory(store, registration_id):
+    from codex_harness.core import acceptance_recovery as recovery
+
+    if not isinstance(registration_id, str) or not re.fullmatch(r"[0-9a-f]{32}", registration_id):
+        raise ValueError("execution-registration-id-invalid")
+    root = store.path.parent / "reviews" / "execution-assessments" / registration_id
+    return recovery._safe(root, root)
+
+
+def _execution_terminal_original(store, header):
+    """A consumed label alone cannot clear an uncertain overlapping attempt."""
+    from codex_harness.core import acceptance_recovery as recovery
+
+    key = header["registrationId"]
+    captures = _execution_events(store, "execution-assessment-captured", key)
+    consumed = _execution_events(store, "execution-assessment-consumed", key)
+    reserved = _execution_events(store, "execution-assessment-reserved", key)
+    if (
+        len(captures) != 1
+        or len(consumed) != 1
+        or len(reserved) != 1
+        or _execution_events(store, "execution-assessment-observation-error", key)
+    ):
+        return False
+    capture = captures[0][1]
+    if (
+        not reserved[0][0] < captures[0][0] < consumed[0][0]
+        or set(capture)
+        != {
+            "schema",
+            "registrationId",
+            "headerHash",
+            "launch",
+            "exitCode",
+            "runtime",
+            "stdout",
+            "stderr",
+        }
+        or type(capture["exitCode"]) is not int
+        or capture["headerHash"] != _assessment_hash(header)
+        or capture["launch"] != header["launch"]
+        or consumed[0][1].get("captureHash") != _assessment_hash(capture)
+    ):
+        return False
+    try:
+        root = _execution_directory(store, key)
+        recovery._read(root, "packet", recovery.seal(header["packet"].encode("utf-8")))
+        # Invalid UTF-8 is still a captured terminal byte stream; it cannot earn
+        # support, but its known process return must not be silently lost.
+        return all(
+            recovery.seal(recovery._safe(root / name, root).read_bytes()) == capture[name]
+            for name in ("stdout", "stderr")
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _execution_capture(store, header, launch, executable, response):
+    from codex_harness.core import acceptance_recovery as recovery
+
+    if recovery._launch_identity(launch, executable) != header["launch"]:
+        raise ValueError("execution-actual-launch-mismatch")
+    code, output, stderr = response
+    if type(code) is not int or not isinstance(output, bytes) or not isinstance(stderr, bytes):
+        raise ValueError("execution-original-byte-capture-required")
+    root = _execution_directory(store, header["registrationId"])
+    try:
+        observation = _execution_session(
+            header["request"]["reviewer"], output.decode("utf-8"), stderr.decode("utf-8")
+        )
+    except (UnicodeError, ValueError, KeyError, TypeError):
+        observation = None
+    payload = dict(
+        schema=1,
+        registrationId=header["registrationId"],
+        headerHash=_assessment_hash(header),
+        launch=header["launch"],
+        exitCode=code,
+        runtime=observation,
+        stdout=recovery._write(root, "stdout", output),
+        stderr=recovery._write(root, "stderr", stderr),
+    )
+    with store._transaction():
+        if _execution_header(store, header["registrationId"]) != header or _execution_events(
+            store, "execution-assessment-captured", header["registrationId"]
+        ):
+            raise ValueError("execution-return-registration-changed-or-duplicate")
+        store._event("execution-assessment-captured", payload)
+
+
+def _execution_parse(store, header):
+    from codex_harness.core import acceptance_recovery as recovery
+
+    rows = _execution_events(store, "execution-assessment-captured", header["registrationId"])
+    if len(rows) != 1:
+        raise ValueError("execution-capture-missing-or-ambiguous")
+    capture = rows[0][1]
+    root = _execution_directory(store, header["registrationId"])
+    recovery._read(root, "packet", recovery.seal(header["packet"].encode("utf-8")))
+    if (
+        set(capture)
+        != {
+            "schema",
+            "registrationId",
+            "headerHash",
+            "launch",
+            "exitCode",
+            "runtime",
+            "stdout",
+            "stderr",
+        }
+        or capture["headerHash"] != _assessment_hash(header)
+        or capture["launch"] != header["launch"]
+        or type(capture["exitCode"]) is not int
+        or capture["exitCode"] != 0
+    ):
+        raise ValueError("execution-capture-failed-or-changed")
+    output = recovery._read(root, "stdout", capture["stdout"])
+    stderr = recovery._read(root, "stderr", capture["stderr"])
+    observation = _execution_session(header["request"]["reviewer"], output, stderr)
+    if observation != capture.get("runtime"):
+        raise ValueError("execution-sealed-runtime-changed")
+    if observation["session"] == header["context"]["authorObservation"]["session"]:
+        raise ValueError("execution-author-reviewer-session-not-separated")
+    other_captures = [
+        row
+        for _, row in _execution_events(store, "execution-assessment-captured")
+        if row["registrationId"] != header["registrationId"]
+    ]
+    other_captures.extend(
+        json.loads(row[0])
+        for row in store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='acceptance-review-completed'"
+        )
+    )
+    for row in other_captures:
+        if (row.get("runtime") or {}).get("session") == observation["session"]:
+            raise ValueError("execution-reviewer-session-replayed")
+    payload = json.loads(_response(output, "codex"))
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema", "snapshotHash", "members"}
+        or payload["schema"] != "seldon/execution-member-response-v1"
+        or payload["snapshotHash"] != header["binding"]
+        or not isinstance(payload["members"], list)
+    ):
+        raise ValueError("execution-targeted-member-response-required")
+    expected = {row["memberId"]: row for row in header["request"]["members"]}
+    findings = {row["finding"]["id"]: row["finding"] for row in header["context"]["origins"]}
+    members, seen = [], set()
+    for item in payload["members"]:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {"memberId", "disposition", "judgment", "explanation", "artifactPaths", "witnessIds"}
+            or not isinstance(item.get("memberId"), str)
+            or item["memberId"] not in expected
+            or item["memberId"] in seen
+        ):
+            raise ValueError("execution-response-membership-invalid")
+        key = item["memberId"]
+        seen.add(key)
+        finding = findings[key]
+        if (
+            item["disposition"] != finding["status"]
+            or item["artifactPaths"] != expected[key]["artifactPaths"]
+            or item["witnessIds"] != expected[key]["witnessIds"]
+            or not isinstance(item["explanation"], str)
+            or not item["explanation"].strip()
+            or item["judgment"]
+            not in {"supports-repair", "supports-counterevidence", "not-satisfied", "cannot-assess"}
+        ):
+            raise ValueError("execution-response-binding-or-judgment-invalid")
+        supported = (
+            item["judgment"]
+            == (
+                "supports-counterevidence" if finding["status"] == "rejected" else "supports-repair"
+            )
+            and finding["status"] != "deferred"
+        )
+        members.append(
+            dict(
+                **item,
+                support="assessed-current" if supported else "unverified",
+                retainedObligation=True,
+                deferredObligationHeld=finding["status"] == "deferred",
+                originalFinding=finding,
+                originRunId=finding["runId"],
+                productRunId=header["request"]["expected_product_run_id"],
+                candidateCommit=header["context"]["execution"]["candidateCommit"],
+            )
+        )
+    if seen != set(expected):
+        raise ValueError("execution-response-required-member-omitted")
+    return dict(
+        members=members, reviewerObservation=observation, captureHash=_assessment_hash(capture)
+    )
+
+
+def assess_execution_findings(store, **request):
+    """Complete controlled Python entry; no external receipt/eligibility importer."""
+    try:
+        header = store.register_execution_assessment(**request)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        return dict(
+            members=[], fullVisionHeld=True, holdReasons=[str(error)], closureEligible=False
+        )
+    if header.get("reused"):
+        return store.execution_assessment_state()
+    from codex_harness.core import acceptance_recovery as recovery
+
+    reviewer = request["reviewer"]
+    executable = header["context"]["reviewerExecutable"]["path"]
+    launch = None
+    attempted = False
+    try:
+        launch = _launch_review(reviewer, header["packet"], executable)
+        if recovery._launch_identity(launch, executable) != header["launch"]:
+            raise ValueError("execution-prelaunch-identity-changed")
+        if _execution_context(store, request) != header["context"]:
+            raise ValueError("execution-prelaunch-selection-changed")
+        with TemporaryDirectory(prefix="harness-execution-review-") as cwd:
+            attempted = True
+            response = _run(launch, Path(cwd), request["timeout"], raw=True)
+            # Preserve the actual return before temporary-directory cleanup.
+            _execution_capture(store, header, launch, executable, response)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        if attempted and not _execution_events(
+            store, "execution-assessment-captured", header["registrationId"]
+        ):
+            output, stderr = getattr(error, "output", None), getattr(error, "stderr", None)
+            try:
+                _execution_capture(
+                    store,
+                    header,
+                    launch,
+                    executable,
+                    (
+                        -1,
+                        output if isinstance(output, bytes) else b"",
+                        stderr if isinstance(stderr, bytes) else b"",
+                    ),
+                )
+            except (OSError, ValueError, TypeError):
+                pass  # Retain partial create-once files and the incomplete reservation.
+        with store._transaction():
+            store._event(
+                "execution-assessment-observation-error",
+                dict(
+                    schema=1,
+                    registrationId=header["registrationId"],
+                    error=f"{type(error).__name__}: {error}",
+                ),
+            )
+        # Never manufacture terminal certainty, refund, or clear overlap on an
+        # ambiguous launch/return/cleanup error. Reads expose this same hold.
+        return store.execution_assessment_state()
+    return store.commit_execution_assessment(header["registrationId"])
+
+
 def run_roundtable(
     store: PlanStore,
     *,
@@ -1332,7 +1915,17 @@ def run_roundtable(
                     "Next: waive the cap by raising or omitting --max-total, "
                     "or accept the remaining findings",
                 )
-            used = attempts + legacy
+            # Execution-stage reservations share this exact tuple/revision pool;
+            # they never become ordinary review_attempts or review success.
+            used = next(
+                (
+                    item["round"]
+                    for item in totals
+                    if item["reviewer"] == reviewer["name"]
+                    and item["provider"] == reviewer["provider"]
+                ),
+                attempts + legacy,
+            )
             if used >= max_rounds:
                 raise PlanStoreError(
                     "roundtable-budget-exhausted",

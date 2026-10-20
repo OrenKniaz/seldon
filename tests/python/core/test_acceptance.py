@@ -1741,3 +1741,38 @@ def test_timeout_cleanup_records_failure(mode, tmp_path, monkeypatch):
     assert len(instances[0].calls) == 2
     assert 0.05 < instances[0].calls[1] <= 0.5
     assert clock[0] + instances[0].calls[1] <= 1.7
+
+
+def test_execution_af_history_is_selected_without_revalidating_old_product(tmp_path, monkeypatch):
+    from tests.python.core.test_roundtable import canonical_af_fixture
+
+    from codex_harness.core.acceptance import read_execution_finding_origins
+
+    store, request, original, current, run, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
+    try:
+        key = request["members"][0]["memberId"]
+        historical_json = store.connection.execute(
+            "SELECT result_json FROM acceptance_runs WHERE id=?", (original["runId"],)
+        ).fetchone()[0]
+        # A changed product must not erase or rewrite its genuinely admitted AF
+        # origin. This historical lookup alone grants no current support.
+        (Path(run["repo"]) / "A.py").write_text("def valid_id(value): return True\n")
+        assert current_run(store) is None
+        before = list(store.connection.iterdump())
+        origins = read_execution_finding_origins(store, [key])
+        assert len(origins) == 1 and origins[0]["finding"]["id"] == key
+        assert origins[0]["sourceRun"]["id"] == original["runId"] != current["id"]
+        assert origins[0]["review"]["attemptId"] == original["attemptId"]
+        assert origins[0]["originals"] and origins[0]["registration"]["slots"]
+        assert (
+            store.connection.execute(
+                "SELECT result_json FROM acceptance_runs WHERE id=?", (original["runId"],)
+            ).fetchone()[0]
+            == historical_json
+        )
+        assert list(store.connection.iterdump()) == before and len(calls) == 2
+        with pytest.raises(ValueError, match="genuine-admitted-af"):
+            read_execution_finding_origins(store, ["not-an-AF"])
+        assert list(store.connection.iterdump()) == before
+    finally:
+        store.close()

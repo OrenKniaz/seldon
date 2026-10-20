@@ -614,9 +614,9 @@ def test_dispatch_resume_requirement_change_reuses_unaffected_bead_and_reproves_
     proofs = []
     validate = dispatch._validate
 
-    def observe(cwd, manifest, module):
+    def observe(cwd, manifest, module, **kwargs):
         proofs.append((module, _git(cwd, "rev-parse", "HEAD")))
-        return validate(cwd, manifest, module)
+        return validate(cwd, manifest, module, **kwargs)
 
     monkeypatch.setattr(dispatch, "_validate", observe)
     resumed = run_plan(
@@ -928,8 +928,8 @@ def test_dispatch_resume_spine_change_updates_requirements_and_revalidates(
     proofs = []
     validate = dispatch._validate
 
-    def observe(cwd, manifest, module):
-        result = validate(cwd, manifest, module)
+    def observe(cwd, manifest, module, **kwargs):
+        result = validate(cwd, manifest, module, **kwargs)
         proofs.append((module, _git(cwd, "rev-parse", "HEAD"), result["passed"]))
         return result
 
@@ -1114,8 +1114,8 @@ def test_dispatch_test_only_revision_revalidates_before_redispatch(
     proofs = []
     validate = dispatch._validate
 
-    def observe(cwd, manifest, module):
-        result = validate(cwd, manifest, module)
+    def observe(cwd, manifest, module, **kwargs):
+        result = validate(cwd, manifest, module, **kwargs)
         proofs.append((module, _git(cwd, "rev-parse", "HEAD"), result["passed"]))
         return result
 

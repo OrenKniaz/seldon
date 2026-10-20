@@ -15,6 +15,274 @@ import pytest
 from codex_harness.core import dispatch, record_io
 
 
+def canonical_assessment_execution(
+    tmp_path,
+    monkeypatch,
+    *,
+    unrelated=False,
+    author_metadata=True,
+    author_tools=False,
+    author_item_case=None,
+    source_only_event=False,
+    mixed_artifacts=False,
+    cover_mixed_artifacts=False,
+):
+    """Actual job/attempt/integration writers with a pinned local Python child.
+
+    All provider/session-shaped observations are synthetic source qualification.
+    No admission, provenance comparison or validation guard is patched.
+    """
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from tests.python.core.execution_support import publish_source_store, source_grant
+    from tests.python.core.test_dispatch import _tiny_plan
+    from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
+
+    from codex_harness.core import planner_jobs
+    from codex_harness.core.provider_launch import ProviderNormalLaunch
+
+    plan = _tiny_plan(tmp_path)
+    manifest_path = plan / "sample.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["beads"]["B"]
+    if mixed_artifacts:
+        manifest["beads"]["A"]["ownedFiles"].append("B.py")
+    manifest_path.write_text(json.dumps(manifest))
+    (plan / "template/A.py").write_text("def valid_id(value): return False\n")
+    (plan / "template/B.py").write_text("def valid_id(value): return type(value) is int\n")
+    selected = "B" if unrelated else "A"
+    (plan / "template/tests/test_A.py").write_text(
+        f"import unittest\nfrom {selected} import valid_id\n"
+        "class Proof(unittest.TestCase):\n"
+        "    def test_bool(self):\n        self.assertFalse(valid_id(True))\n"
+        "        self.assertTrue(valid_id(7))\n"
+    )
+    if cover_mixed_artifacts:
+        with (plan / "template/tests/test_A.py").open("a") as protected:
+            protected.write(
+                "        self.assertFalse(other_valid_id(True))\n"
+                "        self.assertTrue(other_valid_id(7))\n"
+                "\nfrom B import valid_id as other_valid_id\n"
+            )
+    (plan / "template/tests/test_B.py").unlink()
+    author_session = str(uuid4())
+    events = [
+        {"type": "thread.started", "thread_id": author_session},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "SOURCE ONLY"}},
+        {"type": "turn.completed"},
+    ]
+    if author_tools:
+        events.insert(
+            2,
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "source-command",
+                    "type": "command_execution",
+                    "command": "SOURCE-ONLY local Python file write",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "aggregated_output": "",
+                },
+            },
+        )
+        events.insert(
+            3,
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "source-change",
+                    "type": "file_change",
+                    "status": "completed",
+                    "changes": [{"path": "A.py", "kind": "update"}],
+                },
+            },
+        )
+    if source_only_event:
+        events[-1]["isMocked"] = True
+    if author_item_case:
+        command = next(row for row in events if row.get("item", {}).get("id") == "source-command")
+        if author_item_case in {"cross-kind-message", "matching-start-completion"}:
+            started = {
+                "type": "item.started",
+                "item": {
+                    "id": "source-command",
+                    "type": "command_execution",
+                    "command": "SOURCE-ONLY local Python file write",
+                    "status": "in_progress",
+                },
+            }
+            events.insert(events.index(command), started)
+            if author_item_case == "cross-kind-message":
+                command["item"] = {
+                    "id": "source-command",
+                    "type": "reasoning",
+                    "text": "A message cannot prove the command completed",
+                }
+        elif author_item_case in {"prior-message-start", "prior-message-completed"}:
+            events.insert(
+                events.index(command),
+                {
+                    "type": "item.started"
+                    if author_item_case == "prior-message-start"
+                    else "item.completed",
+                    "item": {
+                        "id": "source-command",
+                        "type": "reasoning",
+                        "text": "This ID already identifies a non-tool item",
+                    },
+                },
+            )
+        elif author_item_case == "non-tool-only-reuse":
+            for kind in ("reasoning", "agent_message"):
+                events.insert(
+                    events.index(command),
+                    {
+                        "type": "item.completed",
+                        "item": {"id": "message-only", "type": kind, "text": "SOURCE ONLY"},
+                    },
+                )
+        elif author_item_case in {"duplicate-cross-kind", "duplicate-same-kind"}:
+            repeated = (
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "source-command",
+                        "type": "file_change",
+                        "status": "completed",
+                        "changes": [{"path": "A.py", "kind": "update"}],
+                    },
+                }
+                if author_item_case == "duplicate-cross-kind"
+                else copy.deepcopy(command)
+            )
+            events.insert(events.index(command) + 1, repeated)
+        else:
+            assert author_item_case == "completed-only"
+    stderr = (
+        "Codex initialized with event: SessionConfiguredEvent { "
+        f"session_id: SessionId {{ uuid: {author_session} }}, "
+        f"thread_id: ThreadId {{ uuid: {author_session} }}, "
+        'forked_from_id: None, parent_thread_id: None, model: "gpt-6.1-sol", '
+        "reasoning_effort: Some(Medium) }"
+    )
+    if not author_metadata:
+        stderr = ""
+    child = tmp_path / "source-worker.py"
+    child.write_text(
+        "# SOURCE-ONLY local process fixture; never invokes a native CLI\n"
+        "import sys\nfrom pathlib import Path\n"
+        "Path('A.py').write_text('def valid_id(value): return type(value) is int\\n')\n"
+        f"print({chr(10).join(json.dumps(row) for row in events)!r})\n"
+        f"print({stderr!r}, file=sys.stderr)\n"
+    )
+
+    class SourceAdapter:
+        def provider_normal_command(self, **_kwargs):
+            assert child.is_file() and Path(sys.executable).is_file()
+            return ProviderNormalLaunch(
+                cli="codex",
+                command=(sys.executable, "-B", str(child)),
+                protections=("SOURCE-ONLY local Python process, no provider",),
+            )
+
+    monkeypatch.setattr(dispatch, "get_adapter", lambda _: SourceAdapter())
+    which = dispatch.shutil.which
+    monkeypatch.setattr(
+        dispatch.shutil, "which", lambda name: sys.executable if name == "codex" else which(name)
+    )
+    source_only_packet_renderer(monkeypatch)
+    # Keep disposable canonical Git worktrees short on Windows.
+    import tempfile
+
+    workspace = Path(tempfile.mkdtemp(prefix="af-"))
+    store, revision = publish_source_store(workspace, plan)
+    workers = [dict(bead="A", provider="codex", model="gpt-6.1-sol", effort="medium")]
+    source_grant(store, revision, workers, timeout=15, call_cap=1)
+    with monkeypatch.context() as boundary:
+        boundary.setattr(
+            planner_jobs.subprocess, "Popen", lambda *a, **k: SimpleNamespace(pid=12345)
+        )
+        job = planner_jobs.start_worker_job(store, revision, workers, timeout=15, call_cap=1)
+    terminal = planner_jobs.execute_worker_job(workspace, revision)
+    assert terminal["status"] == "completed", terminal
+    status = planner_jobs.worker_job_status(workspace, revision)
+    run = record_io.read_record_json(Path(status["run"]["recordPath"]))
+    assert run["beads"]["A"]["integrated"]["validation"]["passed"], run
+    (tmp_path / "canonical-job-selection.json").write_text(
+        json.dumps(
+            dict(
+                sourceOnly=True,
+                nativeProviderCalls=0,
+                workspace=str(workspace),
+                jobId=revision,
+                recordPath=status["run"]["recordPath"],
+                repo=run["repo"],
+                authorSession=author_session,
+            )
+        )
+    )
+    return store, revision, run, job, author_session
+
+
+def test_integrated_proof_records_selected_owned_artifact_calls(tmp_path, monkeypatch):
+    store, _, run, _, _ = canonical_assessment_execution(tmp_path, monkeypatch)
+    try:
+        test = run["beads"]["A"]["integrated"]["validation"]["observations"]["tests"][0]
+        assert test["id"] == "test_A.Proof.test_bool"
+        assert test["events"] == [{"kind": "success"}]
+        assert any(
+            call["file"] == "A.py" and call["function"] == "valid_id" and call["phase"] == "test"
+            for call in test["ownedCalls"]
+        ), "Current integrated proof must observe its selected owned artifact"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "selection", ["selected", "shared-other-owner", "empty", "legacy-absent", "invalid"]
+)
+def test_validation_ownership_is_exact_and_legacy_default_unchanged(tmp_path, selection):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "A.py").write_text("def answer(): return 7\n")
+    (tmp_path / "B.py").write_text("def unrelated(): return 8\n")
+    (tmp_path / "tests/test_shared.py").write_text(
+        "import unittest\nfrom A import answer\nclass Proof(unittest.TestCase):\n"
+        "    def test_answer(self): self.assertEqual(answer(), 7)\n"
+    )
+    manifest = dict(
+        validation=["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
+        requirementFiles=["tests"],
+        beads={
+            "A": dict(ownedFiles=["A.py"], proofModule="test_shared.py"),
+            "B": dict(ownedFiles=["B.py"], proofModule="test_shared.py"),
+        },
+    )
+    kwargs = (
+        {}
+        if selection == "legacy-absent"
+        else dict(
+            owned_files={
+                "selected": ("A.py",),
+                "shared-other-owner": ("B.py",),
+                "empty": (),
+                "invalid": None,
+            }[selection]
+        )
+    )
+    if selection == "invalid":
+        with pytest.raises(TypeError):
+            dispatch._validate(tmp_path, manifest, "test_shared.py", **kwargs)
+        return
+    proof = dispatch._validate(tmp_path, manifest, "test_shared.py", **kwargs)
+    assert proof["passed"] and proof["testsRun"] == 1
+    calls = proof["observations"]["tests"][0]["ownedCalls"]
+    assert bool(calls) is (selection == "selected")
+    assert all(call["file"] == "A.py" for call in calls)
+
+
 def originals(tmp_path):
     command = ["local-process-test", "a b", "λ\r\n"]
     request = dict(

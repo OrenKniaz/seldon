@@ -492,7 +492,7 @@ def test_dispatch_proves_clean_candidate_before_fast_forward(tmp_path, monkeypat
     validate = dispatch._validate
     observed = []
 
-    def observe(cwd, manifest, module):
+    def observe(cwd, manifest, module, **kwargs):
         if cwd.name.startswith("candidate-"):
             commit = _git(cwd, "rev-parse", "HEAD")
             assert _git(cwd, "status", "--porcelain") == ""
@@ -500,7 +500,7 @@ def test_dispatch_proves_clean_candidate_before_fast_forward(tmp_path, monkeypat
             assert _git(cwd, "rev-parse", "integration") == _git(cwd, "rev-parse", "HEAD^1")
             assert commit != _git(cwd, "rev-parse", "integration")
             observed.append(commit)
-        return validate(cwd, manifest, module)
+        return validate(cwd, manifest, module, **kwargs)
 
     monkeypatch.setattr(dispatch, "_validate", observe)
     record = run_plan(

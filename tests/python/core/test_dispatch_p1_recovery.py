@@ -256,10 +256,10 @@ def test_caught_candidate_interruption_recovers_existing_branch(tmp_path, monkey
 
     validate = dispatch._validate
 
-    def interrupted(cwd, *args):
+    def interrupted(cwd, *args, **kwargs):
         if cwd.name.startswith("candidate-"):
             raise RuntimeError("interrupted candidate validation")
-        return validate(cwd, *args)
+        return validate(cwd, *args, **kwargs)
 
     monkeypatch.setattr(dispatch, "_validate", interrupted)
     first = dispatch.run_plan(root, work_root=tmp_path / "runs", fake_workers={"A": worker})

@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -2276,6 +2277,243 @@ class PlanStore:
                 [(s["id"], _json(s)) for s in stored],
             )
             self._event("acceptance-scenarios-saved", {"ids": ids})
+
+    def register_execution_assessment(
+        self,
+        *,
+        members,
+        worker_job_id,
+        bead_id,
+        expected_manifest_revision,
+        expected_product_run_id,
+        reviewer,
+        max_rounds,
+        max_total,
+        timeout,
+    ):
+        """Seal a complete execution-stage request and shared capacity before launch."""
+        from codex_harness.core import acceptance_recovery as recovery
+        from codex_harness.core import roundtable
+
+        request = deepcopy(
+            dict(
+                members=members,
+                worker_job_id=worker_job_id,
+                bead_id=bead_id,
+                expected_manifest_revision=expected_manifest_revision,
+                expected_product_run_id=expected_product_run_id,
+                reviewer=reviewer,
+                max_rounds=max_rounds,
+                max_total=max_total,
+                timeout=timeout,
+            )
+        )
+        context = roundtable._execution_context(self, request)
+        item_id = uuid4().hex
+        binding = roundtable._assessment_hash(
+            dict(registrationId=item_id, request=request, context=context)
+        )
+        response = dict(
+            schema="seldon/execution-member-response-v1", snapshotHash=binding, members=[]
+        )
+        originals = {row["finding"]["id"]: row["finding"] for row in context["origins"]}
+        for member in members:
+            response["members"].append(
+                dict(
+                    **member,
+                    disposition=originals[member["memberId"]]["status"],
+                    judgment="cannot-assess",
+                    explanation=(
+                        "Address the exact original concern against these specific "
+                        "protected observations."
+                    ),
+                )
+            )
+        packet = json.dumps(
+            dict(
+                schema="seldon/canonical-execution-packet-v1",
+                binding=binding,
+                context=context,
+                responseContract=response,
+                instructions=(
+                    "Read only this packet. No tools. Return the exact response object, "
+                    "once per member. Positive judgment requires relevant protected behavior "
+                    "or checkable counterevidence, not a hash/link. Use cannot-assess when "
+                    "unsupported. Rejection may use counterevidence without edits. Deferral "
+                    "retains the locked obligation."
+                ),
+            ),
+            ensure_ascii=False,
+        )
+        if (
+            roundtable.estimated_tokens(packet)
+            > roundtable.PROVIDER_TOKEN_BUDGETS[reviewer["provider"]]
+        ):
+            raise ValueError("execution-complete-packet-too-large")
+        executable = context["reviewerExecutable"]["path"]
+        launch = roundtable._launch_review(reviewer, packet, executable)
+        header = dict(
+            schema=1,
+            registrationId=item_id,
+            request=request,
+            context=context,
+            binding=binding,
+            packet=packet,
+            launch=recovery._launch_identity(launch, executable),
+        )
+        root = roundtable._execution_directory(self, item_id)
+        # External files are not locked by SQLite; compare the complete projection
+        # again inside the writer, immediately before the reservation append.
+        with self._transaction():
+            if roundtable._execution_context(self, request) != context:
+                raise ValueError("execution-selection-raced-before-reservation")
+            matching = [
+                old
+                for _, old in roundtable._execution_events(self, "execution-assessment-reserved")
+                if old["request"] == request and old["context"] == context
+            ]
+            if matching:
+                # Duplicate caller delivery cannot launch a second child or
+                # abandon an uncertain first launch. A retry needs a new request.
+                return dict(matching[-1], reused=True)
+            totals = roundtable.review_totals(self, expected_manifest_revision)
+            used = next(
+                (
+                    row
+                    for row in totals
+                    if row["reviewer"] == reviewer["name"]
+                    and row["provider"] == reviewer["provider"]
+                ),
+                dict(round=0, total=0),
+            )
+            if used["round"] >= max_rounds or used["total"] >= max_total:
+                raise ValueError("execution-shared-review-budget-exhausted")
+            root.mkdir(parents=True, exist_ok=False)
+            recovery._write(root, "packet", packet.encode("utf-8"))
+            self._event("execution-assessment-reserved", header)
+        return header
+
+    def commit_execution_assessment(self, registration_id):
+        """Consume only the producer's registered original, once, under the writer."""
+        from codex_harness.core import roundtable
+
+        with self._transaction():
+            header = roundtable._execution_header(self, registration_id)
+            captured = roundtable._execution_events(
+                self, "execution-assessment-captured", registration_id
+            )
+            if len(captured) != 1:
+                # A caller cannot turn an uncertain live/absent return into a
+                # terminal fact and thereby release an overlapping later pass.
+                raise ValueError("execution-producer-capture-missing-or-ambiguous")
+            if roundtable._execution_events(
+                self, "execution-assessment-observation-error", registration_id
+            ):
+                raise ValueError("execution-producer-terminal-observation-unverified")
+            completed = roundtable._execution_events(
+                self, "execution-assessment-consumed", registration_id
+            )
+            capture_hash = (
+                roundtable._assessment_hash(captured[0][1]) if len(captured) == 1 else None
+            )
+            if completed:
+                if len(completed) != 1 or completed[0][1].get("captureHash") != capture_hash:
+                    raise ValueError("execution-replay-changed-or-ambiguous")
+                roundtable._execution_parse(self, header)
+            else:
+                try:
+                    if roundtable._execution_context(self, header["request"]) != header["context"]:
+                        raise ValueError("execution-selection-stale-before-consumption")
+                    result = roundtable._execution_parse(self, header)
+                    if (
+                        roundtable._execution_context(self, header["request"]) != header["context"]
+                        or roundtable._execution_parse(self, header) != result
+                    ):
+                        raise ValueError("execution-selection-raced-before-consumption")
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    subprocess.SubprocessError,
+                ) as error:
+                    result = dict(members=[], holdReasons=[str(error)], captureHash=capture_hash)
+                self._event(
+                    "execution-assessment-consumed",
+                    dict(schema=1, registrationId=registration_id, **result),
+                )
+        return self.execution_assessment_state()
+
+    def execution_assessment_state(self, finding_ids=None):
+        """Same stage projection used by the entry and acceptance status; no final credit."""
+        from codex_harness.core import roundtable
+
+        try:
+            rows = roundtable._execution_reservations(self)
+        except (ValueError, KeyError, TypeError) as error:
+            return dict(
+                schema="seldon/execution-assessed-support-v1",
+                members=[],
+                fullVisionHeld=True,
+                closureEligible=False,
+                holdReasons=[str(error)],
+            )
+        latest, incomplete = {}, set()
+        for _, header in rows:
+            keys = [row["memberId"] for row in header["request"]["members"]]
+            for key in keys:
+                latest[key] = header
+            if not roundtable._execution_terminal_original(self, header):
+                incomplete.update(keys)
+        members = []
+        for key, header in latest.items():
+            if finding_ids is not None and key not in finding_ids:
+                continue
+            reasons = []
+            reasons.extend(
+                row["error"]
+                for _, row in roundtable._execution_events(
+                    self, "execution-assessment-observation-error", header["registrationId"]
+                )
+            )
+            results = roundtable._execution_events(
+                self, "execution-assessment-consumed", header["registrationId"]
+            )
+            selected = None
+            if key in incomplete:
+                reasons.append("execution-overlapping-incomplete-reservation")
+            try:
+                if roundtable._execution_context(self, header["request"]) != header["context"]:
+                    raise ValueError("execution-current-selection-changed")
+                if len(results) != 1:
+                    raise ValueError("execution-latest-attempt-not-consumed")
+                parsed = roundtable._execution_parse(self, header)
+                if parsed != {name: results[0][1][name] for name in parsed}:
+                    raise ValueError("execution-consumed-result-changed")
+                selected = next(row for row in parsed["members"] if row["memberId"] == key)
+                if selected["support"] != "assessed-current":
+                    reasons.append("execution-review-negative-cannot-assess-or-deferred")
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                StopIteration,
+                subprocess.SubprocessError,
+            ) as error:
+                reasons.append(str(error))
+            member = dict(selected or {"memberId": key, "retainedObligation": True})
+            member.update(registrationId=header["registrationId"], holdReasons=reasons)
+            if reasons:
+                member["support"] = "unverified"
+            members.append(member)
+        return dict(
+            schema="seldon/execution-assessed-support-v1",
+            members=members,
+            fullVisionHeld=True,
+            closureEligible=False,
+            scope="current registered AF execution support only; native final acceptance unchanged",
+        )
 
     def acceptance_findings(self) -> list[dict]:
         return [

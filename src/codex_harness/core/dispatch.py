@@ -169,8 +169,10 @@ def _verify_requirement_files(
         raise ValueError("protected requirement files revision mismatch")
 
 
-def _validate(cwd: Path, manifest: dict, module: str) -> dict[str, object]:
-    return validate_proof(cwd, manifest, module)
+def _validate(
+    cwd: Path, manifest: dict, module: str, *, owned_files: tuple[str, ...] = ()
+) -> dict[str, object]:
+    return validate_proof(cwd, manifest, module, owned_files=owned_files)
 
 
 def _content_identity(repo: Path, commit: str, names) -> str:
@@ -900,6 +902,186 @@ def _completed_attempt_identity_error(record: dict, request: dict, result: dict)
     return None
 
 
+def read_completed_execution_evidence(
+    workspace, worker_job_id, bead_id, *, expected_repo, expected_publication_revision
+):
+    """Read selected terminal originals; never integrate, retry or bless a receipt path."""
+    from codex_harness.core import planner_jobs
+
+    status = planner_jobs.worker_job_status(workspace, worker_job_id)
+    if (
+        worker_job_id != expected_publication_revision
+        or status["status"] != "completed"
+        or "run" not in status
+        or status["terminal"].get("runId") != status["run"]["runId"]
+        or Path(status["run"]["repo"]).resolve() != Path(expected_repo).resolve()
+    ):
+        raise ValueError("execution-current-terminal-job-required")
+    directory = planner_jobs._directory(workspace, worker_job_id)
+    files = {}
+
+    def original(path, root):
+        path, root = Path(path), Path(root).resolve()
+        if not path.resolve().is_relative_to(root):
+            raise ValueError("execution-original-outside-selected-root")
+        for part in (path, *path.parents):
+            if part.is_symlink() or getattr(part.stat(), "st_file_attributes", 0) & 0x400:
+                raise ValueError("execution-original-redirected")
+            if part == root:
+                break
+        raw = path.read_bytes()
+        files[str(path.resolve())] = hashlib.sha256(raw).hexdigest()
+        return raw.decode("utf-8")
+
+    def record(path, root):
+        return json.loads(original(path, root))
+
+    request_job = record(directory / "request.json", directory)
+    terminal = record(directory / "terminal.json", directory)
+    started = record(directory / "started.json", directory)
+    if any(
+        item.get("requestDigest") != request_job["requestDigest"] for item in (terminal, started)
+    ):
+        raise ValueError("execution-job-originals-changed")
+    manifest = record(directory / "plan/sample.json", directory)
+    if planner_jobs._digest(manifest) != request_job["manifestDigest"]:
+        raise ValueError("execution-job-manifest-changed")
+    plan = graph.load_plan(directory / "plan")
+    run_path = Path(status["run"]["recordPath"])
+    run = record(run_path, directory)
+    if bead_id not in manifest["beads"] or bead_id not in run["beads"]:
+        raise ValueError("execution-bead-not-in-canonical-job")
+    bead, selected = manifest["beads"][bead_id], run["beads"][bead_id]
+    owned = bead.get("ownedFiles")
+    if (
+        not isinstance(owned, list)
+        or not owned
+        or len(set(owned)) != len(owned)
+        or any(
+            not isinstance(name, str)
+            or not name
+            or Path(name).is_absolute()
+            or ".." in Path(name).parts
+            for name in owned
+        )
+        or selected.get("bead") != bead_id
+        or selected.get("runId") != run["runId"]
+        or selected.get("planRevision") != expected_publication_revision
+        or selected.get("isMocked") is not False
+        or not _did_execute_real_provider(selected)
+        or selected.get("didRunProvider") is not True
+        or selected.get("didRunIntegratedValidation") is not True
+        or selected.get("status") != "requirement-validated"
+        or selected.get("provider") != "codex"
+        or selected.get("observationError")
+    ):
+        raise ValueError("execution-selected-author-or-ownership-unsupported")
+    evidence = Path(selected["evidenceDir"])
+    attempt = evidence / "attempt"
+    request = record(attempt / "request.json", run_path.parent)
+    result = record(attempt / "result.json", run_path.parent)
+    original(attempt / attempt_provenance.FILENAME, run_path.parent)
+    if (
+        _completed_attempt_identity_error(selected, request, result)
+        or request.get("mode") != "provider-normal"
+        or result.get("status") != "exited"
+        or type(result.get("exitCode")) is not int
+        or result.get("exitCode") != 0
+        or result.get("isMocked") is not False
+        or result.get("didRunProvider") is not True
+        or result.get("outputComplete") is not True
+        or result.get("outputCollectionError")
+        or result.get("changeObservationError")
+        or result.get("failure")
+        or result.get("cancellation")
+        or attempt_provenance.read_and_compare(
+            attempt, request, result, record=selected, expected_owned_files=owned
+        )["state"]
+        != "consistent"
+    ):
+        raise ValueError("execution-author-originals-unverified")
+    executable = Path(request["command"][0])
+    if (
+        not executable.is_file()
+        or hashlib.sha256(executable.read_bytes()).hexdigest().upper()
+        != request["executableSha256"]
+    ):
+        raise ValueError("execution-author-executable-unverified")
+    stdout = original(attempt / "events.jsonl", run_path.parent)
+    stderr = original(attempt / "stderr.txt", run_path.parent)
+    if hashlib.sha256(stdout.encode("utf-8")).hexdigest() != result.get("eventsSha256"):
+        raise ValueError("execution-author-stdout-original-changed")
+    audit = efficiency.guard_disposition(attempt / "events.jsonl")
+    if audit.get("requiresUserDisposition") or audit.get("requiresAuditHold"):
+        raise ValueError("execution-author-existing-permission-or-audit-hold")
+    integrated = record(evidence / "integrated.json", run_path.parent)
+    binding = record(evidence / "integration-state.json", run_path.parent)
+    repo = Path(expected_repo).resolve()
+    commit = _git(repo, "rev-parse", "HEAD")
+    candidate = selected.get("candidate") or {}
+    worker = Path(request["cwd"]).resolve()
+    if (
+        _git(repo, "status", "--porcelain")
+        or integrated != selected["integrated"]
+        or integrated.get("recoveryBinding") != binding
+        or binding.get("runId") != run["runId"]
+        or binding.get("bead") != bead_id
+        or binding.get("attemptDirectory") != str(attempt.resolve())
+        or binding.get("ownedFiles") != owned
+        or binding.get("planRevision") != expected_publication_revision
+        or binding.get("attemptBase") != request["baseCommit"]
+        or binding.get("workerWorktree") != str(Path(request["cwd"]).resolve())
+        or binding.get("packetSha256") != hashlib.sha256(request["prompt"].encode()).hexdigest()
+        or binding.get("receiptPath") != str((evidence / "integrated.json").resolve())
+        or binding.get("candidateCommit") != commit
+        or candidate.get("commit") != commit
+        or _git(worker, "rev-parse", "HEAD") != binding.get("workerCommit")
+        or _git(worker, "rev-parse", "HEAD^{tree}") != binding.get("workerTree")
+        or _git(worker, "status", "--porcelain")
+        or _git(repo, "rev-parse", binding["candidateRef"]) != commit
+        or _git(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+        != [binding.get("baseIntegration"), binding.get("workerCommit")]
+        or binding.get("candidateTree") != _git(repo, "rev-parse", "HEAD^{tree}")
+        or candidate.get("tree") != _git(repo, "rev-parse", "HEAD^{tree}")
+        or candidate.get("validated") is not True
+        or integrated.get("integrationCommit") != commit
+        or integrated.get("requirementRefs") != selected["requirementRefs"]
+        or integrated.get("specRefs") != selected.get("specRefs")
+        or any(
+            integrated.get("claim", {}).get(key) != value
+            for key, value in _claim_inputs(repo, plan, bead_id, commit).items()
+        )
+        or integrated.get("claim", {}).get("candidateCommit") != commit
+        or integrated.get("claim", {}).get("candidateTree") != candidate["tree"]
+        or integrated.get("claim", {}).get("passed") is not True
+        or integrated.get("validation", {}).get("passed") is not True
+    ):
+        raise ValueError("execution-current-integrated-witness-required")
+    for name in owned:
+        original(repo / name, repo)
+    for name, path in requirement_file_sources(repo, manifest["requirementFiles"]).items():
+        original(path, repo)
+        if path.read_bytes() != (directory / "plan/template" / name).read_bytes():
+            raise ValueError("execution-protected-source-changed")
+        original(directory / "plan/template" / name, directory)
+    return dict(
+        jobId=worker_job_id,
+        beadId=bead_id,
+        runId=run["runId"],
+        repo=str(repo),
+        publicationRevision=expected_publication_revision,
+        candidateCommit=commit,
+        candidateTree=candidate["tree"],
+        ownedFiles=owned,
+        request=request,
+        result=result,
+        stdout=stdout,
+        stderr=stderr,
+        integrated=integrated,
+        files=files,
+    )
+
+
 def _check_attempt_provenance(
     record: dict, request: dict | None = None, result: dict | None = None, owned_files=None
 ) -> bool:
@@ -1311,7 +1493,9 @@ def _integrate_bead(
         record["integrated"] = integrated
         validation = integrated["validation"]
     else:
-        validation = _validate(validation_root, manifest, bead["proofModule"])
+        validation = _validate(
+            validation_root, manifest, bead["proofModule"], owned_files=tuple(bead["ownedFiles"])
+        )
         record["integrated"] = {
             "beadCommit": bead_commit,
             "integrationCommit": integration_commit,
