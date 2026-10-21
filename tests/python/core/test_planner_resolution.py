@@ -1033,7 +1033,7 @@ def test_exhausted_cli_review_holds_cap_without_waiver(project, monkeypatch, cap
     )
     response = json.loads(capsys.readouterr().out)
     assert len(calls) == 2
-    assert "1/1 total invocations" in response["text"]
+    assert "1/1 total logical review attempts" in response["text"]
     assert "waive" not in json.dumps(response).lower()
     assert "raising or omitting" not in json.dumps(response)
     assert "held" in response["next"].lower()
