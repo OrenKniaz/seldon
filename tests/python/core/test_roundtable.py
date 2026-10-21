@@ -566,10 +566,11 @@ def test_canonical_execution_calls_share_ordinary_budget(tmp_path, monkeypatch):
         totals = roundtable.review_totals(store, store.manifest_revision())
         row = next(item for item in totals if item["reviewer"] == request["reviewer"]["name"])
         assert row["total"] == 2  # One real ordinary reservation + one execution-stage reservation.
-        with pytest.raises(PlanStoreError, match="total invocations"):
+        with pytest.raises(PlanStoreError, match="total logical review attempts") as caught:
             roundtable.run_roundtable(
                 store, reviewers=[request["reviewer"]], max_total=2, max_rounds=6
             )
+        assert caught.value.code == "roundtable-total-budget-exhausted"
         assert len(calls) == 3
     finally:
         store.close()
