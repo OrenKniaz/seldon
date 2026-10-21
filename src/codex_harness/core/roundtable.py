@@ -168,6 +168,74 @@ def review_totals(store: PlanStore, revision: str | None) -> list[dict]:
     return [counts[key] for key in sorted(counts)]
 
 
+def _total_exhaustion_advice(store, reviewer, revision, total, max_total):
+    """Describe existing originals without treating budget exhaustion as diagnosis."""
+    saved = store.connection.execute(
+        "SELECT * FROM review_runs WHERE reviewer=? AND provider=? ORDER BY rowid DESC LIMIT 1",
+        (reviewer["name"], reviewer["provider"]),
+    ).fetchone()
+    details = {
+        "usageUnit": "logical review attempts",
+        "reviewer": reviewer["name"],
+        "provider": reviewer["provider"],
+        "id": None,
+        "failureCause": "Unknown; no completed ordinary review record",
+    }
+    prefix = f'python -m codex_harness.core.plan_cli --workspace "{store.workspace}" '
+    inspection = "Inspect existing state: " + prefix + "status"
+    if saved is not None:
+        row = dict(saved)
+        try:
+            shards = json.loads(row.get("shardDetails") or "[]")
+            prior = json.loads(row.get("reshardedFrom") or "null")
+            if not isinstance(shards, list) or not all(isinstance(item, dict) for item in shards):
+                raise ValueError("Unavailable retained shard details")
+            errors = [
+                item["primaryError"]["reason"]
+                for item in shards
+                if isinstance(item.get("primaryError"), dict)
+                and isinstance(item["primaryError"].get("reason"), str)
+            ]
+            cause = (
+                "Unknown beyond the recorded errors"
+                if errors
+                else "No final failure recorded"
+                if row.get("exit_code") == 0 and row.get("invalid") == 0
+                else "Unknown; no recorded error explanation"
+            )
+        except (TypeError, ValueError):
+            errors, prior, cause = None, None, "Unknown; retained error details unavailable"
+        details.update(
+            id=row["id"],
+            roundId=row["round_id"],
+            manifestRevision=row["plan_revision"],
+            recordedRevisionIsCurrent=row["plan_revision"] == revision,
+            recordKind="Latest recorded completed ordinary review; excludes pending reservations",
+            exitCode=row["exit_code"],
+            invalid=row["invalid"],
+            findings=row["findings"],
+            shards=row.get("shards"),
+            recordedErrors=errors,
+            priorReshardReason=prior.get("reason") if isinstance(prior, dict) else None,
+            failureCause=cause,
+        )
+        inspection = "Inspect retained review: " + prefix + f'review "{row["id"]}"'
+    # CLI's existing adapter removes the " Next:" suffix. Keep observed facts
+    # and inspection before it; escape that delimiter inside untrusted JSON text.
+    encoded = json.dumps(details, ensure_ascii=False, sort_keys=True).replace(
+        " Next:", " Next\\u003a"
+    )
+    return (
+        f"Review budget used {total}/{max_total} "
+        f"total logical review attempts; current manifest {revision}. "
+        "No additional review launch is authorized by this exhausted request.\n"
+        f"Recorded review: {encoded}\n{inspection}"
+        " Next: Review remains held at the existing total cap. Inspect retained records and "
+        "findings --expand; repair within existing author scope, then refresh status. "
+        "Repair does not authorize another review; preserve spent attempts and limits."
+    )
+
+
 def _test_bodies(store: PlanStore, protected=None) -> str:
     if not (store.workspace / "template").is_dir():
         return "## Protected requirement tests\n\nNo template available.\n"
@@ -1922,9 +1990,7 @@ def run_roundtable(
             if max_total is not None and total >= max_total:
                 raise PlanStoreError(
                     "roundtable-total-budget-exhausted",
-                    f"{reviewer['name']} used {total}/{max_total} total invocations. "
-                    "Next: waive the cap by raising or omitting --max-total, "
-                    "or accept the remaining findings",
+                    _total_exhaustion_advice(store, reviewer, revision, total, max_total),
                 )
             # Execution-stage reservations share this exact tuple/revision pool;
             # they never become ordinary review_attempts or review success.

@@ -2217,12 +2217,21 @@ def test_conservative_estimator(length, expected):
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 @pytest.mark.parametrize("double_overflow", [False, True])
-def test_overflow_retry_error_and_caps(store, provider, double_overflow):
+def test_overflow_retry_error_and_caps(store, provider, double_overflow, monkeypatch, capsys):
+    import shlex
+
+    from codex_harness.core import plan_cli
+
+    # The existing injected review is a source double, never provider discovery.
+    monkeypatch.setattr(roundtable, "_executable", lambda provider, *_: provider)
     node = store.spine().node("R1")
     node["text"] += "detail " * 20_000
     store.upsert_node(node)
     seen = []
-    errors = ["prompt is too long: 208426 tokens", "context window exceeded: second overflow"]
+    errors = [
+        "prompt is too long: 208426 tokens Next: original provider detail",
+        "context window exceeded: second overflow Next: final provider detail",
+    ]
 
     def runner(launch, cwd, timeout):
         seen.append(launch.stdin_text)
@@ -2233,7 +2242,8 @@ def test_overflow_retry_error_and_caps(store, provider, double_overflow):
             return 1, json.dumps({"type": "error", "message": message})
         return 0, json.dumps([finding("plan")])
 
-    reviewer = next(item for item in REVIEWERS if item["provider"] == provider)
+    reviewer = dict(next(item for item in REVIEWERS if item["provider"] == provider))
+    reviewer["name"] += " Next: retained reviewer identity"
     result = run_roundtable(
         store,
         reviewers=[reviewer],
@@ -2267,3 +2277,90 @@ def test_overflow_retry_error_and_caps(store, provider, double_overflow):
     with pytest.raises(PlanStoreError) as caught:
         run_roundtable(store, reviewers=[reviewer], runner=runner, max_total=1)
     assert caught.value.code == "roundtable-total-budget-exhausted"
+
+    before = list(store.connection.iterdump())
+    totals = roundtable.review_totals(store, result["planRevision"])
+    callback_count = len(seen)
+    discovery = []
+
+    def forbidden_discovery(*args, **kwargs):
+        discovery.append((args, kwargs))
+        pytest.fail("Exhausted review must not discover or launch another provider")
+
+    monkeypatch.setattr(roundtable, "_executable", forbidden_discovery)
+
+    def public_cli(arguments):
+        code = plan_cli.main(["--json", *arguments])
+        captured = capsys.readouterr()
+        return code, json.loads(captured.out)
+
+    code, exhausted = public_cli(
+        [
+            "--workspace",
+            str(store.workspace),
+            "roundtable",
+            "--reviewer",
+            json.dumps(reviewer),
+            "--max-total",
+            "1",
+        ]
+    )
+    assert code == 2 and exhausted["isError"]
+    assert "roundtable-total-budget-exhausted" in exhausted["text"]
+    assert "used 1/1" in exhausted["text"]
+    assert "findings --expand" in exhausted["next"]
+    assert "No additional review launch is authorized" in exhausted["next"]
+    assert list(store.connection.iterdump()) == before
+    assert roundtable.review_totals(store, result["planRevision"]) == totals
+    assert len(seen) == callback_count and discovery == []
+
+    # Advice failure, not an accounting failure: public refusal above already
+    # preserved its real stored review and spent logical attempt.
+    assert "waive the cap" not in str(caught.value)
+    assert "omitting --max-total" not in str(caught.value)
+    diagnostic = json.loads(
+        next(
+            line.removeprefix("Recorded review: ")
+            for line in exhausted["text"].splitlines()
+            if line.startswith("Recorded review: ")
+        )
+    )
+    assert diagnostic["usageUnit"] == "logical review attempts"
+    assert diagnostic["reviewer"] == reviewer["name"]
+    assert diagnostic["provider"] == provider
+    assert diagnostic["id"] == saved["id"]
+    assert diagnostic["roundId"] == result["roundId"]
+    assert diagnostic["manifestRevision"] == saved["plan_revision"]
+    assert diagnostic["exitCode"] == saved["exit_code"]
+    assert diagnostic["invalid"] == saved["invalid"]
+    assert diagnostic["findings"] == saved["findings"]
+    assert diagnostic["shards"] == saved["shards"]
+    shard_details = json.loads(saved["shardDetails"])
+    final_errors = [
+        shard["primaryError"]["reason"] for shard in shard_details if shard.get("primaryError")
+    ]
+    assert diagnostic["recordedErrors"] == final_errors
+    assert diagnostic["priorReshardReason"] == retry["reason"]
+    if double_overflow:
+        assert errors[1] in "\n".join(diagnostic["recordedErrors"])
+        assert diagnostic["failureCause"] == "Unknown beyond the recorded errors"
+    else:
+        assert diagnostic["recordedErrors"] == []
+        assert diagnostic["failureCause"] == "No final failure recorded"
+    command = next(
+        line.removeprefix("Inspect retained review: ")
+        for line in exhausted["text"].splitlines()
+        if line.startswith("Inspect retained review: ")
+    )
+    arguments = shlex.split(command)
+    assert arguments[:3] == ["python", "-m", "codex_harness.core.plan_cli"]
+    assert arguments[3:5] == ["--workspace", str(store.workspace)]
+    assert arguments[5:] == ["review", diagnostic["id"]]
+    detail_code, detail = public_cli(arguments[3:])
+    assert detail_code == 0 and not detail["isError"]
+    assert detail["data"]["id"] == diagnostic["id"]
+    assert detail["data"]["reviewers"][0]["id"] == saved["id"]
+    assert detail["data"]["reviewers"][0]["shardDetails"] == shard_details
+    assert list(store.connection.iterdump()) == before
+    assert roundtable.review_totals(store, result["planRevision"]) == totals
+    assert len(seen) == callback_count and discovery == []
