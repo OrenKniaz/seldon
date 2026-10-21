@@ -142,8 +142,33 @@ p publish
 Real roundtables launch providers normally. **Test only:** add `--test-only-review-output response.json` with explicit reviewers to inject a finding array (e.g. `[]`) instead; never treat injected reviews as live evidence.
 Review budget defaults to 2 attempts per reviewer per manifest revision; `--max-rounds N` changes it. Totals span revisions; optional `--max-total N` caps total invocations per reviewer.
 ### Host-driven resolution after a review
+
+For MCP acceptance scenario authoring, inspect `harness_schema tool=harness_accept_scenarios`.
+After confirming the current locked vision, `harness_accept_scenarios derive=true`
+replaces the scenario set with drafts carrying canonical coverage IDs: `first-moment`
+and one `scope-N` per scope item. Without arguments, the tool lists saved scenarios.
+Keep every returned ID and its intent; fill nonblank `id`, `title`, `given`, executable
+`steps`, and an `expect` object, then submit the **complete** array using
+`harness_accept_scenarios scenarios=<array>`. This replaces the set rather than merging it.
+The public schema includes a planned command/expectation example: replace it with
+actual product commands and observations for each scenario. Empty steps or expectations
+remain drafts. Saving executable scenarios proves neither execution nor acceptance.
+If coverage is refused, list the saved set before deriving again so authored work is preserved.
+
+For packet inspection in MCP, first prepare the intended project's `template` directory
+with its authored protected test files, then call `harness_compile` with the known
+intended `expected_workspace`. The tool renders canonical requirement documents through
+the existing compiler and returns the recorded manifest, including its revision and
+protected-file binding. It accepts no alternate template path. It neither fabricates
+missing test files nor grants approval, review, publication or execution credit.
+Then use `harness_packet_view id=<bead> provider=<provider>` to read the current packet.
+Packet view stays read-only; after a plan or protected-file change, refresh with an
+explicit `harness_compile` before reading it again. Invalid manifests and missing
+protected files remain refusals. The CLI equivalent remains
+`compile --template template --out manifest.json`.
+
 - `reviewResolution` in MCP status / CLI JSON is revision-stamped advice with one action; it grants no publication, approval or dispatch credit.
-- The host owns edits and dispositions. Use existing CLI compile/audit/roundtable routes; there is no new MCP tool or hidden provider loop.
+- The host owns edits and dispositions. Use `harness_compile` for explicit canonical compilation in MCP; audit/roundtable retain their existing CLI routes, with no hidden provider loop.
 - Native approval and actual questions come first. All open non-readiness findings block, including minor, stale and null-stage findings.
 - Inspect the recorded review, repair the owned plan/tests, then resolve, reject or defer with evidence and reasons; severity never chooses disposition.
 - Deferred findings remain known gaps. All blocker/member IDs remain; 512-character excerpts/truncation flags and `detailRoute` lead to full review detail.

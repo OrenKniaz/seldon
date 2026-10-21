@@ -155,6 +155,14 @@ TOOLS = [
         [],
     ),
     _tool(
+        "harness_compile",
+        "Compile the current canonical plan using this workspace's existing template directory "
+        "and authored protected test files. Render canonical requirement documents and record "
+        "the bound manifest; return it for readback. No approval, review, publication, worker "
+        "or provider execution. Refresh compilation after plan or protected-file changes.",
+        {},
+    ),
+    _tool(
         "harness_packet_view",
         "Read the exact worker packet and its size from the current compiled or published plan.",
         {"id": STRING, "provider": {"type": "string", "enum": ["codex", "claude", "copilot"]}},
@@ -203,10 +211,35 @@ TOOLS = [
     ),
     _tool(
         "harness_accept_scenarios",
-        "Derive, list or replace vision acceptance scenarios.",
+        "Derive, list or replace vision acceptance scenarios. First derive canonical coverage "
+        "from the current locked vision, then retain every returned ID when replacing the set.",
         {
-            "derive": {"type": "boolean"},
-            "scenarios": {"type": "array", "items": {"type": "object"}},
+            "derive": {
+                "type": "boolean",
+                "description": "true replaces scenarios with derived drafts for first-moment "
+                "and every scope item. Omit both arguments to list current scenarios.",
+            },
+            "scenarios": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": "Complete replacement, not a partial update. First call "
+                "harness_accept_scenarios derive=true; retain all returned IDs and titles. "
+                "Each scenario needs nonblank id/title/given, steps (shell command strings or "
+                "objects with command and optional expect), and expect (object). Empty steps "
+                "or expectations remain draft. Adapt the planned example to actual product "
+                "commands and observable expectations; saving does not execute or prove them.",
+                "examples": [
+                    [
+                        {
+                            "id": "first-moment",
+                            "title": "Replace with the returned first-moment title",
+                            "given": "A clean install with no user data",
+                            "steps": ["python -m product --help"],
+                            "expect": {"exit": 0, "stdout": "Usage"},
+                        }
+                    ]
+                ],
+            },
         },
         [],
     ),
@@ -628,7 +661,7 @@ def packet_view(store, bead_id: str, provider: str = "codex") -> dict:
     if manifest is None:
         raise ValueError(
             "No current compiled or published manifest. "
-            "Next: compile --template template --out manifest.json"
+            "Next: harness_compile (CLI: compile --template template --out manifest.json)"
         )
     if bead_id not in manifest["beads"]:
         raise ValueError(f"Unknown bead: {bead_id}")
@@ -934,6 +967,17 @@ class PlannerServer:
                 )
             if name == "harness_upsert_node" and isinstance(error, ValueError | KeyError):
                 body += "\n" + node_error_help(arguments)
+            if name == "harness_accept_scenarios" and operation_error_code in {
+                "acceptance-scenario-invalid",
+                "acceptance-coverage-required",
+            }:
+                body += (
+                    "\nInspect harness_schema tool=harness_accept_scenarios. "
+                    "List current scenarios with harness_accept_scenarios; if none are usable, "
+                    "harness_accept_scenarios derive=true replaces them with locked-vision drafts. "
+                    "Retain every returned first-moment/scope ID; supply given, executable steps "
+                    "and expect, then save the complete scenarios array."
+                )
             if name == "harness_accept_review" and self.result_data:
                 body = views.review_card(self.result_data) + "\n" + body
             if name == "harness_accept_assess":
@@ -1354,7 +1398,8 @@ class PlannerServer:
             ):
                 body += (
                     "\nDraft/stale scenarios: supply steps and expectations, "
-                    "then save with accept-scenarios --input."
+                    "then save the complete set with harness_accept_scenarios scenarios=<array>; "
+                    "harness_schema tool=harness_accept_scenarios shows the planned example."
                 )
             return body
         if name.startswith("harness_mail_"):
@@ -1399,6 +1444,21 @@ class PlannerServer:
             self.result_data = self._status()
             return "No plan exists in the fixed server workspace; no store was created."
         store = self._store()
+        if name == "harness_compile":
+            from codex_harness.core.graph import load_plan
+            from codex_harness.core.spine import compile_manifest
+
+            template = self.workspace / "template"
+            if template.resolve() != template:
+                raise ValueError("Compilation template must stay in the fixed workspace")
+            # Validate the canonical graph before rendering or recording a compile event.
+            # The existing compiler then binds and checks actual protected file contents.
+            with TemporaryDirectory(prefix="planner-compile-") as directory:
+                path = Path(directory) / "manifest.json"
+                path.write_text(json.dumps(compile_manifest(store.spine())), encoding="utf-8")
+                load_plan(path)
+                self.result_data = store.compile_template(template)
+            return f"Compiled current manifest: {self.result_data['planRevision']}"
         if name == "harness_readiness":
             from codex_harness.core.readiness import readiness_review, render_readiness
 

@@ -286,6 +286,7 @@ EXPECTED_TOOLS = {
     "harness_waves",
     "harness_review",
     "harness_readiness",
+    "harness_compile",
     "harness_packet_view",
     "harness_show_node",
     "harness_nodes",
@@ -1060,6 +1061,164 @@ def start(server):
     return call(server, "harness_plan_start", idea="Split the bill fairly", name="tip-split")
 
 
+def test_public_acceptance_contract_derives_complete_executable_coverage(server, monkeypatch):
+    def no_process(*args, **kwargs):
+        raise AssertionError("Scenario authoring must not execute a command or provider")
+
+    monkeypatch.setattr(subprocess, "Popen", no_process)
+    start(server)
+    vision = server.store.spine().node("V1")
+    vision["fields"] = {
+        "first_user_moment": "Split a bill fairly",
+        "scope_in": ["Round cents", "Show each diner's share"],
+    }
+    call(server, "harness_upsert_node", node=vision)
+    native_confirm(server, "align")
+    call(server, "harness_advance", to_phase="expand")
+    call(server, "harness_advance", to_phase="vision-lock")
+    native_confirm(server, "vision-lock")
+    call(server, "harness_schema", tool="harness_accept_scenarios")
+    contract = server.result_data
+    properties = contract["inputSchema"]["properties"]
+    assert properties["derive"]["type"] == "boolean"
+    call(server, "harness_accept_scenarios", derive=True)
+    derived = server.result_data["scenarios"]
+    assert {item["id"] for item in derived} == {"first-moment", "scope-1", "scope-2"}
+    # Populate returned canonical IDs using only the advertised planned example.
+    examples = properties["scenarios"].get("examples", [])
+    example = examples[0][0] if examples else {}
+    planned = [
+        {
+            **item,
+            "steps": example.get("steps", item["steps"]),
+            "expect": example.get("expect", item["expect"]),
+        }
+        for item in derived
+    ]
+    call(server, "harness_accept_scenarios", scenarios=planned)
+    saved = server.result_data["scenarios"]
+    rejected = call(server, "harness_accept_scenarios", error=True, scenarios=planned[:-1])
+    assert "acceptance-coverage-required" in rejected
+    call(server, "harness_accept_scenarios")
+    assert server.result_data["scenarios"] == saved
+    print(json.dumps({"publicContract": contract, "saved": saved, "missingCoverage": rejected}))
+    assert all(item["executable"] and item["status"] == "planned" for item in saved), saved
+    assert "harness_accept_scenarios derive=true" in rejected
+    assert "given" in properties["scenarios"]["description"]
+    assert "expect" in properties["scenarios"]["description"]
+    assert all(item["nodeRevisions"]["V1"] for item in saved)
+    assert (
+        server.store.connection.execute("SELECT count(*) FROM acceptance_runs").fetchone()[0] == 0
+    )
+
+
+def test_public_compile_then_packet_current_manifest_without_execution(
+    server, tmp_path, monkeypatch
+):
+    def no_process(*args, **kwargs):
+        raise AssertionError(
+            "Compilation and packet inspection must not launch a worker or provider"
+        )
+
+    monkeypatch.setattr(subprocess, "Popen", no_process)
+    start(server)
+    add_fixture(server)
+    template = tmp_path / "template"
+    # Authored static test inputs are prerequisites, never generated execution proof.
+    for source in (FIXTURE.parent / "template" / "tests").rglob("*"):
+        if source.is_file():
+            target = template / "tests" / source.relative_to(FIXTURE.parent / "template" / "tests")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+    before_phase = server.store.phase()
+    before_packet = call(server, "harness_packet_view", error=True, id="A", provider="codex")
+    reply = rpc(server, "tools/call", {"name": "harness_compile", "arguments": {}})["result"]
+    print(json.dumps({"packetBeforeCompile": before_packet, "publicCompile": reply}))
+    assert not reply["isError"], reply
+    manifest = reply["structuredContent"]
+    assert "harness_compile" in before_packet
+    assert manifest["planRevision"] == server.store.manifest_revision()
+    assert manifest["requirementFilesRevision"]
+    recorded = json.loads(
+        server.store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='manifest-compiled' ORDER BY id DESC"
+        ).fetchone()[0]
+    )
+    assert recorded["manifest"] == manifest
+    assert recorded["spine"] == server.store.spine().to_dict()
+    assert server.store.phase() == before_phase
+    assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+    event_count = server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+    call(server, "harness_packet_view", id="A", provider="codex")
+    packet = server.result_data
+    assert packet["bytes"] == len(packet["packet"].encode("utf-8")) > 0
+    assert packet["characters"] == len(packet["packet"])
+    assert (
+        server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0] == event_count
+    )
+    for context, code in (
+        ({}, "workspace-assertion-required"),
+        ({"expected_workspace": str(tmp_path / "other")}, "workspace-mismatch"),
+    ):
+        refused = workspace_wire(server, "harness_compile", **context)
+        assert refused["isError"] and code in refused["content"][0]["text"], refused
+        assert (
+            server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+            == event_count
+        )
+    (template / "tests").rename(template / "authored-tests-held")
+    try:
+        missing = call(server, "harness_compile", error=True)
+        assert "plan-requirement-file-missing" in missing
+        assert (
+            server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+            == event_count
+        )
+    finally:
+        (template / "authored-tests-held").rename(template / "tests")
+    server.close()
+    with open_plan_store(tmp_path) as reopened:
+        assert reopened.manifest_revision() == manifest["planRevision"]
+    call(server, "harness_packet_view", id="A", provider="codex")
+    assert server.result_data == packet
+    protected = next((template / "tests").rglob("test_*.py"))
+    original = protected.read_bytes()
+    protected.write_bytes(original + b"\n# Changed protected test input\n")
+    stale = call(server, "harness_packet_view", error=True, id="A", provider="codex")
+    assert "harness_compile" in stale
+    protected.write_bytes(original)
+    bead = server.store.spine().node("A")
+    bead["text"] += " Current revised plan."
+    call(server, "harness_upsert_node", node=bead)
+    assert "harness_compile" in call(server, "harness_packet_view", error=True, id="A")
+    call(server, "harness_compile")
+    assert server.result_data["planRevision"] != manifest["planRevision"]
+    call(server, "harness_packet_view", id="A")
+    bead["fields"]["ownedFiles"] = ["../escape.py"]
+    call(server, "harness_upsert_node", node=bead)
+    compiled_count = server.store.connection.execute(
+        "SELECT count(*) FROM events WHERE kind='manifest-compiled'"
+    ).fetchone()[0]
+    invalid = call(server, "harness_compile", error=True)
+    assert "plan-schema-invalid" in invalid
+    assert (
+        server.store.connection.execute(
+            "SELECT count(*) FROM events WHERE kind='manifest-compiled'"
+        ).fetchone()[0]
+        == compiled_count
+    )
+    call(server, "harness_packet_view", error=True, id="A")
+    assert not (tmp_path / "escape.py").exists()
+    assert server.store.phase() == before_phase
+    assert (
+        server.store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
+        ).fetchone()
+        is None
+    )
+    assert not (tmp_path / "plan" / "revisions").exists()
+
+
 @pytest.mark.parametrize("existing_plan", [False, True])
 def test_preflight_protocol_never_opens_or_creates_plan(tmp_path, monkeypatch, existing_plan):
     inject_mock_discovery(monkeypatch)
@@ -1380,6 +1539,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_resolve_finding",
             "harness_resolve_findings",
             "harness_packet_view",
+            "harness_compile",
             "harness_readiness",
             "harness_preflight",
             "harness_intake",
