@@ -13,6 +13,8 @@ from codex_harness.core.mcp_planner import PlannerServer
 
 
 def invoke(server, tool_name, **arguments):
+    # Same-project fixtures explicitly name their intended workspace on the wire.
+    arguments = {"expected_workspace": str(server.workspace), **arguments}
     return server.handle_line(
         json.dumps(
             {
@@ -23,6 +25,58 @@ def invoke(server, tool_name, **arguments):
             }
         )
     )["result"]
+
+
+def test_public_vision_schema_populates_native_done_summary_without_losing_detail(tmp_path):
+    from tests.python.core.test_mcp_planner import answer_native, begin_native
+
+    server = PlannerServer(tmp_path)
+    try:
+        discovered = invoke(server, "harness_schema", kind="vision")
+        assert not discovered["isError"]
+        guide = discovered["structuredContent"]
+        assert not (tmp_path / ".codex-harness").exists()
+        example = deepcopy(guide["example"]["node"])
+        detail = "Retained extra done_means words: accepted edge cases and complete intent."
+        example["fields"]["done_means"] = detail
+        assert not invoke(
+            server, "harness_plan_start", idea="Source-only schema example", name="Schema demo"
+        )["isError"]
+        assert not invoke(server, "harness_upsert_node", node=example)["isError"]
+        assert invoke(server, "harness_advance", to_phase="expand")["isError"]
+
+        align = begin_native(server)
+        assert align["method"] == "elicitation/create"
+        aligned = answer_native(
+            server,
+            align["id"],
+            approve=True,
+            statement="Synthetic source-client setup to reach vision-lock; no human claim.",
+            conditions="",
+        )
+        assert aligned["result"]["structuredContent"]["state"] == "approved"
+        assert not invoke(server, "harness_advance", to_phase="expand")["isError"]
+        assert not invoke(server, "harness_advance", to_phase="vision-lock")["isError"]
+        requested = begin_native(server, gate="vision-lock")
+        assert requested["method"] == "elicitation/create"
+        card = requested["params"]["message"]
+        assert detail in card and "Done means:" in card
+        primary_done = card.split("\n\nDone:\n", 1)[1].split("\n\n", 1)[0]
+        # Reach the actual public card before checking the previously missing help/example.
+        assert primary_done != "Not recorded", card
+        assert primary_done == guide["example"]["node"]["fields"]["done_feels_like"]
+        for key in ("done_feels_like", "doneFeelsLike", "done", "done_means"):
+            assert key in guide["fieldRules"]
+        stored = invoke(server, "harness_show_node", id=example["id"])["structuredContent"]
+        assert stored["fields"] == example["fields"]
+        cancelled = answer_native(server, requested["id"], action="cancel")
+        assert cancelled["result"]["structuredContent"]["state"] == "cancel"
+        assert invoke(server, "harness_advance", to_phase="features")["isError"]
+        status = invoke(server, "harness_plan_status")["structuredContent"]
+        assert status["phase"] == "vision-lock"
+        assert status["approval"]["gate"] != "vision-lock" or not status["approval"]["granted"]
+    finally:
+        server.close()
 
 
 def typed_template(server, tool):
@@ -386,7 +440,14 @@ def test_each_discovered_example_passes_real_store_and_preserves_open_fields(tmp
         events = server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         contract = invoke(server, "harness_schema", tool="harness_record_confirmation")
         assert not contract["isError"]
-        assert contract["structuredContent"]["inputSchema"]["required"] == ["gate"]
+        assert contract["structuredContent"]["inputSchema"]["required"] == [
+            "gate",
+            "expected_workspace",
+        ]
+        assert (
+            contract["structuredContent"]["inputSchema"]["properties"]["expected_workspace"]["type"]
+            == "string"
+        )
         assert "user_statement" not in contract["structuredContent"]["inputSchema"]["properties"]
         assert server.store.spine().plan_revision() == before
         assert (
@@ -667,6 +728,7 @@ def test_first_typed_refusal_teaches_owner_contract_then_supported_diagnostic(
 
 def test_guide_acceptance_node_route_roundtrips_without_proof_credit(tmp_path, capsys):
     from codex_harness.core.plan_cli import main
+    from codex_harness.core.plan_store import open_plan_store_readonly
 
     guide_path = Path(__file__).resolve().parents[3] / "docs/operator/planner-guide.md"
     guide_text = guide_path.read_text(encoding="utf-8")
@@ -697,7 +759,15 @@ def test_guide_acceptance_node_route_roundtrips_without_proof_credit(tmp_path, c
     server = PlannerServer(tmp_path)
     try:
         status = invoke(server, "harness_plan_status")["structuredContent"]
-        assert server.store.spine().node(payload["id"]) == payload
+        with open_plan_store_readonly(tmp_path) as stored:
+            assert stored.spine().node(payload["id"]) == payload
+            for table in (
+                "acceptance_scenarios",
+                "acceptance_runs",
+                "acceptance_reviews",
+                "approvals",
+            ):
+                assert stored.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
         assert payload["fields"] == {}  # The emitted example has no executable steps.
         assert status["phase"] == "align" and status["approval"]["granted"] is False
         assert status["acceptance"]["accepted"] is False
@@ -705,11 +775,18 @@ def test_guide_acceptance_node_route_roundtrips_without_proof_credit(tmp_path, c
             "id": payload["id"],
             "gap": "acceptance scenario has no executable steps",
         } in status["coverage_gaps"]
-        for table in ("acceptance_scenarios", "acceptance_runs", "acceptance_reviews", "approvals"):
-            assert (
-                server.store.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
-            )
-        assert invoke(server, "harness_schema", kind="acceptance")["structuredContent"] == schema
+        wire_schema = invoke(server, "harness_schema", kind="acceptance")["structuredContent"]
+        # The explicit --workspace CLI producer retains the constructor contract;
+        # wire calls additionally require the caller's intended-workspace assertion.
+        assert wire_schema["inputSchema"]["required"] == [
+            *schema["inputSchema"]["required"],
+            "expected_workspace",
+        ]
+        assert (
+            wire_schema["inputSchema"]["properties"].pop("expected_workspace")["type"] == "string"
+        )
+        wire_schema["inputSchema"]["required"] = schema["inputSchema"]["required"]
+        assert wire_schema == schema
         print(
             json.dumps(
                 dict(

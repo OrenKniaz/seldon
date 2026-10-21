@@ -5,6 +5,16 @@ from copy import deepcopy
 from codex_harness.core.spine import ALLOWED_PARENTS
 
 FIELD_RULES = {
+    "vision": (
+        "Optional understanding-card fields: vision, users, first_user_moment "
+        "(alias firstUserMoment), scope_in (scopeIn), scope_out (scopeOut), "
+        "quality_bar (qualityBar, quality), done_feels_like (doneFeelsLike, done), "
+        "and assumptions. Listed aliases retain their existing precedence. "
+        "Use done_feels_like for the primary Done summary; done_means is an "
+        "additional detail field, not a primary Done alias. Other fields remain "
+        "open finite JSON and their complete words are retained. These are "
+        "planned understanding fields, not approval or delivery proof."
+    ),
     "bead": (
         "fields.ownedFiles: nonempty array of nonblank strings; "
         "fields.proofModule: nonblank string; fields.dependsOn and fields.lessons: "
@@ -205,6 +215,18 @@ def _node(kind, node_id, parents, fields=None, text=None):
 def node_example(kind):
     """Small planning examples, never observations or evidence of acceptance."""
     vision = _node("vision", "V1", [])
+    if kind == "vision":
+        vision["fields"] = {
+            "vision": vision["text"],
+            "users": ["A person submitting parser input"],
+            "first_user_moment": "Submit malformed input and see a clear error.",
+            "scope_in": ["Parse input", "Reject malformed input without saving data"],
+            "scope_out": ["GUI"],
+            "quality_bar": "Keep original data unchanged when input is invalid.",
+            "done_feels_like": "A new user submits malformed input, sees a clear error, "
+            "and no data is saved.",
+            "assumptions": [],
+        }
     feature = _node("feature", "F1", ["V1"])
     requirement = _node(
         "requirement",

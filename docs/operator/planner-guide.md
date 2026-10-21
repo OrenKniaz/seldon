@@ -44,6 +44,18 @@ Success exits 0; input/gate/audit refusal or any failing quality check exits 2. 
 Native confirmation requires MCP2025-06-18, client `elicitation` capability and initialization. The server displays the full stored card and collects explicit approval, complete words and conditions; conditions block credit. Decline, cancel, timeout, disconnect or changed revision grant none. Client support is conditional, not established by source tests. CLI quotes/`--by` labels refuse with `plan-confirmation-origin-unavailable`; they cannot substitute for the native response. Plan-to-roundtable confirmation remains unchanged.
 `workers.json` is an array of exact `{bead,provider,model,effort}` objects, one per published bead, using approved existing capacity and canonical provider names. MCP equivalents are `harness_worker_start expected_revision=<revision> workers=<array>` and `harness_worker_status job_id=<id>`. Starts return one durable job per publication; reconnect/status never relaunches. Missing terminal evidence and current liveness remain unknown. No retry, install or permission expansion is implied.
 Nodes require `id`, `kind`, `title`, `text`, `parents` (id array), and `fields` (object).
+Before writing a vision, use `p schema --kind vision` (MCP: `harness_schema kind="vision"`).
+Its `fieldRules` and runnable `example.node` document the existing primary
+understanding-card fields. Replace the example's planned words with the actual
+agreed vision; preserve the current node ID, full intent and other recorded fields.
+Use `fields.done_feels_like` for the primary **Done** summary. Existing aliases
+`doneFeelsLike` and `done` still work with their existing precedence. Arbitrary
+fields such as `done_means` retain their complete words as additional detail;
+they do not populate that primary summary. The example also names users, first
+moment, scope and quality fields. This guidance changes no stored data or aliases.
+Writing these fields grants no approval or delivery proof; changes to the displayed
+understanding still require the existing fresh native confirmation for its gate
+and revision. Confirmation takes the gate, not a replacement summary or override.
 `accept-run` requires `--subject product|oracle`: only product runs prove delivery, satisfy acceptance, or permit rebind; oracle runs are scenarios verified against the reference implementation (dry run). Legacy runs without a subject are product only when `<repo>/../evidence/run.json` exists; otherwise oracle.
 Acceptance: `accept-scenarios` lists; `--input @scenarios.json` saves `{id,title,given,steps,expect}` for `first-moment` and every `scope-N`; optional `nodeIds` bind other spine nodes. Steps are shell strings or `{command,expect}`; `expect` supports `stdout`/`stderr`, `stdoutRegex`/`stderrRegex`, and `exit` (default 0). Prose-only `--derive` results are `draft`, `executable: false`: supply steps and expectations. Edits retain scenarios and mark changed node references `stale`; save reviewed scenarios to refresh them.
 Use `{repo}`, `{python}`, `{home}`, `{data}` in commands. Each scenario starts in an empty cwd with fresh HOME/data, never a seeded fixture. Vision fields can supply structured `first_user_moment`/`scope_in` items or `acceptance` entries with these ids.
