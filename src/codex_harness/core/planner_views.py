@@ -695,6 +695,11 @@ def review_author_handoff(store, status: dict, *, cli_prefix=None) -> dict:
                 "memberCount": row["memberCount"],
                 "nodeId": row.get("node_id"),
                 "nodeRoute": {
+                    "mcpTool": "harness_nodes",
+                    "next": cli_prefix + "nodes" if cli_prefix is not None else "harness_nodes",
+                }
+                if row.get("node_id") == "plan"
+                else {
                     "mcpTool": "harness_show_node",
                     "id": row.get("node_id"),
                     "next": (

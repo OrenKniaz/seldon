@@ -833,7 +833,7 @@ def test_public_repair_loop_refreshes_review_before_canonical_publication(
     assert len(list(project.connection.execute("SELECT id FROM review_runs"))) == 2
 
 
-def _public_review_with_members(project, monkeypatch, capsys):
+def _public_review_with_members(project, monkeypatch, capsys, node_id="R1"):
     """Actual CLI producer response; provider processes alone are source doubles."""
     from codex_harness.core import roundtable
 
@@ -845,7 +845,7 @@ def _public_review_with_members(project, monkeypatch, capsys):
         return 0, json.dumps(
             [
                 dict(
-                    node_id="R1",
+                    node_id=node_id,
                     severity="major",
                     finding="Accepted answer is unspecified",
                     suggestion=f"Member {calls[-1]}: preserve the answer contract " + "x" * 1300,
@@ -875,8 +875,11 @@ def _public_review_with_members(project, monkeypatch, capsys):
     return json.loads(capsys.readouterr().out), calls, reviewers
 
 
-def test_roundtable_return_hands_member_repairs_to_invoking_planner(project, monkeypatch, capsys):
-    response, calls, _ = _public_review_with_members(project, monkeypatch, capsys)
+@pytest.mark.parametrize("node_id", ["R1", "plan"])
+def test_roundtable_return_hands_member_repairs_to_invoking_planner(
+    project, monkeypatch, capsys, node_id
+):
+    response, calls, _ = _public_review_with_members(project, monkeypatch, capsys, node_id)
     handoff = response["data"]["authorHandoff"]
     assert len(calls) == 2
     assert handoff["manifestRevision"] == response["status"]["manifest_revision"]
@@ -916,15 +919,35 @@ def test_roundtable_return_hands_member_repairs_to_invoking_planner(project, mon
         }
         assert all(row["suggestion"] in detail["content"][0]["text"] for row in exact)
         node_route = handoff["members"][0]["nodeRoute"]
+        before = list(project.connection.iterdump())
+        cli_route = shlex.split(
+            next(
+                line.split("Inspect affected node: ", 1)[1]
+                for line in response["text"].splitlines()
+                if "Inspect affected node: " in line
+            )
+        )
+        assert plan_cli.main(cli_route[cli_route.index("--workspace") :]) == 0
+        cli_node = capsys.readouterr().out
         node = rpc(
             server,
             "tools/call",
             {
                 "name": node_route["mcpTool"],
-                "arguments": {"id": node_route["id"]},
+                "arguments": {"id": node_route["id"]} if "id" in node_route else {},
             },
         )["result"]
-        assert not node["isError"] and node["structuredContent"]["id"] == "R1"
+        assert not node["isError"]
+        if node_id == "plan":
+            assert node_route["mcpTool"] == "harness_nodes" and "id" not in node_route
+            assert node["structuredContent"]["nodes"] == project.list_nodes()
+            assert all(row["id"] in cli_node for row in project.list_nodes())
+            assert all(row["nodeId"] == "plan" for row in handoff["members"])
+        else:
+            assert node["structuredContent"]["id"] == node_id
+            assert node_id in cli_node
+        assert list(project.connection.iterdump()) == before
+        assert len(calls) == 2
     finally:
         server.close()
 
