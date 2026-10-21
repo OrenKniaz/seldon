@@ -271,6 +271,7 @@ def parser() -> argparse.ArgumentParser:
         "supervision-report": ("run",),
         "render": (),
         "roundtable": (),
+        "review-budget": ("campaign",),
         "readiness": (),
         "findings": (),
         "resolve": (),
@@ -407,6 +408,7 @@ def parser() -> argparse.ArgumentParser:
         "--baseline-ref", help="Git baseline ref; defaults to HEAD when available"
     )
     commands["roundtable"].add_argument("--max-rounds", type=int, default=2)
+    commands["review-budget"].add_argument("--max-starts", type=int, required=True)
     readiness_selection = commands["readiness"].add_mutually_exclusive_group()
     readiness_selection.add_argument("--beads", help="Comma-separated bead ids")
     readiness_selection.add_argument("--sample", type=int)
@@ -454,6 +456,14 @@ def parser() -> argparse.ArgumentParser:
 def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
     """Standard commands go through MCP unchanged; extensions reuse core owners."""
     command = args.command
+    if command == "review-budget":
+        from codex_harness.core.plan_store import open_plan_store
+        from codex_harness.core.provider_call_budget import register_planning_review_budget
+
+        if server.store is None:
+            server.store = open_plan_store(server.workspace)
+        data = register_planning_review_budget(server.store, args.campaign, args.max_starts)
+        return _reply(server, json.dumps(data, ensure_ascii=False, indent=2)), data
     if command == "advance" and (args.statement is not None or args.by != "planner"):
         if args.to != "roundtable" or server._store().phase() != "plan":
             raise ValueError("Explicit plan confirmation belongs to plan -> roundtable")
@@ -1023,7 +1033,16 @@ def main(argv=None) -> int:
             status = (
                 data if args.command == "status" and isinstance(data, dict) else server._status()
             )
-            next_step = next_command(server, status)
+            if (
+                args.command == "review-budget"
+                and not server._store().connection.execute("SELECT 1 FROM nodes LIMIT 1").fetchone()
+            ):
+                next_step = (
+                    f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
+                    'start --idea "<idea>" --name "<name>"'
+                )
+            else:
+                next_step = next_command(server, status)
             if args.command in {"worker-start", "worker-status"} and data and not reply["isError"]:
                 next_step = (
                     f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '

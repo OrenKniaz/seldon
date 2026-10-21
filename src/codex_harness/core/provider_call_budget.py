@@ -186,3 +186,122 @@ def claim_call(directory, record, attempt_dir, *, timeout=None):
                 raise ValueError("provider-call-claim-original-invalid") from None
             continue
     raise ValueError("provider-call-cap-exhausted")
+
+
+def _planning_review_originals(store):
+    """Cross-check sticky project originals; absence alone retains legacy behavior."""
+    root = store.path.parent / "planning-review-budget"
+    registrations = store.connection.execute(
+        "SELECT payload_json FROM events WHERE kind='planning-review-budget-registered' ORDER BY id"
+    ).fetchall()
+    claims = store.connection.execute(
+        "SELECT payload_json FROM events WHERE kind='planning-review-start-claimed' ORDER BY id"
+    ).fetchall()
+    if not registrations and not claims and not root.exists():
+        return None, []
+    try:
+        if len(registrations) != 1 or root.is_symlink():
+            raise ValueError("registration required")
+        original = json.loads(registrations[0][0])
+        if (
+            not isinstance(original, dict)
+            or set(original) != {"schema", "workspace", "campaign", "maxStarts"}
+            or original["schema"] != "seldon/planning-review-budget-v1"
+            or original["workspace"] != str(store.workspace)
+            or not isinstance(original["campaign"], str)
+            or not original["campaign"].strip()
+            or type(original["maxStarts"]) is not int
+            or not 1 <= original["maxStarts"] <= 10
+            or read_record_json(root / "registration.json") != original
+        ):
+            raise ValueError("registration changed")
+        digest = hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest()
+        records = [json.loads(row[0]) for row in claims]
+        if len(records) > original["maxStarts"]:
+            raise ValueError("claims exceed original cap")
+        expected = {f"{ordinal:08d}.json" for ordinal in range(1, len(records) + 1)}
+        directory = root / "claims"
+        if directory.is_symlink() or {path.name for path in directory.iterdir()} != expected:
+            raise ValueError("claim originals missing or orphaned")
+        for ordinal, record in enumerate(records, 1):
+            if (
+                not isinstance(record, dict)
+                or set(record) != {"registrationDigest", "ordinal", "reviewer", "pid"}
+                or record["registrationDigest"] != digest
+                or type(record["ordinal"]) is not int
+                or record["ordinal"] != ordinal
+                or not isinstance(record["reviewer"], dict)
+                or type(record["pid"]) is not int
+                or read_record_json(directory / f"{ordinal:08d}.json") != record
+            ):
+                raise ValueError("claim original changed")
+        return original, records
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        raise ValueError("planning-review-budget-invalid-original") from error
+
+
+def planning_review_budget(store):
+    """Read the configured review ceiling; no quota or host-call claim."""
+    original, claims = _planning_review_originals(store)
+    return None if original is None else {**original, "spentAdmissions": len(claims)}
+
+
+def register_planning_review_budget(store, campaign, max_starts):
+    """Prepare once through the public CLI, before any child; never reset a cap."""
+    if (
+        not isinstance(campaign, str)
+        or not campaign.strip()
+        or len(campaign) > 128
+        or type(max_starts) is not int
+        or not 1 <= max_starts <= 10
+    ):
+        raise ValueError("planning-review-budget-invalid-scope")
+    proposed = dict(
+        schema="seldon/planning-review-budget-v1",
+        workspace=str(store.workspace),
+        campaign=campaign,
+        maxStarts=max_starts,
+    )
+    with store._transaction():
+        original, claims = _planning_review_originals(store)
+        if original is not None:
+            if proposed != original:
+                raise ValueError("planning-review-budget-immutable-scope")
+        else:
+            root = store.path.parent / "planning-review-budget"
+            root.mkdir()
+            (root / "claims").mkdir()
+            write_record_json_once(root / "registration.json", proposed)
+            store._event("planning-review-budget-registered", proposed)
+    return {**proposed, "spentAdmissions": len(claims)}
+
+
+def claim_planning_review_start(store, reviewer):
+    """Reserve one durable review admission before a possible real child start.
+
+    Existing SQLite writer reservation serializes participating processes. File
+    originals precede their events: interruption leaves an orphan and holds,
+    never a refundable launch or fresh allowance. A spent admission is not proof
+    the process started. Worker job guards stay separate.
+    """
+    with store._transaction():
+        original, claims = _planning_review_originals(store)
+        if original is None:
+            return None
+        if len(claims) >= original["maxStarts"]:
+            raise ValueError("planning-review-start-cap-exhausted")
+        ordinal = len(claims) + 1
+        record = dict(
+            registrationDigest=hashlib.sha256(
+                json.dumps(original, sort_keys=True).encode()
+            ).hexdigest(),
+            ordinal=ordinal,
+            reviewer=reviewer,
+            pid=os.getpid(),
+        )
+        write_record_json_once(
+            store.path.parent / "planning-review-budget" / "claims" / f"{ordinal:08d}.json",
+            record,
+        )
+        store._event("planning-review-start-claimed", record)
+    return ordinal

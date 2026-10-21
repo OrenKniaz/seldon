@@ -23,6 +23,7 @@ from uuid import uuid4
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
+from codex_harness.core.provider_call_budget import claim_planning_review_start
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
 
@@ -1025,9 +1026,12 @@ def _review_shard(
     try:
         launch = _launch_review(reviewer, shard["packet"], executable)
         directory = TemporaryDirectory(prefix="harness-roundtable-")
-        if before_launch is not None:
+        if before_launch is not None or runner is None:
             checking_launch = True
-            before_launch()
+            if before_launch is not None:
+                before_launch()
+            if runner is None:
+                claim_planning_review_start(store, reviewer)
             checking_launch = False
         response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
         record["didRunProvider"] = runner is None
@@ -1864,6 +1868,7 @@ def assess_execution_findings(store, **request):
         if _execution_context(store, request) != header["context"]:
             raise ValueError("execution-prelaunch-selection-changed")
         with TemporaryDirectory(prefix="harness-execution-review-") as cwd:
+            claim_planning_review_start(store, reviewer)
             attempted = True
             response = _run(launch, Path(cwd), request["timeout"], raw=True)
             # Preserve the actual return before temporary-directory cleanup.
