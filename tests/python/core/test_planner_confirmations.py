@@ -1,6 +1,7 @@
 """Real store persistence for the leaf; native transport/human interaction is not tested."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,277 @@ def answer(**updates):
 
 def approvals(store):
     return [dict(row) for row in store.connection.execute("SELECT * FROM approvals")]
+
+
+def recorded_reviewer(store, *, catalog_update=None):
+    """Supplied source-only observation; never actual account discovery/entitlement."""
+    from tests.python.core.test_plan_store import mock_catalog, mock_choice
+
+    catalog = mock_catalog()
+    if catalog_update:
+        catalog_update(catalog)
+    current = store.record_reviewer_catalog(catalog, store.spine().plan_revision())["catalog"]
+    node = mock_choice(current)
+    result = store.record_reviewer_selection(node, store.spine().plan_revision())
+    return current, node, result
+
+
+def database_records(store):
+    return list(store.connection.iterdump())
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"approve": False},
+        {"approve": "true"},
+        {"approve": 1},
+        {"statement": " \n\t"},
+        {"statement": None},
+        {"conditions": "Only if availability later becomes known"},
+        {"conditions": None},
+    ],
+)
+def test_ordinary_reviewer_action_refuses_without_writes_or_native_credit(store, updates):
+    _, node, selected = recorded_reviewer(store)
+    before = database_records(store)
+    with pytest.raises(PlanStoreError) as error:
+        store.confirm_reviewer_selection(node["id"], selected["spineRevision"], **answer(**updates))
+    assert error.value.code == "plan-reviewer-confirmation-action-invalid"
+    assert database_records(store) == before
+    assert store.spine().node(node["id"])["fields"]["confirmation"] is None
+    assert approvals(store) == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "approvalId",
+        "eventId",
+        "sourceRef",
+        "authorizedScopeDigest",
+        "origin",
+        "by",
+        "human_identity_verified",
+    ],
+)
+def test_ordinary_reviewer_action_rejects_caller_authority_injection(store, field):
+    _, node, selected = recorded_reviewer(store)
+    before = database_records(store)
+    with pytest.raises(TypeError, match=field):
+        store.confirm_reviewer_selection(
+            node["id"], selected["spineRevision"], **answer(), **{field: "caller-injected"}
+        )
+    assert database_records(store) == before
+    assert approvals(store) == []
+
+
+@pytest.mark.parametrize(
+    "case,code",
+    [
+        ("stale-revision", "plan-spine-stale"),
+        ("edited-proposal", "plan-reviewer-confirmation-target-stale"),
+        ("wrong-schema", "plan-reviewer-confirmation-target-stale"),
+        ("wrong-target", "plan-reviewer-confirmation-target-invalid"),
+        ("replaced-catalog", "reviewer-catalog-stale"),
+    ],
+)
+def test_ordinary_reviewer_action_rechecks_recorded_preimage_and_current_catalog(store, case, code):
+    from tests.python.core.test_plan_store import mock_catalog
+
+    _, node, selected = recorded_reviewer(store)
+    revision, target = selected["spineRevision"], node["id"]
+    if case == "stale-revision":
+        vision = store.spine().node("V1")
+        vision["title"] += " changed"
+        store.upsert_node(vision)
+    elif case in ("edited-proposal", "wrong-schema"):
+        proposal = store.spine().node(target)
+        if case == "edited-proposal":
+            proposal["fields"]["recommendation"]["reason"] += " changed"
+        else:
+            proposal["fields"]["schema"] = "dot-intake-v1"
+        store.upsert_node(proposal)
+        revision = store.spine().plan_revision()
+    elif case == "wrong-target":
+        target = "V1"
+    else:
+        catalog = mock_catalog()
+        catalog["id"] = "RC-00000000-0000-0000-0000-000000000002"
+        store.record_reviewer_catalog(catalog, revision)
+        assert store.spine().plan_revision() == revision
+    before = database_records(store)
+    with pytest.raises(ValueError) as error:
+        store.confirm_reviewer_selection(target, revision, **answer())
+    assert getattr(error.value, "code", str(error.value).split(":")[0]) == code
+    assert database_records(store) == before
+    assert approvals(store) == []
+
+
+def test_ordinary_reviewer_confirmation_replay_and_event_node_failure_are_atomic(
+    store, monkeypatch
+):
+    _, node, selected = recorded_reviewer(store)
+    before = database_records(store)
+    save = store._save_draft_nodes
+
+    def fail_after_node(*args, **kwargs):
+        save(*args, **kwargs)
+        raise PlanStoreError("injected-node-failure", "Rollback event and node together")
+
+    monkeypatch.setattr(store, "_save_draft_nodes", fail_after_node)
+    with pytest.raises(PlanStoreError) as error:
+        store.confirm_reviewer_selection(node["id"], selected["spineRevision"], **answer())
+    assert error.value.code == "injected-node-failure"
+    assert database_records(store) == before
+    monkeypatch.setattr(store, "_save_draft_nodes", save)
+    confirmed = store.confirm_reviewer_selection(node["id"], selected["spineRevision"], **answer())
+    before = database_records(store)
+    for revision, code in (
+        (selected["spineRevision"], "plan-spine-stale"),
+        (confirmed["spineRevision"], "plan-reviewer-confirmation-already-recorded"),
+    ):
+        with pytest.raises(PlanStoreError) as error:
+            store.confirm_reviewer_selection(node["id"], revision, **answer())
+        assert error.value.code == code
+        assert database_records(store) == before
+    assert (
+        len(
+            list(
+                store.connection.execute(
+                    "SELECT id FROM events WHERE kind='reviewer-selection-confirmed'"
+                )
+            )
+        )
+        == 1
+    )
+    assert approvals(store) == []
+    # Removing the derived attachment cannot manufacture another record for the
+    # same canonical proposal; a genuinely edited proposal needs its own scope.
+    reset = store.spine().node(node["id"])
+    reset["fields"]["confirmation"] = None
+    selected_again = store.record_reviewer_selection(reset, store.spine().plan_revision())
+    before = database_records(store)
+    with pytest.raises(PlanStoreError) as error:
+        store.confirm_reviewer_selection(node["id"], selected_again["spineRevision"], **answer())
+    assert error.value.code == "plan-reviewer-confirmation-already-recorded"
+    assert database_records(store) == before
+
+
+@pytest.mark.parametrize(
+    "change", ["node-identity", "proposal", "sessions", "authority", "catalog"]
+)
+def test_generated_reviewer_credit_cannot_follow_changed_scope(store, change):
+    from tests.python.core.test_plan_store import mock_catalog
+
+    catalog, node, selected = recorded_reviewer(store)
+    store.confirm_reviewer_selection(node["id"], selected["spineRevision"], **answer())
+    proposal = deepcopy(store.spine().node(node["id"]))
+    sessions = {"implementationSessionIds": [], "reviewerSessionIds": {}}
+    if change == "node-identity":
+        proposal["id"] = "OTHER"
+    elif change == "proposal":
+        proposal["fields"]["recommendation"]["reason"] += " changed"
+    elif change == "sessions":
+        sessions["reviewerSessionIds"]["primary"] = "new-simulated-session"
+    elif change == "authority":
+        proposal["fields"]["confirmation"]["statement"] = "Injected replacement"
+    else:
+        replacement = mock_catalog()
+        replacement["id"] = "RC-00000000-0000-0000-0000-000000000002"
+        store.record_reviewer_catalog(replacement, store.spine().plan_revision())
+    before = database_records(store)
+    with pytest.raises(ValueError) as error:
+        store.record_reviewer_selection(
+            proposal, store.spine().plan_revision(), author_sessions=sessions
+        )
+    assert getattr(error.value, "code", str(error.value).split(":")[0]) == (
+        "reviewer-catalog-stale"
+        if change == "catalog"
+        else "plan-reviewer-confirmation-scope-stale"
+    )
+    assert database_records(store) == before
+    assert approvals(store) == []
+    if change == "catalog":
+        projected = store.outcome_waves()["reviewerSelection"]
+        assert projected["state"] == "stale"
+        assert "selection" not in projected
+    assert catalog["digest"] == node["fields"]["catalogDigest"]
+
+
+@pytest.mark.parametrize("unknown", ["availability", "authentication", "review-path"])
+def test_ordinary_reviewer_confirmation_clears_only_its_own_hold(store, unknown):
+    def update(catalog):
+        provider = catalog["providers"][0]
+        if unknown == "availability":
+            provider["choices"][0]["availability"] = "unknown"
+        elif unknown == "authentication":
+            provider["authentication"] = "unknown"
+            provider["choices"][0]["availability"] = "unknown"
+        else:
+            provider["choices"][0]["reviewPathSupported"] = False
+
+    _, node, selected = recorded_reviewer(store, catalog_update=update)
+    result = store.confirm_reviewer_selection(node["id"], selected["spineRevision"], **answer())
+    assert result["unmetRequirements"] == [
+        hold
+        for hold in selected["unmetRequirements"]
+        if "reviewer-confirmation-required" not in hold
+    ]
+    assert len(result["unmetRequirements"]) >= 3
+    assert approvals(store) == []
+    assert result["approvalGranted"] is False
+    assert result["confirmationRecord"]["human_identity_verified"] is False
+
+
+@pytest.mark.parametrize("change", ["proposal", "sessions", "catalog"])
+def test_current_reviewer_assurance_read_rechecks_generated_scope(store, change):
+    """Persist a changed current draft through the existing internal writer; read must hold.
+
+    Deliberately exercise the consumer beyond public recorder's earlier refusal.
+    These supplied observations and edits are source fixtures, not actual discovery.
+    """
+    from tests.python.core.test_plan_store import mock_catalog
+
+    _, node, selected = recorded_reviewer(store)
+    store.confirm_reviewer_selection(node["id"], selected["spineRevision"], **answer())
+    original = store.spine().node(node["id"])
+    if change == "catalog":
+        replacement = mock_catalog()
+        replacement["id"] = "RC-00000000-0000-0000-0000-000000000002"
+        revision = store.spine().plan_revision()
+        store.record_reviewer_catalog(replacement, revision)
+        assert store.spine().plan_revision() == revision
+    else:
+        proposal = deepcopy(original)
+        sessions = {"implementationSessionIds": [], "reviewerSessionIds": {}}
+        if change == "proposal":
+            proposal["fields"]["recommendation"]["reason"] += " changed after confirmation"
+        else:
+            sessions["reviewerSessionIds"]["primary"] = "new-supplied-session"
+        current_revision = store.spine().plan_revision()
+        with store._transaction():
+            before = store._draft_preimage(current_revision)
+            store._save_draft_nodes(
+                before,
+                [proposal],
+                "reviewer-selection-recorded",
+                {"nodeId": node["id"], "authorSessions": sessions},
+            )
+        current = store.spine()
+        event = store._latest_draft_event("reviewer-selection-recorded")
+        assert event["nodeRevisions"][node["id"]] == current.revision(node["id"])
+    assert (
+        store.spine().node(node["id"])["fields"]["confirmation"]
+        == original["fields"]["confirmation"]
+    )
+    before_read = database_records(store)
+    projected = store.outcome_waves()["reviewerSelection"]
+    assert projected["state"] == "stale"
+    assert "selection" not in projected and "independence" not in projected
+    assert projected["unmetRequirements"]
+    assert database_records(store) == before_read
+    assert approvals(store) == []
 
 
 def test_request_card_and_response_survive_reopen_exactly(store):

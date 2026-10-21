@@ -14,6 +14,28 @@ an explicit mismatch also refuses discovery. Do not copy an unexpected server pa
 to bypass the hold. Use a correctly bound connection; no supported automatic client
 reload route is established. Existing CLI commands retain their explicit `--workspace`
 contract; this additional assertion is required at the public MCP wire boundary.
+**Ordinary reviewer choice confirmation (MCP).** Record a draft choice with
+`harness_reviewer_choice`, retaining its actual node ID and supplied catalog/session
+provenance. Discover `harness_schema tool=harness_confirm_reviewer_choice`, inspect
+the stored proposal, and refresh `harness_plan_status` after every edit. Bind the
+returned choice node ID and current `spine_revision`; supply the independently known
+absolute `expected_workspace`. Submit `approve=true`, the complete explicit selection
+statement and `conditions=""` only when that is the caller's intended action. Schema
+template nulls are unbound placeholders. Do not supply by/origin/human flags or invent
+approval/event/source references: the store generates the actual event binding and
+canonical proposal/catalog/author-session scope atomically.
+
+This is an ordinary caller-declared tester-as-user action with
+`human_identity_verified=false` and `approvalGranted=false`, not natural-person or
+native phase proof. Only the reviewer-confirmation hold can clear. Availability,
+authentication, independence, cross-provider, review-path, budget and native-final
+holds remain. Stale/replaced catalogs, edited proposals and replay refuse; inspect
+the current proposal rather than carrying an old confirmation forward. Catalog
+acquisition still reports `reviewer-catalog-producer-unavailable` when genuine
+observations are missing. Intake confirmation separately remains
+`typed-confirmation-producer-unavailable`; `harness_record_confirmation` still serves
+only align/vision-lock. No reviewer/provider is launched by this ordinary action.
+
 **Recovery ladder when stuck:**
 1. Re-run `p status`. Its `Next:` line is authoritative.
 2. `p <command> --help`.

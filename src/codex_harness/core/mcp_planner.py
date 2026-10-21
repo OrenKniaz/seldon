@@ -118,6 +118,18 @@ TOOLS = [
         ["node", "expected_spine_revision"],
     ),
     _tool(
+        "harness_confirm_reviewer_choice",
+        "Record an explicit ordinary caller-declared action for the current stored choice; "
+        "human identity remains unverified, with no native gate or execution approval.",
+        {
+            "node_id": STRING,
+            "expected_spine_revision": STRING,
+            "approve": {"type": "boolean"},
+            "statement": STRING,
+            "conditions": {"type": "string"},
+        },
+    ),
+    _tool(
         "harness_wave_map",
         "Record full draft map and details atomically. Optional historical_measurements "
         "is supplied history, never remeasured.",
@@ -959,7 +971,12 @@ class PlannerServer:
                 body += (
                     "\nAn original worker job exists; inspect worker status, never infer a retry."
                 )
-            if name in {"harness_intake", "harness_reviewer_catalog", "harness_reviewer_choice"}:
+            if name in {
+                "harness_intake",
+                "harness_reviewer_catalog",
+                "harness_reviewer_choice",
+                "harness_confirm_reviewer_choice",
+            }:
                 guide = schema_help(TOOLS, tool=name)
                 body += "\nOwning typed contract: " + json.dumps(guide["owningContract"])
                 body += (
@@ -1140,6 +1157,7 @@ class PlannerServer:
             "harness_intake",
             "harness_reviewer_catalog",
             "harness_reviewer_choice",
+            "harness_confirm_reviewer_choice",
         }:
             return "harness_schema tool=" + name
         if name == "harness_waves" and self.result_data and self.result_data.get("intake") is None:
@@ -1148,6 +1166,7 @@ class PlannerServer:
             "harness_intake",
             "harness_reviewer_catalog",
             "harness_reviewer_choice",
+            "harness_confirm_reviewer_choice",
             "harness_wave_map",
             "harness_waves",
         ):
@@ -1299,6 +1318,7 @@ class PlannerServer:
             "harness_intake": "record_intake",
             "harness_reviewer_catalog": "record_reviewer_catalog",
             "harness_reviewer_choice": "record_reviewer_selection",
+            "harness_confirm_reviewer_choice": "confirm_reviewer_selection",
             "harness_wave_map": "record_wave_map",
             "harness_waves": "outcome_waves",
         }

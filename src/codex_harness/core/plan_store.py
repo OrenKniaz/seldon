@@ -551,6 +551,9 @@ class PlanStore:
             )
             assurance = intake.validate_selection(observation["catalog"], node["fields"], sessions)
             node["fields"] = assurance["selection"]
+            from codex_harness.core.planner_confirmations import validate_reviewer_record_scope
+
+            validate_reviewer_record_scope(self, node, observation["catalog"], sessions)
             result = self._save_draft_nodes(
                 before,
                 [node],
@@ -562,6 +565,64 @@ class PlanStore:
                 **assurance,
                 "nextAction": "Resolve unmet assurance before existing review gates",
             }
+
+    def confirm_reviewer_selection(
+        self,
+        node_id: str,
+        expected_spine_revision: str,
+        *,
+        approve: bool,
+        statement: str,
+        conditions: str,
+    ) -> dict:
+        """Record an explicit ordinary caller action, never native or human identity proof."""
+        from codex_harness.core.planner_confirmations import (
+            REVIEWER_CONFIRMATION,
+            reviewer_confirmation_target,
+            reviewer_record_authority,
+        )
+
+        with self._transaction():
+            before = self._draft_preimage(expected_spine_revision)
+            node, catalog, sessions, scope = reviewer_confirmation_target(self, before, node_id)
+            if (
+                approve is not True
+                or not isinstance(statement, str)
+                or not statement.strip()
+                or not isinstance(conditions, str)
+                or conditions != ""
+            ):
+                raise PlanStoreError(
+                    "plan-reviewer-confirmation-action-invalid",
+                    "Explicit affirmative action, full statement and empty conditions required",
+                )
+            record = dict(
+                recordId=str(uuid4()),
+                nodeId=node_id,
+                preimageRevision=expected_spine_revision,
+                scopeDigest=scope,
+                catalogId=catalog["id"],
+                catalogDigest=catalog["digest"],
+                authorSessions=deepcopy(sessions),
+                approve=True,
+                statement=statement,
+                conditions="",
+                origin="user",
+                provenance="caller-declared-user-action",
+                human_identity_verified=False,
+            )
+            self._event(REVIEWER_CONFIRMATION, record)
+            event_id = self.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+            node["fields"]["confirmation"] = reviewer_record_authority(event_id, record)
+            assurance = intake.validate_selection(catalog, node["fields"], sessions)
+            node["fields"] = assurance["selection"]
+            result = self._save_draft_nodes(
+                before,
+                [node],
+                "reviewer-selection-recorded",
+                {"nodeId": node_id, "authorSessions": sessions},
+            )
+            return {**result, **assurance, "confirmationRecord": {**record, "eventId": event_id}}
 
     def record_wave_map(
         self,
@@ -1069,6 +1130,13 @@ class PlanStore:
                     if current and field == "reviewerSelection":
                         catalog = self._latest_draft_event("reviewer-catalog-recorded")
                         try:
+                            from codex_harness.core.planner_confirmations import (
+                                validate_reviewer_record_scope,
+                            )
+
+                            validate_reviewer_record_scope(
+                                self, node, catalog["catalog"], event["authorSessions"]
+                            )
                             item.update(
                                 intake.validate_selection(
                                     catalog["catalog"], node["fields"], event["authorSessions"]

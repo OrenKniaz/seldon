@@ -53,7 +53,7 @@ TYPED_CONTRACTS = {
         "user|standing-delegation; authorizedScopeDigest: "
         "lowercase SHA256. This describes retained provenance, "
         "not a producer or authentication.",
-        "confirmationRoute": "Typed intake/reviewer confirmation acquisition is "
+        "confirmationRoute": "Typed intake confirmation acquisition is "
         "not implemented by these public tools. Keep "
         "confirmation null and report owner blocker "
         "typed-confirmation-producer-unavailable. "
@@ -152,14 +152,15 @@ TYPED_CONTRACTS = {
         "authorizedScopeDigest: lowercase SHA256. This "
         "describes retained provenance, not a producer "
         "or authentication.",
-        "confirmationRoute": "Typed intake/reviewer confirmation "
-        "acquisition is not implemented by these "
-        "public tools. Keep confirmation null and "
-        "report owner blocker "
-        "typed-confirmation-producer-unavailable. "
+        "confirmationRoute": "Keep confirmation null while recording a draft. "
+        "For an explicit ordinary caller action, discover harness_schema "
+        "tool=harness_confirm_reviewer_choice, bind the current recorded node ID "
+        "and current spine revision, then submit approve=true, the complete statement "
+        "and empty conditions. The server derives the exact catalog/proposal/session "
+        "scope and actual event reference; human_identity_verified=false. "
         "harness_record_confirmation only serves "
         "align and vision-lock; it cannot confirm "
-        "these typed records.",
+        "this typed choice or grant its native phase approval.",
         "arguments": "node,expected_spine_revision required; optional "
         "author_sessions defaults to "
         "{implementationSessionIds:[],reviewerSessionIds:{}}.",
@@ -197,6 +198,26 @@ TYPED_CONTRACTS = {
         "availability/independence and unmet cross-provider "
         "assurance remain explicit; recording a draft never "
         "admits execution.",
+    },
+    "harness_confirm_reviewer_choice": {
+        "state": "DRAFT/HELD; explicit ordinary typed confirmation only. "
+        "approvalGranted=false, with no entitlement, native gate or execution approval.",
+        "arguments": "node_id, expected_spine_revision, approve:boolean, statement:string, "
+        "conditions:string are all required; no caller authority or identity fields.",
+        "prerequisite": "The exact current recorded dot-reviewer-selection-v1 decision "
+        "and latest catalog must match. Fetch harness_plan_status after all edits; "
+        "copy its spine_revision and the actual stored choice node ID.",
+        "action": "Only explicit approve=true, full nonblank statement and empty conditions "
+        "attach an ordinary caller-declared user action. False/conditional/malformed actions "
+        "refuse without mutation. No native elicitation or authenticated human is claimed.",
+        "binding": "Server derives canonical full proposal/catalog/author-session scope, "
+        "generates a record UUID and actual append-only event row ID, then atomically "
+        "attaches that exact authority. Stale revision/catalog, changed scope and replay "
+        "refuse; refresh and explicitly review the current proposal before another action.",
+        "remainingHolds": "Only reviewer-confirmation-required may clear. Catalog/auth/model "
+        "availability, independence, cross-provider, review-path, budget and native/phase "
+        "holds remain; approvalGranted=false and human_identity_verified=false.",
+        "nextTool": {"name": "harness_plan_status", "arguments": {}},
     },
 }
 
@@ -277,6 +298,26 @@ def node_example(kind):
 
 def typed_draft_help(tool):
     """Complete unconfirmed shapes; unresolved observations are never invented."""
+    if tool == "harness_confirm_reviewer_choice":
+        return {
+            "templateState": "unbound ordinary action; inspect the stored proposal before binding",
+            "actionTemplate": {
+                "node_id": None,
+                "expected_spine_revision": None,
+                "approve": None,
+                "statement": None,
+                "conditions": "",
+            },
+            "templateUse": "Use the actual stored choice node ID and current "
+            "harness_plan_status.spine_revision. Set approve=true only for the intended "
+            "explicit action and preserve the complete statement. Supply the independently "
+            "known absolute expected_workspace on MCP wire calls. Null values are unbound "
+            "placeholders, not a submitted action or invented approval reference.",
+            "producerLimits": TYPED_COMMON["discoveryRoute"] + " Ordinary caller-declared "
+            "tester-as-user action has human_identity_verified=false. It grants no native "
+            "align/vision-lock/final acceptance or execution authority. Intake confirmation "
+            "still reports typed-confirmation-producer-unavailable.",
+        }
     result = {
         "templateState": "unconfirmed-draft; bind prerequisites before submission",
         "revisionBinding": {
@@ -425,12 +466,21 @@ def typed_draft_help(tool):
         )
     if tool != "harness_intake":
         result["effortTemplates"] = [{"kind": "named", "value": None}, {"kind": "unsupported"}]
-    if tool != "harness_reviewer_catalog":
+    if tool == "harness_intake":
         result["producerLimits"] += (
             " typed-confirmation-producer-unavailable: keep confirmation "
             "null. harness_record_confirmation supports only align/vision-lock, not typed "
             "intake/reviewer approval. Recording these drafts grants no execution "
             "or phase approval."
+        )
+    elif tool == "harness_reviewer_choice":
+        result["producerLimits"] += (
+            " For an ordinary caller-declared action on the recorded choice, use "
+            "harness_confirm_reviewer_choice with its actual node ID/current revision, "
+            "explicit approve=true, full statement and empty conditions. "
+            "human_identity_verified=false; generic approvalGranted remains false. "
+            "harness_record_confirmation supports only align/vision-lock; "
+            "reviewer confirmation grants no native phase or execution approval."
         )
     return result
 

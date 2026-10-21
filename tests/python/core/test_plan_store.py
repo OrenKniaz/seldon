@@ -282,6 +282,63 @@ def mock_choice(catalog, origin=None):
     )
 
 
+def test_ordinary_reviewer_confirmation_records_exact_scope_without_native_credit(tmp_path):
+    """Simulated catalog and tester-as-user action; no discovery or human attestation."""
+    from codex_harness.core.intake import canonical_digest
+
+    statement = "Tester selects exactly these reviewers.\nKeep the complete statement.  "
+    with open_plan_store(tmp_path) as store:
+        store.import_spine(FIXTURE)
+        catalog = store.record_reviewer_catalog(mock_catalog(), store.spine().plan_revision())[
+            "catalog"
+        ]
+        node = mock_choice(catalog)
+        selected = store.record_reviewer_selection(node, store.spine().plan_revision())
+        preimage = selected["spineRevision"]
+        before_holds = selected["unmetRequirements"]
+        assert any("reviewer-confirmation-required" in hold for hold in before_holds)
+        result = store.confirm_reviewer_selection(
+            node["id"], preimage, approve=True, statement=statement, conditions=""
+        )
+        authority = result["selection"]["confirmation"]
+        records = store.connection.execute(
+            "SELECT id, payload_json FROM events WHERE kind='reviewer-selection-confirmed'"
+        ).fetchall()
+        assert len(records) == 1
+        event_id, payload = records[0]
+        record = json.loads(payload)
+        expected_scope = canonical_digest(
+            {
+                "node": node,
+                "authorSessions": {"implementationSessionIds": [], "reviewerSessionIds": {}},
+                "catalog": {"id": catalog["id"], "digest": catalog["digest"]},
+            }
+        )
+        assert record["scopeDigest"] == authority["authorizedScopeDigest"] == expected_scope
+        assert authority["eventId"] == event_id
+        assert authority["approvalId"] == record["recordId"]
+        assert authority["sourceRef"] == f"reviewer-confirmation:event:{event_id}"
+        assert record["preimageRevision"] == preimage
+        assert record["statement"] == authority["statement"] == statement
+        assert record["human_identity_verified"] is False
+        assert record["provenance"] == "caller-declared-user-action"
+        assert record["origin"] == authority["origin"] == "user"
+        assert result["spineRevision"] != preimage
+        assert result["approvalGranted"] is False
+        assert result["unmetRequirements"] == [
+            hold for hold in before_holds if "reviewer-confirmation-required" not in hold
+        ]
+        assert any("independence-unknown" in hold for hold in result["unmetRequirements"])
+        assert any("cross-provider" in hold for hold in result["unmetRequirements"])
+        assert store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+        stored = store.spine().node(node["id"])
+        assert stored == {**node, "fields": {**node["fields"], "confirmation": authority}}
+        expected = store.outcome_waves()["reviewerSelection"]
+    with open_plan_store(tmp_path) as reopened:
+        assert reopened.outcome_waves()["reviewerSelection"] == expected
+        assert reopened.spine().node(node["id"])["fields"]["confirmation"] == authority
+
+
 def test_draft_map_reopen_stale_preimage_and_returned_copy(tmp_path):
     with open_plan_store(tmp_path) as store:
         inputs = draft_inputs(store)

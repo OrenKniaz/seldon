@@ -97,6 +97,66 @@ def typed_template(server, tool):
     return guide, template
 
 
+def test_ordinary_reviewer_action_schema_is_cold_unbound_and_distinct_from_intake(tmp_path):
+    server = PlannerServer(tmp_path / "absent")
+    try:
+        guide = invoke(server, "harness_schema", tool="harness_confirm_reviewer_choice")
+        assert not guide["isError"], guide
+        data = guide["structuredContent"]
+        expected = {
+            "node_id",
+            "expected_spine_revision",
+            "approve",
+            "statement",
+            "conditions",
+            "expected_workspace",
+        }
+        assert set(data["inputSchema"]["required"]) == expected
+        assert set(data["inputSchema"]["properties"]) == expected
+        assert data["inputSchema"]["additionalProperties"] is False
+        assert data["inputSchema"]["properties"]["approve"]["type"] == "boolean"
+        assert data["inputSchema"]["properties"]["conditions"]["type"] == "string"
+        assert data["actionTemplate"] == {
+            "node_id": None,
+            "expected_spine_revision": None,
+            "approve": None,
+            "statement": None,
+            "conditions": "",
+        }
+        contract = data["owningContract"]
+        assert "human_identity_verified=false" in contract["remainingHolds"]
+        assert "reviewer-confirmation-required" in contract["remainingHolds"]
+        assert "reviewer-catalog-producer-unavailable" in data["producerLimits"]
+        choice = invoke(server, "harness_schema", tool="harness_reviewer_choice")[
+            "structuredContent"
+        ]
+        assert "harness_confirm_reviewer_choice" in choice["owningContract"]["confirmationRoute"]
+        assert "typed-confirmation-producer-unavailable" not in choice["producerLimits"]
+        intake = invoke(server, "harness_schema", tool="harness_intake")["structuredContent"]
+        assert (
+            "typed-confirmation-producer-unavailable"
+            in intake["owningContract"]["confirmationRoute"]
+        )
+        assert (
+            "harness_record_confirmation only serves align"
+            in intake["owningContract"]["confirmationRoute"]
+        )
+        assert not server.workspace.exists() and server.store is None
+        guide_text = (
+            Path(__file__).resolve().parents[3] / "docs/operator/planner-guide.md"
+        ).read_text(encoding="utf-8")
+        for text in (
+            "harness_confirm_reviewer_choice",
+            "caller-declared tester-as-user",
+            "human_identity_verified=false",
+            "reviewer-catalog-producer-unavailable",
+            "typed-confirmation-producer-unavailable",
+        ):
+            assert text in guide_text
+    finally:
+        server.close()
+
+
 def test_emitted_intake_draft_roundtrips_public_parser_and_store(tmp_path):
     server = PlannerServer(tmp_path)
     try:
@@ -213,7 +273,8 @@ def test_emitted_catalog_and_choice_drafts_require_actual_supplied_bindings(tmp_
             item.startswith("reviewer-confirmation-required:") for item in data["unmetRequirements"]
         )
         assert server.store.spine().node(choice["node"]["id"])["fields"]["confirmation"] is None
-        assert "typed-confirmation-producer-unavailable" in guide["producerLimits"]
+        assert "harness_confirm_reviewer_choice" in guide["producerLimits"]
+        assert "typed-confirmation-producer-unavailable" not in guide["producerLimits"]
     finally:
         server.close()
 
@@ -707,9 +768,13 @@ def test_first_typed_refusal_teaches_owner_contract_then_supported_diagnostic(
         if tool == "harness_reviewer_catalog":
             assert "confirmation" not in contract and "confirmationRoute" not in contract
             assert "supplied observations" in contract["discoveryRoute"]
-        else:
+        elif tool == "harness_intake":
             assert "null" in contract["confirmation"]
             assert "typed-confirmation-producer-unavailable" in contract["confirmationRoute"]
+        else:
+            assert "null" in contract["confirmation"]
+            assert "harness_confirm_reviewer_choice" in contract["confirmationRoute"]
+            assert "typed-confirmation-producer-unavailable" not in contract["confirmationRoute"]
         assert "reviewer-catalog-producer-unavailable" in contract["discoveryRoute"]
         next_tool = contract["nextTool"]
         assert next_tool == {"name": "harness_preflight", "arguments": {}}

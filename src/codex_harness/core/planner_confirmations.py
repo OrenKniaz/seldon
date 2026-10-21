@@ -1,15 +1,17 @@
-"""Single-use confirmation records for the planner's native MCP elicitation bridge.
+"""Native gate records and ordinary caller-declared reviewer-choice scope bindings.
 
 Only the bridge may call completion after correlating a client response to its
 outbound request. This leaf neither authenticates a human nor turns caller-supplied
 words, identifiers or origin flags into trusted responses. Existing legacy approval
-entry points are unchanged until the bridge/store integration is applied.
+entry points are unchanged. Ordinary reviewer-choice records carry no native gate
+credit or verified human identity.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from uuid import uuid4
 
 from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
@@ -17,6 +19,98 @@ from codex_harness.core.spine import Spine
 
 REQUEST = "confirmation-requested"
 RESPONSE = "confirmation-responded"
+REVIEWER_CONFIRMATION = "reviewer-selection-confirmed"
+
+
+def reviewer_selection_scope(node: dict, catalog: dict, author_sessions: dict) -> str:
+    """Bind the complete normalized proposal, not caller-provided authority labels."""
+    from codex_harness.core import intake
+
+    proposal = deepcopy(node)
+    proposal["fields"]["confirmation"] = None
+    proposal["fields"] = intake.validate_selection(catalog, proposal["fields"], author_sessions)[
+        "selection"
+    ]
+    return intake.canonical_digest(
+        {
+            "node": proposal,
+            "authorSessions": author_sessions,
+            "catalog": {"id": catalog["id"], "digest": catalog["digest"]},
+        }
+    )
+
+
+def reviewer_confirmation_target(store: PlanStore, before: Spine, node_id: str) -> tuple:
+    """Resolve only the current recorded choice and current catalog in the transaction."""
+    if not isinstance(node_id, str) or node_id not in before.ids("decision"):
+        raise PlanStoreError("plan-reviewer-confirmation-target-invalid", str(node_id))
+    node = before.node(node_id)
+    event = store._latest_draft_event("reviewer-selection-recorded")
+    if (
+        node["fields"].get("schema") != "dot-reviewer-selection-v1"
+        or event is None
+        or event["nodeId"] != node_id
+        or event["nodeRevisions"].get(node_id) != before.revision(node_id)
+    ):
+        raise PlanStoreError("plan-reviewer-confirmation-target-stale", node_id)
+    catalog = store._latest_draft_event("reviewer-catalog-recorded")
+    if catalog is None:
+        raise PlanStoreError("plan-catalog-unavailable", "Record an explicit observation first")
+    # Includes exact catalog ID/digest and all existing compatibility validation.
+    scope = reviewer_selection_scope(node, catalog["catalog"], event["authorSessions"])
+    if node["fields"]["confirmation"] is not None:
+        raise PlanStoreError("plan-reviewer-confirmation-already-recorded", node_id)
+    if any(
+        record["nodeId"] == node_id and record["scopeDigest"] == scope
+        for _, record in _records(store, REVIEWER_CONFIRMATION)
+    ):
+        raise PlanStoreError("plan-reviewer-confirmation-already-recorded", node_id)
+    return node, catalog["catalog"], event["authorSessions"], scope
+
+
+def reviewer_record_authority(event_id: int, record: dict) -> dict:
+    return {
+        "approvalId": record["recordId"],
+        "eventId": event_id,
+        "origin": "user",
+        "statement": record["statement"],
+        "sourceRef": f"reviewer-confirmation:event:{event_id}",
+        "authorizedScopeDigest": record["scopeDigest"],
+    }
+
+
+def validate_reviewer_record_scope(
+    store: PlanStore, node: dict, catalog: dict, author_sessions: dict
+) -> None:
+    """Validate this producer's records; legacy supplied provenance stays unverified."""
+    from codex_harness.core import intake
+
+    intake.validate_selection(catalog, node["fields"], author_sessions)
+    authority = node["fields"].get("confirmation")
+    if authority is None:
+        return
+    records = list(_records(store, REVIEWER_CONFIRMATION))
+    known = next(
+        (
+            (event_id, record)
+            for event_id, record in records
+            if authority["approvalId"] == record["recordId"] or authority["eventId"] == event_id
+        ),
+        None,
+    )
+    if known is None and not authority["sourceRef"].startswith("reviewer-confirmation:event:"):
+        return  # Existing caller-supplied authority is not promoted to generated evidence.
+    if known is None:
+        raise PlanStoreError("plan-reviewer-confirmation-record-invalid", node["id"])
+    event_id, record = known
+    if (
+        authority != reviewer_record_authority(event_id, record)
+        or record["nodeId"] != node["id"]
+        or record["scopeDigest"] != reviewer_selection_scope(node, catalog, author_sessions)
+        or record["provenance"] != "caller-declared-user-action"
+        or record["human_identity_verified"] is not False
+    ):
+        raise PlanStoreError("plan-reviewer-confirmation-scope-stale", node["id"])
 
 
 def _label(key: str) -> str:
