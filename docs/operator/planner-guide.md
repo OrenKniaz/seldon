@@ -1,6 +1,19 @@
 # Planner guide (v9, 2026-10-18)
 **What a finished plan leads to.** The user's full vision is delivered for real, never a mocked or basic version. Every requirement traces from vision to code to a passing proof. Docs are generated from the plan and never stale. Workers can verify their own work from the plan alone. A final review confirms the product achieves the locked vision, while the user supervises as little as possible. Efficiency never replaces quality: ask the questions the vision genuinely needs, and never invent the user's intent.
 **Read only this guide and the user's project.** Never read Harness source or Harness design docs.
+**MCP workspace binding.** A running server stays bound to its startup `--workspace`;
+plan names and a changed client config cannot retarget it. First inspect
+`harness_plan_status` read-only: every wire tool response exposes `workspaceBinding`
+and the effective server workspace. Host cwd/project context and connection reload
+remain unverified. For every MCP tool except `harness_schema`, `harness_preflight`
+and `harness_plan_status`, supply `expected_workspace` as the absolute intended
+project path, known independently from the caller's task. This is an unauthenticated
+caller assertion, never native identity or approval. Missing, invalid or conflicting
+assertions refuse before store access, native confirmation or provider admission;
+an explicit mismatch also refuses discovery. Do not copy an unexpected server path
+to bypass the hold. Use a correctly bound connection; no supported automatic client
+reload route is established. Existing CLI commands retain their explicit `--workspace`
+contract; this additional assertion is required at the public MCP wire boundary.
 **Recovery ladder when stuck:**
 1. Re-run `p status`. Its `Next:` line is authoritative.
 2. `p <command> --help`.

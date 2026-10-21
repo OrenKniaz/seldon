@@ -19,6 +19,248 @@ from codex_harness.core.spine import MARKDOWN_FILES, load_spine
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
 
 
+def workspace_wire(server, tool_name, **arguments):
+    """Actual unscoped wire; never fill missing caller intent from the server."""
+    return server.handle_line(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 901,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments},
+            }
+        )
+    )["result"]
+
+
+def workspace_files(root):
+    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_wire_workspace_missing_intent_cannot_resume_other_project(tmp_path, monkeypatch):
+    from codex_harness.core import mcp_planner
+
+    habits, tally = tmp_path / "habits", tmp_path / "tally"
+    for project in (habits, tally):
+        project.mkdir()
+        seed = PlannerServer(project)
+        assert not seed.call_tool(
+            "harness_plan_start", {"idea": project.name, "name": project.name}
+        )["isError"]
+        seed.close()
+    before = {str(p): workspace_files(p) for p in (habits, tally)}
+    opens, providers = [], []
+    original = mcp_planner.open_plan_store
+
+    def observed_open(*args, **kwargs):
+        opens.append(args)
+        return original(*args, **kwargs)
+
+    def no_provider(*args, **kwargs):
+        providers.append(args)
+        raise AssertionError("No provider may launch for a missing workspace assertion")
+
+    monkeypatch.setattr(mcp_planner, "open_plan_store", observed_open)
+    monkeypatch.setattr(subprocess, "Popen", no_provider)
+    cached, other = PlannerServer(habits), PlannerServer(tally)
+    try:
+        reply = workspace_wire(cached, "harness_plan_start", idea="Tally", name="Tally")
+        print(json.dumps({"missingIntentResponse": reply, "openedStores": len(opens)}))
+        assert reply["isError"], reply  # Baseline silently resumes the bound Habits plan.
+        assert "workspace-assertion-required" in reply["content"][0]["text"]
+        assert reply["workspaceBinding"]["serverWorkspace"] == str(habits.resolve())
+        assert reply["workspaceBinding"]["expectedWorkspace"] is None
+        assert not opens and not providers and cached.store is other.store is None
+        assert {str(p): workspace_files(p) for p in (habits, tally)} == before
+    finally:
+        cached.close()
+        other.close()
+
+
+@pytest.mark.parametrize(
+    "tool,arguments",
+    [
+        ("harness_plan_start", {"idea": "Tally", "name": "Tally"}),
+        ("harness_worker_start", {}),
+        ("harness_plan_resume", {"request_execution": True}),
+        ("harness_record_confirmation", {"gate": "align"}),
+        (
+            "harness_mail_send",
+            {"from_agent": "user", "to_agent": "planner", "subject": "x", "body": "x"},
+        ),
+    ],
+)
+def test_wire_workspace_refuses_before_store_or_native_interception(
+    tmp_path, monkeypatch, tool, arguments
+):
+    from codex_harness.core import mcp_planner
+
+    bound, expected = tmp_path / "bound", tmp_path / "expected"
+    server = PlannerServer(bound)
+    opened, providers = [], []
+
+    def forbidden_open(*args, **kwargs):
+        opened.append(args)
+        raise AssertionError("Workspace refusal must precede store access")
+
+    def forbidden_provider(*args, **kwargs):
+        providers.append(args)
+        raise AssertionError("Workspace refusal must precede provider admission")
+
+    monkeypatch.setattr(mcp_planner, "open_plan_store", forbidden_open)
+    monkeypatch.setattr(subprocess, "Popen", forbidden_provider)
+    try:
+        for supplied, code in (
+            (None, "workspace-assertion-required"),
+            (str(expected), "workspace-mismatch"),
+            ("relative", "workspace-assertion-invalid"),
+        ):
+            context = {} if supplied is None else {"expected_workspace": supplied}
+            reply = workspace_wire(server, tool, **arguments, **context)
+            assert reply["isError"] and code in reply["content"][0]["text"], reply
+            assert reply["workspaceBinding"]["clientWorkspaceVerified"] is False
+            assert (
+                str(bound) in reply["content"][0]["text"]
+                and str(supplied) in reply["content"][0]["text"]
+            )
+            assert server.store is None and server._pending_confirmation is None
+            assert not bound.exists() and not expected.exists() and not opened and not providers
+    finally:
+        server.close()
+
+
+def test_wire_workspace_correct_projects_and_stale_connection(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    servers = [PlannerServer(first), PlannerServer(second)]
+    try:
+        for project, server in zip((first, second), servers, strict=True):
+            project.mkdir()
+            result = workspace_wire(
+                server,
+                "harness_plan_start",
+                idea=project.name,
+                name=project.name,
+                expected_workspace=str(project / "unused" / ".."),
+            )
+            assert not result["isError"], result
+            assert result["workspaceBinding"]["match"] == "matched"
+            assert result["workspaceBinding"]["clientWorkspaceVerified"] is False
+        before = {str(p): workspace_files(p) for p in (first, second)}
+        # Editing/reloading an external config cannot retarget either existing fixed server.
+        config = tmp_path / "connection-config.json"
+        config.write_text(json.dumps({"workspace": str(second)}), encoding="utf-8")
+        for cached in (servers[0], PlannerServer(first)):
+            try:
+                refused = workspace_wire(
+                    cached,
+                    "harness_plan_start",
+                    idea="Second",
+                    name="Second",
+                    expected_workspace=json.loads(config.read_text())["workspace"],
+                )
+                assert refused["isError"] and "workspace-mismatch" in refused["content"][0]["text"]
+                assert cached.workspace == first
+            finally:
+                if cached is not servers[0]:
+                    cached.close()
+        assert {str(p): workspace_files(p) for p in (first, second)} == before
+        for project, server in zip((first, second), servers, strict=True):
+            status = workspace_wire(server, "harness_plan_status", expected_workspace=str(project))
+            assert not status["isError"] and status["structuredContent"]["name"] == project.name
+            resumed = workspace_wire(
+                server,
+                "harness_plan_start",
+                idea="Existing intent",
+                name="Resume",
+                expected_workspace=str(project),
+            )
+            assert not resumed["isError"]
+            assert server._status()["name"] == project.name
+    finally:
+        for server in servers:
+            server.close()
+
+
+def test_wire_workspace_cold_discovery_and_schema_without_store(tmp_path):
+    workspace = tmp_path / "missing-plan"
+    server = PlannerServer(workspace)
+    try:
+        status = workspace_wire(server, "harness_plan_status")
+        assert not status["isError"], status
+        assert status["workspaceBinding"]["serverWorkspace"] == str(workspace)
+        assert status["workspaceBinding"]["match"] == "not-supplied"
+        assert status["workspaceBinding"]["clientWorkspaceVerified"] is False
+        listed = rpc(server, "tools/list")["result"]["tools"]
+        for tool in listed:
+            required = tool["inputSchema"]["required"]
+            assert ("expected_workspace" in required) is (
+                tool["name"] not in {"harness_schema", "harness_preflight", "harness_plan_status"}
+            )
+        schema = workspace_wire(server, "harness_schema", tool="harness_plan_start")
+        assert "expected_workspace" in schema["structuredContent"]["inputSchema"]["required"]
+        assert "unauthenticated" in schema["content"][0]["text"]
+        assert server.store is None and not workspace.exists()
+    finally:
+        server.close()
+
+
+def test_wire_workspace_preserves_explicit_cli_producer(tmp_path, capsys):
+    from codex_harness.core.plan_cli import main
+
+    project = tmp_path / "cli-project"
+    project.mkdir()
+    assert (
+        main(
+            [
+                "--workspace",
+                str(project),
+                "--json",
+                "start",
+                "--idea",
+                "Explicit CLI",
+                "--name",
+                "CLI",
+            ]
+        )
+        == 0
+    )
+    assert not json.loads(capsys.readouterr().out)["isError"]
+    assert main(["--workspace", str(project), "--json", "status"]) == 0
+    assert json.loads(capsys.readouterr().out)["data"]["name"] == "CLI"
+
+
+def test_wire_workspace_existing_discovery_never_opens_writable_store(tmp_path, monkeypatch):
+    from codex_harness.core import mcp_planner
+
+    seed = PlannerServer(tmp_path)
+    assert not seed.call_tool("harness_plan_start", {"idea": "Actual plan", "name": "Existing"})[
+        "isError"
+    ]
+    expected = seed._status()
+    seed.close()
+    before = workspace_files(tmp_path)
+    opened = []
+    original = mcp_planner.open_plan_store
+
+    def observed_writable(*args, **kwargs):
+        opened.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_planner, "open_plan_store", observed_writable)
+    server = PlannerServer(tmp_path)
+    try:
+        status = workspace_wire(server, "harness_plan_status")
+        assert not status["isError"], status
+        for field in ("name", "phase", "plan_revision", "pending_gate"):
+            assert status["structuredContent"][field] == expected[field]
+        schema = workspace_wire(server, "harness_schema", tool="harness_resolve_findings")
+        assert not schema["isError"] and "closureExample" in schema["structuredContent"]
+        assert not opened, "Unscoped discovery must not initialize or migrate the bound store"
+        assert server.store is None and workspace_files(tmp_path) == before
+    finally:
+        server.close()
+
+
 def test_public_execution_assessment_schema_and_choices_do_not_create_plan(tmp_path):
     workspace = tmp_path / "not-started"
     server = PlannerServer(workspace)
@@ -302,6 +544,20 @@ def test_review_continuation_uses_current_gate_with_retained_afs(tmp_path, monke
 
 
 def rpc(server, method, params=None, request_id=1):
+    # Existing same-project fixtures explicitly target their constructed project.
+    # Routing counterexamples use workspace_wire instead, with no implicit intent.
+    if (
+        method == "tools/call"
+        and isinstance(params, dict)
+        and isinstance(params.get("arguments", {}), dict)
+    ):
+        params = {
+            **params,
+            "arguments": {
+                "expected_workspace": str(server.workspace),
+                **params.get("arguments", {}),
+            },
+        }
     return server.handle_line(
         json.dumps(
             {
@@ -551,6 +807,7 @@ def test_native_pending_lifetime_never_promotes_missing_response(server, case):
         responses = server.expire_confirmation()
         assert responses[0]["method"] == "notifications/cancelled"
         assert responses[1]["id"] == 94 and responses[1]["result"]["isError"]
+        assert responses[1]["result"]["workspaceBinding"]["serverWorkspace"] == str(workspace)
     elif case == "disconnect":
         server.close()
     else:
@@ -636,6 +893,7 @@ def test_worker_mcp_start_status_reconnect_preserve_one_admission(
             client,
             "harness_worker_start",
             {
+                "expected_workspace": str(store.workspace),
                 "expected_revision": options["expected_revision"],
                 "workers": options["workers"],
                 "timeout": 61,
@@ -711,6 +969,9 @@ def test_native_stdio_request_response_keeps_original_tool_id(tmp_path):
             },
         ),
     ]
+    for message in messages:
+        if message.get("method") == "tools/call":
+            message["params"]["arguments"]["expected_workspace"] = str(tmp_path)
     result = subprocess.run(
         [
             sys.executable,
@@ -1017,7 +1278,7 @@ def test_list_tools_and_notifications(server):
         assert "required" in tool["inputSchema"]
     confirmation = next(tool for tool in tools if tool["name"] == "harness_record_confirmation")
     assert "Requires negotiated elicitation" in confirmation["description"]
-    assert set(confirmation["inputSchema"]["properties"]) == {"gate"}
+    assert set(confirmation["inputSchema"]["properties"]) == {"gate", "expected_workspace"}
     assert server.handle_line('{"jsonrpc":"2.0","method":"notifications/initialized"}') is None
     assert rpc(server, "ping")["result"] == {}
     assert rpc(server, "unknown")["error"]["code"] == -32601
@@ -1218,16 +1479,17 @@ def test_restart_resumes_without_overwriting_vision(server, tmp_path):
 
 def test_unavailable_status_is_error_and_server_recovers(server, monkeypatch):
     start(server)
-    original = server.store.status
+    store_type = type(server.store)
+    original = store_type.status
 
-    def unavailable():
+    def unavailable(self):
         raise OSError("Store unavailable")
 
-    monkeypatch.setattr(server.store, "status", unavailable)
+    monkeypatch.setattr(store_type, "status", unavailable)
     response = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
     assert response["isError"] is True
     assert response["content"][0]["text"].startswith("Harness Plan Mode: ")
-    monkeypatch.setattr(server.store, "status", original)
+    monkeypatch.setattr(store_type, "status", original)
     call(server, "harness_plan_status")
 
 
@@ -1288,6 +1550,9 @@ def test_stdio_subprocess_protocol_and_recovery(tmp_path):
         },
         {"jsonrpc": "2.0", "id": 5, "method": "ping"},
     ]
+    for request in requests:
+        if request.get("method") == "tools/call":
+            request["params"]["arguments"]["expected_workspace"] = str(tmp_path)
     wire = "{malformed\n" + "\n".join(json.dumps(item) for item in requests) + "\n"
     result = subprocess.run(
         [sys.executable, "-m", "codex_harness.core.mcp_planner", "--workspace", str(tmp_path)],
@@ -1317,7 +1582,10 @@ def confirmation_rpc(server, **arguments):
         jsonrpc="2.0",
         id=41,
         method="tools/call",
-        params=dict(name="harness_advance", arguments=arguments),
+        params=dict(
+            name="harness_advance",
+            arguments={"expected_workspace": str(server.workspace), **arguments},
+        ),
     )
     response = server.handle_line(json.dumps(request, ensure_ascii=False))
     with (server.workspace / "confirmation-wire.jsonl").open("a", encoding="utf-8") as stream:
@@ -1349,8 +1617,9 @@ def test_advance_advertises_optional_confirmation_transport(server):
     tools = rpc(server, "tools/list")["result"]["tools"]
     advance = next(tool for tool in tools if tool["name"] == "harness_advance")
     schema = advance["inputSchema"]
-    assert set(schema["properties"]) == {"to_phase", "user_statement", "by"}
-    assert schema["required"] == ["to_phase"]
+    assert set(schema["properties"]) == {"to_phase", "user_statement", "by", "expected_workspace"}
+    assert schema["required"] == ["to_phase", "expected_workspace"]
+    assert schema["properties"]["expected_workspace"]["type"] == "string"
     assert schema["properties"]["user_statement"]["type"] == "string"
     assert "plan" in advance["description"] and "proxy:" in advance["description"]
 

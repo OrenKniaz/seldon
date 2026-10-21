@@ -10,13 +10,14 @@ import re
 import sys
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
-from codex_harness.core.plan_store import PHASES, open_plan_store
+from codex_harness.core.plan_store import PHASES, open_plan_store, open_plan_store_readonly
 from codex_harness.core.planner_schema import node_error_help, schema_help
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
 from codex_harness.core.spine import ALLOWED_PARENTS
@@ -729,6 +730,127 @@ class PlannerServer:
         self._pending_confirmation = None
         self._confirmation_timeout = confirmation_timeout
 
+    def _wire_tools(self):
+        """Wire assertions are caller intent, never authenticated host context."""
+        tools = deepcopy(TOOLS)
+        for tool in tools:
+            schema = tool["inputSchema"]
+            schema["properties"]["expected_workspace"] = {
+                **STRING,
+                "description": "Absolute intended project path supplied by the caller; "
+                "unauthenticated assertion, not verified host cwd. Never copy the server path "
+                "as a substitute for knowing the intended project.",
+            }
+            if tool["name"] not in {"harness_schema", "harness_preflight", "harness_plan_status"}:
+                schema["required"].append("expected_workspace")
+            for branch in schema.get("oneOf", []):
+                if "maxProperties" in branch:
+                    branch["maxProperties"] += 1
+        return tools
+
+    def _workspace_binding(self, arguments):
+        supplied = isinstance(arguments, dict) and "expected_workspace" in arguments
+        expected = arguments.get("expected_workspace") if supplied else None
+        match = "not-supplied"
+        if supplied:
+            match = "invalid"
+            if isinstance(expected, str) and expected.strip():
+                try:
+                    path = Path(expected)
+                    if path.is_absolute():
+                        expected = str(path.resolve())
+                        match = "matched" if Path(expected) == self.workspace else "mismatch"
+                except (OSError, RuntimeError, ValueError):
+                    pass
+        return {
+            "serverWorkspace": str(self.workspace),
+            "expectedWorkspace": expected,
+            "match": match,
+            "assertionSource": "caller-supplied; unauthenticated" if supplied else "not supplied",
+            "clientWorkspaceVerified": False,
+            "connectionStatus": "Fixed server workspace; client routing/reload unknown",
+        }
+
+    @staticmethod
+    def _binding_text(binding):
+        return (
+            "Effective server workspace: "
+            + binding["serverWorkspace"]
+            + "; expected caller workspace: "
+            + str(binding["expectedWorkspace"])
+            + "; match: "
+            + binding["match"]
+            + ". Caller assertion is unauthenticated; host workspace and connection reload "
+            "are unverified. The server never retargets."
+        )
+
+    def _wire_binding_reply(self, response, binding):
+        if response is None:
+            return None
+        if isinstance(response.get("result"), dict) and "content" in response["result"]:
+            result = response["result"]
+            result["workspaceBinding"] = binding
+            for item in result["content"]:
+                if item.get("type") == "text":
+                    first, separator, rest = item["text"].partition("\n")
+                    item["text"] = first + "\n" + self._binding_text(binding) + separator + rest
+        elif response.get("method") == "elicitation/create":
+            response["params"]["message"] += "\n" + self._binding_text(binding)
+        return response
+
+    def _workspace_refusal(self, request_id, binding, code):
+        # No status/store reads here: even formatting a normal error can open a store.
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "isError": True,
+                "workspaceBinding": binding,
+                "structuredContent": {"workspaceBinding": binding},
+                "content": [
+                    {
+                        "type": "text",
+                        "text": code
+                        + ": workspace binding refused.\n"
+                        + self._binding_text(binding)
+                        + "\nNo store access or provider admission was attempted for this call.\n"
+                        "Next: Inspect harness_plan_status read-only, verify the intended project "
+                        "from the caller, then use a correctly bound connection with "
+                        "expected_workspace. A supported client reload route is unknown; "
+                        "changing config alone proves no live binding.",
+                    }
+                ],
+            },
+        }
+
+    def _wire_call_tool(self, name, arguments):
+        if name not in {"harness_schema", "harness_preflight", "harness_plan_status"}:
+            return self.call_tool(name, arguments, schema_tools=self._wire_tools())
+        previous = self.store
+        try:
+            if (self.workspace / ".codex-harness/plan.sqlite3").is_file():
+                with open_plan_store_readonly(self.workspace) as store:
+                    self.store = store
+                    return self.call_tool(name, arguments, schema_tools=self._wire_tools())
+            self.store = None
+            return self.call_tool(name, arguments, schema_tools=self._wire_tools())
+        except Exception as error:
+            return {
+                "isError": True,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "workspace-discovery-unavailable: read-only observation failed: "
+                        + str(error)
+                        + ". No writable store fallback.\n"
+                        "Next: Verify the fixed connection and existing store; "
+                        "keep mutations held.",
+                    }
+                ],
+            }
+        finally:
+            self.store = previous
+
     def close(self) -> None:
         if self._pending_confirmation is not None:
             self._cancel_confirmation("Client disconnected; no approval recorded")
@@ -763,7 +885,7 @@ class PlannerServer:
         self.result_data = {"kind": kind, "mermaid": diagram(spine, kind)}
         return views.chat_diagram(spine, kind)
 
-    def call_tool(self, name: str, arguments: dict) -> dict:
+    def call_tool(self, name: str, arguments: dict, *, schema_tools=None) -> dict:
         self.result_data = None
         operation_error_code = None
         try:
@@ -780,7 +902,7 @@ class PlannerServer:
                     "OR harness_accept_run repo=<reference-repo> subject=oracle"
                 )
             _validate(arguments, tool["inputSchema"])
-            body = self._dispatch(name, arguments)
+            body = self._dispatch(name, arguments, schema_tools=schema_tools)
             is_error = bool(
                 name == "harness_readiness"
                 and self.result_data
@@ -1088,14 +1210,14 @@ class PlannerServer:
             }[name]
         )
 
-    def _dispatch(self, name: str, args: dict) -> str:
+    def _dispatch(self, name: str, args: dict, *, schema_tools=None) -> str:
         if name == "harness_plan_resume":
             from codex_harness.core.planner_resume import resume_plan
 
             self.result_data = resume_plan(self.workspace, **args)
             return "Durable plan resume\n" + resume_card(self.result_data)
         if name == "harness_schema":
-            self.result_data = schema_help(TOOLS, **args)
+            self.result_data = schema_help(TOOLS if schema_tools is None else schema_tools, **args)
             if args.get("tool") == "harness_resolve_findings":
                 store = (
                     self._store()
@@ -1269,6 +1391,13 @@ class PlannerServer:
                 )
             self.result_data = {"id": "V1"}
             return "Plan mode resumed. To pause, say 'pause plan'."
+        if (
+            name == "harness_plan_status"
+            and self.store is None
+            and not (self.workspace / ".codex-harness/plan.sqlite3").is_file()
+        ):
+            self.result_data = self._status()
+            return "No plan exists in the fixed server workspace; no store was created."
         store = self._store()
         if name == "harness_readiness":
             from codex_harness.core.readiness import readiness_review, render_readiness
@@ -1800,9 +1929,11 @@ class PlannerServer:
             "method": "notifications/cancelled",
             "params": {"requestId": pending["wire_id"], "reason": "Confirmation timed out"},
         }
+        response = self._cancel_confirmation("Confirmation timed out; no approval recorded")
+        binding = pending.get("workspaceBinding")
         return [
             cancelled,
-            self._cancel_confirmation("Confirmation timed out; no approval recorded"),
+            self._wire_binding_reply(response, binding) if binding is not None else response,
         ]
 
     def handle_line(self, line: str) -> dict | None:
@@ -1813,7 +1944,9 @@ class PlannerServer:
         if not isinstance(request, dict):
             return _error(None, -32600, "Invalid Request")
         if request.get("jsonrpc") == "2.0" and "method" not in request and "id" in request:
-            return self._finish_confirmation(request)
+            binding = (self._pending_confirmation or {}).get("workspaceBinding")
+            response = self._finish_confirmation(request)
+            return self._wire_binding_reply(response, binding) if binding is not None else response
         request_id = request.get("id")
         if (
             request.get("jsonrpc") != "2.0"
@@ -1861,60 +1994,90 @@ class PlannerServer:
         elif method in ("ping", "notifications/initialized"):
             result = {}
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": self._wire_tools(), "workspaceBinding": self._workspace_binding({})}
         elif method == "tools/call":
             name, arguments = params.get("name"), params.get("arguments", {})
+            binding = self._workspace_binding(arguments)
+            code = {
+                "mismatch": "workspace-mismatch",
+                "invalid": "workspace-assertion-invalid",
+            }.get(binding["match"])
+            if binding["match"] == "not-supplied" and name not in {
+                "harness_schema",
+                "harness_preflight",
+                "harness_plan_status",
+            }:
+                code = "workspace-assertion-required"
+            if code:
+                return self._workspace_refusal(request_id, binding, code)
+            if isinstance(arguments, dict):
+                arguments = {
+                    key: value for key, value in arguments.items() if key != "expected_workspace"
+                }
             if name == "harness_worker_start" or (
                 name == "harness_plan_resume"
                 and isinstance(arguments, dict)
                 and arguments.get("request_execution") is True
             ):
                 try:
-                    return self._begin_execution(request_id, name, arguments)
+                    response = self._begin_execution(request_id, name, arguments)
+                    if self._pending_confirmation is not None:
+                        self._pending_confirmation["workspaceBinding"] = binding
+                    return self._wire_binding_reply(response, binding)
                 except (ValueError, KeyError, TypeError) as error:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": self._resume_reply(
-                            {
-                                "state": "held",
-                                "reasonCode": "worker-admission-refused",
-                                "canonicalStatus": None,
-                                "nextAction": {"kind": "request_native_execution"},
-                                "job": None,
-                            },
-                            error=True,
-                            reason=str(error),
-                        ),
-                    }
+                    return self._wire_binding_reply(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": self._resume_reply(
+                                {
+                                    "state": "held",
+                                    "reasonCode": "worker-admission-refused",
+                                    "canonicalStatus": None,
+                                    "nextAction": {"kind": "request_native_execution"},
+                                    "job": None,
+                                },
+                                error=True,
+                                reason=str(error),
+                            ),
+                        },
+                        binding,
+                    )
             if params.get("name") == "harness_record_confirmation":
                 try:
-                    return self._begin_confirmation(request_id, params.get("arguments", {}))
+                    response = self._begin_confirmation(request_id, arguments)
+                    if self._pending_confirmation is not None:
+                        self._pending_confirmation["workspaceBinding"] = binding
+                    return self._wire_binding_reply(response, binding)
                 except (ValueError, KeyError) as error:
                     status = self._status()
                     code = getattr(error, "code", "tool-input-or-operation-error")
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "isError": True,
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": views.response(
-                                        status,
-                                        f"{code}: {error}",
-                                        "Review the current gate; use a native client "
-                                        "with negotiated elicitation.",
-                                    ),
-                                }
-                            ],
+                    return self._wire_binding_reply(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": {
+                                "isError": True,
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": views.response(
+                                            status,
+                                            f"{code}: {error}",
+                                            "Review the current gate; use a native client "
+                                            "with negotiated elicitation.",
+                                        ),
+                                    }
+                                ],
+                            },
                         },
-                    }
-            result = self.call_tool(params.get("name"), params.get("arguments", {}))
+                        binding,
+                    )
+            result = self._wire_call_tool(name, arguments)
         else:
             return _error(request_id, -32601, "Method not found")
-        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+        response = {"jsonrpc": "2.0", "id": request_id, "result": result}
+        return self._wire_binding_reply(response, binding) if method == "tools/call" else response
 
 
 def _invalid_constant(value: str):
