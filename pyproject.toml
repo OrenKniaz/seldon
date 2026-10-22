@@ -11,6 +11,8 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
+seldon = "codex_harness.core.seldon_cli:main"
+seldon-mcp = "codex_harness.core.seldon_cli:mcp_main"
 p = "codex_harness.core.plan_cli:main"
 plan_cli = "codex_harness.core.plan_cli:main"
 run_plan = "codex_harness.core.dispatch_cli:main"

@@ -18,6 +18,11 @@ capability audit; they are not gates for local implementation.
 
 ## Core entry points
 
+Installed project activation: `seldon init --host all --dry-run`, then
+`seldon init --host <host>` from your product folder. See the
+[project-local setup guide](docs/operator/project-init.md) for check/remove,
+preservation rules and experimental host support status.
+
 From an installed package, `p` and `plan_cli` run the planner, `run_plan` runs dispatch, and `status_server` serves the view-only cockpit. Equivalent module targets are `python -m codex_harness.core.plan_cli`, `python -m codex_harness.core.dispatch_cli`, and `python -m codex_harness.core.status_server`. For source use, put this repository's `src` directory on `PYTHONPATH`. Provider launches use the user's existing configuration and authentication; this extraction changes neither.
 
 Start with the [planner guide](docs/operator/planner-guide.md), [handoff contract](docs/operator/handoff-contract.md) and [verification runners](docs/architecture/verification-runners.md). The runtime uses the Python standard library. Development tooling versions are pinned in `pyproject.toml`; the Windows source gate uses the existing prepared interpreter without installing packages.
