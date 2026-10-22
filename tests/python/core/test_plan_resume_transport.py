@@ -689,7 +689,11 @@ def test_native_resume_preserves_actual_job_when_optional_observation_is_blocked
 
 
 def test_native_resume_card_failure_retains_admitted_job_and_query_route(project, monkeypatch):
-    """Rendering cannot erase an admitted job or grant a retry."""
+    """Rendering cannot erase an admitted job or its read-only query route.
+
+    Catch generic uncertain-action advice hiding an already persisted original;
+    ordinary successful-resume tests miss the post-admission renderer failure.
+    """
     from codex_harness.core import mcp_planner
 
     options = test_planner_resume._published(project)
@@ -724,3 +728,37 @@ def test_native_resume_card_failure_retains_admitted_job_and_query_route(project
     )
     assert len(launches) == 1
     assert "harness_worker_status job_id=" in reply["result"]["content"][0]["text"]
+    assert reply["result"]["_meta"]["executionConfirmation"]["human_identity_verified"] is False
+    original_dir = project.workspace / ".codex-harness/worker-jobs" / options["expected_revision"]
+    originals = {
+        p.relative_to(original_dir): p.read_bytes() for p in original_dir.rglob("*") if p.is_file()
+    }
+    request = json.loads((original_dir / "request.json").read_text(encoding="utf-8"))
+    assert request["executionRequestId"]
+    assert request["options"]["workers"] == options["workers"]
+    # Reopen through the public route named by the failed response, not a copied result.
+    reopened = PlannerServer(project.workspace)
+    try:
+        queried = rpc(
+            reopened,
+            "harness_worker_status",
+            {"job_id": data["job"]["jobId"]},
+            expected_workspace=project.workspace,
+        )
+        assert not queried["isError"], queried
+        observed = queried["structuredContent"]
+        assert observed["jobId"] == options["expected_revision"]
+        assert observed["publicationRevision"] == options["expected_revision"]
+        assert observed["options"] == request["options"]
+        assert observed["nativeApproval"] == "recorded"
+        assert observed["status"] == observed["liveness"] == "unknown"
+        assert observed["harnessDeliveryProven"] is False
+        assert approve_execution_wire(reopened, form) is None
+        assert len(launches) == 1
+        assert {
+            p.relative_to(original_dir): p.read_bytes()
+            for p in original_dir.rglob("*")
+            if p.is_file()
+        } == originals
+    finally:
+        reopened.close()

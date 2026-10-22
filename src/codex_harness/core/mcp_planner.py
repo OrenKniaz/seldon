@@ -1120,6 +1120,17 @@ class PlannerServer:
             else "harness_plan_status read-only; inspect the primary result and saved IDs. "
             "Do not repeat a completed or uncertain mutation; inspect its recorded effect first."
         )
+        if (
+            uncertain_dispatch
+            and name == "harness_plan_resume"
+            and self.result_data
+            and self.result_data.get("job")
+            and self.result_data["nextAction"]["kind"] == "inspect_worker_job"
+        ):
+            # resume_plan returned the canonical original before optional card rendering failed.
+            next_step = (
+                resume_next(self.result_data) + "; read-only inspection; do not repeat admission."
+            )
         turn = status.get("planningTurn")
         if not is_error and turn and turn["schemaTarget"]:
             next_step += "; " + turn["schemaTarget"]["mcp"] + "; " + turn["guidance"]
