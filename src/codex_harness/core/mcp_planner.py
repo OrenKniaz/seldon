@@ -152,6 +152,23 @@ TOOLS = [
     ),
     _tool("harness_review", "Read a recorded review and its shard evidence.", {"id": STRING}),
     _tool(
+        "harness_roundtable",
+        "Run the existing protected roundtable with explicit authorized reviewers. "
+        "Inspect harness_schema tool=harness_roundtable first; offerings do not prove access. "
+        "Uses the same synchronous producer and review gates as CLI roundtable.",
+        {
+            "reviewers": {
+                "type": "array",
+                "minItems": 1,
+                "items": _object(dict.fromkeys(("name", "provider", "model", "effort"), STRING)),
+            },
+            "max_rounds": {"type": "integer", "minimum": 1},
+            "max_total": {"type": "integer", "minimum": 1},
+            "timeout": {"type": "number", "exclusiveMinimum": 0},
+        },
+        ["reviewers"],
+    ),
+    _tool(
         "harness_readiness",
         "Review exact worker packets for cold-start readiness (advisory; normal providers).",
         {
@@ -980,6 +997,13 @@ class PlannerServer:
                 name == "harness_readiness"
                 and self.result_data
                 and self.result_data["invalid"]
+                or name == "harness_roundtable"
+                and self.result_data
+                and (
+                    not self.result_data["reviewers"]
+                    or self.result_data["invalid"]
+                    or any(row["exitCode"] != 0 for row in self.result_data["reviewers"])
+                )
                 or name == "harness_accept_run"
                 and self.result_data
                 and not self.result_data["passed"]
@@ -1091,6 +1115,7 @@ class PlannerServer:
                     or name
                     in (
                         "harness_readiness",
+                        "harness_roundtable",
                         "harness_accept_run",
                         "harness_accept_review",
                         "harness_accept_assess",
@@ -1114,6 +1139,12 @@ class PlannerServer:
         )
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if name == "harness_roundtable" and self.result_data:
+            return (
+                "harness_review id="
+                + self.result_data["id"]
+                + "; inspect each recorded reviewer outcome before explicitly selecting any retry."
+            )
         if name == "harness_accept_assess":
             if status.get("pending_gate") == "harness_plan_start":
                 return "harness_plan_start idea=<your idea> name=<plan name>"
@@ -1283,6 +1314,12 @@ class PlannerServer:
         if status["phase"] in {"roundtable", "publish"}:
             resolution = status.get("reviewResolution")
             if resolution and resolution["nextAction"]["kind"] != "not_applicable":
+                if resolution["nextAction"]["kind"] == "review_required":
+                    return (
+                        "harness_schema tool=harness_roundtable; then harness_roundtable "
+                        "reviewers=<explicit authorized name/provider/model/effort tuples>; "
+                        "inspect existing review details before retrying a failed reviewer."
+                    )
                 return views.review_resolution_next(resolution)
         if status.get("acceptance", {}).get("accepted"):
             return (
@@ -1512,6 +1549,15 @@ class PlannerServer:
             self.result_data = {"ids": [node["id"] for node in args["nodes"]]}
             return body
         store = self._store()
+        if name == "harness_roundtable":
+            from codex_harness.core import roundtable
+
+            self.result_data = roundtable.run_roundtable(store, **args)
+            self.result_data["id"] = self.result_data["roundId"]
+            policy = store.plan_review_policy_state(store.manifest_revision())
+            if policy["active"]:
+                self.result_data["reviewPolicy"] = policy
+            return views.roundtable_card(self.result_data, roundtable.findings(store))
         if name == "harness_compile":
             from codex_harness.core.graph import load_plan
             from codex_harness.core.spine import compile_manifest
