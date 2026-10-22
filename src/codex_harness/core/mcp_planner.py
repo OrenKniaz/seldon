@@ -18,7 +18,11 @@ from uuid import uuid4
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
 from codex_harness.core.plan_store import PHASES, open_plan_store, open_plan_store_readonly
+from codex_harness.core.planner_connection import connection_reply
+from codex_harness.core.planner_guidance import planning_turn
+from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.planner_schema import node_error_help, schema_help
+from codex_harness.core.planner_vision import vision_projection
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
 from codex_harness.core.spine import ALLOWED_PARENTS
 from codex_harness.core.spine_diagrams import diagram
@@ -395,6 +399,12 @@ TOOLS = [
                 }
             )
         },
+    ),
+    _tool(
+        "harness_upsert_nodes",
+        "Save one feature's requirements and tests in one atomic canonical node batch; "
+        "inspect harness_schema tool=harness_upsert_nodes before first use.",
+        {"nodes": {"type": "array", "items": {"type": "object"}, "minItems": 1}},
     ),
     _tool("harness_remove_node", "Remove a node without children or references.", {"id": STRING}),
     _tool(
@@ -841,11 +851,20 @@ class PlannerServer:
                     item["text"] = first + "\n" + self._binding_text(binding) + separator + rest
         elif response.get("method") == "elicitation/create":
             response["params"]["message"] += "\n" + self._binding_text(binding)
-        return response
+        # Ordinary tool results already carry the status observed by call_tool.
+        # Native cards use the gate/revision already prepared for this request.
+        pending = self._pending_confirmation or {}
+        prepared = pending.get("request", {})
+        status = (
+            {"phase": prepared["gate"], "plan_revision": prepared.get("plan_revision", "unknown")}
+            if response.get("method") == "elicitation/create" and "gate" in prepared
+            else None
+        )
+        return connection_reply(response, self.workspace, status)
 
     def _workspace_refusal(self, request_id, binding, code):
         # No status/store reads here: even formatting a normal error can open a store.
-        return {
+        response = {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
@@ -867,6 +886,7 @@ class PlannerServer:
                 ],
             },
         }
+        return connection_reply(response, self.workspace, show_recovery=True)
 
     def _wire_call_tool(self, name, arguments):
         if name not in {"harness_schema", "harness_preflight", "harness_plan_status"}:
@@ -898,7 +918,9 @@ class PlannerServer:
 
     def close(self) -> None:
         if self._pending_confirmation is not None:
-            self._cancel_confirmation("Client disconnected; no approval recorded")
+            self._cancel_confirmation(
+                "Client disconnected; no approval recorded", preserve_pending=True
+            )
         self._initialized = False
         self._elicitation = False
         if self.store is not None:
@@ -916,7 +938,13 @@ class PlannerServer:
         if self.store is None and (self.workspace / ".codex-harness" / "plan.sqlite3").is_file():
             self._store()
         if self.store is not None:
-            return self.store.status()
+            status = self.store.status()
+            if status["plan_revision"] != hashlib.sha256(b"").hexdigest():
+                spine = self.store.spine()
+                status["visionProjection"] = vision_projection(spine.node(spine.ids("vision")[0]))
+                if status["phase"] in {"features", "requirements", "plan"}:
+                    status["planningTurn"] = planning_turn(spine)
+            return status
         return {
             "name": self.workspace.name,
             "phase": "align",
@@ -1030,6 +1058,9 @@ class PlannerServer:
         if name == "harness_plan_status" and acceptance.get("invalidMessage"):
             body += "\nAcceptance invalid: " + acceptance["invalidMessage"]
         next_step = self._next(name, arguments, status, is_error, operation_error_code)
+        turn = status.get("planningTurn")
+        if not is_error and turn and turn["schemaTarget"]:
+            next_step += "; " + turn["schemaTarget"]["mcp"] + "; " + turn["guidance"]
         if name == "harness_accept_run" and arguments.get("subject") not in ("product", "oracle"):
             next_step = (
                 "harness_accept_run repo=<integrated-repo> subject=product OR "
@@ -1048,7 +1079,7 @@ class PlannerServer:
         ):
             handoff = views.review_author_handoff(self._store(), status)
             body += "\n" + views.author_handoff_card(handoff)
-        return {
+        reply = {
             "isError": is_error,
             **(
                 {"structuredContent": {"authorHandoff": handoff}}
@@ -1078,6 +1109,9 @@ class PlannerServer:
                 }
             ],
         }
+        return connection_reply(
+            reply, self.workspace, status, show_recovery=name == "harness_plan_status"
+        )
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
         if name == "harness_accept_assess":
@@ -1463,6 +1497,20 @@ class PlannerServer:
         ):
             self.result_data = self._status()
             return "No plan exists in the fixed server workspace; no store was created."
+        if name == "harness_upsert_nodes":
+            node_schema = next(
+                tool["inputSchema"] for tool in TOOLS if tool["name"] == "harness_upsert_node"
+            )
+            # Preserve the CLI's input-validation-before-store ordering.
+            for node in args["nodes"]:
+                _validate({"node": node}, node_schema)
+            if len({node["id"] for node in args["nodes"]}) != len(args["nodes"]):
+                raise ValueError("Duplicate node ids in batch")
+            body = batch_nodes(
+                self._store(), args["nodes"], lambda node: _validate({"node": node}, node_schema)
+            )
+            self.result_data = {"ids": [node["id"] for node in args["nodes"]]}
+            return body
         store = self._store()
         if name == "harness_compile":
             from codex_harness.core.graph import load_plan
@@ -1727,20 +1775,22 @@ class PlannerServer:
         body = resume_card(snapshot)
         if reason:
             body += "\n" + reason
-        return {
+        status = resume_status(self.workspace, snapshot)
+        reply = {
             "isError": error,
             "structuredContent": snapshot,
             "content": [
                 {
                     "type": "text",
                     "text": views.response(
-                        resume_status(self.workspace, snapshot),
+                        status,
                         body,
                         resume_next(snapshot),
                     ),
                 }
             ],
         }
+        return connection_reply(reply, self.workspace, status)
 
     def _begin_execution(self, request_id, name, arguments):
         from codex_harness.core.plan_store import open_plan_store_readonly
@@ -1890,21 +1940,32 @@ class PlannerServer:
             )
         if reason:
             body += "\n" + reason
+        if data["state"] == "pending":
+            body = (
+                f"Still waiting for your answer: {data['gate']}.\n"
+                "No client response was received; no approval recorded.\n" + (reason or "")
+            )
         next_step = (
-            "harness_advance to_phase=" + PHASES[PHASES.index(status["phase"]) + 1]
+            "harness_record_confirmation gate=" + data["gate"]
+            if data["state"] == "pending"
+            else "harness_advance to_phase=" + PHASES[PHASES.index(status["phase"]) + 1]
             if data["state"] == "approved" and data["gate"] == status["phase"]
             else "harness_plan_status; follow the current recorded gate."
             if data["state"] == "approved"
             else "Review the current understanding; retry native confirmation when ready."
         )
-        return {
+        reply = {
             "isError": error,
             "structuredContent": data,
             "content": [{"type": "text", "text": views.response(status, body, next_step)}],
         }
+        return connection_reply(reply, self.workspace, status)
 
     def _begin_confirmation(self, request_id, arguments):
-        from codex_harness.core.planner_confirmations import prepare_confirmation
+        from codex_harness.core.planner_confirmation_cards import (
+            compact_card,
+            resume_or_prepare_confirmation,
+        )
 
         tool = next(tool for tool in TOOLS if tool["name"] == "harness_record_confirmation")
         _validate(arguments, tool["inputSchema"])
@@ -1916,7 +1977,7 @@ class PlannerServer:
             )
         if self._pending_confirmation is not None:
             raise ValueError("plan-confirmation-pending: answer or cancel the displayed request")
-        prepared = prepare_confirmation(self._store(), arguments["gate"])
+        prepared = resume_or_prepare_confirmation(self._store(), arguments["gate"])
         wire_id = "seldon-confirmation-" + uuid4().hex
         self._pending_confirmation = {
             "wire_id": wire_id,
@@ -1929,7 +1990,7 @@ class PlannerServer:
             "id": wire_id,
             "method": "elicitation/create",
             "params": {
-                "message": prepared["card"],
+                "message": compact_card(prepared),
                 "requestedSchema": _object(
                     {
                         "approve": {
@@ -1953,9 +2014,16 @@ class PlannerServer:
         if pending is None or response.get("id") != pending["wire_id"]:
             return None  # Never respond to an unknown/duplicate JSON-RPC response.
         if time.monotonic() >= pending["deadline"]:
-            return self._cancel_confirmation("Confirmation timed out; no approval recorded")
+            return self._cancel_confirmation(
+                "Confirmation timed out; no approval recorded", preserve_pending=True
+            )
         if pending.get("purpose") == "execution":
             return self._finish_execution(response, pending)
+        if "error" in response:
+            return self._cancel_confirmation(
+                "Native client could not display confirmation; no approval recorded",
+                preserve_pending=True,
+            )
         self._pending_confirmation = None
         result = response.get("result")
         try:
@@ -1979,7 +2047,8 @@ class PlannerServer:
             reply = self._confirmation_reply(outcome, error=True, reason=str(error))
         return {"jsonrpc": "2.0", "id": pending["tool_id"], "result": reply}
 
-    def _cancel_confirmation(self, reason):
+    def _cancel_confirmation(self, reason, *, preserve_pending=False):
+        from codex_harness.core.planner_confirmation_cards import pending_outcome
         from codex_harness.core.planner_confirmations import complete_confirmation
 
         pending, self._pending_confirmation = self._pending_confirmation, None
@@ -1992,7 +2061,11 @@ class PlannerServer:
                 "id": pending["tool_id"],
                 "result": self._execution_outcome_reply(pending, outcome, reason=reason),
             }
-        outcome = complete_confirmation(self._store(), pending["request"]["request_id"], "cancel")
+        outcome = (
+            pending_outcome(pending["request"])
+            if preserve_pending
+            else complete_confirmation(self._store(), pending["request"]["request_id"], "cancel")
+        )
         return {
             "jsonrpc": "2.0",
             "id": pending["tool_id"],
@@ -2009,7 +2082,9 @@ class PlannerServer:
             "method": "notifications/cancelled",
             "params": {"requestId": pending["wire_id"], "reason": "Confirmation timed out"},
         }
-        response = self._cancel_confirmation("Confirmation timed out; no approval recorded")
+        response = self._cancel_confirmation(
+            "Confirmation timed out; no approval recorded", preserve_pending=True
+        )
         binding = pending.get("workspaceBinding")
         return [
             cancelled,

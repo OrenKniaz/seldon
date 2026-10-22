@@ -20,8 +20,10 @@ from codex_harness.core.mcp_planner import (
 )
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PHASES
+from codex_harness.core.planner_connection import connection_reply
+from codex_harness.core.planner_nodes import batch_nodes as write_batch_nodes
 from codex_harness.core.preflight import diagnostic_status
-from codex_harness.core.spine import Spine, compile_manifest
+from codex_harness.core.spine import compile_manifest
 
 TYPED_DECISION_SCHEMAS = {"dot-intake-v1", "dot-reviewer-selection-v1", "dot-wave-map-v1"}
 
@@ -61,18 +63,7 @@ def batch_nodes(server: PlannerServer, nodes: list) -> str:
         _validate({"node": node}, schema)
     if len({node["id"] for node in nodes}) != len(nodes):
         raise ValueError("Duplicate node ids in batch")
-    store = server._store()
-    with store._transaction():
-        data = store._data()
-        merged = {node["id"]: node for node in data["nodes"]}
-        merged.update({node["id"]: node for node in nodes})
-        spine = Spine({**data, "nodes": list(merged.values())})
-        for node in nodes:
-            store._write_node(spine, node["id"])
-            store._event(
-                "node-upserted", {"id": node["id"], "plan_revision": spine.plan_revision()}
-            )
-    return "\n".join(f"Changed node: {node['id']} (upserted)." for node in nodes)
+    return write_batch_nodes(server._store(), nodes, lambda node: _validate({"node": node}, schema))
 
 
 def next_command(server: PlannerServer, status: dict) -> str:
@@ -942,7 +933,7 @@ def _reply(
         if diagnostic
         else server._status()
     )
-    return {
+    reply = {
         "isError": error,
         "content": [
             {
@@ -951,6 +942,7 @@ def _reply(
             }
         ],
     }
+    return connection_reply(reply, server.workspace, status)
 
 
 def main(argv=None) -> int:
@@ -1246,6 +1238,9 @@ def main(argv=None) -> int:
                         "explicit authorized reviewer/finite limits)"
                     )
                 )
+        turn = status.get("planningTurn")
+        if not reply["isError"] and turn and turn["schemaTarget"]:
+            next_step += "; " + turn["schemaTarget"]["cli"] + "; " + turn["guidance"]
         next_step = next_step.replace("\r", " ").replace("\n", " ")
         if (
             command == "roundtable"
@@ -1274,6 +1269,11 @@ def main(argv=None) -> int:
             # Mapped MCP refusals already contain the MCP transport's card;
             # replace it with the CLI-bound projection, not a second copy.
             body = body.split("\n**Author repair: feedback to the invoking planner**", 1)[0]
+        # CLI-only branches and --brief recompose text outside call_tool.
+        projected_reply = connection_reply(
+            {"content": [{"type": "text", "text": body}]}, server.workspace, status
+        )
+        body = projected_reply["content"][0]["text"]
         text = (
             body
             + ("\n" + planner_views.author_handoff_card(handoff) if handoff is not None else "")

@@ -1098,10 +1098,16 @@ def test_native_nonapproval_response_never_grants_gate(server, case):
     call(server, "harness_advance", to_phase="expand", error=True)
 
 
-@pytest.mark.parametrize("case", ["timeout", "disconnect", "client-cancel"])
+@pytest.mark.parametrize("case", ["timeout", "disconnect", "rpc-error", "client-cancel"])
 def test_native_pending_lifetime_never_promotes_missing_response(server, case):
+    """Protect no-response recovery without granting or losing a native approval.
+
+    Catch timeout/disconnect being stored as user cancellation; the leaf tests
+    cannot prove correlation of a fresh wire ID to the same durable request.
+    """
     start(server)
     outbound = begin_native(server)
+    durable_id = server._pending_confirmation["request"]["request_id"]
     workspace = server.workspace
     if case == "timeout":
         server._pending_confirmation["deadline"] = -1
@@ -1111,6 +1117,13 @@ def test_native_pending_lifetime_never_promotes_missing_response(server, case):
         assert responses[1]["result"]["workspaceBinding"]["serverWorkspace"] == str(workspace)
     elif case == "disconnect":
         server.close()
+    elif case == "rpc-error":
+        failed = server.handle_line(
+            json.dumps(
+                dict(jsonrpc="2.0", id=outbound["id"], error=dict(code=-32603, message="Closed"))
+            )
+        )
+        assert failed["result"]["structuredContent"]["state"] == "pending"
     else:
         assert (
             server.handle_line(
@@ -1134,7 +1147,34 @@ def test_native_pending_lifetime_never_promotes_missing_response(server, case):
             "SELECT payload_json FROM events WHERE kind='confirmation-responded' "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        assert json.loads(event[0])["action"] == "cancel"
+        if case == "client-cancel":
+            assert json.loads(event[0])["action"] == "cancel"
+        else:
+            assert event is None
+    if case != "client-cancel":
+        reconnect = PlannerServer(workspace)
+        try:
+            reoffered = begin_native(reconnect)
+            assert reoffered["id"] != outbound["id"]
+            assert reconnect._pending_confirmation["request"]["request_id"] == durable_id
+            assert (
+                answer_native(
+                    reconnect, outbound["id"], approve=True, statement="Late", conditions=""
+                )
+                is None
+            )
+            approved = answer_native(
+                reconnect,
+                reoffered["id"],
+                approve=True,
+                statement="SOURCE-ONLY synthetic current response",
+                conditions="",
+            )
+            assert not approved["result"]["isError"]
+            call(reconnect, "harness_advance", to_phase="expand")
+            assert reconnect._status()["phase"] == "expand"
+        finally:
+            reconnect.close()
 
 
 def test_native_quoted_or_forged_tool_arguments_cannot_complete_response(server):
@@ -1344,7 +1384,8 @@ def call(server, tool_name, *, error=False, **args):
     result = response["result"]
     assert result["isError"] is error, result
     text = result["content"][0]["text"]
-    assert text.splitlines()[0] == banner(server._status())
+    assert text.splitlines()[0].startswith("Seldon · project: ")
+    assert banner(server._status()) in text.splitlines()
     assert text.splitlines()[-1].startswith("Next:")
     assert sum(line.startswith("Next:") for line in text.splitlines()) == 1
     return text
@@ -1929,7 +1970,8 @@ def test_restart_resumes_without_overwriting_vision(server, tmp_path):
     invalid = call(
         server, "harness_resolve_assumption", error=True, id="missing", confirmed="false"
     )
-    assert invalid.splitlines()[0] == banner(before)
+    assert invalid.splitlines()[0].startswith("Seldon · project: ")
+    assert banner(before) in invalid.splitlines()
     assert "Phase 2/11: Expand" in call(
         server, "harness_plan_start", idea="Other idea", name="Other name"
     )
@@ -1949,7 +1991,8 @@ def test_unavailable_status_is_error_and_server_recovers(server, monkeypatch):
     monkeypatch.setattr(store_type, "status", unavailable)
     response = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
     assert response["isError"] is True
-    assert response["content"][0]["text"].startswith("Harness Plan Mode: ")
+    assert response["content"][0]["text"].startswith("Seldon · project: ")
+    assert "\nHarness Plan Mode: " in response["content"][0]["text"]
     monkeypatch.setattr(store_type, "status", original)
     call(server, "harness_plan_status")
 
@@ -2033,7 +2076,8 @@ def test_stdio_subprocess_protocol_and_recovery(tmp_path):
     assert replies[4]["result"]["isError"] is True
     assert replies[5]["result"] == {}
     for reply in replies[3:5]:
-        assert reply["result"]["content"][0]["text"].startswith("Harness Plan Mode: ")
+        assert reply["result"]["content"][0]["text"].startswith("Seldon · project: ")
+        assert "\nHarness Plan Mode: " in reply["result"]["content"][0]["text"]
     assert "planner tool failed:" in result.stderr
 
 
