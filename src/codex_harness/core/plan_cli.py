@@ -706,8 +706,7 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             score = quality_report(server._store())["score"]
             reply["content"][0]["text"] = (
                 planner_views.banner(status)
-                + "\n"
-                + planner_views.status_line(status)
+                + f" · workspace: {server.workspace}"
                 + f"\nphase: {status['phase']}\npending_gate: {status['pending_gate'] or 'none'}"
                 + f"\nPlanner quality: {score}/100 · {status['proofLevelLabel']}"
                 + f" · Worker readiness (advisory): {status['readiness']['status']}"

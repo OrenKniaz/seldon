@@ -279,6 +279,10 @@ def test_cross_bead_contract_checks_consumer_source(project, proof):
 
 
 def test_status_acceptance_once_and_brief(project):
+    """Catch duplicate brief summaries overflowing seven lines after identity wrapping.
+
+    Ordinary status tests miss the final compact CLI text and exact workspace.
+    """
     lock(project)
     cli(project.workspace, "accept-scenarios", "--derive")
     text = cli(project.workspace, "status")
@@ -291,16 +295,32 @@ def test_status_acceptance_once_and_brief(project):
     for token in ("phase:", "pending_gate:", "Next:", "Planner quality:", "Open:"):
         assert token in brief
     assert '"lastResult":' not in brief
+    assert brief.startswith(f"Seldon · project: {project.workspace.name} · phase ")
+    assert brief.count("Seldon · project:") == brief.count("Next:") == 1
+    assert f"workspace: {project.workspace}" in brief
+    assert f"phase: {machine['status']['phase']}" in brief
+    assert (
+        f"Open: {machine['status']['open_clarifications']} questions, "
+        f"{machine['status']['open_assumptions']} assumptions"
+    ) in brief
     assert len(brief.splitlines()) <= 7
+    brief_json = cli(project.workspace, "status", "--brief", machine=True)
+    assert brief_json["text"] == brief.rsplit("\nNext: ", 1)[0]
+    assert brief_json["data"]["acceptance"] == machine["data"]["acceptance"]
 
 
-def test_guide_v9_contract():
+def test_guide_v9_contract(project):
+    """Keep compact route discovery tied to actual named proof and refusal consumers.
+
+    The historical version title is not a product promise; example replay alone
+    misses named test inspection and helpful native-only approval refusals.
+    """
     guide = (Path(__file__).resolve().parents[3] / "docs/operator/planner-guide.md").read_text(
         encoding="utf-8"
     )
-    assert "(v9," in guide and len(guide.splitlines()) <= 140
+    assert guide.startswith("# Planner guide\n") and len(guide.splitlines()) <= 140
     for token in (
-        "--body --test <name>",
+        "show ID --body --test NAME",
         "planned",
         "proved",
         "impact --since",
@@ -314,3 +334,25 @@ def test_guide_v9_contract():
         "Plan-to-roundtable confirmation remains unchanged",
     ):
         assert token in guide
+    before = list(project.connection.iterdump())
+    inspected = cli(
+        project.workspace, "show", "T1", "--body", "--test", "test_result", machine=True
+    )
+    assert any(
+        "self.assertEqual(answer(), 42)" in file.get("body", "")
+        for file in inspected["data"]["testFiles"]
+    )
+    missing_name = cli(project.workspace, "show", "T1", "--body", code=2, machine=True)
+    assert "--body requires --test <name>" in missing_name["text"]
+    refused = cli(
+        project.workspace,
+        "confirm",
+        "--gate",
+        "align",
+        "--statement",
+        "Quoted words",
+        code=2,
+        machine=True,
+    )
+    assert "plan-confirmation-origin-unavailable" in refused["text"]
+    assert list(project.connection.iterdump()) == before
