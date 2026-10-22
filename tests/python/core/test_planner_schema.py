@@ -68,7 +68,15 @@ def test_public_compile_help_populates_existing_vision_metadata_and_compiles(tmp
         server.close()
 
 
-def test_public_vision_schema_populates_native_done_summary_without_losing_detail(tmp_path):
+@pytest.mark.parametrize("done_key", ["done_feels_like", "doneFeelsLike", "done"])
+def test_public_vision_schema_populates_native_done_summary_without_losing_detail(
+    tmp_path, done_key
+):
+    """Protect Done aliases and full detail across the public writer/request/readback.
+
+    Compact cards intentionally omit extra sections; card-only assertions miss loss
+    from the canonical request or the public full-detail route that the card names.
+    """
     from tests.python.core.test_mcp_planner import answer_native, begin_native
 
     server = PlannerServer(tmp_path)
@@ -78,6 +86,8 @@ def test_public_vision_schema_populates_native_done_summary_without_losing_detai
         guide = discovered["structuredContent"]
         assert not (tmp_path / ".codex-harness").exists()
         example = deepcopy(guide["example"]["node"])
+        done = example["fields"].pop("done_feels_like")
+        example["fields"][done_key] = done
         detail = "Retained extra done_means words: accepted edge cases and complete intent."
         example["fields"]["done_means"] = detail
         assert not invoke(
@@ -101,11 +111,24 @@ def test_public_vision_schema_populates_native_done_summary_without_losing_detai
         requested = begin_native(server, gate="vision-lock")
         assert requested["method"] == "elicitation/create"
         card = requested["params"]["message"]
-        assert detail in card and "Done means:" in card
-        primary_done = card.split("\n\nDone:\n", 1)[1].split("\n\n", 1)[0]
-        # Reach the actual public card before checking the previously missing help/example.
-        assert primary_done != "Not recorded", card
-        assert primary_done == guide["example"]["node"]["fields"]["done_feels_like"]
+        assert "Summary only" in card and f"harness_show_node id={example['id']}" in card
+        primary_done = next(
+            line.removeprefix("Done: ") for line in card.splitlines() if line.startswith("Done: ")
+        )
+        assert primary_done == done
+        # The real bridge persisted the complete scope, not just the native summary.
+        full_request = json.loads(
+            server.store.connection.execute(
+                "SELECT payload_json FROM events WHERE kind='confirmation-requested' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+        assert full_request["gate"] == "vision-lock"
+        assert full_request["plan_revision"] == server.store.spine().plan_revision()
+        assert full_request["plan_revision"] in card
+        assert full_request["vision"] == example
+        assert f"Done:\n{done}" in full_request["card"]
+        assert f"Done means:\n{detail}" in full_request["card"]
         for key in ("done_feels_like", "doneFeelsLike", "done", "done_means"):
             assert key in guide["fieldRules"]
         stored = invoke(server, "harness_show_node", id=example["id"])["structuredContent"]
