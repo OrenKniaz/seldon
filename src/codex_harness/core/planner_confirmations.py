@@ -162,7 +162,7 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
     return None
 
 
-def prepare_confirmation(store: PlanStore, gate: str, *, resume_pending: bool = False) -> dict:
+def prepare_confirmation(store: PlanStore, gate: str) -> dict:
     """Persist exactly what the native client will display for the current gate."""
     with store._transaction():
         if gate not in ("align", "vision-lock"):
@@ -172,12 +172,6 @@ def prepare_confirmation(store: PlanStore, gate: str, *, resume_pending: bool = 
             gate == "vision-lock" and PHASES.index(phase) > PHASES.index("vision-lock")
         ):
             raise PlanStoreError("plan-confirmation-gate-mismatch", f"Current phase is {phase}")
-        if resume_pending:
-            from codex_harness.core.planner_confirmation_cards import pending_confirmation
-
-            pending = pending_confirmation(store, gate)
-            if pending is not None:
-                return pending
         spine = Spine(store._data())
         visions = spine.ids("vision")
         if len(visions) != 1:
