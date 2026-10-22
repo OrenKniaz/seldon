@@ -517,7 +517,7 @@ def test_continuation_missing_plan_surfaces_do_not_create_state(tmp_path, capsys
         status = server._status()
         view = review_resolution_state(None, status)
         mcp = rpc(server, "tools/call", {"name": "harness_plan_status", "arguments": {}})["result"]
-        assert mcp["isError"] and view["nextAction"]["kind"] == "unavailable_refresh"
+        assert not mcp["isError"] and view["nextAction"]["kind"] == "unavailable_refresh"
         assert mcp["content"][0]["text"].split("Next:")[-1].startswith(" harness_plan_start")
         assert plan_cli.main(["--workspace", str(missing), "--json", "status"]) == 2
         cli = json.loads(capsys.readouterr().out)
@@ -613,7 +613,8 @@ def test_resolution_reads_preserve_state_and_canonical_refusal(project, monkeypa
     server = PlannerServer(missing)
     try:
         response = rpc(server, "tools/call", {"name": "harness_plan_status", "arguments": {}})
-        assert response["result"]["isError"]
+        assert not response["result"]["isError"]
+        assert "harness_plan_start" in response["result"]["content"][0]["text"]
         assert not missing.exists()
     finally:
         server.close()
