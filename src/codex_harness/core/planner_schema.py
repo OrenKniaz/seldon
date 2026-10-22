@@ -123,19 +123,17 @@ TYPED_CONTRACTS = {
         "supplied model, never default/latest/auto/*-latest. "
         "effort exact{kind:named,value:nonblank} or "
         "{kind:unsupported}; "
-        "availability=available|unavailable|unknown; "
+        "availability=offered|unavailable|unknown (legacy available normalizes to offered); "
         "reviewPathSupported:boolean; reason:nonblank.",
         "derivedHashes": "choiceId hashes "
         "provider,executable,executableDigest,version,model,effort. "
         "digest hashes normalized catalog excluding "
         "digest. Both computed by owning validator if "
         "omitted; do not substitute dummy hashes.",
-        "availableRule": "availability=available requires actual "
-        "installed/executable/hash/version, "
-        "authentication available, discovery observed "
-        "and a source. Preserve unknown if evidence is "
-        "absent; providers=[] or choices=[] claims no "
-        "available reviewer.",
+        "availableRule": "Catalog choices are offered, not verified. Legacy available claims "
+        "normalize to offered. Unknown authentication or review path does not block selection. "
+        "The first protected real review launch is the access probe; its observed outcome "
+        "never replaces successful current review or independence requirements.",
     },
     "harness_reviewer_choice": {
         "node": "For node-bearing intake/choice tools only: id, "
@@ -336,8 +334,8 @@ def typed_draft_help(tool):
         "observations or authority. Keep confirmation null.",
         "producerLimits": "reviewer-catalog-producer-unavailable: harness_preflight only "
         "observes executable readiness; it does not produce a model catalog or establish "
-        "authentication/entitlement. Supply genuine retained observations or hold reviewer "
-        "selection for an owner integration decision.",
+        "authentication/entitlement. Supply genuine offered-model observations; select explicitly "
+        "with unknown access, then let the first protected real review observe the outcome.",
     }
     if tool == "harness_intake":
         fields = {

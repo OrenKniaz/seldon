@@ -17,6 +17,7 @@ from codex_harness.core.readiness import QUESTION, readiness_review, select_bead
 
 project = test_planner_replay_gaps.project
 REVIEWERS = test_planner_replay_gaps.REVIEWERS
+REAL_RUN = roundtable._run
 READY = dict(ready=True, canVerify=True, blockers=[], questions=[])
 BLOCKED = dict(
     ready=False,
@@ -442,3 +443,45 @@ def test_cli_mcp_and_render_status_parity(project, monkeypatch, capsys):
     finally:
         server.close()
     assert "planned calls" in capsys.readouterr().err
+
+
+def test_real_process_access_failure_and_explicit_reselection_persist(
+    project, tmp_path, monkeypatch
+):
+    """Catch masked failed access; injected runners miss real IO and persistence."""
+    import sys
+
+    from codex_harness.core.provider_launch import ProviderNormalLaunch
+
+    child = tmp_path / "review.py"
+    child.write_text(
+        "import sys\nsys.stdin.read()\nsys.stderr.write('model not found')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    def launch(reviewer, packet, executable, **kwargs):
+        return ProviderNormalLaunch(
+            cli=reviewer["provider"],
+            command=(sys.executable, str(child)),
+            protections=(),
+            stdin_text=packet,
+        )
+
+    monkeypatch.setattr(roundtable, "_launch_review", launch)
+    monkeypatch.setattr(roundtable, "_run", REAL_RUN)
+    first = readiness_review(project, reviewers=[REVIEWERS[0]])
+    failed = first["reviews"][0]
+    assert failed["accessObservation"]["outcome"] == "failure"
+    assert failed["accessObservation"]["failureCategory"] == "unknown-model"
+    assert first["invalid"] == 1
+    child.write_text(
+        "import json,sys\nsys.stdin.read()\nprint(json.dumps(" + repr(READY) + "))\n",
+        encoding="utf-8",
+    )
+    second = readiness_review(project, reviewers=[dict(REVIEWERS[0], name="reselected")])
+    assert second["reviews"][0]["accessObservation"]["outcome"] == "success"
+    assert second["invalid"] == 0
+    with PlanStore(project.workspace) as reopened:
+        rows = reopened.readiness_reviews()
+        assert {r["batchId"] for r in rows} >= {first["id"], second["id"]}
+        assert next(r for r in rows if r["batchId"] == first["id"])["error"]

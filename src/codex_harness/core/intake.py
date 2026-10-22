@@ -304,8 +304,8 @@ def _model(value: Any) -> str:
 def validate_catalog(observation: Value) -> ReviewerCatalogV1:
     """Normalize injected evidence only. Preserve ordered providers and choices.
 
-    Available requires observed discovery, identity/version, installed executable,
-    authentication and source provenance. Unknown or unsupported remains explicit.
+    Catalog entries are offerings, never access or review-path proof. Legacy
+    available claims are normalized to offered; actual launches observe access.
     No wall-clock expiry is invented: freshness is selection's exact catalog binding.
     """
     canonical_digest(observation)
@@ -372,24 +372,13 @@ def validate_catalog(observation: Value) -> ReviewerCatalogV1:
             _effort(choice["effort"], "choice.effort")
             _enum(
                 choice["availability"],
-                ("available", "unavailable", "unknown"),
+                ("offered", "available", "unavailable", "unknown"),
                 "choice.availability",
             )
             _bool(choice["reviewPathSupported"], "choice.reviewPathSupported")
             _text(choice["reason"], "choice.reason")
-            if choice["availability"] == "available" and not (
-                provider["installed"] is True
-                and executable
-                and provider["executableDigest"]
-                and provider["version"]
-                and provider["authentication"] == "available"
-                and provider["discovery"] == "observed"
-                and source is not None
-            ):
-                _refuse(
-                    "reviewer-availability-unproven",
-                    f"{name}: missing identity/authentication/discovery/source",
-                )
+            if choice["availability"] == "available":
+                choice["availability"] = "offered"
             binding = {
                 key: provider[key]
                 for key in ("provider", "executable", "executableDigest", "version")
@@ -513,10 +502,9 @@ def validate_selection(
             _refuse("reviewer-tuple-mismatch", f"{name}: exact provider/model/effort differs")
         providers.add(reviewer["provider"])
         models.add(reviewer["model"])
-        if choice["availability"] != "available":
-            unmet.append(f"reviewer-availability-{choice['availability']}: {name}")
-        if not choice["reviewPathSupported"]:
-            unmet.append(f"reviewer-path-unsupported: {name}")
+        # Catalog assertions cannot establish or deny actual protected access.
+        # The first real review launch is the probe; successful current review
+        # and independence gates remain owned by their existing consumers.
     extra_sessions = set(reviewer_sessions) - names
     if extra_sessions:
         _refuse(

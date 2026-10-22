@@ -303,27 +303,20 @@ def test_forged_hashes_stale_catalog_and_tuple_mismatch_are_refusals():
         validate_selection(catalog, chosen, sessions())
 
 
-def test_unknown_unavailable_and_unsupported_remain_unmet_not_fallback():
+def test_catalog_offers_never_prove_access_or_block_first_protected_attempt():
+    """Catch the P1 deadlock: old tests required entitlement before a real launch."""
     raw = observation()
     provider = raw["providers"][0]
     provider.update(authentication="unknown", discovery="blocked", source=None)
-    with pytest.raises(ValueError, match="reviewer-availability-unproven"):
-        validate_catalog(raw)
-    provider["choices"][0].update(availability="unknown", reviewPathSupported=False)
-    catalog = validate_catalog(raw)
-    report = validate_selection(catalog, selection(catalog), sessions(**{"reviewer-0": "other"}))
-    assert report["unmetRequirements"] == [
-        "reviewer-availability-unknown: reviewer-0",
-        "reviewer-path-unsupported: reviewer-0",
-    ]
-    provider["choices"][0]["availability"] = "unavailable"
-    catalog = validate_catalog(raw)
-    assert (
-        "reviewer-availability-unavailable: reviewer-0"
-        in validate_selection(catalog, selection(catalog), sessions(**{"reviewer-0": "other"}))[
-            "unmetRequirements"
-        ]
-    )
+    for claim in ("available", "offered", "unknown", "unavailable"):
+        provider["choices"][0].update(availability=claim, reviewPathSupported=False)
+        catalog = validate_catalog(raw)
+        assert catalog["providers"][0]["choices"][0]["availability"] != "available"
+        report = validate_selection(
+            catalog, selection(catalog), sessions(**{"reviewer-0": "other"})
+        )
+        assert report["unmetRequirements"] == []
+        assert provider["choices"][0]["availability"] == claim
 
 
 def test_effort_absence_requires_explicit_unsupported_and_aliases_are_refused():

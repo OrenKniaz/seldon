@@ -1023,6 +1023,7 @@ def _review_shard(
     launch, output, stderr, directory = None, "", "", None
     items = []
     checking_launch = False
+    attempted = False
     try:
         launch = _launch_review(reviewer, shard["packet"], executable)
         directory = TemporaryDirectory(prefix="harness-roundtable-")
@@ -1033,6 +1034,7 @@ def _review_shard(
             if runner is None:
                 claim_planning_review_start(store, reviewer)
             checking_launch = False
+        attempted = True
         response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
         record["didRunProvider"] = runner is None
         record["exitCode"], output = response[:2]
@@ -1105,6 +1107,14 @@ def _review_shard(
         record["invalid"] = 1
         _diagnostic(store, result, record, launch, output, stderr or str(error))
     finally:
+        from codex_harness.core.reviewer_access import observe_access
+
+        record["accessObservation"] = observe_access(
+            attempted=attempted,
+            mocked=runner is not None,
+            succeeded=not record["invalid"],
+            error=record.get("primaryError", {}).get("reason", ""),
+        )
         record.update(packet_binding(output, reviewer["provider"]))
         if directory is not None:
             for attempt in range(3):
@@ -2219,6 +2229,12 @@ def render_roundtable_card(result: dict, findings: list[dict]) -> str:
                 f"  round {reviewer['round']}/{result['maxRounds']} for this revision "
                 f"· {reviewer['total']} total"
             )
+        for shard in reviewer.get("shardDetails", []):
+            access = shard.get("accessObservation", {})
+            if access.get("outcome") == "failure":
+                lines.append(
+                    f"  Access failure: {access['failureCategory']}. {access['nextAction']}"
+                )
         if reviewer.get("artifactPath"):
             lines.append(f"  Failure artifact: {reviewer['artifactPath']}")
             lines.append("  stderr: " + reviewer["stderrPreview"])
