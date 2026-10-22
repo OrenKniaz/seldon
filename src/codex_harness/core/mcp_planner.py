@@ -1131,6 +1131,9 @@ class PlannerServer:
         ):
             handoff = views.review_author_handoff(self._store(), status)
             body += "\n" + views.author_handoff_card(handoff)
+            body += "\nRepair guidance after inspection: " + self._next(
+                name, arguments, status, is_error, operation_error_code
+            )
         reply = {
             "isError": is_error,
             "statusAvailable": status_available,
