@@ -10,7 +10,6 @@ credit or verified human identity.
 from __future__ import annotations
 
 import json
-import re
 from copy import deepcopy
 from uuid import uuid4
 
@@ -113,50 +112,10 @@ def validate_reviewer_record_scope(
         raise PlanStoreError("plan-reviewer-confirmation-scope-stale", node["id"])
 
 
-def _label(key: str) -> str:
-    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", key).replace("_", " ").capitalize()
-
-
-def _readable(value) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join("- " + _readable(item) for item in value) or "None recorded"
-    if isinstance(value, dict):
-        return "\n\n".join(f"{_label(key)}:\n{_readable(item)}" for key, item in value.items())
-    if value is None:
-        return "Not recorded"
-    if isinstance(value, bool):
-        return "Yes" if value else "No"
-    return str(value)
-
-
 def _understanding(vision: dict) -> str:
-    fields = vision["fields"]
-    used = {"validation", "requirementFiles", "schema"}
-    sections = [vision["title"]]
-    labels = (
-        ("Vision", ("vision",)),
-        ("Users", ("users",)),
-        ("First moment", ("first_user_moment", "firstUserMoment")),
-        ("Scope in", ("scope_in", "scopeIn")),
-        ("Scope out", ("scope_out", "scopeOut")),
-        ("Quality", ("quality_bar", "qualityBar", "quality")),
-        ("Done", ("done_feels_like", "doneFeelsLike", "done")),
-        ("Assumptions", ("assumptions",)),
-    )
-    for label, keys in labels:
-        key = next((key for key in keys if key in fields), None)
-        value = fields[key] if key else vision["text"] if label == "Vision" else None
-        sections.append(f"{label}:\n{_readable(value)}")
-        if key:
-            used.add(key)
-    if fields.get("vision") != vision["text"] and "vision" in fields:
-        sections.append("Complete vision details:\n" + vision["text"])
-    for key, value in fields.items():
-        if key not in used:
-            sections.append(f"{_label(key)}:\n{_readable(value)}")
-    return "\n\n".join(sections)
+    from codex_harness.core.planner_vision import render_vision, vision_projection
+
+    return render_vision(vision_projection(vision))
 
 
 def _records(store: PlanStore, kind: str):
@@ -203,7 +162,7 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
     return None
 
 
-def prepare_confirmation(store: PlanStore, gate: str) -> dict:
+def prepare_confirmation(store: PlanStore, gate: str, *, resume_pending: bool = False) -> dict:
     """Persist exactly what the native client will display for the current gate."""
     with store._transaction():
         if gate not in ("align", "vision-lock"):
@@ -213,6 +172,12 @@ def prepare_confirmation(store: PlanStore, gate: str) -> dict:
             gate == "vision-lock" and PHASES.index(phase) > PHASES.index("vision-lock")
         ):
             raise PlanStoreError("plan-confirmation-gate-mismatch", f"Current phase is {phase}")
+        if resume_pending:
+            from codex_harness.core.planner_confirmation_cards import pending_confirmation
+
+            pending = pending_confirmation(store, gate)
+            if pending is not None:
+                return pending
         spine = Spine(store._data())
         visions = spine.ids("vision")
         if len(visions) != 1:
