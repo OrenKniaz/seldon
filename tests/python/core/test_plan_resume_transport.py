@@ -15,7 +15,11 @@ from codex_harness.core.mcp_planner import PlannerServer
 project = test_planner_resume.project
 
 
-def rpc(server, name, arguments=None):
+def rpc(server, name, arguments=None, *, expected_workspace=None):
+    """Use the independently known fixture target for positive same-project calls."""
+    arguments = dict(arguments or {})
+    if expected_workspace is not None:
+        arguments = {"expected_workspace": str(expected_workspace), **arguments}
     return server.handle_line(
         json.dumps(
             {
@@ -52,16 +56,19 @@ def cli(workspace, *arguments):
 def test_existing_chat_resume_returns_persisted_hold_without_starting_workers(tmp_path, transport):
     """A reconnect exposes the real saved gate instead of requiring chat reconstruction."""
     server = PlannerServer(tmp_path)
-    assert not rpc(server, "harness_plan_start", {"idea": "Small saved idea", "name": "Saved"})[
-        "isError"
-    ]
+    assert not rpc(
+        server,
+        "harness_plan_start",
+        {"idea": "Small saved idea", "name": "Saved"},
+        expected_workspace=tmp_path,
+    )["isError"]
     server.close()
     database = tmp_path / ".codex-harness/plan.sqlite3"
     original = database.read_bytes()
     if transport == "mcp":
         server = PlannerServer(tmp_path)
         try:
-            reply = rpc(server, "harness_plan_resume")
+            reply = rpc(server, "harness_plan_resume", expected_workspace=tmp_path)
         finally:
             server.close()
         assert not reply["isError"], reply
@@ -95,7 +102,7 @@ def test_missing_plan_resume_never_creates_workspace(tmp_path, transport):
     if transport == "mcp":
         server = PlannerServer(workspace)
         try:
-            reply = rpc(server, "harness_plan_resume")
+            reply = rpc(server, "harness_plan_resume", expected_workspace=workspace)
         finally:
             server.close()
         assert not reply["isError"], reply
@@ -114,7 +121,12 @@ def test_missing_plan_resume_never_creates_workspace(tmp_path, transport):
 def test_malformed_resume_cannot_reopen_writable_store_or_approve(tmp_path, transport, monkeypatch):
     """Transport input errors must not fall through normal writable status rendering."""
     server = PlannerServer(tmp_path)
-    assert not rpc(server, "harness_plan_start", {"idea": "Saved", "name": "Saved"})["isError"]
+    assert not rpc(
+        server,
+        "harness_plan_start",
+        {"idea": "Saved", "name": "Saved"},
+        expected_workspace=tmp_path,
+    )["isError"]
     server.close()
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     if transport == "mcp":
@@ -126,7 +138,12 @@ def test_malformed_resume_cannot_reopen_writable_store_or_approve(tmp_path, tran
         monkeypatch.setattr(server, "_store", forbidden)
         monkeypatch.setattr(server, "_status", forbidden)
         try:
-            reply = rpc(server, "harness_plan_resume", {"by": "user", "approve": True})
+            reply = rpc(
+                server,
+                "harness_plan_resume",
+                {"by": "user", "approve": True},
+                expected_workspace=tmp_path,
+            )
         finally:
             server.close()
         assert reply["isError"]
@@ -145,7 +162,7 @@ def test_chat_hold_then_separate_worker_start_and_cli_reconnect_preserves_origin
 ):
     """Resume only holds/reattaches; separate existing start uses a source-only Popen spy."""
     server = PlannerServer(project.workspace)
-    held = rpc(server, "harness_plan_resume")
+    held = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
     assert not held["isError"] and held["structuredContent"]["state"] == "held"
     options = test_planner_resume._published(project)
     launches = []
@@ -155,7 +172,7 @@ def test_chat_hold_then_separate_worker_start_and_cli_reconnect_preserves_origin
             "Popen",
             lambda *a, **k: launches.append((a, k)) or SimpleNamespace(pid=54321),
         )
-        started = rpc(server, "harness_plan_resume", options)
+        started = rpc(server, "harness_plan_resume", options, expected_workspace=project.workspace)
         assert not launches
         assert (
             started["structuredContent"]["reasonCode"] == "native-execution-confirmation-required"
@@ -165,6 +182,7 @@ def test_chat_hold_then_separate_worker_start_and_cli_reconnect_preserves_origin
             server,
             "harness_worker_start",
             {key: options[key] for key in ("expected_revision", "workers", "timeout", "call_cap")},
+            expected_workspace=project.workspace,
         )
         separate = approve_execution_wire(server, form)["result"]
         assert not separate["isError"], separate
@@ -208,7 +226,7 @@ def test_ready_resume_hold_reports_missing_host_admission(project, transport):
     if transport == "mcp":
         server = PlannerServer(project.workspace)
         try:
-            reply = rpc(server, "harness_plan_resume")
+            reply = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
         finally:
             server.close()
         assert not reply["isError"], reply
@@ -238,7 +256,7 @@ def test_missing_resume_hold_offers_supported_start_without_creating(tmp_path, t
     if transport == "mcp":
         server = PlannerServer(workspace)
         try:
-            reply = rpc(server, "harness_plan_resume")
+            reply = rpc(server, "harness_plan_resume", expected_workspace=workspace)
         finally:
             server.close()
         assert not reply["isError"], reply
@@ -280,9 +298,12 @@ def test_reattached_resume_preserves_original_when_observation_cannot_be_saved(
                     key: options[key]
                     for key in ("expected_revision", "workers", "timeout", "call_cap")
                 },
+                expected_workspace=project.workspace,
             )
             assert not approve_execution_wire(server, form)["result"]["isError"]
-            reply = rpc(server, "harness_plan_resume", options)
+            reply = rpc(
+                server, "harness_plan_resume", options, expected_workspace=project.workspace
+            )
         finally:
             server.close()
     assert not reply["isError"], reply
@@ -307,7 +328,7 @@ def test_early_planning_resume_offers_status_before_audit_or_review(project, tra
     if transport == "mcp":
         server = PlannerServer(project.workspace)
         try:
-            reply = rpc(server, "harness_plan_resume")
+            reply = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
         finally:
             server.close()
         assert not reply["isError"], reply
@@ -342,7 +363,9 @@ def test_complete_resume_claims_cannot_authorize_worker_launch(project, transpor
             )
             server = PlannerServer(project.workspace)
             try:
-                reply = rpc(server, "harness_plan_resume", options)
+                reply = rpc(
+                    server, "harness_plan_resume", options, expected_workspace=project.workspace
+                )
             finally:
                 server.close()
         assert not reply["isError"], reply
@@ -399,7 +422,10 @@ def test_complete_resume_claims_cannot_authorize_worker_launch(project, transpor
     assert not (project.workspace / ".codex-harness/worker-jobs").exists()
 
 
-def execution_wire(server, name, arguments, request_id=81):
+def execution_wire(server, name, arguments, request_id=81, *, expected_workspace=None):
+    """Bind this synthetic client to its known test project, not inferred host identity."""
+    if expected_workspace is not None:
+        arguments = {"expected_workspace": str(expected_workspace), **arguments}
     return server.handle_line(
         json.dumps(
             {
@@ -466,7 +492,7 @@ def test_explicit_execution_request_requires_actual_native_wire_before_launch(
         server = PlannerServer(project.workspace)
         native_execution_client(server)
         try:
-            response = execution_wire(server, tool, arguments)
+            response = execution_wire(server, tool, arguments, expected_workspace=project.workspace)
             assert response.get("method") == "elicitation/create", response
             assert "worker" in response["params"]["message"].lower()
             assert options["expected_revision"] in response["params"]["message"]
@@ -522,7 +548,7 @@ def test_native_execution_wire_approves_exact_proposal_once_then_reattaches(
         )
         server = PlannerServer(project.workspace)
         native_execution_client(server)
-        form = execution_wire(server, tool, arguments)
+        form = execution_wire(server, tool, arguments, expected_workspace=project.workspace)
         assert form.get("method") == "elicitation/create", form
         assert not launches and not (project.workspace / ".codex-harness/worker-jobs").exists()
         forged = {
@@ -546,7 +572,7 @@ def test_native_execution_wire_approves_exact_proposal_once_then_reattaches(
         assert approve_execution_wire(server, form) is None  # Replay is not a new tool invocation.
         assert len(launches) == 1
         changed = {**arguments, "timeout": arguments["timeout"] + 1}
-        refused = execution_wire(server, tool, changed, 82)
+        refused = execution_wire(server, tool, changed, 82, expected_workspace=project.workspace)
         assert (
             refused["result"]["isError"]
             or refused["result"]["structuredContent"]["state"] == "held"
@@ -579,7 +605,9 @@ def test_native_execution_nonapproval_never_admits_or_replays(project, monkeypat
     )
     server = PlannerServer(project.workspace, confirmation_timeout=0 if case == "timeout" else 120)
     native_execution_client(server)
-    form = execution_wire(server, "harness_plan_resume", arguments)
+    form = execution_wire(
+        server, "harness_plan_resume", arguments, expected_workspace=project.workspace
+    )
     assert form.get("method") == "elicitation/create", form
     if case == "stale":
         node = project.spine().node("R1")
@@ -638,7 +666,9 @@ def test_native_resume_preserves_actual_job_when_optional_observation_is_blocked
     )
     server = PlannerServer(project.workspace)
     native_execution_client(server)
-    form = execution_wire(server, "harness_plan_resume", arguments)
+    form = execution_wire(
+        server, "harness_plan_resume", arguments, expected_workspace=project.workspace
+    )
     observation_dir = project.workspace / ".codex-harness/planner-resume"
     # The initial inspection may have observations: block the exact next UUID
     # writer by replacing only the emptyable observation directory with a file.
@@ -659,7 +689,11 @@ def test_native_resume_preserves_actual_job_when_optional_observation_is_blocked
 
 
 def test_native_resume_card_failure_retains_admitted_job_and_query_route(project, monkeypatch):
-    """Rendering cannot erase an admitted job or grant a retry."""
+    """Rendering cannot erase an admitted job or its read-only query route.
+
+    Catch generic uncertain-action advice hiding an already persisted original;
+    ordinary successful-resume tests miss the post-admission renderer failure.
+    """
     from codex_harness.core import mcp_planner
 
     options = test_planner_resume._published(project)
@@ -675,7 +709,9 @@ def test_native_resume_card_failure_retains_admitted_job_and_query_route(project
     )
     server = PlannerServer(project.workspace)
     native_execution_client(server)
-    form = execution_wire(server, "harness_plan_resume", arguments)
+    form = execution_wire(
+        server, "harness_plan_resume", arguments, expected_workspace=project.workspace
+    )
     with monkeypatch.context() as patch:
 
         def broken_card(data):
@@ -692,3 +728,37 @@ def test_native_resume_card_failure_retains_admitted_job_and_query_route(project
     )
     assert len(launches) == 1
     assert "harness_worker_status job_id=" in reply["result"]["content"][0]["text"]
+    assert reply["result"]["_meta"]["executionConfirmation"]["human_identity_verified"] is False
+    original_dir = project.workspace / ".codex-harness/worker-jobs" / options["expected_revision"]
+    originals = {
+        p.relative_to(original_dir): p.read_bytes() for p in original_dir.rglob("*") if p.is_file()
+    }
+    request = json.loads((original_dir / "request.json").read_text(encoding="utf-8"))
+    assert request["executionRequestId"]
+    assert request["options"]["workers"] == options["workers"]
+    # Reopen through the public route named by the failed response, not a copied result.
+    reopened = PlannerServer(project.workspace)
+    try:
+        queried = rpc(
+            reopened,
+            "harness_worker_status",
+            {"job_id": data["job"]["jobId"]},
+            expected_workspace=project.workspace,
+        )
+        assert not queried["isError"], queried
+        observed = queried["structuredContent"]
+        assert observed["jobId"] == options["expected_revision"]
+        assert observed["publicationRevision"] == options["expected_revision"]
+        assert observed["options"] == request["options"]
+        assert observed["nativeApproval"] == "recorded"
+        assert observed["status"] == observed["liveness"] == "unknown"
+        assert observed["harnessDeliveryProven"] is False
+        assert approve_execution_wire(reopened, form) is None
+        assert len(launches) == 1
+        assert {
+            p.relative_to(original_dir): p.read_bytes()
+            for p in original_dir.rglob("*")
+            if p.is_file()
+        } == originals
+    finally:
+        reopened.close()
