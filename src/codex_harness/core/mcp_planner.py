@@ -1166,6 +1166,20 @@ class PlannerServer:
                 + self.result_data["id"]
                 + "; inspect each recorded reviewer outcome before explicitly selecting any retry."
             )
+        if name == "harness_accept_scenarios" and not error:
+            scenarios = self.result_data["scenarios"]
+            if not scenarios or any(
+                not item.get("executable") or item.get("status") == "stale" for item in scenarios
+            ):
+                return (
+                    "harness_schema tool=harness_accept_scenarios; fill executable steps and "
+                    "expectations and save the complete current set with harness_accept_scenarios."
+                )
+        if name == "harness_accept_run" and not error and self.result_data["subject"] == "oracle":
+            return (
+                "harness_accept_run repo=<integrated-product-repo> subject=product; "
+                "the oracle result is a dry run, not product acceptance."
+            )
         if name == "harness_accept_assess":
             if status.get("pending_gate") == "harness_plan_start":
                 return "harness_plan_start idea=<your idea> name=<plan name>"
@@ -1220,17 +1234,22 @@ class PlannerServer:
             and self.result_data.get("jobId")
         ):
             return "harness_worker_status job_id=" + self.result_data["jobId"]
-        if name == "harness_publish" and not error:
+        if (
+            name in {"harness_publish", "harness_plan_status"}
+            and not error
+            and status["phase"] == "publish"
+            and status.get("publication", {}).get("up_to_date")
+            and not status.get("acceptance", {}).get("accepted")
+        ):
             if (
                 status.get("continuation", {}).get("recommendation", {}).get("kind")
                 != "not_applicable"
             ):
                 return views.review_resolution_next(status["reviewResolution"])
             return (
-                "harness_worker_start expected_revision="
-                + self.result_data["id"]
-                + " workers=<explicit bead/provider/model/effort tuples>; "
-                "workers implement; the planner steers."
+                "harness_plan_resume; inspect existing job state first. Execution requires "
+                "exact workers, an explicit call_cap and a separate native decision; "
+                "this guidance does not authorize a launch."
             )
         if name == "harness_preflight":
             return (
@@ -1335,12 +1354,6 @@ class PlannerServer:
         if status["phase"] in {"roundtable", "publish"}:
             resolution = status.get("reviewResolution")
             if resolution and resolution["nextAction"]["kind"] != "not_applicable":
-                if resolution["nextAction"]["kind"] == "review_required":
-                    return (
-                        "harness_schema tool=harness_roundtable; then harness_roundtable "
-                        "reviewers=<explicit authorized name/provider/model/effort tuples>; "
-                        "inspect existing review details before retrying a failed reviewer."
-                    )
                 return views.review_resolution_next(resolution)
         if status.get("acceptance", {}).get("accepted"):
             return (

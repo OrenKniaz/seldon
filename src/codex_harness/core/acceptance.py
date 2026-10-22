@@ -519,7 +519,7 @@ def acceptance_next(reason, repo=None) -> str:
     if reason in ("revision-algorithm-upgraded", "legacy-unbound"):
         return f"harness_accept_rebind repo={json.dumps(repo or '<integrated-repo>')}"
     if reason == "vision-unlocked":
-        return "harness_record_confirmation gate=vision-lock statement=<actual-words>"
+        return "harness_record_confirmation gate=vision-lock"
     if reason == "scenarios-changed":
         return (
             "Review and save the current scenarios with harness_accept_scenarios, "

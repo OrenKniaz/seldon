@@ -415,7 +415,7 @@ def test_metadata_only_compile_prerequisite_has_precise_public_gate(project, cap
             == statuses[2]["continuation"]
         )
         assert "compile --template" in cli["next"]
-        assert "existing CLI compile --template" in mcp["content"][0]["text"].split("Next:")[-1]
+        assert "harness_compile" in mcp["content"][0]["text"].split("Next:")[-1]
         mutation = (
             {"name": "harness_advance", "arguments": {"to_phase": "publish"}}
             if phase == "roundtable"

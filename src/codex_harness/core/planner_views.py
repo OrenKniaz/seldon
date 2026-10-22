@@ -836,7 +836,11 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
         return review_policy_next(state["reviewPolicy"], cli_prefix=cli_prefix)
     if kind == "compile_required":
         return (
-            cmd("compile --template <existing-template> --out <manifest.json>")
+            (
+                cmd("compile --template <existing-template> --out <manifest.json>")
+                if cli_prefix is not None
+                else "harness_compile"
+            )
             + "; refresh "
             + refresh
         )
@@ -859,6 +863,12 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
         )
     if kind == "review_required":
         review = state["review"]
+        review_command = (
+            cmd("roundtable --reviewer @<reviewer.json>")
+            if cli_prefix is not None
+            else "harness_roundtable "
+            "reviewers=<explicit authorized name/provider/model/effort tuples>"
+        )
         if review.get("qualityStatus") == "fail" and review["current"]:
             round_id = review["detailRoute"]["roundId"]
             inspect = (
@@ -868,15 +878,15 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
             )
             return (
                 f"Inspect {inspect}: {review['advice']}; retry only the failed reviewer with "
-                + cmd("roundtable --reviewer @<failed-reviewer.json>")
+                + (
+                    cmd("roundtable --reviewer @<failed-reviewer.json>")
+                    if cli_prefix is not None
+                    else review_command
+                )
                 + " within host-reserved capacity and existing round/total caps; refresh "
                 + refresh
             )
-        return (
-            cmd("roundtable --reviewer @<reviewer.json>")
-            + " within host-reserved capacity; refresh "
-            + refresh
-        )
+        return review_command + " within host-reserved capacity; refresh " + refresh
     if kind == "attempt_phase_advance":
         return (
             (
