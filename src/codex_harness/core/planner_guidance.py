@@ -34,9 +34,22 @@ def planning_turn(spine) -> dict:
             continue
         feature_id, requirement_ids = feature, local
         break
+    if stage == "ready":
+        # Feature scans cannot cover valid draft requirements without feature ancestry.
+        remaining = [item for item in gaps if item["gap"].startswith("requirement-without-")]
+        if remaining:
+            requirement_ids = sorted({item["id"] for item in remaining})
+            stage, kind = (
+                ("tests", "test")
+                if any(item["gap"] == "requirement-without-test" for item in remaining)
+                else ("bead", "bead")
+            )
     focus = (
         f"Focus {feature_id}; existing requirement IDs: {', '.join(requirement_ids) or 'none'}. "
         if feature_id
+        else f"Unbound requirement IDs: {', '.join(requirement_ids)}; "
+        "inspect their feature attachment and missing coverage. "
+        if requirement_ids
         else ""
     )
     return {

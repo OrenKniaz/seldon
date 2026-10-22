@@ -108,6 +108,38 @@ def test_current_feature_bead_precedes_later_feature_test_gap(project, capsys):
         server.close()
 
 
+def test_unbound_requirement_gaps_remain_visible_after_connected_features_finish(project, capsys):
+    """Catch false ready for a valid parentless draft; feature-only tests miss it.
+
+    Real batch/status/CLI prove advice without introducing parent validation.
+    """
+    confirmed_vision(project)
+    server = PlannerServer(project.workspace)
+    try:
+        requirement, test = deepcopy(
+            schema(server, tool="harness_upsert_nodes")["example"]["nodes"]
+        )
+        requirement.update(id="R-unbound", parents=[])
+        save(server, [requirement])
+        assert project.spine().node(requirement["id"]) == requirement
+        current = turn(server, capsys, None, "tests")
+        assert current["requirementIds"] == ["R-unbound"]
+        assert "Unbound" in current["guidance"] and "R-unbound" in current["guidance"]
+        assert project.spine().coverage_gaps() == [
+            {"id": "R-unbound", "gap": "requirement-without-bead"},
+            {"id": "R-unbound", "gap": "requirement-without-test"},
+        ]
+        test.update(id="T-unbound", parents=["R-unbound"])
+        save(server, [test])
+        assert turn(server, capsys, None, "bead")["requirementIds"] == ["R-unbound"]
+        assert project.spine().node("R-unbound")["parents"] == []
+        requirement["parents"] = ["F1"]
+        save(server, [requirement])
+        assert turn(server, capsys, "F1", "bead")["requirementIds"] == ["R-unbound", "R1"]
+    finally:
+        server.close()
+
+
 def test_first_use_batch_and_test_help_match_real_single_e2e_suite_compiler(project):
     """Catch late two-e2e refusal and undocumented metadata; fixtures already know both."""
     server = PlannerServer(project.workspace)
