@@ -507,6 +507,20 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
         result.update(typed_draft_help(tool))
+    if tool == "harness_audit":
+        result.update(
+            example={"mode": "prospective"},
+            prerequisites="Prepare authored protected tests and importable failing stubs in "
+            "workspace/template, then use harness_compile. The workspace binding is required; "
+            "no template, oracle, baseline or output path can be supplied.",
+            result="The existing prospective audit engine and record_audit writer return "
+            "actual findings, collection/red-baseline results, audit ID, bound manifestRevision "
+            "and prospective warning. Failure is recorded as failure; changed plans or "
+            "protected files cannot reuse a passing audit.",
+            authority="Prospective planning validation only: not oracle satisfiability, "
+            "product execution, review, human approval or acceptance. Existing publication "
+            "and review-policy gates remain; prospective publication needs an explicit reason.",
+        )
     if tool == "harness_compile" or tool == "harness_upsert_node" and kind == "vision":
         result["compilationMetadata"] = {
             "owner": "The existing vision node's fields; not arguments to harness_compile.",

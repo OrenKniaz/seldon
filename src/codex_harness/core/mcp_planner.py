@@ -202,6 +202,14 @@ TOOLS = [
         ["id"],
     ),
     _tool(
+        "harness_audit",
+        "Audit planned proofs on disposable red stubs in the fixed workspace/template. "
+        "Explicit prospective mode checks collection, assertions, imports and traceability; "
+        "it does not establish oracle satisfiability, product execution or acceptance. "
+        "Inspect harness_schema tool=harness_audit before first use.",
+        {"mode": {"type": "string", "enum": ["prospective"]}},
+    ),
+    _tool(
         "harness_show_node",
         "Read a node and its linked protected test functions or named body.",
         {"id": STRING, "body": {"type": "boolean"}, "test": STRING},
@@ -997,6 +1005,9 @@ class PlannerServer:
                 name == "harness_readiness"
                 and self.result_data
                 and self.result_data["invalid"]
+                or name == "harness_audit"
+                and self.result_data
+                and not self.result_data["ok"]
                 or name == "harness_roundtable"
                 and self.result_data
                 and (
@@ -1116,6 +1127,7 @@ class PlannerServer:
                     in (
                         "harness_readiness",
                         "harness_roundtable",
+                        "harness_audit",
                         "harness_accept_run",
                         "harness_accept_review",
                         "harness_accept_assess",
@@ -1139,6 +1151,15 @@ class PlannerServer:
         )
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if name == "harness_audit":
+            if self.result_data and not error:
+                return "harness_plan_status; follow the current recorded gate."
+            return (
+                "harness_plan_status; inspect the recorded audit findings and current gate. "
+                "Repair only the implicated planning proofs/stubs before recompiling."
+                if self.result_data
+                else "harness_schema tool=harness_audit; correct the reported audit prerequisite."
+            )
         if name == "harness_roundtable" and self.result_data:
             return (
                 "harness_review id="
@@ -1573,6 +1594,25 @@ class PlannerServer:
                 load_plan(path)
                 self.result_data = store.compile_template(template)
             return f"Compiled current manifest: {self.result_data['planRevision']}"
+        if name == "harness_audit":
+            from codex_harness.core import test_audit
+            from codex_harness.core.spine import compile_manifest
+
+            template = self.workspace / "template"
+            if template.resolve() != template:
+                raise ValueError("Audit template must stay in the fixed workspace")
+            spine = store.spine()
+            manifest = compile_manifest(spine, template)
+            store.check_requirement_files(manifest, template)
+            self.result_data = {
+                **test_audit.audit_prospective_tests(
+                    template=template, manifest=manifest, spine=spine
+                ),
+                "manifestRevision": manifest["planRevision"],
+                "warning": test_audit.PROSPECTIVE_WARNING,
+            }
+            self.result_data["id"] = store.record_audit(manifest["planRevision"], self.result_data)
+            return test_audit.render_test_audit_card(self.result_data)
         if name == "harness_readiness":
             from codex_harness.core.readiness import readiness_review, render_readiness
 

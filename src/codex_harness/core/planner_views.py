@@ -842,6 +842,11 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
         )
     if kind == "audit_required":
         mode = action["auditMode"]
+        if cli_prefix is None and mode != "oracle-verified":
+            return (
+                "harness_schema tool=harness_audit; then harness_audit mode=prospective "
+                "for planned collection/red-stub checks, not oracle or product proof."
+            )
         if mode == "prospective":
             return cmd("audit --prospective")
         if mode == "oracle-verified":
