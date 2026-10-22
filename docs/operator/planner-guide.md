@@ -46,8 +46,10 @@ only align/vision-lock. No reviewer/provider is launched by this ordinary action
 tests → bead, ending each turn with the one-line stored-count status. Read
 `harness_schema kind=<kind>` (CLI: `schema --kind <kind>`) at first use. CLI
 `node --json @feature-nodes.jsonl` accepts requirements and their tests together in
-one atomic batch; a refused batch saves none of its nodes. The current single-node
-MCP tool is `harness_upsert_node`. The ≤8 calls-per-stage goal is a measurement target,
+one atomic batch; a refused batch saves none of its nodes. MCP `harness_upsert_nodes`
+accepts the same mixed batch through the same writer; first read
+`harness_schema tool=harness_upsert_nodes`. Single-node edits remain
+`harness_upsert_node`. The ≤8 calls-per-stage goal is a measurement target,
 not an enforced cap or evidence of planning quality. Complete the agreed depth.
 
 **Recorded vision.** Summary and cockpit use the same stored vision projection as

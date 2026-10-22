@@ -4,6 +4,7 @@
 NEXT_TARGETS = {
     "schema": ("schema", "harness_schema"),
     "node": ("node", "harness_upsert_node"),
+    "batch": ("node", "harness_upsert_nodes"),
     "status": ("status", "harness_plan_status"),
     "advance": ("advance", "harness_advance"),
     "compile": ("compile", "harness_compile"),
@@ -42,13 +43,13 @@ def planning_turn(spine) -> dict:
         if kind is None
         else {
             "cli": "node --json @feature-nodes.jsonl",
-            "mcp": "harness_upsert_node node=<one schema-valid node>",
+            "mcp": "harness_upsert_nodes nodes=<one feature's requirements and tests>",
         },
         "guidance": (
             "Work one feature at a time: features → requirements → tests → bead. "
             "Inspect the schema at first use; finish each turn with this one-line status. "
             "CLI node accepts a requirements+tests JSONL batch in one atomic write; "
-            "MCP currently accepts one node per call. These are planning records, "
+            "MCP harness_upsert_nodes uses the same writer. These are planning records, "
             "not proof that the product works."
         ),
     }
