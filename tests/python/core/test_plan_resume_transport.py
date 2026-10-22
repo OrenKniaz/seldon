@@ -15,9 +15,11 @@ from codex_harness.core.mcp_planner import PlannerServer
 project = test_planner_resume.project
 
 
-def rpc(server, name, arguments=None, *, expected_workspace):
+def rpc(server, name, arguments=None, *, expected_workspace=None):
     """Use the independently known fixture target for positive same-project calls."""
-    arguments = {"expected_workspace": str(expected_workspace), **(arguments or {})}
+    arguments = dict(arguments or {})
+    if expected_workspace is not None:
+        arguments = {"expected_workspace": str(expected_workspace), **arguments}
     return server.handle_line(
         json.dumps(
             {
@@ -420,9 +422,10 @@ def test_complete_resume_claims_cannot_authorize_worker_launch(project, transpor
     assert not (project.workspace / ".codex-harness/worker-jobs").exists()
 
 
-def execution_wire(server, name, arguments, request_id=81, *, expected_workspace):
+def execution_wire(server, name, arguments, request_id=81, *, expected_workspace=None):
     """Bind this synthetic client to its known test project, not inferred host identity."""
-    arguments = {"expected_workspace": str(expected_workspace), **arguments}
+    if expected_workspace is not None:
+        arguments = {"expected_workspace": str(expected_workspace), **arguments}
     return server.handle_line(
         json.dumps(
             {
