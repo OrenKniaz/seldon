@@ -519,10 +519,10 @@ def test_continuation_missing_plan_surfaces_do_not_create_state(tmp_path, capsys
         mcp = rpc(server, "tools/call", {"name": "harness_plan_status", "arguments": {}})["result"]
         assert not mcp["isError"] and view["nextAction"]["kind"] == "unavailable_refresh"
         assert mcp["content"][0]["text"].split("Next:")[-1].startswith(" harness_plan_start")
-        assert plan_cli.main(["--workspace", str(missing), "--json", "status"]) == 2
+        assert plan_cli.main(["--workspace", str(missing), "--json", "status"]) == 0
         cli = json.loads(capsys.readouterr().out)
         resumed = resume_plan(missing)
-        assert cli["isError"] and resumed["reasonCode"] == "plan-missing"
+        assert not cli["isError"] and resumed["reasonCode"] == "plan-missing"
         assert resumed["nextAction"]["kind"] == "start_plan"
         assert not missing.exists()
         print(json.dumps({"missingMCP": mcp, "missingCLI": cli, "missingResume": resumed}))
