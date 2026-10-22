@@ -14,6 +14,8 @@ from codex_harness.core import proof_accounting
 from codex_harness.core.attempt_activity import observe_attempt_activity
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PHASES, PlanStore
+from codex_harness.core.planner_guidance import planning_turn
+from codex_harness.core.planner_vision import vision_projection
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.roundtable import findings
 from codex_harness.core.spine import SpineError
@@ -114,11 +116,15 @@ def _plan(workspace):
             else None
         )
         if result["vision"]:
+            projection = vision_projection(store.spine().node(result["vision"]["id"]))
+            result["visionProjection"] = projection
             result["vision"] = {
                 **result["vision"],
                 "firstUserMoment": result["vision"]["fields"].get("first_user_moment"),
                 "scopeIn": result["vision"]["fields"].get("scope_in"),
             }
+        if result["phase"] in {"features", "requirements", "plan"}:
+            result["planningTurn"] = planning_turn(store.spine())
         result["latestPublishedRevision"] = _read(lambda: _latest(db))
         result["latestPublishedRevisionShort"] = _short_revision(result["latestPublishedRevision"])
         result["mermaid"] = {
@@ -350,30 +356,7 @@ def _recorded_understanding(store, status):
     )
     if request.get("card") != expected_card or not isinstance(vision.get("title"), str):
         return None
-    fields = vision["fields"]
-    sections = []
-    for label, aliases in (
-        ("Vision", ("vision",)),
-        ("Users", ("users",)),
-        ("First moment", ("first_user_moment", "firstUserMoment")),
-        ("Scope in", ("scope_in", "scopeIn")),
-        ("Scope out", ("scope_out", "scopeOut")),
-        ("Quality", ("quality_bar", "qualityBar", "quality")),
-        ("Done", ("done_feels_like", "doneFeelsLike", "done")),
-        ("Assumptions", ("assumptions",)),
-    ):
-        key = next((name for name in aliases if name in fields), None)
-        value = fields[key] if key else vision.get("text") if label == "Vision" else None
-        if isinstance(value, list) and all(isinstance(item, str) for item in value):
-            value = "\n".join("- " + item for item in value)
-        if isinstance(value, str) and value:
-            sections.append({"label": label, "text": value})
-    if (
-        "vision" in fields
-        and fields["vision"] != vision.get("text")
-        and isinstance(vision.get("text"), str)
-    ):
-        sections.append({"label": "Complete vision details", "text": vision["text"]})
+    sections = vision_projection(vision)["sections"]
     return {
         "title": vision["title"],
         "gate": gate,
@@ -1379,12 +1362,16 @@ def _cockpit(report, detail, current):
             }
         )
     acceptance = plan.get("acceptance") if isinstance(plan.get("acceptance"), dict) else {}
+    projection = plan.get("visionProjection")
+    if vision is not None and projection is None:
+        projection = vision_projection({**vision, "text": vision["detail"]})
     vision_view = (
         None
         if vision is None
         else {
             "title": vision["title"],
-            "promise": vision["fields"].get("vision") or vision["detail"],
+            "promise": projection["sections"][0]["text"],
+            "sections": projection["sections"],
             "acceptance": {
                 key: deepcopy(acceptance.get(key))
                 for key in (

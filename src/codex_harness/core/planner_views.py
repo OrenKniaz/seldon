@@ -3,16 +3,21 @@
 import sqlite3
 
 from codex_harness.core.plan_store import PHASES
+from codex_harness.core.planner_vision import render_vision
 from codex_harness.core.spine_diagrams import _escape, _layers, _projection, diagram, text_fallback
 
 NEXT = {
     "align": "Restate the vision and ask the user to confirm the understanding.",
     "expand": "Offer improvements; record what the user accepts, rejects or defers.",
     "vision-lock": "Show the understanding and journey; ask for explicit vision approval.",
-    "features": "Map features, user stories, edge cases and open questions.",
-    "requirements": "Give every requirement acceptance criteria and planned verification.",
+    "features": "harness_schema kind=feature (CLI: schema --kind feature); "
+    "map features, user stories, edge cases and open questions in short turns.",
+    "requirements": "harness_schema kind=requirement (CLI: schema --kind requirement); "
+    "write requirements and their planned tests one feature at a time.",
     "tech-stack": "Show options, trade-offs and recommendations as decision cards.",
-    "plan": "Link beads to requirements, with file ownership and dependencies.",
+    "plan": "harness_schema kind=bead (CLI: schema --kind bead); "
+    "link beads to requirements, with file ownership and dependencies. "
+    "Then harness_compile (CLI: compile --template template --out manifest.json).",
     "roundtable": "Record review findings and resolve open clarifications.",
     "publish": "Publish the frozen revision and its worker manifest.",
     "execute": "Follow worker progress and proof against the published revision.",
@@ -1250,7 +1255,7 @@ def status_card(status: dict, questions: list[dict]) -> str:
         else "not accepted: " + str(acceptance["invalidReason"])
     )
     passed = sum(item["lastResult"] == "pass" for item in acceptance["scenarios"])
-    return data_card(
+    body = data_card(
         "Plan status",
         {
             "Editable spine_revision": status["spine_revision"],
@@ -1268,6 +1273,12 @@ def status_card(status: dict, questions: list[dict]) -> str:
             ],
         },
     )
+    if status.get("visionProjection"):
+        body += "\n\n" + render_vision(status["visionProjection"])
+    if status.get("planningTurn"):
+        turn = status["planningTurn"]
+        body += "\n\n" + turn["status"] + "\n" + turn["guidance"]
+    return body
 
 
 def chat_diagram(spine, kind: str) -> str:

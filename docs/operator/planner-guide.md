@@ -41,6 +41,21 @@ only align/vision-lock. No reviewer/provider is launched by this ordinary action
 2. `p <command> --help`.
 3. Targeted diagnostics on the reported error.
 4. Only then a bounded search.
+
+**Short planning turns.** Work one feature at a time through features → requirements →
+tests → bead, ending each turn with the one-line stored-count status. Read
+`harness_schema kind=<kind>` (CLI: `schema --kind <kind>`) at first use. CLI
+`node --json @feature-nodes.jsonl` accepts requirements and their tests together in
+one atomic batch; a refused batch saves none of its nodes. The current single-node
+MCP tool is `harness_upsert_node`. The ≤8 calls-per-stage goal is a measurement target,
+not an enforced cap or evidence of planning quality. Complete the agreed depth.
+
+**Recorded vision.** Summary and cockpit use the same stored vision projection as
+the confirmation-card integration. Primary Done is `done_feels_like` (`doneFeelsLike`
+or `done`); `done_means` remains complete additional detail. `Not recorded` means
+the field is absent; explicit null is `Not specified`, and empty/false values do
+not fall back to different vision text. Displaying a vision gives no approval credit.
+
 In PowerShell define `function p { uv run --no-sync --frozen --offline python -m codex_harness.core.plan_cli --workspace "$W" @args }`.
 Set `$W` to an existing project directory. Every text reply ends with the next action; replace angle-bracket values.
 `--json` returns one JSON object (`text`, `status`, `data`, `next`, `isError`); its **text** ends with `Next:`. Creations return `data.id`.
