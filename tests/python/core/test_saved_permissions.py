@@ -9,12 +9,13 @@ import pytest
 from codex_harness.core import status_api
 
 
-def test_project_config_reaches_shipped_read_only_card_without_secrets(tmp_path):
+@pytest.mark.parametrize("mode", ["auto", "prompt", "writes", "approve"])
+def test_project_config_reaches_shipped_read_only_card_without_secrets(tmp_path, mode):
     config = tmp_path / ".codex" / "config.toml"
     config.parent.mkdir()
     config.write_text(
         'approval_policy = "never"\nsandbox_mode = "workspace-write"\n'
-        '[mcp_servers.seldon]\ndefault_tools_approval_mode = "approve"\n'
+        f'[mcp_servers.seldon]\ndefault_tools_approval_mode = "{mode}"\n'
         'command = "PRIVATE_COMMAND_SENTINEL"\n'
         '[mcp_servers.seldon.env]\nTOKEN = "PRIVATE_TOKEN_SENTINEL"\n',
         encoding="utf-8",
@@ -26,7 +27,7 @@ def test_project_config_reaches_shipped_read_only_card_without_secrets(tmp_path)
     assert saved["saved"] == {
         "approval_policy": "never",
         "sandbox_mode": "workspace-write",
-        "seldon_tool_approval": "approve",
+        "seldon_tool_approval": mode,
     }
     assert saved["activePolicy"] == saved["chatConnection"] == "unknown"
     assert "PRIVATE_" not in json.dumps(payload)
@@ -58,7 +59,7 @@ console.log(JSON.stringify(card(JSON.parse(fs.readFileSync(0,'utf8')))));
         check=True,
     ).stdout
     assert "Saved project permissions" in rendered
-    assert "never" in rendered and "workspace-write" in rendered and "approve" in rendered
+    assert "never" in rendered and "workspace-write" in rendered and mode in rendered
     assert "unknown" in rendered and "do not prove" in rendered
     assert not any(f'"tag":"{tag}"' in rendered for tag in ("button", "input", "form"))
 

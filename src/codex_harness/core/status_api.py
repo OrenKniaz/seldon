@@ -1109,7 +1109,7 @@ def _saved_permissions(workspace):
     allowed = {
         "approval_policy": {"never", "on-request", "untrusted", "on-failure"},
         "sandbox_mode": {"read-only", "workspace-write", "danger-full-access"},
-        "seldon_tool_approval": {"approve"},
+        "seldon_tool_approval": {"auto", "prompt", "writes", "approve"},
     }
     for key, value in observed.items():
         if isinstance(value, str) and value in allowed[key]:
