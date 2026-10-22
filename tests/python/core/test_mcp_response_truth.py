@@ -9,10 +9,11 @@ No live providers or product workers are used; the audit fixture runs local proo
 import json
 from copy import deepcopy
 
+import pytest
 from tests.python.core import test_mcp_audit, test_planner_replay_gaps
 
 from codex_harness.core.mcp_planner import PlannerServer
-from codex_harness.core.plan_store import open_plan_store_readonly
+from codex_harness.core.plan_store import PlanStoreError, open_plan_store_readonly
 
 project = test_planner_replay_gaps.project
 prospective = test_mcp_audit.prospective
@@ -133,13 +134,15 @@ def test_primary_exception_after_real_write_never_becomes_success(project, monke
         server.close()
 
 
+@pytest.mark.parametrize("completion_error", ["os", "store"])
 def test_single_node_commit_before_result_requires_inspection_but_input_refusal_keeps_help(
-    project, monkeypatch
+    project, monkeypatch, completion_error
 ):
     """Catch retry advice when canonical commit raises before result_data is set.
 
     The existing uncertain-batch test sets result_data before its injected error;
     this real single-node producer exercises the missing completion boundary.
+    A typed store error must not be assumed to prove a refusal before effects.
     """
     store_type, calls = type(project), []
     original = store_type.upsert_node
@@ -147,6 +150,8 @@ def test_single_node_commit_before_result_requires_inspection_but_input_refusal_
     def commit_then_raise(self, node):
         calls.append(node["id"])
         original(self, node)
+        if completion_error == "store":
+            raise PlanStoreError("plan-export-conflict", "Completion lost before dispatch result")
         raise OSError("Completion lost before dispatch result")
 
     monkeypatch.setattr(store_type, "upsert_node", commit_then_raise)

@@ -17,7 +17,12 @@ from uuid import uuid4
 
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
-from codex_harness.core.plan_store import PHASES, open_plan_store, open_plan_store_readonly
+from codex_harness.core.plan_store import (
+    PHASES,
+    PlanStoreError,
+    open_plan_store,
+    open_plan_store_readonly,
+)
 from codex_harness.core.planner_connection import connection_reply
 from codex_harness.core.planner_guidance import planning_turn
 from codex_harness.core.planner_nodes import batch_nodes
@@ -986,7 +991,7 @@ class PlannerServer:
     def call_tool(self, name: str, arguments: dict, *, schema_tools=None) -> dict:
         self.result_data = None
         operation_error_code = None
-        operation_raised = False
+        uncertain_dispatch = False
         dispatch_started = False
         try:
             tool = next((tool for tool in TOOLS if tool["name"] == name), None)
@@ -1029,8 +1034,18 @@ class PlannerServer:
                 )
             )
         except Exception as error:
-            operation_raised = True
             operation_error_code = getattr(error, "code", None)
+            # These advance/publish prerequisites precede writes in canonical transactions.
+            uncertain_dispatch = dispatch_started and not (
+                isinstance(error, PlanStoreError)
+                and name in {"harness_advance", "harness_publish"}
+                and operation_error_code
+                in {
+                    "plan-findings-open",
+                    "plan-publication-evidence-required",
+                    "plan-review-policy-unmet",
+                }
+            )
             # Tool failures are isolated at the protocol boundary; no input/secret logs.
             print(f"planner tool failed: {type(error).__name__}", file=sys.stderr)
             body = f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}"
@@ -1101,7 +1116,7 @@ class PlannerServer:
             body += "\nAcceptance invalid: " + acceptance["invalidMessage"]
         next_step = (
             self._next(name, arguments, status, is_error, operation_error_code)
-            if status_available and not (operation_raised and dispatch_started)
+            if status_available and not uncertain_dispatch
             else "harness_plan_status read-only; inspect the primary result and saved IDs. "
             "Do not repeat a completed or uncertain mutation; inspect its recorded effect first."
         )
@@ -1131,9 +1146,6 @@ class PlannerServer:
         ):
             handoff = views.review_author_handoff(self._store(), status)
             body += "\n" + views.author_handoff_card(handoff)
-            body += "\nRepair guidance after inspection: " + self._next(
-                name, arguments, status, is_error, operation_error_code
-            )
         reply = {
             "isError": is_error,
             "statusAvailable": status_available,
