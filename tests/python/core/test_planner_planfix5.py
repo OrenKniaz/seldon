@@ -298,6 +298,7 @@ def test_status_acceptance_once_and_brief(project):
     assert brief.startswith(f"Seldon · project: {project.workspace.name} · phase ")
     assert brief.count("Seldon · project:") == brief.count("Next:") == 1
     assert f"workspace: {project.workspace}" in brief
+    assert f"Revision {machine['status']['plan_revision'][:12]}" in brief
     assert f"phase: {machine['status']['phase']}" in brief
     assert (
         f"Open: {machine['status']['open_clarifications']} questions, "
@@ -306,6 +307,7 @@ def test_status_acceptance_once_and_brief(project):
     assert len(brief.splitlines()) <= 7
     brief_json = cli(project.workspace, "status", "--brief", machine=True)
     assert brief_json["text"] == brief.rsplit("\nNext: ", 1)[0]
+    assert brief_json["status"]["plan_revision"] == machine["status"]["plan_revision"]
     assert brief_json["data"]["acceptance"] == machine["data"]["acceptance"]
 
 
