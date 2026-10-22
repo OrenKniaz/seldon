@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+import tomllib
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
@@ -1071,6 +1072,52 @@ def _agents(runs):
     return list(groups.values())
 
 
+def _saved_permissions(workspace):
+    """Allowlisted saved settings only; no active host policy can be inferred."""
+    result = {
+        "source": "project-local .codex/config.toml",
+        "availability": "unknown",
+        "saved": dict.fromkeys(
+            ("approval_policy", "sandbox_mode", "seldon_tool_approval"), "unknown"
+        ),
+        "activePolicy": "unknown",
+        "chatConnection": "unknown",
+    }
+    if workspace is None:
+        return result
+    try:
+        root = Path(workspace).resolve(strict=True)
+        config = (root / ".codex" / "config.toml").resolve(strict=True)
+        if not config.is_relative_to(root):
+            return result
+        with config.open("rb") as handle:
+            content = handle.read(65537)
+        if len(content) > 65536:
+            return result
+        data = tomllib.loads(content.decode("utf-8"))
+    except (OSError, ValueError, RuntimeError):
+        return result
+    servers = data.get("mcp_servers")
+    seldon = servers.get("seldon") if isinstance(servers, dict) else None
+    observed = {
+        "approval_policy": data.get("approval_policy"),
+        "sandbox_mode": data.get("sandbox_mode"),
+        "seldon_tool_approval": seldon.get("default_tools_approval_mode")
+        if isinstance(seldon, dict)
+        else None,
+    }
+    allowed = {
+        "approval_policy": {"never", "on-request", "untrusted", "on-failure"},
+        "sandbox_mode": {"read-only", "workspace-write", "danger-full-access"},
+        "seldon_tool_approval": {"approve"},
+    }
+    for key, value in observed.items():
+        if isinstance(value, str) and value in allowed[key]:
+            result["saved"][key] = value
+    result["availability"] = "available"
+    return result
+
+
 def snapshot(*, workspace=None, runs_root=None) -> dict:
     """Project canonical plan, run receipts and planner mail without mutations."""
     plan = _read(lambda: _plan(workspace)) if workspace is not None else UNAVAILABLE
@@ -1139,6 +1186,7 @@ def snapshot(*, workspace=None, runs_root=None) -> dict:
         if isinstance(messages, list)
     )
     result = {
+        "savedPermissions": _saved_permissions(workspace),
         "plan": plan[0] if isinstance(plan, tuple) else UNAVAILABLE,
         "runs": runs,
         "mail": mail,
