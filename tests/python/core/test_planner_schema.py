@@ -27,6 +27,47 @@ def invoke(server, tool_name, **arguments):
     )["result"]
 
 
+def test_public_compile_help_populates_existing_vision_metadata_and_compiles(tmp_path):
+    """Protect schema-first compile: omitted argv/path shapes caused a live refusal.
+
+    Existing compile tests prepopulate fixture metadata and miss learning by error.
+    """
+    from shutil import copytree
+
+    from tests.python.core.test_mcp_planner import FIXTURE, add_fixture, start
+
+    server = PlannerServer(tmp_path)
+    try:
+        start(server)
+        add_fixture(server)
+        vision = invoke(server, "harness_show_node", id="V1")["structuredContent"]
+        node = {key: vision[key] for key in ("id", "kind", "title", "text", "parents", "fields")}
+        node["fields"].pop("validation")
+        node["fields"].pop("requirementFiles")
+        # Initial authoring still accepts a vision without compilation metadata.
+        assert not invoke(server, "harness_upsert_node", node=node)["isError"]
+        original = deepcopy(node)
+        vision_help = invoke(server, "harness_schema", kind="vision")["structuredContent"]
+        compile_help = invoke(server, "harness_schema", tool="harness_compile")["structuredContent"]
+        contract = compile_help["compilationMetadata"]
+        assert vision_help["compilationMetadata"] == contract
+        node["fields"].update(contract["fieldExample"])
+        assert not invoke(server, "harness_upsert_node", node=node)["isError"]
+        copytree(FIXTURE.parent / "template" / "tests", tmp_path / "template" / "tests")
+        compiled = invoke(server, "harness_compile")
+        assert not compiled["isError"], compiled
+        manifest = compiled["structuredContent"]
+        assert manifest["validation"] == contract["fieldExample"]["validation"]
+        assert manifest["planRevision"] == server.store.manifest_revision()
+        stored = server.store.spine().node("V1")
+        for key in ("validation", "requirementFiles"):
+            stored["fields"].pop(key)
+        assert stored == original
+        assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+    finally:
+        server.close()
+
+
 def test_public_vision_schema_populates_native_done_summary_without_losing_detail(tmp_path):
     from tests.python.core.test_mcp_planner import answer_native, begin_native
 

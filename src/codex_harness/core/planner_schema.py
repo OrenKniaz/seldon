@@ -13,7 +13,11 @@ FIELD_RULES = {
         "Use done_feels_like for the primary Done summary; done_means is an "
         "additional detail field, not a primary Done alias. Other fields remain "
         "open finite JSON and their complete words are retained. These are "
-        "planned understanding fields, not approval or delivery proof."
+        "planned understanding fields, not approval or delivery proof. "
+        "Before compile, add fields.validation (Python argv prefix as a string array) "
+        "and fields.requirementFiles (extra protected relative paths as a string array, "
+        "possibly empty); see compilationMetadata for exact shapes and a valid example. "
+        "These metadata fields are not required at initial vision authoring."
     ),
     "bead": (
         "fields.ownedFiles: nonempty array of nonblank strings; "
@@ -503,6 +507,33 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
         result.update(typed_draft_help(tool))
+    if tool == "harness_compile" or tool == "harness_upsert_node" and kind == "vision":
+        result["compilationMetadata"] = {
+            "owner": "The existing vision node's fields; not arguments to harness_compile.",
+            "requiredWhen": "Required before compile, not at initial vision authoring.",
+            "validation": "Array of nonblank strings: Python argv preceding the proof module. "
+            "For stdlib unittest discovery use -B -m unittest discover -s tests -p; "
+            "the bead's proofModule supplies the discovery pattern after -p.",
+            "requirementFiles": "Array of nonblank relative path strings for extra protected "
+            "files/directories; [] is valid. Compile already protects the test directory "
+            "and generated planning documents; do not repeat them unless needed.",
+            "pathBase": "Paths are relative to the product/template checkout root. "
+            "MCP compiles workspace/template: use tests, not template/tests; "
+            "do not use absolute paths or paths escaping the checkout.",
+            "fieldExample": {
+                "validation": ["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
+                "requirementFiles": [],
+            },
+            "apply": "Read the existing vision with harness_show_node. Merge only these "
+            "metadata fields into its fields and upsert the complete preserved node with "
+            "harness_upsert_node; keep all other vision fields, text, title and IDs. "
+            "Prepare the actual template proofs before harness_compile.",
+            "references": [
+                "docs/operator/handoff-contract.md#planner-declarations",
+                "docs/operator/planner-guide.md",
+                "docs/architecture/verification-runners.md#manifest-contract",
+            ],
+        }
     if tool == "harness_upsert_nodes":
         prerequisites, test = node_example("test")
         requirement = next(node for node in prerequisites if node["kind"] == "requirement")
