@@ -131,7 +131,9 @@ TYPED_CONTRACTS = {
         "digest. Both computed by owning validator if "
         "omitted; do not substitute dummy hashes.",
         "availableRule": "Catalog choices are offered, not verified. Legacy available claims "
-        "normalize to offered. Unknown authentication or review path does not block selection. "
+        "normalize to offered. installed status, executable identity/version, discovery and source "
+        "describe catalog provenance; authentication and protected path access remain unknown "
+        "until an actual attempt. Unknown access does not block selection. "
         "The first protected real review launch is the access probe; its observed outcome "
         "never replaces successful current review or independence requirements.",
     },
