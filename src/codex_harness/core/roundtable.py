@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1942,6 +1943,8 @@ def run_roundtable(
     reviews are refused if the canonical plan changes before persistence. Injected
     callbacks are always mocked and cannot earn provider-execution credit.
     """
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be a finite positive number")
     spine = store.spine()
     revision = store.manifest_revision()
     if revision is None:
