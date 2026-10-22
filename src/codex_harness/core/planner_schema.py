@@ -503,6 +503,20 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
         result.update(typed_draft_help(tool))
+    if tool == "harness_upsert_nodes":
+        prerequisites, test = node_example("test")
+        requirement = next(node for node in prerequisites if node["kind"] == "requirement")
+        result.update(
+            prerequisiteNodes=[node for node in prerequisites if node != requirement],
+            example={"nodes": [requirement, test]},
+            exampleUse="Use actual feature/requirement IDs. Record one feature's requirements "
+            "and tests together; the whole batch validates and saves atomically or none saves. "
+            "Order within the batch does not matter; duplicate IDs refuse. "
+            "Read harness_schema kind=requirement and kind=test at first use.",
+            authority="The existing canonical node writer and Spine validation are shared with "
+            "CLI node --json @feature-nodes.jsonl. No approvals or product proof are granted.",
+        )
+        return result
     if tool == "harness_upsert_node":
         kind = kind or "requirement"
         if kind not in ALLOWED_PARENTS:
