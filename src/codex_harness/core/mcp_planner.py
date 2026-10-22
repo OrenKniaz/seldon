@@ -1962,10 +1962,8 @@ class PlannerServer:
         return connection_reply(reply, self.workspace, status)
 
     def _begin_confirmation(self, request_id, arguments):
-        from codex_harness.core.planner_confirmation_cards import (
-            compact_card,
-            resume_or_prepare_confirmation,
-        )
+        from codex_harness.core.planner_confirmation_cards import compact_card
+        from codex_harness.core.planner_confirmations import prepare_confirmation
 
         tool = next(tool for tool in TOOLS if tool["name"] == "harness_record_confirmation")
         _validate(arguments, tool["inputSchema"])
@@ -1977,7 +1975,7 @@ class PlannerServer:
             )
         if self._pending_confirmation is not None:
             raise ValueError("plan-confirmation-pending: answer or cancel the displayed request")
-        prepared = resume_or_prepare_confirmation(self._store(), arguments["gate"])
+        prepared = prepare_confirmation(self._store(), arguments["gate"])
         wire_id = "seldon-confirmation-" + uuid4().hex
         self._pending_confirmation = {
             "wire_id": wire_id,

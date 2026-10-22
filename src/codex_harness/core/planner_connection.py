@@ -81,7 +81,12 @@ def connection_reply(
 def _text(text: str, projection: dict, show_recovery: bool) -> str:
     if text.startswith(projection["header"] + "\n"):
         return text
-    lines = [projection["header"], text]
-    if show_recovery:
-        lines.append("Connection recovery: " + projection["recovery"])
+    lines = [projection["header"]]
+    body, separator, next_step = text.rpartition("\nNext: ")
+    if show_recovery and separator:
+        lines.extend([body, "Connection recovery: " + projection["recovery"], "Next: " + next_step])
+    else:
+        lines.append(text)
+        if show_recovery:
+            lines.append("Connection recovery: " + projection["recovery"])
     return "\n".join(lines)

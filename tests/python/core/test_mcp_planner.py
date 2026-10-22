@@ -608,6 +608,7 @@ EXPECTED_TOOLS = {
     "harness_record_confirmation",
     "harness_advance",
     "harness_upsert_node",
+    "harness_upsert_nodes",
     "harness_remove_node",
     "harness_ask",
     "harness_answer",
@@ -1108,6 +1109,7 @@ def test_native_pending_lifetime_never_promotes_missing_response(server, case):
     start(server)
     outbound = begin_native(server)
     durable_id = server._pending_confirmation["request"]["request_id"]
+    original_request = server._pending_confirmation["request"]
     workspace = server.workspace
     if case == "timeout":
         server._pending_confirmation["deadline"] = -1
@@ -1156,7 +1158,11 @@ def test_native_pending_lifetime_never_promotes_missing_response(server, case):
         try:
             reoffered = begin_native(reconnect)
             assert reoffered["id"] != outbound["id"]
-            assert reconnect._pending_confirmation["request"]["request_id"] == durable_id
+            fresh = reconnect._pending_confirmation["request"]
+            assert fresh["request_id"] != durable_id
+            assert fresh["plan_revision"] == original_request["plan_revision"]
+            assert fresh["gate"] == original_request["gate"]
+            assert fresh["card"] == original_request["card"]
             assert (
                 answer_native(
                     reconnect, outbound["id"], approve=True, statement="Late", conditions=""
@@ -1175,6 +1181,60 @@ def test_native_pending_lifetime_never_promotes_missing_response(server, case):
             assert reconnect._status()["phase"] == "expand"
         finally:
             reconnect.close()
+
+
+@pytest.mark.parametrize("older_first", [True, False])
+@pytest.mark.parametrize("current_action", ["accept", "cancel"])
+def test_overlapping_native_displays_only_current_request_can_approve(
+    server, older_first, current_action
+):
+    """Catch the reproduced two-client replay and consumed-request crash.
+
+    Single-client timeout/reconnect tests cannot establish ordering between two
+    simultaneously live native clients displaying the same saved revision.
+    """
+    start(server)
+    old = begin_native(server)
+    old_request = server._pending_confirmation["request"]
+    current = PlannerServer(server.workspace)
+    try:
+        new = begin_native(current)
+        new_request = current._pending_confirmation["request"]
+        assert new_request["request_id"] != old_request["request_id"]
+        assert new_request["card"] == old_request["card"]
+
+        def answer_old():
+            refused = answer_native(
+                server,
+                old["id"],
+                approve=True,
+                statement="SOURCE-ONLY stale display",
+                conditions="",
+            )
+            assert refused["result"]["isError"]
+            assert refused["result"]["structuredContent"]["state"] == "stale"
+
+        if older_first:
+            answer_old()
+        result = answer_native(
+            current,
+            new["id"],
+            action=current_action,
+            approve=True,
+            statement="SOURCE-ONLY current display",
+            conditions="",
+        )
+        assert result["result"]["structuredContent"]["state"] == (
+            "approved" if current_action == "accept" else "cancel"
+        )
+        if not older_first:
+            answer_old()
+        assert current.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == (
+            1 if current_action == "accept" else 0
+        )
+        call(current, "harness_advance", to_phase="expand", error=current_action == "cancel")
+    finally:
+        current.close()
 
 
 def test_native_quoted_or_forged_tool_arguments_cannot_complete_response(server):
@@ -1882,6 +1942,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_packet_view",
             "harness_compile",
             "harness_readiness",
+            "harness_upsert_nodes",  # Dedicated real mixed-batch/atomic-refusal journey.
             "harness_preflight",
             "harness_intake",
             "harness_reviewer_catalog",

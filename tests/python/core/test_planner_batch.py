@@ -8,7 +8,7 @@ from codex_harness.core.planner_guidance import planning_turn
 from codex_harness.core.status_api import snapshot
 
 
-def invoke(server, name, **arguments):
+def invoke(server, tool_name, **arguments):
     return server.handle_line(
         json.dumps(
             {
@@ -16,7 +16,7 @@ def invoke(server, name, **arguments):
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": name,
+                    "name": tool_name,
                     "arguments": {"expected_workspace": str(server.workspace), **arguments},
                 },
             }
