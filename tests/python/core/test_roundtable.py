@@ -2365,3 +2365,17 @@ def test_overflow_retry_error_and_caps(store, provider, double_overflow, monkeyp
     assert list(store.connection.iterdump()) == before
     assert roundtable.review_totals(store, result["planRevision"]) == totals
     assert len(seen) == callback_count and discovery == []
+
+
+def test_canonical_roundtable_receipt_retains_exact_launch_tuple_after_reopen(store):
+    """Catch lost effort in durable receipts; existing launch-argv tests never reopen the store."""
+    reviewer = dict(REVIEWERS[0], effort="medium")
+    result = run_roundtable(store, reviewers=[reviewer], runner=lambda *args: (0, "[]"))
+    expected = result["reviewers"][0]["shardDetails"][0]["launchSelection"]
+    assert expected["provider"] == reviewer["provider"]
+    assert expected["model"] == reviewer["model"]
+    assert expected["effort"] == "medium"
+    assert expected["startedAt"] <= expected["finishedAt"]
+    with PlanStore(store.workspace) as reopened:
+        reviews = reopened.review(result["roundId"])["reviewers"]
+        assert reviews[0]["shardDetails"][0]["launchSelection"] == expected

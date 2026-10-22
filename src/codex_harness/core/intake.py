@@ -326,6 +326,8 @@ def validate_catalog(observation: Value) -> ReviewerCatalogV1:
         raise ValueError(
             "reviewer-catalog-time-invalid: expected timezone-aware timestamp"
         ) from error
+    legacy_observation = deepcopy(result)
+    legacy_available = False
     providers, choices = set(), set()
     for provider in _list(result["providers"], "catalog.providers"):
         _object(
@@ -378,6 +380,7 @@ def validate_catalog(observation: Value) -> ReviewerCatalogV1:
             _bool(choice["reviewPathSupported"], "choice.reviewPathSupported")
             _text(choice["reason"], "choice.reason")
             if choice["availability"] == "available":
+                legacy_available = True
                 choice["availability"] = "offered"
             binding = {
                 key: provider[key]
@@ -393,6 +396,17 @@ def validate_catalog(observation: Value) -> ReviewerCatalogV1:
             choice["choiceId"] = digest
     digest = canonical_digest({key: value for key, value in result.items() if key != "digest"})
     if "digest" in result and _hash(result["digest"], "catalog.digest") != digest:
+        if legacy_available and result["digest"] == canonical_digest(
+            {key: value for key, value in legacy_observation.items() if key != "digest"}
+        ):
+            _refuse(
+                "reviewer-catalog-refresh-required",
+                "Legacy catalog access claims need explicit re-selection: record a new "
+                "offering observation through reviewer-catalog with a NEW RC-UUID, "
+                "availability=offered and no digest; then record reviewer-choice against "
+                "the returned catalog ID/digest and explicitly confirm it. Existing "
+                "catalogs, selections and review evidence are retained as history.",
+            )
         _refuse(
             "reviewer-catalog-hash-mismatch", "supplied digest differs from normalized observation"
         )

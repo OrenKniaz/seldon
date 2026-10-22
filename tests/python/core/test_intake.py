@@ -415,3 +415,24 @@ def test_cross_provider_diversity_cannot_make_author_review_independent():
     )
     assert report["diversity"] == "cross-provider"
     assert "reviewer-is-author: reviewer-0" in report["unmetRequirements"]
+
+
+def test_legacy_catalog_requires_explicit_fresh_offering_and_reselection():
+    """Catch opaque stale-catalog deadlock; old hash tests cover forgery, not migration."""
+    legacy = validate_catalog(observation())
+    legacy["providers"][0]["choices"][0]["availability"] = "available"
+    legacy["digest"] = canonical_digest({k: v for k, v in legacy.items() if k != "digest"})
+    with pytest.raises(ValueError, match="reviewer-catalog-refresh-required.*NEW RC-UUID"):
+        validate_selection(legacy, selection(legacy), sessions(**{"reviewer-0": "other"}))
+    refreshed = deepcopy(legacy)
+    refreshed["id"] = "RC-22345678-1234-4234-8234-123456789abc"
+    refreshed["providers"][0]["choices"][0]["availability"] = "offered"
+    del refreshed["digest"]
+    current = validate_catalog(refreshed)
+    with pytest.raises(ValueError, match="reviewer-catalog-stale"):
+        validate_selection(current, selection(legacy), sessions(**{"reviewer-0": "other"}))
+    selected = selection(current)
+    selected["confirmation"] = None
+    assert validate_selection(current, selected, sessions(**{"reviewer-0": "other"}))[
+        "unmetRequirements"
+    ] == ["reviewer-confirmation-required: proposal is unconfirmed"]

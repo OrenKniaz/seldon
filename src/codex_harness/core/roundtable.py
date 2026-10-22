@@ -1024,6 +1024,7 @@ def _review_shard(
     items = []
     checking_launch = False
     attempted = False
+    started_at = _now()
     try:
         launch = _launch_review(reviewer, shard["packet"], executable)
         directory = TemporaryDirectory(prefix="harness-roundtable-")
@@ -1109,6 +1110,13 @@ def _review_shard(
     finally:
         from codex_harness.core.reviewer_access import observe_access
 
+        record["launchSelection"] = {
+            "provider": reviewer["provider"],
+            "model": reviewer.get("model"),
+            "effort": reviewer.get("effort"),
+            "startedAt": started_at,
+            "finishedAt": _now(),
+        }
         record["accessObservation"] = observe_access(
             attempted=attempted,
             mocked=runner is not None,
