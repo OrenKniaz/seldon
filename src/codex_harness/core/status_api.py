@@ -16,7 +16,7 @@ from codex_harness.core.attempt_activity import observe_attempt_activity
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PHASES, PlanStore
 from codex_harness.core.planner_guidance import planning_turn
-from codex_harness.core.planner_vision import vision_projection
+from codex_harness.core.planner_vision import SECTIONS, label, vision_projection
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.roundtable import findings
 from codex_harness.core.spine import SpineError
@@ -357,7 +357,21 @@ def _recorded_understanding(store, status):
     )
     if request.get("card") != expected_card or not isinstance(vision.get("title"), str):
         return None
-    sections = vision_projection(vision)["sections"]
+    # This is a public excerpt, not the unrestricted canonical node/request.
+    public_keys = {key for _, aliases in SECTIONS for key in aliases} | {"done_means"}
+    fields = {key: value for key, value in vision["fields"].items() if key in public_keys}
+    present = {
+        heading
+        for heading, aliases in SECTIONS
+        if heading == "Vision" or any(key in fields for key in aliases)
+    }
+    present.update(label(key) for key in fields)
+    present.add("Complete vision details")
+    sections = [
+        section
+        for section in vision_projection({**vision, "fields": fields})["sections"]
+        if section["label"] in present
+    ]
     return {
         "title": vision["title"],
         "gate": gate,

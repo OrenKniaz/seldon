@@ -40,7 +40,7 @@ function currentEligibility(snapshot){
  return {eligible,selectedRun};
 }
 function recordedUnderstanding(raw,item,plan){
- const value=obj(raw),labels=['Vision','Users','First moment','Scope in','Scope out','Quality','Done','Assumptions','Complete vision details'],notice='Recorded understanding only. The chat connection and whether a prompt is still open are unknown.';
+ const value=obj(raw),labels=['Vision','Users','First moment','First user moment','Scope in','Scope out','Quality','Quality bar','Done','Done feels like','Done means','Assumptions','Complete vision details'],notice='Recorded understanding only. The chat connection and whether a prompt is still open are unknown.';
  return ['align','vision-lock'].includes(value.gate)&&item.id==='approval:'+value.gate&&item.kind==='approval'&&item.id===plan.pending_gate&&value.sourceRevision===plan.plan_revision&&recordedIdentity(value.title)&&value.chatConnection==='unknown'&&value.notice===notice&&optionalList(value.sections)!==null&&value.sections.every(section=>labels.includes(section.label)&&typeof section.text==='string')?value:null;
 }
 function normalize(raw){
