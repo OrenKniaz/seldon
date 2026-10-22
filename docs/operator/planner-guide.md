@@ -1,126 +1,57 @@
-# Planner guide (v9, 2026-10-18)
-**What a finished plan leads to.** The user's full vision is delivered for real, never a mocked or basic version. Every requirement traces from vision to code to a passing proof. Docs are generated from the plan and never stale. Workers can verify their own work from the plan alone. A final review confirms the product achieves the locked vision, while the user supervises as little as possible. Efficiency never replaces quality: ask the questions the vision genuinely needs, and never invent the user's intent.
-**Read only this guide and the user's project.** Never read Harness source or Harness design docs.
-**MCP workspace binding.** A running server stays bound to its startup `--workspace`;
-plan names and a changed client config cannot retarget it. First inspect
-`harness_plan_status` read-only: every wire tool response exposes `workspaceBinding`
-and the effective server workspace. Host cwd/project context and connection reload
-remain unverified. For every MCP tool except `harness_schema`, `harness_preflight`
-and `harness_plan_status`, supply `expected_workspace` as the absolute intended
-project path, known independently from the caller's task. This is an unauthenticated
-caller assertion, never native identity or approval. Missing, invalid or conflicting
-assertions refuse before store access, native confirmation or provider admission;
-an explicit mismatch also refuses discovery. Do not copy an unexpected server path
-to bypass the hold. Use a correctly bound connection; no supported automatic client
-reload route is established. Existing CLI commands retain their explicit `--workspace`
-contract; this additional assertion is required at the public MCP wire boundary.
-**Ordinary reviewer choice confirmation (MCP).** Record a draft choice with
-`harness_reviewer_choice`, retaining its actual node ID and supplied catalog/session
-provenance. Discover `harness_schema tool=harness_confirm_reviewer_choice`, inspect
-the stored proposal, and refresh `harness_plan_status` after every edit. Bind the
-returned choice node ID and current `spine_revision`; supply the independently known
-absolute `expected_workspace`. Submit `approve=true`, the complete explicit selection
-statement and `conditions=""` only when that is the caller's intended action. Schema
-template nulls are unbound placeholders. Do not supply by/origin/human flags or invent
-approval/event/source references: the store generates the actual event binding and
-canonical proposal/catalog/author-session scope atomically.
+# Planner guide
 
-This is an ordinary caller-declared tester-as-user action with
-`human_identity_verified=false` and `approvalGranted=false`, not natural-person or
-native phase proof. Only the reviewer-confirmation hold can clear. Availability,
-authentication, independence, cross-provider, review-path, budget and native-final
-holds remain. Stale/replaced catalogs, edited proposals and replay refuse; inspect
-the current proposal rather than carrying an old confirmation forward. Catalog
-acquisition still reports `reviewer-catalog-producer-unavailable` when genuine
-observations are missing. Intake confirmation separately remains
-`typed-confirmation-producer-unavailable`; `harness_record_confirmation` still serves
-only align/vision-lock. No reviewer/provider is launched by this ordinary action.
+The full agreed vision must reach working product with real proof. Trace vision → requirements → beads → code → tests; generated docs reflect the structured plan. Workers should build without guessing, and final acceptance checks the locked vision. Efficiency never replaces depth, actual user decisions or meaningful failure cases.
+Use this guide, public schema/help and the user's project; do not inspect Harness source to discover planning contracts. Detailed [handoff declarations](handoff-contract.md), [verification runners](../architecture/verification-runners.md) and [resume contract](resume-plan.md) expand the relevant steps.
 
-**Recovery ladder when stuck:**
-1. Re-run `p status`. Its `Next:` line is authoritative.
-2. `p <command> --help`.
-3. Targeted diagnostics on the reported error.
-4. Only then a bounded search.
+**Start and recover.** Inspect `harness_plan_status` or `p status`; follow `Next:`, then command `--help`, targeted diagnostics and only then a bounded search. Status resumes without changing plan truth. Missing-plan reads create nothing; broken reads and unavailable telemetry remain unknown.
+In PowerShell define `function p { uv run --no-sync --frozen --offline python -m codex_harness.core.plan_cli --workspace "$W" @args }`; set `$W` to the existing project. Replace angle-bracket placeholders.
+Global `--json` returns `{text,status,data,next,isError}`; text ends with `Next:` and creations expose `data.id`. For node/decision input, use global `--json` before the subcommand or `--machine-json` after it. Success exits 0; input/gate/audit/quality refusal exits 2.
+`p status --brief` shows phase, gate and quality. `p nodes --kind K` lists IDs/titles; `p show ID --body --test NAME` reads node detail and named protected test bodies (8 KB cap). A clean diagnostic is not proof of product behavior.
 
-**Short planning turns.** Work one feature at a time through features → requirements →
-tests → bead, ending each turn with the one-line stored-count status. Read
-`harness_schema kind=<kind>` (CLI: `schema --kind <kind>`) at first use. CLI
-`node --json @feature-nodes.jsonl` accepts requirements and their tests together in
-one atomic batch; a refused batch saves none of its nodes. MCP `harness_upsert_nodes`
-accepts the same mixed batch through the same writer; first read
-`harness_schema tool=harness_upsert_nodes`. Single-node edits remain
-`harness_upsert_node`. The ≤8 calls-per-stage goal is a measurement target,
-not an enforced cap or evidence of planning quality. Complete the agreed depth.
+**Project identity.** MCP stays bound to its startup workspace; names or changed config cannot retarget it. Check `workspaceBinding` first. Except schema/preflight/status, supply `expected_workspace` as an independently known absolute project path. Missing/invalid/conflicting assertions refuse before store/provider/native-card access; explicit mismatch also refuses discovery. Never copy an unexpected server path to bypass a hold.
+Caller workspace assertions are unauthenticated, not host identity or approval. Host cwd and connection reload remain unverified; use the correctly bound connection. CLI keeps explicit `--workspace`.
+`p preflight --provider codex --provider claude` / `harness_preflight providers=[...]` observes executables and workspace/plan/template existence without database/config/credential reads, creation or provider launch. Default providers: Codex/Claude/Copilot. Missing tools can still return diagnostic exit 0; invalid input exits 2. Authentication, protections, network, plan validity and worker success remain unproved; no planning gates clear.
 
-**Recorded vision.** Summary and cockpit use the same stored vision projection as
-the confirmation-card integration. Primary Done is `done_feels_like` (`doneFeelsLike`
-or `done`); `done_means` remains complete additional detail. `Not recorded` means
-the field is absent; explicit null is `Not specified`, and empty/false values do
-not fall back to different vision text. Displaying a vision gives no approval credit.
+**Short turns and schema first.** Work one feature through requirements → tests → bead; finish each turn with the stored-count status. Read `p schema --kind K` / `harness_schema kind=K` at first use. `node --json @feature-nodes.jsonl` and `harness_upsert_nodes nodes=[...]` share the atomic mixed-node writer; a refusal saves none. Discover batch help with `harness_schema tool=harness_upsert_nodes`; single edits use `harness_upsert_node`. ≤8 calls per stage is a measurement target, never a cap or quality verdict.
+Every node has `id,kind,title,text,parents,fields`; parents are unique existing IDs (batch order is independent), and vision is unique. Preserve accepted intent and current IDs. Schema supplies allowed parent kinds, prerequisites and examples; examples are planned content, not proof or approval.
+Vision schema names users, first moment, scope, quality and Done. Primary Done is `done_feels_like` (aliases `doneFeelsLike`, `done`); `done_means` retains additional detail. Canonical summary/card/cockpit projections preserve full words: absent is `Not recorded`, null `Not specified`, and false/empty values do not fall back to other text.
+Before compile, vision fields need `validation:["-B","-m","unittest","discover","-s","tests","-p"]` and `requirementFiles:[]` (or extra protected relative file/directory paths). These are not required at initial vision authoring. Paths are relative to the product/template checkout: `tests`, not `template/tests`. Read vision/compile schema, merge metadata into the existing complete node and retain all other fields.
+Test nodes link requirements/beads via parents and declare `module` plus `level:unit|e2e`; one e2e becomes integration proof. Beads declare disjoint `ownedFiles`, acyclic `dependsOn`, `proofModule`, and `lessons` decision IDs (empty allowed). Consumer proofs should import the producer's owned module or declare `fields.contractTest`; pin the interface and dependency.
 
-In PowerShell define `function p { uv run --no-sync --frozen --offline python -m codex_harness.core.plan_cli --workspace "$W" @args }`.
-Set `$W` to an existing project directory. Every text reply ends with the next action; replace angle-bracket values.
-`--json` returns one JSON object (`text`, `status`, `data`, `next`, `isError`); its **text** ends with `Next:`. Creations return `data.id`.
-For `node`/`decision`, use global `--json` before the subcommand or `--machine-json` after it: their local `--json` is input.
-`p show <node-id> [--body --test <name>]` reads node detail, links and protected test functions; named source is capped at 8 KB.
-`p nodes [--kind K]` reads `id · kind · title` listings. `p status --brief` shows phase, gate, quality, open counts and `Next:`. `p preflight [--provider codex --provider claude]` (or MCP `harness_preflight` with optional `providers`) reports executable discovery and workspace/plan/template existence; default selection is Codex, Claude and Copilot. It creates nothing, even for a missing workspace, and does not open the plan database. Exit 0 means the diagnostic returned, including missing tools; invalid input exits 2. Use global `--json` for structured observations. Authentication, network, effective protections, plan validity and actual worker success remain unknown/not proven. It reads no credentials/config, launches no provider, and neither changes nor satisfies quality/readiness/publication gates.
-Re-disposition a closed finding with `resolve` again: resolved / deferred (real gap not fixed now) / rejected (finding is wrong, cite evidence). `p readiness [--beads B1,B2 | --sample N --seed S] --reviewer @reviewer.json ...` reviews exact worker packets (default: all ≤8 beads, otherwise 5). Readiness is advisory in quality/status/render/publish; blockers use `findings`/`resolve`. Above 12 beads × 2 reviewers requires `--max-calls N`.
-Scope alone is never a reason to reject.
-Success exits 0; input/gate/audit refusal or any failing quality check exits 2. `p status` resumes without changing truth.
-| Phase | Commands in order (`p` prefix); exit gate |
+| Phase | Public commands (`p` prefix unless MCP named); exit condition |
 | --- | --- |
-| align | `start --idea "..." --name "..."`; `card --vision "..." --users "..." --first-moment "..." --scope-in "..." --scope-out "..." [--assumption "..."]`; native MCP `harness_record_confirmation gate=align`; `advance --to expand`. Fresh displayed-gate/revision response. |
-| expand | `ask --question "..." [--node V1]`; `answer --id Q --text "..."`; `assume --text "..."`; `resolve-assumption --id A --confirmed --rationale "reason" --by planner` (or `--rejected`); `--by` is required: `user`, `planner` or `proxy:<name>`. `node --json "@uplifts.jsonl"`; `advance --to vision-lock`. Capture accepted/rejected/deferred ideas. |
-| vision-lock | `diagram --kind user-journey`; native MCP `harness_record_confirmation gate=vision-lock`; `advance --to features`. Fresh displayed-gate/revision response. |
-| features | `node --json "@features.jsonl"`; `diagram --kind feature-map`; `advance --to requirements`. Features/stories mapped; no additional store gate. |
-| requirements | `node --json "@requirements.jsonl"`; `advance --to tech-stack`. Every requirement has a test descendant. |
-| tech-stack | `decision --json "@decision.json"`; `decision --id D1 --choose "<option>" --rationale "<reason>"`; `diagram --kind decision-map`; `advance --to plan`. Decisions recorded; no additional store gate. |
-| plan | `node --json "@beads.jsonl"`; `compile --template template --out manifest.json`; `diagram --kind bead-dag`; `advance --to roundtable`. Compile renders spine docs into the template and checks every listed requirement file; requirement-to-bead coverage and valid manifest. |
-| roundtable | `roundtable [--reviewer "@reviewer.json" ...] [--max-rounds 2]`; `findings`; `resolve --id F --resolution "fix/reason" [--resolved | --deferred | --rejected]` (`--deferred` for real gaps not fixed now; `--rejected` only for wrong findings); `audit --oracle oracle`; `quality`; `advance --to publish`. Open questions block exit; audit/review must match the manifest before publication. |
-| publish | `render [--out plan/docs]`; `publish`; `worker-start --expected-revision <published_revision> --workers @workers.json`. Matching template, audit, reviews and publication required. Workers implement; the planner steers. |
-| execute | `worker-status --job-id <job-id>`; `status`; `impact` after edits; `advance --to accept` only after actual workers/integrated proofs are assessed. Product checks alone do not prove worker delivery. |
-| accept | `accept-scenarios --derive`; `accept-run --subject product --repo <dir>`; `accept-review --repo <dir>`; resolve findings; `accept --statement "actual words" --by user`. All scenarios pass at the current integrated revision, no open acceptance findings. |
-Native confirmation requires MCP2025-06-18, client `elicitation` capability and initialization. The server displays the full stored card and collects explicit approval, complete words and conditions; conditions block credit. Decline, cancel, timeout, disconnect or changed revision grant none. Client support is conditional, not established by source tests. CLI quotes/`--by` labels refuse with `plan-confirmation-origin-unavailable`; they cannot substitute for the native response. Plan-to-roundtable confirmation remains unchanged.
-`workers.json` is an array of exact `{bead,provider,model,effort}` objects, one per published bead, using approved existing capacity and canonical provider names. MCP equivalents are `harness_worker_start expected_revision=<revision> workers=<array>` and `harness_worker_status job_id=<id>`. Starts return one durable job per publication; reconnect/status never relaunches. Missing terminal evidence and current liveness remain unknown. No retry, install or permission expansion is implied.
-Nodes require `id`, `kind`, `title`, `text`, `parents` (id array), and `fields` (object).
-Before writing a vision, use `p schema --kind vision` (MCP: `harness_schema kind="vision"`).
-Its `fieldRules` and runnable `example.node` document the existing primary
-understanding-card fields. Replace the example's planned words with the actual
-agreed vision; preserve the current node ID, full intent and other recorded fields.
-Use `fields.done_feels_like` for the primary **Done** summary. Existing aliases
-`doneFeelsLike` and `done` still work with their existing precedence. Arbitrary
-fields such as `done_means` retain their complete words as additional detail;
-they do not populate that primary summary. The example also names users, first
-moment, scope and quality fields. This guidance changes no stored data or aliases.
-Writing these fields grants no approval or delivery proof; changes to the displayed
-understanding still require the existing fresh native confirmation for its gate
-and revision. Confirmation takes the gate, not a replacement summary or override.
-`accept-run` requires `--subject product|oracle`: only product runs prove delivery, satisfy acceptance, or permit rebind; oracle runs are scenarios verified against the reference implementation (dry run). Legacy runs without a subject are product only when `<repo>/../evidence/run.json` exists; otherwise oracle.
-Acceptance: `accept-scenarios` lists; `--input @scenarios.json` saves `{id,title,given,steps,expect}` for `first-moment` and every `scope-N`; optional `nodeIds` bind other spine nodes. Steps are shell strings or `{command,expect}`; `expect` supports `stdout`/`stderr`, `stdoutRegex`/`stderrRegex`, and `exit` (default 0). Prose-only `--derive` results are `draft`, `executable: false`: supply steps and expectations. Edits retain scenarios and mark changed node references `stale`; save reviewed scenarios to refresh them.
-Use `{repo}`, `{python}`, `{home}`, `{data}` in commands. Each scenario starts in an empty cwd with fresh HOME/data, never a seeded fixture. Vision fields can supply structured `first_user_moment`/`scope_in` items or `acceptance` entries with these ids.
-`accept-review --reviewer @codex-reviewer.json --reviewer @claude-reviewer.json` uses normal subscriptions; its findings appear in `findings` and use `resolve`. A code/scenario change requires a fresh run and review. `accept-rebind --repo <dir>` reruns all scenarios for `revision-algorithm-upgraded` or `legacy-unbound` (matching raw hash; audited node-binding back-fill); passing unchanged v1 products retain reviews/approval by references, preserving approver and proxy identity. Product, plan, scenario or vision changes require fresh acceptance.
-Interrupted ordinary acceptance reviews retain their registered attempt and sealed original packets/returns under `.codex-harness/acceptance-review-attempts/`. Find attempt IDs in the interruption error or status JSON's `acceptance.reviewAttempts`; stored-return counts do not imply eligibility. Recover the existing aggregate without launching providers with `accept-review --repo <same-dir> --resume <id>` (MCP: `harness_accept_review` with `repo` and `resume`). Every original slot must be complete, valid, nonmocked and bound to the same source, candidate, context and observed native model/session.
-Unknown telemetry, tool/error events, missing protected bodies, overflow reshards, stale or changed receipts refuse recovery. Missing work is never automatically relaunched; do not move or edit originals. Repeated successful resume returns the same review/findings and preserves dispositions. External saved reviews without original Harness registration cannot be imported. Questions, findings, phase and user approval gates remain in force.
-Delegated acceptance uses `--by proxy:<name>` (or `opus-user-proxy`); status records `isProxy: true`, never real-user acceptance. Only record actual user words with `--by user`.
-Quality distinguishes **planned vs proved** with `evidence: planned|executed`: a clean-state first-moment scenario or linked e2e (`firstMoment: true`, `cleanState: true`) is planned; only a passing current acceptance result is proved. Draft/stale scenarios are not planned. Missing-file cases must not defeat first use.
-Explicit `acceptance` spine nodes are supported with vision or feature parents. Use `p schema --kind acceptance` (MCP: `harness_schema` with `kind: "acceptance"`) for the contract and example. Apply its `prerequisiteNodes` first, save `example.node` to `acceptance.json`, then submit `p node --json @acceptance.json` (MCP: `harness_upsert_node` with `node`). In an existing plan, use its actual parent IDs and preserve accepted intent. These are planning/draft records, not automatic planned coverage or current proof: the empty-fields example needs executable steps; current product runs, review and approval remain required.
-`node --json` accepts a literal object, `"@file.json"`, or `"@file.jsonl"` (atomic batch; order independent). Parents must exist and have these kinds; a vision is unique. Nonvision nodes should retain an intent chain.
-Allowed parents: vision none; feature vision; acceptance vision/feature; story feature; requirement story/feature; decision vision/feature/requirement.
-Design parents: requirement/decision; bead parents: requirement/design/decision; test parents: requirement/bead.
-Bead fields: disjoint `ownedFiles`, `dependsOn` bead ids (acyclic), `proofModule`, and `lessons` decision ids (possibly empty). The cross-bead contract check warns unless a consumer proof imports the producer's owned module or the requirement declares `fields.contractTest`; pin the interface and make the consumer depend on the producer.
-Link tests to requirement ids through `parents`; test fields are `module` and `level` (`unit` or one `e2e` integration test).
-Vision fields must include `validation` (Python arguments preceding the module) and protected `requirementFiles` paths.
-TypeScript command runner example: `"verification":{"runner":"command","argv":["node","--test","{proof}"],"testDir":"tests","proofGlob":"*.test.ts"}`; see [verification runners](../architecture/verification-runners.md).
-Put executable requirement tests in `<workspace>/template`; assert observable results, including meaningful failures. Include importable implementation stubs failing with `NotImplementedError`; workers own implementation, never protected tests.
-`audit --prospective` checks unittest collection, red stubs, assertions/imports and requirement traceability without an oracle; it does not prove satisfiability. Unsupported command collection contracts refuse honestly.
-Publish that choice explicitly: `publish --proof-level prospective --reason "why no oracle"`; the prospective label remains visible. Workers must block impossible protected tests with evidence.
-Prospective quality warns: integrated worker validation and clean-state acceptance are the first real proof. A later oracle audit upgrades the proof level; republish the stronger snapshot.
-`audit --oracle oracle` defaults to Git HEAD when available; otherwise it copies the template and checks every oracle bead plus integration. Use `--baseline template` explicitly or `--baseline-ref <git-ref>`; output records the baseline. Repair the reported proof, then retry audit.
-The oracle directory supplies every affected owned file; audit overlays protected tests and oracle into temporary copies.
-After publication, affected beads come from the published-to-current spine impact; HEAD must be the intended integration baseline.
-An integration test proves the complete user path; absent integration proof is reported explicitly. Failing modules show the first 40 output lines and a full-output artifact under `state/runs`.
-Use `remove-node --id X` only without children/references. `impact --since <manifest-revision|file>` predicts before publication; bare `impact` uses publication or the last compiled revision. After edits run `impact`, `compile`, `audit`, `quality`; return to an earlier phase and reapprove when needed.
-After vision lock, V1 edits limited to `fields.validation` and `fields.requirementFiles` keep the lock. Edits to V1 text or understanding-card fields stale it; native `harness_record_confirmation gate=vision-lock` renews the displayed understanding before further advance. A client-reported response is not natural-person authentication; never relabel proxy or quoted words as owner approval.
+| align | `start --idea "..." --name "..."`; `card --vision "..." --users "..." --first-moment "..." --scope-in "..." --scope-out "..."`; native `harness_record_confirmation gate=align`; `advance --to expand`. Fresh displayed-revision response. |
+| expand | `ask --question "..." --node V1`; `answer --id Q --text "..."`; `assume --text "..."`; `resolve-assumption --id A --confirmed --rationale "..." --by planner` (or `--rejected`; by user/planner/proxy:name); record accepted/rejected/deferred suggestions; advance to vision-lock. |
+| vision-lock | `diagram --kind user-journey`; native `harness_record_confirmation gate=vision-lock`; advance to features after fresh approval. |
+| features | `node --json @features.jsonl`; `diagram --kind feature-map`; advance to requirements with mapped features/stories. |
+| requirements | `node --json @requirements.jsonl`; advance to tech-stack only with test descendants for every requirement. |
+| tech-stack | `decision --json @decision.json --choose Python --rationale "..."`; `diagram --kind decision-map`; advance to plan. Record material choices/trade-offs. |
+| plan | `node --json @beads.jsonl`; `compile --template template --out manifest.json`; `diagram --kind bead-dag`; advance to roundtable with requirement-to-bead coverage and valid manifest. |
+| roundtable | `roundtable --reviewer @reviewer.json ...`; `findings`; `resolve --id F --resolution "fix/reason" --resolved` (or deferred/rejected); `audit --oracle oracle`; `quality`; advance to publish. Current matching review/audit and resolved questions required. |
+| publish | `render --out plan/docs`; `publish`; explicit `worker-start --expected-revision REV --workers @workers.json` subject to native execution authorization. Matching protected template, audit and reviews required. |
+| execute | `worker-status --job-id ID`; `status`; `impact` after edits; advance to accept only after actual worker/integrated evidence is assessed. |
+| accept | `accept-scenarios --derive`; `accept-run --subject product --repo DIR`; `accept-review --repo DIR`; resolve findings; `accept --statement "actual words" --by user`. All current scenarios, review and approval required. |
+
+**Native decisions and reviewer limits.** Align/vision-lock need initialized MCP2025-06-18 with elicitation. Review the full displayed gate/revision, then supply explicit approval, complete words and conditions. Conditions, decline/cancel, timeout/disconnect or stale revisions give no credit. CLI quotes/by labels cannot substitute; client-reported responses do not authenticate a person. Plan-to-roundtable confirmation remains unchanged.
+Edits limited to vision validation/requirementFiles retain the lock; edits to text/understanding require renewed native vision-lock confirmation. Read the current node before editing; never fabricate approvals, reviewer records or user words.
+Record reviewer proposals with `harness_reviewer_choice`; inspect `harness_schema tool=harness_confirm_reviewer_choice`, the stored proposal and fresh status. Bind actual node ID/current `spine_revision`/known workspace, `approve=true`, complete selection statement and `conditions=""` only for the caller's actual action. Template nulls are unbound; do not supply by/origin/human flags or invented approval/event/source IDs.
+Ordinary choice is caller-declared (`human_identity_verified=false`, `approvalGranted=false`), clears only the reviewer-confirmation hold and launches no provider. Availability/authentication/independence/cross-provider/review-path/budget/native-final holds remain. Replaced catalogs, changed proposals and replay refuse. Missing genuine catalog observations report `reviewer-catalog-producer-unavailable`; intake separately reports `typed-confirmation-producer-unavailable`. Gate confirmation only serves align/vision-lock; offered models do not prove entitlement.
+Real roundtables use existing approved capacity, exact authorized models/effort and normal provider protections. Default budget: 2 attempts/reviewer/manifest; `--max-rounds` changes that, `--max-total` caps totals across revisions. Preserve existing caps/deadlines; unknown capacity is not permission to retry or enlarge them. Failed reviewers expose diagnostic artifacts; retry only affected failed work. No benchmark launch is authorized by this guide.
+`p readiness --beads B1,B2 --reviewer @reviewer.json ...` (or sample/seed) reviews exact packets; default all ≤8 beads, otherwise 5. Advisory status never substitutes for proof; findings use resolve. Above 12 beads ×2 reviewers requires `--max-calls`. Scope alone is not a rejection reason.
+
+**Compile, audit and review recovery.** Prepare executable protected tests and importable failing implementation stubs in workspace/template; workers own implementation, never proofs. MCP `harness_compile` uses that fixed template and known workspace, renders canonical docs and records protected-file/manifest binding; then `harness_packet_view id=B provider=codex` is read-only. Recompile after plan/protected-file edits; missing tests or invalid manifests refuse, never fabricate proof.
+`audit --oracle oracle` uses Git HEAD when available, otherwise template; explicit `--baseline template` / `--baseline-ref REF` records the choice. Oracle supplies every affected owned file. Without oracle, authorized `audit --prospective` checks collection/red stubs/assertions/imports/traceability, not satisfiability; unsupported runner collection refuses. Publish explicitly with `--proof-level prospective --reason "..."`; workers must report impossible protected proofs, never weaken them. A later oracle audit permits republishing stronger proof.
+TypeScript/command runner shapes and collection requirements are in [verification runners](../architecture/verification-runners.md). Current matching audit/real-review evidence is required; mocks, stale reviews and changed-only checks cannot substitute. Prospective publication/worker validation alone do not prove the locked vision.
+`reviewResolution` is revision-stamped advice, not approval/publication/dispatch credit. Host owns repairs/dispositions; questions/native approval come first, and all open non-readiness findings block regardless of severity. Resolve fixed issues; defer real gaps with reason; reject only disproven findings with evidence. Re-disposition closed findings explicitly. Retain member/blocker IDs; `detailRoute` exposes complete review beyond bounded excerpts.
+Refresh status/compile after edits, then use normal audit/review/advance/publication. Manifest/spine equality alone does not prove compilation. `spine_revision` (plan_revision alias) hashes editable nodes; manifest_revision binds protected content; published_revision is frozen worker authority. Test edits stale evidence; there is no force bypass. Use `impact --since REV|FILE` (default publication/last compilation); remove nodes only without children/references. Report obligations verified/failed/unverified and preserve unresolved gaps.
+
+**Execution and acceptance.** Workers implement while planner steers. `workers.json` is exact `{bead,provider,model,effort}` per published bead; MCP start/status mirror CLI. Durable jobs reattach without relaunch; missing terminal evidence/liveness remain unknown. Native execution authorization, finite limits and uncertain-work recovery are detailed in the [resume contract](resume-plan.md); no install, retry or permission expansion is implied.
+Scenario schema/derive return canonical first-moment and every scope-N ID. Derive replaces with drafts: list existing work first. Preserve IDs/intent and submit the complete array `{id,title,given,steps,expect}`; optional nodeIds bind other nodes. Steps are commands or `{command,expect}`; expectations support stdout/stderr, regex variants and exit (default0). Fill actual executable steps/expectations; prose drafts or saving alone prove nothing.
+Use `{repo}`, `{python}`, `{home}`, `{data}`; each scenario starts in fresh empty cwd/HOME/data. Changes stale referenced coverage; resave reviewed scenarios. Explicit acceptance spine nodes use vision/feature parents and public schema examples; empty fields still need executable steps. Planned clean-state first-moment/e2e (`firstMoment:true,cleanState:true`) is not proved until current product runs pass. Missing-file behavior must support first use.
+`accept-run --subject product|oracle` distinguishes product delivery from reference dry runs. Legacy unspecified subject is product only with sibling evidence/run.json, otherwise oracle. Acceptance review uses distinct existing Codex/Claude capacity and findings/resolve; changed product/plan/scenario/vision needs fresh acceptance. `accept-rebind --repo DIR` reruns legacy-unbound/revision-algorithm-upgraded cases, preserving original approver/proxy references only for unchanged passing products.
+Interrupted acceptance reviews retain registered attempt originals under .codex-harness/acceptance-review-attempts. Inspect acceptance.reviewAttempts and use `accept-review --repo SAME --resume ID` / MCP resume: no provider launch. Every slot must be complete, valid, nonmocked and match source/candidate/context/native session/model. Missing/unknown telemetry, error events, overflow reshards, stale/changed originals refuse; never edit/move originals or import unregistered external returns. Successful repeat resume is idempotent and preserves dispositions; all gates remain.
+Only record actual user words as `--by user`; delegated acceptance uses `proxy:NAME` (or opus-user-proxy), remains isProxy:true and never real-user identity. Product checks do not prove actual worker delivery; final acceptance must assess the full locked vision.
+
 Worked mini example: **26 CLI calls**, two beads (B depends on A). Save these files in the checkout (CLI JSON inputs use cwd).
 Create project `template/tests_cli` with `test_one.py`, `test_two.py`, `test_end_to_end.py` using unittest assertions:
 `from mini_one import inc; assert inc(2) == 3`; `from mini_two import twice; assert twice(2) == 6`; integration asserts `twice(inc(1)) == 6`.
@@ -178,52 +109,4 @@ p quality
 p advance --to publish
 p publish
 ```
-Real roundtables launch providers normally. **Test only:** add `--test-only-review-output response.json` with explicit reviewers to inject a finding array (e.g. `[]`) instead; never treat injected reviews as live evidence.
-Review budget defaults to 2 attempts per reviewer per manifest revision; `--max-rounds N` changes it. Totals span revisions; optional `--max-total N` caps total invocations per reviewer.
-### Host-driven resolution after a review
-
-For MCP acceptance scenario authoring, inspect `harness_schema tool=harness_accept_scenarios`.
-After confirming the current locked vision, `harness_accept_scenarios derive=true`
-replaces the scenario set with drafts carrying canonical coverage IDs: `first-moment`
-and one `scope-N` per scope item. Without arguments, the tool lists saved scenarios.
-Keep every returned ID and its intent; fill nonblank `id`, `title`, `given`, executable
-`steps`, and an `expect` object, then submit the **complete** array using
-`harness_accept_scenarios scenarios=<array>`. This replaces the set rather than merging it.
-The public schema includes a planned command/expectation example: replace it with
-actual product commands and observations for each scenario. Empty steps or expectations
-remain drafts. Saving executable scenarios proves neither execution nor acceptance.
-If coverage is refused, list the saved set before deriving again so authored work is preserved.
-
-For packet inspection in MCP, first prepare the intended project's `template` directory
-with its authored protected test files, then call `harness_compile` with the known
-intended `expected_workspace`. The tool renders canonical requirement documents through
-the existing compiler and returns the recorded manifest, including its revision and
-protected-file binding. It accepts no alternate template path. It neither fabricates
-missing test files nor grants approval, review, publication or execution credit.
-Then use `harness_packet_view id=<bead> provider=<provider>` to read the current packet.
-Packet view stays read-only; after a plan or protected-file change, refresh with an
-explicit `harness_compile` before reading it again. Invalid manifests and missing
-protected files remain refusals. The CLI equivalent remains
-`compile --template template --out manifest.json`.
-
-- `reviewResolution` in MCP status / CLI JSON is revision-stamped advice with one action; it grants no publication, approval or dispatch credit.
-- The host owns edits and dispositions. Use `harness_compile` for explicit canonical compilation in MCP; audit/roundtable retain their existing CLI routes, with no hidden provider loop.
-- Native approval and actual questions come first. All open non-readiness findings block, including minor, stale and null-stage findings.
-- Inspect the recorded review, repair the owned plan/tests, then resolve, reject or defer with evidence and reasons; severity never chooses disposition.
-- Deferred findings remain known gaps. All blocker/member IDs remain; 512-character excerpts/truncation flags and `detailRoute` lead to full review detail.
-- Unknown/broken reads remain unknown. No raw logs, packets or private fields are added. Missing-plan reads create nothing.
-- Refresh and compile after edits. Manifest/spine equality is legitimate without a bound template; never infer compilation from equality alone.
-- Audit and real-review evidence must match the current manifest. Stale/mock reviews and changed-only checks cannot substitute for canonical evidence.
-- Choose an authorized `audit --prospective` or `audit --oracle <existing-reference>`; never guess an oracle directory or silently downgrade proof.
-- `review.qualityStatus` and bounded advice retain existing quality semantics: inspect failure diagnostics and retry only the failed reviewer.
-- Use existing round/total caps and reserved capacity. One successful provider with no other attempted retains a warning, not a new admission rule.
-- Reserve calls and a hard deadline for author continuation, exact-revision audit/review, workers and later acceptance before beginning or resuming repair.
-- Budget is `unknown_to_product`: 3 planner calls + 1 review use 4/6; repair + re-review + 1 worker require 7 total, before acceptance. Six cannot finish.
-- Hold if capacity/routes are unavailable; preserve findings, never enlarge caps automatically or treat continuations as free. No benchmark launch is authorized.
-- With current evidence/dispositions, attempt normal advance/publication with any prospective reason; refresh first, as canonical mutations recheck gates.
-- This host-driven advice does not fix the frozen external pilot controller. After workers, assess actual integrated locked-vision product acceptance.
-- Report every public task obligation verified/failed/unverified; prospective publication and worker validation alone do not establish full acceptance.
-- Windows reviewer discovery prefers newest desktop-bundled Codex; explicit overrides remain. Failed reviewers expose diagnostic artifact paths, not success.
-- `spine_revision` (`plan_revision` alias) hashes editable nodes; `manifest_revision` includes protected files and is unavailable until compilable.
-- `published_revision` is the frozen worker manifest; `up_to_date` compares it with the manifest, so test edits invalidate evidence. No force bypass exists.
-- At vision-lock, journey uses `first_user_moment`/`scope_in` until stories exist. An unchosen decision's next action records a choice before advance.
+Real roundtables launch providers normally. Test-only `--test-only-review-output response.json` injects an explicit finding array with supplied reviewers; injected/mock reviews never count as live evidence. The example's source test stops at the real review gate.
