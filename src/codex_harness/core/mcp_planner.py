@@ -987,6 +987,7 @@ class PlannerServer:
         self.result_data = None
         operation_error_code = None
         operation_raised = False
+        dispatch_started = False
         try:
             tool = next((tool for tool in TOOLS if tool["name"] == name), None)
             if tool is None:
@@ -1001,6 +1002,7 @@ class PlannerServer:
                     "OR harness_accept_run repo=<reference-repo> subject=oracle"
                 )
             _validate(arguments, tool["inputSchema"])
+            dispatch_started = True
             body = self._dispatch(name, arguments, schema_tools=schema_tools)
             is_error = bool(
                 name == "harness_readiness"
@@ -1099,7 +1101,7 @@ class PlannerServer:
             body += "\nAcceptance invalid: " + acceptance["invalidMessage"]
         next_step = (
             self._next(name, arguments, status, is_error, operation_error_code)
-            if status_available and not (operation_raised and self.result_data is not None)
+            if status_available and not (operation_raised and dispatch_started)
             else "harness_plan_status read-only; inspect the primary result and saved IDs. "
             "Do not repeat a completed or uncertain mutation; inspect its recorded effect first."
         )

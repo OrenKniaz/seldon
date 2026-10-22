@@ -133,6 +133,49 @@ def test_primary_exception_after_real_write_never_becomes_success(project, monke
         server.close()
 
 
+def test_single_node_commit_before_result_requires_inspection_but_input_refusal_keeps_help(
+    project, monkeypatch
+):
+    """Catch retry advice when canonical commit raises before result_data is set.
+
+    The existing uncertain-batch test sets result_data before its injected error;
+    this real single-node producer exercises the missing completion boundary.
+    """
+    store_type, calls = type(project), []
+    original = store_type.upsert_node
+
+    def commit_then_raise(self, node):
+        calls.append(node["id"])
+        original(self, node)
+        raise OSError("Completion lost before dispatch result")
+
+    monkeypatch.setattr(store_type, "upsert_node", commit_then_raise)
+    server, trace = PlannerServer(project.workspace), []
+    node = deepcopy(project.spine().node("R1"))
+    node["id"] = "R2"
+    before = list(project.connection.iterdump())
+    try:
+        refused = wire(server, trace, "harness_upsert_node")  # Missing required input.
+        assert refused["isError"] is True and refused["statusAvailable"] is True
+        assert "harness_schema" in refused["content"][0]["text"]
+        assert "retry this tool" in refused["content"][0]["text"].split("Next:")[-1]
+        assert calls == [] and list(project.connection.iterdump()) == before
+        response = wire(server, trace, "harness_upsert_node", node=node)
+        assert response["isError"] is True and response["statusAvailable"] is True
+        assert server.result_data is None and "structuredContent" not in response
+        assert calls == ["R2"] and project.spine().node("R2") == node
+        assert count_node_events(project, "R2") == 1
+        next_step = response["content"][0]["text"].split("Next:")[-1]
+        assert "read-only" in next_step and "uncertain mutation" in next_step
+        assert "retry this tool" not in next_step
+    finally:
+        server.close()
+    with open_plan_store_readonly(project.workspace) as reopened:
+        assert reopened.spine().node("R2") == node
+        assert count_node_events(reopened, "R2") == 1
+    assert calls == ["R2"]  # Observation and reopen never replay the mutation.
+
+
 def test_failed_audit_receipt_stays_failed_when_followup_status_is_unavailable(
     prospective, monkeypatch
 ):
