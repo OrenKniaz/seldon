@@ -521,7 +521,16 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "product execution, review, human approval or acceptance. Existing publication "
             "and review-policy gates remain; prospective publication needs an explicit reason.",
         )
-    if tool == "harness_compile" or tool == "harness_upsert_node" and kind == "vision":
+    if tool in {"harness_compile", "harness_upsert_node", "harness_upsert_nodes"}:
+        result["compilationLimits"] = {
+            "maxE2eNodes": 1,
+            "integration": "The current compiler accepts at most one level=e2e test node. "
+            "Represent integration with one suite module containing multiple cases; "
+            "do not create an e2e node per case or feature. Unit test nodes may be separate.",
+            "traceability": "A test's parents are requirement or bead IDs; one integration "
+            "suite can reference requirements across features. These are existing compiler "
+            "limits, not additional authoring or approval gates.",
+        }
         result["compilationMetadata"] = {
             "owner": "The existing vision node's fields; not arguments to harness_compile.",
             "requiredWhen": "Required before compile, not at initial vision authoring.",
