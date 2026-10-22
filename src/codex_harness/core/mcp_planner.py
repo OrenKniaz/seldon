@@ -986,6 +986,7 @@ class PlannerServer:
     def call_tool(self, name: str, arguments: dict, *, schema_tools=None) -> dict:
         self.result_data = None
         operation_error_code = None
+        operation_raised = False
         try:
             tool = next((tool for tool in TOOLS if tool["name"] == name), None)
             if tool is None:
@@ -1026,6 +1027,7 @@ class PlannerServer:
                 )
             )
         except Exception as error:
+            operation_raised = True
             operation_error_code = getattr(error, "code", None)
             # Tool failures are isolated at the protocol boundary; no input/secret logs.
             print(f"planner tool failed: {type(error).__name__}", file=sys.stderr)
@@ -1066,6 +1068,7 @@ class PlannerServer:
                 if self.result_data is None:
                     self.result_data = dict(contract=contract, holdReasons=[str(error)])
             is_error = True
+        status_available = True
         try:
             status = (
                 resume_status(self.workspace, self.result_data)
@@ -1085,25 +1088,37 @@ class PlannerServer:
                 "open_clarifications": "unknown",
                 "pending_gate": "status-unavailable",
             }
-            body += "\nCanonical status unavailable; retry harness_plan_status."
-            is_error = True
+            status_available = False
+            body += "\nCanonical status unavailable; the primary tool result above is separate."
+            if not is_error:
+                body += " The tool completed; do not repeat its mutation to refresh status."
         if is_error:
             body += f"\npending_gate: {status['pending_gate'] or 'none'}"
         acceptance = status.get("acceptance", {})
         if name == "harness_plan_status" and acceptance.get("invalidMessage"):
             body += "\nAcceptance invalid: " + acceptance["invalidMessage"]
-        next_step = self._next(name, arguments, status, is_error, operation_error_code)
+        next_step = (
+            self._next(name, arguments, status, is_error, operation_error_code)
+            if status_available and not (operation_raised and self.result_data is not None)
+            else "harness_plan_status read-only; inspect the primary result and saved IDs. "
+            "Do not repeat a completed or uncertain mutation; inspect its recorded effect first."
+        )
         turn = status.get("planningTurn")
         if not is_error and turn and turn["schemaTarget"]:
             next_step += "; " + turn["schemaTarget"]["mcp"] + "; " + turn["guidance"]
-        if name == "harness_accept_run" and arguments.get("subject") not in ("product", "oracle"):
+        if (
+            status_available
+            and name == "harness_accept_run"
+            and arguments.get("subject") not in ("product", "oracle")
+        ):
             next_step = (
                 "harness_accept_run repo=<integrated-repo> subject=product OR "
                 "harness_accept_run repo=<reference-repo> subject=oracle"
             )
         handoff = None
         if (
-            is_error
+            status_available
+            and is_error
             and name in {"harness_advance", "harness_publish"}
             and operation_error_code
             in {
@@ -1116,6 +1131,7 @@ class PlannerServer:
             body += "\n" + views.author_handoff_card(handoff)
         reply = {
             "isError": is_error,
+            "statusAvailable": status_available,
             **(
                 {"structuredContent": {"authorHandoff": handoff}}
                 if handoff is not None

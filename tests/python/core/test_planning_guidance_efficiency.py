@@ -166,10 +166,11 @@ def test_first_use_batch_and_test_help_match_real_single_e2e_suite_compiler(proj
         duplicate = deepcopy(test_help["example"]["node"])
         duplicate.update(id="TE2", parents=["R1"])
         duplicate["fields"].update(level="e2e", module="test_journey.py")
-        # Existing batch accepts the graph, but its status projection also compiles it.
-        # Therefore a compiler-invalid graph can persist and return an error response.
+        # The batch completes even though the subsequent compiler-based status fails.
         duplicate_result = invoke(server, "harness_upsert_nodes", nodes=[duplicate])
-        assert duplicate_result["isError"]
+        assert duplicate_result["isError"] is False
+        assert duplicate_result["statusAvailable"] is False
+        assert duplicate_result["structuredContent"] == {"ids": ["TE2"]}
         assert project.spine().node("TE2") == duplicate
         refused = invoke(server, "harness_compile")
         assert refused["isError"] and "spine-integration-invalid" in refused["content"][0]["text"]
