@@ -107,7 +107,8 @@ def next_command(server: PlannerServer, status: dict) -> str:
         if approval.get("granted") and approval.get("gate") == gate.split(":", 1)[1]:
             return advance
         confirm = f"Use native MCP harness_record_confirmation gate={gate.split(':', 1)[1]}"
-        fields = store.spine().node("V1")["fields"]
+        spine = store.spine()
+        fields = spine.node(spine.ids("vision")[0])["fields"]
         if any(
             not fields.get(key)
             for key in ("vision", "users", "first_user_moment", "scope_in", "scope_out")

@@ -432,6 +432,65 @@ def test_guide_example_stops_at_synthetic_review_gate(tmp_path):
     assert "revised-tests-unsatisfiable" in audit["text"]
 
 
+@pytest.mark.parametrize("complete", [False, True], ids=["incomplete-vision", "complete-vision"])
+def test_imported_vision_id_survives_reopened_public_status_footer(tmp_path, complete):
+    """Catch V1-only footer lookup; start/card tests always create that conventional ID."""
+    from codex_harness.core.spine import SCHEMA, Spine, save_spine
+
+    fields = (
+        dict(
+            vision="A small CLI",
+            users="Me",
+            first_user_moment="Read status",
+            scope_in=["CLI"],
+            scope_out=["GUI"],
+        )
+        if complete
+        else {}
+    )
+    spine = Spine(
+        dict(
+            schema=SCHEMA,
+            name="Imported vision",
+            nodes=[
+                dict(
+                    id="V",
+                    kind="vision",
+                    title="Imported vision",
+                    text="Imported intent",
+                    parents=[],
+                    fields=fields,
+                )
+            ],
+        )
+    )
+    source = tmp_path / "imported.json"
+    save_spine(spine, source)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    with open_plan_store(workspace) as store:
+        store.import_spine(source)
+        before = store.spine().to_dict()
+        revision = store.spine().plan_revision()
+        events = store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+        assert store.spine().ids("vision") == ["V"]
+        assert store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+
+    report = cli(workspace, "status", machine=True)
+    assert report["status"]["phase"] == "align"
+    assert report["status"]["pending_gate"] == "approval:align"
+    assert not (report["status"].get("approval") or {}).get("granted")
+    assert "harness_record_confirmation gate=align" in report["next"]
+    assert ("card --vision" in report["next"]) is (not complete)
+    assert "advance --to" not in report["next"]
+    with open_plan_store(workspace) as reopened:
+        assert reopened.spine().to_dict() == before
+        assert reopened.spine().plan_revision() == revision
+        assert reopened.phase() == "align"
+        assert reopened.connection.execute("SELECT count(*) FROM events").fetchone()[0] == events
+        assert reopened.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+
+
 def test_refused_gates_next_steps_and_attribution(started):
     workspace = started
     out = cli(workspace, "advance", "--to", "expand", code=2)
