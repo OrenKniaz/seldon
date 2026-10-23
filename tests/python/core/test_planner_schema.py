@@ -458,6 +458,44 @@ def test_typed_draft_invalid_bindings_refuse_atomically(tmp_path, fault):
         server.close()
 
 
+def test_first_proof_authoring_help_exposes_stub_and_audit_prerequisites_without_creating_plan(
+    tmp_path, capsys
+):
+    """Catch discovering missing CLI stubs only after a zero-finding review.
+
+    Audit-route tests ask for help at audit time; cold example tests only save nodes.
+    Check the public first-use MCP and CLI help instead, without running a product.
+    """
+    from codex_harness.core.plan_cli import main
+
+    server = PlannerServer(tmp_path)
+    try:
+        guides = [
+            invoke(server, "harness_schema", kind=kind)["structuredContent"]
+            for kind in ("test", "bead")
+        ]
+        guides.append(
+            invoke(server, "harness_schema", tool="harness_upsert_nodes")["structuredContent"]
+        )
+        assert main(["--workspace", str(tmp_path), "--json", "schema", "--kind", "test"]) == 0
+        guides.append(json.loads(capsys.readouterr().out)["data"])
+        for guide in guides:
+            help_text = guide["proofAuthoring"]
+            assert "before compile/review" in help_text["prepare"]
+            assert "does not create those files" in help_text["prepare"]
+            assert "tally/__main__.py" in help_text["cli"]
+            assert "NotImplementedError" in help_text["cli"]
+            assert "arbitrary helper/control-flow" in help_text["cli"]
+            assert "not product implementation" in help_text["scope"]
+            assert "Zero review findings do not establish a passing audit" in help_text["evidence"]
+            assert (
+                "collection, attributable red-stub failures and interface" in help_text["evidence"]
+            )
+        assert not (tmp_path / ".codex-harness").exists()
+    finally:
+        server.close()
+
+
 def test_schema_discovery_before_start_has_usable_examples_without_creating_plan(tmp_path):
     # A cold planner cannot recover by reading source. tools/list only describes
     # fields as an opaque object, so it misses the bead/test repair contract.
