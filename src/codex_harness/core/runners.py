@@ -203,6 +203,9 @@ def _module_observer():
         "launcherExecutable": sys.executable,
         "requestedArgv": spec["argv"],
         "cwd": str(Path.cwd().resolve()),
+        "stdoutEncoding": sys.stdout.encoding,
+        "stderrEncoding": sys.stderr.encoding,
+        "dontWriteBytecode": sys.dont_write_bytecode,
     }
 
     def save():
@@ -383,11 +386,24 @@ def _unittest_observer():
                     cwd = Path(kwargs.get("cwd") or root).resolve()
                     requested_env = kwargs.get("env")
                     env = dict(os.environ if requested_env is None else requested_env)
+                    # These requested values affect output encoding and cache writes,
+                    # not import resolution. Preserve them in the actual child;
+                    # every other interpreter-startup change still refuses.
+                    output_settings = {
+                        "PYTHONIOENCODING": "utf-8",
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    }
+                    changes = {
+                        k: env.get(k)
+                        for k in set(env) | set(startup_env)
+                        if k.startswith("PYTHON")
+                        and k != "PYTHONPATH"
+                        and env.get(k) != startup_env.get(k)
+                    }
                     if (
                         any(
-                            env.get(k) != startup_env.get(k)
-                            for k in set(env) | set(startup_env)
-                            if k.startswith("PYTHON") and k != "PYTHONPATH"
+                            k not in output_settings or value != output_settings[k]
+                            for k, value in changes.items()
                         )
                         or "HARNESS_MODULE_OBSERVATION" in env
                     ):
@@ -415,7 +431,9 @@ def _unittest_observer():
                         str((root / name).resolve()): name for name in json.loads(owned_json)
                     }
                     targets = {
-                        str((Path(p) / (module.replace(".", "/") + ".py")).resolve()) for p in paths
+                        str((Path(p) / (module.replace(".", "/") + suffix)).resolve())
+                        for p in paths
+                        for suffix in (".py", "/__main__.py")
                     }
                     if not targets.intersection(expected):
                         raise ValueError("Module does not identify an owned Python source.")
@@ -447,6 +465,7 @@ def _unittest_observer():
                         cwd=str(cwd),
                         module=module,
                         environmentDelta=delta,
+                        requestedOutputEnvironment=changes,
                         actualInterpreter=sys.orig_argv[0],
                         platform=sys.platform,
                         instrumented=True,
