@@ -69,7 +69,8 @@ def candidate(tmp_path):
         "wrong-exit",
         "extra-output",
         "cwd-import",
-        "unsupported",
+        "executed-proof-branch",
+        "copied-proof-branch",
         "guarded-stub",
         "guarded-side-effect",
         "noncanonical-guard",
@@ -79,10 +80,10 @@ def candidate(tmp_path):
     ],
 )
 def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatch, case):
-    """Product behavior and audit attribution are separate, observable contracts."""
+    """Protect actual CLI attribution; direct launch cases miss branch/result substitution."""
     root = candidate["template"]
     source = "import sys\nif __name__ == '__main__':\n    print('[]')\n"
-    if case in ("stub", "unsupported"):
+    if case in ("stub", "executed-proof-branch", "copied-proof-branch"):
         source = (
             "def _list_command():\n    raise NotImplementedError('planned list')\n"
             "if __name__ == '__main__':\n    _list_command()\n"
@@ -121,8 +122,14 @@ def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatc
         "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
     )
     body = "        " + launch
-    if case == "unsupported":
+    if case in ("executed-proof-branch", "copied-proof-branch"):
         body = "        if True:\n            " + launch
+        if case == "copied-proof-branch":
+            # Equal fields on a different object cannot borrow the real child's identity.
+            body += (
+                "            result = subprocess.CompletedProcess(\n"
+                "                result.args, result.returncode, result.stdout, result.stderr)\n"
+            )
     (root / "tests/test_app.py").write_text(
         "import subprocess, sys, unittest\nfrom pathlib import Path\n"
         "class Proof(unittest.TestCase):\n    def test_cli(self):\n"
@@ -156,11 +163,28 @@ def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatc
         assert ("NotImplementedError: planned list" in ordinary.stderr) is (case != "compliant")
 
     audit = test_audit.audit_prospective_tests(**candidate)
-    if case in ("stub", "guarded-stub"):
+    if case in ("stub", "guarded-stub", "executed-proof-branch"):
         assert audit["ok"], audit["findings"]
         provenance = audit["redBaseline"][0]["failureProvenance"]
         assert provenance["classification"] == "meaningful-red"
         assert provenance["tests"][0]["classification"] == "owned-cli-stub"
+        observed = provenance["tests"][0]
+        assert len(observed["events"]) == len(observed["moduleLaunches"]) == 1
+        binding = observed["events"][0]["resultBinding"]
+        launch = observed["moduleLaunches"][0]
+        assert binding["launchId"] and binding["launchId"] == launch["launchId"]
+        assert binding["resultUnchanged"] is True and binding["currentEvent"] is True
+        assert binding["assertion"]["method"] == "assertEqual"
+        assert binding["assertion"]["resultName"] == "result"
+        assert binding["assertion"]["field"] == "returncode"
+        assert launch["completedResultObserved"] is True and launch["instrumented"] is True
+        assert launch["child"]["exception"]["type"] == "NotImplementedError"
+        assert not launch["child"]["exception"]["foreignTail"]
+        assert all(frame["file"] == "app.py" for frame in launch["child"]["exception"]["frames"])
+        assert launch["child"]["startupIdentity"] == launch["startupIdentity"]
+        assert launch["child"]["atexitObserved"] is True
+        assert audit["proofLevel"] == "prospective" and audit["integrationChecked"] is False
+        assert audit["integrationProof"] is None
         if case == "guarded-stub":
             launch = provenance["tests"][0]["moduleLaunches"][0]
             assert launch["child"]["exception"]["type"] == "NotImplementedError"
@@ -170,19 +194,18 @@ def test_declared_cli_contract_and_prospective_attribution(candidate, monkeypatc
     else:
         assert not audit["ok"], audit
         expected = (
-            "prospective-vacuous-proof"
-            if case == "compliant"
-            else "prospective-no-interface-assertion"
-            if case == "unsupported"
-            else "prospective-red-unproved"
+            "prospective-vacuous-proof" if case == "compliant" else "prospective-red-unproved"
         )
         assert expected in {finding["code"] for finding in audit["findings"]}
-        if case == "unsupported":
-            assert any(
-                "no product main() API is required" in item["output"] for item in audit["findings"]
-            )
-        elif case != "compliant":
+        if case != "compliant":
             assert audit["redBaseline"][0]["failureProvenance"]["classification"] == "unproved"
+        if case == "copied-proof-branch":
+            observed = audit["redBaseline"][0]["failureProvenance"]["tests"][0]
+            assert "resultBinding" not in observed["events"][0]
+            assert observed["moduleLaunches"][0]["completedResultObserved"] is True
+            assert (
+                observed["moduleLaunches"][0]["child"]["exception"]["type"] == "NotImplementedError"
+            )
 
 
 @pytest.mark.parametrize("phase", ["setUp", "tearDown", "test_value"])
