@@ -163,6 +163,13 @@ TOOLS = [
         {},
     ),
     _tool(
+        "harness_adopt_review_policy",
+        "Explicitly declare optional plan-review policy roles for the current manifest "
+        "before review attempts. No review launch, permission, approval or verified closure. "
+        "Inspect harness_review_policy and its adoption warning first.",
+        {"slots": views.plan_review_policy_slots_schema(), "expectedManifestRevision": STRING},
+    ),
+    _tool(
         "harness_roundtable",
         "Run the existing protected roundtable with explicit authorized reviewers. "
         "Inspect harness_schema tool=harness_roundtable first; offerings do not prove access. "
@@ -1214,10 +1221,27 @@ class PlannerServer:
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
         if name == "harness_review_policy" and not error:
+            revision = self.result_data["example"]["expectedManifestRevision"]
+            reasons = status.get("reviewPolicy", {}).get("reasons", [])
+            if not revision or "review-policy-revision-stale" in reasons:
+                return (
+                    "harness_compile; inspect the refreshed policy contract before any "
+                    "explicit adoption. Existing roles and holds remain in force."
+                )
             return (
                 "Inspect adoptionWarning, limits and unavailableProducers; "
-                "MCP policy adoption/refresh is unavailable. "
+                "only if explicitly choosing this optional policy, use harness_adopt_review_policy "
+                "with supplied slots, current expectedManifestRevision and independently known "
+                "expected_workspace. "
                 "Inspection grants no approval or verified closure; keep existing holds."
+            )
+        if name == "harness_adopt_review_policy":
+            return (
+                "harness_review_policy; inspect current revision, immutable roles and prior "
+                "attempts. No automatic retry or retroactive role change."
+                if error
+                else "harness_plan_status; inspect recorded roles and current holds before any "
+                "separately authorized reviewer launch."
             )
         if name == "harness_audit":
             if self.result_data and not error:
@@ -1663,6 +1687,22 @@ class PlannerServer:
                 + self.result_data["limits"]
                 + "\nUnavailable producers: "
                 + "; ".join(self.result_data["unavailableProducers"])
+            )
+        if name == "harness_adopt_review_policy":
+            declaration = store.record_plan_review_policy(
+                args["slots"], args["expectedManifestRevision"]
+            )
+            self.result_data = {
+                "declaration": declaration,
+                "reviewPolicy": store.plan_review_policy_state(declaration["manifestRevision"]),
+                "adoptionWarning": views.POLICY_ADOPTION_WARNING,
+            }
+            return (
+                "Recorded explicit plan-review policy for manifest "
+                + declaration["manifestRevision"]
+                + ". No review was started; "
+                "no permission, approval or verified closure was granted.\n"
+                + views.POLICY_ADOPTION_WARNING
             )
         if name == "harness_roundtable":
             from codex_harness.core import roundtable

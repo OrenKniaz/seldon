@@ -107,7 +107,8 @@ def test_current_and_stale_policy_contract_reaches_native_reader_and_preserves_c
                 assert all(value in text for value in contract["unavailableProducers"])
                 own_next = text.rsplit("\nNext: ", 1)[1]
                 assert "harness_review_policy" not in own_next
-                assert "MCP policy adoption/refresh is unavailable" in own_next
+                assert "MCP policy adoption/refresh is unavailable" not in own_next
+                assert ("harness_compile" if stale else "harness_adopt_review_policy") in own_next
                 status = wire(server, "harness_plan_status", arguments)
                 policy = status["structuredContent"]["reviewPolicy"]
                 assert policy["active"] and not policy["eligible"]

@@ -191,12 +191,30 @@ POLICY_ADOPTION_WARNING = (
     "No supported verified finding-closure producer is available. Adopting this optional "
     "fail-closed policy can leave quality and publication held when findings arise, even after "
     "author repair, dispositions or a clean rereview. Ordinary policy-free work is unchanged. "
-    "Inspect --policy-schema and its limits before choosing --policy."
+    "Inspect the policy contract and its limits before explicit adoption."
 )
 
 
+def plan_review_policy_slots_schema() -> dict:
+    """The same explicit role input for CLI policy and native adoption."""
+    return {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["name", "provider", "required"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "required": {"type": "boolean"},
+                "provider": {"type": "string", "enum": ["codex", "claude", "copilot"]},
+            },
+        },
+    }
+
+
 def plan_review_policy_contract(store) -> dict:
-    """Complete contract for the existing CLI roundtable's optional prospective input."""
+    """Shared contract for explicit optional prospective policy declaration."""
     string = {"type": "string", "minLength": 1}
     revision = store.manifest_revision()
     example = dict(
@@ -221,27 +239,7 @@ def plan_review_policy_contract(store) -> dict:
                 "schema": {"type": "string", "enum": ["seldon/plan-review-policy-v1"]},
                 "stage": {"type": "string", "enum": ["plan"]},
                 "expectedManifestRevision": string,
-                "slots": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["name", "provider", "required"],
-                        "properties": {
-                            "name": string,
-                            "required": {"type": "boolean"},
-                            "provider": {
-                                "type": "string",
-                                "enum": [
-                                    "codex",
-                                    "claude",
-                                    "copilot",
-                                ],
-                            },
-                        },
-                    },
-                },
+                "slots": plan_review_policy_slots_schema(),
             },
         },
         "example": example,
@@ -254,11 +252,14 @@ def plan_review_policy_contract(store) -> dict:
         },
         "exampleArgs": ["roundtable", "--policy", "@policy.json", "--reviewer", "@reviewer.json"],
         "adoptionWarning": POLICY_ADOPTION_WARNING,
-        "adoption": "Explicit --policy declaration only, before attempts on this revision. "
+        "adoption": "Explicit --policy or harness_adopt_review_policy declaration only, "
+        "before attempts on this revision. "
         "Ordinary policy-free roundtables retain legacy behavior, including latest-success "
         "selection; automatic adoption is not implemented.",
         "exampleUse": "Save the example with your already authorized reviewer names/providers; "
         "pass --policy @policy.json with existing --reviewer entries to roundtable. "
+        "For native adoption, supply slots and expectedManifestRevision to "
+        "harness_adopt_review_policy with an independently known expected_workspace. "
         "At least one required slot; distinct names; roles fixed before attempts. "
         "This illustrative role choice grants no authorization or model selection.",
         "limits": "Plan stage only. Existing counts, caps, native approval and final acceptance "
