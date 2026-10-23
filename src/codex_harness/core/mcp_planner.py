@@ -1806,14 +1806,16 @@ class PlannerServer:
             body += "\n" + views.outcome_waves_card(store.outcome_waves())
             return body
         if name == "harness_understanding_card":
-            node = store.spine().node("V1")
+            spine = store.spine()
+            vision_id = spine.ids("vision")[0]
+            node = spine.node(vision_id)
             existing = node["fields"].get("assumptions", [])
             node["fields"].update(args)
             store.upsert_node(node)
             for text in args["assumptions"]:
                 if text not in existing:
-                    store.add_assumption(text, ["V1"])
-            self.result_data = {"id": "V1"}
+                    store.add_assumption(text, [vision_id])
+            self.result_data = {"id": vision_id}
             return views.understanding_card(**args)
         if name == "harness_record_confirmation":
             raise ValueError(
