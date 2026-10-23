@@ -522,6 +522,22 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "and review-policy gates remain; prospective publication needs an explicit reason.",
         )
     if tool in {"harness_compile", "harness_upsert_node", "harness_upsert_nodes"}:
+        result["proofAuthoring"] = {
+            "prepare": "When authoring test nodes or bead proofs, prepare executable protected "
+            "tests and importable failing stubs in workspace/template before compile/review. "
+            "A test node records intent; it does not create those files.",
+            "cli": "For a Python module CLI, provide its planned entry module. For example, "
+            "template/app.py can contain raise NotImplementedError('planned CLI'); a direct "
+            "subprocess proof invokes [sys.executable, '-m', 'app'] and asserts its real result. "
+            "For python -m tally, provide tally/__init__.py and tally/__main__.py under template. "
+            "An imported main() API is not required; this example does not promise support for "
+            "arbitrary helper/control-flow shapes.",
+            "scope": "Stubs are planning skeletons, not product implementation or delivery. "
+            "Keep protected assertions intact; workers implement the owned product files.",
+            "evidence": "Zero review findings do not establish a passing audit. Prospective "
+            "audit still requires collection, attributable red-stub failures and interface "
+            "assertions; it does not prove product behavior or oracle satisfiability.",
+        }
         result["compilationLimits"] = {
             "maxE2eNodes": 1,
             "integration": "The current compiler accepts at most one level=e2e test node. "
