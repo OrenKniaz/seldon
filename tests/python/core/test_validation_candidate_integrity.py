@@ -35,7 +35,8 @@ def test_canonical_integration_refuses_validation_time_candidate_mutation(
         "    value.write_text('2\\n')\n"
         "after = value.read_text().strip()\n"
         "expected = '2' if candidate and mutate else Path(sys.argv[1]).read_text().strip()\n"
-        "commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()\n"
+        "commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], "
+        "cwd=root, text=True).strip()\n"
         "print(json.dumps(dict(root=str(root), candidate=candidate, before=before, after=after, "
         "expected=expected, commit=commit)))\n"
         "sys.exit(0 if after == expected else 1)\n",
