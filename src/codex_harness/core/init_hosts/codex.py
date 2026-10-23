@@ -16,8 +16,15 @@ def render(text, entry, *, remove=False, yes=False):
         raise ValueError("Expected mcp_servers table")
     existing = data.get("mcp_servers", {}).get("seldon")
     expected = {**entry, "startup_timeout_sec": 20}
+    mode_key = "default_tools_approval_mode"
+    if not remove and isinstance(existing, dict) and mode_key in existing:
+        mode = existing[mode_key]
+        if not isinstance(mode, str) or mode not in {"auto", "prompt", "writes", "approve"}:
+            raise ValueError("Unsupported Seldon tool approval mode; preserve it manually")
+        expected[mode_key] = mode
     if not remove and existing is not None and existing != expected and not yes:
         raise ValueError("Existing seldon entry differs; inspect it and use --yes to replace")
+    emit_mode = mode_key in expected
     if START in text or END in text:
         if text.count(START) != 1 or text.count(END) != 1:
             raise ValueError("Malformed seldon ownership markers")
@@ -35,6 +42,8 @@ def render(text, entry, *, remove=False, yes=False):
             raise ValueError(
                 "Ownership block contains unrelated configuration; preserve it manually"
             )
+        if emit_mode:
+            emit_mode = mode_key in block_data["mcp_servers"]["seldon"]
     elif existing is not None:
         if remove:
             return text
@@ -57,14 +66,17 @@ def render(text, entry, *, remove=False, yes=False):
         if remove:
             return text
         start = end = len(text)
+    if not remove and existing == expected:
+        return text
     replacement = ""
     if not remove:
         replacement = START + "\n[mcp_servers.seldon]\n"
         for key in ("command", "args"):
             replacement += f"{key} = {json.dumps(entry[key], ensure_ascii=False)}\n"
-        replacement += (
-            'env = { SELDON_INIT = "seldon-init v1" }\nstartup_timeout_sec = 20\n' + END + "\n"
-        )
+        replacement += 'env = { SELDON_INIT = "seldon-init v1" }\nstartup_timeout_sec = 20\n'
+        if emit_mode:
+            replacement += f"{mode_key} = {json.dumps(expected[mode_key])}\n"
+        replacement += END + "\n"
         if start and text[start - 1] != "\n":
             replacement = "\n" + replacement
     result = text[:start] + replacement + text[end:]
@@ -79,6 +91,4 @@ def render(text, entry, *, remove=False, yes=False):
         raise ValueError("Refusing a change to unrelated TOML settings")
     if not remove and after.get("mcp_servers", {}).get("seldon") != expected:
         raise ValueError("Cannot represent seldon in this TOML layout; manual merge required")
-    if not remove and existing == expected:
-        return text
     return result

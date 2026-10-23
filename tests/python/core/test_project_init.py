@@ -61,6 +61,7 @@ def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(proje
     assert snapshot(project) == before
     codex = tomllib.loads((project / ".codex/config.toml").read_text())
     assert codex["model"] == "user-choice"
+    assert "default_tools_approval_mode" not in codex["mcp_servers"]["seldon"]
     for host, writer in HOSTS.items():
         entry = project_init.read_entry(host, (project / writer.PATH).read_text())
         assert entry["args"][-1] == str(project.resolve())
@@ -156,6 +157,97 @@ def test_check_requires_registration_and_marker(project):
     """Catch empty setups incorrectly reported as ready without the new installation evidence."""
     with pytest.raises(ValueError, match="missing"):
         project_init.run_init(options(project, check=True))
+
+
+@pytest.mark.parametrize(
+    "mode,field",
+    [
+        ("auto", "command"),
+        ("prompt", "args"),
+        ("writes", "env"),
+        ("approve", "startup_timeout_sec"),
+    ],
+)
+def test_explicit_codex_mode_survives_reinit_and_authorized_identity_replacement(
+    project, mode, field
+):
+    """Catch mode loss without masking identity drift; existing reruns have no user-owned mode."""
+    project_init.run_init(options(project, host="codex"))
+    config = project / ".codex/config.toml"
+    line = f'default_tools_approval_mode = "{mode}"\n'
+    if mode in {"prompt", "approve"}:
+        config.write_text(config.read_text() + line)
+    else:
+        config.write_text(
+            config.read_text().replace(
+                "startup_timeout_sec = 20\n", "startup_timeout_sec = 20\n" + line
+            )
+        )
+    original = snapshot(project)
+    expected = project_init.read_entry("codex", config.read_text())
+    project_init.run_init(options(project, host="codex"))
+    assert snapshot(project) == original
+    replacement = {
+        "command": '"must-not-execute"',
+        "args": '["--workspace", "wrong"]',
+        "env": '{ SELDON_INIT = "wrong" }',
+        "startup_timeout_sec": "999",
+    }[field]
+    config.write_text(
+        "".join(
+            f"{field} = {replacement}\n" if line.startswith(field + " = ") else line
+            for line in config.read_text().splitlines(True)
+        )
+    )
+    before = snapshot(project)
+    with pytest.raises(ValueError, match="differs"):
+        project_init.run_init(options(project, host="codex"))
+    assert snapshot(project) == before
+    project_init.run_init(options(project, host="codex", yes=True))
+    assert project_init.read_entry("codex", config.read_text()) == expected
+    after = snapshot(project)
+    project_init.run_init(options(project, host="codex"))
+    assert snapshot(project) == after
+
+
+@pytest.mark.parametrize("literal", ['"unsupported"', '["approve"]'])
+@pytest.mark.parametrize("yes", [False, True])
+def test_invalid_explicit_codex_mode_refuses_without_writes_even_with_replacement(
+    project, literal, yes
+):
+    """Catch silent policy deletion; malformed TOML tests miss valid TOML with bad modes."""
+    project_init.run_init(options(project, host="codex"))
+    config = project / ".codex/config.toml"
+    config.write_text(
+        config.read_text().replace(
+            "startup_timeout_sec = 20\n",
+            f"startup_timeout_sec = 20\ndefault_tools_approval_mode = {literal}\n",
+        )
+    )
+    before = snapshot(project)
+    with pytest.raises(ValueError, match="approval mode"):
+        project_init.run_init(options(project, host="codex", yes=yes))
+    assert snapshot(project) == before
+
+
+def test_owned_remove_retains_safety_and_idempotence_with_invalid_mode(project):
+    """Catch validation blocking safe removal; existing removal has no invalid mode."""
+    config = project / ".codex/config.toml"
+    config.parent.mkdir()
+    original = '# retain\nmodel = "user-choice"\n'
+    config.write_text(original)
+    project_init.run_init(options(project, host="codex"))
+    config.write_text(
+        config.read_text().replace(
+            "startup_timeout_sec = 20\n",
+            'startup_timeout_sec = 20\ndefault_tools_approval_mode = ["approve"]\n',
+        )
+    )
+    project_init.run_init(options(project, remove=True, host=None))
+    assert config.read_text() == original
+    before = snapshot(project)
+    project_init.run_init(options(project, remove=True, host=None))
+    assert snapshot(project) == before
 
 
 def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
