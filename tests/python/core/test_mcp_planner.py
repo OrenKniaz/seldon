@@ -586,6 +586,7 @@ EXPECTED_TOOLS = {
     "harness_waves",
     "harness_review",
     "harness_review_policy",
+    "harness_adopt_review_policy",
     "harness_readiness",
     "harness_compile",
     "harness_packet_view",
@@ -1954,6 +1955,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_readiness",
             "harness_upsert_nodes",  # Dedicated real mixed-batch/atomic-refusal journey.
             "harness_roundtable",  # Dedicated public protected-producer/receipt journey.
+            "harness_adopt_review_policy",  # test_mcp_review_policy_adoption: writer/reopen/guards.
             "harness_audit",  # Dedicated real audit/persisted-gate/refusal journey.
             "harness_preflight",
             "harness_intake",
