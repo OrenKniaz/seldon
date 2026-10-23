@@ -1,6 +1,8 @@
 """Real Git snapshots and proof modules; providers are strictly stand-ins."""
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -66,6 +68,7 @@ def prospective(tmp_path):
 
 
 def test_prospective_checks_real_stubs_without_modifying_template(prospective):
+    """Protect real red and collection facts; refusal-only tests miss count/identity drift."""
     root = prospective["template"]
     before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
     result = audit_prospective_tests(**prospective)
@@ -75,6 +78,28 @@ def test_prospective_checks_real_stubs_without_modifying_template(prospective):
     assert result["redBaseline"][0]["passed"] is False
     assert "NotImplementedError" in result["redBaseline"][0]["output"]
     assert all(item["passed"] for item in result["collection"])
+    for item in result["collection"]:
+        markers = re.findall(
+            r"^HARNESS_COLLECTION_STAGE (\S+) pid=(\d+)(?: count=(\d+))?$",
+            item["output"],
+            re.MULTILINE,
+        )
+        assert [stage for stage, _, _ in markers] == [
+            "before-unittest-import",
+            "before-discovery",
+            "discovery-complete",
+        ]
+        assert len({pid for _, pid, _ in markers}) == 1
+        assert int(markers[0][1]) != os.getpid()
+        assert markers[-1][2] == "1"
+        assert "Collected tests: 1" in item["output"]
+        execution = item["serverExecution"]
+        assert execution["pid"] == os.getpid() and execution["sysExecutable"] == sys.executable
+        assert execution["moduleOrigin"].endswith("test_audit.py")
+        assert execution["sourceIdentity"]["scope"] == "on-disk-file"
+        assert execution["sourceIdentity"]["isLoadedBytecodeAttestation"] is False
+        assert execution["sourceIdentity"]["isCommitAttestation"] is False
+        assert re.fullmatch(r"[0-9a-f]{64}", execution["sourceIdentity"]["sha256"])
     assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
@@ -518,12 +543,13 @@ def test_prospective_cli_binds_each_subtest_failure_to_its_actual_result(prospec
 
 @pytest.mark.parametrize("case", ["import-error", "timeout"])
 def test_prospective_collection_failure_never_becomes_red_proof(prospective, monkeypatch, case):
-    """Protect collection refusal; successful child tests miss real discovery timeouts."""
+    """Protect refusal and flushed progress; successful tests miss blocked protected imports."""
     proof = prospective["template"] / "tests/test_app.py"
     prefix = (
         "import absent_dependency\n"
         if case == "import-error"
-        else "import time\nprint('collection started', flush=True)\ntime.sleep(3)\n"
+        else "import os, time\n"
+        "print('collection started pid=' + str(os.getpid()), flush=True)\ntime.sleep(3)\n"
     )
     proof.write_text(prefix + proof.read_text())
     if case == "timeout":
@@ -540,6 +566,24 @@ def test_prospective_collection_failure_never_becomes_red_proof(prospective, mon
     assert "prospective-not-collectable" in {f["code"] for f in result["findings"]}
     assert result["redBaseline"] == []
     assert all(not c["passed"] for c in result["collection"])
+    for item in result["collection"]:
+        markers = re.findall(
+            r"^HARNESS_COLLECTION_STAGE (\S+) pid=(\d+)(?: count=(\d+))?$",
+            item["output"],
+            re.MULTILINE,
+        )
+        assert [stage for stage, _, _ in markers[:2]] == [
+            "before-unittest-import",
+            "before-discovery",
+        ]
+        assert len({pid for _, pid, _ in markers}) == 1
+        if case == "timeout":
+            assert len(markers) == 2  # Discovery entered the sleeping protected import.
+            child_pid = re.search(r"collection started pid=(\d+)", item["output"])[1]
+            assert markers[0][1] == child_pid
+        else:
+            assert markers[-1][0] == "discovery-complete"
+            assert markers[-1][2] == "1"  # Loader's failed-test placeholder is not credit.
     if case == "timeout":
         assert all("collection started" in c["output"] for c in result["collection"])
 

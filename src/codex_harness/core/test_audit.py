@@ -13,6 +13,7 @@ import fnmatch
 import hashlib
 import io
 import json
+import os
 import posixpath
 import re
 import shutil
@@ -1079,12 +1080,38 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
             # Discovery imports every module without running test bodies. Failed
             # imports and empty selectors cannot masquerade as expected red tests.
             script = (
-                "import sys, unittest\n"
+                "import os, sys\n"
+                "print('HARNESS_COLLECTION_STAGE before-unittest-import pid='"
+                " + str(os.getpid()), flush=True)\n"
+                "import unittest\n"
+                "print('HARNESS_COLLECTION_STAGE before-discovery pid='"
+                " + str(os.getpid()), flush=True)\n"
                 "suite = unittest.defaultTestLoader.discover(sys.argv[1], pattern=sys.argv[2])\n"
                 "errors = unittest.defaultTestLoader.errors\n"
                 "print('\\n'.join(errors))\n"
-                "print('Collected tests:', suite.countTestCases())\n"
+                "count = suite.countTestCases()\n"
+                "print('HARNESS_COLLECTION_STAGE discovery-complete pid=' + str(os.getpid())"
+                " + ' count=' + str(count), flush=True)\n"
+                "print('Collected tests:', count)\n"
                 "sys.exit(1 if errors or not suite.countTestCases() else 0)\n"
+            )
+            source_path = Path(__file__).resolve()
+            source_identity = dict(
+                scope="on-disk-file",
+                path=str(source_path),
+                sha256=None,
+                isLoadedBytecodeAttestation=False,
+                isCommitAttestation=False,
+            )
+            try:
+                source_identity["sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            except OSError as error:
+                source_identity["error"] = type(error).__name__
+            server_execution = dict(
+                pid=os.getpid(),
+                sysExecutable=sys.executable,
+                moduleOrigin=__spec__.origin,
+                sourceIdentity=source_identity,
             )
             selectors = dict.fromkeys(["test*.py", *(p.name for p in paths), *runner.proof_globs])
             for selector in selectors:
@@ -1112,6 +1139,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                         command=command,
                         cwd=str(repo / runner.cwd),
                         stage="unittest-discovery",
+                        serverExecution=server_execution,
                         elapsedSeconds=round(time.monotonic() - collection_started, 3),
                     )
                 )
