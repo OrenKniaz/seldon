@@ -67,6 +67,44 @@ def prospective(tmp_path):
     return dict(template=template, spine=spine, manifest=compile_manifest(spine, template))
 
 
+def test_public_empty_plan_audit_cannot_persist_passing_credit(prospective):
+    """Catch collection-only audit credit; populated fixtures always supply red obligations.
+
+    Exercise the public producer and reopen its real canonical writer, not a supplied result.
+    """
+    from tests.python.core.test_mcp_audit import invoke
+
+    from codex_harness.core.mcp_planner import PlannerServer
+    from codex_harness.core.plan_store import open_plan_store_readonly
+
+    root = prospective["template"]
+    workspace = root.parent
+    server = PlannerServer(workspace)
+    try:
+        assert not invoke(server, "harness_plan_start", idea="Draft only", name="Empty")["isError"]
+        vision = {**prospective["spine"].node("V"), "id": "V1"}
+        assert not invoke(server, "harness_upsert_node", node=vision)["isError"]
+        compiled = invoke(server, "harness_compile")
+        assert not compiled["isError"], compiled
+        reply = invoke(server, "harness_audit", mode="prospective")
+        result = reply["structuredContent"]
+        assert all(item["passed"] for item in result["collection"])
+        assert result["redBaseline"] == []
+        assert result["ok"] is False, result
+        assert reply["isError"]
+        assert "prospective-no-proof-obligations" in {f["code"] for f in result["findings"]}
+        revision = result["manifestRevision"]
+    finally:
+        server.close()
+    with open_plan_store_readonly(workspace) as reopened:
+        row = reopened.connection.execute(
+            "SELECT passed, result_json FROM audit_runs WHERE id=?", (result["id"],)
+        ).fetchone()
+        assert row[0] == 0 and json.loads(row[1])["ok"] is False
+        assert reopened.passing_audit(revision) is None
+        assert reopened.proof_level(revision) is None
+
+
 def test_prospective_checks_real_stubs_without_modifying_template(prospective):
     """Protect real red and collection facts; refusal-only tests miss count/identity drift."""
     root = prospective["template"]
@@ -100,6 +138,11 @@ def test_prospective_checks_real_stubs_without_modifying_template(prospective):
         assert execution["sourceIdentity"]["isLoadedBytecodeAttestation"] is False
         assert execution["sourceIdentity"]["isCommitAttestation"] is False
         assert re.fullmatch(r"[0-9a-f]{64}", execution["sourceIdentity"]["sha256"])
+        evidence = item["stageEvidence"]
+        assert evidence["status"] == "read" and evidence["truncated"] is False
+        assert evidence["output"].startswith("parent-created\nscript-entered\n")
+        assert "discovery-complete" in evidence["output"]
+        assert not Path(evidence["path"]).exists()
     assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
@@ -543,7 +586,7 @@ def test_prospective_cli_binds_each_subtest_failure_to_its_actual_result(prospec
 
 @pytest.mark.parametrize("case", ["import-error", "timeout"])
 def test_prospective_collection_failure_never_becomes_red_proof(prospective, monkeypatch, case):
-    """Protect refusal and flushed progress; successful tests miss blocked protected imports."""
+    """Catch false CLI defects after collection fails; successful proofs miss absent execution."""
     proof = prospective["template"] / "tests/test_app.py"
     prefix = (
         "import absent_dependency\n"
@@ -551,7 +594,15 @@ def test_prospective_collection_failure_never_becomes_red_proof(prospective, mon
         else "import os, time\n"
         "print('collection started pid=' + str(os.getpid()), flush=True)\ntime.sleep(3)\n"
     )
-    proof.write_text(prefix + proof.read_text())
+    proof.write_text(
+        prefix + "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n    def test_cli(self):\n"
+        "        result = subprocess.run([sys.executable, '-m', 'app'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+        "        self.assertEqual(result.returncode, 0)\n"
+    )
+    root = prospective["template"]
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
     if case == "timeout":
         original_run = subprocess.run
 
@@ -586,6 +637,73 @@ def test_prospective_collection_failure_never_becomes_red_proof(prospective, mon
             assert markers[-1][2] == "1"  # Loader's failed-test placeholder is not credit.
     if case == "timeout":
         assert all("collection started" in c["output"] for c in result["collection"])
+    codes = {f["code"] for f in result["findings"]}
+    assert "prospective-no-interface-assertion" not in codes
+    assert "prospective-interface-unassessed" in codes
+    assert "UNASSESSED" in render_test_audit_card(result)
+    assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("stage_fault", [None, "absent", "oversized", "read-error"])
+def test_collection_stage_file_survives_suppressed_stdout_and_real_timeout(
+    prospective, monkeypatch, stage_fault
+):
+    """Catch lost/unbounded diagnostics; existing timeout tests retain working stdout/files."""
+    root = prospective["template"]
+    proof = root / "tests/test_app.py"
+    fault = {
+        None: "",
+        "absent": "        marker.unlink()\n",
+        "oversized": "        marker.write_bytes(b'X' * 5000)\n",
+        "read-error": "        marker.unlink()\n        marker.mkdir()\n",
+    }[stage_fault]
+    proof.write_text(
+        "import __main__, time\nfrom pathlib import Path\n"
+        "if hasattr(__main__, '_stage_path'):\n"
+        "    marker = Path(__main__._stage_path)\n"
+        "    if marker.exists():\n"
+        + (fault or "        pass\n")
+        + "    time.sleep(3)\n"
+        + proof.read_text()
+    )
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    original_run = subprocess.run
+
+    def suppress_stdout(*args, **kwargs):
+        command = list(args[0])
+        command[3] = command[3].replace(
+            "import os, sys\n", "import os, sys\nsys.stdout = open(os.devnull, 'w')\n", 1
+        )
+        kwargs["timeout"] = min(kwargs.get("timeout", 120), 1)
+        return original_run(command, *args[1:], **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", suppress_stdout)
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"] and not result["redBaseline"]
+    paths = []
+    for item in result["collection"]:
+        assert not item["passed"] and "timed out" in item["output"]
+        assert not re.search(r"^HARNESS_COLLECTION_STAGE", item["output"], re.MULTILINE)
+        evidence = item["stageEvidence"]
+        assert evidence["status"] == (
+            stage_fault if stage_fault in ("absent", "read-error") else "read"
+        )
+        if stage_fault is None:
+            assert evidence["truncated"] is False
+            assert evidence["output"].startswith("parent-created\nscript-entered\n")
+            assert "before-unittest-import" in evidence["output"]
+            assert "before-discovery" in evidence["output"]
+            assert "discovery-complete" not in evidence["output"]
+        elif stage_fault == "oversized":
+            assert evidence["truncated"] is True and evidence["output"] == "X" * 4096
+        elif stage_fault == "read-error":
+            assert evidence["error"] in ("PermissionError", "IsADirectoryError")
+        path = Path(evidence["path"])
+        assert path.parent == Path(item["cwd"]).parent
+        assert not path.exists()  # Evidence was read before its owning temporary root retired.
+        paths.append(path)
+    assert len(set(paths)) == len(paths) == 2
+    assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
 def test_prospective_module_cli_refuses_mutated_result(prospective):
@@ -718,6 +836,11 @@ def test_prospective_refuses_bad_proofs(prospective, body, code):
     result = audit_prospective_tests(**prospective)
     assert result["ok"] is False
     assert code in {finding["code"] for finding in result["findings"]}
+    if body == "self.assertEqual(42, 42)":
+        # Missing execution must be unassessed; a completed unrelated assertion is a real defect.
+        assert all(item["passed"] for item in result["collection"])
+        assert "prospective-no-interface-assertion" in {f["code"] for f in result["findings"]}
+        assert "prospective-interface-unassessed" not in {f["code"] for f in result["findings"]}
 
 
 def test_prospective_requires_test_traceability(prospective):

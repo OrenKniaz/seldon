@@ -1003,6 +1003,14 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
         path = root / "manifest.json"
         path.write_text(json.dumps(manifest), encoding="utf-8")
         plan = load_plan(path)
+        if not plan.beads or not spine.ids("requirement"):
+            fail(
+                "prospective-no-proof-obligations",
+                "plan",
+                "",
+                "Prospective credit requires requirements and beads with red proof obligations; "
+                "successful collection alone is not proof.",
+            )
         repo = root / "template"
         requirement_file_sources(
             template, list(dict.fromkeys((*plan.requirement_files, runner.test_dir)))
@@ -1044,6 +1052,8 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                             item["output"],
                         )
                 for bead_id, bead in plan.beads.items():
+                    if not all(item["passed"] for item in collection):
+                        continue
                     proof_path = repo / bead.proof_module
                     if not proof_path.is_file():
                         fail(
@@ -1080,18 +1090,32 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
             # Discovery imports every module without running test bodies. Failed
             # imports and empty selectors cannot masquerade as expected red tests.
             script = (
+                "_stage_errors = []\n"
+                "def _record_stage(text):\n"
+                "    try:\n"
+                "        with open(_stage_path, 'ab', buffering=0) as marker:\n"
+                "            marker.write((text + '\\n').encode('ascii'))\n"
+                "    except OSError as error:\n"
+                "        _stage_errors.append(type(error).__name__)\n"
+                "_record_stage('script-entered')\n"
                 "import os, sys\n"
-                "print('HARNESS_COLLECTION_STAGE before-unittest-import pid='"
-                " + str(os.getpid()), flush=True)\n"
+                "def _stage(name, count=None):\n"
+                "    text = name + ' pid=' + str(os.getpid())\n"
+                "    if count is not None:\n"
+                "        text += ' count=' + str(count)\n"
+                "    _record_stage(text)\n"
+                "    while _stage_errors:\n"
+                "        print('HARNESS_COLLECTION_DIAGNOSTIC write-error=' + "
+                "_stage_errors.pop(0), file=sys.stderr, flush=True)\n"
+                "    print('HARNESS_COLLECTION_STAGE ' + text, flush=True)\n"
+                "_stage('before-unittest-import')\n"
                 "import unittest\n"
-                "print('HARNESS_COLLECTION_STAGE before-discovery pid='"
-                " + str(os.getpid()), flush=True)\n"
+                "_stage('before-discovery')\n"
                 "suite = unittest.defaultTestLoader.discover(sys.argv[1], pattern=sys.argv[2])\n"
                 "errors = unittest.defaultTestLoader.errors\n"
                 "print('\\n'.join(errors))\n"
                 "count = suite.countTestCases()\n"
-                "print('HARNESS_COLLECTION_STAGE discovery-complete pid=' + str(os.getpid())"
-                " + ' count=' + str(count), flush=True)\n"
+                "_stage('discovery-complete', count)\n"
                 "print('Collected tests:', count)\n"
                 "sys.exit(1 if errors or not suite.countTestCases() else 0)\n"
             )
@@ -1114,23 +1138,46 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                 sourceIdentity=source_identity,
             )
             selectors = dict.fromkeys(["test*.py", *(p.name for p in paths), *runner.proof_globs])
-            for selector in selectors:
-                command = [sys.executable, "-B", "-c", script, runner.test_dir, selector]
+            for index, selector in enumerate(selectors):
+                stage_path = root / f"collection-{index}.stages"
+                preparation_error = None
+                try:
+                    stage_path.write_bytes(b"parent-created\n")
+                except OSError as error:
+                    preparation_error = type(error).__name__
+                child_script = f"_stage_path = {str(stage_path)!r}\n" + script
+                command = [sys.executable, "-B", "-c", child_script, runner.test_dir, selector]
                 collection_started = time.monotonic()
+                captured_stdout = captured_stderr = None
                 try:
                     result = subprocess.run(
                         command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120
                     )
                     output = result.stdout + result.stderr
+                    captured_stdout, captured_stderr = result.stdout, result.stderr
                     passed = runner.passed(result.returncode)
                 except (OSError, subprocess.TimeoutExpired) as error:
                     output, passed = str(error), False
                     if isinstance(error, subprocess.TimeoutExpired):
+                        captured_stdout, captured_stderr = error.stdout, error.stderr
                         for partial in (error.stdout, error.stderr):
                             if partial:
                                 if isinstance(partial, bytes):
                                     partial = partial.decode("utf-8", errors="replace")
                                 output += "\n" + partial[:4000]
+                stage_evidence = dict(path=str(stage_path), preparationError=preparation_error)
+                try:
+                    with stage_path.open("rb") as marker:
+                        recorded = marker.read(4097)
+                    stage_evidence.update(
+                        status="read",
+                        output=recorded[:4096].decode("ascii", errors="replace"),
+                        truncated=len(recorded) > 4096,
+                    )
+                except FileNotFoundError:
+                    stage_evidence.update(status="absent")
+                except OSError as error:
+                    stage_evidence.update(status="read-error", error=type(error).__name__)
                 collection.append(
                     dict(
                         module=selector,
@@ -1140,16 +1187,43 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                         cwd=str(repo / runner.cwd),
                         stage="unittest-discovery",
                         serverExecution=server_execution,
+                        stageEvidence=stage_evidence,
+                        capturedOutput={
+                            name: dict(
+                                state="absent"
+                                if value is None
+                                else "captured"
+                                if value
+                                else "empty",
+                                length=len(value) if value is not None else None,
+                            )
+                            for name, value in (
+                                ("stdout", captured_stdout),
+                                ("stderr", captured_stderr),
+                            )
+                        },
                         elapsedSeconds=round(time.monotonic() - collection_started, 3),
                     )
                 )
                 if not passed:
                     fail("prospective-not-collectable", "collection", selector, output)
-        if (
+        collection_ready = bool(
             collection
             and all(item["passed"] for item in collection)
             and not any(finding["code"] == "prospective-syntax-error" for finding in findings)
-        ):
+        )
+        if not collection_ready:
+            findings.append(
+                dict(
+                    code="prospective-interface-unassessed",
+                    severity="info",
+                    bead="collection",
+                    module="",
+                    output="Runtime-dependent interface checks: UNASSESSED because collection "
+                    "did not complete successfully. No interface-authoring defect is inferred.",
+                )
+            )
+        if collection_ready:
             for bead_id in topological_order(plan):
                 proof = _proof(
                     repo,
@@ -1218,7 +1292,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                     )
                 for proof_path in selected:
                     tree = trees.get(proof_path.relative_to(repo).as_posix())
-                    if tree is None:
+                    if tree is None or not collection_ready:
                         continue
                     tests = [
                         node
