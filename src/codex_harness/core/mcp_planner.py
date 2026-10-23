@@ -157,6 +157,12 @@ TOOLS = [
     ),
     _tool("harness_review", "Read a recorded review and its shard evidence.", {"id": STRING}),
     _tool(
+        "harness_review_policy",
+        "Inspect the existing bound plan-review policy contract read-only. "
+        "Does not adopt/refresh policy, start reviews or establish verified closure.",
+        {},
+    ),
+    _tool(
         "harness_roundtable",
         "Run the existing protected roundtable with explicit authorized reviewers. "
         "Inspect harness_schema tool=harness_roundtable first; offerings do not prove access. "
@@ -919,7 +925,12 @@ class PlannerServer:
         return connection_reply(response, self.workspace, show_recovery=True)
 
     def _wire_call_tool(self, name, arguments):
-        if name not in {"harness_schema", "harness_preflight", "harness_plan_status"}:
+        if name not in {
+            "harness_schema",
+            "harness_preflight",
+            "harness_plan_status",
+            "harness_review_policy",
+        }:
             return self.call_tool(name, arguments, schema_tools=self._wire_tools())
         previous = self.store
         try:
@@ -1195,6 +1206,12 @@ class PlannerServer:
         )
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if name == "harness_review_policy" and not error:
+            return (
+                "Inspect adoptionWarning, limits and unavailableProducers; "
+                "MCP policy adoption/refresh is unavailable. "
+                "Inspection grants no approval or verified closure; keep existing holds."
+            )
         if name == "harness_audit":
             if self.result_data and not error:
                 return "harness_plan_status; follow the current recorded gate."
@@ -1627,6 +1644,19 @@ class PlannerServer:
             self.result_data = {"ids": [node["id"] for node in args["nodes"]]}
             return body
         store = self._store()
+        if name == "harness_review_policy":
+            self.result_data = views.plan_review_policy_contract(store)
+            return (
+                "Inspection only: no policy adopted/refreshed, "
+                "review started or closure verified.\n"
+                "Example manifest revision: "
+                f"{self.result_data['example']['expectedManifestRevision']}\n"
+                + self.result_data["adoptionWarning"]
+                + "\nLimits: "
+                + self.result_data["limits"]
+                + "\nUnavailable producers: "
+                + "; ".join(self.result_data["unavailableProducers"])
+            )
         if name == "harness_roundtable":
             from codex_harness.core import roundtable
 

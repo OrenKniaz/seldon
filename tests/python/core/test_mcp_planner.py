@@ -585,6 +585,7 @@ EXPECTED_TOOLS = {
     "harness_wave_map",
     "harness_waves",
     "harness_review",
+    "harness_review_policy",
     "harness_readiness",
     "harness_compile",
     "harness_packet_view",
@@ -1895,6 +1896,13 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
     run("harness_remove_node", id="temporary")
     add_fixture(server)
     seen.add("harness_upsert_node")
+    before_inspection = list(server.store.connection.iterdump())
+    assert "Inspection only" in run("harness_review_policy")
+    assert (
+        server.result_data["example"]["expectedManifestRevision"]
+        == server.store.manifest_revision()
+    )
+    assert list(server.store.connection.iterdump()) == before_inspection
     run("harness_show_node", id="V1")
     run("harness_nodes", kind="requirement")
     run("harness_diagram", kind="feature-map")

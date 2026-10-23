@@ -326,10 +326,11 @@ def closure_declaration_example(store) -> dict:
 def review_policy_next(policy: dict, *, cli_prefix=None) -> str:
     """Actions over the same canonical policy facts; never a retry/identity producer."""
     if "review-policy-revision-stale" in policy["reasons"]:
-        prefix = cli_prefix or (
-            f'python -m codex_harness.core.plan_cli --workspace "{policy["workspace"]}" '
+        return (
+            cli_prefix + "roundtable --policy-schema"
+            if cli_prefix is not None
+            else "harness_review_policy"
         )
-        return prefix + "roundtable --policy-schema"
     if policy["closureFindings"]:
         return (
             "Hold: targeted per-member assessment and observed-separation producers "
