@@ -23,7 +23,12 @@ FIELD_RULES = {
         "fields.ownedFiles: nonempty array of nonblank strings; "
         "fields.proofModule: nonblank string; fields.dependsOn and fields.lessons: "
         "arrays of unique existing bead/decision IDs respectively (empty allowed). "
-        "Optional fields.provider: nonblank string. Dependencies must be acyclic."
+        "Optional fields.provider: nonblank string. Optional fields.capabilityRefs: array of "
+        "unique lowercase dotted identifiers (each at most 128 characters; segments start "
+        "with a-z and continue with a-z, 0-9, underscore or hyphen), e.g. skill.playwright. "
+        "Omitted or empty means no declaration. References are REQUESTED/UNVERIFIED metadata; "
+        "they do not grant tools, permissions or runtime availability. Commands, endpoints, "
+        "credentials and configuration are not reference identifiers. Dependencies must be acyclic."
     ),
     "test": "fields.module: nonblank string; fields.level: unit or e2e.",
 }

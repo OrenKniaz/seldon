@@ -9,7 +9,7 @@ from collections import deque
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
-from codex_harness.core.graph import test_dir
+from codex_harness.core.graph import PlanError, test_dir, validate_capability_refs
 
 SCHEMA = "codex-harness/spine-v1"
 MARKDOWN_FILES = ("PLAN.md", "REQUIREMENTS.md", "TRACE.md", "VISION.md")
@@ -141,6 +141,10 @@ class Spine:
 
     def _validate_bead(self, node: dict) -> None:
         fields = node["fields"]
+        try:
+            validate_capability_refs(fields.get("capabilityRefs", []))
+        except PlanError as error:
+            raise SpineError("spine-bead-fields-invalid", str(error)) from error
         valid = (
             all(_strings(fields.get(key)) for key in ("ownedFiles", "dependsOn", "lessons"))
             and bool(fields["ownedFiles"])
@@ -432,6 +436,8 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         }
         if "provider" in fields:
             bead["suggestedProvider"] = fields["provider"]
+        if "capabilityRefs" in fields:
+            bead["capabilityRefs"] = fields["capabilityRefs"]
         beads[node_id] = bead
     integration_tests = [
         key for key in spine.ids("test") if spine.node(key)["fields"]["level"] == "e2e"

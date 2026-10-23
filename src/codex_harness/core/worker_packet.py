@@ -490,6 +490,10 @@ def build_packet(
     # Empty fields carry no meaning; dropping them keeps every packet source
     # (manifest bead, recorded compilation) byte-identical.
     fields = {key: value for key, value in fields.items() if value not in ([], {}, None, "")}
+    # Use the loaded plan declaration even when the caller supplies narrative fields.
+    fields.pop("capabilityRefs", None)
+    if bead.capability_refs:
+        fields["capabilityRefs"] = list(bead.capability_refs)
     detail = raw_bead.get(
         "detail",
         raw_bead.get(
@@ -509,6 +513,15 @@ def build_packet(
         f"Plan revision: {plan.plan_revision[:12] if plan.plan_revision else 'unavailable'}. "
         f"Requirements: {requirement_labels}.",
     ]
+    if bead.capability_refs:
+        goal.append(
+            "### Requested capabilities (REQUESTED / UNVERIFIED)\n"
+            f"Plan revision: {plan.plan_revision}.\n"
+            + "\n".join(f"- {reference}" for reference in bead.capability_refs)
+            + "\nThese identifiers record requested capabilities only; availability and access "
+            "are unverified. They grant no tools or permissions. Follow the runtime discovery, "
+            "account identity and denial rules in this packet before any use."
+        )
     for ref in refs:
         goal.append(json.dumps(ref, sort_keys=True))
     for node in dict.fromkeys(ref["id"] for ref in refs):

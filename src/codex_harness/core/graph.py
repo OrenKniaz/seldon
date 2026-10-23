@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import heapq
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -31,6 +32,7 @@ class Bead:
     spec_refs: tuple[tuple[str, str, str], ...] | None = None
     # None binds all transitive prerequisites; [] declares a fully stubbed proof.
     proof_depends_on: tuple[str, ...] | None = None
+    capability_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,25 @@ def _strings(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise PlanError("plan-schema-invalid", "Expected a list of strings")
     return tuple(_string(item) for item in value)
+
+
+def validate_capability_refs(value: object) -> tuple[str, ...]:
+    """Validate inert reference identifiers, never commands or capability grants."""
+    if (
+        not isinstance(value, list)
+        or any(
+            not isinstance(item, str)
+            or len(item) > 128
+            or re.fullmatch(r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*", item) is None
+            for item in value
+        )
+        or len(set(value)) != len(value)
+    ):
+        raise PlanError(
+            "plan-schema-invalid",
+            "capabilityRefs must be unique lowercase dotted identifiers of at most 128 characters",
+        )
+    return tuple(value)
 
 
 def _revision(value: object) -> str:
@@ -192,6 +213,7 @@ def load_plan(path: Path) -> Plan:
                 proof_depends_on=_strings(data["proofDependsOn"])
                 if "proofDependsOn" in data
                 else None,
+                capability_refs=validate_capability_refs(data.get("capabilityRefs", [])),
             )
         integration = manifest.get("integration", {})
         if not isinstance(integration, dict):
