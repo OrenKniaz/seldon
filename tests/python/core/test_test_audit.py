@@ -433,6 +433,117 @@ def test_prospective_class_cli_refuses_unbound_result_failures(prospective, case
     assert bool(observed["tests"][0]["moduleLaunches"]) is (case != "unreached")
 
 
+@pytest.mark.parametrize("case", ["all-bound", "unrelated-second", "stale", "replaced", "mutated"])
+def test_prospective_cli_binds_each_subtest_failure_to_its_actual_result(prospective, case):
+    """Protect per-event attribution; single-failure tests miss stale/foreign later subtests."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    invocation = "                result = self.invoke()\n"
+    if case == "stale":
+        invocation = "                if index == 0:\n                    result = self.invoke()\n"
+    elif case == "replaced":
+        invocation += "                result = subprocess.CompletedProcess([], 1, '', '')\n"
+    elif case == "mutated":
+        invocation += "                result.returncode = 42\n"
+    check = "                self.success(result)\n"
+    if case == "unrelated-second":
+        check = (
+            "                if index == 1:\n                    self.assertEqual(1, 0)\n"
+            "                self.success(result)\n"
+        )
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n"
+        "    def invoke(self):\n"
+        "        command = [sys.executable, '-m', 'app']\n"
+        "        return subprocess.run(command, cwd=Path(__file__).resolve().parents[1], "
+        "capture_output=True, text=True)\n"
+        "    def success(self, result):\n"
+        "        self.assertEqual(result.returncode, 0, result.stderr)\n"
+        "    def test_cli(self):\n        for index in (0, 1):\n"
+        "            with self.subTest(index=index):\n" + invocation + check
+    )
+    prospective["manifest"] = compile_manifest(prospective["spine"], root)
+    if case == "all-bound":
+        from codex_harness.core.plan_store import PlanStore
+
+        workspace = root.parent
+        source = workspace / "spine.json"
+        data = prospective["spine"].to_dict()
+        for node in data["nodes"]:
+            node["id"] = "V1" if node["id"] == "V" else node["id"]
+            node["parents"] = ["V1" if p == "V" else p for p in node["parents"]]
+        save_spine(Spine(data), source)
+        with PlanStore(workspace) as store:
+            store.import_spine(source)
+            manifest = store.compile_template(root)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "codex_harness.core.plan_cli",
+                "--workspace",
+                str(workspace),
+                "--json",
+                "audit",
+                "--prospective",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        result = json.loads(completed.stdout)["data"]
+        with PlanStore(workspace) as reopened:
+            persisted = reopened.passing_audit(manifest["planRevision"])
+            assert persisted == result
+            assert reopened.manifest_revision() == manifest["planRevision"]
+        assert result["proofLevel"] == "prospective" and not result["integrationChecked"]
+        assert result["integrationProof"] is None
+    else:
+        result = audit_prospective_tests(**prospective)
+    assert result["ok"] is (case == "all-bound"), result["findings"]
+    observed = result["redBaseline"][0]["failureProvenance"]["tests"][0]
+    assert len(observed["events"]) == 2
+    if case == "all-bound":
+        assert observed["classification"] == "owned-cli-stub"
+        bindings = [e["resultBinding"] for e in observed["events"]]
+        assert len({b["launchId"] for b in bindings}) == 2
+        assert all(b["resultUnchanged"] and b["currentEvent"] for b in bindings)
+    else:
+        assert observed["classification"] == "unproved"
+
+
+@pytest.mark.parametrize("case", ["import-error", "timeout"])
+def test_prospective_collection_failure_never_becomes_red_proof(prospective, monkeypatch, case):
+    """Protect collection refusal; successful child tests miss real discovery timeouts."""
+    proof = prospective["template"] / "tests/test_app.py"
+    prefix = (
+        "import absent_dependency\n"
+        if case == "import-error"
+        else "import time\nprint('collection started', flush=True)\ntime.sleep(3)\n"
+    )
+    proof.write_text(prefix + proof.read_text())
+    if case == "timeout":
+        original_run = subprocess.run
+
+        def bounded_run(*args, **kwargs):
+            kwargs["timeout"] = min(kwargs.get("timeout", 120), 1)
+            return original_run(*args, **kwargs)
+
+        # Exercise real discovery and OS timeout; no fabricated subprocess result.
+        monkeypatch.setattr(subprocess, "run", bounded_run)
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"]
+    assert "prospective-not-collectable" in {f["code"] for f in result["findings"]}
+    assert result["redBaseline"] == []
+    assert all(not c["passed"] for c in result["collection"])
+    if case == "timeout":
+        assert all("collection started" in c["output"] for c in result["collection"])
+
+
 def test_prospective_module_cli_refuses_mutated_result(prospective):
     """A field overwrite must not borrow the real child's earlier stub lineage."""
     root = prospective["template"]
