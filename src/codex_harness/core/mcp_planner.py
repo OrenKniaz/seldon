@@ -1690,6 +1690,7 @@ class PlannerServer:
             return f"Compiled current manifest: {self.result_data['planRevision']}"
         if name == "harness_audit":
             from codex_harness.core import test_audit
+            from codex_harness.core.planner_audit_views import render_native_audit_card
             from codex_harness.core.spine import compile_manifest
 
             template = self.workspace / "template"
@@ -1706,7 +1707,7 @@ class PlannerServer:
                 "warning": test_audit.PROSPECTIVE_WARNING,
             }
             self.result_data["id"] = store.record_audit(manifest["planRevision"], self.result_data)
-            return test_audit.render_test_audit_card(self.result_data)
+            return render_native_audit_card(self.result_data)
         if name == "harness_readiness":
             from codex_harness.core.readiness import readiness_review, render_readiness
 
