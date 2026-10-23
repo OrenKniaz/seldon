@@ -314,6 +314,7 @@ def _module_observer():
 
 def _unittest_observer():
     """Controller script: observe unittest callbacks and execution, never test reports."""
+    import ast
     import importlib.machinery
     import json
     import os
@@ -321,6 +322,7 @@ def _unittest_observer():
     import sys
     import unittest
     from pathlib import Path
+    from uuid import uuid4
 
     report, argv_json, owned_json, bootstrap = sys.argv[1:]
     root = Path.cwd().resolve()
@@ -341,6 +343,89 @@ def _unittest_observer():
         p for p in startup_paths[1:] if normalized([p])[0] not in parent_pythonpath
     ]
     original_popen = subprocess.Popen
+    original_run_code = subprocess.run.__code__
+    completed_type = subprocess.CompletedProcess
+    assert_equal_code = unittest.TestCase.assertEqual.__code__
+    captures, syntax = {}, {}
+
+    def result_fields(value):
+        if type(value) is not completed_type:
+            return None
+        fields = vars(value)
+        args = fields.get("args")
+        if (
+            type(args) not in (list, tuple)
+            or not all(type(arg) is str for arg in args)
+            or type(fields.get("returncode")) is not int
+            or any(
+                type(fields.get(key)) not in (str, bytes, type(None))
+                for key in ("stdout", "stderr")
+            )
+        ):
+            return None
+        return (type(args), tuple(args), fields["returncode"], fields["stdout"], fields["stderr"])
+
+    def failure_binding(error, current):
+        if error[0] is not AssertionError or "source" not in current:
+            return None
+        tb = error[2]
+        while tb and tb.tb_next:
+            frame, following = tb.tb_frame, tb.tb_next.tb_frame
+            path = Path(frame.f_code.co_filename).resolve()
+            if (
+                str(path) == str(root / current["source"]["file"])
+                and following.f_code is assert_equal_code
+            ):
+                if path not in syntax:
+                    syntax[path] = ast.parse(path.read_text(encoding="utf-8-sig"))
+                sites = [
+                    node.value
+                    for node in ast.walk(syntax[path])
+                    if isinstance(node, ast.Expr)
+                    and node.lineno == tb.tb_lineno
+                    and isinstance(node.value, ast.Call)
+                ]
+                if len(sites) != 1:
+                    return None
+                call = sites[0]
+                if (
+                    not isinstance(call.func, ast.Attribute)
+                    or call.func.attr != "assertEqual"
+                    or not isinstance(call.func.value, ast.Name)
+                    or frame.f_locals.get(call.func.value.id) is not following.f_locals.get("self")
+                    or len(call.args) < 2
+                    or not isinstance(call.args[0], ast.Attribute)
+                    or not isinstance(call.args[0].value, ast.Name)
+                    or call.args[0].attr not in ("returncode", "stdout", "stderr")
+                ):
+                    return None
+                operand = call.args[0]
+                value = frame.f_locals.get(operand.value.id)
+                captured = captures.get(id(value))
+                if captured is None:
+                    return None
+                original, launch, fields, epoch = captured
+                if (
+                    value is not original
+                    or epoch != result.event_epoch
+                    or result_fields(value) != fields
+                    or type(following.f_locals.get("first")) is not type(vars(value)[operand.attr])
+                    or following.f_locals.get("first") != vars(value)[operand.attr]
+                ):
+                    return None
+                return {
+                    "launchId": launch["launchId"],
+                    "resultUnchanged": True,
+                    "currentEvent": True,
+                    "assertion": {
+                        **location(frame, tb.tb_lineno),
+                        "method": "assertEqual",
+                        "resultName": operand.value.id,
+                        "field": operand.attr,
+                    },
+                }
+            tb = tb.tb_next
+        return None
 
     class ModulePopen(original_popen):
         def __init__(self, args, *positional, **kwargs):
@@ -360,6 +445,7 @@ def _unittest_observer():
                         callers.append(location(frame))
                     frame = frame.f_back
                 entry = {
+                    "launchId": uuid4().hex,
                     "argv": list(args) if isinstance(args, list | tuple) else args,
                     "phase": observed_phase,
                     "callers": callers,
@@ -512,9 +598,12 @@ def _unittest_observer():
             super().__init__(*args, **kwargs)
             self.records = []
             self.current = None
+            self.event_epoch = 0
 
         def startTest(self, test):
             super().startTest(test)
+            captures.clear()
+            self.event_epoch = 0
             method = getattr(test, test._testMethodName)
             self.current = {
                 "id": test.id(),
@@ -545,8 +634,13 @@ def _unittest_observer():
                 self.records.append(item)
             event = {"kind": kind}
             if error:
+                binding = failure_binding(error, item)
+                if binding is not None:
+                    event["resultBinding"] = binding
                 frames = []
-                observed_phase = "fixture"
+                # A subTest callback runs before _callTestMethod unwinds; its
+                # traceback alone omits that frame. Preserve the live test phase.
+                observed_phase = phase(sys._getframe(1))
                 tb = error[2]
                 while tb:
                     frames.append(location(tb.tb_frame, tb.tb_lineno))
@@ -564,6 +658,7 @@ def _unittest_observer():
                     phase=observed_phase,
                 )
             item["events"].append(event)
+            self.event_epoch += 1
 
         def addSuccess(self, test):
             self.record(test, "success")
@@ -604,6 +699,23 @@ def _unittest_observer():
     count = 0
 
     def trace(frame, event, arg):
+        if frame.f_code is original_run_code:
+            if event == "return" and result.current is not None:
+                process = frame.f_locals.get("process")
+                launch = getattr(process, "module_observation", None)
+                fields = result_fields(arg)
+                if (
+                    type(process) is ModulePopen
+                    and launch is not None
+                    and fields is not None
+                    and fields[1] == tuple(launch["argv"])
+                    and fields[2] == launch.get("exitCode") == frame.f_locals.get("retcode")
+                    and fields[3] == frame.f_locals.get("stdout")
+                    and fields[4] == frame.f_locals.get("stderr")
+                ):
+                    captures[id(arg)] = (arg, launch, fields, result.event_epoch)
+                    launch["completedResultObserved"] = True
+            return trace
         filename = frame.f_code.co_filename
         if not filename.startswith(str(root)):
             return None

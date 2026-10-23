@@ -140,3 +140,85 @@ def test_package_failure_without_complete_child_provenance_cannot_look_observed(
     else:
         assert not launch.get("instrumented")
         assert "child" not in launch
+
+
+@pytest.mark.parametrize("case", ["fresh", "unrelated", "stale", "replaced", "mutated"])
+def test_each_subtest_failure_binds_only_its_actual_unchanged_completed_result(tmp_path, case):
+    """Catch position/line matching: old observations cannot distinguish 2 failures on one line."""
+    (tmp_path / "app.py").write_text("raise NotImplementedError('owned stub')\n")
+    (tmp_path / "tests").mkdir()
+    second = {
+        "fresh": "result = self.invoke()",
+        "unrelated": "result = self.invoke()",
+        "stale": "pass",
+        "replaced": (
+            "result = self.invoke(); result = subprocess.CompletedProcess("
+            "result.args, 1, result.stdout, result.stderr)"
+        ),
+        "mutated": "result = self.invoke(); result.returncode = 99",
+    }[case]
+    assertion = "self.assertEqual(1, 0)" if case == "unrelated" else "self.check(result)"
+    source = (
+        "import subprocess, sys, unittest\n"
+        "class Proof(unittest.TestCase):\n"
+        "    def invoke(self):\n"
+        "        return subprocess.run([sys.executable, '-B', '-m', 'app'], "
+        "capture_output=True, text=True)\n"
+        "    def check(self, result):\n"
+        "        self.assertEqual(result.returncode, 0, result.stderr)\n"
+        "    def test_cli(self):\n"
+        "        result = self.invoke()\n"
+        "        with self.subTest(part=1):\n"
+        "            self.check(result)\n"
+        "        with self.subTest(part=2):\n"
+        f"            {second}\n"
+        f"            {assertion}\n"
+    )
+    (tmp_path / "tests/test_cli.py").write_text(source, encoding="utf-8")
+    observed = observe_unittest(
+        tmp_path,
+        resolve_runner({"validation": ["-B", "-m", "unittest", "discover", "-s", "tests", "-p"]}),
+        "test_cli.py",
+        ("app.py",),
+    )
+    record = observed["observations"]["tests"][0]
+    failures = [event for event in record["events"] if event["kind"] == "subtest-error"]
+    assert len(failures) == 2
+    assert all(event["phase"] == "test" for event in failures)
+    first = failures[0].get("resultBinding")
+    assert first is not None
+    launches = {launch["launchId"]: launch for launch in record["moduleLaunches"]}
+    assert launches[first["launchId"]]["completedResultObserved"] is True
+    assert first["resultUnchanged"] is True and first["currentEvent"] is True
+    assert first["assertion"]["field"] == "returncode"
+    if case == "fresh":
+        second_binding = failures[1]["resultBinding"]
+        assert second_binding["launchId"] != first["launchId"]
+        assert launches[second_binding["launchId"]]["completedResultObserved"] is True
+    else:
+        assert "resultBinding" not in failures[1]
+
+
+def test_class_fixture_failure_preserves_non_cli_observation(tmp_path):
+    """Catch new binding crashing before startTest; prior CLI cases always start a test method."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_fixture.py").write_text(
+        "import unittest\n"
+        "class Proof(unittest.TestCase):\n"
+        "    @classmethod\n"
+        "    def setUpClass(cls):\n"
+        "        raise AssertionError('fixture failure')\n"
+        "    def test_unused(self):\n"
+        "        self.assertEqual(1, 1)\n"
+    )
+    observed = observe_unittest(
+        tmp_path,
+        resolve_runner({"validation": ["-B", "-m", "unittest", "discover", "-s", "tests", "-p"]}),
+        "test_fixture.py",
+        (),
+    )
+    assert observed["exitCode"] == 1
+    assert observed["observations"]["testsRun"] == 0
+    event = observed["observations"]["tests"][0]["events"][0]
+    assert event["kind"] == "error" and event["phase"] == "fixture"
+    assert "resultBinding" not in event
