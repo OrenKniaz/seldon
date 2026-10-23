@@ -2408,14 +2408,32 @@ def test_mcp_closure_schema_example_records_unverified_and_holds_publication(tmp
             )["result"]
             emitted = refreshed["content"][0]["text"].rsplit("\nNext: ", 1)[1]
             arguments = shlex.split(emitted)
-            assert arguments[-2:] == ["roundtable", "--policy-schema"]
-            inspected = subprocess.run(
-                arguments,
-                cwd=tmp_path.parent,
-                capture_output=True,
-                text=True,
+            assert arguments == ["harness_review_policy"]
+            from codex_harness.core.planner_views import plan_review_policy_contract
+
+            before_inspection = list(store.connection.iterdump())
+            expected_contract = plan_review_policy_contract(store)
+            held = store.plan_review_policy_state(store.manifest_revision())
+            inspected = rpc(
+                instance,
+                "tools/call",
+                {
+                    "name": arguments[0],
+                    "arguments": {"expected_workspace": str(tmp_path.resolve())},
+                },
+            )["result"]
+            assert not inspected["isError"], inspected
+            assert inspected["structuredContent"] == expected_contract
+            assert (
+                expected_contract["example"]["expectedManifestRevision"]
+                == store.manifest_revision()
             )
-            assert inspected.returncode == 0, inspected.stdout + inspected.stderr
-            assert store.manifest_revision() in inspected.stdout
+            text = inspected["content"][0]["text"]
+            assert (
+                expected_contract["adoptionWarning"] in text and expected_contract["limits"] in text
+            )
+            assert all(value in text for value in expected_contract["unavailableProducers"])
+            assert store.plan_review_policy_state(store.manifest_revision()) == held
+            assert list(store.connection.iterdump()) == before_inspection
         finally:
             instance.close()

@@ -935,7 +935,7 @@ def test_status_empty_spine_and_unknown_efficiency(tmp_path):
         "invalidReason": "vision-unlocked",
         "invalidMessage": "The current vision is not locked.",
         "repo": None,
-        "next": "harness_record_confirmation gate=vision-lock statement=<actual-words>",
+        "next": "harness_record_confirmation gate=vision-lock",
         "approval": None,
         "reviews": [],
         "reviewAttempts": [],

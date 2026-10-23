@@ -1128,9 +1128,16 @@ class PlannerServer:
         next_step = (
             self._next(name, arguments, status, is_error, operation_error_code)
             if status_available and not uncertain_dispatch
-            else "harness_plan_status read-only; inspect the primary result and saved IDs. "
+            else "harness_plan_status read-only; inspect the reported blocker, "
+            "primary result and saved IDs. "
             "Do not repeat a completed or uncertain mutation; inspect its recorded effect first."
         )
+        if (
+            is_error
+            and name == "harness_resolve_findings"
+            and (uncertain_dispatch or not status_available)
+        ):
+            next_step += " Read-only contract: harness_schema tool=harness_resolve_findings."
         if (
             uncertain_dispatch
             and name == "harness_plan_resume"
