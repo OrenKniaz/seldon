@@ -311,6 +311,128 @@ def test_prospective_module_cli_refuses_changed_startup_identity(prospective, ch
     assert any(word in launch["reason"] for word in ("finder", "hook", "function", "identity"))
 
 
+@pytest.mark.parametrize("shape", ["chain", "branch", "loop", "package"])
+def test_prospective_class_cli_fresh_result_reaches_helper_assertion(prospective, shape):
+    """Catch rejection of real helper red; direct/module helpers miss class frames and flow."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    module = "app"
+    if shape == "package":
+        module = "tally"
+        (root / "tally").mkdir()
+        (root / "tally/__init__.py").write_text("")
+        (root / "tally/__main__.py").write_text("raise NotImplementedError('planned CLI')\n")
+        data = prospective["spine"].to_dict()
+        next(n for n in data["nodes"] if n["id"] == "B")["fields"]["ownedFiles"] = [
+            "tally/__init__.py",
+            "tally/__main__.py",
+        ]
+        prospective["spine"] = Spine(data)
+    bodies = {
+        "chain": "        self.success(self.command())\n",
+        "branch": "        if True:\n            self.success(self.command())\n",
+        "loop": (
+            "        for command in ('list', 'total'):\n"
+            "            self.success(self.command(command))\n"
+        ),
+    }
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n"
+        "    def invoke(self, command='list'):\n"
+        f"        return subprocess.run([sys.executable, '-m', '{module}', command], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)\n"
+        "    def command(self, command='list'):\n        return self.invoke(command)\n"
+        "    def success(self, result):\n"
+        "        self.assertEqual(result.returncode, 0, result.stderr)\n"
+        "        return result.stdout\n"
+        "    def test_cli(self):\n" + bodies.get(shape, bodies["chain"])
+    )
+    # Consume the real compiler's manifest, not manually supplied ownership/proof facts.
+    prospective["manifest"] = compile_manifest(prospective["spine"], root)
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    result = audit_prospective_tests(**prospective)
+    assert result["ok"], result["findings"]
+    observed = result["redBaseline"][0]["failureProvenance"]["tests"][0]
+    assert observed["classification"] == "owned-cli-stub"
+    assert [f["function"] for f in observed["moduleLaunches"][0]["callers"]] == [
+        "invoke",
+        "command",
+        "test_cli",
+    ]
+    assert observed["moduleLaunches"][0]["child"]["exception"]["type"] == "NotImplementedError"
+    assert observed["moduleLaunches"][0]["child"]["targetModule"] == (
+        "tally.__main__" if shape == "package" else "app"
+    )
+    assert not result["integrationChecked"] and result["integrationProof"] is None
+    assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "mutated",
+        "opaque",
+        "message-only",
+        "foreign",
+        "foreign-package",
+        "stored-result",
+        "unreached",
+    ],
+)
+def test_prospective_class_cli_refuses_unbound_result_failures(prospective, case):
+    """Protect helper lineage: old direct-call refusal cases miss class return/assert frames."""
+    root = prospective["template"]
+    (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
+    (root / "foreign.py").write_text("raise NotImplementedError('unowned CLI')\n")
+    command = "foreign" if case in {"foreign", "foreign-package"} else "app"
+    if case == "foreign-package":
+        (root / "foreign.py").unlink()
+        (root / "foreign").mkdir()
+        (root / "foreign/__init__.py").write_text("")
+        (root / "foreign/__main__.py").write_text("raise NotImplementedError('unowned package')\n")
+    launch = (
+        f"subprocess.run([sys.executable, '-m', '{command}'], "
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)"
+    )
+    invocation = "        return " + launch + "\n"
+    check = "        self.assertEqual(result.returncode, 0, result.stderr)\n"
+    test = "        self.success(self.invoke())\n"
+    if case == "mutated":
+        check = "        result.returncode = 42\n" + check
+    elif case == "opaque":
+        invocation = (
+            "        result = " + launch + "\n"
+            "        setattr(result, 'returncode', 42)\n        return result\n"
+        )
+    elif case == "message-only":
+        check = "        self.assertEqual(1, 0, result.stderr)\n"
+    elif case == "stored-result":
+        test = (
+            "        result = self.invoke()\n        result.returncode = 42\n"
+            "        for item in (1, 2):\n            self.success(result)\n"
+        )
+    elif case == "unreached":
+        test = "        if False:\n            self.success(self.invoke())\n"
+    (root / "tests/test_app.py").write_text(
+        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "class Proof(unittest.TestCase):\n    def invoke(self):\n"
+        + invocation
+        + "    def success(self, result):\n"
+        + check
+        + "    def test_cli(self):\n"
+        + test
+    )
+    prospective["manifest"] = compile_manifest(prospective["spine"], root)
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"]
+    assert all(item["passed"] for item in result["collection"])
+    observed = result["redBaseline"][0]["failureProvenance"]
+    assert observed["classification"] == "unproved"
+    assert observed["tests"][0]["classification"] == "unproved"
+    assert bool(observed["tests"][0]["moduleLaunches"]) is (case != "unreached")
+
+
 def test_prospective_module_cli_refuses_mutated_result(prospective):
     """A field overwrite must not borrow the real child's earlier stub lineage."""
     root = prospective["template"]
