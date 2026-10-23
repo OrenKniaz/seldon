@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryFile
 
 from codex_harness.core import attempt_control, attempt_provenance, efficiency, graph, worker_packet
 from codex_harness.core.mail import Mailbox
@@ -576,12 +577,21 @@ def _run_provider(
 
     claim_call(execution_job or request.get("executionJob"), request, attempt_dir, timeout=timeout)
     try:
-        with events_path.open("wb") as events_file, stderr_path.open("wb") as stderr_file:
+        with (
+            events_path.open("wb") as events_file,
+            stderr_path.open("wb") as stderr_file,
+            TemporaryFile() as prompt_file,
+        ):
+            if launch.stdin_text is not None:
+                # A seeked binary file preserves exact UTF-8 packet bytes without
+                # a blocking pipe writer when a child exits early or never reads.
+                prompt_file.write(launch.stdin_text.encode("utf-8"))
+                prompt_file.seek(0)
             process = subprocess.Popen(
                 launch.command,
                 cwd=cwd,
                 env=effective_environment,
-                stdin=subprocess.DEVNULL,
+                stdin=prompt_file if launch.stdin_text is not None else subprocess.DEVNULL,
                 stdout=events_file,
                 stderr=stderr_file,
             )
@@ -1149,11 +1159,17 @@ def _attempt_bead(
     elif mock_provider == "noop":
         attempt["mode"] = "mock:noop"
     else:
+        from codex_harness.core.roundtable import _executable
+
+        executable = record["executable"] or _executable(record["provider"], None)
+        if executable:
+            executable = str(Path(executable).resolve())
         launch = get_adapter(record["provider"]).provider_normal_command(
             prompt=record["prompt"],
+            prompt_via_stdin=True,
             model=record["model"],
             reasoning_effort=record["effort"],
-            executable=record["executable"],
+            executable=executable,
             allowed_tools=_validation_tool_rules(record["provider"], bead, plan),
         )
         attempt.update(mode="provider-normal", launch=launch.to_payload(), dir=str(attempt_dir))
@@ -1165,9 +1181,7 @@ def _attempt_bead(
             "requirementId": f"{plan.name}-{record['bead']}:{'-'.join(bead['requirements'])}",
             "baseCommit": attempt["baseCommit"],
             **adapter_provenance(),
-            "executableSha256": _file_sha256(record["executable"] or launch.command[0])
-            if launch
-            else None,
+            "executableSha256": _file_sha256(launch.command[0]) if launch else None,
             "cwd": str(worktree),
             "launch": launch.to_payload() if launch else {"command": [attempt["mode"]]},
             "command": list(launch.command) if launch else [attempt["mode"]],

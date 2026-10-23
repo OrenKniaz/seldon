@@ -32,7 +32,9 @@ from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 from codex_harness.core.spine import Spine, load_spine
 
 
-def public_assessment_repair_fixture(tmp_path, monkeypatch, *, author_metadata=True):
+def public_assessment_repair_fixture(
+    tmp_path, monkeypatch, *, author_metadata=True, worker_setup=None, worker_context=""
+):
     """Genuine pre-worker AF and actual changed-byte repair; SOURCE ONLY processes."""
     import shutil
     import tempfile
@@ -50,12 +52,19 @@ def public_assessment_repair_fixture(tmp_path, monkeypatch, *, author_metadata=T
     manifest = json.loads((plan / "sample.json").read_text())
     del manifest["beads"]["B"]
     (plan / "sample.json").write_text(json.dumps(manifest))
-    (plan / "template/A.py").write_text("def valid_id(value): return isinstance(value, int)\n")
-    (plan / "template/tests/test_A.py").write_text(
-        "import unittest\nfrom A import valid_id\nclass Proof(unittest.TestCase):\n"
-        "    def test_bool(self):\n        self.assertFalse(valid_id(True))\n"
-        "        self.assertTrue(valid_id(7))\n"
+    (plan / "template/A.py").write_text(
+        worker_context + "def valid_id(value): return isinstance(value, int)\n", encoding="utf-8"
     )
+    (plan / "template/tests/test_A.py").write_text(
+        worker_context
+        + ("import context_helper\n" if worker_context else "")
+        + "import unittest\nfrom A import valid_id\nclass Proof(unittest.TestCase):\n"
+        "    def test_bool(self):\n        self.assertFalse(valid_id(True))\n"
+        "        self.assertTrue(valid_id(7))\n",
+        encoding="utf-8",
+    )
+    if worker_context:
+        (plan / "template/tests/context_helper.py").write_text(worker_context, encoding="utf-8")
     (plan / "template/tests/test_B.py").unlink()
     # Gate-local TEMP can make canonical Git worktree paths too long on Windows.
     fixture_temp_root = None
@@ -197,7 +206,8 @@ def public_assessment_repair_fixture(tmp_path, monkeypatch, *, author_metadata=T
                 protections=("SOURCE-ONLY process double",),
             )
 
-    monkeypatch.setattr(dispatch, "get_adapter", lambda _: Adapter())
+    adapter_for = worker_setup(worker, workspace) if worker_setup else lambda _: Adapter()
+    monkeypatch.setattr(dispatch, "get_adapter", adapter_for)
     source_only_packet_renderer(monkeypatch)
     workers = [dict(bead="A", provider="codex", model="gpt-6.1-sol", effort="medium")]
     source_grant(store, revision, workers, timeout=15, call_cap=1)
