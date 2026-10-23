@@ -170,10 +170,77 @@ def _verify_requirement_files(
         raise ValueError("protected requirement files revision mismatch")
 
 
+def _validation_inputs(cwd: Path) -> tuple[str, bool]:
+    """Observe tracked working bytes and index, even with Git's trust flags set."""
+    listing = subprocess.run(
+        ["git", "-C", str(cwd), "ls-files", "--stage", "-z"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    head = _git(cwd, "rev-parse", "HEAD")
+    digest = hashlib.sha256(head.encode() + b"\0" + listing)
+    working = hashlib.sha256()
+    names = []
+    types_match = True
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        metadata, raw_name = entry.split(b"\t", 1)
+        mode = metadata.split()[0]
+        name = raw_name.decode("utf-8")
+        names.append(name)
+        path = cwd / name
+        digest.update(name.encode("utf-8") + b"\0")
+        if path.is_symlink():
+            types_match = types_match and mode == b"120000"
+            content = os.fsencode(os.readlink(path))
+            digest.update(b"link\0" + content)
+        elif path.is_file():
+            types_match = types_match and mode in {b"100644", b"100755"}
+            content = path.read_bytes()
+            digest.update(str(path.stat().st_mode).encode() + b"\0")
+            digest.update(hashlib.sha256(content).digest())
+        else:
+            types_match = False
+            content = None
+            digest.update(b"missing\0")
+        normalized = content.replace(b"\r\n", b"\n") if content is not None else b""
+        size = len(normalized) if content is not None else 2**64 - 1
+        working.update(name.encode("utf-8") + b"\0" + size.to_bytes(8, "big") + normalized)
+    index = subprocess.run(
+        ["git", "-C", str(cwd), "diff", "--cached", "--quiet", head], check=False
+    )
+    # Match the canonical claim's LF-normalized blob identity; inspect actual
+    # files rather than Git status, which may trust assume-unchanged/skip flags.
+    committed = (
+        types_match
+        and index.returncode == 0
+        and working.hexdigest() == _content_identity(cwd, head, names)
+    )
+    return digest.hexdigest(), committed
+
+
 def _validate(
     cwd: Path, manifest: dict, module: str, *, owned_files: tuple[str, ...] = ()
 ) -> dict[str, object]:
-    return validate_proof(cwd, manifest, module, owned_files=owned_files)
+    before, before_committed = _validation_inputs(cwd)
+    result = validate_proof(cwd, manifest, module, owned_files=owned_files)
+    error = None
+    try:
+        after, after_committed = _validation_inputs(cwd)
+    except (OSError, subprocess.CalledProcessError, ValueError) as failure:
+        after = None
+        after_committed = False
+        error = str(failure)
+    result["inputIntegrity"] = {
+        "passed": before == after and before_committed and after_committed,
+        "matchesCommit": before_committed and after_committed,
+        "before": before,
+        "after": after,
+        "error": error,
+    }
+    result["passed"] = result["passed"] and result["inputIntegrity"]["passed"]
+    return result
 
 
 def _content_identity(repo: Path, commit: str, names) -> str:
