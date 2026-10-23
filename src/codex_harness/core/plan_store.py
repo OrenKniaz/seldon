@@ -1901,7 +1901,14 @@ class PlanStore:
         from codex_harness.core.wave_refine import execution_scope
 
         scope = execution_scope(spine)
-        gaps = [gap for gap in spine.coverage_gaps() if gap["gap"] == f"requirement-without-{kind}"]
+        coverage = spine.coverage_gaps()
+        if kind == "bead":
+            # Wave scope already requires every executable bead in its detailed prefix.
+            # Sketches and unrelated draft nodes are not executable beads.
+            unlinked = [gap for gap in coverage if gap["gap"] == "bead-without-vision"]
+            if unlinked:
+                raise PlanStoreError("plan-bead-without-vision", _json(unlinked))
+        gaps = [gap for gap in coverage if gap["gap"] == f"requirement-without-{kind}"]
         if scope:
             gaps = [gap for gap in gaps if gap["id"] in scope["inScopeRequirementIds"]]
         if gaps:
