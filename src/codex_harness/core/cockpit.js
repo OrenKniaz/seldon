@@ -14,7 +14,7 @@ const knownCount=v=>Number.isInteger(v)&&v>=0;
 const has=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
 function permissionCard(raw){const saved=obj(obj(raw).saved),card=el('section',{class:'context-card'},el('h3',{text:'Saved project permissions'}));
  for(const [key,label] of [['approval_policy','Shell approval policy'],['sandbox_mode','Sandbox'],['seldon_tool_approval','Seldon tool approval']])card.append(p(label+': '+text(saved[key],'unknown')));
- card.append(small('Project-local saved values only. Active chat permissions and pending prompts: unknown. Saved values do not prove they are effective in this chat.'));
+ card.append(small('Project-local saved values only; Seldon tool approval applies to this server\'s tools. Codex app chat-creation and browser requests use separate host approval controls. Active chat permissions and pending prompts: unknown; saved values do not prove they are effective in this chat.'));
  return card;
 }
 function sourceJSON(value){try{return JSON.parse(str(value));}catch{return null;}}

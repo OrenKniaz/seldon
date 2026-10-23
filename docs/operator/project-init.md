@@ -19,6 +19,10 @@ the generated `SELDON.md`. Existing Seldon registrations pointing to another
 workspace are refused unless `--yes` explicitly authorizes replacing that entry.
 Init never changes global configuration, trust, authentication or permissions.
 
+The cockpit shows saved project settings, not active chat permissions or pending
+prompt state. Seldon's server tool-approval setting does not govern Codex app
+chat-creation or browser requests; those use separate host controls.
+
 The absolute interpreter from the wheel installation starts the canonical MCP
 server with `--workspace` bound to the project's absolute path. Keep this Python
 installation in place. Source-only and editable installations are refused. Moving
