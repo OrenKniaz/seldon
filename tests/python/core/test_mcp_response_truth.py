@@ -195,19 +195,41 @@ def test_failed_audit_receipt_stays_failed_when_followup_status_is_unavailable(
         proof = prospective["template"] / "tests/test_app.py"
         proof.write_text("invalid Python syntax here!\n")
         assert not wire(server, trace, "harness_compile")["isError"]
+        from codex_harness.core import test_audit
+
+        engine, executions = test_audit.audit_prospective_tests, []
+
+        def execute(**arguments):
+            executions.append(1)
+            return engine(**arguments)
+
+        monkeypatch.setattr(test_audit, "audit_prospective_tests", execute)
+        admission = wire(server, trace, "harness_audit", mode="prospective")
+        assert not admission["isError"]
+        attempt = admission["structuredContent"]
+        assert not attempt["proofCreditGranted"]
+        server.audits.dispatch_after_flush(server.store)
+        server.audits.thread.join(timeout=30)
+        assert not server.audits.thread.is_alive()
+        server.audits.drain(server.store)
+        before = tuple(server.store.connection.iterdump())
 
         def unavailable(self):
             raise OSError("Follow-up status unavailable")
 
         monkeypatch.setattr(PlannerServer, "_status", unavailable)
-        result = wire(server, trace, "harness_audit", mode="prospective")
+        result = wire(server, trace, "harness_audit_status", id=attempt["attemptId"])
         assert result["isError"] is True and result["statusAvailable"] is False
-        receipt = result["structuredContent"]
+        state = result["structuredContent"]
+        assert state["state"] == "completed" and not state["proofCreditGranted"]
+        receipt = state["result"]
         assert receipt["ok"] is False
         assert any(item["code"] == "prospective-syntax-error" for item in receipt["findings"])
         row = server.store.connection.execute(
             "SELECT passed FROM audit_runs WHERE id=?", (receipt["id"],)
         ).fetchone()
         assert row[0] == 0
+        assert tuple(server.store.connection.iterdump()) == before
+        assert executions == [1]  # Follow-up observation failure never reruns validation.
     finally:
         server.close()

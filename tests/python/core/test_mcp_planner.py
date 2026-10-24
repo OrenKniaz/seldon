@@ -613,6 +613,7 @@ EXPECTED_TOOLS = {
     "harness_upsert_nodes",
     "harness_roundtable",
     "harness_audit",
+    "harness_audit_status",
     "harness_remove_node",
     "harness_ask",
     "harness_answer",
@@ -1957,6 +1958,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_roundtable",  # Dedicated public protected-producer/receipt journey.
             "harness_adopt_review_policy",  # test_mcp_review_policy_adoption: writer/reopen/guards.
             "harness_audit",  # Dedicated real audit/persisted-gate/refusal journey.
+            "harness_audit_status",  # Dedicated committed-result/read-only history journey.
             "harness_preflight",
             "harness_intake",
             "harness_reviewer_catalog",
@@ -1972,9 +1974,9 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
     decision["text"] += " Clarified rounding."
     run("harness_upsert_node", node=decision)
     digest = run("harness_impact")
-    assert "Affected beads: A" in digest
-    assert "Untouched beads: B" in digest
-    assert "Affected tests: test_money" in digest
+    assert "Affected beads: A, B" in digest
+    assert "Untouched beads: none" in digest
+    assert "Affected tests: test_cli, test_money" in digest
     assert "Stale docs: PLAN.md, VISION.md" in digest
     server.close()
     with open_plan_store(tmp_path) as reopened:
