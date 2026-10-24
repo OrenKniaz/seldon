@@ -273,6 +273,7 @@ def test_dispatch_resume_prelaunch_failure_is_not_redispatched(tmp_path, monkeyp
         launch = SimpleNamespace(
             command=(str(tmp_path / "nonexistent-provider.exe"),),
             environment={},
+            stdin_text=None,
             to_payload=lambda: {"cli": "codex", "command": ["nonexistent-provider.exe"]},
         )
         monkeypatch.setattr(
