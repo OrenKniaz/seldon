@@ -25,7 +25,7 @@ async (page, {baseURL, outputDir, canonicalBaseURL, steeringOnly=false, r2Only=f
         check((await shared.innerText()).includes('Review Alpha')&&(await shared.innerText()).includes('Review Beta'),'Both recorded cluster members remain attributed');
         while(await page.locator('.review-cluster:not([open]) summary').count())await page.locator('.review-cluster:not([open]) summary').first().click();
         const detail=await dialog.innerText();
-        check(['resolved','rejected','deferred'].every(status=>detail.includes('Disposition: '+status)&&detail.includes('Recorded '+status+' reason')),'Recorded dispositions and reasons remain distinct');
+        check(['resolved','rejected','deferred'].every(status=>detail.includes('Declared disposition: '+status)&&detail.includes('Recorded '+status+' reason')),'Recorded dispositions and reasons remain distinct');
         check(await dialog.evaluate(e=>e.scrollWidth<=e.clientWidth),'Recorded details wrap inside dialog');
         await capture('recorded-reviews-'+width);
         await page.keyboard.press('Escape');check(await dialog.evaluate(e=>!e.open),'Keyboard Escape closes recorded details');
