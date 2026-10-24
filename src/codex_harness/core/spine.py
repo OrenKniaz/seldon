@@ -277,6 +277,13 @@ def impact(old: Spine, new: Spine) -> dict[str, list[str]]:
     changes = diff(old, new)
     changed = set().union(*changes.values())
     affected = set(changed)
+    followers = {}
+    for version, spine in (("old", old), ("new", new)):
+        edges = {key: set(spine._children[key]) for key in spine.ids()}
+        for consumer in spine.ids("bead"):
+            for producer in spine.node(consumer)["fields"]["dependsOn"]:
+                edges[producer].add(consumer)
+        followers[version] = edges
     # A single multi-source traversal; old edges are followed only for removals.
     pending = [("new", key) for key in changed if key in new._nodes]
     pending.extend(("old", key) for key in changes["removed"])
@@ -287,8 +294,7 @@ def impact(old: Spine, new: Spine) -> dict[str, list[str]]:
             continue
         visited.add((version, key))
         affected.add(key)
-        spine = new if version == "new" else old
-        pending.extend((version, child) for child in spine._children[key])
+        pending.extend((version, child) for child in followers[version][key])
     # Include retired beads/tests in affected lists so consumers can retire their evidence.
     beads = set(old.ids("bead")) | set(new.ids("bead"))
     tests = set(old.ids("test")) | set(new.ids("test"))

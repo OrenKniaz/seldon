@@ -349,10 +349,10 @@ def test_tip_rounding_impact_and_exact_stale_documents(monkeypatch) -> None:
     )
     result = impact(old, new)
     assert result["changed"] == ["D3"]
-    assert result["affected"] == ["A", "D3", "test_money"]
-    assert result["affectedBeads"] == ["A"]
-    assert result["untouchedBeads"] == ["B"]
-    assert result["affectedTests"] == ["test_money"]
+    assert result["affected"] == ["A", "B", "D3", "test_cli", "test_money"]
+    assert result["affectedBeads"] == ["A", "B"]
+    assert result["untouchedBeads"] == []
+    assert result["affectedTests"] == ["test_cli", "test_money"]
     assert result["staleDocs"] == sorted(key for key in old_docs if old_docs[key] != new_docs[key])
     assert result["staleDocs"] == ["PLAN.md", "VISION.md"]
 
@@ -366,9 +366,9 @@ def test_added_removed_and_changed_impact_uses_both_graphs() -> None:
     new = Spine(data)
     assert diff(old, new) == {"added": ["D6"], "removed": ["D3"], "changed": ["A"]}
     result = impact(old, new)
-    assert result["affected"] == ["A", "D3", "D6", "test_money"]
-    assert result["affectedBeads"] == ["A"]
-    assert result["untouchedBeads"] == ["B"]
+    assert result["affected"] == ["A", "B", "D3", "D6", "test_cli", "test_money"]
+    assert result["affectedBeads"] == ["A", "B"]
+    assert result["untouchedBeads"] == []
 
 
 def test_retired_beads_and_tests_are_affected() -> None:
