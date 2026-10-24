@@ -246,3 +246,40 @@ def test_recorded_decision_is_qualified_but_unrelated_dialog_is_not(snapshots):
     assert "These details changed" not in unrelated["text"]
     assert "Show latest received details" not in unrelated["text"]
     assert tree(workspace) == before
+
+
+def test_empty_decisions_qualifies_same_revision_rendered_readiness_change(snapshots):
+    """Catch stale empty-view readiness; previous tests changed decision items, not this text."""
+    from tests.python.core.planning_support import source_only_confirmation
+
+    workspace, _ = snapshots
+    with PlanStore(workspace) as store:
+        source_only_confirmation(store, "align", statement="Source-only empty-view fixture")
+        store.advance("expand", by="planner")
+    baseline = status_api.snapshot(workspace=workspace)
+    assert baseline["cockpit"]["answers"]["needsYou"] == []
+    # Explicit consumer doubles: canonical status does not emit readyForReview.
+    # Keep actual canonical empty needs and revisions; vary only optional displayed readiness.
+    samples = {name: deepcopy(baseline) for name in ("not_ready", "ready")}
+    for name, ready in (("not_ready", False), ("ready", True)):
+        samples[name]["cockpit"]["vision"]["acceptance"]["readyForReview"] = ready
+    assert (
+        samples["not_ready"]["plan"]["plan_revision"] == samples["ready"]["plan"]["plan_revision"]
+    )
+    before = tree(workspace)
+    changed, refreshed = journey(
+        samples,
+        [
+            dict(load="not_ready", open="decisions"),
+            dict(load="ready", capture="changed"),
+            dict(refresh=True, capture="refreshed"),
+        ],
+    )["records"]
+    assert "These details changed" in changed["text"]
+    assert "Acceptance not ready" in changed["text"]
+    assert "Ready for your review" not in changed["text"]
+    assert changed["sameBody"] and changed["sameFocus"] and changed["scroll"] == 77
+    assert "Matches latest received snapshot" in refreshed["text"]
+    assert "Ready for your review" in refreshed["text"]
+    assert "Acceptance not ready" not in refreshed["text"]
+    assert tree(workspace) == before

@@ -114,7 +114,7 @@ function inspectorSource(kind){
   facts=model.recordedReviews;
  }else if(kind==='decisions'){
   if(model.needs===null)return null;
-  facts={phase:model.plan.phase,gate:model.plan.pending_gate,items:model.needs.map(n=>({item:n,node:model.byId.get(n.id)}))};
+  facts={phase:model.plan.phase,gate:model.plan.pending_gate,readiness:model.needs.length?null:readiness(),items:model.needs.map(n=>({item:n,node:model.byId.get(n.id)}))};
  }else facts=model.nodes.filter(n=>n.kind==='decision');
  return {mode:state.mode,project:state.mode==='history'?state.project:null,planRevision:model.plan.plan_revision,
   manifestRevision:kind==='reviews'?model.plan.manifest_revision:null,facts:JSON.stringify(facts)};
