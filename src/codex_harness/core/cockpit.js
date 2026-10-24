@@ -127,7 +127,17 @@ function recordedReviews(){
   else if(!arr(round.clusters).length)section.append(p('No finding members recorded for this round. This is not approval.'));
   for(const cluster of arr(round.clusters)){
    const details=el('details',{class:'review-cluster'},el('summary',{text:'Recorded finding cluster · '+arr(cluster.members).length+' members'}));
-   for(const member of arr(cluster.members))details.append(el('article',{class:'review-member'},el('h4',{text:text(member.reviewer,'Reviewer not recorded')+' · '+text(member.provider,'Provider not recorded')}),small('Item: '+text(member.nodeId,'not recorded')+' · '+text(member.severity,'Severity unknown')),p(text(member.text,'Finding text unavailable')),p('Suggestion: '+text(member.suggestion,'not recorded')),p('Disposition: '+text(member.disposition,'unknown')),p('Reason: '+text(member.reason,'Reason not recorded')),member.runLinkage!=='recorded'?small('Reviewer run linkage unknown'):null));
+   for(const member of arr(cluster.members)){
+    const closure=obj(member.closure);
+    details.append(el('article',{class:'review-member'},el('h4',{text:text(member.reviewer,'Reviewer not recorded')+' · '+text(member.provider,'Provider not recorded')}),small('Item: '+text(member.nodeId,'not recorded')+' · '+text(member.severity,'Severity unknown')),p(text(member.text,'Finding text unavailable')),p('Suggestion: '+text(member.suggestion,'not recorded')),p('Declared disposition: '+text(member.disposition,'unknown')),p('Reason: '+text(member.reason,'Reason not recorded')),
+     p('Closure verification: '+text(closure.verification,'unknown')),
+     p('Declaration binding: '+(closure.declarationBindingCurrent===true?'current':closure.declarationBindingCurrent===false?'not current or absent':'unknown')),
+     p('Remaining obligation: '+(closure.retainedObligation===true?'retained':closure.retainedObligation===false?'not retained (recorded)':'unknown')),
+     p('Obligation verification: '+text(closure.obligationVerification,'unknown')),
+     ...(Array.isArray(closure.reasons)?closure.reasons:[]).map(reason=>small(reason)),
+     p('Recorded obligation references: '+(Array.isArray(closure.obligationNodeIds)?closure.obligationNodeIds.join(', ')||'none declared':'unknown')),
+     member.runLinkage!=='recorded'?small('Reviewer run linkage unknown'):null));
+   }
    section.append(details);
   }
   content.push(section);

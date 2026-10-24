@@ -408,6 +408,62 @@ def _recorded_reviews(store, status):
         "rounds": [],
         "unboundRowCount": 0,
     }
+    policy = status.get("reviewPolicy")
+    current_revision = result["currentManifestRevision"]
+    closure_facts = (
+        policy.get("closureFindings", [])
+        if isinstance(policy, dict)
+        and policy.get("active") is True
+        and identity(current_revision)
+        and policy.get("manifestRevision") == policy.get("declaredRevision") == current_revision
+        else []
+    )
+
+    def member_closure(finding, revision):
+        matches = (
+            [
+                fact
+                for fact in closure_facts
+                if isinstance(fact, dict) and fact.get("id") == finding["id"]
+            ]
+            if isinstance(closure_facts, list)
+            else []
+        )
+        if revision != current_revision or len(matches) != 1:
+            return None
+        fact = matches[0]
+        if (
+            fact.get("nodeId") != finding["node_id"]
+            or fact.get("disposition") != finding["status"]
+            or fact.get("recordedRevision") != revision
+        ):
+            return None
+        declaration = fact.get("declaration")
+        if declaration is not None and (
+            not isinstance(declaration, dict) or fact.get("declarationBindingCurrent") is not True
+        ):
+            return None
+        references = declaration.get("obligationNodeIds") if declaration is not None else None
+        reasons = fact.get("reasons")
+        return {
+            "declarationBindingCurrent": fact.get("declarationBindingCurrent")
+            if type(fact.get("declarationBindingCurrent")) is bool
+            else None,
+            "verification": fact.get("closure") if identity(fact.get("closure")) else None,
+            "reasons": reasons
+            if isinstance(reasons, list) and all(identity(r) for r in reasons)
+            else None,
+            "retainedObligation": fact.get("retainedObligation")
+            if type(fact.get("retainedObligation")) is bool
+            else None,
+            "obligationVerification": fact.get("obligationVerification")
+            if identity(fact.get("obligationVerification"))
+            else None,
+            "obligationNodeIds": references
+            if isinstance(references, list) and all(identity(r) for r in references)
+            else None,
+        }
+
     tables = {
         row[0]
         for row in store.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -603,6 +659,7 @@ def _recorded_reviews(store, status):
                             if finding["status"] in ("open", "resolved", "rejected", "deferred")
                             else "unknown",
                             "reason": finding.get("resolution"),
+                            "closure": member_closure(finding, revision),
                             "recordedAt": timestamp(finding.get("created_at")),
                             "dispositionAt": timestamp(finding.get("resolved_at")),
                         }
