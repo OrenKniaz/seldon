@@ -1080,10 +1080,10 @@ def test_happy_path_publish_frozen_artifacts_idempotency_and_impact(store, tmp_p
     node = store.spine().node("D3")
     node["text"] += " New rounding."
     store.upsert_node(node)
-    assert store.impact_since(revision)["affectedBeads"] == ["A"]
+    assert store.impact_since(revision)["affectedBeads"] == ["A", "B"]
     assert store.published_manifest(revision)["planRevision"] == revision
     with open_plan_store(tmp_path) as reopened:
-        assert reopened.impact_since(revision)["affectedBeads"] == ["A"]
+        assert reopened.impact_since(revision)["affectedBeads"] == ["A", "B"]
         assert reopened.phase() == "accept"
 
 
