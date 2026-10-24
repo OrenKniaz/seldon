@@ -424,7 +424,13 @@ def report(workspace, run_dir, *, baseline_run=None, forecast=None, intervention
                 if old_spine is not None:
                     baseline_plan_revision = old_spine.plan_revision()
                     semantic = impact(old_spine, spine)
-                    direct = set(semantic["affectedBeads"])
+                    # Canonical impact includes dependencies; this dimension is trace-only.
+                    direct = set()
+                    for node_id in semantic["changed"]:
+                        version = spine if node_id in spine.ids() else old_spine
+                        direct.update(
+                            {node_id, *version.descendants(node_id)} & set(version.ids("bead"))
+                        )
                     consumers = _consumers(
                         {key: spine.node(key)["fields"] for key in spine.ids("bead")}, direct
                     )

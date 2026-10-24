@@ -304,13 +304,26 @@ def test_protected_test_revision_preserves_broad_canonical_proof_impact(tmp_path
 
 
 def test_semantic_trace_dependency_and_protected_effects_are_separate(tmp_path):
-    report = read_report(scenario(tmp_path, semantic=True))
+    """Keep dependency-expanded totals separate from trace-only diagnostics.
+
+    Protected-input-only reports have no semantic seeds and miss this leakage.
+    """
+    fixture = scenario(tmp_path, semantic=True)
+    before = files(fixture[0])
+    report = read_report(fixture)
     effects = report["impact"]["reportingBreakdown"]
     assert "R1" in effects["directChangedNodes"]
     assert effects["semanticTraceBeads"] == ["A"]
     assert effects["dependencyConsumers"] == ["B"]
     assert effects["protectedProofBeads"] == ["A", "B", "C"]
     assert report["actual"]["retainedClaimIds"] == []
+    canonical = {
+        key: value for key, value in report["impact"].items() if key != "reportingBreakdown"
+    }
+    assert canonical == fixture[-1]  # Actual PlanStore/compiler/impact_since producer.
+    assert canonical["affectedBeads"] == ["A", "B", "C"]
+    assert canonical["protectedFilesChanged"] is True
+    assert files(fixture[0]) == before
 
 
 def test_unrelated_later_commit_does_not_rewrite_original_claim_or_actual_window(tmp_path):
