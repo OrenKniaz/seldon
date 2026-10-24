@@ -319,9 +319,19 @@ def test_reattached_resume_preserves_original_when_observation_cannot_be_saved(
     assert "harness_worker_status job_id=" + options["expected_revision"] in text
 
 
+@pytest.fixture
+def early_status_project(tmp_path, monkeypatch):
+    yield from test_planner_replay_gaps.project.__wrapped__(
+        tmp_path / "audit-review-project", monkeypatch
+    )
+
+
 @pytest.mark.parametrize("transport", ["mcp", "cli"])
-def test_early_planning_resume_offers_status_before_audit_or_review(project, transport):
-    """Approved early planning must continue its actual phase before publication proof."""
+def test_early_planning_resume_offers_status_before_audit_or_review(
+    early_status_project, transport
+):
+    """Preserve phase routing; plain workspace names miss false audit/review matches."""
+    project = early_status_project
     test_planner_replay_gaps.confirmed_vision(project)
     assert project.phase() == "features"
     assert project.status()["open_clarifications"] == 0
@@ -345,7 +355,8 @@ def test_early_planning_resume_offers_status_before_audit_or_review(project, tra
     assert data["nextAction"]["kind"] == "inspect_plan_phase"
     assert data["nextAction"]["phase"] == "features"
     assert "features" in text.lower()
-    assert "audit" not in next_step and "review" not in next_step
+    next_route = next_step.replace(str(project.workspace), "<workspace>")
+    assert "audit" not in next_route and "review" not in next_route
     assert not (project.workspace / ".codex-harness/worker-jobs").exists()
 
 
