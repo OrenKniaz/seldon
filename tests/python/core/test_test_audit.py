@@ -1254,15 +1254,86 @@ def test_audit_correct_revision_passes_and_preserves_repo_and_plan(revision):
     )
 
 
-def test_audit_rejects_unaffected_cli_failure(revision):
+def test_audit_rejects_affected_dependent_cli_failure(revision):
+    """Protect oracle satisfiability for B after canonical A-to-B dependency impact."""
     proof = revision["revised_template"] / "tests/test_cli.py"
     proof.write_text(proof.read_text().replace('"$12.34"', '"$12.35"'), encoding="utf-8")
     result = audit_revised_tests(**revision)
     assert not result["ok"]
     assert [
         (finding["code"], finding["severity"], finding["bead"]) for finding in result["findings"]
-    ] == [("unexpected-failure", "major", "B")]
-    assert [finding["bead"] for finding in result["expectedFailures"]] == ["A"]
+    ] == [("revised-tests-unsatisfiable", "blocker", "B")]
+    assert [finding["bead"] for finding in result["expectedFailures"]] == ["A", "B"]
+
+
+def test_audit_rejects_unaffected_independent_proof_failure(revision):
+    """Protect unexpected-failure for independent C; dependent B no longer covers it."""
+    repo, template, oracle = (revision[key] for key in ("repo", "revised_template", "oracle_dir"))
+    source = "def value(): return 42\n"
+    proof = (
+        "import unittest\nfrom independent import value\nclass Proof(unittest.TestCase):\n"
+        "    def test_value(self):\n        self.assertEqual(value(), 42)\n"
+    )
+    for root in (repo, template, oracle):
+        (root / "independent.py").write_text(source, encoding="utf-8")
+    (repo / "tests/test_independent.py").write_text(proof, encoding="utf-8")
+    _git(repo, "add", "independent.py", "tests/test_independent.py")
+    _git(repo, "commit", "-m", "Independent audit fixture baseline")
+    (template / "tests/test_independent.py").write_text(
+        proof.replace("value(), 42", "value(), 43"), encoding="utf-8"
+    )
+    old = load_spine(FIXTURE / "spine.json").to_dict()
+    new = load_spine(template.parent / "spine.json").to_dict()
+    for data in (old, new):
+        data["nodes"].extend(
+            [
+                dict(
+                    id="RC",
+                    kind="requirement",
+                    title="Independent value",
+                    text="Value 42",
+                    parents=["F1"],
+                    fields={},
+                ),
+                dict(
+                    id="C",
+                    kind="bead",
+                    title="Independent",
+                    text="Independent value",
+                    parents=["RC"],
+                    fields={
+                        "ownedFiles": ["independent.py"],
+                        "dependsOn": [],
+                        "proofModule": "test_independent.py",
+                        "lessons": [],
+                    },
+                ),
+                dict(
+                    id="TC",
+                    kind="test",
+                    title="Independent proof",
+                    text="Value 42",
+                    parents=["RC"],
+                    fields={"module": "test_independent.py", "level": "unit"},
+                ),
+            ]
+        )
+    old, new = Spine(old), Spine(new)
+    actual_impact = impact(old, new)
+    assert actual_impact["affectedBeads"] == ["A", "B"]
+    assert "C" in actual_impact["untouchedBeads"]
+    result = audit_revised_tests(
+        **{
+            **revision,
+            "base_ref": _git(repo, "rev-parse", "HEAD"),
+            "manifest": compile_manifest(new, template),
+            "impact": actual_impact,
+        }
+    )
+    assert [(row["code"], row["severity"], row["bead"]) for row in result["findings"]] == [
+        ("unexpected-failure", "major", "C")
+    ]
+    assert [row["bead"] for row in result["expectedFailures"]] == ["A"]
 
 
 def test_audit_blocks_failing_oracle_integration(revision):
