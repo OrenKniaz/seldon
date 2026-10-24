@@ -937,10 +937,10 @@ def test_saved_manifest_impact_preserves_protected_reason_and_existing_sets(tmp_
             elif origin == "local":
                 expected = dict(
                     changed=["A"],
-                    affected=["A", "test_money"],
-                    affectedBeads=["A"],
-                    affectedTests=["test_money"],
-                    untouchedBeads=["B", "C"],
+                    affected=["A", "B", "test_cli", "test_money"],
+                    affectedBeads=["A", "B"],
+                    affectedTests=["test_cli", "test_money"],
+                    untouchedBeads=["C"],
                     staleDocs=["PLAN.md", "TRACE.md"],
                 )
             else:
