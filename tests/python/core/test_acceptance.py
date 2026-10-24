@@ -33,7 +33,14 @@ from codex_harness.core.spine import Spine, load_spine
 
 
 def public_assessment_repair_fixture(
-    tmp_path, monkeypatch, *, author_metadata=True, worker_setup=None, worker_context=""
+    tmp_path,
+    monkeypatch,
+    *,
+    author_metadata=True,
+    worker_setup=None,
+    worker_context="",
+    second_bead=False,
+    prerequisite=False,
 ):
     """Genuine pre-worker AF and actual changed-byte repair; SOURCE ONLY processes."""
     import shutil
@@ -50,7 +57,23 @@ def public_assessment_repair_fixture(
 
     plan = _tiny_plan(tmp_path)
     manifest = json.loads((plan / "sample.json").read_text())
-    del manifest["beads"]["B"]
+    if second_bead:
+        manifest["beads"]["B"]["dependsOn"] = ["A"]
+    else:
+        del manifest["beads"]["B"]
+    if prerequisite:
+        manifest["beads"]["D"] = {
+            "title": "A prerequisite",
+            "ownedFiles": ["D.py"],
+            "requirements": ["RD"],
+            "proofModule": "test_D.py",
+        }
+        manifest["beads"]["A"]["dependsOn"] = ["D"]
+        (plan / "template/D.py").write_text("VALUE = 0\n")
+        (plan / "template/tests/test_D.py").write_text(
+            "import unittest\nfrom D import VALUE\nclass Proof(unittest.TestCase):\n"
+            "    def test_dependency(self):\n        self.assertEqual(VALUE, 1)\n"
+        )
     (plan / "sample.json").write_text(json.dumps(manifest))
     (plan / "template/A.py").write_text(
         worker_context + "def valid_id(value): return isinstance(value, int)\n", encoding="utf-8"
@@ -58,14 +81,17 @@ def public_assessment_repair_fixture(
     (plan / "template/tests/test_A.py").write_text(
         worker_context
         + ("import context_helper\n" if worker_context else "")
+        + ("import D\n" if prerequisite else "")
         + "import unittest\nfrom A import valid_id\nclass Proof(unittest.TestCase):\n"
         "    def test_bool(self):\n        self.assertFalse(valid_id(True))\n"
-        "        self.assertTrue(valid_id(7))\n",
+        "        self.assertTrue(valid_id(7))\n"
+        + ("        self.assertEqual(D.VALUE, 1)\n" if prerequisite else ""),
         encoding="utf-8",
     )
     if worker_context:
         (plan / "template/tests/context_helper.py").write_text(worker_context, encoding="utf-8")
-    (plan / "template/tests/test_B.py").unlink()
+    if not second_bead:
+        (plan / "template/tests/test_B.py").unlink()
     # Gate-local TEMP can make canonical Git worktree paths too long on Windows.
     fixture_temp_root = None
     if os.name == "nt":
@@ -196,21 +222,47 @@ def public_assessment_repair_fixture(
         f"print({chr(10).join(json.dumps(row) for row in events)!r})\n"
         f"print({stderr!r},file=sys.stderr)\n"
     )
+    additional_workers = {}
+    for identity in (["B"] if second_bead else []) + (["D"] if prerequisite else []):
+        later_session = str(uuid4())
+        later_events = (
+            chr(10).join(json.dumps(row) for row in events).replace(session, later_session)
+        )
+        later_worker = tmp_path / f"source-worker-{identity}.py"
+        later_worker.write_text(
+            "# SOURCE-ONLY independent owned source change\n"
+            "from pathlib import Path\nimport sys\n"
+            f"Path('{identity}.py').write_text('VALUE = 1\\n')\n"
+            f"print({later_events!r})\n"
+            f"print({stderr.replace(session, later_session)!r},file=sys.stderr)\n"
+        )
+        additional_workers[identity] = later_worker
 
     class Adapter:
         def provider_normal_command(self, **_kwargs):
             assert worker.is_file() and Path(sys.executable).is_file()
+            selected_worker = next(
+                (
+                    script
+                    for identity, script in additional_workers.items()
+                    if f"implement bead {identity}." in _kwargs["prompt"]
+                ),
+                worker,
+            )
             return ProviderNormalLaunch(
                 cli="codex",
-                command=(sys.executable, "-B", str(worker)),
+                command=(sys.executable, "-B", str(selected_worker)),
                 protections=("SOURCE-ONLY process double",),
             )
 
     adapter_for = worker_setup(worker, workspace) if worker_setup else lambda _: Adapter()
     monkeypatch.setattr(dispatch, "get_adapter", adapter_for)
     source_only_packet_renderer(monkeypatch)
-    workers = [dict(bead="A", provider="codex", model="gpt-6.1-sol", effort="medium")]
-    source_grant(store, revision, workers, timeout=15, call_cap=1)
+    workers = [
+        dict(bead=identity, provider="codex", model="gpt-6.1-sol", effort="medium")
+        for identity in ((["D"] if prerequisite else []) + (["A", "B"] if second_bead else ["A"]))
+    ]
+    source_grant(store, revision, workers, timeout=15, call_cap=len(workers))
     with monkeypatch.context() as boundary:
         popen = planner_jobs.subprocess.Popen
 
@@ -222,7 +274,7 @@ def public_assessment_repair_fixture(
         boundary.setattr(planner_jobs.subprocess, "Popen", controller_handoff)
         tool(
             "harness_worker_start",
-            dict(expected_revision=revision, workers=workers, timeout=15, call_cap=1),
+            dict(expected_revision=revision, workers=workers, timeout=15, call_cap=len(workers)),
         )
     terminal = planner_jobs.execute_worker_job(workspace, revision)
     assert terminal["status"] == "completed", terminal

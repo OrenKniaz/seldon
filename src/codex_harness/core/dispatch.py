@@ -1095,6 +1095,16 @@ def read_completed_execution_evidence(
     binding = record(evidence / "integration-state.json", run_path.parent)
     repo = Path(expected_repo).resolve()
     commit = _git(repo, "rev-parse", "HEAD")
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    original_commit = integrated.get("integrationCommit")
+    if not isinstance(original_commit, str) or not original_commit:
+        raise ValueError("execution-current-integrated-witness-required")
+    original_tree = _git(repo, "rev-parse", f"{original_commit}^{{tree}}")
+    current_inputs = _claim_inputs(repo, plan, bead_id, commit)
+    if _changed_claim_inputs(integrated.get("claim"), current_inputs):
+        # This slice retains the original observed witness only when its full
+        # assertion still applies. Revalidation is not a substitute author.
+        raise ValueError("execution-selected-proof-inputs-changed")
     candidate = selected.get("candidate") or {}
     worker = Path(request["cwd"]).resolve()
     if (
@@ -1110,30 +1120,111 @@ def read_completed_execution_evidence(
         or binding.get("workerWorktree") != str(Path(request["cwd"]).resolve())
         or binding.get("packetSha256") != hashlib.sha256(request["prompt"].encode()).hexdigest()
         or binding.get("receiptPath") != str((evidence / "integrated.json").resolve())
-        or binding.get("candidateCommit") != commit
-        or candidate.get("commit") != commit
+        or binding.get("candidateCommit") != original_commit
+        or candidate.get("commit") != original_commit
         or _git(worker, "rev-parse", "HEAD") != binding.get("workerCommit")
         or _git(worker, "rev-parse", "HEAD^{tree}") != binding.get("workerTree")
         or _git(worker, "status", "--porcelain")
-        or _git(repo, "rev-parse", binding["candidateRef"]) != commit
-        or _git(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+        or _git(repo, "rev-parse", binding["candidateRef"]) != original_commit
+        or _git(repo, "rev-list", "--parents", "-n", "1", original_commit).split()[1:]
         != [binding.get("baseIntegration"), binding.get("workerCommit")]
-        or binding.get("candidateTree") != _git(repo, "rev-parse", "HEAD^{tree}")
-        or candidate.get("tree") != _git(repo, "rev-parse", "HEAD^{tree}")
+        or binding.get("candidateTree") != original_tree
+        or candidate.get("tree") != original_tree
         or candidate.get("validated") is not True
-        or integrated.get("integrationCommit") != commit
         or integrated.get("requirementRefs") != selected["requirementRefs"]
         or integrated.get("specRefs") != selected.get("specRefs")
         or any(
             integrated.get("claim", {}).get(key) != value
-            for key, value in _claim_inputs(repo, plan, bead_id, commit).items()
+            for key, value in _claim_inputs(repo, plan, bead_id, original_commit).items()
         )
-        or integrated.get("claim", {}).get("candidateCommit") != commit
+        or integrated.get("claim", {}).get("candidateCommit") != original_commit
         or integrated.get("claim", {}).get("candidateTree") != candidate["tree"]
         or integrated.get("claim", {}).get("passed") is not True
         or integrated.get("validation", {}).get("passed") is not True
+        or integrated.get("validation", {}).get("inputIntegrity", {}).get("passed") is not True
+        or not _validation_inputs(repo)[1]
     ):
         raise ValueError("execution-current-integrated-witness-required")
+    claims = run.get("claims", [])
+    latest = next((item for item in reversed(claims) if item.get("bead") == bead_id), None)
+    disposition = next(
+        (item for item in run.get("requirementValidation", []) if item.get("bead") == bead_id), {}
+    )
+    expected = _requirement_validation(
+        bead_id,
+        plan.beads[bead_id].requirements,
+        plan.beads[bead_id].proof_module,
+        integrated,
+        expected_publication_revision,
+        selected["requirementRefs"],
+        selected.get("specRefs"),
+    )
+    if latest != integrated["claim"] or any(
+        disposition.get(key) != value for key, value in expected.items()
+    ):
+        raise ValueError("execution-current-selected-proof-required")
+    ancestry = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", original_commit, commit],
+        capture_output=True,
+        check=False,
+    )
+    if ancestry.returncode:
+        raise ValueError("execution-original-candidate-not-ancestor")
+    if commit != original_commit:
+        # Bind the later HEAD to an actual terminal-job integration, not any
+        # manual descendant whose selected-bead files happen to be unchanged.
+        head_id, head = next(
+            (
+                (key, value)
+                for key, value in run["beads"].items()
+                if value.get("candidate", {}).get("commit") == commit
+            ),
+            (None, None),
+        )
+        if head_id not in plan.beads or head.get("status") != "requirement-validated":
+            raise ValueError("execution-current-head-proof-required")
+        head_directory = Path(head["evidenceDir"])
+        head_integrated = record(head_directory / "integrated.json", run_path.parent)
+        head_binding = record(head_directory / "integration-state.json", run_path.parent)
+        head_claim = next((item for item in reversed(claims) if item.get("bead") == head_id), None)
+        head_disposition = next(
+            (item for item in run["requirementValidation"] if item.get("bead") == head_id), {}
+        )
+        head_expected = _requirement_validation(
+            head_id,
+            plan.beads[head_id].requirements,
+            plan.beads[head_id].proof_module,
+            head_integrated,
+            expected_publication_revision,
+            head["requirementRefs"],
+            head.get("specRefs"),
+        )
+        if (
+            head_integrated != head["integrated"]
+            or head_integrated.get("recoveryBinding") != head_binding
+            or head_integrated.get("integrationCommit") != commit
+            or head_integrated.get("candidate") != head.get("candidate")
+            or head.get("candidate", {}).get("validated") is not True
+            or head.get("candidate", {}).get("tree") != tree
+            or head_binding.get("candidateCommit") != commit
+            or head_binding.get("candidateTree") != tree
+            or head_binding.get("runId") != run["runId"]
+            or head_binding.get("bead") != head_id
+            or head_binding.get("planRevision") != expected_publication_revision
+            or _git(repo, "rev-parse", head_binding["candidateRef"]) != commit
+            or _git(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+            != [head_binding.get("baseIntegration"), head_binding.get("workerCommit")]
+            or head_integrated.get("claim") != head_claim
+            or _changed_claim_inputs(head_claim, _claim_inputs(repo, plan, head_id, commit))
+            or head_claim.get("candidateCommit") != commit
+            or head_claim.get("candidateTree") != tree
+            or head_claim.get("passed") is not True
+            or head_integrated.get("validation", {}).get("passed") is not True
+            or head_integrated.get("validation", {}).get("inputIntegrity", {}).get("passed")
+            is not True
+            or any(head_disposition.get(key) != value for key, value in head_expected.items())
+        ):
+            raise ValueError("execution-current-head-proof-required")
     for name in owned:
         original(repo / name, repo)
     for name, path in requirement_file_sources(repo, manifest["requirementFiles"]).items():
@@ -1148,7 +1239,7 @@ def read_completed_execution_evidence(
         repo=str(repo),
         publicationRevision=expected_publication_revision,
         candidateCommit=commit,
-        candidateTree=candidate["tree"],
+        candidateTree=tree,
         ownedFiles=owned,
         request=request,
         result=result,
