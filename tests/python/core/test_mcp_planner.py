@@ -1972,9 +1972,9 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
     decision["text"] += " Clarified rounding."
     run("harness_upsert_node", node=decision)
     digest = run("harness_impact")
-    assert "Affected beads: A" in digest
-    assert "Untouched beads: B" in digest
-    assert "Affected tests: test_money" in digest
+    assert "Affected beads: A, B" in digest
+    assert "Untouched beads: none" in digest
+    assert "Affected tests: test_cli, test_money" in digest
     assert "Stale docs: PLAN.md, VISION.md" in digest
     server.close()
     with open_plan_store(tmp_path) as reopened:
