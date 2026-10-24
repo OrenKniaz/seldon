@@ -72,8 +72,20 @@ def _notify_failures(record: dict, evidence: Path) -> None:
         if reason not in {
             "integrated validation failed",
             "ambiguous launch",
+            "provider launch-failed",
+            "provider timed-out",
+            "provider observation-failed",
+            "provider evidence-finalization-failed",
             *DENIAL_HELD_STATUSES,
-        } and not reason.startswith(("rejected: ", "blocked: ")):
+        } and not reason.startswith(
+            (
+                "rejected: ",
+                "blocked: ",
+                "provider exited nonzero (",
+                "prelaunch failed: ",
+                "bead failed: ",
+            )
+        ):
             continue
         dependency = reason.removeprefix("blocked: dependency ").removesuffix(" failed")
         source = record["beads"].get(dependency, {}) if reason.startswith("blocked:") else {}
@@ -2334,6 +2346,8 @@ def run_plan(
                 except (OSError, subprocess.SubprocessError, ValueError) as error:
                     current["status"] = f"prelaunch failed: {type(error).__name__}: {error}"
                     fail(bead_id)
+                    _write_record(evidence / "run.json", record)
+                    _notify_failures(record, evidence)
             if not running:
                 continue
             wait(running.values(), return_when=FIRST_COMPLETED)
