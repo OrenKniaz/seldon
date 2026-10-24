@@ -6,14 +6,80 @@ import hashlib
 import json
 import queue
 import shutil
+import sys
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import CodeType, FunctionType
 from uuid import uuid4
 
 from codex_harness.core.spine import compile_manifest
 
 CONTRACT = "captured-input-v1"
+
+
+def engine_identity():
+    """Fingerprint loaded audit/runner code and constants, not mutable source files."""
+    from codex_harness.core import graph, runners, spine, test_audit
+
+    def structural(value):
+        if isinstance(value, CodeType):
+            return {
+                name: getattr(value, name)
+                for name in (
+                    "co_argcount",
+                    "co_posonlyargcount",
+                    "co_kwonlyargcount",
+                    "co_flags",
+                    "co_code",
+                    "co_consts",
+                    "co_names",
+                    "co_varnames",
+                    "co_freevars",
+                    "co_cellvars",
+                    "co_exceptiontable",
+                )
+            }
+        if isinstance(value, bytes):
+            return ["bytes", value.hex()]
+        if isinstance(value, set | frozenset):
+            return sorted(
+                value, key=lambda item: json.dumps(item, sort_keys=True, default=structural)
+            )
+        if isinstance(value, complex):
+            return ["complex", value.real, value.imag]
+        if value is Ellipsis:
+            return ["ellipsis"]
+        raise TypeError("Unsupported loaded engine identity value")
+
+    def function_code(function):
+        return [
+            function.__code__,
+            function.__defaults__,
+            function.__kwdefaults__,
+        ]
+
+    records = {}
+    for module in (test_audit, runners, graph, spine):
+        for name, value in sorted(vars(module).items()):
+            key = module.__name__ + "." + name
+            if isinstance(value, FunctionType):
+                records[key] = function_code(value)
+            elif isinstance(value, type) and value.__module__ == module.__name__:
+                for method_name, method in sorted(vars(value).items()):
+                    if isinstance(method, staticmethod | classmethod):
+                        method = method.__func__
+                    if isinstance(method, FunctionType):
+                        records[key + "." + method_name] = function_code(method)
+            elif name.isupper():
+                records[key] = value
+    records["python"] = sys.version
+    return (
+        "loaded-python-audit-v1:"
+        + hashlib.sha256(
+            json.dumps(records, sort_keys=True, default=structural).encode()
+        ).hexdigest()
+    )
 
 
 def input_files(template):
@@ -57,6 +123,11 @@ class CapturedAudit:
             if compile_manifest(self.spine, self.template) != self.manifest:
                 raise ValueError("audit-manifest-changed-during-capture")
             self.input_digest = digest(self.files)
+            from codex_harness.core.test_audit import PROSPECTIVE_WARNING, audit_prospective_tests
+
+            self.engine = audit_prospective_tests
+            self.engine_identity = engine_identity()
+            self.warning = PROSPECTIVE_WARNING
         except BaseException:
             self.close()
             raise
@@ -65,13 +136,9 @@ class CapturedAudit:
         self.temp.cleanup()
 
     def run(self):
-        from codex_harness.core.test_audit import PROSPECTIVE_WARNING, audit_prospective_tests
-
         return {
-            **audit_prospective_tests(
-                template=self.template, manifest=self.manifest, spine=self.spine
-            ),
-            "warning": PROSPECTIVE_WARNING,
+            **self.engine(template=self.template, manifest=self.manifest, spine=self.spine),
+            "warning": self.warning,
         }
 
 
@@ -91,6 +158,7 @@ class AuditOwner:
                 captured.manifest["planRevision"],
                 captured.input_digest,
                 captured.files,
+                captured.engine_identity,
             )
             if created:
                 self.prepared = (attempt["attemptId"], captured)
@@ -151,7 +219,8 @@ def audit_synchronously(store):
         if owner.prepared is None:
             return attempt
         owner.dispatch_after_flush(store)
-        owner.thread.join()
+        if owner.thread is not None:
+            owner.thread.join()
         owner.drain(store)
         return store.audit_attempt(attempt["attemptId"], owner.instance)
     finally:

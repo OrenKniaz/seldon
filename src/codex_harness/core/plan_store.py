@@ -145,7 +145,7 @@ class PlanStore:
                 "attempt_key TEXT UNIQUE NOT NULL, owner TEXT NOT NULL, state TEXT NOT NULL, "
                 "manifest_revision TEXT NOT NULL, input_digest TEXT NOT NULL, "
                 "inputs_json TEXT NOT NULL, result_json TEXT, audit_id TEXT, error TEXT, "
-                "did_run_validation INTEGER)",
+                "did_run_validation INTEGER, engine_identity TEXT)",
                 "CREATE UNIQUE INDEX IF NOT EXISTS audit_one_inflight ON "
                 "audit_attempts ((1)) WHERE state IN ('queued','running')",
                 "CREATE TABLE IF NOT EXISTS readiness_reviews (id TEXT PRIMARY KEY, "
@@ -171,6 +171,7 @@ class PlanStore:
                 ("meta", "locked_vision_json", "TEXT"),
                 ("assumptions", "rationale", "TEXT"),
                 ("assumptions", "resolved_by", "TEXT"),
+                ("audit_attempts", "engine_identity", "TEXT"),
             ):
                 columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
                 if column not in columns:
@@ -1525,6 +1526,7 @@ class PlanStore:
             "mode": "prospective",
             "manifestRevision": row["manifest_revision"],
             "inputDigest": row["input_digest"],
+            "engineIdentity": row["engine_identity"] if "engine_identity" in row.keys() else None,
             "auditId": row["audit_id"],
             "result": result,
             "error": row["error"],
@@ -1537,11 +1539,11 @@ class PlanStore:
             "reason": "owner-not-observed; no replay" if state == "unknown-interrupted" else None,
         }
 
-    def admit_audit(self, owner, revision, input_digest, files):
+    def admit_audit(self, owner, revision, input_digest, files, engine_identity):
         from codex_harness.core.planner_audits import CONTRACT
 
         key = hashlib.sha256(
-            _json([CONTRACT, "prospective", revision, input_digest]).encode()
+            _json([CONTRACT, "prospective", revision, input_digest, engine_identity]).encode()
         ).hexdigest()
         with self._transaction():
             row = self.connection.execute(
@@ -1560,8 +1562,11 @@ class PlanStore:
                 raise PlanStoreError("audit-plan-changed", "Capture the current manifest")
             attempt_id = uuid4().hex
             self.connection.execute(
-                "INSERT INTO audit_attempts VALUES (?,?,?,'queued',?,?,?,NULL,NULL,NULL,0)",
-                (attempt_id, key, owner, revision, input_digest, _json(files)),
+                "INSERT INTO audit_attempts (id,attempt_key,owner,state,manifest_revision,"
+                "input_digest,inputs_json,result_json,audit_id,error,"
+                "did_run_validation,engine_identity) "
+                "VALUES (?,?,?,'queued',?,?,?,NULL,NULL,NULL,0,?)",
+                (attempt_id, key, owner, revision, input_digest, _json(files), engine_identity),
             )
             self._event("audit-admitted", {"attemptId": attempt_id, "manifestRevision": revision})
         return self.audit_attempt(attempt_id, owner), True
@@ -1596,6 +1601,7 @@ class PlanStore:
                     "attemptId": attempt_id,
                     "manifestRevision": row["manifest_revision"],
                     "inputDigest": row["input_digest"],
+                    "engineIdentity": row["engine_identity"],
                 }
                 try:
                     fresh = (
@@ -1633,7 +1639,7 @@ class PlanStore:
         # A stronger audit cannot be downgraded by a later prospective check.
         # Legacy oracle audit envelopes remain byte-identical.
         audits = [json.loads(row[0]) for row in rows]
-        from codex_harness.core.planner_audits import CONTRACT, digest, input_files
+        from codex_harness.core.planner_audits import CONTRACT, digest, engine_identity, input_files
 
         eligible = []
         table = self.connection.execute(
@@ -1653,6 +1659,8 @@ class PlanStore:
                 attempt
                 and attempt["manifest_revision"] == revision
                 and audit.get("inputDigest") == attempt["input_digest"]
+                and "engine_identity" in attempt.keys()
+                and audit.get("engineIdentity") == attempt["engine_identity"] == engine_identity()
             ):
                 try:
                     fresh = (

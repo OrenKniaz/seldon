@@ -521,6 +521,72 @@ def test_pre_result_engine_exception_records_dispatch_without_proof(prospective)
         server.close()
 
 
+def test_engine_upgrade_admits_new_attempt_after_terminal_but_preserves_busy_hold(
+    prospective, monkeypatch
+):
+    """Protect engine-build deduplication; input-only retry tests miss upgraded code."""
+    from codex_harness.core import test_audit
+
+    server, _ = started(prospective)
+    try:
+        first = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
+        engine = test_audit.audit_prospective_tests
+
+        def upgraded_engine(**arguments):
+            return engine(**arguments)  # Execute real proofs under a distinct loaded build.
+
+        monkeypatch.setattr(test_audit, "audit_prospective_tests", upgraded_engine)
+        busy = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
+        assert busy["attemptId"] == first["attemptId"] and "busy" in busy["reason"]
+        server.audits.dispatch_after_flush(server.store)
+        server.audits.thread.join(timeout=30)
+        assert not server.audits.thread.is_alive()
+        server.audits.drain(server.store)
+        second = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
+        assert second["attemptId"] != first["attemptId"]
+        assert second["engineIdentity"] != first["engineIdentity"]
+        assert not second["proofCreditGranted"]
+        server.audits.dispatch_after_flush(server.store)
+        server.audits.thread.join(timeout=30)
+        assert not server.audits.thread.is_alive()
+        server.audits.drain(server.store)
+        final = invoke(server, "harness_audit_status", id=second["attemptId"])["structuredContent"]
+        assert final["result"]["ok"] and final["proofCreditGranted"]
+    finally:
+        server.close()
+    with open_plan_store_readonly(prospective["template"].parent) as reopened:
+        assert (
+            reopened.audit_attempt(first["attemptId"])["engineIdentity"] == first["engineIdentity"]
+        )
+        assert (
+            reopened.audit_attempt(second["attemptId"])["engineIdentity"]
+            == second["engineIdentity"]
+        )
+
+
+def test_cli_thread_start_refusal_returns_persisted_failure_json(prospective, monkeypatch, capsys):
+    """Protect normal CLI failure receipts; engine failures occur after thread creation."""
+    from codex_harness.core import plan_cli
+
+    server, _ = started(prospective)
+    root = server.workspace
+    server.close()
+
+    def refused_start(thread):
+        raise RuntimeError("Controlled thread creation refusal")
+
+    monkeypatch.setattr(threading.Thread, "start", refused_start)
+    exit_code = plan_cli.main(["--workspace", str(root), "--json", "audit", "--prospective"])
+    response = json.loads(capsys.readouterr().out)
+    assert exit_code == 2 and response["isError"]
+    failed = response["data"]
+    assert failed["attemptId"] and failed["state"] == "failed"
+    assert failed["didRunValidation"] is False and failed["proofCreditGranted"] is False
+    assert "Controlled thread creation refusal" in failed["error"]
+    with open_plan_store_readonly(root) as reopened:
+        assert reopened.audit_attempt(failed["attemptId"])["error"] == failed["error"]
+
+
 def test_public_audit_binding_and_input_refuse_before_effects(tmp_path, monkeypatch):
     """Catch audit bypassing the workspace guard or accepting outside/oracle paths.
 
