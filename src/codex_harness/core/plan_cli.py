@@ -389,7 +389,11 @@ def parser() -> argparse.ArgumentParser:
     commands["decision"].add_argument("--rationale")
     audit_mode = commands["audit"].add_mutually_exclusive_group(required=True)
     audit_mode.add_argument("--oracle")
-    audit_mode.add_argument("--prospective", action="store_true")
+    audit_mode.add_argument(
+        "--prospective",
+        action="store_true",
+        help="Synchronously audit captured inputs; existing in-flight attempts return busy ID",
+    )
     commands["publish"].add_argument(
         "--proof-level", choices=["oracle-verified", "prospective"], default="oracle-verified"
     )
@@ -885,6 +889,23 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
         elif command == "audit":
             if args.prospective and args.baseline_ref:
                 raise ValueError("Prospective audit uses the template, not a Git baseline")
+            if args.prospective:
+                from codex_harness.core.planner_audits import audit_synchronously
+
+                attempt = audit_synchronously(store)
+                if attempt["state"] != "completed" or attempt["result"] is None:
+                    return _reply(
+                        server,
+                        "Audit "
+                        + attempt["attemptId"]
+                        + ": "
+                        + attempt["state"]
+                        + "; "
+                        + (attempt["reason"] or attempt["error"] or "not completed"),
+                        True,
+                    ), attempt
+                data = attempt["result"]
+                return _reply(server, test_audit.render_test_audit_card(data), not data["ok"]), data
             spine = store.spine()
             manifest = compile_manifest(spine, server.workspace / "template")
             store.check_requirement_files(manifest, server.workspace / "template")
@@ -893,21 +914,13 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 store.impact_since(revision) if revision else {"affectedBeads": spine.ids("bead")}
             )
             template = server.workspace / "template"
-            data = (
-                test_audit.audit_prospective_tests(
-                    template=template,
-                    manifest=manifest,
-                    spine=spine,
-                )
-                if args.prospective
-                else test_audit.audit_revised_tests(
-                    repo=server.workspace,
-                    base_ref=args.baseline_ref or args.baseline or "auto",
-                    revised_template=template,
-                    manifest=manifest,
-                    impact=affected,
-                    oracle_dir=_path(server, args.oracle),
-                )
+            data = test_audit.audit_revised_tests(
+                repo=server.workspace,
+                base_ref=args.baseline_ref or args.baseline or "auto",
+                revised_template=template,
+                manifest=manifest,
+                impact=affected,
+                oracle_dir=_path(server, args.oracle),
             )
             data["id"] = store.record_audit(manifest["planRevision"], data)
             body = test_audit.render_test_audit_card(data)

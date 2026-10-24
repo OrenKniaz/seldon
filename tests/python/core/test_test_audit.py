@@ -72,7 +72,7 @@ def test_public_empty_plan_audit_cannot_persist_passing_credit(prospective):
 
     Exercise the public producer and reopen its real canonical writer, not a supplied result.
     """
-    from tests.python.core.test_mcp_audit import invoke
+    from tests.python.core.test_mcp_audit import finished_audit, invoke
 
     from codex_harness.core.mcp_planner import PlannerServer
     from codex_harness.core.plan_store import open_plan_store_readonly
@@ -86,7 +86,7 @@ def test_public_empty_plan_audit_cannot_persist_passing_credit(prospective):
         assert not invoke(server, "harness_upsert_node", node=vision)["isError"]
         compiled = invoke(server, "harness_compile")
         assert not compiled["isError"], compiled
-        reply = invoke(server, "harness_audit", mode="prospective")
+        reply = finished_audit(server, mode="prospective")
         result = reply["structuredContent"]
         assert all(item["passed"] for item in result["collection"])
         assert result["redBaseline"] == []
@@ -905,7 +905,15 @@ def test_prospective_publication_cli_mcp_status_and_oracle_upgrade(prospective, 
             encoding="utf-8",
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        assert json.loads(result.stdout)["data"]["proofLevel"] == "prospective"
+        bound = json.loads(result.stdout)["data"]
+        assert bound["proofLevel"] == "prospective"
+        assert bound["prospectiveAuditContract"] == "captured-input-v1"
+        from codex_harness.core.plan_store import open_plan_store_readonly
+
+        with open_plan_store_readonly(tmp_path) as reopened:
+            receipt = reopened.audit_attempt(bound["attemptId"])
+            assert receipt["state"] == "completed" and receipt["proofCreditGranted"]
+            assert receipt["auditId"] == bound["id"]
         run_roundtable(
             store,
             reviewers=[{"name": "test-review", "provider": "codex"}],
@@ -1254,15 +1262,86 @@ def test_audit_correct_revision_passes_and_preserves_repo_and_plan(revision):
     )
 
 
-def test_audit_rejects_unaffected_cli_failure(revision):
+def test_audit_rejects_affected_dependent_cli_failure(revision):
+    """Protect oracle satisfiability for B after canonical A-to-B dependency impact."""
     proof = revision["revised_template"] / "tests/test_cli.py"
     proof.write_text(proof.read_text().replace('"$12.34"', '"$12.35"'), encoding="utf-8")
     result = audit_revised_tests(**revision)
     assert not result["ok"]
     assert [
         (finding["code"], finding["severity"], finding["bead"]) for finding in result["findings"]
-    ] == [("unexpected-failure", "major", "B")]
-    assert [finding["bead"] for finding in result["expectedFailures"]] == ["A"]
+    ] == [("revised-tests-unsatisfiable", "blocker", "B")]
+    assert [finding["bead"] for finding in result["expectedFailures"]] == ["A", "B"]
+
+
+def test_audit_rejects_unaffected_independent_proof_failure(revision):
+    """Protect unexpected-failure for independent C; dependent B no longer covers it."""
+    repo, template, oracle = (revision[key] for key in ("repo", "revised_template", "oracle_dir"))
+    source = "def value(): return 42\n"
+    proof = (
+        "import unittest\nfrom independent import value\nclass Proof(unittest.TestCase):\n"
+        "    def test_value(self):\n        self.assertEqual(value(), 42)\n"
+    )
+    for root in (repo, template, oracle):
+        (root / "independent.py").write_text(source, encoding="utf-8")
+    (repo / "tests/test_independent.py").write_text(proof, encoding="utf-8")
+    _git(repo, "add", "independent.py", "tests/test_independent.py")
+    _git(repo, "commit", "-m", "Independent audit fixture baseline")
+    (template / "tests/test_independent.py").write_text(
+        proof.replace("value(), 42", "value(), 43"), encoding="utf-8"
+    )
+    old = load_spine(FIXTURE / "spine.json").to_dict()
+    new = load_spine(template.parent / "spine.json").to_dict()
+    for data in (old, new):
+        data["nodes"].extend(
+            [
+                dict(
+                    id="RC",
+                    kind="requirement",
+                    title="Independent value",
+                    text="Value 42",
+                    parents=["F1"],
+                    fields={},
+                ),
+                dict(
+                    id="C",
+                    kind="bead",
+                    title="Independent",
+                    text="Independent value",
+                    parents=["RC"],
+                    fields={
+                        "ownedFiles": ["independent.py"],
+                        "dependsOn": [],
+                        "proofModule": "test_independent.py",
+                        "lessons": [],
+                    },
+                ),
+                dict(
+                    id="TC",
+                    kind="test",
+                    title="Independent proof",
+                    text="Value 42",
+                    parents=["RC"],
+                    fields={"module": "test_independent.py", "level": "unit"},
+                ),
+            ]
+        )
+    old, new = Spine(old), Spine(new)
+    actual_impact = impact(old, new)
+    assert actual_impact["affectedBeads"] == ["A", "B"]
+    assert "C" in actual_impact["untouchedBeads"]
+    result = audit_revised_tests(
+        **{
+            **revision,
+            "base_ref": _git(repo, "rev-parse", "HEAD"),
+            "manifest": compile_manifest(new, template),
+            "impact": actual_impact,
+        }
+    )
+    assert [(row["code"], row["severity"], row["bead"]) for row in result["findings"]] == [
+        ("unexpected-failure", "major", "C")
+    ]
+    assert [row["bead"] for row in result["expectedFailures"]] == ["A"]
 
 
 def test_audit_blocks_failing_oracle_integration(revision):

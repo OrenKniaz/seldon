@@ -12,6 +12,7 @@ from tests.python.core import test_planner_replay_gaps, test_planner_resolution
 from tests.python.core.planning_support import source_controller_roundtable
 
 from codex_harness.core.mcp_planner import PlannerServer
+from codex_harness.core.planner_audits import audit_synchronously
 
 project = test_planner_replay_gaps.project
 
@@ -66,12 +67,7 @@ def test_failed_advance_and_resume_name_native_roundtable(project):
     Existing successful status tests miss these two public recovery consumers.
     """
     test_planner_resolution._at_roundtable(project)
-    project.record_audit(
-        project.manifest_revision(),
-        dict(
-            ok=True, proofLevel="prospective", isMocked=True, sourceOnly="Next bookkeeping fixture"
-        ),
-    )
+    assert audit_synchronously(project)["proofCreditGranted"]
     server = PlannerServer(project.workspace)
     try:
         before = list(project.connection.iterdump())
@@ -174,12 +170,7 @@ def test_current_publication_next_preserves_inspection_and_quality_scope(project
     status handoff; source-controller returns are explicit nonlive test inputs.
     """
     test_planner_resolution._at_roundtable(project)
-    project.record_audit(
-        project.manifest_revision(),
-        dict(
-            ok=True, proofLevel="prospective", isMocked=True, sourceOnly="Next bookkeeping fixture"
-        ),
-    )
+    assert audit_synchronously(project)["proofCreditGranted"]
     for name, provider, code in (
         ("Alpha", "codex", 0),
         ("Beta", "claude", 1 if quality_failure else 0),
