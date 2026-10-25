@@ -32,6 +32,7 @@ try:
     config = json.loads(data)
     child = subprocess.Popen(
         config['args'], cwd=config['cwd'], env=config['env'],
+        stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
         creationflags=subprocess.CREATE_NO_WINDOW)
     code = child.wait()
     send({'kind': 'complete', 'returncode': code})
