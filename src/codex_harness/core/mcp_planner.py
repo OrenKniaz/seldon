@@ -832,7 +832,7 @@ def show_node(store, node_id: str, *, body=False, test=None) -> dict:
 
 
 class PlannerServer:
-    def __init__(self, workspace: str | Path, *, confirmation_timeout=120):
+    def __init__(self, workspace: str | Path, *, confirmation_timeout=600):
         from codex_harness.core.planner_audits import AuditOwner
 
         self.audits = AuditOwner()

@@ -50,6 +50,48 @@ def database_records(store):
     return list(store.connection.iterdump())
 
 
+@pytest.mark.parametrize("elapsed", [599, 601])
+def test_native_align_reading_window_accepts_late_response_but_not_expired(
+    tmp_path, monkeypatch, elapsed
+):
+    """Protect reading time through actual protocol and durable gate completion.
+
+    Existing lifetime tests force an expired internal deadline; they miss the
+    default cancelling a correlated answer after two minutes of reading.
+    This virtual client does not prove the desktop host waits ten minutes.
+    """
+    from tests.python.core.test_mcp_planner import answer_native, begin_native, start
+
+    from codex_harness.core import mcp_planner
+
+    clock = [1000.0]
+    monkeypatch.setattr(mcp_planner.time, "monotonic", lambda: clock[0])
+    server = mcp_planner.PlannerServer(tmp_path)
+    try:
+        start(server)
+        revision = server.store.spine().plan_revision()
+        outbound = begin_native(server)
+        request_id = server._pending_confirmation["request"]["request_id"]
+        clock[0] += elapsed
+        result = answer_native(server, outbound["id"], action="accept", **answer())["result"]
+        assert server.store.spine().plan_revision() == revision
+        assert result["isError"] is (elapsed > 600)
+        assert result["structuredContent"]["state"] == ("pending" if elapsed > 600 else "approved")
+        assert result["structuredContent"]["request_id"] == request_id
+    finally:
+        server.close()
+    with open_plan_store(tmp_path) as reopened:
+        rows = approvals(reopened)
+        if elapsed > 600:
+            assert rows == []
+            with pytest.raises(PlanStoreError):
+                reopened.advance("expand", by="planner")
+        else:
+            assert len(rows) == 1 and rows[0]["statement"] == answer()["statement"]
+            assert rows[0]["by"] == "mcp-client-elicitation"
+            reopened.advance("expand", by="planner")
+
+
 @pytest.mark.parametrize(
     "updates",
     [
