@@ -14,8 +14,7 @@ import tomllib
 from importlib.metadata import distribution
 from pathlib import Path
 
-from codex_harness.core.init_hosts import HOSTS, MARKER, server_entry
-from codex_harness.core.init_hosts import claude
+from codex_harness.core.init_hosts import HOSTS, MARKER, claude, server_entry
 from codex_harness.core.preflight import preflight_report
 
 IGNORE_START = f"# {MARKER} begin\n"
@@ -265,7 +264,8 @@ def run_init(args):
             permissions_before = read_text(permissions_path)
             if args.remove:
                 print(
-                    "Claude permission settings retained: ownership unknown; remove manually if desired."
+                    "Claude permission settings retained: ownership unknown; "
+                    "remove manually if desired."
                 )
             else:
                 permissions_after, saved, granted = claude.render_permissions(
@@ -294,7 +294,8 @@ def run_init(args):
     if new_grant and not args.dry_run and approval_mode != "approve":
         if not sys.stdin.isatty():
             raise ValueError(
-                "Explicit permission choice required: --approval-mode approve or --approval-mode prompt"
+                "Explicit permission choice required: "
+                "--approval-mode approve or --approval-mode prompt"
             )
         answer = input("Approve this server-wide permission scope for this project? [y/N] ")
         if answer.strip().lower() not in {"y", "yes"}:

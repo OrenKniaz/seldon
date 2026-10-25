@@ -16,8 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_harness.core import project_init
-from codex_harness.core import seldon_cli
+from codex_harness.core import project_init, seldon_cli
 from codex_harness.core.init_hosts import HOSTS, server_entry
 
 
@@ -88,7 +87,7 @@ def test_public_init_requires_disclosed_choice_then_checks_saved_permissions(
 
 
 def test_permission_optout_preserves_stricter_rules_and_remove_keeps_user_policy(project):
-    """Catch broad approval overriding narrower rules/removal deleting policy; old tests have none."""
+    """Catch approval overriding narrower rules or removal deleting policy; old tests have none."""
     claude = project / ".claude/settings.local.json"
     claude.parent.mkdir()
     original = {
@@ -104,7 +103,8 @@ def test_permission_optout_preserves_stricter_rules_and_remove_keeps_user_policy
     codex.write_text(
         codex.read_text().replace(
             "# seldon-init v1 end",
-            '[mcp_servers.seldon.tools.harness_publish]\napproval_mode = "prompt"\n# seldon-init v1 end',
+            '[mcp_servers.seldon.tools.harness_publish]\napproval_mode = "prompt"\n'
+            "# seldon-init v1 end",
         )
     )
     project_init.run_init(options(project, approval_mode="prompt"))
@@ -126,7 +126,7 @@ def test_permission_optout_preserves_stricter_rules_and_remove_keeps_user_policy
 
 
 def test_default_approve_requires_an_affirmative_interactive_answer(project, monkeypatch):
-    """Catch default approval on decline; explicit CLI choices do not exercise interactive consent."""
+    """Catch default approval on decline; explicit CLI choices miss interactive consent."""
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     answers = iter(["no", "yes"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
@@ -138,7 +138,7 @@ def test_default_approve_requires_an_affirmative_interactive_answer(project, mon
 
 
 def test_malformed_claude_permission_policy_refuses_all_writes(project):
-    """Catch partial registration before a bad permission file; old malformed tests cover registration only."""
+    """Catch partial setup before bad policy; old malformed tests cover registration only."""
     target = project / ".claude/settings.local.json"
     target.parent.mkdir()
     target.write_text('{"permissions":{"allow":"all"}}')
