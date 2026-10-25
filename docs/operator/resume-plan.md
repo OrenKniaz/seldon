@@ -46,6 +46,12 @@ one, it reports native confirmation required. It never converts caller claims
 into approval. Existing original jobs reattach without a fresh approval or a
 second launch; changed execution options are refused.
 
+For a failed controller or a completed job whose dispatcher reports a failed
+plan, reconnect reattaches to inspect the original evidence. Replacement-controller
+continuation is not supported. A terminal job record does not establish controller
+exit or current child liveness; do not relaunch ambiguous work. This diagnostic
+does not recover the job or change its original execution approval or call budget.
+
 If optional observation or card rendering fails after admission, the actual job
 and its status query remain authoritative. Inspect original dispatch evidence;
 do not infer a retry. An old PID or terminal dispatcher record does not establish

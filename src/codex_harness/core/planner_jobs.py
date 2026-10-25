@@ -350,6 +350,16 @@ def worker_job_status(workspace, job_id):
         raise ValueError("worker-job-dispatch-record-ambiguous")
     if "terminal" not in result:
         result["reason"] = "No terminal original; read dispatcher evidence; do not relaunch"
+    elif result["terminal"]["status"] == "failed" or (
+        result["terminal"]["status"] == "completed"
+        and result["terminal"].get("dispatchStatus", "").startswith("plan-failed: ")
+    ):
+        result["reason"] = (
+            "Reconnect reattaches to inspect original evidence. "
+            "Replacement-controller continuation is not supported. "
+            "A terminal record does not establish controller exit or current child liveness; "
+            "do not relaunch ambiguous work."
+        )
     return result
 
 

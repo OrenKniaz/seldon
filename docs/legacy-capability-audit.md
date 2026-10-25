@@ -31,7 +31,7 @@ basic local-provenance lane.
 | Backlog, October 16 decision | Attributable scoped mail | Server-side sender/recipient/run binding and revocation remain deferred. |
 | Backlog, October 16 decision | Authenticated localhost | Loopback plus read-only GET does not establish authentication; authentication remains deferred. |
 | Open obligation | Supported cancellation | Select and stop a thin attempt while preserving truthful terminal state and recovery |
-| Open obligation | Basic stall/crash recovery | Timeouts, no-progress detection and clean resume require live evidence. Stronger lease-expiry/interleaving guarantees remain deferred. |
+| Open obligation | Basic stall/crash recovery | Timeouts, no-progress detection and clean resume require live evidence. Failed-job status/resume explains inspection-only reattachment; replacement-controller continuation remains unsupported. Terminal records do not prove controller exit or current child liveness. Stronger lease-expiry/interleaving guarantees remain deferred. |
 | Open obligation | Minimal health/preflight | Report actual supported launch readiness without importing the legacy operator/session runtime |
 | Open obligation | Actual worker and full-vision evidence | Provider/model runs and integrated acceptance need separate authorization and execution evidence |
 

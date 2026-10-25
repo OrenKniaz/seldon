@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,6 +51,101 @@ def cli(workspace, *arguments):
         encoding="utf-8",
         timeout=60,
     )
+
+
+@pytest.fixture
+def terminal_job_project(monkeypatch):
+    # Keep canonical job/run paths below Windows Git's path limit. Preserve the
+    # disposable originals, as the existing execution source fixture does.
+    workspace = Path(tempfile.mkdtemp(prefix="w3-"))
+    yield from test_planner_replay_gaps.project.__wrapped__(workspace, monkeypatch)
+
+
+@pytest.mark.parametrize("failure", ["controller", "dispatch"])
+def test_unsuccessful_terminal_job_explains_recovery_limit_on_reconnect(
+    terminal_job_project, monkeypatch, failure
+):
+    # Existing reconnect tests cover unknown jobs, not a real terminal writer.
+    # A missing explanation makes reattachment look like supported continuation.
+    from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
+
+    from codex_harness.core import dispatch
+    from codex_harness.core.provider_launch import ProviderNormalLaunch
+    from codex_harness.core.record_io import read_record_json
+
+    project = terminal_job_project
+    options = test_planner_resume._published(project)
+    launches = []
+    with monkeypatch.context() as admission:
+        admission.setattr(
+            planner_jobs.subprocess,
+            "Popen",
+            lambda *a, **k: launches.append(1) or SimpleNamespace(pid=54321),
+        )
+        job = test_planner_resume._seed_original(project, options)
+    directory = Path(job["evidenceDir"])
+    if failure == "controller":
+        # The canonical controller refuses changed snapshot bytes and writes
+        # its own failed terminal; no test-authored terminal/status answer.
+        (directory / "plan/template/PLAN.md").write_text("SOURCE-ONLY changed snapshot")
+    else:
+        source_only_packet_renderer(monkeypatch)
+        launch = ProviderNormalLaunch(
+            cli="codex",
+            command=(
+                sys.executable,
+                "-B",
+                "-c",
+                "# SOURCE-ONLY local process fixture\nimport sys\n"
+                'print(\'{"type":"turn.completed","isMocked":true}\',flush=True)\n'
+                "sys.exit(7)\n",
+            ),
+            protections=("SOURCE-ONLY finite child; no coding provider",),
+        )
+        monkeypatch.setattr(
+            dispatch,
+            "get_adapter",
+            lambda _: SimpleNamespace(provider_normal_command=lambda **kwargs: launch),
+        )
+    terminal = planner_jobs.execute_worker_job(project.workspace, options["expected_revision"])
+    assert terminal["status"] == ("failed" if failure == "controller" else "completed")
+    if failure == "dispatch":
+        assert "provider exited nonzero (7)" in terminal["dispatchStatus"]
+    originals = {
+        p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()
+    }
+    for _ in range(2):  # Reopen the public consumer against the same originals.
+        server = PlannerServer(project.workspace)
+        try:
+            status = rpc(
+                server,
+                "harness_worker_status",
+                {"job_id": options["expected_revision"]},
+                expected_workspace=project.workspace,
+            )
+            resumed = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
+        finally:
+            server.close()
+        assert not status["isError"] and not resumed["isError"]
+        saved, data = status["structuredContent"], resumed["structuredContent"]
+        assert saved["terminal"] == terminal and saved["status"] == terminal["status"]
+        assert saved["liveness"] == data["job"]["liveness"] == "unknown"
+        assert data["state"] == "reattached"
+        assert data["nextAction"] == {
+            "kind": "inspect_worker_job",
+            "jobId": options["expected_revision"],
+        }
+        assert read_record_json(data["observationPath"]) == data
+        assert len(launches) == 1
+        assert {
+            p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()
+        } == originals
+        reason = saved.get("reason", "")
+        assert "Replacement-controller continuation is not supported" in reason
+        assert "does not establish controller exit or current child liveness" in reason
+        assert "do not relaunch ambiguous work" in reason
+        assert data["job"]["reason"] == reason
+        assert data["job"]["reasonTruncated"] is False
 
 
 @pytest.mark.parametrize("transport", ["mcp", "cli"])
