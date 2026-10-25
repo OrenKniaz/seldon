@@ -1,6 +1,7 @@
 """Codex project TOML: preserve unrelated text and validate the resulting document."""
 
 import json
+import math
 import re
 import tomllib
 
@@ -15,7 +16,13 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
     if not isinstance(data.get("mcp_servers", {}), dict):
         raise ValueError("Expected mcp_servers table")
     existing = data.get("mcp_servers", {}).get("seldon")
-    expected = {**entry, "startup_timeout_sec": 20}
+    timeout_key = "tool_timeout_sec"
+    expected = {**entry, "startup_timeout_sec": 20, timeout_key: 900}
+    if not remove and isinstance(existing, dict) and timeout_key in existing:
+        value = existing[timeout_key]
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError("Unsupported Seldon tool timeout; preserve it manually")
+        expected[timeout_key] = value
     mode_key = "default_tools_approval_mode"
     if not remove and isinstance(existing, dict) and mode_key in existing:
         mode = existing[mode_key]
@@ -37,18 +44,19 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
                 expected[key] = value
                 filters[key] = value
     identity = (
-        {k: v for k, v in existing.items() if k != mode_key}
+        {k: v for k, v in existing.items() if k not in {mode_key, timeout_key}}
         if isinstance(existing, dict)
         else existing
     )
     if (
         not remove
         and existing is not None
-        and identity != {k: v for k, v in expected.items() if k != mode_key}
+        and identity != {k: v for k, v in expected.items() if k not in {mode_key, timeout_key}}
         and not yes
     ):
         raise ValueError("Existing seldon entry differs; inspect it and use --yes to replace")
     emit_mode = mode_key in expected
+    emit_timeout = True
     policy_tables = ""
     if START in text or END in text:
         if text.count(START) != 1 or text.count(END) != 1:
@@ -67,6 +75,9 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
             raise ValueError(
                 "Ownership block contains unrelated configuration; preserve it manually"
             )
+        emit_timeout = (
+            timeout_key in block_data["mcp_servers"]["seldon"] or timeout_key not in existing
+        )
         if emit_mode:
             block_server = block_data["mcp_servers"]["seldon"]
             emit_mode = (
@@ -116,6 +127,7 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
         and isinstance(existing, dict)
         and (
             mode_key in existing
+            or timeout_key in existing
             or "tools" in existing
             or any(key in existing for key in filter_keys)
         )
@@ -124,6 +136,8 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
         replacement = "[mcp_servers.seldon]\n"
         if mode_key in block_data["mcp_servers"]["seldon"]:
             replacement += f"{mode_key} = {json.dumps(existing[mode_key])}\n"
+        if timeout_key in block_data["mcp_servers"]["seldon"]:
+            replacement += f"{timeout_key} = {json.dumps(existing[timeout_key])}\n"
         for key, value in filters.items():
             replacement += f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
         replacement += policy_tables
@@ -132,6 +146,8 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
         for key in ("command", "args"):
             replacement += f"{key} = {json.dumps(entry[key], ensure_ascii=False)}\n"
         replacement += 'env = { SELDON_INIT = "seldon-init v1" }\nstartup_timeout_sec = 20\n'
+        if emit_timeout:
+            replacement += f"{timeout_key} = {json.dumps(expected[timeout_key])}\n"
         if emit_mode:
             replacement += f"{mode_key} = {json.dumps(expected[mode_key])}\n"
         for key, value in filters.items():

@@ -46,6 +46,65 @@ def snapshot(root):
     return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
+@pytest.mark.parametrize("case", ["fresh", "legacy", "owned-custom", "unowned-custom"])
+def test_codex_request_budget_preserves_user_timeout_and_tool_policy(project, case):
+    """Protect reading budget through the real writer, replacement and removal.
+
+    Existing policy tests omit tool timeouts, missing short default requests and
+    a writer erasing custom budgets while preserving the approval-mode label.
+    """
+    project_init.run_init(options(project, host="codex"))
+    config = project / ".codex/config.toml"
+    if case == "fresh":
+        assert project_init.read_entry("codex", config.read_text())["tool_timeout_sec"] == 900
+        return
+    text = "".join(
+        line
+        for line in config.read_text().splitlines(True)
+        if not line.startswith("tool_timeout_sec")
+    )
+    policy = 'enabled_tools = ["harness_plan_status"]\ndisabled_tools = ["harness_publish"]\n'
+    budget = "tool_timeout_sec = 1800\n" if case == "owned-custom" else "tool_timeout_sec = 300.5\n"
+    if case == "owned-custom":
+        policy += budget
+    config.write_text(
+        text.replace("# seldon-init v1 end", policy + "# seldon-init v1 end")
+        + (budget if case == "unowned-custom" else "")
+    )
+    before = tomllib.loads(config.read_text())["mcp_servers"]["seldon"]
+    project_init.run_init(options(project, host="codex", approval_mode=None))
+    expected = {
+        **before,
+        "tool_timeout_sec": 900 if case == "legacy" else before["tool_timeout_sec"],
+    }
+    assert project_init.read_entry("codex", config.read_text()) == expected
+    config.write_text(
+        config.read_text().replace("startup_timeout_sec = 20", "startup_timeout_sec = 99")
+    )
+    project_init.run_init(options(project, host="codex", yes=True, approval_mode=None))
+    assert project_init.read_entry("codex", config.read_text()) == expected
+    project_init.run_init(options(project, host=None, remove=True))
+    remaining = tomllib.loads(config.read_text())["mcp_servers"]["seldon"]
+    assert remaining["tool_timeout_sec"] == expected["tool_timeout_sec"]
+    assert remaining["default_tools_approval_mode"] == "prompt"
+    assert remaining["enabled_tools"] == ["harness_plan_status"]
+    assert remaining["disabled_tools"] == ["harness_publish"]
+    assert "command" not in remaining
+
+
+def test_invalid_codex_request_budget_refuses_without_writes(project):
+    """A TOML boolean is not numeric seconds; old invalid-mode tests miss it."""
+    project_init.run_init(options(project, host="codex"))
+    config = project / ".codex/config.toml"
+    config.write_text(
+        config.read_text().replace("tool_timeout_sec = 900", "tool_timeout_sec = true")
+    )
+    before = snapshot(project)
+    with pytest.raises(ValueError, match="tool timeout"):
+        project_init.run_init(options(project, host="codex", yes=True))
+    assert snapshot(project) == before
+
+
 def test_public_init_requires_disclosed_choice_then_checks_saved_permissions(
     project, monkeypatch, capsys
 ):
@@ -388,7 +447,9 @@ def test_owned_remove_retains_safety_and_idempotence_with_invalid_mode(project):
     project_init.run_init(options(project, remove=True, host=None))
     assert (
         config.read_text()
-        == original + '[mcp_servers.seldon]\ndefault_tools_approval_mode = ["approve"]\n'
+        == original
+        + '[mcp_servers.seldon]\ndefault_tools_approval_mode = ["approve"]\n'
+        + "tool_timeout_sec = 900\n"
     )
     before = snapshot(project)
     project_init.run_init(options(project, remove=True, host=None))

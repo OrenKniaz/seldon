@@ -55,6 +55,14 @@ observed. Claude Desktop chat and Copilot CLI are not covered by these writers.
 Codex saves `default_tools_approval_mode` on the project Seldon server; existing
 per-tool `approval_mode` overrides retain precedence. See the
 [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+New Codex registrations use `tool_timeout_sec = 900` as the per-request budget,
+separate from permission approval and the server's 600-second confirmation wait.
+Re-init preserves explicit user timeouts, including smaller budgets; those can
+expire sooner. Removal retains saved budgets with unowned policy for manual cleanup.
+The [documented key](https://developers.openai.com/codex/config-reference/) does
+not establish that a native client actually waits ten minutes. The cause of the
+observed 120-second cutoff remains unverified. Equivalent Claude Code and VS Code
+timeout settings are **UNKNOWN** here; these writers emit no timeout overrides.
 Claude approve mode merges `enabledMcpjsonServers: ["seldon"]` and the
 [server-scoped rule](https://code.claude.com/docs/en/permissions) `mcp__seldon__*`
 into `permissions.allow`; prompt mode uses `permissions.ask`. Existing narrower
