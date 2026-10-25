@@ -243,7 +243,7 @@ def run_audit_process(
             for handle in handles:
                 os.set_handle_inheritable(handle, True)
             process = subprocess.Popen(
-                [image, "-I", "-S", "-c", _BOOTSTRAP, *map(str, handles)],
+                [image, "-I", "-S", "-B", "-c", _BOOTSTRAP, *map(str, handles)],
                 cwd=os.path.dirname(image),
                 stdin=stdin,
                 stdout=subprocess.PIPE if capture_output else None,
