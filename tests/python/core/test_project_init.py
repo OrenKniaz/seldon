@@ -458,11 +458,17 @@ def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
     )
     before = snapshot(product)
     cli("--check")
+    cli("--host", "all")
+    assert snapshot(product) == before
+    registered = tomllib.loads(config.read_text())
     config.write_text(
         config.read_text().replace("startup_timeout_sec = 20", "startup_timeout_sec = 99")
     )
     cli("--host", "all", "--yes")
-    assert snapshot(product) == before
+    assert tomllib.loads(config.read_text()) == registered
+    assert {p: b for p, b in snapshot(product).items() if p != Path(".codex/config.toml")} == {
+        p: b for p, b in before.items() if p != Path(".codex/config.toml")
+    }
     assert not (product / ".codex-harness/plan.sqlite3").exists()
     entry = json.loads((product / ".mcp.json").read_text())["mcpServers"]["seldon"]
     assert entry["command"] == str(interpreter)
