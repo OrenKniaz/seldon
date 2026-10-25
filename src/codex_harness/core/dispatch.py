@@ -66,8 +66,6 @@ def _notify_steering(bead: dict, memory: Path, run_record: Path | None = None) -
         observation["state"] == "observed" and observation["summary"]["total"] == 0
     ):
         return
-    if not observation["evidencePaths"] and run_record is None:
-        return  # Unpersisted report errors first travel through canonical run.json.
     event = {
         **{key: value for key, value in observation.items() if key != "delivery"},
         "evidencePaths": observation["evidencePaths"] or [str(run_record)],
@@ -101,7 +99,14 @@ def _notify_steering(bead: dict, memory: Path, run_record: Path | None = None) -
         observation["delivery"] = {"state": "recorded", "messageId": message_id}
 
 
-def _observe_steering(bead: dict, manifest: dict, root: Path, base: str, memory: Path) -> None:
+def _observe_steering(
+    bead: dict,
+    manifest: dict,
+    root: Path,
+    base: str,
+    memory: Path,
+    persist_observation: Callable[[], Path] | None,
+) -> None:
     from codex_harness.core.steering import steering_report
 
     observation = {
@@ -154,7 +159,14 @@ def _observe_steering(bead: dict, manifest: dict, root: Path, base: str, memory:
     else:
         metadata.update(evidencePaths=[str(path)], reportSha256=digest)
     bead["steering"] = metadata
-    _notify_steering(bead, memory)
+    run_record = None
+    if not metadata["evidencePaths"]:
+        if persist_observation is None:
+            raise ValueError("Canonical run writer required for unavailable steering observation")
+        # The existing serial owner writes its live record. Canonical storage
+        # failures propagate normally, outside the advisory-file error guard.
+        run_record = persist_observation()
+    _notify_steering(bead, memory, run_record)
 
 
 def _notify_failures(record: dict, evidence: Path) -> None:
@@ -1712,6 +1724,7 @@ def _integrate_bead(
     receipt: Path,
     confirmer: str,
     manifest_path: Path,
+    persist_observation: Callable[[], Path] | None = None,
 ) -> None:
     if _hold_permission_guard(record, Path(record["evidenceDir"]) / "attempt"):
         return
@@ -1809,7 +1822,9 @@ def _integrate_bead(
     if not changed:
         record["status"] = "already-satisfied"
         return
-    _observe_steering(record, manifest, validation_root, binding["baseIntegration"], memory)
+    _observe_steering(
+        record, manifest, validation_root, binding["baseIntegration"], memory, persist_observation
+    )
     if _git(repo, "rev-parse", "HEAD") == binding["baseIntegration"]:
         _git(repo, "merge", "-q", "--ff-only", integration_commit)
     record["lessonsPromoted"] = []
@@ -2373,6 +2388,11 @@ def run_plan(
         )
         return (latest_claim(bead_id) or {}).get("passed", False)
 
+    def persist_observation() -> Path:
+        path = evidence / "run.json"
+        _write_record(path, record)
+        return path
+
     with ThreadPoolExecutor(max_workers=max_parallel) as pool:
         while len(terminal) < len(order):
             for bead_id in graph.ready_beads(plan, done, set(running) | terminal):
@@ -2472,6 +2492,7 @@ def run_plan(
                             receipt=Path(current["evidenceDir"]) / "integrated.json",
                             confirmer=confirmer,
                             manifest_path=manifest_path,
+                            persist_observation=persist_observation,
                         )
                 except Exception as error:
                     # A worker exception fails its bead, preserving independent

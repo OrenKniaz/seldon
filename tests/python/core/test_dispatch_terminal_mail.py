@@ -152,6 +152,7 @@ def test_terminal_failure_is_mailed_before_independent_sibling_finishes(
         "report-read",
         "mail",
         "uncertain-mail",
+        "canonical-write",
     ],
 )
 def test_candidate_steering_reaches_planner_before_real_fast_forward(
@@ -169,7 +170,7 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
     (plan / "template/extra.py").write_text("# Source-only extra module\n")
     source_only_packet_renderer(monkeypatch)
     context = source_execution_context(tmp_path / "canonical", plan, timeout=60)
-    faults = {"report-write", "report-read", "mail", "uncertain-mail"}
+    faults = {"report-write", "report-read", "mail", "uncertain-mail", "canonical-write"}
     body = "pass" if candidate_kind == "placeholder" or candidate_kind in faults else "return 42"
     source = f"VALUE = 1\ndef public_api():\n    {body}\n"
     extra = "def broken(:\n" if candidate_kind == "unparseable" else "# Source-only extra module\n"
@@ -216,8 +217,18 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
     fault_active, mail_attempts = [True], []
 
     def write(path, record):
-        if candidate_kind == "report-write" and Path(path).name == "steering.json":
+        if (
+            candidate_kind in {"report-write", "canonical-write"}
+            and Path(path).name == "steering.json"
+        ):
             raise PermissionError("Controlled advisory report write refusal")
+        if candidate_kind == "canonical-write" and Path(path).name == "run.json":
+            bead = record["beads"]["A"]
+            if (
+                bead["status"] == "running"
+                and bead.get("steering", {}).get("state") == "unavailable"
+            ):
+                raise PermissionError("Controlled canonical run write refusal")
         return write_record(path, record)
 
     def read(path):
@@ -253,6 +264,7 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
                     candidateCommit=args[-1],
                     receipt=read_record_json(run_path.parent / "A/integrated.json"),
                     steering=read_record_json(report_path) if report_path.exists() else None,
+                    canonicalSteering=run["beads"]["A"].get("steering"),
                     mail=Mailbox(run["memoryWorkspace"]).inbox("planner"),
                     boardMail=board["mail"]["runs"][run["runId"]],
                 )
@@ -267,6 +279,18 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
     (tmp_path / "steering-evidence.json").write_text(
         json.dumps(dict(sourceOnly=True, beforeMerge=before_merge, terminal=result), indent=2)
     )
+    if candidate_kind == "canonical-write":
+        # Only advisory storage is isolated. A real owning-writer failure must
+        # still fail the bead and prevent the actual merge, preserving proof.
+        bead = result["beads"]["A"]
+        assert before_merge == []
+        assert (
+            "bead failed: PermissionError: Controlled canonical run write refusal" == bead["status"]
+        )
+        assert bead["integrated"]["validation"]["passed"] is True
+        assert result["status"].startswith("plan-failed:")
+        assert git(Path(result["repo"]), "rev-parse", "HEAD") != bead["candidate"]["commit"]
+        return
     assert len(before_merge) == 1
     observed = before_merge[0]
     bead = result["beads"]["A"]
@@ -285,6 +309,13 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
         )
         mailbox = Mailbox(result["memoryWorkspace"])
         if candidate_kind.startswith("report-"):
+            # Advisory-file refusal still needs a durable unavailable original
+            # and planner notification before the actual fast-forward begins.
+            assert observed["canonicalSteering"] is not None
+            assert observed["canonicalSteering"]["state"] == "unavailable"
+            premerge_mail = [row for row in observed["mail"] if row["subject"] == "Steering: A"]
+            assert len(premerge_mail) == 1
+            assert any(row["id"] == premerge_mail[0]["id"] for row in observed["boardMail"])
             assert observation["error"]["type"] == "PermissionError"
             assert observation["summary"] is None and "reportSha256" not in observation
             assert observation["evidencePaths"] == []
