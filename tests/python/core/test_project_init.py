@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from codex_harness.core import project_init
+from codex_harness.core import seldon_cli
 from codex_harness.core.init_hosts import HOSTS, server_entry
 
 
@@ -30,6 +31,7 @@ def options(path, **values):
             "dry_run": False,
             "check": False,
             "remove": False,
+            "approval_mode": "prompt",
             **values,
         }
     )
@@ -43,6 +45,107 @@ def project(tmp_path, monkeypatch):
 
 def snapshot(root):
     return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_public_init_requires_disclosed_choice_then_checks_saved_permissions(
+    project, monkeypatch, capsys
+):
+    """Protect consent and real writer/check integration; old tests bypass CLI and save no policy.
+
+    Catch --yes silently granting all tools, malformed host policy, or a check claiming
+    effective permissions from saved settings. The handshake uses the qualified DFF install.
+    """
+    installed = Path(
+        os.environ.get(
+            "SELDON_CHECK_PYTHON",
+            str(Path(__file__).resolve().parents[4] / "runtime-dff93bb/Scripts/python.exe"),
+        )
+    )
+    if not installed.exists():
+        pytest.skip("requires the existing qualified DFF interpreter for real MCP handshake")
+    monkeypatch.setattr(project_init, "installed_command", lambda: str(installed))
+    monkeypatch.setattr(seldon_cli, "version", lambda _name: "source-test")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert seldon_cli.main(["init", str(project), "--host", "all", "--yes"]) == 1
+    assert snapshot(project) == {}
+    assert "all current and future Seldon MCP tools" in capsys.readouterr().out
+    assert (
+        seldon_cli.main(["init", str(project), "--host", "all", "--approval-mode", "approve"]) == 0
+    )
+    saved = tomllib.loads((project / ".codex/config.toml").read_text())
+    assert saved["mcp_servers"]["seldon"]["default_tools_approval_mode"] == "approve"
+    settings = json.loads((project / ".claude/settings.local.json").read_text())
+    assert settings["enabledMcpjsonServers"] == ["seldon"]
+    assert settings["permissions"]["allow"] == ["mcp__seldon__*"]
+    before = snapshot(project)
+    assert seldon_cli.main(["init", str(project), "--check"]) == 0
+    assert seldon_cli.main(["init", str(project), "--host", "all"]) == 0
+    assert snapshot(project) == before
+    output = capsys.readouterr().out
+    assert "host effective policy UNKNOWN" in output
+    assert "Chat: Manage Tool Approval" in output
+    assert not (project / ".vscode/settings.json").exists()
+
+
+def test_permission_optout_preserves_stricter_rules_and_remove_keeps_user_policy(project):
+    """Catch broad approval overriding narrower rules/removal deleting policy; old tests have none."""
+    claude = project / ".claude/settings.local.json"
+    claude.parent.mkdir()
+    original = {
+        "custom": 1,
+        "permissions": {
+            "deny": ["mcp__seldon__harness_publish"],
+            "ask": ["mcp__seldon__harness_worker_step"],
+        },
+    }
+    claude.write_text(json.dumps(original))
+    project_init.run_init(options(project, approval_mode="approve"))
+    codex = project / ".codex/config.toml"
+    codex.write_text(
+        codex.read_text().replace(
+            "# seldon-init v1 end",
+            '[mcp_servers.seldon.tools.harness_publish]\napproval_mode = "prompt"\n# seldon-init v1 end',
+        )
+    )
+    project_init.run_init(options(project, approval_mode="prompt"))
+    config = tomllib.loads(codex.read_text())["mcp_servers"]["seldon"]
+    assert config["default_tools_approval_mode"] == "prompt"
+    assert config["tools"]["harness_publish"]["approval_mode"] == "prompt"
+    settings = json.loads(claude.read_text())
+    assert settings["permissions"]["deny"] == original["permissions"]["deny"]
+    assert settings["permissions"]["ask"] == [*original["permissions"]["ask"], "mcp__seldon__*"]
+    assert "mcp__seldon__*" not in settings["permissions"]["allow"]
+    before = snapshot(project)
+    project_init.run_init(options(project, approval_mode=None))
+    assert snapshot(project) == before
+    policy = claude.read_bytes()
+    project_init.run_init(options(project, remove=True, host=None))
+    assert claude.read_bytes() == policy
+    remaining = tomllib.loads(codex.read_text())["mcp_servers"]["seldon"]
+    assert remaining == {"default_tools_approval_mode": "prompt", "tools": config["tools"]}
+
+
+def test_default_approve_requires_an_affirmative_interactive_answer(project, monkeypatch):
+    """Catch default approval on decline; explicit CLI choices do not exercise interactive consent."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    answers = iter(["no", "yes"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    assert project_init.run_init(options(project, host="codex", approval_mode=None, yes=True)) == 1
+    assert snapshot(project) == {}
+    assert project_init.run_init(options(project, host="codex", approval_mode=None)) == 0
+    config = tomllib.loads((project / ".codex/config.toml").read_text())
+    assert config["mcp_servers"]["seldon"]["default_tools_approval_mode"] == "approve"
+
+
+def test_malformed_claude_permission_policy_refuses_all_writes(project):
+    """Catch partial registration before a bad permission file; old malformed tests cover registration only."""
+    target = project / ".claude/settings.local.json"
+    target.parent.mkdir()
+    target.write_text('{"permissions":{"allow":"all"}}')
+    before = snapshot(project)
+    with pytest.raises(ValueError, match="allow"):
+        project_init.run_init(options(project, approval_mode="approve"))
+    assert snapshot(project) == before
 
 
 def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(project):
@@ -61,7 +164,7 @@ def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(proje
     assert snapshot(project) == before
     codex = tomllib.loads((project / ".codex/config.toml").read_text())
     assert codex["model"] == "user-choice"
-    assert "default_tools_approval_mode" not in codex["mcp_servers"]["seldon"]
+    assert codex["mcp_servers"]["seldon"]["default_tools_approval_mode"] == "prompt"
     for host, writer in HOSTS.items():
         entry = project_init.read_entry(host, (project / writer.PATH).read_text())
         assert entry["args"][-1] == str(project.resolve())
@@ -71,7 +174,9 @@ def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(proje
     assert project_init.run_init(options(project, remove=True, host=None)) == 0
     assert (project / ".codex-harness/plan.sqlite3").read_bytes() == b"existing plan stays"
     assert not (project / "SELDON.md").exists()
-    assert (project / ".codex/config.toml").read_bytes() == original_toml_bytes
+    assert (project / ".codex/config.toml").read_bytes().startswith(original_toml_bytes)
+    remaining = tomllib.loads((project / ".codex/config.toml").read_text())
+    assert remaining["mcp_servers"]["seldon"] == {"default_tools_approval_mode": "prompt"}
     assert json.loads((project / ".mcp.json").read_text()) == original_json
     assert (project / ".gitignore").read_bytes() == original_ignore_bytes
 
@@ -175,6 +280,7 @@ def test_explicit_codex_mode_survives_reinit_and_authorized_identity_replacement
     project_init.run_init(options(project, host="codex"))
     config = project / ".codex/config.toml"
     line = f'default_tools_approval_mode = "{mode}"\n'
+    config.write_text(config.read_text().replace('default_tools_approval_mode = "prompt"\n', ""))
     if mode in {"prompt", "approve"}:
         config.write_text(config.read_text() + line)
     else:
@@ -185,7 +291,7 @@ def test_explicit_codex_mode_survives_reinit_and_authorized_identity_replacement
         )
     original = snapshot(project)
     expected = project_init.read_entry("codex", config.read_text())
-    project_init.run_init(options(project, host="codex"))
+    project_init.run_init(options(project, host="codex", approval_mode=None))
     assert snapshot(project) == original
     replacement = {
         "command": '"must-not-execute"',
@@ -201,12 +307,12 @@ def test_explicit_codex_mode_survives_reinit_and_authorized_identity_replacement
     )
     before = snapshot(project)
     with pytest.raises(ValueError, match="differs"):
-        project_init.run_init(options(project, host="codex"))
+        project_init.run_init(options(project, host="codex", approval_mode=None))
     assert snapshot(project) == before
-    project_init.run_init(options(project, host="codex", yes=True))
+    project_init.run_init(options(project, host="codex", yes=True, approval_mode=None))
     assert project_init.read_entry("codex", config.read_text()) == expected
     after = snapshot(project)
-    project_init.run_init(options(project, host="codex"))
+    project_init.run_init(options(project, host="codex", approval_mode=None))
     assert snapshot(project) == after
 
 
@@ -220,8 +326,8 @@ def test_invalid_explicit_codex_mode_refuses_without_writes_even_with_replacemen
     config = project / ".codex/config.toml"
     config.write_text(
         config.read_text().replace(
-            "startup_timeout_sec = 20\n",
-            f"startup_timeout_sec = 20\ndefault_tools_approval_mode = {literal}\n",
+            'default_tools_approval_mode = "prompt"\n',
+            f"default_tools_approval_mode = {literal}\n",
         )
     )
     before = snapshot(project)
@@ -239,12 +345,15 @@ def test_owned_remove_retains_safety_and_idempotence_with_invalid_mode(project):
     project_init.run_init(options(project, host="codex"))
     config.write_text(
         config.read_text().replace(
-            "startup_timeout_sec = 20\n",
-            'startup_timeout_sec = 20\ndefault_tools_approval_mode = ["approve"]\n',
+            'default_tools_approval_mode = "prompt"\n',
+            'default_tools_approval_mode = ["approve"]\n',
         )
     )
     project_init.run_init(options(project, remove=True, host=None))
-    assert config.read_text() == original
+    assert (
+        config.read_text()
+        == original + '[mcp_servers.seldon]\ndefault_tools_approval_mode = ["approve"]\n'
+    )
     before = snapshot(project)
     project_init.run_init(options(project, remove=True, host=None))
     assert snapshot(project) == before
@@ -303,7 +412,7 @@ def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
 
     cli("--host", "all", "--dry-run")
     assert list(product.iterdir()) == []
-    cli("--host", "all")
+    cli("--host", "all", "--approval-mode", "approve")
     before = snapshot(product)
     cli("--check")
     cli("--host", "all")

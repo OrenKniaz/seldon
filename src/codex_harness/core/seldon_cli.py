@@ -25,6 +25,12 @@ def main(argv=None):
     init.add_argument("--host", choices=["codex", "claude", "copilot-vscode", "all"])
     init.add_argument("--name")
     init.add_argument("--yes", action="store_true")
+    init.add_argument(
+        "--approval-mode",
+        choices=["approve", "prompt"],
+        help="Explicit project permission choice for all current/future Seldon tools; "
+        "approve skips tool prompts, prompt requests them (default: approve with consent)",
+    )
     init.add_argument("--dry-run", action="store_true")
     modes = init.add_mutually_exclusive_group()
     modes.add_argument("--check", action="store_true")

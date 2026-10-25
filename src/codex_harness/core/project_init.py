@@ -15,6 +15,7 @@ from importlib.metadata import distribution
 from pathlib import Path
 
 from codex_harness.core.init_hosts import HOSTS, MARKER, server_entry
+from codex_harness.core.init_hosts import claude
 from codex_harness.core.preflight import preflight_report
 
 IGNORE_START = f"# {MARKER} begin\n"
@@ -226,12 +227,23 @@ def run_init(args):
     command = installed_command() if not args.remove else ""
     entry = server_entry(command, root)
     changes = []
+    approval_mode = getattr(args, "approval_mode", None)
+    new_grant = False
+    if not args.remove:
+        print(
+            "Permission scope: all current and future Seldon MCP tools, including "
+            "worker, acceptance and mail invocations. Approve skips host tool prompts; "
+            "prompt requests them. Application Align/Vision, execution, acceptance, "
+            "audit, review and publication gates remain unchanged. Stricter tool rules "
+            "and host policy still apply. --yes is not permission consent."
+        )
     for host in selected:
         writer = HOSTS[host]
         path = local_path(root, writer.PATH)
         before = read_text(path)
         try:
-            after = writer.render(before, entry, remove=args.remove, yes=args.yes)
+            extra = {"approval_mode": approval_mode} if host == "codex" else {}
+            after = writer.render(before, entry, remove=args.remove, yes=args.yes, **extra)
         except ValueError as error:
             if "differs" in str(error) or "unowned" in str(error):
                 print(registration_diff(host, before, writer.render(before, entry, yes=True)))
@@ -241,6 +253,32 @@ def run_init(args):
                 raise ValueError(f"{path}: missing or changed registration, marker or workspace")
         elif after != before:
             changes.append((path, before, after))
+        if host == "codex" and not args.remove:
+            saved = read_entry(host, after)["default_tools_approval_mode"]
+            new_grant |= (
+                saved == "approve"
+                and (read_entry(host, before) or {}).get("default_tools_approval_mode") != "approve"
+            )
+            print(f"codex: saved server approval mode {saved}; host effective policy UNKNOWN")
+        if host == "claude":
+            permissions_path = local_path(root, claude.PERMISSIONS_PATH)
+            permissions_before = read_text(permissions_path)
+            if args.remove:
+                print(
+                    "Claude permission settings retained: ownership unknown; remove manually if desired."
+                )
+            else:
+                permissions_after, saved, granted = claude.render_permissions(
+                    permissions_before, approval_mode
+                )
+                new_grant |= granted
+                if args.check and permissions_after != permissions_before:
+                    raise ValueError(f"{permissions_path}: missing or changed saved permissions")
+                if not args.check and permissions_after != permissions_before:
+                    changes.append((permissions_path, permissions_before, permissions_after))
+                print(f"claude: saved server approval mode {saved}; host effective policy UNKNOWN")
+        if args.remove and host == "codex" and read_entry(host, after):
+            print("Codex policy retained: ownership unknown; remove manually if desired.")
         print(f"{host}: {path} - experimental; {writer.GUIDANCE}")
     marker_path = local_path(root, STORE_MARKER)
     doc_path = local_path(root, "SELDON.md")
@@ -253,6 +291,14 @@ def run_init(args):
         server_check(command, root)
         print("Registration and installed server handshake OK; host planning journey unverified.")
         return 0
+    if new_grant and not args.dry_run and approval_mode != "approve":
+        if not sys.stdin.isatty():
+            raise ValueError(
+                "Explicit permission choice required: --approval-mode approve or --approval-mode prompt"
+            )
+        answer = input("Approve this server-wide permission scope for this project? [y/N] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            return 1
     for path, after in (
         (ignore_path, ignore_text(read_text(ignore_path), args.remove)),
         (
@@ -306,5 +352,5 @@ def run_init(args):
         print("Configuration prepared; actual host planning journey remains unverified.")
         print('Next: open a chat here and say "Let\'s plan <your idea> with Seldon".')
     else:
-        print("Removed owned registrations; plan data and unrelated settings preserved.")
+        print("Removed owned registrations; plan data and permission policies preserved.")
     return 0

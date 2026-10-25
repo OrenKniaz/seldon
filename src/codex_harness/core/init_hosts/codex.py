@@ -10,7 +10,7 @@ START = "# seldon-init v1 begin"
 END = "# seldon-init v1 end"
 
 
-def render(text, entry, *, remove=False, yes=False):
+def render(text, entry, *, remove=False, yes=False, approval_mode=None):
     data = tomllib.loads(text)
     if not isinstance(data.get("mcp_servers", {}), dict):
         raise ValueError("Expected mcp_servers table")
@@ -21,10 +21,25 @@ def render(text, entry, *, remove=False, yes=False):
         mode = existing[mode_key]
         if not isinstance(mode, str) or mode not in {"auto", "prompt", "writes", "approve"}:
             raise ValueError("Unsupported Seldon tool approval mode; preserve it manually")
-        expected[mode_key] = mode
-    if not remove and existing is not None and existing != expected and not yes:
+        expected[mode_key] = approval_mode or mode
+    elif not remove:
+        expected[mode_key] = approval_mode or "approve"
+    if isinstance(existing, dict) and "tools" in existing:
+        expected["tools"] = existing["tools"]
+    identity = (
+        {k: v for k, v in existing.items() if k != mode_key}
+        if isinstance(existing, dict)
+        else existing
+    )
+    if (
+        not remove
+        and existing is not None
+        and identity != {k: v for k, v in expected.items() if k != mode_key}
+        and not yes
+    ):
         raise ValueError("Existing seldon entry differs; inspect it and use --yes to replace")
     emit_mode = mode_key in expected
+    policy_tables = ""
     if START in text or END in text:
         if text.count(START) != 1 or text.count(END) != 1:
             raise ValueError("Malformed seldon ownership markers")
@@ -43,7 +58,19 @@ def render(text, entry, *, remove=False, yes=False):
                 "Ownership block contains unrelated configuration; preserve it manually"
             )
         if emit_mode:
-            emit_mode = mode_key in block_data["mcp_servers"]["seldon"]
+            block_server = block_data["mcp_servers"]["seldon"]
+            emit_mode = (
+                mode_key in block_server
+                or not isinstance(existing, dict)
+                or mode_key not in existing
+            )
+            if not emit_mode and approval_mode and existing[mode_key] != approval_mode:
+                raise ValueError("Unowned approval mode requires manual merge")
+        table = re.search(r"(?m)^\[mcp_servers\.seldon\.tools(?:\.|\])", block)
+        if table:
+            policy_tables = block[table.start() : block.index(END)]
+        elif "tools" in block_data["mcp_servers"]["seldon"]:
+            raise ValueError("Inline tool policy requires manual merge")
     elif existing is not None:
         if remove:
             return text
@@ -69,6 +96,12 @@ def render(text, entry, *, remove=False, yes=False):
     if not remove and existing == expected:
         return text
     replacement = ""
+    if remove and isinstance(existing, dict) and (mode_key in existing or "tools" in existing):
+        # Retain policy as unowned TOML; only the marked registration is removed.
+        replacement = "[mcp_servers.seldon]\n"
+        if mode_key in block_data["mcp_servers"]["seldon"]:
+            replacement += f"{mode_key} = {json.dumps(existing[mode_key])}\n"
+        replacement += policy_tables
     if not remove:
         replacement = START + "\n[mcp_servers.seldon]\n"
         for key in ("command", "args"):
@@ -76,6 +109,7 @@ def render(text, entry, *, remove=False, yes=False):
         replacement += 'env = { SELDON_INIT = "seldon-init v1" }\nstartup_timeout_sec = 20\n'
         if emit_mode:
             replacement += f"{mode_key} = {json.dumps(expected[mode_key])}\n"
+        replacement += policy_tables
         replacement += END + "\n"
         if start and text[start - 1] != "\n":
             replacement = "\n" + replacement

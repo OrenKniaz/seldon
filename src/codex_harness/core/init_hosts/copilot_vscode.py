@@ -3,7 +3,11 @@
 from .json_config import merge
 
 PATH = ".vscode/mcp.json"
-GUIDANCE = "Open this folder in VS Code; review/approve seldon in MCP configuration."
+GUIDANCE = (
+    "Manual approval: run Chat: Manage Tool Approval; use the Seldon server-group "
+    "checkbox to approve, or leave it unchecked for prompts. No scoped autoapproval "
+    "setting written; effective permissions UNVERIFIED."
+)
 
 
 def render(text, entry, *, remove=False, yes=False):
