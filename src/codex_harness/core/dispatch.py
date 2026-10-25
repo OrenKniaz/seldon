@@ -59,6 +59,82 @@ DENIAL_CAPABILITIES = {
 HARNESS_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _notify_steering(bead: dict, memory: Path) -> None:
+    observation = bead.get("steering")
+    if not observation or (
+        observation["state"] == "observed" and observation["summary"]["total"] == 0
+    ):
+        return
+    event = {
+        **observation,
+        "reason": (
+            "Steering review needed; proof outcome unchanged. "
+            "Python heuristics on committed changed files are advisory only; "
+            "inherited or intentional placeholders may need no change. "
+            "No finding is not full-product proof."
+            if observation["state"] == "observed"
+            else "Steering inspection unavailable; proof outcome unchanged. "
+            "Inspect the recorded error; unavailable is not clean or product proof."
+        ),
+    }
+    body = json.dumps(event, sort_keys=True)
+    Mailbox(memory).send_event(
+        body,
+        from_agent="harness-dispatcher",
+        to_agent="planner",
+        subject=f"Steering: {bead['bead']}",
+        body=body,
+        refs=[bead["bead"], *[ref["id"] for ref in _identity_refs(bead)]],
+        kind="replan-trigger",
+    )
+
+
+def _observe_steering(bead: dict, manifest: dict, root: Path, base: str, memory: Path) -> None:
+    from codex_harness.core.steering import steering_report
+
+    observation = {
+        "runId": bead["runId"],
+        "bead": bead["bead"],
+        "planRevision": bead["planRevision"],
+        "specRefs": _identity_refs(bead),
+        "baseCommit": base,
+        "baseTree": None,
+        "candidateCommit": bead["candidate"]["commit"],
+        "candidateTree": bead["candidate"]["tree"],
+        "manifestSha256": hashlib.sha256(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "advisoryOnly": True,
+        "scope": "Committed changed files in the frozen manifest; Python heuristics only. "
+        "Whole-file inherited/intentional stubs can be reported. Not product proof.",
+        "state": "observed",
+        "report": None,
+    }
+    try:
+        observation["baseTree"] = _git(root, "rev-parse", f"{base}^{{tree}}")
+        observation["report"] = steering_report(
+            repo=root,
+            base_commit=base,
+            head_commit=observation["candidateCommit"],
+            manifest=manifest,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError, SyntaxError) as error:
+        observation.update(
+            state="unavailable", error={"type": type(error).__name__, "message": str(error)}
+        )
+    path = Path(bead["evidenceDir"]) / "steering.json"
+    _write_record(path, observation)
+    bead["steering"] = {
+        key: value for key, value in observation.items() if key not in {"report", "error"}
+    }
+    bead["steering"].update(
+        summary=observation["report"]["summary"] if observation["report"] is not None else None,
+        evidencePaths=[str(path)],
+        reportSha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+    _notify_steering(bead, memory)
+
+
 def _notify_failures(record: dict, evidence: Path) -> None:
     """Mail goes to the run memory workspace, alongside cross-provider project memory.
 
@@ -68,6 +144,7 @@ def _notify_failures(record: dict, evidence: Path) -> None:
     """
     events = []
     for bead_id, bead in record["beads"].items():
+        _notify_steering(bead, record["memoryWorkspace"])
         reason = bead["status"]
         if reason not in {
             "integrated validation failed",
@@ -1710,6 +1787,7 @@ def _integrate_bead(
     if not changed:
         record["status"] = "already-satisfied"
         return
+    _observe_steering(record, manifest, validation_root, binding["baseIntegration"], memory)
     if _git(repo, "rev-parse", "HEAD") == binding["baseIntegration"]:
         _git(repo, "merge", "-q", "--ff-only", integration_commit)
     record["lessonsPromoted"] = []

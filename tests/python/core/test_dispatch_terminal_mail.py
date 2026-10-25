@@ -1,5 +1,6 @@
 """Actionable terminal failure must reach planner mail while a sibling is held."""
 
+import hashlib
 import json
 import sys
 import threading
@@ -16,6 +17,7 @@ from codex_harness.core import dispatch
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.provider_launch import ProviderNormalLaunch
 from codex_harness.core.record_io import read_record_json
+from codex_harness.core.status_api import snapshot
 
 
 @pytest.mark.parametrize("failure_kind", ["nonzero", "packet-refusal"])
@@ -138,3 +140,125 @@ def test_terminal_failure_is_mailed_before_independent_sibling_finishes(
     mailbox = Mailbox(terminal["memoryWorkspace"])
     final = [row for row in mailbox.inbox("planner") if row["subject"] == "Replan: A"]
     assert [row["id"] for row in final] == [row["id"] for row in before]
+
+
+@pytest.mark.parametrize("candidate_kind", ["placeholder", "repaired", "unparseable"])
+def test_candidate_steering_reaches_planner_before_real_fast_forward(
+    tmp_path, monkeypatch, candidate_kind
+):
+    # The checker-only tests never cross candidate production, proof, durable
+    # report, mail and public board. Unrelated passing proof can miss an API stub.
+    plan = _tiny_plan(tmp_path)
+    manifest_path = plan / "sample.json"
+    manifest = read_record_json(manifest_path)
+    manifest["beads"].pop("B")
+    manifest["beads"]["A"]["ownedFiles"].append("extra.py")
+    manifest_path.write_text(json.dumps(manifest))
+    (plan / "template/extra.py").write_text("# Source-only extra module\n")
+    source_only_packet_renderer(monkeypatch)
+    context = source_execution_context(tmp_path / "canonical", plan, timeout=60)
+    body = "pass" if candidate_kind == "placeholder" else "return 42"
+    source = f"VALUE = 1\ndef public_api():\n    {body}\n"
+    extra = "def broken(:\n" if candidate_kind == "unparseable" else "# Source-only extra module\n"
+    launch = ProviderNormalLaunch(
+        cli="codex",
+        command=(
+            sys.executable,
+            "-B",
+            "-c",
+            "# SOURCE-ONLY local process fixture\nfrom pathlib import Path\n"
+            f"Path('A.py').write_text({source!r})\nPath('extra.py').write_text({extra!r})\n"
+            'print(\'{"type":"turn.completed","isMocked":true}\',flush=True)\n',
+        ),
+        protections=("SOURCE-ONLY finite local child; no coding provider",),
+    )
+
+    class LocalAdapter:
+        def provider_normal_command(self, **kwargs):
+            return launch
+
+    monkeypatch.setattr(dispatch, "get_adapter", lambda _: LocalAdapter())
+    git = dispatch._git
+    before_merge = []
+
+    def observe_git(repo, *args):
+        if "--ff-only" in args:
+            run_path = next(context["runs"].glob("*/evidence/run.json"))
+            run = read_record_json(run_path)
+            report_path = run_path.parent / "A/steering.json"
+            board = snapshot(workspace=context["directory"].parents[2], runs_root=context["runs"])
+            before_merge.append(
+                dict(
+                    integrationHead=git(repo, "rev-parse", "HEAD"),
+                    candidateCommit=args[-1],
+                    receipt=read_record_json(run_path.parent / "A/integrated.json"),
+                    steering=read_record_json(report_path) if report_path.exists() else None,
+                    mail=Mailbox(run["memoryWorkspace"]).inbox("planner"),
+                    boardMail=board["mail"]["runs"][run["runId"]],
+                )
+            )
+        return git(repo, *args)  # Always execute the original merge, including on RED.
+
+    monkeypatch.setattr(dispatch, "_git", observe_git)
+    result = dispatch.run_plan(context["plan"], work_root=context["runs"], **context["kwargs"])
+    (tmp_path / "steering-evidence.json").write_text(
+        json.dumps(dict(sourceOnly=True, beforeMerge=before_merge, terminal=result), indent=2)
+    )
+    assert len(before_merge) == 1
+    observed = before_merge[0]
+    bead = result["beads"]["A"]
+    assert bead["attempt"]["status"] == "exited" and bead["attempt"]["exitCode"] == 0
+    assert bead["status"] == "requirement-validated"
+    assert observed["receipt"]["validation"]["passed"] is True
+    assert bead["integrated"]["validation"]["passed"] is True
+    assert result["didExecuteRealProvider"] is False and result["isLiveProductProof"] is False
+    assert git(Path(result["repo"]), "rev-parse", "HEAD") == observed["candidateCommit"]
+    report = observed["steering"]
+    assert report is not None, "Passing unrelated proof reached merge without automatic steering"
+    assert report["candidateCommit"] == observed["candidateCommit"]
+    assert report["baseCommit"] == observed["integrationHead"]
+    assert report["baseTree"] == git(
+        Path(result["repo"]), "rev-parse", f"{report['baseCommit']}^{{tree}}"
+    )
+    assert report["candidateTree"] == bead["candidate"]["tree"]
+    assert report["planRevision"] == context["revision"] and report["runId"] == result["runId"]
+    assert report["bead"] == "A" and report["advisoryOnly"] is True
+    messages = [row for row in observed["mail"] if row["subject"] == "Steering: A"]
+    if candidate_kind == "repaired":
+        assert report["state"] == "observed" and report["report"]["summary"]["total"] == 0
+        assert messages == []
+    else:
+        assert len(messages) == 1
+        assert any(row["id"] == messages[0]["id"] for row in observed["boardMail"])
+        event = json.loads(messages[0]["body"])
+        assert event["candidateCommit"] == report["candidateCommit"]
+        report_path = Path(bead["evidenceDir"]) / "steering.json"
+        assert event["reportSha256"] == hashlib.sha256(report_path.read_bytes()).hexdigest()
+        assert event["evidencePaths"] == [str(report_path)]
+        assert event["specRefs"] == dispatch._identity_refs(bead)
+        assert "proof outcome unchanged" in event["reason"]
+        if candidate_kind == "placeholder":
+            assert report["state"] == "observed"
+            finding = next(
+                item for item in report["report"]["findings"] if item["code"] == "stub-left"
+            )
+            assert finding["path"] == "A.py" and finding["line"] == 2 and finding["bead"] == "A"
+        else:
+            assert report["state"] == "unavailable" and report["report"] is None
+            assert report["error"]["type"] == "SyntaxError"
+        mailbox = Mailbox(result["memoryWorkspace"])
+        dispatch._notify_failures(result, Path(result["repo"]).parent / "evidence")
+        if candidate_kind == "placeholder":
+            # Supported same-controller reattachment, not reworking a completed
+            # bead or transferring controller authority. No new provider call.
+            resumed = dispatch.run_plan(
+                context["plan"],
+                work_root=context["runs"],
+                resume_run_dir=Path(result["repo"]).parent,
+                **context["kwargs"],
+            )
+            assert resumed["runId"] == result["runId"]
+            assert resumed["resumeSummary"]["redispatched"] == []
+            assert resumed["beads"]["A"]["steering"] == bead["steering"]
+        final = [row for row in mailbox.inbox("planner") if row["subject"] == "Steering: A"]
+        assert [row["id"] for row in final] == [row["id"] for row in messages]
