@@ -27,6 +27,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core.graph import load_plan, topological_order
+from codex_harness.core.planner_audits import ProspectiveAuditFailure, audit_failure_evidence
 from codex_harness.core.runners import Runner, resolve_runner, validate_proof
 from codex_harness.core.spine import (
     Spine,
@@ -988,6 +989,37 @@ def _failure_provenance(
     )
 
 
+class _ProspectiveWorkspace:
+    """Keep engine and cleanup failures together without suppressing either."""
+
+    def __init__(self, stage, findings, proofs, collection):
+        self.stage, self.findings = stage, findings
+        self.proofs, self.collection = proofs, collection
+
+    def __enter__(self):
+        self.temp = TemporaryDirectory(prefix="harness-prospective-")
+        return self.temp.name
+
+    def __exit__(self, kind, body_error, tb):
+        if body_error is not None and not isinstance(body_error, Exception):
+            return self.temp.__exit__(kind, body_error, tb)
+        if body_error is None:
+            self.stage["value"] = "body-complete"
+        evidence = audit_failure_evidence(
+            self.stage["value"], self.findings, self.proofs, self.collection
+        )
+        cleanup_error = None
+        try:
+            self.temp.cleanup()
+        except Exception as error:
+            cleanup_error = error
+        if body_error is not None or cleanup_error is not None:
+            raise ProspectiveAuditFailure(body_error, cleanup_error, evidence) from (
+                cleanup_error or body_error
+            )
+        return False
+
+
 def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spine) -> dict:
     """Check planned proofs on disposable stubs, without claiming satisfiability."""
     findings, proofs, collection = [], [], []
@@ -998,7 +1030,8 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
         )
 
     runner = resolve_runner(manifest)
-    with TemporaryDirectory(prefix="harness-prospective-") as temp:
+    stage = {"value": "preparation"}
+    with _ProspectiveWorkspace(stage, findings, proofs, collection) as temp:
         root = Path(temp)
         path = root / "manifest.json"
         path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -1021,6 +1054,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
         )
         paths = runner.proof_paths(repo)
         trees = {}
+        stage["value"] = "collection"
         if runner.name == "command":
             for field, value in (
                 ("listArgv", runner.list_argv),
@@ -1224,6 +1258,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                 )
             )
         if collection_ready:
+            stage["value"] = "proof"
             for bead_id in topological_order(plan):
                 proof = _proof(
                     repo,
@@ -1253,6 +1288,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                         proof["module"],
                         provenance["reason"] + "\n" + proof["output"],
                     )
+        stage["value"] = "traceability"
         for requirement in spine.ids("requirement"):
             linked = [
                 spine.node(key) for key in spine.ids("test") if requirement in spine.ancestors(key)

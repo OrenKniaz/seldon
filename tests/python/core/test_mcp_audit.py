@@ -521,6 +521,90 @@ def test_pre_result_engine_exception_records_dispatch_without_proof(prospective)
         server.close()
 
 
+@pytest.mark.parametrize("fault", ["body", "cleanup", "both"])
+def test_engine_failure_diagnostics_survive_public_status_and_reopen(
+    prospective, monkeypatch, fault
+):
+    """Protect internal-failure evidence without credit; existing exceptions lose proof/stage data.
+
+    Controlled SOURCE-ONLY faults follow real engine collection and red proof execution.
+    They test error retention, not the live Windows lock cause or process quiescence.
+    """
+    from codex_harness.core import test_audit
+
+    real_directory = test_audit.TemporaryDirectory
+    real_order = test_audit.topological_order
+
+    class CleanupFault(real_directory):
+        def cleanup(self):
+            super().cleanup()  # Actual owned fixture cleanup still runs.
+            if fault in {"cleanup", "both"}:
+                raise PermissionError(32, "Controlled cleanup fault", self.name)
+
+    def fail_after_actual_proofs(plan):
+        yield from real_order(plan)
+        raise RuntimeError("Controlled body fault " + "bounded-output-" * 4096)
+
+    server, revision = started(prospective)
+    workspace = server.workspace
+    try:
+        admission = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
+        with monkeypatch.context() as patch:
+            patch.setattr(test_audit, "TemporaryDirectory", CleanupFault)
+            if fault in {"body", "both"}:
+                patch.setattr(test_audit, "topological_order", fail_after_actual_proofs)
+            server.audits.dispatch_after_flush(server.store)
+            server.audits.thread.join(timeout=30)
+            assert not server.audits.thread.is_alive()
+        server.audits.drain(server.store)
+        response = invoke(server, "harness_audit_status", id=admission["attemptId"])
+        failed = response["structuredContent"]
+        assert response["isError"] and failed["state"] == "failed"
+        assert failed["didRunValidation"] and not failed["completedAllRequiredSteps"]
+        assert failed["result"] is None and failed["auditId"] is None
+        assert not failed["proofCreditGranted"]
+        error = failed["error"]
+        assert error.startswith("ProspectiveAuditFailure: ")
+        assert len(error.encode("utf-8")) <= 16384
+        detail = json.loads(error.split(": ", 1)[1])
+        assert detail["schema"] == "seldon/prospective-failure-v1"
+        assert detail["stage"] == ("proof" if fault in {"body", "both"} else "body-complete")
+        assert detail["collection"]["count"] >= 1
+        assert all(item["passed"] for item in detail["collection"]["items"])
+        assert detail["proofs"]["count"] == 1
+        assert detail["proofs"]["items"][0]["failureClassification"] == "meaningful-red"
+        if fault in {"body", "both"}:
+            assert detail["bodyError"]["messageTruncated"] is True
+        for key, expected in (
+            ("bodyError", "RuntimeError" if fault in {"body", "both"} else None),
+            ("cleanupError", "PermissionError" if fault in {"cleanup", "both"} else None),
+        ):
+            if expected is None:
+                assert detail[key] is None
+            else:
+                assert detail[key]["kind"] == expected
+                assert (
+                    detail[key]["message"].startswith("Controlled")
+                    or "Controlled" in detail[key]["message"]
+                )
+                frames = detail[key]["frames"]
+                assert 1 <= len(frames) <= 6
+                assert all(set(frame) == {"file", "function", "line"} for frame in frames)
+                assert all(
+                    frame["file"] in {"test_audit.py", "runners.py", "planner_audits.py"}
+                    for frame in frames
+                )
+    finally:
+        server.close()
+    reopened = PlannerServer(workspace)
+    try:
+        retained = invoke(reopened, "harness_audit_status", id=admission["attemptId"])
+        assert retained["isError"] and retained["structuredContent"] == failed
+        assert reopened.store.passing_audit(revision) is None
+    finally:
+        reopened.close()
+
+
 def test_engine_upgrade_admits_new_attempt_after_terminal_but_preserves_busy_hold(
     prospective, monkeypatch
 ):

@@ -8,6 +8,7 @@ import queue
 import shutil
 import sys
 import threading
+import traceback
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import CodeType, FunctionType
@@ -16,6 +17,99 @@ from uuid import uuid4
 from codex_harness.core.spine import compile_manifest
 
 CONTRACT = "captured-input-v1"
+
+
+def audit_failure_evidence(stage, findings, proofs, collection):
+    """Snapshot bounded, allowlisted engine evidence before disposable cleanup."""
+    return {
+        "stage": stage,
+        "collection": {
+            "count": len(collection),
+            "items": [
+                {
+                    "module": item["module"][:96],
+                    "passed": item["passed"],
+                    "output": item.get("output", "")[:256],
+                    "stageEvidence": {
+                        "status": item.get("stageEvidence", {}).get("status"),
+                        "output": item.get("stageEvidence", {}).get("output", "")[:128],
+                    },
+                }
+                for item in collection[:3]
+            ],
+            "truncated": len(collection) > 3,
+        },
+        "proofs": {
+            "count": len(proofs),
+            "items": [
+                {
+                    "bead": item["bead"][:96],
+                    "module": item["module"][:96],
+                    "passed": item["passed"],
+                    "exitCode": item["exitCode"],
+                    "output": item.get("output", "")[:256],
+                    "failureClassification": item.get("failureProvenance", {}).get(
+                        "classification"
+                    ),
+                }
+                for item in proofs[:2]
+            ],
+            "truncated": len(proofs) > 2,
+        },
+        "findings": {
+            "count": len(findings),
+            "items": [
+                {"code": item["code"][:96], "output": item.get("output", "")[:256]}
+                for item in findings[:2]
+            ],
+            "truncated": len(findings) > 2,
+        },
+    }
+
+
+class ProspectiveAuditFailure(Exception):
+    """Diagnostic error text, never a partial audit result or proof-credit envelope."""
+
+    def __init__(self, body_error, cleanup_error, evidence):
+        def detail(error):
+            if error is None:
+                return None
+            frames = [
+                {
+                    "file": Path(frame.f_code.co_filename).name,
+                    "function": frame.f_code.co_name[:64],
+                    "line": line,
+                }
+                for frame, line in traceback.walk_tb(error.__traceback__)
+                if Path(frame.f_code.co_filename).parent == Path(__file__).parent
+                and Path(frame.f_code.co_filename).name
+                in {"test_audit.py", "runners.py", "planner_audits.py"}
+            ]
+            message = str(error)
+            return {
+                "kind": type(error).__name__[:96],
+                "message": message[:256],
+                "messageTruncated": len(message) > 256,
+                "frames": frames[-6:],
+                "framesTruncated": len(frames) > 6,
+            }
+
+        payload = {
+            "schema": "seldon/prospective-failure-v1",
+            **evidence,
+            "bodyError": detail(body_error),
+            "cleanupError": detail(cleanup_error),
+        }
+        encoded = json.dumps(payload, ensure_ascii=True)
+        if len(encoded) > 16000:
+            payload["evidenceTruncated"] = True
+            for group in ("collection", "proofs", "findings"):
+                for item in payload[group]["items"]:
+                    item.pop("output", None)
+                    if "stageEvidence" in item:
+                        item["stageEvidence"].pop("output", None)
+            encoded = json.dumps(payload, ensure_ascii=True)
+        super().__init__(encoded)
 
 
 def engine_identity():
