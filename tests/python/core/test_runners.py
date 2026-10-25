@@ -6,11 +6,13 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
+from tests.python.core import test_test_audit
 
-from codex_harness.core import dispatch, runners
+from codex_harness.core import audit_process, dispatch, runners
 from codex_harness.core.dispatch import STATUS_MOCK_ONLY, _claim_inputs, _commit, _git, run_plan
 from codex_harness.core.graph import PlanError, load_plan
 from codex_harness.core.graph import test_dir as protected_test_dir
@@ -27,6 +29,129 @@ from codex_harness.core.worker_packet import build_packet
 TIPSPLIT = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
 VARIATION = Path(__file__).parent / "fixtures/handoff_variation"
 COMMAND = Path(__file__).parent / "fixtures/command_runner"
+prospective = test_test_audit.prospective
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+def test_windows_job_contains_canonical_proof_descendant(prospective):
+    """Catch descendants surviving proof return; prior runner checks wait only the direct child."""
+    root = prospective["template"]
+    pulse, done = root / "pulse", root / "done"
+    child = (
+        "import sys,time;from pathlib import Path;p=Path(sys.argv[1]);end=time.monotonic()+2\n"
+        "while time.monotonic()<end:\n"
+        " with p.open('ab') as f:f.write(b'x')\n"
+        " time.sleep(.03)\n"
+        "Path(sys.argv[2]).write_text('finished')\n"
+    )
+    (root / "app.py").write_text("def value(): return 42\n")
+    (root / "tests/test_app.py").write_text(
+        "import subprocess,sys,time,unittest\nfrom pathlib import Path\nfrom app import value\n"
+        f"PULSE=Path({str(pulse)!r})\nclass Proof(unittest.TestCase):\n"
+        " def test_value(self):\n"
+        f"  subprocess.Popen([sys.executable,'-I','-S','-c',{child!r},"
+        f"{str(pulse)!r},{str(done)!r}],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "  end=time.monotonic()+3\n"
+        "  while not PULSE.exists() and time.monotonic()<end:time.sleep(.01)\n"
+        "  self.assertTrue(PULSE.exists())\n  self.assertEqual(value(),42)\n"
+    )
+    proof = None
+    try:
+        manifest = compile_manifest(prospective["spine"], root)
+        proof = runners.validate_proof(root, manifest, "test_app.py", owned_files=("app.py",))
+        assert proof["passed"], proof
+        before = pulse.stat().st_size
+        time.sleep(0.15)
+        assert pulse.stat().st_size == before, "Descendant still executing after proof return"
+        control = proof["processControl"]
+        assert control["membershipVerifiedBeforePayload"]
+        assert control["quiescenceVerified"] and control["activeProcessesAfterTeardown"] == 0
+    finally:
+        if proof is None or not proof.get("processControl", {}).get("quiescenceVerified"):
+            deadline = time.monotonic() + 5
+            while not done.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)  # Only a finite owned fixture; never kill by PID.
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+def test_windows_job_preserves_payload_io_exit_and_drains_inherited_pipe(tmp_path):
+    """Catch wrapper substitutions and held-stdout hangs; canonical proof detaches child pipes."""
+    folder = tmp_path / "space folder"
+    folder.mkdir()
+    source = folder / "stdin.txt"
+    source.write_bytes(b"original-stdin\n")
+    argument = 'a b"c'
+    script = (
+        "import json,os,subprocess,sys\n"
+        "print(json.dumps(dict(stdin=sys.stdin.read(),argument=sys.argv[1],cwd=os.getcwd(),"
+        "fixtureEnv=os.environ['AUDIT_FIXTURE'],executable=sys.executable)),flush=True)\n"
+        "sys.stderr.write('original-stderr\\n');sys.stderr.flush()\n"
+        "subprocess.Popen([sys.executable,'-I','-S','-c','import time;time.sleep(5)'],"
+        "stdin=subprocess.DEVNULL)\n"
+        "sys.exit(23)\n"
+    )
+    command = [sys.executable, "-c", script, argument]
+    started_at = time.monotonic()
+    with source.open("rb") as stdin:
+        result = audit_process.run_audit_process(
+            command,
+            cwd=folder,
+            env={**os.environ, "AUDIT_FIXTURE": "payload-only"},
+            stdin=stdin,
+            timeout=3,
+        )
+    assert time.monotonic() - started_at < 3
+    assert result.args == command and result.returncode == 23
+    observed = json.loads(result.stdout)
+    assert observed["stdin"] == "original-stdin\n" and observed["argument"] == argument
+    assert Path(observed["cwd"]) == folder and observed["fixtureEnv"] == "payload-only"
+    assert Path(observed["executable"]) == Path(sys.executable)
+    assert result.stderr == "original-stderr\n"
+    assert result.audit_control["quiescenceVerified"]
+    assert result.audit_control["activeProcessesAfterTeardown"] == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+def test_windows_job_timeout_drains_descendant_held_stdout(tmp_path):
+    """Catch timeout leaving pipes/descendants alive; completion does not exercise this path."""
+    script = (
+        "import subprocess,sys,time\nprint('payload-ready',flush=True)\n"
+        "subprocess.Popen([sys.executable,'-I','-S','-c','import time;time.sleep(5)'])\n"
+        "time.sleep(5)\n"
+    )
+    started_at = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
+        audit_process.run_audit_process([sys.executable, "-c", script], cwd=tmp_path, timeout=1)
+    assert time.monotonic() - started_at < 4
+    assert "payload-ready" in raised.value.stdout
+    assert raised.value.audit_control["quiescenceVerified"]
+    assert raised.value.audit_control["activeProcessesAfterTeardown"] == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+def test_windows_job_assignment_refusal_never_releases_payload(tmp_path, monkeypatch):
+    """Catch fallback launch/kill after refused assignment; membership success misses refusal."""
+    marker = tmp_path / "must-not-run"
+
+    def refused(_job, _process):
+        raise PermissionError(5, "Controlled SOURCE-ONLY assignment refusal")
+
+    def forbidden_teardown(*args):
+        pytest.fail("Unassigned bootstrap must use gate EOF, not a termination fallback")
+
+    monkeypatch.setattr(audit_process._WindowsJob, "assign", refused)
+    monkeypatch.setattr(audit_process._WindowsJob, "finish", forbidden_teardown)
+    with pytest.raises(PermissionError, match="Controlled") as raised:
+        audit_process.run_audit_process(
+            [sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"],
+            cwd=tmp_path,
+            timeout=3,
+        )
+    assert not marker.exists()
+    control = raised.value.audit_control
+    assert not control["payloadReleased"] and not control["membershipVerifiedBeforePayload"]
+    assert not control["quiescenceVerified"] and not control.get("jobHandleRetained")
 
 
 def _command(**fields):

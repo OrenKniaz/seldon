@@ -165,7 +165,7 @@ class ProspectiveAuditFailure(Exception):
 
 def engine_identity():
     """Fingerprint loaded audit/runner code and constants, not mutable source files."""
-    from codex_harness.core import graph, runners, spine, test_audit
+    from codex_harness.core import audit_process, graph, runners, spine, test_audit
 
     def structural(value):
         if isinstance(value, CodeType):
@@ -205,7 +205,7 @@ def engine_identity():
         ]
 
     records = {}
-    for module in (test_audit, runners, graph, spine):
+    for module in (test_audit, runners, graph, spine, audit_process):
         for name, value in sorted(vars(module).items()):
             key = module.__name__ + "." + name
             if isinstance(value, FunctionType):

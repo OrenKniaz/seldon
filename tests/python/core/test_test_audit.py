@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from tests.python.core.planning_support import source_only_confirmation, source_only_publication
 
-from codex_harness.core import dispatch
+from codex_harness.core import dispatch, test_audit
 from codex_harness.core.acceptance import derive_scenarios, run_scenarios
 from codex_harness.core.dispatch import STATUS_MOCK_ONLY, _git, run_plan
 from codex_harness.core.spine import Spine, compile_manifest, impact, load_spine, save_spine
@@ -604,14 +604,14 @@ def test_prospective_collection_failure_never_becomes_red_proof(prospective, mon
     root = prospective["template"]
     before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
     if case == "timeout":
-        original_run = subprocess.run
+        original_run = test_audit.run_audit_process
 
         def bounded_run(*args, **kwargs):
             kwargs["timeout"] = min(kwargs.get("timeout", 120), 1)
             return original_run(*args, **kwargs)
 
         # Exercise real discovery and OS timeout; no fabricated subprocess result.
-        monkeypatch.setattr(subprocess, "run", bounded_run)
+        monkeypatch.setattr(test_audit, "run_audit_process", bounded_run)
     result = audit_prospective_tests(**prospective)
     assert not result["ok"]
     assert "prospective-not-collectable" in {f["code"] for f in result["findings"]}
@@ -667,7 +667,7 @@ def test_collection_stage_file_survives_suppressed_stdout_and_real_timeout(
         + proof.read_text()
     )
     before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
-    original_run = subprocess.run
+    original_run = test_audit.run_audit_process
 
     def suppress_stdout(*args, **kwargs):
         command = list(args[0])
@@ -677,7 +677,7 @@ def test_collection_stage_file_survives_suppressed_stdout_and_real_timeout(
         kwargs["timeout"] = min(kwargs.get("timeout", 120), 1)
         return original_run(command, *args[1:], **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", suppress_stdout)
+    monkeypatch.setattr(test_audit, "run_audit_process", suppress_stdout)
     result = audit_prospective_tests(**prospective)
     assert not result["ok"] and not result["redBaseline"]
     paths = []

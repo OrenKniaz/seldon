@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.graph import Plan, PlanError
 from codex_harness.core.graph import test_dir as unittest_test_dir
 from codex_harness.core.planner_audits import AuditTemporaryDirectory as TemporaryDirectory
@@ -799,7 +800,7 @@ def observe_unittest(repo: Path, runner: Runner, module: str, owned: tuple[str, 
             json.dumps(owned),
             str(bootstrap),
         ]
-        result = subprocess.run(
+        result = run_audit_process(
             command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120
         )
         output = result.stdout + result.stderr
@@ -821,6 +822,8 @@ def observe_unittest(repo: Path, runner: Runner, module: str, owned: tuple[str, 
             output=output,
             observations=observations,
         )
+        if control := getattr(result, "audit_control", None):
+            observed["processControl"] = control
     if workspace.cleanup_warning:
         observed["cleanupWarning"] = [workspace.cleanup_warning]
     return observed
@@ -1133,7 +1136,7 @@ def validate_proof(
                 "nonSkippedTestsRun": observed,
                 "passed": bool(result["passed"] and valid and observed > 0 and successful > 0),
             }
-        result = subprocess.run(
+        result = run_audit_process(
             command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120
         )
         return {
@@ -1147,6 +1150,9 @@ def validate_proof(
             "successfulTests": None,
             "testsRun": None,
             "nonSkippedTestsRun": None,
+            **(
+                {"processControl": result.audit_control} if hasattr(result, "audit_control") else {}
+            ),
         }
     except subprocess.TimeoutExpired as error:
         cleanup_warning = getattr(error, "audit_cleanup_warning", None)
@@ -1165,6 +1171,7 @@ def validate_proof(
             "successfulTests": None,
             "testsRun": None,
             "nonSkippedTestsRun": 0,
+            **({"processControl": error.audit_control} if hasattr(error, "audit_control") else {}),
             **({"cleanupWarning": [cleanup_warning]} if cleanup_warning else {}),
         }
     except (OSError, ValueError) as error:
@@ -1180,5 +1187,6 @@ def validate_proof(
             "successfulTests": None,
             "testsRun": None,
             "nonSkippedTestsRun": 0,
+            **({"processControl": error.audit_control} if hasattr(error, "audit_control") else {}),
             **({"cleanupWarning": [cleanup_warning]} if cleanup_warning else {}),
         }

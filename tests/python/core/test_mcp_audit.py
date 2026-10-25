@@ -23,6 +23,49 @@ from codex_harness.core.plan_store import PHASES, open_plan_store_readonly
 prospective = test_test_audit.prospective
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+def test_public_audit_persists_observed_job_quiescence(prospective):
+    """Catch omitted collection/proof containment; helper-only tests miss the durable consumer."""
+    root = prospective["template"]
+    pulse = root.parent / "contained-pulse"
+    child = (
+        "import sys,time;from pathlib import Path;p=Path(sys.argv[1]);end=time.monotonic()+2\n"
+        "while time.monotonic()<end:\n"
+        " with p.open('ab') as f:f.write(b'x')\n"
+        " time.sleep(.03)\n"
+    )
+    (root / "tests/test_app.py").write_text(
+        "import subprocess,sys,time,unittest\nfrom pathlib import Path\nfrom app import value\n"
+        f"PULSE=Path({str(pulse)!r})\nbefore=PULSE.stat().st_size if PULSE.exists() else 0\n"
+        f"subprocess.Popen([sys.executable,'-I','-S','-c',{child!r},{str(pulse)!r}],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "end=time.monotonic()+3\n"
+        "while (not PULSE.exists() or PULSE.stat().st_size<=before) and time.monotonic()<end:"
+        "time.sleep(.01)\n"
+        "class Proof(unittest.TestCase):\n def test_value(self):\n"
+        "  self.assertEqual(value(),42)\n"
+    )
+    server, revision = started(prospective)
+    workspace = server.workspace
+    try:
+        result = finished_audit(server, mode="prospective")["structuredContent"]
+        assert result["ok"] and result["manifestRevision"] == revision
+        controls = [item["processControl"] for item in result["collection"]]
+        controls.append(result["redBaseline"][0]["processControl"])
+        assert all(item["membershipVerifiedBeforePayload"] for item in controls)
+        assert all(
+            item["quiescenceVerified"] and item["activeProcessesAfterTeardown"] == 0
+            for item in controls
+        )
+        count = pulse.stat().st_size
+        time.sleep(0.15)
+        assert pulse.stat().st_size == count
+    finally:
+        server.close()
+    with open_plan_store_readonly(workspace) as saved:
+        assert saved.passing_audit(revision)["collection"] == result["collection"]
+
+
 def test_stdio_audit_returns_durable_attempt_before_real_engine_finishes(prospective):
     """Protect prompt admission when a real protected-module import stalls.
 

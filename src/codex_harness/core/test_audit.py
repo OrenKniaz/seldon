@@ -26,6 +26,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.graph import load_plan, topological_order
 from codex_harness.core.planner_audits import (
     AuditTemporaryDirectory,
@@ -136,11 +137,13 @@ def _collect_command(repo: Path, runner: Runner, modules: list[str]) -> list[dic
     per_proof = "{proof}" in runner.list_argv
     for module in modules if per_proof else modules[:1]:
         command = []
+        control = None
         try:
             command = runner.list_argv_for(module)
-            result = subprocess.run(
+            result = run_audit_process(
                 command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120
             )
+            control = getattr(result, "audit_control", None)
             output = result.stdout + result.stderr
             listed = _listed_proofs(result.stdout, runner)
             expected = [module] if per_proof else modules
@@ -154,7 +157,16 @@ def _collect_command(repo: Path, runner: Runner, modules: list[str]) -> list[dic
                 output += "\nProof files absent from listArgv stdout: " + ", ".join(missing)
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
             output, passed = str(error), False
-        collection.append(dict(module=module, command=command, passed=bool(passed), output=output))
+            control = getattr(error, "audit_control", None)
+        collection.append(
+            dict(
+                module=module,
+                command=command,
+                passed=bool(passed),
+                output=output,
+                processControl=control,
+            )
+        )
     return collection
 
 
@@ -1192,15 +1204,18 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                 command = [sys.executable, "-B", "-c", child_script, runner.test_dir, selector]
                 collection_started = time.monotonic()
                 captured_stdout = captured_stderr = None
+                control = None
                 try:
-                    result = subprocess.run(
+                    result = run_audit_process(
                         command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120
                     )
+                    control = getattr(result, "audit_control", None)
                     output = result.stdout + result.stderr
                     captured_stdout, captured_stderr = result.stdout, result.stderr
                     passed = runner.passed(result.returncode)
                 except (OSError, subprocess.TimeoutExpired) as error:
                     output, passed = str(error), False
+                    control = getattr(error, "audit_control", None)
                     if isinstance(error, subprocess.TimeoutExpired):
                         captured_stdout, captured_stderr = error.stdout, error.stderr
                         for partial in (error.stdout, error.stderr):
@@ -1229,6 +1244,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                         command=command,
                         cwd=str(repo / runner.cwd),
                         stage="unittest-discovery",
+                        processControl=control,
                         serverExecution=server_execution,
                         stageEvidence=stage_evidence,
                         capturedOutput={
