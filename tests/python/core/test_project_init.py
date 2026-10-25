@@ -181,7 +181,11 @@ def test_permission_optout_preserves_stricter_rules_and_remove_keeps_user_policy
     project_init.run_init(options(project, remove=True, host=None))
     assert claude.read_bytes() == policy
     remaining = tomllib.loads(codex.read_text())["mcp_servers"]["seldon"]
-    assert remaining == {"default_tools_approval_mode": "prompt", "tools": config["tools"]}
+    assert remaining == {
+        "default_tools_approval_mode": "prompt",
+        "tools": config["tools"],
+        "tool_timeout_sec": 900,
+    }
 
 
 def test_default_approve_requires_an_affirmative_interactive_answer(project, monkeypatch):
@@ -271,7 +275,10 @@ def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(proje
     assert not (project / "SELDON.md").exists()
     assert (project / ".codex/config.toml").read_bytes().startswith(original_toml_bytes)
     remaining = tomllib.loads((project / ".codex/config.toml").read_text())
-    assert remaining["mcp_servers"]["seldon"] == {"default_tools_approval_mode": "prompt"}
+    assert remaining["mcp_servers"]["seldon"] == {
+        "default_tools_approval_mode": "prompt",
+        "tool_timeout_sec": 900,
+    }
     assert json.loads((project / ".mcp.json").read_text()) == original_json
     assert (project / ".gitignore").read_bytes() == original_ignore_bytes
 
@@ -589,5 +596,6 @@ def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
         "default_tools_approval_mode": "approve",
         "enabled_tools": ["harness_plan_status"],
         "disabled_tools": ["harness_publish"],
+        "tool_timeout_sec": 900,
     }
     assert (product / ".codex-harness/plan.sqlite3").exists()
