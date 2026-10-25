@@ -600,7 +600,8 @@ def test_engine_failure_diagnostics_survive_public_status_and_reopen(
     try:
         retained = invoke(reopened, "harness_audit_status", id=admission["attemptId"])
         assert retained["isError"] and retained["structuredContent"] == failed
-        assert reopened.store.passing_audit(revision) is None
+        with open_plan_store_readonly(workspace) as saved:
+            assert saved.passing_audit(revision) is None
     finally:
         reopened.close()
 
