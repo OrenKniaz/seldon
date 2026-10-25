@@ -632,13 +632,16 @@ def assert_failed_diagnostics(response, failed, fault):
             )
 
 
-@pytest.mark.parametrize("boundary", ["captured", "captured-body-error", "observation"])
+@pytest.mark.parametrize(
+    "boundary", ["captured", "captured-body-error", "observation", "observation-body-error"]
+)
 def test_other_cleanup_boundaries_preserve_public_audit_receipts(
     prospective, monkeypatch, boundary
 ):
     """Catch lost async queue/proof results; the prospective-directory test misses these owners.
 
     Real collection/proofs run; only cleanup of new owned fixtures is fault-injected.
+    The nested case catches earlier proof warnings lost on a later engine failure.
     """
     from codex_harness.core import planner_audits, runners, test_audit
 
@@ -664,7 +667,7 @@ def test_other_cleanup_boundaries_preserve_public_audit_receipts(
     try:
         with monkeypatch.context() as patch:
             patch.setattr(module, "TemporaryDirectory", CleanupFault)
-            if boundary == "captured-body-error":
+            if boundary.endswith("body-error"):
                 patch.setattr(test_audit, "topological_order", fail_after_proofs)
             admission = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
             server.audits.dispatch_after_flush(server.store)
@@ -673,12 +676,21 @@ def test_other_cleanup_boundaries_preserve_public_audit_receipts(
         server.audits.drain(server.store)
         reply = invoke(server, "harness_audit_status", id=admission["attemptId"])
         receipt = reply["structuredContent"]
-        if boundary == "captured-body-error":
+        if boundary.endswith("body-error"):
             assert receipt["state"] == "failed" and receipt["result"] is None
             assert receipt["auditId"] is None and not receipt["proofCreditGranted"]
             detail = json.loads(receipt["error"].split(": ", 1)[1])
+            assert len(receipt["error"].encode("utf-8")) <= 16384
             assert detail["bodyError"]["kind"] == "RuntimeError"
-            assert detail["inputCleanupWarning"]["error"]["kind"] == "PermissionError"
+            if boundary == "captured-body-error":
+                assert detail["inputCleanupWarning"]["error"]["kind"] == "PermissionError"
+            else:
+                warnings = detail["cleanupWarnings"]
+                assert warnings["count"] == 1 and not warnings["truncated"]
+                warning = warnings["items"][0]
+                assert warning["error"]["kind"] == "PermissionError"
+                assert warning["leftoverPath"] == owned[0].name
+                assert Path(warning["leftoverPath"]).is_dir()
         else:
             assert not reply["isError"] and receipt["state"] == "completed"
             assert receipt["result"]["ok"] and receipt["proofCreditGranted"]
@@ -692,7 +704,8 @@ def test_other_cleanup_boundaries_preserve_public_audit_receipts(
             base.cleanup(directory)
     with open_plan_store_readonly(workspace) as saved:
         assert saved.audit_attempt(admission["attemptId"])["result"] == receipt["result"]
-        assert (saved.passing_audit(revision) is not None) is (boundary != "captured-body-error")
+        assert saved.audit_attempt(admission["attemptId"])["error"] == receipt["error"]
+        assert (saved.passing_audit(revision) is not None) is (not boundary.endswith("body-error"))
 
 
 def test_engine_upgrade_admits_new_attempt_after_terminal_but_preserves_busy_hold(

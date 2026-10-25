@@ -1014,6 +1014,12 @@ class _ProspectiveWorkspace:
         evidence = audit_failure_evidence(
             self.stage["value"], self.findings, self.proofs, self.collection
         )
+        if self.cleanup_warnings:
+            evidence["cleanupWarnings"] = {
+                "count": len(self.cleanup_warnings),
+                "items": self.cleanup_warnings[:3],
+                "truncated": len(self.cleanup_warnings) > 3,
+            }
         warning = guarded_cleanup(self.temp)
         if warning:
             self.cleanup_warnings.append(warning)
