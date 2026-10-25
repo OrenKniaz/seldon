@@ -142,7 +142,18 @@ def test_terminal_failure_is_mailed_before_independent_sibling_finishes(
     assert [row["id"] for row in final] == [row["id"] for row in before]
 
 
-@pytest.mark.parametrize("candidate_kind", ["placeholder", "repaired", "unparseable"])
+@pytest.mark.parametrize(
+    "candidate_kind",
+    [
+        "placeholder",
+        "repaired",
+        "unparseable",
+        "report-write",
+        "report-read",
+        "mail",
+        "uncertain-mail",
+    ],
+)
 def test_candidate_steering_reaches_planner_before_real_fast_forward(
     tmp_path, monkeypatch, candidate_kind
 ):
@@ -151,13 +162,15 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
     plan = _tiny_plan(tmp_path)
     manifest_path = plan / "sample.json"
     manifest = read_record_json(manifest_path)
-    manifest["beads"].pop("B")
+    if candidate_kind != "mail":
+        manifest["beads"].pop("B")
     manifest["beads"]["A"]["ownedFiles"].append("extra.py")
     manifest_path.write_text(json.dumps(manifest))
     (plan / "template/extra.py").write_text("# Source-only extra module\n")
     source_only_packet_renderer(monkeypatch)
     context = source_execution_context(tmp_path / "canonical", plan, timeout=60)
-    body = "pass" if candidate_kind == "placeholder" else "return 42"
+    faults = {"report-write", "report-read", "mail", "uncertain-mail"}
+    body = "pass" if candidate_kind == "placeholder" or candidate_kind in faults else "return 42"
     source = f"VALUE = 1\ndef public_api():\n    {body}\n"
     extra = "def broken(:\n" if candidate_kind == "unparseable" else "# Source-only extra module\n"
     launch = ProviderNormalLaunch(
@@ -175,9 +188,56 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
 
     class LocalAdapter:
         def provider_normal_command(self, **kwargs):
+            if "implement bead B." in kwargs["prompt"]:
+                return ProviderNormalLaunch(
+                    cli="codex",
+                    command=(
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        "# SOURCE-ONLY local process fixture\nfrom pathlib import Path\n"
+                        f"release=Path({str(tmp_path / 'release-B')!r})\n"
+                        "import time,sys\ndeadline=time.monotonic()+20\n"
+                        "while not release.exists() and time.monotonic()<deadline:\n"
+                        "    time.sleep(.02)\n"
+                        'print(\'{"type":"turn.completed","isMocked":true}\',flush=True)\n'
+                        "sys.exit(7)\n",
+                    ),
+                    protections=("SOURCE-ONLY finite sibling failure; no coding provider",),
+                )
             return launch
 
     monkeypatch.setattr(dispatch, "get_adapter", lambda _: LocalAdapter())
+    write_record, read_bytes, send_event = (
+        dispatch._write_record,
+        Path.read_bytes,
+        Mailbox.send_event,
+    )
+    fault_active, mail_attempts = [True], []
+
+    def write(path, record):
+        if candidate_kind == "report-write" and Path(path).name == "steering.json":
+            raise PermissionError("Controlled advisory report write refusal")
+        return write_record(path, record)
+
+    def read(path):
+        if candidate_kind == "report-read" and path.name == "steering.json":
+            raise PermissionError("Controlled advisory digest read refusal")
+        return read_bytes(path)
+
+    def send(mailbox, key, **message):
+        if message["subject"] == "Steering: A":
+            mail_attempts.append(key)
+            if candidate_kind in {"mail", "uncertain-mail"} and fault_active[0]:
+                (tmp_path / "release-B").write_text("released by advisory failure")
+                if candidate_kind == "uncertain-mail":
+                    send_event(mailbox, key, **message)  # Real commit, then lost acknowledgment.
+                raise PermissionError("Controlled steering-only mail refusal")
+        return send_event(mailbox, key, **message)
+
+    monkeypatch.setattr(dispatch, "_write_record", write)
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr(Mailbox, "send_event", send)
     git = dispatch._git
     before_merge = []
 
@@ -200,7 +260,10 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
         return git(repo, *args)  # Always execute the original merge, including on RED.
 
     monkeypatch.setattr(dispatch, "_git", observe_git)
-    result = dispatch.run_plan(context["plan"], work_root=context["runs"], **context["kwargs"])
+    try:
+        result = dispatch.run_plan(context["plan"], work_root=context["runs"], **context["kwargs"])
+    finally:
+        (tmp_path / "release-B").write_text("released in finally")
     (tmp_path / "steering-evidence.json").write_text(
         json.dumps(dict(sourceOnly=True, beforeMerge=before_merge, terminal=result), indent=2)
     )
@@ -213,6 +276,38 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
     assert bead["integrated"]["validation"]["passed"] is True
     assert result["didExecuteRealProvider"] is False and result["isLiveProductProof"] is False
     assert git(Path(result["repo"]), "rev-parse", "HEAD") == observed["candidateCommit"]
+    if candidate_kind in faults:
+        saved = read_record_json(Path(result["repo"]).parent / "evidence/run.json")
+        observation = saved["beads"]["A"]["steering"]
+        assert observation["candidateCommit"] == observed["candidateCommit"]
+        assert observation["state"] == (
+            "unavailable" if candidate_kind.startswith("report-") else "observed"
+        )
+        mailbox = Mailbox(result["memoryWorkspace"])
+        if candidate_kind.startswith("report-"):
+            assert observation["error"]["type"] == "PermissionError"
+            assert observation["summary"] is None and "reportSha256" not in observation
+            assert observation["evidencePaths"] == []
+        else:
+            assert observation["delivery"]["state"] == "unavailable"
+            assert observation["delivery"]["error"]["type"] == "PermissionError"
+        if candidate_kind == "mail":
+            assert result["beads"]["B"]["status"] == "provider exited nonzero (7)"
+            assert any(row["subject"] == "Replan: B" for row in mailbox.inbox("planner"))
+        else:
+            assert not result["status"].startswith("plan-failed:")
+        fault_active[0] = False
+        dispatch._notify_failures(result, Path(result["repo"]).parent / "evidence")
+        messages = [row for row in mailbox.inbox("planner") if row["subject"] == "Steering: A"]
+        assert len(messages) == 1
+        assert len(set(mail_attempts)) == 1  # Includes uncertain delivery and successful retry.
+        event = json.loads(messages[0]["body"])
+        if candidate_kind.startswith("report-"):
+            assert "reportSha256" not in event
+            assert event["evidencePaths"] == [
+                str(Path(result["repo"]).parent / "evidence/run.json")
+            ]
+        return
     report = observed["steering"]
     assert report is not None, "Passing unrelated proof reached merge without automatic steering"
     assert report["candidateCommit"] == observed["candidateCommit"]

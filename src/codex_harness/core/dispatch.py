@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -59,14 +60,17 @@ DENIAL_CAPABILITIES = {
 HARNESS_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _notify_steering(bead: dict, memory: Path) -> None:
+def _notify_steering(bead: dict, memory: Path, run_record: Path | None = None) -> None:
     observation = bead.get("steering")
     if not observation or (
         observation["state"] == "observed" and observation["summary"]["total"] == 0
     ):
         return
+    if not observation["evidencePaths"] and run_record is None:
+        return  # Unpersisted report errors first travel through canonical run.json.
     event = {
-        **observation,
+        **{key: value for key, value in observation.items() if key != "delivery"},
+        "evidencePaths": observation["evidencePaths"] or [str(run_record)],
         "reason": (
             "Steering review needed; proof outcome unchanged. "
             "Python heuristics on committed changed files are advisory only; "
@@ -78,15 +82,23 @@ def _notify_steering(bead: dict, memory: Path) -> None:
         ),
     }
     body = json.dumps(event, sort_keys=True)
-    Mailbox(memory).send_event(
-        body,
-        from_agent="harness-dispatcher",
-        to_agent="planner",
-        subject=f"Steering: {bead['bead']}",
-        body=body,
-        refs=[bead["bead"], *[ref["id"] for ref in _identity_refs(bead)]],
-        kind="replan-trigger",
-    )
+    try:
+        message_id = Mailbox(memory).send_event(
+            body,
+            from_agent="harness-dispatcher",
+            to_agent="planner",
+            subject=f"Steering: {bead['bead']}",
+            body=body,
+            refs=[bead["bead"], *[ref["id"] for ref in _identity_refs(bead)]],
+            kind="replan-trigger",
+        )
+    except (OSError, sqlite3.Error, ValueError) as error:
+        observation["delivery"] = {
+            "state": "unavailable",
+            "error": {"type": type(error).__name__, "message": str(error)},
+        }
+    else:
+        observation["delivery"] = {"state": "recorded", "messageId": message_id}
 
 
 def _observe_steering(bead: dict, manifest: dict, root: Path, base: str, memory: Path) -> None:
@@ -123,15 +135,25 @@ def _observe_steering(bead: dict, manifest: dict, root: Path, base: str, memory:
             state="unavailable", error={"type": type(error).__name__, "message": str(error)}
         )
     path = Path(bead["evidenceDir"]) / "steering.json"
-    _write_record(path, observation)
-    bead["steering"] = {
-        key: value for key, value in observation.items() if key not in {"report", "error"}
-    }
-    bead["steering"].update(
+    metadata = {key: value for key, value in observation.items() if key not in {"report", "error"}}
+    metadata.update(
         summary=observation["report"]["summary"] if observation["report"] is not None else None,
-        evidencePaths=[str(path)],
-        reportSha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        evidencePaths=[],
     )
+    stage = "report-persistence"
+    try:
+        _write_record(path, observation)
+        stage = "report-read"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except (OSError, ValueError) as error:
+        metadata.update(
+            state="unavailable",
+            summary=None,
+            error={"stage": stage, "type": type(error).__name__, "message": str(error)},
+        )
+    else:
+        metadata.update(evidencePaths=[str(path)], reportSha256=digest)
+    bead["steering"] = metadata
     _notify_steering(bead, memory)
 
 
@@ -144,7 +166,7 @@ def _notify_failures(record: dict, evidence: Path) -> None:
     """
     events = []
     for bead_id, bead in record["beads"].items():
-        _notify_steering(bead, record["memoryWorkspace"])
+        _notify_steering(bead, record["memoryWorkspace"], evidence / "run.json")
         reason = bead["status"]
         if reason not in {
             "integrated validation failed",
