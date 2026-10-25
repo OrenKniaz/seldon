@@ -39,9 +39,17 @@ Command runners may optionally declare `listArgv`, `assertPatterns` and
 `importPatterns`. All three are required for `audit --prospective`; a refusal
 names each missing field. They are unnecessary for an oracle audit. The entire
 contract, including these fields, contributes to the plan revision.
+These fields are collection and structural prerequisites, not sufficient
+meaningful-red provenance. For current command/TAP runners, including TypeScript,
+CLI `audit --prospective` refuses prospective proof credit: successful collection,
+regex matches and actual nonzero stub exits still produce `prospective-red-unproved`.
+Prospective credit currently requires supported controller-owned unittest
+per-test execution and exception provenance. Command-runner meaningful-red
+provenance remains an open capability.
 
-This Node 25 contract uses only built-in TypeScript stripping and Node tests;
-no npm packages or installation are needed:
+This Node 25 collection configuration uses only built-in TypeScript stripping
+and Node tests; no npm packages or installation are needed. It does not enable
+successful prospective proof:
 
 ```json
 {
@@ -60,8 +68,9 @@ Verified with Node 25.8.0: `--test-skip-pattern=.*` loads the proof module and i
 imports without running test bodies. The TAP reporter emits the file identifier
 even though its tests are filtered out. Load/syntax errors still fail collection.
 Ordinary `argv` then runs each bead's proof on a disposable copy of the stubs;
-each must exit nonzero. Launch failures, timeouts and terminated processes do not
-count as red proofs. Do not use `--test-only` as listing: it can run marked tests.
+even nonzero stub exits remain unproved for command runners. Launch failures,
+timeouts and terminated processes do not count as red proofs. Do not use
+`--test-only` as listing: it can run marked tests.
 
 `listArgv` accepts zero or one standalone `{proof}` slot. With the slot, Harness
 lists each protected or declared proof separately. Without it, Harness runs the
@@ -78,15 +87,27 @@ specifiers resolve against the proof's directory, checking the exact file,
 `.ts`, `.js`, `index.ts`, `index.js`, and `.js` specifiers pointing to `.ts` source.
 These are declared regex checks, not language parsing or assertion dataflow
 analysis. Requirements must still trace to protected test nodes, as for unittest.
-Prospective audits do not establish test satisfiability. Worker packets carry
-the published prospective warning from the canonical rendered PLAN.md; oracle
-packets retain their existing bytes. A subsequent passing oracle audit upgrades
-the recorded plan proof level to oracle-verified.
+These checks do not overcome the command provenance limitation. Use the CLI
+`audit --oracle <reference-directory>` for actual oracle verification; compile,
+dispatch and oracle support for TypeScript/command runners remain available.
+The current public MCP `harness_audit` route is prospective-only and supplies no
+oracle mode or automatic fallback.
+
+Supported unittest prospective audits do not establish test satisfiability.
+Worker packets carry the published prospective warning from the canonical rendered
+PLAN.md; oracle packets retain their existing bytes. A subsequent passing oracle
+audit upgrades the recorded plan proof level to oracle-verified.
 
 The real fixture at `tests/python/core/fixtures/ts_runner/` contains separate
 sum/format beads, throwing TypeScript stubs, protected Node proofs and reference
-implementations. Its tests exercise the CLI prospective audit, both red proofs,
-rejection of vacuous/unowned/load-failing proofs, and recorded oracle upgrade.
+implementations. The existing
+[`test_typescript_unproved_tap_baseline_and_oracle_upgrade`](../../tests/python/core/test_test_audit.py)
+regression records a refused CLI prospective baseline (exit 2): collection
+succeeds and both actual stub runs exit 1, but their provenance remains unproved
+and no prospective credit is granted. It then performs real canonical oracle
+verification and records an oracle-verified upgrade. Other fixture checks reject
+vacuous, unowned and load-failing proofs; they do not demonstrate successful
+command-runner prospective provenance.
 
 ## Derived proof and trust
 
