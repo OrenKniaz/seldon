@@ -26,6 +26,16 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
         expected[mode_key] = approval_mode or "approve"
     if isinstance(existing, dict) and "tools" in existing:
         expected["tools"] = existing["tools"]
+    filter_keys = ("enabled_tools", "disabled_tools")
+    filters = {}
+    if isinstance(existing, dict):
+        for key in filter_keys:
+            if key in existing:
+                value = existing[key]
+                if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                    raise ValueError(f"Unsupported Seldon {key}; preserve it manually")
+                expected[key] = value
+                filters[key] = value
     identity = (
         {k: v for k, v in existing.items() if k != mode_key}
         if isinstance(existing, dict)
@@ -66,6 +76,11 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
             )
             if not emit_mode and approval_mode and existing[mode_key] != approval_mode:
                 raise ValueError("Unowned approval mode requires manual merge")
+        filters = {
+            key: value
+            for key, value in filters.items()
+            if key in block_data["mcp_servers"]["seldon"]
+        }
         table = re.search(r"(?m)^\[mcp_servers\.seldon\.tools(?:\.|\])", block)
         if table:
             policy_tables = block[table.start() : block.index(END)]
@@ -96,11 +111,21 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
     if not remove and existing == expected:
         return text
     replacement = ""
-    if remove and isinstance(existing, dict) and (mode_key in existing or "tools" in existing):
+    if (
+        remove
+        and isinstance(existing, dict)
+        and (
+            mode_key in existing
+            or "tools" in existing
+            or any(key in existing for key in filter_keys)
+        )
+    ):
         # Retain policy as unowned TOML; only the marked registration is removed.
         replacement = "[mcp_servers.seldon]\n"
         if mode_key in block_data["mcp_servers"]["seldon"]:
             replacement += f"{mode_key} = {json.dumps(existing[mode_key])}\n"
+        for key, value in filters.items():
+            replacement += f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
         replacement += policy_tables
     if not remove:
         replacement = START + "\n[mcp_servers.seldon]\n"
@@ -109,6 +134,8 @@ def render(text, entry, *, remove=False, yes=False, approval_mode=None):
         replacement += 'env = { SELDON_INIT = "seldon-init v1" }\nstartup_timeout_sec = 20\n'
         if emit_mode:
             replacement += f"{mode_key} = {json.dumps(expected[mode_key])}\n"
+        for key, value in filters.items():
+            replacement += f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
         replacement += policy_tables
         replacement += END + "\n"
         if start and text[start - 1] != "\n":

@@ -137,6 +137,42 @@ def test_default_approve_requires_an_affirmative_interactive_answer(project, mon
     assert config["mcp_servers"]["seldon"]["default_tools_approval_mode"] == "approve"
 
 
+@pytest.mark.parametrize("action", ["reinit", "check", "remove"])
+def test_codex_tool_filters_survive_public_cli(project, monkeypatch, action):
+    """Catch --yes broadening a saved approve policy; existing tests cover only nested tools.
+
+    Check must accept the filtered canonical registration, replacement must preserve
+    its filters, and removal must retain them as user policy rather than deleting them.
+    """
+    installed = Path(__file__).resolve().parents[4] / "runtime-dff93bb/Scripts/python.exe"
+    if not installed.exists():
+        pytest.skip("requires existing qualified DFF interpreter for check handshake")
+    monkeypatch.setattr(project_init, "installed_command", lambda: str(installed))
+    monkeypatch.setattr(seldon_cli, "version", lambda _name: "source-test")
+    assert (
+        seldon_cli.main(["init", str(project), "--host", "codex", "--approval-mode", "approve"])
+        == 0
+    )
+    config = project / ".codex/config.toml"
+    filters = 'enabled_tools = ["harness_plan_status"]\ndisabled_tools = ["harness_publish"]\n'
+    config.write_text(
+        config.read_text().replace("# seldon-init v1 end", filters + "# seldon-init v1 end")
+    )
+    if action == "reinit":
+        config.write_text(
+            config.read_text().replace("startup_timeout_sec = 20", "startup_timeout_sec = 99")
+        )
+        args = ["--host", "codex", "--yes"]
+    else:
+        args = ["--" + action]
+    assert seldon_cli.main(["init", str(project), *args]) == 0
+    saved = tomllib.loads(config.read_text())["mcp_servers"]["seldon"]
+    assert saved["enabled_tools"] == ["harness_plan_status"]
+    assert saved["disabled_tools"] == ["harness_publish"]
+    assert saved["default_tools_approval_mode"] == "approve"
+    assert ("command" in saved) == (action != "remove")
+
+
 def test_malformed_claude_permission_policy_refuses_all_writes(project):
     """Catch partial setup before bad policy; old malformed tests cover registration only."""
     target = project / ".claude/settings.local.json"
@@ -364,6 +400,8 @@ def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
 
     Source-writer tests cannot prove console installation, isolated interpreter
     import, MCP startup or consumption of the generated workspace argument.
+    User filters outside the marked block must also survive installed CLI
+    replacement/removal; the source filter cases cover fields inside that block.
     """
     wheel = os.environ.get("SELDON_PROVENANCE_WHEEL")
     python = os.environ.get("SELDON_PACKAGING_PYTHON")
@@ -413,9 +451,17 @@ def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
     cli("--host", "all", "--dry-run")
     assert list(product.iterdir()) == []
     cli("--host", "all", "--approval-mode", "approve")
+    config = product / ".codex/config.toml"
+    config.write_text(
+        config.read_text()
+        + 'enabled_tools = ["harness_plan_status"]\ndisabled_tools = ["harness_publish"]\n'
+    )
     before = snapshot(product)
     cli("--check")
-    cli("--host", "all")
+    config.write_text(
+        config.read_text().replace("startup_timeout_sec = 20", "startup_timeout_sec = 99")
+    )
+    cli("--host", "all", "--yes")
     assert snapshot(product) == before
     assert not (product / ".codex-harness/plan.sqlite3").exists()
     entry = json.loads((product / ".mcp.json").read_text())["mcpServers"]["seldon"]
@@ -471,4 +517,10 @@ def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
     assert (product / ".codex-harness/plan.sqlite3").exists()
     assert not (other / ".codex-harness").exists()
     cli("--remove")
+    policy = tomllib.loads(config.read_text())["mcp_servers"]["seldon"]
+    assert policy == {
+        "default_tools_approval_mode": "approve",
+        "enabled_tools": ["harness_plan_status"],
+        "disabled_tools": ["harness_publish"],
+    }
     assert (product / ".codex-harness/plan.sqlite3").exists()
