@@ -456,6 +456,30 @@ def _tiny_plan(tmp_path: Path, *, dependent: bool = False) -> Path:
     return plan
 
 
+def _tiny_audited_plan(tmp_path: Path) -> Path:
+    """Give canonical source fixtures an actual owned-call red expectation.
+
+    Direct constant assertions remain sufficient for ordinary dispatch tests,
+    but prospective publication needs observed owned-function failure lineage.
+    Workers still implement the same VALUE=1 contract; accessors are not mocks.
+    """
+    plan = _tiny_plan(tmp_path)
+    manifest = json.loads((plan / "sample.json").read_text())
+    for bead_id in ("A", "B"):
+        module = f"value_{bead_id}"
+        (plan / "template" / f"{module}.py").write_text(
+            f"from {bead_id} import VALUE\n\ndef value() -> int:\n    return VALUE\n"
+        )
+        manifest["beads"][bead_id]["ownedFiles"].append(f"{module}.py")
+        (plan / "template/tests" / f"test_{bead_id}.py").write_text(
+            f"import unittest\nfrom {module} import value\n"
+            "class Proof(unittest.TestCase):\n"
+            "    def test_value(self):\n        self.assertEqual(value(), 1)\n"
+        )
+    (plan / "sample.json").write_text(json.dumps(manifest))
+    return plan
+
+
 def test_dispatch_attempts_overlap_and_integrate_without_ownership_conflict(tmp_path: Path) -> None:
     plan = _tiny_plan(tmp_path)
     barrier = threading.Barrier(2, timeout=10)
@@ -578,10 +602,13 @@ def test_dispatch_labels_local_validation_without_claiming_live_acceptance(
 
     from codex_harness.core.provider_launch import ProviderNormalLaunch
 
-    plan = _tiny_plan(tmp_path)
+    plan = _tiny_audited_plan(tmp_path)
     if declared:
         manifest = json.loads((plan / "sample.json").read_text())
         manifest["integration"] = {"requirements": ["RI"], "proofModule": "test_*.py"}
+        # The wildcard includes B's proof too; RI must trace to that owner.
+        # Source publication already assigns integration requirements to A.
+        manifest["beads"]["B"]["requirements"].append("RI")
         (plan / "sample.json").write_text(json.dumps(manifest))
 
     class ScriptedAdapter:

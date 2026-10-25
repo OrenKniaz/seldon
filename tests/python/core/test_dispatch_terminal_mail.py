@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core.execution_support import source_execution_context
-from tests.python.core.test_dispatch import _tiny_plan
+from tests.python.core.test_dispatch import _tiny_audited_plan
 from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
 
 from codex_harness.core import dispatch
@@ -28,7 +28,7 @@ def test_terminal_failure_is_mailed_before_independent_sibling_finishes(
     # They miss a terminal A silently waiting for unrelated B to finish. The
     # nonzero case uses an actual child; packet refusal injects only that source
     # input error, never a mailbox answer or terminal record.
-    plan = _tiny_plan(tmp_path)
+    plan = _tiny_audited_plan(tmp_path)
     source_only_packet_renderer(monkeypatch)
     context = source_execution_context(tmp_path / "canonical", plan, timeout=60)
     ready, release = tmp_path / "B-ready", tmp_path / "release-B"
@@ -160,7 +160,7 @@ def test_candidate_steering_reaches_planner_before_real_fast_forward(
 ):
     # The checker-only tests never cross candidate production, proof, durable
     # report, mail and public board. Unrelated passing proof can miss an API stub.
-    plan = _tiny_plan(tmp_path)
+    plan = _tiny_audited_plan(tmp_path)
     manifest_path = plan / "sample.json"
     manifest = read_record_json(manifest_path)
     if candidate_kind != "mail":
