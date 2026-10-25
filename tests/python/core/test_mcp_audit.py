@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from tests.python.core import test_test_audit
@@ -525,7 +526,7 @@ def test_pre_result_engine_exception_records_dispatch_without_proof(prospective)
 def test_engine_failure_diagnostics_survive_public_status_and_reopen(
     prospective, monkeypatch, fault
 ):
-    """Protect internal-failure evidence without credit; existing exceptions lose proof/stage data.
+    """Protect genuine verdicts and internal-failure evidence across housekeeping faults.
 
     Controlled SOURCE-ONLY faults follow real engine collection and red proof execution.
     They test error retention, not the live Windows lock cause or process quiescence.
@@ -534,12 +535,17 @@ def test_engine_failure_diagnostics_survive_public_status_and_reopen(
 
     real_directory = test_audit.TemporaryDirectory
     real_order = test_audit.topological_order
+    owned_directories = []
 
     class CleanupFault(real_directory):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            owned_directories.append(self)
+
         def cleanup(self):
-            super().cleanup()  # Actual owned fixture cleanup still runs.
             if fault in {"cleanup", "both"}:
                 raise PermissionError(32, "Controlled cleanup fault", self.name)
+            super().cleanup()
 
     def fail_after_actual_proofs(plan):
         yield from real_order(plan)
@@ -559,51 +565,134 @@ def test_engine_failure_diagnostics_survive_public_status_and_reopen(
         server.audits.drain(server.store)
         response = invoke(server, "harness_audit_status", id=admission["attemptId"])
         failed = response["structuredContent"]
-        assert response["isError"] and failed["state"] == "failed"
-        assert failed["didRunValidation"] and not failed["completedAllRequiredSteps"]
-        assert failed["result"] is None and failed["auditId"] is None
-        assert not failed["proofCreditGranted"]
-        error = failed["error"]
-        assert error.startswith("ProspectiveAuditFailure: ")
-        assert len(error.encode("utf-8")) <= 16384
-        detail = json.loads(error.split(": ", 1)[1])
-        assert detail["schema"] == "seldon/prospective-failure-v1"
-        assert detail["stage"] == ("proof" if fault in {"body", "both"} else "body-complete")
-        assert detail["collection"]["count"] >= 1
-        assert all(item["passed"] for item in detail["collection"]["items"])
-        assert detail["proofs"]["count"] == 1
-        assert detail["proofs"]["items"][0]["failureClassification"] == "meaningful-red"
-        if fault in {"body", "both"}:
-            assert detail["bodyError"]["messageTruncated"] is True
-        for key, expected in (
-            ("bodyError", "RuntimeError" if fault in {"body", "both"} else None),
-            ("cleanupError", "PermissionError" if fault in {"cleanup", "both"} else None),
-        ):
-            if expected is None:
-                assert detail[key] is None
-            else:
-                assert detail[key]["kind"] == expected
-                assert (
-                    detail[key]["message"].startswith("Controlled")
-                    or "Controlled" in detail[key]["message"]
-                )
-                frames = detail[key]["frames"]
-                assert 1 <= len(frames) <= 6
-                assert all(set(frame) == {"file", "function", "line"} for frame in frames)
-                assert all(
-                    frame["file"] in {"test_audit.py", "runners.py", "planner_audits.py"}
-                    for frame in frames
-                )
+        if fault == "cleanup":
+            assert not response["isError"] and failed["state"] == "completed"
+            assert failed["completedAllRequiredSteps"] and failed["proofCreditGranted"]
+            assert failed["auditId"] == failed["result"]["id"]
+            assert failed["result"]["ok"] and failed["result"]["cleanupWarning"]
+            warning = failed["result"]["cleanupWarning"][0]
+            assert warning["error"]["kind"] == "PermissionError"
+            assert warning["quiescence"] == "UNVERIFIED"
+            assert warning["leftoverPath"] == owned_directories[0].name
+            assert Path(warning["leftoverPath"]).is_dir()
+        else:
+            assert_failed_diagnostics(response, failed, fault)
     finally:
         server.close()
+        # Only new owned fixtures are removed after the retained-warning observation.
+        for directory in owned_directories:
+            real_directory.cleanup(directory)
     reopened = PlannerServer(workspace)
     try:
         retained = invoke(reopened, "harness_audit_status", id=admission["attemptId"])
-        assert retained["isError"] and retained["structuredContent"] == failed
+        assert retained["isError"] is (fault != "cleanup")
+        assert retained["structuredContent"] == failed
         with open_plan_store_readonly(workspace) as saved:
-            assert saved.passing_audit(revision) is None
+            assert (saved.passing_audit(revision) is not None) is (fault == "cleanup")
     finally:
         reopened.close()
+
+
+def assert_failed_diagnostics(response, failed, fault):
+    """Shared assertions for the body-only and combined controlled failures."""
+    assert response["isError"] and failed["state"] == "failed"
+    assert failed["didRunValidation"] and not failed["completedAllRequiredSteps"]
+    assert failed["result"] is None and failed["auditId"] is None
+    assert not failed["proofCreditGranted"]
+    error = failed["error"]
+    assert error.startswith("ProspectiveAuditFailure: ")
+    assert len(error.encode("utf-8")) <= 16384
+    detail = json.loads(error.split(": ", 1)[1])
+    assert detail["schema"] == "seldon/prospective-failure-v1"
+    assert detail["stage"] == ("proof" if fault in {"body", "both"} else "body-complete")
+    assert detail["collection"]["count"] >= 1
+    assert all(item["passed"] for item in detail["collection"]["items"])
+    assert detail["proofs"]["count"] == 1
+    assert detail["proofs"]["items"][0]["failureClassification"] == "meaningful-red"
+    if fault in {"body", "both"}:
+        assert detail["bodyError"]["messageTruncated"] is True
+    for key, expected in (
+        ("bodyError", "RuntimeError" if fault in {"body", "both"} else None),
+        ("cleanupError", "PermissionError" if fault in {"cleanup", "both"} else None),
+    ):
+        if expected is None:
+            assert detail[key] is None
+        else:
+            assert detail[key]["kind"] == expected
+            assert (
+                detail[key]["message"].startswith("Controlled")
+                or "Controlled" in detail[key]["message"]
+            )
+            frames = detail[key]["frames"]
+            assert 1 <= len(frames) <= 6
+            assert all(set(frame) == {"file", "function", "line"} for frame in frames)
+            assert all(
+                frame["file"] in {"test_audit.py", "runners.py", "planner_audits.py"}
+                for frame in frames
+            )
+
+
+@pytest.mark.parametrize("boundary", ["captured", "captured-body-error", "observation"])
+def test_other_cleanup_boundaries_preserve_public_audit_receipts(
+    prospective, monkeypatch, boundary
+):
+    """Catch lost async queue/proof results; the prospective-directory test misses these owners.
+
+    Real collection/proofs run; only cleanup of new owned fixtures is fault-injected.
+    """
+    from codex_harness.core import planner_audits, runners, test_audit
+
+    module = planner_audits if boundary.startswith("captured") else runners
+    base = module.TemporaryDirectory
+    owned = []
+
+    class CleanupFault(base):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            owned.append(self)
+
+        def cleanup(self):
+            raise PermissionError(32, "Controlled boundary cleanup fault", self.name)
+
+    def fail_after_proofs(plan):
+        yield from order(plan)
+        raise RuntimeError("Controlled captured body fault")
+
+    order = test_audit.topological_order
+    server, revision = started(prospective)
+    workspace = server.workspace
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "TemporaryDirectory", CleanupFault)
+            if boundary == "captured-body-error":
+                patch.setattr(test_audit, "topological_order", fail_after_proofs)
+            admission = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
+            server.audits.dispatch_after_flush(server.store)
+            server.audits.thread.join(timeout=30)
+            assert not server.audits.thread.is_alive()
+        server.audits.drain(server.store)
+        reply = invoke(server, "harness_audit_status", id=admission["attemptId"])
+        receipt = reply["structuredContent"]
+        if boundary == "captured-body-error":
+            assert receipt["state"] == "failed" and receipt["result"] is None
+            assert receipt["auditId"] is None and not receipt["proofCreditGranted"]
+            detail = json.loads(receipt["error"].split(": ", 1)[1])
+            assert detail["bodyError"]["kind"] == "RuntimeError"
+            assert detail["inputCleanupWarning"]["error"]["kind"] == "PermissionError"
+        else:
+            assert not reply["isError"] and receipt["state"] == "completed"
+            assert receipt["result"]["ok"] and receipt["proofCreditGranted"]
+            warning = receipt["result"]["cleanupWarning"][0]
+            assert warning["error"]["kind"] == "PermissionError" and warning["attempts"] == 3
+            assert warning["leftoverPath"] == owned[0].name
+            assert Path(warning["leftoverPath"]).is_dir()
+    finally:
+        server.close()
+        for directory in owned:
+            base.cleanup(directory)
+    with open_plan_store_readonly(workspace) as saved:
+        assert saved.audit_attempt(admission["attemptId"])["result"] == receipt["result"]
+        assert (saved.passing_audit(revision) is not None) is (boundary != "captured-body-error")
 
 
 def test_engine_upgrade_admits_new_attempt_after_terminal_but_preserves_busy_hold(

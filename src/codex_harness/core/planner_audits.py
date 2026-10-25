@@ -8,6 +8,7 @@ import queue
 import shutil
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -67,39 +68,88 @@ def audit_failure_evidence(stage, findings, proofs, collection):
     }
 
 
+def audit_error_detail(error):
+    if error is None:
+        return None
+    frames = [
+        {
+            "file": Path(frame.f_code.co_filename).name,
+            "function": frame.f_code.co_name[:64],
+            "line": line,
+        }
+        for frame, line in traceback.walk_tb(error.__traceback__)
+        if Path(frame.f_code.co_filename).parent == Path(__file__).parent
+        and Path(frame.f_code.co_filename).name
+        in {"test_audit.py", "runners.py", "planner_audits.py"}
+    ]
+    message = str(error)
+    detail = {
+        "kind": type(error).__name__[:96],
+        "message": message[:256],
+        "messageTruncated": len(message) > 256,
+        "frames": frames[-6:],
+        "framesTruncated": len(frames) > 6,
+    }
+    if warning := getattr(error, "audit_cleanup_warning", None):
+        detail["cleanupWarning"] = warning
+    return detail
+
+
+def guarded_cleanup(directory):
+    """Bound housekeeping retries; a warning never attests process quiescence."""
+    for attempt in range(3):
+        try:
+            directory.cleanup()
+            return None
+        except Exception as error:
+            detail = audit_error_detail(error)
+            if not isinstance(error, OSError) or attempt == 2:
+                break
+        time.sleep(0.5 * (attempt + 1))
+    try:
+        leftover = str(directory.name) if Path(directory.name).exists() else None
+    except OSError:
+        leftover = str(directory.name)
+    return {
+        "directory": str(directory.name),
+        "leftoverPath": leftover,
+        "attempts": attempt + 1,
+        "error": detail,
+        "quiescence": "UNVERIFIED",
+    }
+
+
+class AuditTemporaryDirectory(TemporaryDirectory):
+    """Standard temporary directory with reported, nonfatal housekeeping."""
+
+    cleanup_warning = None
+
+    def __exit__(self, kind, error, tb):
+        self.cleanup_warning = guarded_cleanup(self)
+        if error is not None and self.cleanup_warning:
+            error.audit_cleanup_warning = self.cleanup_warning
+        return False
+
+
 class ProspectiveAuditFailure(Exception):
     """Diagnostic error text, never a partial audit result or proof-credit envelope."""
 
-    def __init__(self, body_error, cleanup_error, evidence):
-        def detail(error):
-            if error is None:
-                return None
-            frames = [
-                {
-                    "file": Path(frame.f_code.co_filename).name,
-                    "function": frame.f_code.co_name[:64],
-                    "line": line,
-                }
-                for frame, line in traceback.walk_tb(error.__traceback__)
-                if Path(frame.f_code.co_filename).parent == Path(__file__).parent
-                and Path(frame.f_code.co_filename).name
-                in {"test_audit.py", "runners.py", "planner_audits.py"}
-            ]
-            message = str(error)
-            return {
-                "kind": type(error).__name__[:96],
-                "message": message[:256],
-                "messageTruncated": len(message) > 256,
-                "frames": frames[-6:],
-                "framesTruncated": len(frames) > 6,
+    def __init__(self, body_error, cleanup_warning, evidence, input_cleanup_warning=None):
+        cleanup_warning = cleanup_warning or getattr(body_error, "audit_cleanup_warning", None)
+        payload = (
+            dict(body_error.payload)
+            if isinstance(body_error, ProspectiveAuditFailure)
+            else {
+                "schema": "seldon/prospective-failure-v1",
+                **evidence,
+                "bodyError": audit_error_detail(body_error),
+                "cleanupError": cleanup_warning["error"] if cleanup_warning else None,
             }
-
-        payload = {
-            "schema": "seldon/prospective-failure-v1",
-            **evidence,
-            "bodyError": detail(body_error),
-            "cleanupError": detail(cleanup_error),
-        }
+        )
+        if cleanup_warning:
+            payload["cleanupWarning"] = cleanup_warning
+        if input_cleanup_warning:
+            payload["inputCleanupWarning"] = input_cleanup_warning
         encoded = json.dumps(payload, ensure_ascii=True)
         if len(encoded) > 16000:
             payload["evidenceTruncated"] = True
@@ -109,6 +159,7 @@ class ProspectiveAuditFailure(Exception):
                     if "stageEvidence" in item:
                         item["stageEvidence"].pop("output", None)
             encoded = json.dumps(payload, ensure_ascii=True)
+        self.payload = payload
         super().__init__(encoded)
 
 
@@ -227,7 +278,7 @@ class CapturedAudit:
             raise
 
     def close(self):
-        self.temp.cleanup()
+        return guarded_cleanup(self.temp)
 
     def run(self):
         return {
@@ -270,13 +321,24 @@ class AuditOwner:
         store.run_audit_attempt(attempt_id, self.instance)
 
         def execute():
-            result, error = None, None
+            result, error, engine_error = None, None, None
             try:
                 result = captured.run()
             except Exception as failure:
-                error = f"{type(failure).__name__}: {failure}"
+                engine_error = failure
             finally:
-                captured.close()
+                cleanup_warning = captured.close()
+            if result is not None and cleanup_warning:
+                result.setdefault("cleanupWarning", []).append(cleanup_warning)
+            if engine_error is not None:
+                if cleanup_warning:
+                    engine_error = ProspectiveAuditFailure(
+                        engine_error,
+                        None,
+                        audit_failure_evidence("engine", [], [], []),
+                        input_cleanup_warning=cleanup_warning,
+                    )
+                error = f"{type(engine_error).__name__}: {engine_error}"
             self.results.put((attempt_id, result, error))
             if self.wake:
                 self.wake()

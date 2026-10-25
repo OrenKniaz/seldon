@@ -743,18 +743,48 @@ def test_prospective_module_cli_refuses_assert_named_mutator(prospective):
     assert result["redBaseline"][0]["failureProvenance"]["classification"] == "unproved"
 
 
-def test_prospective_module_cli_preserves_explicit_empty_environment(prospective):
-    """Explicit env={} cannot become inherited startup and instrumented proof."""
+@pytest.mark.parametrize("environment", ["empty", "empty-no-python", "pythonpath", "output-only"])
+def test_prospective_module_cli_preserves_explicit_empty_environment(
+    prospective, monkeypatch, environment
+):
+    """Protect requested startup context; previous env={} regression missed absent PYTHON keys.
+
+    Changed PYTHONPATH must refuse observation; supported output settings must still
+    run. Both expose overly broad or ambient-dependent fixes to the empty-env bug.
+    """
+    if environment == "empty-no-python":
+        for key in list(os.environ):
+            if key.startswith("PYTHON"):
+                monkeypatch.delenv(key)
+    requested = {
+        "empty": "{}",
+        "empty-no-python": "{}",
+        "pythonpath": "{**os.environ, 'PYTHONPATH': 'unsupported-startup-path'}",
+        "output-only": (
+            "{**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONDONTWRITEBYTECODE': '1'}"
+        ),
+    }[environment]
     root = prospective["template"]
     (root / "app.py").write_text("raise NotImplementedError('planned CLI')\n")
     (root / "tests/test_app.py").write_text(
-        "import subprocess, sys, unittest\nfrom pathlib import Path\n"
+        "import os, subprocess, sys, unittest\nfrom pathlib import Path\n"
         "class Proof(unittest.TestCase):\n    def test_cli(self):\n"
         "        result = subprocess.run([sys.executable, '-m', 'app'], "
-        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, env={})\n"
+        "cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, env="
+        + requested
+        + ")\n"
         "        self.assertEqual(result.returncode, 0)\n"
     )
     result = audit_prospective_tests(**prospective)
+    if environment == "output-only":
+        assert result["ok"], result["findings"]
+        launch = result["redBaseline"][0]["failureProvenance"]["tests"][0]["moduleLaunches"][0]
+        assert launch["instrumented"]
+        assert launch["requestedOutputEnvironment"] == {
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        return
     assert not result["ok"], result["findings"]
     observed = result["redBaseline"][0]["failureProvenance"]
     assert observed["classification"] == "unproved"
@@ -1222,6 +1252,71 @@ def test_audit_flags_demo_stale_half_up_row(revision):
     ] == [("revised-tests-unsatisfiable", "blocker", "A")]
     assert "1152 != 1151" in result["findings"][0]["output"]
     assert [finding["bead"] for finding in result["expectedFailures"]] == ["A"]
+
+
+def test_oracle_verdict_survives_owned_workspace_cleanup_failure(revision, monkeypatch):
+    """Catch discarded oracle verdicts; public prospective cases never use this workspace.
+
+    Only cleanup of a new owned oracle fixture is injected; real validation runs.
+    """
+    from tempfile import TemporaryDirectory
+
+    original_cleanup = TemporaryDirectory.cleanup
+    owned = []
+
+    def cleanup(directory):
+        if Path(directory.name).name.startswith("harness-test-audit-"):
+            if directory not in owned:
+                owned.append(directory)
+            raise PermissionError(32, "Controlled oracle cleanup fault", directory.name)
+        return original_cleanup(directory)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(TemporaryDirectory, "cleanup", cleanup)
+            result = audit_revised_tests(**revision)
+        assert result["ok"] and result["integrationChecked"]
+        assert result["integrationProof"]["passed"]
+        warning = result["cleanupWarning"][0]
+        assert warning["error"]["kind"] == "PermissionError" and warning["attempts"] == 3
+        assert warning["leftoverPath"] == owned[0].name
+        assert Path(warning["leftoverPath"]).is_dir()
+    finally:
+        for directory in owned:
+            original_cleanup(directory)
+
+
+def test_proof_launch_error_keeps_cleanup_warning(prospective, monkeypatch):
+    """Catch lost nested cleanup evidence; successful cleanup tests miss launch refusal."""
+    from codex_harness.core import runners
+
+    base = runners.TemporaryDirectory
+    owned = []
+
+    class CleanupFault(base):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            owned.append(self)
+
+        def cleanup(self):
+            raise PermissionError(32, "Controlled proof cleanup fault", self.name)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runners, "TemporaryDirectory", CleanupFault)
+            missing = str(prospective["template"] / "absent-python.exe")
+            patch.setattr(sys, "executable", missing)
+            proof = runners.validate_proof(
+                prospective["template"], prospective["manifest"], "test_app.py"
+            )
+        assert not proof["passed"] and proof["exitCode"] is None
+        assert proof["command"][0] == missing and proof["output"]
+        warning = proof["cleanupWarning"][0]
+        assert warning["error"]["kind"] == "PermissionError"
+        assert warning["leftoverPath"] == owned[0].name
+    finally:
+        for directory in owned:
+            base.cleanup(directory)
 
 
 def test_audit_correct_revision_passes_and_preserves_repo_and_plan(revision):

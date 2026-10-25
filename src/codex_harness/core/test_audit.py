@@ -27,7 +27,12 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core.graph import load_plan, topological_order
-from codex_harness.core.planner_audits import ProspectiveAuditFailure, audit_failure_evidence
+from codex_harness.core.planner_audits import (
+    AuditTemporaryDirectory,
+    ProspectiveAuditFailure,
+    audit_failure_evidence,
+    guarded_cleanup,
+)
 from codex_harness.core.runners import Runner, resolve_runner, validate_proof
 from codex_harness.core.spine import (
     Spine,
@@ -990,11 +995,12 @@ def _failure_provenance(
 
 
 class _ProspectiveWorkspace:
-    """Keep engine and cleanup failures together without suppressing either."""
+    """Preserve engine failures and report nonfatal housekeeping warnings."""
 
     def __init__(self, stage, findings, proofs, collection):
         self.stage, self.findings = stage, findings
         self.proofs, self.collection = proofs, collection
+        self.cleanup_warnings = []
 
     def __enter__(self):
         self.temp = TemporaryDirectory(prefix="harness-prospective-")
@@ -1008,15 +1014,11 @@ class _ProspectiveWorkspace:
         evidence = audit_failure_evidence(
             self.stage["value"], self.findings, self.proofs, self.collection
         )
-        cleanup_error = None
-        try:
-            self.temp.cleanup()
-        except Exception as error:
-            cleanup_error = error
-        if body_error is not None or cleanup_error is not None:
-            raise ProspectiveAuditFailure(body_error, cleanup_error, evidence) from (
-                cleanup_error or body_error
-            )
+        warning = guarded_cleanup(self.temp)
+        if warning:
+            self.cleanup_warnings.append(warning)
+        if body_error is not None:
+            raise ProspectiveAuditFailure(body_error, warning, evidence) from body_error
         return False
 
 
@@ -1031,7 +1033,8 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
 
     runner = resolve_runner(manifest)
     stage = {"value": "preparation"}
-    with _ProspectiveWorkspace(stage, findings, proofs, collection) as temp:
+    workspace = _ProspectiveWorkspace(stage, findings, proofs, collection)
+    with workspace as temp:
         root = Path(temp)
         path = root / "manifest.json"
         path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -1271,6 +1274,7 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                     repo, runner, plan.beads[bead_id].owned_files, proof
                 )
                 proof["failureProvenance"] = provenance
+                workspace.cleanup_warnings.extend(proof.get("cleanupWarning", []))
                 proofs.append({"bead": bead_id, **proof})
                 if runner.passed(proof["exitCode"]):
                     fail("prospective-vacuous-proof", bead_id, proof["module"], proof["output"])
@@ -1383,18 +1387,23 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                                 "controlled Python -m result expectation. CLI helper/control-flow "
                                 "topology may be unsupported; no product main() API is required.",
                             )
-    return dict(
-        baseline="template",
-        proofLevel="prospective",
-        ok=not findings,
-        findings=findings,
-        expectedFailures=[],
-        collection=collection,
-        redBaseline=proofs,
-        integrationChecked=False,
-        integrationReason="Prospective tests were not verified against a reference implementation.",
-        integrationProof=None,
-    )
+        result = dict(
+            baseline="template",
+            proofLevel="prospective",
+            ok=not findings,
+            findings=findings,
+            expectedFailures=[],
+            collection=collection,
+            redBaseline=proofs,
+            integrationChecked=False,
+            integrationReason=(
+                "Prospective tests were not verified against a reference implementation."
+            ),
+            integrationProof=None,
+        )
+    if workspace.cleanup_warnings:
+        result["cleanupWarning"] = workspace.cleanup_warnings
+    return result
 
 
 def _overlay_requirements(destination: Path, template: Path, names: list[str]) -> None:
@@ -1444,6 +1453,7 @@ def audit_revised_tests(
     integration_checked = False
     integration_reason = "No oracle was supplied; integration satisfiability was not checked."
     integration_proof = None
+    cleanup_warnings = []
     if base_ref == "auto":
         head = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
@@ -1451,7 +1461,8 @@ def audit_revised_tests(
             check=False,
         )
         base_ref = "HEAD" if head.returncode == 0 and (Path(repo) / ".git").exists() else "template"
-    with TemporaryDirectory(prefix="harness-test-audit-") as temp:
+    workspace = AuditTemporaryDirectory(prefix="harness-test-audit-")
+    with workspace as temp:
         root = Path(temp)
         manifest_path = root / "manifest.json"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -1486,8 +1497,11 @@ def audit_revised_tests(
             bead_id: _proof(baseline, manifest, plan.beads[bead_id].proof_module)
             for bead_id in order
         }
+        for proof in baseline_proofs.values():
+            cleanup_warnings.extend(proof.get("cleanupWarning", []))
         for bead_id in order:
             proof = _proof(revised, manifest, plan.beads[bead_id].proof_module)
+            cleanup_warnings.extend(proof.get("cleanupWarning", []))
             if proof["passed"]:
                 continue
             if bead_id not in affected:
@@ -1517,6 +1531,7 @@ def audit_revised_tests(
             for bead_id in order:
                 if bead_id in affected:
                     proof = _proof(oracle, manifest, plan.beads[bead_id].proof_module)
+                    cleanup_warnings.extend(proof.get("cleanupWarning", []))
                     if not proof["passed"]:
                         findings.append(
                             {
@@ -1528,6 +1543,7 @@ def audit_revised_tests(
                         )
             if plan.integration_proof_module:
                 integration_proof = _proof(oracle, manifest, plan.integration_proof_module)
+                cleanup_warnings.extend(integration_proof.get("cleanupWarning", []))
                 integration_checked = True
                 integration_reason = None
                 if not integration_proof["passed"]:
@@ -1541,6 +1557,20 @@ def audit_revised_tests(
                     )
             else:
                 integration_reason = "The manifest declares no integration proof module."
+        result = {
+            "baseline": base_ref,
+            **({"proofLevel": "impact-only"} if oracle_dir is None else {}),
+            "ok": not findings,
+            "findings": findings,
+            "expectedFailures": expected,
+            "integrationChecked": integration_checked,
+            "integrationReason": integration_reason,
+            "integrationProof": integration_proof,
+        }
+    if workspace.cleanup_warning:
+        cleanup_warnings.append(workspace.cleanup_warning)
+    if cleanup_warnings:
+        result["cleanupWarning"] = cleanup_warnings
     if findings:
         artifacts = Path(repo) / "state" / "runs" / ("test-audit-" + uuid4().hex)
         artifacts.mkdir(parents=True)
@@ -1549,16 +1579,7 @@ def audit_revised_tests(
             artifact.write_text(finding["output"], encoding="utf-8")
             finding["artifactPath"] = str(artifact.resolve())
             finding["outputPreview"] = "\n".join(finding["output"].splitlines()[:40])
-    return {
-        "baseline": base_ref,
-        **({"proofLevel": "impact-only"} if oracle_dir is None else {}),
-        "ok": not findings,
-        "findings": findings,
-        "expectedFailures": expected,
-        "integrationChecked": integration_checked,
-        "integrationReason": integration_reason,
-        "integrationProof": integration_proof,
-    }
+    return result
 
 
 def render_test_audit_card(result: dict) -> str:

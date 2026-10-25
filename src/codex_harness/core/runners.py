@@ -13,10 +13,10 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from tempfile import TemporaryDirectory
 
 from codex_harness.core.graph import Plan, PlanError
 from codex_harness.core.graph import test_dir as unittest_test_dir
+from codex_harness.core.planner_audits import AuditTemporaryDirectory as TemporaryDirectory
 
 CMD_META = '&|<>^%!"\r\n'
 
@@ -482,12 +482,11 @@ def _unittest_observer():
                     changes = {
                         k: env.get(k)
                         for k in set(env) | set(startup_env)
-                        if k.startswith("PYTHON")
-                        and k != "PYTHONPATH"
-                        and env.get(k) != startup_env.get(k)
+                        if k.startswith("PYTHON") and env.get(k) != startup_env.get(k)
                     }
                     if (
-                        any(
+                        requested_env == {}
+                        or any(
                             k not in output_settings or value != output_settings[k]
                             for k, value in changes.items()
                         )
@@ -775,7 +774,8 @@ def observe_unittest(repo: Path, runner: Runner, module: str, owned: tuple[str, 
     argv = argv[2:]
     sources = {*runner.proof_paths(repo), *(repo / name for name in owned)}
     before = {path: path.read_bytes() for path in sources if path.is_file()}
-    with TemporaryDirectory(prefix="harness-observation-") as temp:
+    workspace = TemporaryDirectory(prefix="harness-observation-")
+    with workspace as temp:
         report = Path(temp) / "observations.json"
         bootstrap = Path(temp) / "bootstrap"
         bootstrap.mkdir()
@@ -814,13 +814,16 @@ def observe_unittest(repo: Path, runner: Runner, module: str, owned: tuple[str, 
                 "tests": [],
                 "reason": "Proof or owned source changed during observation.",
             }
-        return dict(
+        observed = dict(
             command=command,
             exitCode=result.returncode,
             passed=runner.passed(result.returncode),
             output=output,
             observations=observations,
         )
+    if workspace.cleanup_warning:
+        observed["cleanupWarning"] = [workspace.cleanup_warning]
+    return observed
 
 
 def _cmd_safe(arguments) -> None:
@@ -1146,6 +1149,7 @@ def validate_proof(
             "nonSkippedTestsRun": None,
         }
     except subprocess.TimeoutExpired as error:
+        cleanup_warning = getattr(error, "audit_cleanup_warning", None)
         output = "".join(
             value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
             for value in (error.stdout, error.stderr)
@@ -1161,8 +1165,10 @@ def validate_proof(
             "successfulTests": None,
             "testsRun": None,
             "nonSkippedTestsRun": 0,
+            **({"cleanupWarning": [cleanup_warning]} if cleanup_warning else {}),
         }
     except (OSError, ValueError) as error:
+        cleanup_warning = getattr(error, "audit_cleanup_warning", None)
         return {
             "module": module,
             "command": command,
@@ -1174,4 +1180,5 @@ def validate_proof(
             "successfulTests": None,
             "testsRun": None,
             "nonSkippedTestsRun": 0,
+            **({"cleanupWarning": [cleanup_warning]} if cleanup_warning else {}),
         }
