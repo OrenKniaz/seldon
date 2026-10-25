@@ -23,12 +23,24 @@ from tests.python.core.test_mcp_planner import rpc
 from codex_harness.core import plan_cli
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import PlanStoreError
+from codex_harness.core.planner_audits import audit_synchronously
 from codex_harness.core.roundtable import findings, run_roundtable
 
 project = test_planner_replay_gaps.project
 
 
 def _at_roundtable(store):
+    # The replay fixture's identical expectation must be a supported statement,
+    # rather than a one-line method hidden by the former synthetic audit credit.
+    for name in ("test_answer.py", "test_journey.py"):
+        proof = store.workspace / "template" / "tests" / name
+        source = proof.read_text()
+        proof.write_text(
+            source.replace(
+                "def test_result(self): self.assertEqual(answer(), 42)",
+                "def test_result(self):\n        self.assertEqual(answer(), 42)",
+            )
+        )
     test_planner_replay_gaps.confirmed_vision(store)
     for phase in ("requirements", "tech-stack", "plan", "roundtable"):
         store.advance(phase, by="source-test")
@@ -145,17 +157,9 @@ def test_actual_mcp_and_cli_name_all_open_publication_findings(project, monkeypa
 
 
 def _record_source_evidence(store):
-    # Bookkeeping envelope through the actual writer, not an executed audit.
+    # Real captured prospective fixture execution through the canonical writer.
     # Controller-path source doubles below are not real provider/model witnesses.
-    store.record_audit(
-        store.manifest_revision(),
-        {
-            "ok": True,
-            "proofLevel": "prospective",
-            "isMocked": True,
-            "sourceOnly": "Resolution bookkeeping fixture, not product audit proof",
-        },
-    )
+    assert audit_synchronously(store)["proofCreditGranted"]
     source_controller_roundtable(
         store,
         process_stub=lambda *_: (0, "[]"),
@@ -173,9 +177,8 @@ def test_publication_continuation_uses_configured_gate_not_worker_quality(
     from codex_harness.core.planner_resume import resume_plan
 
     _at_roundtable(project)
-    project.record_audit(
-        project.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
-    )
+    audit = audit_synchronously(project)
+    assert audit["proofCreditGranted"], json.dumps(audit)
     for name, provider, code in [
         ("Alpha", "codex", 0),
         ("Beta", "claude", 1 if failed_provider else 0),
@@ -254,9 +257,8 @@ def test_continuation_policy_and_finding_actions_keep_reciprocal_success(project
     from codex_harness.core.planner_resume import resume_plan
 
     _at_roundtable(project)
-    project.record_audit(
-        project.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
-    )
+    audit = audit_synchronously(project)
+    assert audit["proofCreditGranted"], json.dumps(audit)
     if case.startswith("required"):
         project.record_plan_review_policy(
             [
@@ -549,9 +551,8 @@ def test_current_evidence_sequence_never_invents_an_oracle(project, capsys):
         assert state["nextAction"]["kind"] == "audit_required"
         assert state["nextAction"]["auditMode"] == "unknown"
     assert "audit --oracle oracle" not in cli["next"]
-    project.record_audit(
-        project.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
-    )
+    audit = audit_synchronously(project)
+    assert audit["proofCreditGranted"], json.dumps(audit)
     run_roundtable(
         project,
         reviewers=[dict(name="Mock", provider="codex")],
@@ -628,9 +629,8 @@ def test_partial_review_failure_keeps_supported_retry_guidance(project, capsys):
     source-controller doubles, never evidence of actual provider execution.
     """
     _at_roundtable(project)
-    project.record_audit(
-        project.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
-    )
+    audit = audit_synchronously(project)
+    assert audit["proofCreditGranted"], json.dumps(audit)
     source_controller_roundtable(
         project,
         process_stub=lambda *_: (0, "[]"),

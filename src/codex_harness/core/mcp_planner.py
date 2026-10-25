@@ -54,11 +54,14 @@ def _object(properties: dict, required=None) -> dict:
 
 
 def _tool(name: str, description: str, properties: dict, required=None) -> dict:
-    return {
+    tool = {
         "name": name,
         "description": description,
         "inputSchema": _object(properties, required),
     }
+    if name == "harness_audit_status":
+        tool["inputSchema"]["oneOf"] = [{"required": [key]} for key in properties]
+    return tool
 
 
 CLOSURE_DECLARATION_SCHEMA = _object(
@@ -221,11 +224,20 @@ TOOLS = [
     ),
     _tool(
         "harness_audit",
+        "Admit a durable prospective audit attempt before long validation. "
+        "Read completion with harness_audit_status id=<attemptId>; pending is not proof. "
         "Audit planned proofs on disposable red stubs in the fixed workspace/template. "
         "Explicit prospective mode checks collection, assertions, imports and traceability; "
         "it does not establish oracle satisfiability, product execution or acceptance. "
         "Inspect harness_schema tool=harness_audit before first use.",
         {"mode": {"type": "string", "enum": ["prospective"]}},
+    ),
+    _tool(
+        "harness_audit_status",
+        "Read a durable prospective audit attempt and its committed result. "
+        "Pending or unknown ownership grants no proof credit; never resubmit to poll.",
+        {"id": STRING, "manifest_revision": STRING},
+        [],
     ),
     _tool(
         "harness_show_node",
@@ -821,6 +833,9 @@ def show_node(store, node_id: str, *, body=False, test=None) -> dict:
 
 class PlannerServer:
     def __init__(self, workspace: str | Path, *, confirmation_timeout=120):
+        from codex_harness.core.planner_audits import AuditOwner
+
+        self.audits = AuditOwner()
         self.workspace = Path(workspace).resolve()
         self.store = None
         self._elicitation = False
@@ -937,6 +952,7 @@ class PlannerServer:
             "harness_preflight",
             "harness_plan_status",
             "harness_review_policy",
+            "harness_audit_status",
         }:
             return self.call_tool(name, arguments, schema_tools=self._wire_tools())
         previous = self.store
@@ -965,6 +981,7 @@ class PlannerServer:
             self.store = previous
 
     def close(self) -> None:
+        self.audits.close(self.store)
         if self._pending_confirmation is not None:
             self._cancel_confirmation(
                 "Client disconnected; no approval recorded", preserve_pending=True
@@ -1031,9 +1048,13 @@ class PlannerServer:
                 name == "harness_readiness"
                 and self.result_data
                 and self.result_data["invalid"]
-                or name == "harness_audit"
+                or name in {"harness_audit", "harness_audit_status"}
                 and self.result_data
-                and not self.result_data["ok"]
+                and (
+                    self.result_data.get("state") in {"failed", "stale", "unknown-interrupted"}
+                    or self.result_data.get("result") is not None
+                    and not self.result_data["result"]["ok"]
+                )
                 or name == "harness_roundtable"
                 and self.result_data
                 and (
@@ -1197,6 +1218,7 @@ class PlannerServer:
                         "harness_readiness",
                         "harness_roundtable",
                         "harness_audit",
+                        "harness_audit_status",
                         "harness_accept_run",
                         "harness_accept_review",
                         "harness_accept_assess",
@@ -1243,9 +1265,26 @@ class PlannerServer:
                 else "harness_plan_status; inspect recorded roles and current holds before any "
                 "separately authorized reviewer launch."
             )
-        if name == "harness_audit":
+        if name in {"harness_audit", "harness_audit_status"}:
+            if self.result_data and "audits" in self.result_data:
+                return (
+                    "Recorded history only; request correlation and server quiescence "
+                    "remain UNKNOWN."
+                )
+            if self.result_data and self.result_data.get("state") == "unknown-interrupted":
+                return (
+                    "harness_audit_status id="
+                    + self.result_data["attemptId"]
+                    + "; ownership UNKNOWN: hold mutations; no replay or new key."
+                )
+            if self.result_data and self.result_data.get("state") in {"queued", "running"}:
+                return (
+                    "harness_audit_status id="
+                    + self.result_data["attemptId"]
+                    + "; read persisted status/result; pending admission is not audit completion."
+                )
             if self.result_data and not error:
-                return "harness_plan_status; follow the current recorded gate."
+                return "harness_plan_status; inspect committed audit result and current gate."
             return (
                 "harness_plan_status; inspect the recorded audit findings and current gate. "
                 "Repair only the implicated planning proofs/stubs before recompiling."
@@ -1471,6 +1510,8 @@ class PlannerServer:
         )
 
     def _dispatch(self, name: str, args: dict, *, schema_tools=None) -> str:
+        if name == "harness_audit_status" and (("id" in args) == ("manifest_revision" in args)):
+            raise ValueError("Supply exactly one of id or manifest_revision")
         if name == "harness_plan_resume":
             from codex_harness.core.planner_resume import resume_plan
 
@@ -1729,25 +1770,29 @@ class PlannerServer:
                 self.result_data = store.compile_template(template)
             return f"Compiled current manifest: {self.result_data['planRevision']}"
         if name == "harness_audit":
-            from codex_harness.core import test_audit
-            from codex_harness.core.planner_audit_views import render_native_audit_card
-            from codex_harness.core.spine import compile_manifest
+            self.result_data = self.audits.start(store)
+            return (
+                "Audit admitted: "
+                + self.result_data["attemptId"]
+                + "; "
+                + self.result_data["state"]
+            )
+        if name == "harness_audit_status":
+            if "manifest_revision" in args:
+                self.result_data = store.audit_history(args["manifest_revision"])
+                return (
+                    f"Recorded audit rows: {len(self.result_data['audits'])}; not quiescence proof."
+                )
+            self.result_data = store.audit_attempt(args["id"], self.audits.instance)
+            if self.result_data["result"]:
+                from codex_harness.core.planner_audit_views import render_native_audit_card
 
-            template = self.workspace / "template"
-            if template.resolve() != template:
-                raise ValueError("Audit template must stay in the fixed workspace")
-            spine = store.spine()
-            manifest = compile_manifest(spine, template)
-            store.check_requirement_files(manifest, template)
-            self.result_data = {
-                **test_audit.audit_prospective_tests(
-                    template=template, manifest=manifest, spine=spine
-                ),
-                "manifestRevision": manifest["planRevision"],
-                "warning": test_audit.PROSPECTIVE_WARNING,
-            }
-            self.result_data["id"] = store.record_audit(manifest["planRevision"], self.result_data)
-            return render_native_audit_card(self.result_data)
+                return (
+                    render_native_audit_card(self.result_data["result"])
+                    + "\nCurrent proof credit: "
+                    + ("eligible" if self.result_data["proofCreditGranted"] else "held")
+                )
+            return "Audit " + self.result_data["attemptId"] + ": " + self.result_data["state"]
         if name == "harness_readiness":
             from codex_harness.core.readiness import readiness_review, render_readiness
 
@@ -2475,6 +2520,8 @@ def main() -> None:
         # Only stdin reading moves off-thread; all store/protocol mutation stays
         # on this thread. A queue timeout bounds one pending user interaction.
         incoming = queue.Queue()
+        audit_completed = object()
+        server.audits.wake = lambda: incoming.put(audit_completed)
 
         def read_lines():
             try:
@@ -2485,6 +2532,8 @@ def main() -> None:
 
         threading.Thread(target=read_lines, daemon=True).start()
         while True:
+            if server.store is not None:
+                server.audits.drain(server.store)
             for response in server.expire_confirmation():
                 print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
             pending = server._pending_confirmation
@@ -2495,9 +2544,13 @@ def main() -> None:
                 continue
             if line is None:
                 break
+            if line is audit_completed:
+                continue
             response = server.handle_line(line)
             if response is not None:
                 print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
+                if server.store is not None:
+                    server.audits.dispatch_after_flush(server.store)
     finally:
         server.close()
 

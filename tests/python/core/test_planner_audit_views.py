@@ -4,7 +4,7 @@ import json
 from copy import deepcopy
 
 from tests.python.core import test_test_audit
-from tests.python.core.test_mcp_audit import invoke
+from tests.python.core.test_mcp_audit import finished_audit
 
 from codex_harness.core import test_audit
 from codex_harness.core.mcp_planner import PlannerServer
@@ -65,7 +65,7 @@ def test_public_audit_groups_repeated_diagnostics_without_changing_engine_or_rec
     monkeypatch.setattr(test_audit, "audit_prospective_tests", capture)
     server = PlannerServer(root)
     try:
-        response = invoke(server, "harness_audit", mode="prospective")
+        response = finished_audit(server, mode="prospective")
         raw = response["structuredContent"]
         text = response["content"][0]["text"]
         assert response["isError"] and raw["ok"] is False

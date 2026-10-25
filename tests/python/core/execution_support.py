@@ -1,7 +1,7 @@
 """Source-only canonical execution originals for existing local-process fixtures.
 
-Native forms, audit envelopes, review returns and controller Popen return are
-explicit synthetic inputs. Actual PlanStore/native-domain/job writers run. The
+Native forms, review returns and controller Popen return are synthetic inputs.
+Audits execute real fixture proofs; actual PlanStore/native-domain/job writers run. The
 actual owned controller entry writes started.json before a synthetic handoff;
 this does not prove a human response, provider run or product acceptance.
 """
@@ -20,6 +20,7 @@ from tests.python.core.planning_support import source_controller_roundtable, sou
 
 from codex_harness.core import dispatch, planner_jobs
 from codex_harness.core.plan_store import PlanStore
+from codex_harness.core.planner_audits import audit_synchronously
 from codex_harness.core.planner_execution import complete_execution, prepare_execution
 
 
@@ -159,9 +160,31 @@ def publish_source_store(workspace, plan=None, *, spine_file=None):
             store.compile_template(workspace / "template")
         store.advance(phase, by="source-test")
     store.compile_template(workspace / "template")
-    store.record_audit(
-        store.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
-    )
+    known = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
+    declared_oracle = spine_file and Path(spine_file).resolve() == known / "spine.json"
+    if declared_oracle:
+        # This named fixture has an actual reference; its loop/subTest proofs do
+        # not claim the prospective engine's straight-line meaningful-red scope.
+        from codex_harness.core.test_audit import audit_revised_tests
+
+        result = audit_revised_tests(
+            repo=workspace,
+            base_ref="template",
+            revised_template=workspace / "template",
+            manifest=store.compile_template(workspace / "template"),
+            impact={"affectedBeads": store.spine().ids("bead")},
+            oracle_dir=known / "reference",
+        )
+        assert result["ok"], result["findings"]
+        store.record_audit(store.manifest_revision(), result)
+        proof_level = "oracle-verified"
+    else:
+        audit = audit_synchronously(store)
+        assert audit["proofCreditGranted"], [
+            (row["code"], row.get("bead"), row.get("output", "")[:200])
+            for row in (audit["result"] or {}).get("findings", [])
+        ]
+        proof_level = "prospective"
     source_controller_roundtable(
         store,
         process_stub=lambda *_: (0, "[]"),
@@ -175,8 +198,8 @@ def publish_source_store(workspace, plan=None, *, spine_file=None):
     revision = store.publish(
         by="source-test",
         export_dir=workspace / "export",
-        proof_level="prospective",
-        reason="SOURCE-ONLY synthetic audit/review bookkeeping",
+        proof_level=proof_level,
+        reason="Real fixture audit; SOURCE-ONLY synthetic controller reviews",
     )
     return store, revision
 

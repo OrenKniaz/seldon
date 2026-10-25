@@ -518,13 +518,26 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             prerequisites="Prepare authored protected tests and importable failing stubs in "
             "workspace/template, then use harness_compile. The workspace binding is required; "
             "no template, oracle, baseline or output path can be supplied.",
-            result="The existing prospective audit engine and record_audit writer return "
-            "actual findings, collection/red-baseline results, audit ID, bound manifestRevision "
-            "and prospective warning. Failure is recorded as failure; changed plans or "
-            "protected files cannot reuse a passing audit.",
+            result="Return a durable attemptId before long validation; queued admission is not "
+            "an audit verdict. Next: harness_audit_status id=<attemptId>. One in-flight attempt "
+            "holds the whole plan across input revisions. No retry, cancel or supersede. "
+            "Legacy unbound prospective rows are history only: audit-binding-required; "
+            "re-audit captured current inputs. CLI audit --prospective uses the same captured "
+            "inputs and bound completion writer synchronously.",
             authority="Prospective planning validation only: not oracle satisfiability, "
             "product execution, review, human approval or acceptance. Existing publication "
             "and review-policy gates remain; prospective publication needs an explicit reason.",
+        )
+    if tool == "harness_audit_status":
+        result.update(
+            example={"id": "<attemptId>"},
+            history="Supply exactly one of id OR manifest_revision. The latter reads actual "
+            "audit_runs history including legacy failures; no attempt wrapper, credit, migration, "
+            "request correlation or server-quiescence claim. Bound history is not current credit.",
+            result="Read queued/running, persisted completed result, failed/stale or "
+            "unknown-interrupted ownership. Pending is not proof. Only a completed bound "
+            "attempt with matching audit ID, current manifest and exact raw inputs grants "
+            "prospective credit. Unknown ownership never auto-replays. No state is initialized.",
         )
     if tool in {"harness_compile", "harness_upsert_node", "harness_upsert_nodes"}:
         result["proofAuthoring"] = {

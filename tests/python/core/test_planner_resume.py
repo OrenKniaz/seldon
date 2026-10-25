@@ -19,6 +19,7 @@ from tests.python.core.planning_support import (
 from tests.python.core.test_planner_resolution import _at_roundtable
 
 from codex_harness.core import planner_jobs
+from codex_harness.core.planner_audits import audit_synchronously
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.roundtable import run_roundtable
 
@@ -33,9 +34,7 @@ def _resume(*args, **kwargs):
 
 def _published(store):
     _at_roundtable(store)
-    store.record_audit(
-        store.manifest_revision(), {"ok": True, "proofLevel": "prospective", "isMocked": True}
-    )
+    assert audit_synchronously(store)["proofCreditGranted"]
     source_controller_roundtable(
         store,
         process_stub=lambda *_: (0, "[]"),

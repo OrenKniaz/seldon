@@ -1,12 +1,15 @@
 """Real spine/store/graph integration, phase refusals and transactional failure."""
 
 import json
+import queue
 import shutil
 import sqlite3
+import threading
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from tests.python.core import test_test_audit
 from tests.python.core.planning_support import (
     publication_evidence,
     source_controller_roundtable,
@@ -14,11 +17,70 @@ from tests.python.core.planning_support import (
 )
 
 from codex_harness.core.graph import PlanError, load_plan
-from codex_harness.core.plan_store import PHASES, PlanStoreError, open_plan_store
+from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError, open_plan_store
 from codex_harness.core.spine import MARKDOWN_FILES, SpineError, compile_manifest, load_spine
 from codex_harness.core.spine_render import render_markdown
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
+audit_fixture = test_test_audit.prospective
+
+
+def test_concurrent_audit_admission_dispatches_one_real_engine(audit_fixture, monkeypatch):
+    """Protect cross-connection single-flight; serial MCP calls miss the claim race."""
+    from tests.python.core.test_mcp_audit import started
+
+    from codex_harness.core import test_audit
+    from codex_harness.core.planner_audits import AuditOwner
+
+    initial, _ = started(audit_fixture)
+    root = initial.workspace
+    initial.close()
+    barrier, release, entered = threading.Barrier(2), threading.Event(), threading.Event()
+    observations, failures, dispatches = queue.Queue(), queue.Queue(), []
+    real_admit = PlanStore.admit_audit
+    engine = test_audit.audit_prospective_tests
+
+    def admit(store, *args):
+        barrier.wait(timeout=5)
+        return real_admit(store, *args)
+
+    def run(**args):
+        dispatches.append(1)
+        entered.set()
+        assert release.wait(timeout=10)
+        return engine(**args)
+
+    monkeypatch.setattr(PlanStore, "admit_audit", admit)
+    monkeypatch.setattr(test_audit, "audit_prospective_tests", run)
+
+    def connection():
+        try:
+            with open_plan_store(root) as store:
+                owner = AuditOwner()
+                attempt = owner.start(store)
+                observations.put(attempt)
+                owner.dispatch_after_flush(store)
+                owner.close(store)
+        except BaseException as error:
+            failures.put(error)
+
+    threads = [threading.Thread(target=connection) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    try:
+        first, second = observations.get(timeout=10), observations.get(timeout=10)
+        assert first["attemptId"] == second["attemptId"]
+        assert "unknown-interrupted" in {first["state"], second["state"]}
+        assert entered.wait(timeout=5) and len(dispatches) == 1
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(timeout=30)
+            assert not thread.is_alive()
+    assert failures.empty(), list(failures.queue)
+    with open_plan_store(root) as reopened:
+        result = reopened.audit_attempt(first["attemptId"])
+        assert result["state"] == "completed" and result["proofCreditGranted"]
 
 
 def draft_node(identity, kind, fields, parents):

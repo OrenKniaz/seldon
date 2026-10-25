@@ -72,7 +72,7 @@ def test_public_empty_plan_audit_cannot_persist_passing_credit(prospective):
 
     Exercise the public producer and reopen its real canonical writer, not a supplied result.
     """
-    from tests.python.core.test_mcp_audit import invoke
+    from tests.python.core.test_mcp_audit import finished_audit, invoke
 
     from codex_harness.core.mcp_planner import PlannerServer
     from codex_harness.core.plan_store import open_plan_store_readonly
@@ -86,7 +86,7 @@ def test_public_empty_plan_audit_cannot_persist_passing_credit(prospective):
         assert not invoke(server, "harness_upsert_node", node=vision)["isError"]
         compiled = invoke(server, "harness_compile")
         assert not compiled["isError"], compiled
-        reply = invoke(server, "harness_audit", mode="prospective")
+        reply = finished_audit(server, mode="prospective")
         result = reply["structuredContent"]
         assert all(item["passed"] for item in result["collection"])
         assert result["redBaseline"] == []
@@ -905,7 +905,15 @@ def test_prospective_publication_cli_mcp_status_and_oracle_upgrade(prospective, 
             encoding="utf-8",
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        assert json.loads(result.stdout)["data"]["proofLevel"] == "prospective"
+        bound = json.loads(result.stdout)["data"]
+        assert bound["proofLevel"] == "prospective"
+        assert bound["prospectiveAuditContract"] == "captured-input-v1"
+        from codex_harness.core.plan_store import open_plan_store_readonly
+
+        with open_plan_store_readonly(tmp_path) as reopened:
+            receipt = reopened.audit_attempt(bound["attemptId"])
+            assert receipt["state"] == "completed" and receipt["proofCreditGranted"]
+            assert receipt["auditId"] == bound["id"]
         run_roundtable(
             store,
             reviewers=[{"name": "test-review", "provider": "codex"}],

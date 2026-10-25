@@ -99,6 +99,22 @@ def source_evidence(server):
     """Actual public prospective audit plus explicitly simulated review, never live credit."""
     result = invoke(server, "harness_audit", mode="prospective")
     assert not result["isError"], result["content"][0]["text"]
+    admission = result["structuredContent"]
+    if admission["state"] in {"queued", "running"}:
+        assert not admission["proofCreditGranted"]
+        assert server.audits.prepared is not None  # Only our fresh admission may dispatch.
+        server.audits.dispatch_after_flush(server.store)
+        server.audits.thread.join(timeout=30)
+        assert not server.audits.thread.is_alive()
+        server.audits.drain(server.store)
+    else:
+        assert admission["state"] == "completed", admission
+    result = invoke(server, "harness_audit_status", id=admission["attemptId"])
+    assert not result["isError"], result
+    receipt = result["structuredContent"]
+    assert receipt["state"] == "completed" and receipt["result"]["ok"]
+    assert receipt["proofCreditGranted"] and receipt["completedAllRequiredSteps"]
+    assert receipt["auditId"] == receipt["result"]["id"]
     run_roundtable(
         server.store,
         reviewers=[
@@ -109,14 +125,24 @@ def source_evidence(server):
         executable_for=lambda provider: provider,
     )
     assert not server.store.successful_reviews(server.store.manifest_revision())
+    return receipt
 
 
-def test_publication_rechecks_lineage_after_post_admission_edit(tmp_path):
+def test_publication_rechecks_lineage_after_post_admission_edit(tmp_path, monkeypatch):
     """Catch a post-admission disconnect; Plan-only guards miss later canonical edits."""
+    from codex_harness.core import test_audit
+
+    engine, executions = test_audit.audit_prospective_tests, []
+
+    def execute(**arguments):
+        executions.append(1)
+        return engine(**arguments)
+
+    monkeypatch.setattr(test_audit, "audit_prospective_tests", execute)
     server = planned(tmp_path, disconnected=False)
     try:
         assert not invoke(server, "harness_advance", to_phase="roundtable")["isError"]
-        source_evidence(server)
+        original = source_evidence(server)
         with source_only_publication():
             assert not invoke(server, "harness_advance", to_phase="publish")["isError"]
         assert not invoke(server, "harness_upsert_node", node=node("F", "feature", []))["isError"]
@@ -148,7 +174,17 @@ def test_publication_rechecks_lineage_after_post_admission_edit(tmp_path):
         assert (
             held["isError"] and "plan-publication-evidence-required" in held["content"][0]["text"]
         )
-        source_evidence(server)
+        before_audits = server.store.connection.execute(
+            "SELECT count(*) FROM audit_runs"
+        ).fetchone()[0]
+        before_executions = list(executions)
+        restored = source_evidence(server)
+        assert restored["attemptId"] == original["attemptId"]
+        assert restored["auditId"] == original["auditId"]
+        assert executions == before_executions  # Revisited terminal candidate never replays engine.
+        assert server.store.connection.execute("SELECT count(*) FROM audit_runs").fetchone()[0] == (
+            before_audits
+        )
         with source_only_publication():
             published = invoke(
                 server,
