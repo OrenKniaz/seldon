@@ -65,7 +65,18 @@ def test_legacy_and_board_are_byte_preserved(tmp_path):
         assert get(connection, "/api/status?unrecognized=1")[0] == 404
 
 
-@pytest.mark.parametrize("name", ["cockpit.css", "cockpit.js"])
+def test_plan_overview_panel_is_served_read_only(tmp_path):
+    with running(tmp_path) as connection:
+        status, _, body = get(connection, "/")
+        assert b'id="overview"' in body and b"/cockpit-overview.js" in body
+        status, headers, body = get(connection, "/cockpit-overview.js")
+        assert status == 200 and headers["Content-Type"].startswith("text/javascript")
+        assert body == Path(status_server.__file__).with_name("cockpit-overview.js").read_bytes()
+        # The overview only reads status; it has no mutation routes or methods.
+        assert b"method:" not in body and b"/api/status" in body
+
+
+@pytest.mark.parametrize("name", ["cockpit.css", "cockpit.js", "cockpit-overview.js"])
 def test_cockpit_asset_routes_exist(tmp_path, name):
     with running(tmp_path) as connection:
         assert get(connection, "/" + name)[0] == 200

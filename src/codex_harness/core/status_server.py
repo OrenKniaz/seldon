@@ -18,6 +18,7 @@ def create_server(*, workspace=None, runs_root=None, port=7480):
         "/": (core / "cockpit.html", "text/html; charset=utf-8"),
         "/cockpit.css": (core / "cockpit.css", "text/css; charset=utf-8"),
         "/cockpit.js": (core / "cockpit.js", "text/javascript; charset=utf-8"),
+        "/cockpit-overview.js": (core / "cockpit-overview.js", "text/javascript; charset=utf-8"),
         "/legacy": (core / "workspace.html", "text/html; charset=utf-8"),
         "/board": (core / "board.html", "text/html; charset=utf-8"),
         "/fixtures/linkshelf.json": (fixtures / "public" / "linkshelf.json", "application/json"),
