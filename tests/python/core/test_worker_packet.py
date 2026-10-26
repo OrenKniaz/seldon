@@ -64,6 +64,13 @@ def test_legacy_packets_match_narrative_revision_bytes(tmp_path, fixture):
     for bead in plan.beads.values():
         for provider in ("codex", "claude", "copilot"):
             packet = build_packet(plan, bead, root / "template", None, provider)
+            # Only the explicitly scoped denial clarification changes legacy contract bytes.
+            packet = packet.replace(
+                "A host/tool/sandbox permission denial", "A permission denial", 1
+            )
+            before_scope, scope = packet.split("Denial scope/examples:\n", 1)
+            _, after_scope = scope.split("Tools:", 1)
+            packet = before_scope + "Tools:" + after_scope
             before, policy = packet.split("TEST POLICY (workers and reviewers):\n", 1)
             policy, after = policy.split("Recovery ladder:", 1)
             assert policy == EXPECTED_TEST_POLICY
@@ -158,6 +165,25 @@ def test_browser_acceptance_does_not_require_optional_worker_tools(tmp_path, pro
     assert "BROWSER-CHECKS.md" in packet
     assert "python -B -m unittest discover -s tests -p test_cli.py" in packet
     assert "required worker proof needs an unattested browser tool, report the blocker" in packet
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude", "copilot"])
+def test_product_runtime_errors_are_not_host_permission_denials(tmp_path, provider):
+    """Protect denial scope after real B3 stopped on an expected socket fixture.
+
+    The existing denial test protects stopping, but cannot distinguish a host
+    refusal from ordinary product/runtime debugging input.
+    """
+    plan, repo = _checkout(tmp_path)
+    packet = build_packet(plan, plan.beads["B"], repo, None, provider)
+    contract = packet.split("## 2. Goal")[0]
+    assert "A host/tool/sandbox permission denial blocks the action" in contract
+    assert "Product runtime errors are debugging input, not authorization decisions" in contract
+    assert "socket WinError 10013/10048 or expected file-fixture errors" in contract
+    assert "debug the product within the owned files and exact proof contract" in contract
+    assert "MCP approval refused, sandbox write/network blocked, or credential prompts" in contract
+    assert "stop and report; do not use an equivalent shell/tool/route" in contract
+    assert "fresh explicit user disposition must identify" in contract
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude", "copilot"])
