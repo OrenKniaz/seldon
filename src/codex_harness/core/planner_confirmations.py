@@ -1,14 +1,15 @@
-"""Native gate records and ordinary caller-declared reviewer-choice scope bindings.
+"""Native/chat gate records and caller-declared reviewer-choice scope bindings.
 
-Only the bridge may call completion after correlating a client response to its
+Only the native bridge completes native requests after correlating a response to its
 outbound request. This leaf neither authenticates a human nor turns caller-supplied
-words, identifiers or origin flags into trusted responses. Existing legacy approval
-entry points are unchanged. Ordinary reviewer-choice records carry no native gate
-credit or verified human identity.
+words into native responses. Explicit bound chat decisions have separately labelled,
+lower-assurance authority. Legacy quote entry points stay refused. Neither channel
+authenticates a human; reviewer-choice records carry no native gate credit.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from uuid import uuid4
@@ -19,6 +20,77 @@ from codex_harness.core.spine import Spine
 REQUEST = "confirmation-requested"
 RESPONSE = "confirmation-responded"
 REVIEWER_CONFIRMATION = "reviewer-selection-confirmed"
+CHAT = "chat-confirmation"
+NATIVE = "mcp-client-elicitation"
+
+
+def _chat_question(request, revision):
+    request.update(channel=CHAT, choices=["Approve", "No", "Cancel", "Changes: <text>"])
+    request["card"] += (
+        f"\nChat confirmation {request['request_id']} for revision {revision}.\n"
+        "Reply exactly Approve, No, Cancel, or Changes: <text>. No response grants nothing. "
+        "The caller must quote your latest actual external chat message verbatim, with its "
+        "SHA-256 and an actor label. Actor identity and message source are unverified; "
+        "the hash binds the supplied quote and does not authenticate its author."
+    )
+    return request
+
+
+def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, actor_label):
+    if (
+        not isinstance(quoted_message, str)
+        or not isinstance(actor_label, str)
+        or not actor_label.strip()
+    ):
+        raise ValueError("chat-confirmation-quote-and-actor-required")
+    if hashlib.sha256(quoted_message.encode("utf-8")).hexdigest() != quote_sha256:
+        raise ValueError("chat-confirmation-quote-hash-mismatch")
+    choice = quoted_message.strip()
+    conditions = ""
+    if choice.casefold() not in {"approve", "no", "cancel"}:
+        if not choice.casefold().startswith("changes:") or not choice[8:].strip():
+            raise ValueError("chat-confirmation-choice-unclear: use a displayed choice")
+        conditions = choice[8:].strip()
+    action = "cancel" if choice.casefold() == "cancel" else "accept"
+    content = dict(
+        approve=choice.casefold() == "approve", statement=quoted_message, conditions=conditions
+    )
+    evidence = dict(
+        request_id=request_id,
+        revision=expected_revision,
+        quoted_message=quoted_message,
+        quote_sha256=quote_sha256,
+        actor_label=actor_label,
+        actor_identity_verified=False,
+        source_claim="latest-external-chat-message",
+        source_verified=False,
+    )
+    return action, content, evidence
+
+
+def _response_channel(request, response, revision):
+    channel = request.get("channel", NATIVE)
+    if channel not in {NATIVE, CHAT} or response.get("provenance") != channel:
+        return None
+    if channel == CHAT:
+        try:
+            saved = response["chat"]
+            action, content, evidence = _chat_evidence(
+                request["request_id"],
+                revision,
+                saved["quoted_message"],
+                saved["quote_sha256"],
+                saved["actor_label"],
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (
+            saved != evidence
+            or response.get("action") != action
+            or response.get("content") != content
+        ):
+            return None
+    return channel
 
 
 def reviewer_selection_scope(node: dict, catalog: dict, author_sessions: dict) -> str:
@@ -142,7 +214,7 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
             or request.get("plan_revision") != revision
             or response.get("plan_revision") != revision
             or response.get("action") != "accept"
-            or response.get("provenance") != "mcp-client-elicitation"
+            or not _response_channel(request, response, revision)
             or not isinstance(content, dict)
             or content.get("approve") is not True
             or content.get("conditions") != ""
@@ -155,14 +227,14 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
             approval
             and approval["gate"] == gate
             and approval["plan_revision"] == revision
-            and approval["by"] == "mcp-client-elicitation"
+            and approval["by"] == _response_channel(request, response, revision)
             and approval["statement"] == content.get("statement")
         ):
             return dict(approval)
     return None
 
 
-def prepare_confirmation(store: PlanStore, gate: str) -> dict:
+def prepare_confirmation(store: PlanStore, gate: str, *, _chat=False) -> dict:
     """Persist exactly what the native client will display for the current gate."""
     with store._transaction():
         if gate not in ("align", "vision-lock"):
@@ -194,13 +266,38 @@ def prepare_confirmation(store: PlanStore, gate: str) -> dict:
             card=card,
             vision=vision,
         )
+        if _chat:
+            _chat_question(request, revision)
         store._event(REQUEST, request)
         return request
+
+
+def prepare_chat_confirmation(store: PlanStore, gate: str) -> dict:
+    """Offer a fresh question without interpreting a previous native decline."""
+    return prepare_confirmation(store, gate, _chat=True)
 
 
 def complete_confirmation(
     store: PlanStore, request_id: str, action: str, content: dict | None = None
 ) -> dict:
+    return _complete_confirmation(store, request_id, action, content)
+
+
+def complete_chat_confirmation(
+    store, request_id, *, gate, expected_revision, quoted_message, quote_sha256, actor_label
+):
+    """Caller-mediated authority; neither latest-message origin nor actor is authenticated."""
+    action, content, evidence = _chat_evidence(
+        request_id, expected_revision, quoted_message, quote_sha256, actor_label
+    )
+    return _complete_confirmation(
+        store, request_id, action, content, chat=evidence, expected_gate=gate
+    )
+
+
+def _complete_confirmation(
+    store, request_id, action, content=None, *, chat=None, expected_gate=None
+):
     """Consume one bridge-correlated response, retaining its exact words/conditions.
 
     Provenance describes a client-reported user action, not authenticated natural
@@ -220,6 +317,13 @@ def complete_confirmation(
         if saved is None:
             raise PlanStoreError("plan-confirmation-request-unknown", str(request_id))
         request_event, request = saved
+        channel = CHAT if chat is not None else NATIVE
+        if request.get("channel", NATIVE) != channel:
+            raise PlanStoreError("plan-confirmation-channel-mismatch", request_id)
+        if chat is not None and chat["revision"] != request["plan_revision"]:
+            raise PlanStoreError("plan-confirmation-revision-mismatch", request_id)
+        if chat is not None and expected_gate != request["gate"]:
+            raise PlanStoreError("plan-confirmation-gate-mismatch", request_id)
         if any(row["request_id"] == request_id for _, row in _records(store, RESPONSE)):
             raise PlanStoreError("plan-confirmation-already-consumed", request_id)
         if action not in ("accept", "decline", "cancel"):
@@ -256,9 +360,7 @@ def complete_confirmation(
             elif not content["approve"]:
                 state = "declined"
             else:
-                approval_id = store._approve(
-                    request["gate"], "mcp-client-elicitation", content["statement"]
-                )
+                approval_id = store._approve(request["gate"], channel, content["statement"])
                 state = "approved"
         outcome = dict(
             request_id=request_id,
@@ -269,8 +371,10 @@ def complete_confirmation(
             content=content,
             state=state,
             approval_id=approval_id,
-            provenance="mcp-client-elicitation",
+            provenance=channel,
             human_identity_verified=False,
         )
+        if chat is not None:
+            outcome["chat"] = chat
         store._event(RESPONSE, outcome)
         return outcome

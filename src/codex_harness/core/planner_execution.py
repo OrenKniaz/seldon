@@ -1,8 +1,8 @@
-"""Local single-use worker-execution responses from the existing native bridge.
+"""Single-use native and caller-mediated chat worker-execution decisions.
 
-Only its correlated pending-response handler calls completion. These records are
-not authentication, subscription capacity verification or protection from the
-same local user rewriting their files. Plan approval remains a separate gate.
+Native responses remain bridge-correlated. Chat authority explicitly has lower,
+caller-mediated assurance. Neither authenticates a human or verifies subscription
+capacity. Plan approval remains separate from execution admission.
 """
 
 import json
@@ -10,6 +10,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from codex_harness.core.plan_quality import quality_report
+from codex_harness.core.planner_confirmations import (
+    CHAT,
+    NATIVE,
+    _chat_evidence,
+    _chat_question,
+    _response_channel,
+)
 from codex_harness.core.planner_views import review_resolution_state
 
 REQUEST = "worker-execution-requested"
@@ -134,7 +141,9 @@ def _recheck(store, scope):
         raise ValueError("worker-execution-scope-stale")
 
 
-def prepare_execution(store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap):
+def prepare_execution(
+    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap, _chat=False
+):
     _canonical_store(store)
     scope = execution_scope(
         store,
@@ -167,19 +176,54 @@ def prepare_execution(store, expected_revision, workers, *, max_parallel=2, time
         + f"Protected inputs: {scope['manifestDigest']}\n"
     )
     request = dict(request_id=uuid4().hex, card=card, scope=scope)
+    if _chat:
+        _chat_question(request, expected_revision)
     with store._transaction():
         _recheck(store, scope)
         store._event(REQUEST, request)
     return request
 
 
+def prepare_chat_execution(
+    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap
+):
+    """Fresh question over the same canonical worker scope, without native credit."""
+    return prepare_execution(
+        store,
+        expected_revision,
+        workers,
+        max_parallel=max_parallel,
+        timeout=timeout,
+        call_cap=call_cap,
+        _chat=True,
+    )
+
+
 def complete_execution(store, request_id, action, content=None):
+    return _complete_execution(store, request_id, action, content)
+
+
+def complete_chat_execution(
+    store, request_id, *, expected_revision, quoted_message, quote_sha256, actor_label
+):
+    action, content, evidence = _chat_evidence(
+        request_id, expected_revision, quoted_message, quote_sha256, actor_label
+    )
+    return _complete_execution(store, request_id, action, content, chat=evidence)
+
+
+def _complete_execution(store, request_id, action, content=None, *, chat=None):
     _canonical_store(store)
     requests = _records(store, REQUEST)
     request = next((r for r in requests if r["request_id"] == request_id), None)
     if request is None:
         raise ValueError("worker-execution-request-unknown")
     scope = request["scope"]
+    channel = CHAT if chat is not None else NATIVE
+    if request.get("channel", NATIVE) != channel:
+        raise ValueError("worker-execution-channel-mismatch")
+    if chat is not None and chat["revision"] != scope["publicationRevision"]:
+        raise ValueError("worker-execution-revision-mismatch")
     if action not in {"accept", "decline", "cancel"} or (
         action == "accept"
         and (
@@ -228,9 +272,11 @@ def complete_execution(store, request_id, action, content=None):
             scope=scope,
             action=action,
             content=content,
-            provenance="mcp-client-elicitation",
+            provenance=channel,
             human_identity_verified=False,
         )
+        if chat is not None:
+            result["chat"] = chat
         store._event(RESPONSE, result)
     return result
 
@@ -248,7 +294,7 @@ def require_execution(store, scope):
         or response.get("scope") != scope
         or response.get("state") != "approved"
         or response.get("action") != "accept"
-        or response.get("provenance") != "mcp-client-elicitation"
+        or not _response_channel(request, response, scope["publicationRevision"])
         or content.get("approve") is not True
         or content.get("conditions") != ""
         or not isinstance(content.get("statement"), str)
@@ -279,7 +325,7 @@ def consumed_execution(store, request_id, scope, job_id):
         and response.get("scope") == scope
         and response.get("state") == "approved"
         and response.get("action") == "accept"
-        and response.get("provenance") == "mcp-client-elicitation"
+        and _response_channel(request, response, scope["publicationRevision"])
         and content.get("approve") is True
         and content.get("conditions") == ""
         and isinstance(content.get("statement"), str)
@@ -288,4 +334,15 @@ def consumed_execution(store, request_id, scope, job_id):
     return original and any(
         r.get("request_id") == request_id and r.get("jobId") == job_id and r.get("scope") == scope
         for r in _records(store, CONSUMED)
+    )
+
+
+def consumed_execution_provenance(store, request_id, scope, job_id):
+    """Project the verified canonical original for the job writer; never infer from an ID."""
+    if not consumed_execution(store, request_id, scope, job_id):
+        raise ValueError("worker-execution-original-unproved")
+    return next(
+        row["provenance"]
+        for row in _records(store, RESPONSE)
+        if row.get("request_id") == request_id
     )
