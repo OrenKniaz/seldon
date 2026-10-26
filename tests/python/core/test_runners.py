@@ -130,6 +130,106 @@ def test_windows_job_timeout_drains_descendant_held_stdout(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+def test_windows_bootstrap_delayed_ready_within_caller_budget_runs_payload(tmp_path, monkeypatch):
+    """Catch the five-second false refusal; ordinary success has no startup delay."""
+    delayed = audit_process._BOOTSTRAP.replace(
+        "send({'kind': 'ready'})", "import time;time.sleep(6)\nsend({'kind': 'ready'})"
+    )
+    monkeypatch.setattr(audit_process, "_BOOTSTRAP", delayed)
+    result = audit_process.run_audit_process(
+        [sys.executable, "-B", "-c", "print('delayed-ready-payload')"],
+        cwd=tmp_path,
+        timeout=30,
+    )
+    assert result.returncode == 0 and result.stdout == "delayed-ready-payload\n"
+    assert result.stderr == ""
+    assert result.audit_control["membershipVerifiedBeforePayload"]
+    assert result.audit_control["payloadReleased"] is True
+    assert result.audit_control["quiescenceVerified"]
+    assert result.audit_control["activeProcessesAfterTeardown"] == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+@pytest.mark.parametrize("query_refused", [False, True])
+def test_windows_assigned_unreleased_eof_observes_job_zero_before_close(
+    tmp_path, monkeypatch, query_refused
+):
+    """Catch lost Job evidence or fallback after EOF/query refusal; payload timeout terminates."""
+    events = []
+    jobs = []
+    real_init = audit_process._WindowsJob.__init__
+    real_active = audit_process._WindowsJob.active
+    real_dumps = audit_process.json.dumps
+
+    class CloseObservation:
+        def __init__(self, api, job):
+            self.api, self.job = api, job
+
+        def __getattr__(self, name):
+            return getattr(self.api, name)
+
+        def CloseHandle(self, handle):
+            if handle == self.job.handle:
+                events.append(("close-job", None))
+            return self.api.CloseHandle(handle)
+
+        def TerminateJobObject(self, *args):
+            pytest.fail("Assigned unreleased EOF must finish naturally without termination")
+
+    def observe_init(job):
+        real_init(job)
+        job.api = CloseObservation(job.api, job)
+        jobs.append(job)
+
+    def observe_active(job):
+        if query_refused:
+            error = PermissionError(5, "Controlled SOURCE-ONLY Job query refusal")
+            error.audit_native_failure = "QueryInformationJobObject"
+            raise error
+        active = real_active(job)  # Delegate to the actual owned Job; never supply a count.
+        events.append(("query-job", active))
+        return active
+
+    def refuse_config(value, *args, **kwargs):
+        if isinstance(value, dict) and set(value) == {"args", "cwd", "env"}:
+            raise OSError("Controlled pre-delivery serialization failure")
+        return real_dumps(value, *args, **kwargs)
+
+    marker = tmp_path / "payload-must-not-run"
+    monkeypatch.setattr(audit_process._WindowsJob, "__init__", observe_init)
+    monkeypatch.setattr(audit_process._WindowsJob, "active", observe_active)
+    monkeypatch.setattr(audit_process.json, "dumps", refuse_config)
+    with pytest.raises(OSError, match="Controlled pre-delivery") as raised:
+        audit_process.run_audit_process(
+            [sys.executable, "-B", "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"],
+            cwd=tmp_path,
+        )
+    assert not marker.exists()
+    control = raised.value.audit_control
+    assert control["membershipVerifiedBeforePayload"] and control["payloadReleased"] is False
+    if query_refused:
+        try:
+            assert events == [], "Refused query must not close/terminate the Job as fallback"
+            assert control["quiescenceVerified"] is False
+            assert control["activeProcessesAfterTeardown"] is None
+            assert control["jobHandleRetained"] and control["nativeFailure"]
+            assert control["nativeFailureOperation"] == "QueryInformationJobObject"
+            assert "Controlled SOURCE-ONLY" in control["unreleasedTeardownWarning"]
+        finally:
+            # Remove only the controlled test fault. Query this fixture's real held
+            # Job to zero before releasing its handle; never perform a fallback kill.
+            deadline = time.monotonic() + 5
+            while real_active(jobs[0]) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert real_active(jobs[0]) == 0
+            assert jobs[0].api.CloseHandle(jobs[0].handle)
+        return
+    assert events[-2:] == [("query-job", 0), ("close-job", None)]
+    assert control["activeProcessesAfterTeardown"] == 0
+    assert not control.get("jobHandleRetained")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
 def test_windows_bootstrap_failure_reaches_proof_control_with_bounded_diagnostics(
     prospective, monkeypatch
 ):
@@ -153,8 +253,8 @@ def test_windows_bootstrap_failure_reaches_proof_control_with_bounded_diagnostic
     assert not marker.exists()
     control = result["processControl"]
     assert control["membershipVerifiedBeforePayload"] and control["payloadReleased"] is False
-    assert control["quiescenceVerified"] is False
-    assert control["activeProcessesAfterTeardown"] is None
+    assert control["quiescenceVerified"] is True
+    assert control["activeProcessesAfterTeardown"] == 0
     assert not control.get("jobHandleRetained")
     assert 0 <= control["bootstrapReadyWaitSeconds"] < 5
     assert len(control["bootstrapStderrTail"]) == 4096

@@ -230,6 +230,7 @@ def run_audit_process(
     records = []
     native_failed = False
     bootstrap_exited = False
+    unreleased_job_pending = False
     gate_transfer_started = False
     ready_started = None
     bootstrap_status = bytearray()
@@ -285,7 +286,8 @@ def run_audit_process(
                 records.append(json.loads(line))
 
         ready_started = time.monotonic()
-        ready_deadline = ready_started + min(timeout, 5)
+        # Native captured-input witness: 15.172s to READY; three times, rounded up.
+        ready_deadline = ready_started + min(timeout, 46)
         while not records and "status" in channels and time.monotonic() < ready_deadline:
             pump()
             time.sleep(0.005)
@@ -359,6 +361,23 @@ def run_audit_process(
             try:
                 process.wait(timeout=5)  # Gate EOF; never release or use an alternative kill.
                 bootstrap_exited = True
+                if control["membershipVerifiedBeforePayload"] and not native_failed:
+                    unreleased_job_pending = True
+                    try:
+                        deadline = time.monotonic() + 5
+                        active = job.active()
+                        while active and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                            active = job.active()
+                        control["activeProcessesAfterTeardown"] = active
+                        if not active:
+                            control["quiescenceVerified"] = True
+                            unreleased_job_pending = False
+                    except OSError as teardown_error:
+                        native_failed = bool(getattr(teardown_error, "audit_native_failure", None))
+                        if native_failed:
+                            control["nativeFailureOperation"] = teardown_error.audit_native_failure
+                        control["unreleasedTeardownWarning"] = str(teardown_error)[:256]
             except subprocess.TimeoutExpired:
                 pass
         error.audit_control = control
@@ -372,7 +391,11 @@ def run_audit_process(
                     stream.close()
         if (
             process is None
-            or (bootstrap_exited and control["payloadReleased"] is False)
+            or (
+                bootstrap_exited
+                and control["payloadReleased"] is False
+                and not unreleased_job_pending
+            )
             or control["quiescenceVerified"]
         ):
             if not job.api.CloseHandle(job.handle):
