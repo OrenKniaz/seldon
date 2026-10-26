@@ -91,6 +91,8 @@ def test_infrastructure_stops_remaining_scenarios(tmp_path, source, reason):
         pytest.param("data/cli.py", None, id="entry-collision"),
         pytest.param("data/helper.py", None, id="import-collision"),
         pytest.param("data/helper.py", "missing", id="new-import-collision"),
+        pytest.param("data/helper.py.", "missing", id="dot-alias-collision"),
+        pytest.param("data/helper.py ", "missing", id="space-alias-collision"),
     ],
 )
 def test_preflight_refuses_invalid_data_before_any_action(tmp_path, keys, value):

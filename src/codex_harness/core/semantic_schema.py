@@ -1,7 +1,7 @@
 """Closed data vocabulary for the experimental Python CLI slice; no proof authority."""
 
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 LIMIT = 16384
 ACTION = "exitEquals stdoutEquals stdoutJsonEquals stderrNonempty".split()
@@ -16,8 +16,8 @@ def fields(value, allowed, required=()):
 def path(root, name):
     if type(name) is not str or not name or "\\" in name or ":" in name:
         raise ValueError("Use a relative sandbox path")
-    if PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts:
-        raise ValueError("Path escapes the product sandbox")
+    if name.startswith("/") or any(p.endswith((".", " ")) for p in name.split("/")):
+        raise ValueError("Use canonical sandbox paths without trailing dots/spaces or traversal")
     resolved = (Path(root) / name).resolve()
     if not resolved.is_relative_to(Path(root).resolve()):
         raise ValueError("Path resolves outside the product sandbox")

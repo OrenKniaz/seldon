@@ -141,9 +141,7 @@ def run(
     try:
         scenarios = validate(document, product, targets)
         if phase not in ("contracts", "validation") or os.name != "nt":
-            raise ValueError(
-                "Use contracts/validation; this spike requires Windows Job containment"
-            )
+            raise ValueError("Use contracts/validation on Windows (held Job required)")
         budgets = (action_seconds, scenario_seconds, run_seconds)
         if (
             not all(type(v) in (int, float) for v in budgets)
