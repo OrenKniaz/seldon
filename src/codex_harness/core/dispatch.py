@@ -22,6 +22,7 @@ from tempfile import TemporaryFile
 from codex_harness.core import attempt_control, attempt_provenance, efficiency, graph, worker_packet
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.memory_promotion import (
+    MemoryPromotionUnavailable,
     PromotionEvidence,
     confirm_lesson,
     memory_prompt_for,
@@ -1828,20 +1829,34 @@ def _integrate_bead(
     if _git(repo, "rev-parse", "HEAD") == binding["baseIntegration"]:
         _git(repo, "merge", "-q", "--ff-only", integration_commit)
     record["lessonsPromoted"] = []
-    for lesson in bead.get("lessons", []):
-        entry_id = promote_lesson(
-            memory,
-            text=lesson["text"],
-            evidence=PromotionEvidence(integration_commit, str(receipt), lesson["decisionId"]),
-            author=f"worker:{record['bead']}:{record['provider']}",
-            provider=record["provider"],
-            model=record["model"] or "unknown",
-            recovery_identity=json.dumps(binding, sort_keys=True),
-        )
-        promoted = {**lesson, "entryId": entry_id, "confirmed": False}
+    for index, lesson in enumerate(bead.get("lessons", [])):
+        promoted = {**lesson, "entryId": None, "confirmed": False}
         record["lessonsPromoted"].append(promoted)
-        confirm_lesson(memory, entry_id, by=confirmer, recover=True)
-        promoted["confirmed"] = True
+        try:
+            entry_id = promote_lesson(
+                memory,
+                text=lesson["text"],
+                evidence=PromotionEvidence(
+                    integration_commit,
+                    str(receipt),
+                    lesson["decisionId"],
+                    f"{manifest_path.resolve()}#/beads/{record['bead']}/lessons/{index}/text",
+                ),
+                author=f"worker:{record['bead']}:{record['provider']}",
+                provider=record["provider"],
+                model=record["model"] or "unknown",
+                recovery_identity=json.dumps(binding, sort_keys=True),
+            )
+            promoted["entryId"] = entry_id
+            confirm_lesson(memory, entry_id, by=confirmer, recover=True)
+            promoted["confirmed"] = True
+        except (MemoryPromotionUnavailable, OSError, sqlite3.Error) as error:
+            # Only advisory memory operations are in this catch. Proof/receipt writes
+            # and typed ownership, provenance and confirmation refusals still fail closed.
+            promoted["error"] = {
+                "code": getattr(error, "code", "advisory-memory-unavailable"),
+                "message": f"{type(error).__name__}: {error}",
+            }
     record["status"] = STATUS_MOCK_ONLY if record["isMocked"] else "requirement-validated"
 
 

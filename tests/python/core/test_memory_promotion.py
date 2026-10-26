@@ -15,6 +15,50 @@ from codex_harness.core.memory_promotion import (
 )
 from codex_harness.core.project_memory import ProjectMemoryStore, Provenance
 
+
+def test_long_lesson_and_recovery_reference_fit_real_memory_writer(tmp_path):
+    """Catch evidence suffix overflowing a valid lesson; prior tests use short receipt paths."""
+    lesson = ("Retain the complete agreed decision and its validated evidence. " * 40)[:1854]
+    receipt = str(tmp_path / ("evidence-" + "x" * 110) / "B1" / "integrated.json")
+    evidence = PromotionEvidence("a" * 40, receipt, "D0")
+    assert (
+        len(
+            lesson
+            + f" [evidence: commit={'a' * 12} receipt={receipt}]"
+            + " [promotion: "
+            + "0" * 64
+            + "]"
+        )
+        > 2000
+    )
+    entry_id = promote_lesson(
+        tmp_path,
+        text=lesson,
+        evidence=evidence,
+        author="worker:B1:source-test",
+        provider="source-test",
+        model="finite-child",
+        recovery_identity="same-canonical-attempt",
+    )
+    stored = ProjectMemoryStore(tmp_path).get(entry_id)
+    assert len(stored.text) <= 2000
+    assert stored.text.startswith(lesson[:100])
+    assert receipt in stored.text and "[promotion: " in stored.text
+    assert stored.status == "unverified"
+    assert (
+        promote_lesson(
+            tmp_path,
+            text=lesson,
+            evidence=evidence,
+            author="worker:B1:source-test",
+            provider="source-test",
+            model="finite-child",
+            recovery_identity="same-canonical-attempt",
+        )
+        == entry_id
+    )
+
+
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
     reason="project memory holds Windows workspace leases; other hosts fail closed",

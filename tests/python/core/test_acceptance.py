@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from tests.python.core import test_dispatch
 from tests.python.core.planning_support import (
     publication_evidence,
     source_only_confirmation,
@@ -30,6 +31,61 @@ from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_quality import first_moment_proof
 from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 from codex_harness.core.spine import Spine, load_spine
+
+lesson_dispatch = test_dispatch.lesson_dispatch
+
+
+@pytest.mark.parametrize("mode", ["self-confirmation", "ok", "reused"])
+def test_public_acceptance_requires_accepted_dispatch_candidate_not_partial_artifacts(
+    lesson_dispatch, tmp_path, mode
+):
+    """Catch accepting zero delivered beads or rejecting useful partial diagnostics.
+
+    The canonical finite child builds A and real integration proves it. An actual
+    self-confirmation refusal can still leave no accepted bead; old product tests
+    lack this completed dispatch producer and would execute scenarios regardless.
+    """
+    from tests.python.core.test_mcp_planner import workspace_wire
+
+    case = lesson_dispatch(mode)
+    record = case["record"]
+    repo = Path(record["repo"])
+    assert record["beads"]["A"]["integrated"]["validation"]["passed"]
+    assert (repo / "A.py").read_text() == "VALUE = 1\n"
+    assert record["status"].startswith("plan-failed")  # B remains legitimately blocked.
+    marker = tmp_path / "scenario-started"
+    server = PlannerServer(case["workspace"])
+
+    def tool(name, **arguments):
+        return workspace_wire(server, name, expected_workspace=str(case["workspace"]), **arguments)
+
+    try:
+        derived = tool("harness_accept_scenarios", derive=True)
+        assert not derived["isError"], derived
+        scenarios = derived["structuredContent"]["scenarios"]
+        command = (
+            '"{python}" -c "from pathlib import Path; import runpy; '
+            f"Path(r'{marker}').write_text('ran'); "
+            "print(runpy.run_path(r'{repo}/A.py')['VALUE'])\""
+        )
+        for scenario in scenarios:
+            scenario["steps"] = [command]
+            scenario["expect"] = {"stdout": "1", "exit": 0}
+        saved = tool("harness_accept_scenarios", scenarios=scenarios)
+        assert not saved["isError"], saved
+        result = tool("harness_accept_run", repo=str(repo), subject="product")
+        if mode == "self-confirmation":
+            assert result["isError"], result
+            assert "acceptance-no-delivered-candidate" in result["content"][0]["text"]
+            assert not marker.exists()
+            assert not server.store.connection.execute("SELECT 1 FROM acceptance_runs").fetchone()
+        else:
+            assert not result["isError"], result
+            assert marker.exists()
+            assert result["structuredContent"]["passed"]
+            assert result["structuredContent"]["results"]
+    finally:
+        server.close()
 
 
 def public_assessment_repair_fixture(

@@ -480,6 +480,178 @@ def _tiny_audited_plan(tmp_path: Path) -> Path:
     return plan
 
 
+@pytest.fixture
+def lesson_dispatch(tmp_path, monkeypatch):
+    """Actual canonical publication/attempt/child/proof/memory; no provider or proof double."""
+    from tests.python.core import execution_support
+    from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
+
+    from codex_harness.core import dispatch
+    from codex_harness.core.provider_launch import ProviderNormalLaunch
+
+    def run(mode="ok"):
+        plan = _tiny_audited_plan(tmp_path)
+        lesson = ("Retain the full agreed decision and its validated evidence. " * 40)[:1854]
+
+        def node(id, kind, parents, fields=None, text=None):
+            return dict(
+                id=id,
+                kind=kind,
+                title=f"Bead {id}",
+                text=text or id,
+                parents=parents,
+                fields=fields or {},
+            )
+
+        nodes = [
+            node(
+                "V1",
+                "vision",
+                [],
+                dict(
+                    validation=["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
+                    requirementFiles=["tests"],
+                ),
+            ),
+            node("F", "feature", ["V1"]),
+            node("RA", "requirement", ["F"]),
+            node("RB", "requirement", ["F"]),
+            node("D0", "decision", ["V1"], text=lesson),
+        ]
+        for bead_id in ("A", "B"):
+            nodes += [
+                node(
+                    bead_id,
+                    "bead",
+                    ["R" + bead_id],
+                    dict(
+                        ownedFiles=[bead_id + ".py", "value_" + bead_id + ".py"],
+                        dependsOn=["A"] if bead_id == "B" else [],
+                        proofModule="test_" + bead_id + ".py",
+                        lessons=["D0"] if bead_id == "A" else [],
+                    ),
+                ),
+                node(
+                    "T" + bead_id,
+                    "test",
+                    ["R" + bead_id],
+                    dict(
+                        module="test_" + bead_id + ".py",
+                        level="unit",
+                    ),
+                ),
+            ]
+        source = plan / "source-spine.json"
+        source.write_text(json.dumps(dict(schema="codex-harness/spine-v1", name="m", nodes=nodes)))
+        publish = execution_support.publish_source_store
+        # Select genuine typed input for the existing producer; no admission guard is patched.
+        monkeypatch.setattr(
+            execution_support,
+            "publish_source_store",
+            lambda workspace, ignored: publish(workspace, spine_file=source),
+        )
+        context = execution_support.source_execution_context(tmp_path / "canonical", plan)
+
+        class FiniteAdapter:
+            def provider_normal_command(self, *, prompt, **kwargs):
+                action = (
+                    "Path('A.py').write_text('VALUE = 1\\n')"
+                    if "Bead A" in prompt
+                    else "Path('.harness').mkdir(exist_ok=True); "
+                    "Path('.harness/blocker.json').write_text("
+                    '\'{"reason":"source fixture B blocked"}\')'
+                )
+                script = (
+                    "from pathlib import Path\n" + action + "\n"
+                    'print(\'{"type":"turn.completed","isMocked":true}\')\n'
+                    "# SOURCE-ONLY local process fixture\n"
+                )
+                return ProviderNormalLaunch(
+                    cli="codex",
+                    command=(sys.executable, "-c", script),
+                    protections=("finite source-only child",),
+                )
+
+        monkeypatch.setattr(dispatch, "get_adapter", lambda name: FiniteAdapter())
+        source_only_packet_renderer(monkeypatch)
+        execution_support.source_process_observations(monkeypatch)
+        options = dict(context["kwargs"])
+        if mode == "unavailable":
+
+            def unavailable(*args, **kwargs):
+                raise PermissionError("controlled advisory memory write unavailable")
+
+            monkeypatch.setattr(ProjectMemoryStore, "add", unavailable)
+        if mode == "self-confirmation":
+            options["confirmer"] = "worker:A:codex"
+        if mode == "receipt-failure":
+            write = dispatch._write_record
+
+            def unavailable_receipt(path, value):
+                if Path(path).name == "integrated.json":
+                    raise OSError("controlled canonical receipt write failure")
+                return write(path, value)
+
+            monkeypatch.setattr(dispatch, "_write_record", unavailable_receipt)
+        record = run_plan(context["plan"], work_root=context["runs"], **options)
+        if mode == "reused":
+            record = run_plan(
+                context["plan"],
+                work_root=context["runs"],
+                resume_run_dir=context["runs"] / record["runId"],
+                **options,
+            )
+            assert record["beads"]["A"]["status"] == "reused"
+        return dict(
+            context=context, record=record, lesson=lesson, workspace=context["directory"].parents[2]
+        )
+
+    return run
+
+
+@pytest.mark.parametrize("mode", ["ok", "unavailable"])
+def test_dispatch_lesson_summary_and_advisory_failure_preserve_validated_bead(
+    lesson_dispatch, mode
+):
+    """Catch post-proof memory failing a bead; short-lesson tests miss this boundary."""
+    case = lesson_dispatch(mode)
+    record = case["record"]
+    bead = record["beads"]["A"]
+    assert bead["status"] == "requirement-validated"
+    assert bead["candidate"]["validated"] and bead["integrated"]["validation"]["passed"]
+    assert bead["didRunProvider"] and bead["didRunIntegratedValidation"]
+    assert not record["didExecuteRealProvider"] and not record["isLiveProductProof"]
+    assert len(bead["workerReport"]) < 2000
+    promoted = bead["lessonsPromoted"][0]
+    assert promoted["text"] == case["lesson"]
+    assert record["beads"]["B"]["status"] == "blocked: worker reported"
+    saved = json.loads((Path(record["repo"]).parent / "evidence/run.json").read_text())
+    assert saved == record
+    if mode == "ok":
+        entry = ProjectMemoryStore(record["memoryWorkspace"]).get(promoted["entryId"])
+        assert promoted["confirmed"] and len(entry.text) <= 2000
+        assert f"{case['context']['plan'] / 'sample.json'}#/beads/A/lessons/0/text" in entry.text
+        assert bead["integrated"]["receiptPath"] in entry.text
+    else:
+        assert promoted["entryId"] is None and not promoted["confirmed"]
+        assert promoted["error"]["code"] == "advisory-memory-unavailable"
+
+
+@pytest.mark.parametrize(
+    "mode,reason",
+    [
+        ("self-confirmation", "cannot confirm their own lesson"),
+        ("receipt-failure", "canonical receipt write failure"),
+    ],
+)
+def test_memory_advisory_catch_excludes_auth_and_canonical_receipts(lesson_dispatch, mode, reason):
+    """Catch an overbroad memory catch certifying auth/receipt failures; I/O failure is weaker."""
+    case = lesson_dispatch(mode)
+    assert "bead failed" in case["record"]["beads"]["A"]["status"]
+    assert reason in case["record"]["beads"]["A"]["status"]
+    assert case["record"]["beads"]["B"]["status"] == "blocked: dependency A failed"
+
+
 def test_dispatch_attempts_overlap_and_integrate_without_ownership_conflict(tmp_path: Path) -> None:
     plan = _tiny_plan(tmp_path)
     barrier = threading.Barrier(2, timeout=10)

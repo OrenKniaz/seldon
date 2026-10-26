@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codex_harness.core.project_memory import (
+    MAX_TEXT_CHARS,
     ProjectMemoryError,
     ProjectMemoryStore,
     Provenance,
@@ -24,11 +25,16 @@ class MemoryPromotionError(ValueError):
         self.code = code
 
 
+class MemoryPromotionUnavailable(MemoryPromotionError):
+    """Advisory content cannot fit without losing its evidence references."""
+
+
 @dataclass(frozen=True)
 class PromotionEvidence:
     integration_commit: str
     validation_receipt: str
     decision_id: str | None = None
+    source_ref: str | None = None
 
 
 def promote_lesson(
@@ -59,6 +65,7 @@ def promote_lesson(
     content = f"{text.strip()} [evidence: commit={commit[:12]} receipt={receipt}]"
     provenance = Provenance(author=author, provider=provider, model=model, commit=commit)
     store = ProjectMemoryStore(workspace_root)
+    token = None
     if recovery_identity is not None:
         token = hashlib.sha256(
             json.dumps(
@@ -76,6 +83,20 @@ def promote_lesson(
             ).encode()
         ).hexdigest()
         content += f" [promotion: {token}]"
+    if len(content) > MAX_TEXT_CHARS:
+        # Keep token inputs and complete evidence intact; only summarize the lesson body.
+        suffix = content[len(text.strip()) :]
+        if evidence.source_ref:
+            suffix = f" [full lesson: {evidence.source_ref}]" + suffix
+        marker = " ... [summary]"
+        budget = MAX_TEXT_CHARS - len(suffix) - len(marker)
+        if budget < 1:
+            raise MemoryPromotionUnavailable(
+                "memory-promotion-evidence-too-long",
+                "Full evidence references exceed memory budget",
+            )
+        content = text.strip()[:budget] + marker + suffix
+    if token is not None:
         entries = store.search(token, include_superseded=True, limit=100)
         originals = [entry for entry in entries if entry.supersedes is None]
         if originals:

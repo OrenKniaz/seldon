@@ -23,6 +23,7 @@ from uuid import uuid4
 from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import roundtable
 from codex_harness.core.plan_store import PlanStoreError, _now
+from codex_harness.core.record_io import read_record_json
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
 
@@ -375,6 +376,42 @@ def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
             "Specify the acceptance subject. Next: harness_accept_run repo=<integrated-repo> "
             "subject=product OR harness_accept_run repo=<reference-repo> subject=oracle",
         )
+    if subject == "product":
+        product = Path(repo).resolve()
+        dispatch_record = product.parent / "evidence" / "run.json"
+        if dispatch_record.is_file():
+            from codex_harness.core.dispatch import STATUS_MOCK_ONLY
+
+            run = read_record_json(dispatch_record)
+            if (
+                run.get("schema") != "codex-harness/plan-run-v1"
+                or not isinstance(run.get("beads"), dict)
+                or Path(run.get("repo", "")).resolve() != product
+            ):
+                raise PlanStoreError("acceptance-dispatch-record-invalid", str(dispatch_record))
+            accepted = any(
+                bead.get("status")
+                in {
+                    "requirement-validated",
+                    "already-satisfied",
+                    "reused",
+                    STATUS_MOCK_ONLY,
+                }
+                and (bead.get("acceptedPlanRevision") or bead.get("planRevision"))
+                == run.get("planRevision")
+                and (bead.get("revalidation") or bead.get("integrated") or {})
+                .get("validation", {})
+                .get("passed")
+                is True
+                for bead in run["beads"].values()
+            )
+            if not accepted:
+                raise PlanStoreError(
+                    "acceptance-no-delivered-candidate",
+                    "No accepted dispatch candidate is available for product scenarios. "
+                    "Partial integrated artifacts remain retained; they are not accepted beads. "
+                    f"Inspect {dispatch_record} and recover the failed/blocked work first.",
+                )
     spine = store.locked_acceptance_spine()
     scenarios = store.acceptance_scenarios()
     if not scenarios:
