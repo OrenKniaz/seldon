@@ -362,6 +362,9 @@ def test_public_failed_audit_records_findings_without_granting_credit(prospectiv
         assert row[0] == revision and row[1] == 0
         assert json.loads(row[2])["findings"] == result["findings"]
         assert not server.store.passing_audit(revision)
+        cached = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
+        assert cached["attemptId"] == result["attemptId"] and cached["result"] == result
+        assert server.audits.prepared is None
         blocked = invoke(server, "harness_advance", to_phase="publish")
         assert blocked["isError"] and server.store.phase() == "roundtable"
     finally:
@@ -544,9 +547,12 @@ def test_real_child_launch_failure_persists_failed_verdict_without_credit(prospe
         server.close()
 
 
-def test_pre_result_engine_exception_records_dispatch_without_proof(prospective):
-    """Protect dispatch truth when the real engine raises before returning its envelope."""
-    server, _ = started(prospective)
+def test_pre_result_engine_exception_records_dispatch_without_proof(prospective, capsys):
+    """Catch concurrent retry after engine failure; unstarted failure misses dispatch races."""
+    from codex_harness.core import plan_cli
+
+    server, revision = started(prospective)
+    workspace = server.workspace
     try:
         admission = invoke(server, "harness_audit", mode="prospective")["structuredContent"]
         captured = server.audits.prepared[1]
@@ -563,6 +569,49 @@ def test_pre_result_engine_exception_records_dispatch_without_proof(prospective)
         assert not failed["proofCreditGranted"]
     finally:
         server.close()
+    barrier = threading.Barrier(2)
+    admitted = threading.Barrier(2)
+    outcomes, failures = [], []
+
+    def retry():
+        contender = PlannerServer(workspace)
+        try:
+            barrier.wait(timeout=10)
+            receipt = invoke(contender, "harness_audit", mode="prospective")["structuredContent"]
+            prepared = contender.audits.prepared is not None
+            admitted.wait(timeout=10)  # Both requests race before either dispatches.
+            contender.audits.dispatch_after_flush(contender.store)
+            if contender.audits.thread is not None:
+                contender.audits.thread.join(timeout=30)
+                assert not contender.audits.thread.is_alive()
+                contender.audits.drain(contender.store)
+            outcomes.append((receipt, prepared))
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            contender.close()
+
+    contenders = [threading.Thread(target=retry) for _ in range(2)]
+    for contender in contenders:
+        contender.start()
+    for contender in contenders:
+        contender.join(timeout=45)
+    assert not failures, failures
+    assert all(not contender.is_alive() for contender in contenders)
+    assert len(outcomes) == 2
+    retry_ids = {receipt["attemptId"] for receipt, _ in outcomes}
+    assert len(retry_ids) == 1 and failed["attemptId"] not in retry_ids
+    assert sum(prepared for _, prepared in outcomes) == 1
+    with open_plan_store_readonly(workspace) as reopened:
+        assert reopened.audit_attempt(failed["attemptId"]) == failed
+        completed = reopened.audit_attempt(retry_ids.pop())
+        assert completed["result"]["ok"] and completed["proofCreditGranted"]
+        assert reopened.passing_audit(revision)["id"] == completed["auditId"]
+        assert len(reopened.audit_history(revision)["audits"]) == 1
+        assert reopened.connection.execute("SELECT count(*) FROM audit_attempts").fetchone()[0] == 2
+    assert plan_cli.main(["--workspace", str(workspace), "--json", "audit", "--prospective"]) == 0
+    cached = json.loads(capsys.readouterr().out)["data"]
+    assert cached["attemptId"] == completed["attemptId"]
 
 
 @pytest.mark.parametrize("fault", ["body", "cleanup", "both"])
@@ -805,8 +854,9 @@ def test_cli_thread_start_refusal_returns_persisted_failure_json(prospective, mo
     def refused_start(thread):
         raise RuntimeError("Controlled thread creation refusal")
 
-    monkeypatch.setattr(threading.Thread, "start", refused_start)
-    exit_code = plan_cli.main(["--workspace", str(root), "--json", "audit", "--prospective"])
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", refused_start)
+        exit_code = plan_cli.main(["--workspace", str(root), "--json", "audit", "--prospective"])
     response = json.loads(capsys.readouterr().out)
     assert exit_code == 2 and response["isError"]
     failed = response["data"]
@@ -815,6 +865,25 @@ def test_cli_thread_start_refusal_returns_persisted_failure_json(prospective, mo
     assert "Controlled thread creation refusal" in failed["error"]
     with open_plan_store_readonly(root) as reopened:
         assert reopened.audit_attempt(failed["attemptId"])["error"] == failed["error"]
+    retried = PlannerServer(root)
+    try:
+        admission = invoke(retried, "harness_audit", mode="prospective")["structuredContent"]
+        assert admission["attemptId"] != failed["attemptId"]
+        assert admission["state"] == "queued" and not admission["proofCreditGranted"]
+        assert admission["manifestRevision"] == failed["manifestRevision"]
+        assert admission["inputDigest"] == failed["inputDigest"]
+        assert admission["engineIdentity"] == failed["engineIdentity"]
+        retried.audits.dispatch_after_flush(retried.store)
+        retried.audits.thread.join(timeout=30)
+        assert not retried.audits.thread.is_alive()
+        retried.audits.drain(retried.store)
+        completed = invoke(retried, "harness_audit_status", id=admission["attemptId"])[
+            "structuredContent"
+        ]
+        assert completed["result"]["ok"] and completed["proofCreditGranted"]
+        assert retried.store.audit_attempt(failed["attemptId"]) == failed
+    finally:
+        retried.close()
 
 
 def test_public_audit_binding_and_input_refuse_before_effects(tmp_path, monkeypatch):

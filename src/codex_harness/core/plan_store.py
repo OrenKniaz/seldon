@@ -1553,11 +1553,14 @@ class PlanStore:
                 attempt = self.audit_attempt(row["id"], owner)
                 attempt["reason"] = "audit-busy: existing attempt holds this plan"
                 return attempt, False
-            row = self.connection.execute(
-                "SELECT id FROM audit_attempts WHERE attempt_key=?", (key,)
-            ).fetchone()
-            if row:
-                return self.audit_attempt(row["id"], owner), False
+            while row := self.connection.execute(
+                "SELECT id,state,result_json FROM audit_attempts WHERE attempt_key=?", (key,)
+            ).fetchone():
+                if row["state"] != "failed" or row["result_json"] is not None:
+                    return self.audit_attempt(row["id"], owner), False
+                # A terminal infrastructure failure has no verdict to reuse. Preserve
+                # its immutable row; derive the next admission slot under this lock.
+                key = hashlib.sha256(_json([key, "retry", row["id"]]).encode()).hexdigest()
             if self.manifest_revision() != revision:
                 raise PlanStoreError("audit-plan-changed", "Capture the current manifest")
             attempt_id = uuid4().hex
