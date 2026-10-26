@@ -286,7 +286,10 @@ def _reviews(store):
 
 def _recorded_understanding(store, status):
     """Enrich an existing prerequisite, never infer an active prompt or approval."""
-    from codex_harness.core.planner_confirmations import _understanding
+    from codex_harness.core.planner_confirmations import (
+        confirmation_card,
+        legacy_confirmation_card,
+    )
 
     gate = status.get("pending_gate")
     if gate not in ("approval:align", "approval:vision-lock"):
@@ -347,15 +350,11 @@ def _recorded_understanding(store, status):
     if not isinstance(vision, dict) or vision != spine.node(visions[0]):
         return None
     phase = status["phase"]
-    heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
-    expected_card = (
-        f"{heading} for revision {revision}.\n"
-        "Review the complete recorded understanding below. Approve only this gate and "
-        "revision. Retain your complete words; put any conditions or requested changes "
-        "in conditions. A conditional response does not approve this gate.\n\n"
-        + _understanding(vision)
-    )
-    if request.get("card") != expected_card or not isinstance(vision.get("title"), str):
+    expected_cards = {
+        render(gate, phase, revision, vision)
+        for render in (confirmation_card, legacy_confirmation_card)
+    }
+    if request.get("card") not in expected_cards or not isinstance(vision.get("title"), str):
         return None
     # This is a public excerpt, not the unrestricted canonical node/request.
     public_keys = {key for _, aliases in SECTIONS for key in aliases} | {"done_means"}

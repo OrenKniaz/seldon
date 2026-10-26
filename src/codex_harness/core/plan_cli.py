@@ -736,7 +736,9 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             totals = server._status().get("roundtable", [])
             for item in totals:
                 reply["content"][0]["text"] = reply["content"][0]["text"].rsplit("\nNext: ", 1)[0]
-                reply["content"][0]["text"] += "\n" + item["reviewer"] + ": " + item["text"]
+                line = item["reviewer"] + ": " + item["text"]
+                if line not in reply["content"][0]["text"]:
+                    reply["content"][0]["text"] += "\n" + line
         return reply, reply.get("structuredContent")
     if command == "node":
         nodes = read_json(args.payload)
@@ -1297,12 +1299,17 @@ def main(argv=None) -> int:
             {"content": [{"type": "text", "text": body}]}, server.workspace, status
         )
         body = projected_reply["content"][0]["text"]
-        text = (
-            body
-            + ("\n" + planner_views.author_handoff_card(handoff) if handoff is not None else "")
-            + "\nNext: "
-            + display_next
-        )
+        if "**Decision needed: run one more plan review?**" in body:
+            # Nothing to repair: the MCP question replaces the repair boilerplate.
+            handoff_card = ""
+            display_next = "Ask the user the question above and wait; on Run review: " + (
+                display_next
+            )
+        else:
+            handoff_card = (
+                "\n" + planner_views.author_handoff_card(handoff) if handoff is not None else ""
+            )
+        text = body + handoff_card + "\nNext: " + display_next
         for tool in sorted(cli_names, key=len, reverse=True):
             text = text.replace(tool, cli_names[tool])
         if status["pending_gate"] in cli_names:

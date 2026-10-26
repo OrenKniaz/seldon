@@ -83,10 +83,16 @@ def _text(text: str, projection: dict, show_recovery: bool) -> str:
         return text
     lines = [projection["header"]]
     body, separator, next_step = text.rpartition("\nNext: ")
+    # Full recovery guidance stays in structured plannerConnection.recovery.
+    recovery = (
+        "- Connection recovery: if this chat loses Seldon, open a new chat in "
+        + projection["projectRoot"]
+        + " and call harness_plan_status with expected_workspace set to that folder."
+    )
     if show_recovery and separator:
-        lines.extend([body, "Connection recovery: " + projection["recovery"], "Next: " + next_step])
+        lines.extend([body, recovery, "Next: " + next_step])
     else:
         lines.append(text)
         if show_recovery:
-            lines.append("Connection recovery: " + projection["recovery"])
+            lines.append(recovery)
     return "\n".join(lines)

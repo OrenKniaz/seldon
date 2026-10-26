@@ -97,12 +97,11 @@ def test_banner_and_tracker_all_phases(phase):
     index = PHASES.index(phase)
     text = views.banner(current)
     assert text.splitlines() == [
-        f"Harness Plan Mode: tip-split · Phase {index + 1}/11: "
-        f"{phase.replace('-', ' ').title()} · pending: {current['pending_gate'] or 'none'}",
+        f"Plan **tip-split** · {views.pending_label(current['pending_gate'])}",
     ]
     tracker = views.phase_tracker(current)
     assert f"**{phase}**" in tracker
-    assert "position, not proof" in tracker
+    assert tracker.count("✓") == index
     assert all(p in tracker for p in PHASES)
     assert tracker == views.phase_tracker(current)
 
@@ -112,7 +111,7 @@ def test_understanding_card_fields_and_confirmation():
         "Split fairly", "Diners", "Exact shares", "Dollars", "History", ["CLI users"]
     )
     assert text == (
-        "**Here's what I understood**\n- Vision: Split fairly\n- Users: Diners\n"
+        "**Here's what I understood: is this right?**\n- Vision: Split fairly\n- Users: Diners\n"
         "- First user moment: Exact shares\n- Scope in: Dollars\n- Scope out: History\n"
         "- Assumptions: CLI users\n- Your call: confirm, or tell me what's wrong."
     )
@@ -228,3 +227,92 @@ def test_diagram_caps_large_serial_dag_and_preserves_full_machine_output(tmp_pat
         assert text.splitlines()[-1].startswith("Next:")
     finally:
         server.close()
+
+
+def _published_status(**changes):
+    value = {
+        **status("publish"),
+        "spine_revision": "a" * 64,
+        "manifest_revision": "b" * 64,
+        "published_revision": "c" * 64,
+        "vision_locked_revision": "d" * 64,
+        "vision_lock_stale": 0,
+        "approval": {"gate": "vision-lock", "granted": True},
+        "publication": {"up_to_date": True},
+        "reviewResolution": {
+            "audit": {"current": True},
+            "review": {"current": True, "qualityStatus": "pass"},
+        },
+        "proofLevelLabel": "Prospective plan · tests not oracle-verified",
+        "roundtable": [{"reviewer": "Sol", "text": "round 1/1 for this revision", "reviews": []}],
+        "acceptance": {
+            "accepted": False,
+            "scenarios": [{"lastResult": "pass"}, {"lastResult": None}],
+        },
+        "open_clarifications": 0,
+        "open_assumptions": 1,
+        "open_findings": 0,
+        "open_finding_members": 0,
+        "readiness": {"status": "not-yet"},
+        "visionProjection": {
+            "title": "Tip split",
+            "sections": [{"label": "Vision", "text": "Split the bill fairly. " * 30}],
+        },
+    }
+    value.update(changes)
+    return value
+
+
+def test_status_card_puts_gates_first_and_hashes_in_details():
+    current = _published_status()
+    card = views.status_card(current, [])
+    assert card.splitlines()[0] == "**Where things stand** · Publish (9 of 11)"
+    assert "- Vision lock: ✓ approved" in card
+    assert "- Published: ✓ up to date (cccccccccccc)" in card
+    assert "- Product acceptance: not yet · 1/2 scenarios proved by recorded runs" in card
+    assert "c" * 13 not in card  # no full hashes in the user-facing card
+    assert card.count("**Vision:**") == 1 and "Users:" not in card
+    details = "\n".join(views.status_details(current))
+    assert "spine aaaaaaaaaaaa · manifest bbbbbbbbbbbb · published cccccccccccc" in details
+
+
+def test_status_card_shows_full_vision_before_lock_and_open_questions():
+    current = _published_status(phase="align", vision_locked_revision=None)
+    card = views.status_card(current, [{"id": "Q1", "question": "Round up or down?"}])
+    assert "**Questions waiting for you**\n- Q1: Round up or down?" in card
+    assert "Vision:\nSplit the bill fairly." in card
+    stale = views.status_card(_published_status(vision_lock_stale=1), [])
+    assert "- Vision lock: ⚠ needs re-approval" in stale
+    needs_review = _published_status(
+        reviewResolution={"audit": {"current": True}, "review": {"current": False}}
+    )
+    assert "- Plan review: needs a fresh review" in views.status_card(needs_review, [])
+
+
+@pytest.mark.parametrize(
+    "code, message, expected",
+    [
+        ("plan-approval-required", "align needs approval of abc", "gate=align"),
+        ("plan-approval-stale", "vision-lock needs approval of abc", "gate=vision-lock"),
+        ("plan-confirmation-origin-unavailable", "", "harness_record_chat_confirmation"),
+        ("plan-clarifications-open", "", "harness_answer"),
+        ("plan-findings-open", "", "harness_resolve_findings"),
+        (
+            "plan-publication-evidence-required",
+            "Missing successful review (roundtable) for current manifest revision x",
+            "a successful plan review (harness_roundtable)",
+        ),
+        ("plan-phase-order", "", "advance to expand next"),
+    ],
+)
+def test_refusal_help_teaches_the_fix(code, message, expected):
+    text = views.refusal_help(code, message, status())
+    assert text.startswith("How to fix: ") and expected in text
+    assert views.refusal_help("unknown-code", message, status()) is None
+
+
+def test_publish_review_question_is_a_user_decision():
+    text = views.publish_review_question({"published_revision": "f" * 64})
+    assert text.startswith("**Decision needed: run one more plan review?**")
+    assert "**Run review**" in text and "**Stop**" in text and "ffffffffffff)" in text
+    assert "unpublished" in views.publish_review_question({"published_revision": None})

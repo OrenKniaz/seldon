@@ -951,6 +951,9 @@ class PlannerServer:
 
     @staticmethod
     def _binding_text(binding):
+        if binding["match"] == "matched":
+            # Full routing facts stay in structured workspaceBinding; one quiet line here.
+            return "Workspace: matched (caller-stated; unverified)"
         return (
             "Effective server workspace: "
             + binding["serverWorkspace"]
@@ -972,6 +975,8 @@ class PlannerServer:
                 if item.get("type") == "text":
                     first, separator, rest = item["text"].partition("\n")
                     item["text"] = first + "\n" + self._binding_text(binding) + separator + rest
+                    # One binding line per reply; later blocks (e.g. chat questions) stay clean.
+                    break
         elif response.get("method") == "elicitation/create":
             response["params"]["message"] += "\n" + self._binding_text(binding)
         # Ordinary tool results already carry the status observed by call_tool.
@@ -1135,6 +1140,7 @@ class PlannerServer:
         if name == "harness_accept_status":
             return self._acceptance_job_status(arguments)
         operation_error_code = None
+        error_message = ""
         uncertain_dispatch = False
         dispatch_started = False
         try:
@@ -1187,6 +1193,7 @@ class PlannerServer:
             )
         except Exception as error:
             operation_error_code = getattr(error, "code", None)
+            error_message = str(error)
             # These advance/publish prerequisites precede writes in canonical transactions.
             uncertain_dispatch = dispatch_started and not (
                 isinstance(error, PlanStoreError)
@@ -1263,9 +1270,16 @@ class PlannerServer:
                 body += " The tool completed; do not repeat its mutation to refresh status."
         if is_error:
             body += f"\npending_gate: {status['pending_gate'] or 'none'}"
+            help_line = (
+                views.refusal_help(operation_error_code, error_message, status)
+                if operation_error_code
+                else None
+            )
+            if help_line:
+                body += "\n" + help_line
         acceptance = status.get("acceptance", {})
         if name == "harness_plan_status" and acceptance.get("invalidMessage"):
-            body += "\nAcceptance invalid: " + acceptance["invalidMessage"]
+            body += "\n- Acceptance invalid: " + acceptance["invalidMessage"]
         next_step = (
             self._next(name, arguments, status, is_error, operation_error_code)
             if status_available and not uncertain_dispatch
@@ -1315,7 +1329,18 @@ class PlannerServer:
             }
         ):
             handoff = views.review_author_handoff(self._store(), status)
-            body += "\n" + views.author_handoff_card(handoff)
+            if (
+                name == "harness_publish"
+                and operation_error_code == "plan-publication-evidence-required"
+                and "successful review" in error_message
+                and "passing audit" not in error_message
+                and handoff.get("memberCount") == 0
+            ):
+                # Nothing to repair: the user decides whether to spend another review.
+                body += "\n" + views.publish_review_question(status)
+                next_step = "Ask the user the question above and wait; on Run review: " + next_step
+            else:
+                body += "\n" + views.author_handoff_card(handoff)
         reply = {
             "isError": is_error,
             "statusAvailable": status_available,
@@ -1578,11 +1603,11 @@ class PlannerServer:
             return self._accept_next(name).removeprefix("\nNext: ")
         if name == "harness_understanding_card":
             return (
-                "Your call: confirm this understanding in your own words, "
-                "or tell me what to change."
+                "Show the user this card exactly as written (do not summarise), then ask them "
+                "to confirm it or say what to change."
             )
         if name == "harness_decision_card" and not args.get("chosen"):
-            return "Your call: choose an option, or explain the change you want."
+            return "Show the user this decision exactly as written and wait for their choice."
         if name == "harness_ask":
             return "Your call: answer the question above so the planner can record your decision."
         if name == "harness_add_assumption":
@@ -1594,8 +1619,8 @@ class PlannerServer:
             return "Read your inbox with harness_mail_inbox."
         if name == "harness_plan_start" and status["phase"] == "align":
             return (
-                "Restate the vision with harness_understanding_card; "
-                "your call: confirm the understanding or explain what to change."
+                "Restate the vision with harness_understanding_card, show the user the card "
+                "exactly as written, and ask them to confirm it or say what to change."
             )
         if name == "harness_record_confirmation" and status["phase"] == args["gate"]:
             phase = status["phase"]
@@ -2025,38 +2050,37 @@ class PlannerServer:
                 )
             ]
             body = views.status_card(status, questions)
-            body += (
-                f"\nOpen findings: {status['open_findings']} clusters "
-                f"({status['open_finding_members']} members)"
-            )
-            if status.get("proofLevelLabel"):
-                body += "\nProof level: " + status["proofLevelLabel"]
-            body += "\nWorker readiness (advisory): " + status["readiness"]["status"]
+            # Provenance and exact ids live in a compact footer for the agent.
+            details = views.status_details(status)
             approval = status.get("approval")
             if approval:
                 granted = approval["granted"]
-                body += (
-                    f"\nCurrent {approval['gate']} approval: "
+                line = (
+                    f"- Current {approval['gate']} approval: "
                     + ("granted" if granted else "not granted")
                     + "; origin: "
                     + approval["origin"]
                 )
                 if approval["origin"] == "mcp-client-elicitation":
-                    body += (
+                    line += (
                         " (native MCP client-reported response; "
                         "natural-person identity is not authenticated)"
                     )
                 elif approval["origin"] == "chat-confirmation":
-                    body += (
+                    line += (
                         " (caller-mediated; message source, recency and actor identity unverified)"
                     )
+                details.append(line)
                 if approval["gate"] == "vision-lock":
-                    body += "\nVision lock: " + (
-                        f"locked vision (current recorded {approval['origin']} credit)"
-                        if granted
-                        else (
-                            "not currently granted; fresh bound native or chat "
-                            "confirmation required"
+                    details.append(
+                        "- Vision lock: "
+                        + (
+                            f"locked vision (current recorded {approval['origin']} credit)"
+                            if granted
+                            else (
+                                "not currently granted; fresh bound native or chat "
+                                "confirmation required"
+                            )
                         )
                     )
             row = store.connection.execute(
@@ -2065,15 +2089,23 @@ class PlannerServer:
                 ("vision-lock",),
             ).fetchone()
             if row:
-                body += (
-                    "\nHistorical vision-lock record (not current approval credit): recorded by "
+                details.append(
+                    "- Historical vision-lock record (not current approval credit): recorded by "
                     + views.readable(row["by"])
                     + " for "
-                    + row["plan_revision"]
-                    + "\nHistorical statement: "
-                    + views.readable(row["statement"])
+                    + row["plan_revision"][:12]
                 )
-            body += "\n" + views.outcome_waves_card(store.outcome_waves())
+                details.append("- Historical statement: " + views.readable(row["statement"]))
+            waves = store.outcome_waves()
+            if waves.get("waveMap") or waves.get("mapNode"):
+                # A recorded outcome map is planning content, so it stays in full.
+                body += "\n\n" + views.outcome_waves_card(waves)
+            else:
+                outcome = views.outcome_summary(waves)
+                if outcome:
+                    details.append(outcome)
+            body += "\n\n**Details** (for the agent; full data in structured output)\n"
+            body += "\n".join(details)
             return body
         if name == "harness_understanding_card":
             spine = store.spine()
@@ -2286,6 +2318,14 @@ class PlannerServer:
             reply["content"].append({"type": "text", "text": f"Chat question not offered: {error}"})
         else:
             reply["structuredContent"]["chatConfirmation"] = question
+            first = reply["content"][0] if reply["content"] else {}
+            if first.get("type") == "text" and "\nNext: " in first["text"]:
+                # Point at the question the user can actually answer now.
+                first["text"] = (
+                    first["text"].rsplit("\nNext: ", 1)[0]
+                    + "\nNext: Show the user the chat question below exactly as written and "
+                    "wait for their reply."
+                )
             reply["content"].append({"type": "text", "text": question["card"]})
         return reply
 
@@ -2457,8 +2497,8 @@ class PlannerServer:
             else "no native client response; no approval recorded."
         )
         body = (
-            f"Confirmation {data['state']} for {data['gate']} / {data['plan_revision']}.\nOrigin: "
-            + origin
+            f"Confirmation {data['state']} for {data['gate']} "
+            f"(revision {str(data['plan_revision'])[:12]}).\nOrigin: " + origin
         )
         if data.get("content") is not None:
             body += "\nComplete submitted response:\n" + json.dumps(

@@ -91,7 +91,7 @@ def cli(workspace, *args, code=0, cwd=None, machine=False):
         output = result.stdout
         text = output
     assert text.startswith("Seldon · project: ")
-    assert "\nHarness Plan Mode: " in text
+    assert "\nPlan **" in text
     if not machine:
         assert text.rstrip().splitlines()[-1].startswith("Next: ")
         assert sum(line.startswith("Next:") for line in text.splitlines()) == 1

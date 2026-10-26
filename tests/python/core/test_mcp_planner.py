@@ -2216,7 +2216,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             return native_confirm(server, args["gate"], args["user_statement"])
         return call(server, tool_name, **args)
 
-    assert "Phase 1/11: Align" in run("harness_plan_start", idea="Split fairly", name="tip-split")
+    assert "phase 1/11: align" in run("harness_plan_start", idea="Split fairly", name="tip-split")
     assert "approval:align" in run("harness_plan_status")
     assert "Durable plan resume" in run("harness_plan_resume")
     run("harness_schema", kind="requirement")
@@ -2410,7 +2410,7 @@ def test_restart_resumes_without_overwriting_vision(server, tmp_path):
     )
     assert invalid.splitlines()[0].startswith("Seldon · project: ")
     assert banner(before) in invalid.splitlines()
-    assert "Phase 2/11: Expand" in call(
+    assert "phase 2/11: expand" in call(
         server, "harness_plan_start", idea="Other idea", name="Other name"
     )
     assert server.store.status() == before
@@ -2430,7 +2430,7 @@ def test_unavailable_status_is_error_and_server_recovers(server, monkeypatch):
     response = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
     assert response["isError"] is True
     assert response["content"][0]["text"].startswith("Seldon · project: ")
-    assert "\nHarness Plan Mode: " in response["content"][0]["text"]
+    assert "\nPlan **" in response["content"][0]["text"]
     monkeypatch.setattr(store_type, "status", original)
     call(server, "harness_plan_status")
 
@@ -2515,7 +2515,7 @@ def test_stdio_subprocess_protocol_and_recovery(tmp_path):
     assert replies[5]["result"] == {}
     for reply in replies[3:5]:
         assert reply["result"]["content"][0]["text"].startswith("Seldon · project: ")
-        assert "\nHarness Plan Mode: " in reply["result"]["content"][0]["text"]
+        assert "\nPlan **" in reply["result"]["content"][0]["text"]
     assert "planner tool failed:" in result.stderr
 
 

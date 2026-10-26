@@ -7,7 +7,8 @@ from codex_harness.core.planner_vision import render_vision
 from codex_harness.core.spine_diagrams import _escape, _layers, _projection, diagram, text_fallback
 
 NEXT = {
-    "align": "Restate the vision and ask the user to confirm the understanding.",
+    "align": "Restate the vision with harness_understanding_card, show the user the card "
+    "exactly as written, and ask them to confirm it.",
     "expand": "Offer improvements; record what the user accepts, rejects or defers.",
     "vision-lock": "Show the understanding and journey; ask for explicit vision approval.",
     "features": "harness_schema kind=feature (CLI: schema --kind feature); "
@@ -803,6 +804,79 @@ def author_handoff_card(handoff: dict) -> str:
     return "\n".join(lines)
 
 
+def refusal_help(code, message: str, status: dict) -> str | None:
+    """One plain 'How to fix' line for common planning refusals; never changes the gate."""
+    message = str(message)
+    phase = status.get("phase")
+    if code in {"plan-approval-required", "plan-approval-stale"}:
+        gate = message.split(" needs approval", 1)[0].strip() or "the current"
+        return (
+            f"How to fix: the user has not approved {gate} for this plan version yet. "
+            "Show them the understanding card exactly as written, then call "
+            f"harness_record_confirmation gate={gate}. If the client cannot show the form, "
+            "show the chat question Seldon offers instead and wait for the user's reply."
+        )
+    if code == "plan-confirmation-origin-unavailable":
+        return (
+            "How to fix: this client cannot show Seldon's approval form. Show the user the "
+            "chat question Seldon offers exactly as written, wait for their reply, then record "
+            "it with harness_record_chat_confirmation."
+        )
+    if code == "plan-clarifications-open":
+        return (
+            "How to fix: ask the user each open question (ids in harness_plan_status), record "
+            "their answers with harness_answer, then retry."
+        )
+    if code == "plan-findings-open":
+        return (
+            "How to fix: repair the plan for each open review finding, or record a reasoned "
+            "disposition with harness_resolve_findings; then compile, audit and review again."
+        )
+    if code == "plan-publication-evidence-required":
+        missing = []
+        if "passing audit" in message:
+            missing.append("a passing test audit (harness_audit)")
+        if "successful review" in message:
+            missing.append("a successful plan review (harness_roundtable)")
+        return (
+            "How to fix: publishing needs "
+            + (" and ".join(missing) or "current audit and review evidence")
+            + " for this exact plan version. Any plan edit makes earlier evidence stale."
+        )
+    if code == "plan-phase-order":
+        index = PHASES.index(phase) if phase in PHASES else None
+        target = PHASES[index + 1] if index is not None and index + 1 < len(PHASES) else None
+        return "How to fix: phases move one step at a time" + (
+            f"; advance to {target} next, or return to an earlier phase." if target else "."
+        )
+    if code == "plan-phase-invalid":
+        return "How to fix: use one of these phases: " + ", ".join(PHASES) + "."
+    if code == "plan-confirmation-gate-mismatch":
+        return f"How to fix: confirm only the gate for the current phase ({phase})."
+    if code == "plan-node-missing":
+        return "How to fix: check the exact id with harness_nodes (ids are case-sensitive)."
+    return None
+
+
+def publish_review_question(status: dict) -> str:
+    """Turn a missing-review publish refusal into a question the user can answer."""
+    published = status.get("published_revision")
+    stop = (
+        f"keep the last published plan ({str(published)[:12]})"
+        if published
+        else "leave the plan unpublished for now"
+    )
+    return "\n".join(
+        [
+            "**Decision needed: run one more plan review?**",
+            "The plan changed after its last successful review, so publishing needs a fresh "
+            "review of this exact version.",
+            "Reply **Run review** to review it now (uses one review call from your budget), "
+            f"or **Stop** to {stop}.",
+        ]
+    )
+
+
 def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
     """Transport-specific wording for the same single canonical advisory action."""
     action = state["nextAction"]
@@ -944,6 +1018,22 @@ def _short(value, limit=60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+PENDING_LABELS = {
+    "approval:align": "waiting for your Align approval",
+    "approval:vision-lock": "waiting for your Vision Lock approval",
+    "passing-audit-required": "needs a passing test audit",
+    "successful-review-required": "needs a fresh plan review",
+    "status-unavailable": "status unavailable",
+}
+
+
+def pending_label(gate) -> str:
+    """Plain words for the pending gate; the raw code stays in structured status."""
+    if not gate:
+        return "nothing is waiting on you"
+    return PENDING_LABELS.get(gate) or "waiting on: " + _short(str(gate).replace("-", " "), 60)
+
+
 def status_line(status: dict) -> str:
     return (
         f"Revision {status['plan_revision'][:12]} · "
@@ -953,19 +1043,17 @@ def status_line(status: dict) -> str:
 
 
 def banner(status: dict) -> str:
-    phase = status["phase"]
-    number = str(PHASES.index(phase) + 1) if phase in PHASES else "?"
     return (
-        f"Harness Plan Mode: {_short(status.get('name', 'unknown'), 48)} · "
-        f"Phase {number}/11: {phase.replace('-', ' ').title()} · "
-        f"pending: {_short(status['pending_gate'] or 'none', 48)}"
+        f"Plan **{_short(status.get('name', 'unknown'), 48)}** · "
+        f"{pending_label(status['pending_gate'])}"
     )
 
 
 def phase_tracker(status: dict) -> str:
     current = PHASES.index(status["phase"])
-    return "Phases (position, not proof): " + " → ".join(
-        f"**{phase}**" if index == current else phase for index, phase in enumerate(PHASES)
+    return "Progress: " + " · ".join(
+        f"**{phase}**" if index == current else phase + " ✓" if index < current else phase
+        for index, phase in enumerate(PHASES)
     )
 
 
@@ -979,7 +1067,7 @@ def response(status: dict, body: str, next_step: str | None = None, *, tracker=F
     body = body.rsplit("\nNext: ", 1)[0].rstrip()
     parts = [banner(status)]
     if tracker and status["phase"] in PHASES:
-        parts.extend([status_line(status), phase_tracker(status)])
+        parts.append(phase_tracker(status))
     if body:
         parts.append(body)
     parts.append(
@@ -1264,38 +1352,129 @@ def review_card(result: dict, *, details=False) -> str:
     return "\n".join(lines)
 
 
-def status_card(status: dict, questions: list[dict]) -> str:
+def _short_revision(value) -> str:
+    return str(value)[:12] if value else "none"
+
+
+def _gate_lines(status: dict) -> list[str]:
+    """User-facing gate checklist over the same recorded status; never new authority."""
+    phase_index = PHASES.index(status["phase"]) if status["phase"] in PHASES else -1
+    approval = status.get("approval") or {}
+    if status.get("vision_lock_stale"):
+        vision = "⚠ needs re-approval (the vision changed after it was locked)"
+    elif status.get("pending_gate") == "approval:vision-lock":
+        vision = "waiting for your approval"
+    elif approval.get("gate") == "vision-lock" and approval.get("granted"):
+        vision = "✓ approved"
+    elif status.get("vision_locked_revision"):
+        vision = "✓ locked (approval not current; see details)"
+    else:
+        vision = "not yet"
+    resolution = status.get("reviewResolution") or {}
+    audit = resolution.get("audit") or {}
+    if audit.get("current"):
+        audit_text = "✓ passing" + (
+            f" ({status['proofLevelLabel']})" if status.get("proofLevelLabel") else ""
+        )
+    elif audit.get("current") is False:
+        audit_text = "needed for the current plan version"
+    else:
+        audit_text = "not run yet" if phase_index < PHASES.index("roundtable") else "unknown"
+    review = resolution.get("review") or {}
+    rounds = "; ".join(f"{row['reviewer']}: {row['text']}" for row in status["roundtable"])
+    if review.get("current"):
+        review_text = "✓ current" + (f" · {rounds}" if rounds else "")
+        if review.get("qualityStatus") in {"warn", "fail"} and review.get("advice"):
+            review_text += f" · ⚠ {_short(review['advice'], 140)}"
+    elif review.get("current") is False:
+        review_text = "needs a fresh review of the current version" + (
+            f" (last: {rounds})" if rounds else ""
+        )
+    else:
+        review_text = rounds or "not yet"
+    publication = status.get("publication") or {}
+    if publication.get("up_to_date"):
+        published = f"✓ up to date ({_short_revision(status['published_revision'])})"
+    elif status.get("published_revision"):
+        published = (
+            f"⚠ out of date: the plan changed after {_short_revision(status['published_revision'])}"
+        )
+    else:
+        published = "not yet"
     acceptance = status["acceptance"]
-    approval = (
-        approval_label(acceptance["approvedBy"], is_proxy=acceptance["isProxy"])
-        if acceptance["accepted"]
-        else "not accepted: " + str(acceptance["invalidReason"])
-    )
     passed = sum(item["lastResult"] == "pass" for item in acceptance["scenarios"])
-    body = data_card(
-        "Plan status",
-        {
-            "Editable spine_revision": status["spine_revision"],
-            "Compiled manifest_revision": status["manifest_revision"],
-            "Frozen published_revision": status["published_revision"],
-            "Acceptance": approval,
-            "Proof": f"{passed}/{len(acceptance['scenarios'])} scenarios proved "
-            "by current recorded runs; "
-            "review reports are recorded evidence, not independent live proof",
-            "Open questions / assumptions": f"{readable(questions)} / {status['open_assumptions']}",
-            "Roundtable": [
-                f"{row['reviewer']}: {row['text']} · Recorded review scope: "
-                + "; ".join(sorted({review_scope(review) for review in row.get("reviews", [])}))
-                for row in status["roundtable"]
-            ],
-        },
+    accepted = (
+        "✓ " + approval_label(acceptance["approvedBy"], is_proxy=acceptance["isProxy"])
+        if acceptance["accepted"]
+        else "not yet"
     )
-    if status.get("visionProjection"):
-        body += "\n\n" + render_vision(status["visionProjection"])
+    return [
+        f"- Vision lock: {vision}",
+        f"- Test audit: {audit_text}",
+        f"- Plan review: {review_text}",
+        f"- Published: {published}",
+        f"- Open: {status['open_clarifications']} questions · "
+        f"{status.get('open_findings', 0)} open findings · "
+        f"{status['open_assumptions']} assumptions",
+        f"- Product acceptance: {accepted} · "
+        f"{passed}/{len(acceptance['scenarios'])} scenarios proved by recorded runs",
+        "- Worker readiness (advisory): "
+        + str((status.get("readiness") or {}).get("status", "unknown")),
+    ]
+
+
+def status_card(status: dict, questions: list[dict]) -> str:
+    phase = status["phase"]
+    number = PHASES.index(phase) + 1 if phase in PHASES else "?"
+    lines = [f"**Where things stand** · {phase.replace('-', ' ').title()} ({number} of 11)"]
+    lines.extend(_gate_lines(status))
+    if questions:
+        lines.append("**Questions waiting for you**")
+        lines.extend(f"- {row['id']}: {_inline(row['question'])}" for row in questions)
+    projection = status.get("visionProjection")
+    if projection:
+        # The full understanding matters before the lock; afterwards one line is enough.
+        if phase in {"align", "expand", "vision-lock"} or not status.get("vision_locked_revision"):
+            lines.append("\n" + render_vision(projection))
+        else:
+            sections = {item["label"]: item["text"] for item in projection.get("sections", [])}
+            summary = sections.get("Vision") or projection.get("title") or ""
+            lines.append(f"**Vision:** {_short(summary, 220)}")
     if status.get("planningTurn"):
         turn = status["planningTurn"]
-        body += "\n\n" + turn["status"] + "\n" + turn["guidance"]
-    return body
+        lines.append("\n" + turn["status"] + "\n" + turn["guidance"])
+    return "\n".join(lines)
+
+
+def status_details(status: dict) -> list[str]:
+    """Compact footer lines: short ids and recorded review scope for the agent."""
+    scopes = sorted(
+        {review_scope(review) for row in status["roundtable"] for review in row.get("reviews", [])}
+    )
+    return [
+        f"- Pending gate: {status['pending_gate'] or 'none'}",
+        f"- Revisions: spine {_short_revision(status['spine_revision'])} · "
+        f"manifest {_short_revision(status['manifest_revision'])} · "
+        f"published {_short_revision(status['published_revision'])}",
+        f"- Open findings: {status['open_findings']} clusters "
+        f"({status['open_finding_members']} members)"
+        + (f" · recorded review scope: {'; '.join(scopes)}" if scopes else ""),
+    ]
+
+
+def outcome_summary(projection: dict) -> str | None:
+    """One line for status; the full map stays in harness_waves."""
+    parts = []
+    for field, label in (("intake", "intake"), ("reviewerSelection", "reviewer choice")):
+        item = projection.get(field)
+        if item:
+            node = item.get("node")
+            parts.append(f"{label} {readable(node['id'] if node else None)} ({item['state']})")
+    if projection.get("waveMap") or projection.get("mapNode"):
+        parts.append(f"map {projection['state']}")
+    if not parts:
+        return None
+    return "- Outcome planning: " + " · ".join(parts) + " · full map: harness_waves"
 
 
 def chat_diagram(spine, kind: str) -> str:
@@ -1369,7 +1548,7 @@ def understanding_card(
 ) -> str:
     return "\n".join(
         [
-            "**Here's what I understood**",
+            "**Here's what I understood: is this right?**",
             f"- Vision: {_short(vision, 300)}",
             f"- Users: {_short(users, 300)}",
             f"- First user moment: {_short(first_user_moment, 300)}",
@@ -1402,10 +1581,9 @@ def decision_card(
         return _inline(value).replace("|", "\\|").replace("`", "&#96;")
 
     lines = [
-        f"**Decision {cell(id)}**",
-        f"- Question: {_inline(question)}",
-        f"- Linked to: {_names(parents)}",
+        f"**Decision {cell(id)}: {_inline(question)}**",
         f"- Recommendation: {_inline(recommendation)}",
+        f"- Linked to: {_names(parents)}",
         "",
         "| Option | Pros | Cons |",
         "| --- | --- | --- |",
@@ -1420,7 +1598,7 @@ def decision_card(
             [
                 f"- Chosen: {_inline(chosen)}",
                 f"- Rationale: {_inline(rationale)}",
-                "- Recorded decision; this is not user approval or delivery proof.",
+                "- Recorded decision (not a gate approval or delivery proof).",
             ]
         )
     else:

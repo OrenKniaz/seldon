@@ -26,12 +26,21 @@ NATIVE = "mcp-client-elicitation"
 
 def _chat_question(request, revision):
     request.update(channel=CHAT, choices=["Approve", "No", "Cancel", "Changes: <text>"])
-    request["card"] += (
-        f"\nChat confirmation {request['request_id']} for revision {revision}.\n"
-        "Reply exactly Approve, No, Cancel, or Changes: <text>. No response grants nothing. "
-        "The caller must quote your latest actual external chat message verbatim, with its "
-        "SHA-256 and an actor label. Actor identity and message source are unverified; "
-        "the hash binds the supplied quote and does not authenticate its author."
+    subject = {
+        "align": "the Align understanding below",
+        "vision-lock": "the Vision Lock below",
+    }.get(request.get("gate"), "the worker execution below")
+    # The user's decision comes first; the agent's recording rules go in a footer.
+    request["card"] = (
+        f"**Your decision: approve {subject}?**\n"
+        "Reply with exactly one of: **Approve** · **No** · **Cancel** · "
+        "**Changes: <what to change>**\n\n" + request["card"].rstrip() + "\n\n---\n"
+        f"For the agent: chat confirmation {request['request_id']} for revision {revision}. "
+        "Show this question to the user exactly as written and wait for their reply. "
+        "Record it with harness_record_chat_confirmation: quote their latest actual chat "
+        "message verbatim, with its SHA-256 and an actor label. Actor identity and message "
+        "source are unverified; the hash binds the quote, not its author. "
+        "No reply grants nothing."
     )
     return request
 
@@ -190,6 +199,29 @@ def _understanding(vision: dict) -> str:
     return render_vision(vision_projection(vision))
 
 
+def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str:
+    """The exact stored text of a planning confirmation request (one shared writer)."""
+    heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
+    return (
+        f"{heading} for revision {revision[:12]}.\n"
+        "Read the whole understanding below and approve only if it is right. "
+        "To ask for changes, say what to change; a conditional answer does not approve "
+        "this step.\n\n" + _understanding(vision)
+    )
+
+
+def legacy_confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str:
+    """Card text stored before the decision-first wording; still recognised on read."""
+    heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
+    return (
+        f"{heading} for revision {revision}.\n"
+        "Review the complete recorded understanding below. Approve only this gate and "
+        "revision. Retain your complete words; put any conditions or requested changes "
+        "in conditions. A conditional response does not approve this gate.\n\n"
+        + _understanding(vision)
+    )
+
+
 def _records(store: PlanStore, kind: str):
     for row in store.connection.execute(
         "SELECT id, payload_json FROM events WHERE kind=? ORDER BY id DESC", (kind,)
@@ -256,14 +288,7 @@ def prepare_confirmation(
             raise PlanStoreError("plan-confirmation-card-unavailable", "One vision is required")
         vision = spine.node(visions[0])
         revision = spine.plan_revision()
-        heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
-        card = (
-            f"{heading} for revision {revision}.\n"
-            "Review the complete recorded understanding below. Approve only this gate and "
-            "revision. Retain your complete words; put any conditions or requested changes "
-            "in conditions. A conditional response does not approve this gate.\n\n"
-            + _understanding(vision)
-        )
+        card = confirmation_card(gate, phase, revision, vision)
         request = dict(
             request_id=uuid4().hex,
             gate=gate,
