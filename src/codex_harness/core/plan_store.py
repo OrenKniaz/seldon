@@ -5,14 +5,16 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import stat
 import subprocess
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
-from pathlib import Path
-from tempfile import TemporaryDirectory
+from pathlib import Path, PurePosixPath
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core import intake, waves
@@ -238,7 +240,14 @@ class PlanStore:
         """Read the current nodes without writing planning truth."""
         return [node for node in self._data()["nodes"] if kind is None or node["kind"] == kind]
 
-    def show_node(self, node_id: str, *, body: bool = False, test: str | None = None) -> dict:
+    def show_node(
+        self,
+        node_id: str,
+        *,
+        body: bool = False,
+        test: str | None = None,
+        include_source: bool = False,
+    ) -> dict:
         """Inspect linked protected Python tests using AST only, never imports."""
         if body and not test:
             raise ValueError("--body requires --test <name>")
@@ -280,6 +289,7 @@ class PlanStore:
                     if candidate.suffix == ".py" and candidate.is_file():
                         protected.add(candidate)
         remaining = 8 * 1024
+        source_remaining = 256 * 1024
         found = False
         for path in sorted(protected):
             relative = path.relative_to(template).as_posix()
@@ -289,7 +299,8 @@ class PlanStore:
                 for module in modules
             ):
                 continue
-            source = path.read_text(encoding="utf-8-sig")
+            raw = path.read_bytes()
+            source = raw.decode("utf-8-sig")
             tree = ast.parse(source, filename=relative)
             functions = []
             for item in tree.body:
@@ -302,7 +313,16 @@ class PlanStore:
                         if isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef)
                     )
             functions = [(name, item) for name, item in functions if item.name.startswith("test")]
-            entry = {"path": relative, "functions": [name for name, _ in functions]}
+            entry = {
+                "path": relative,
+                "functions": [name for name, _ in functions],
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+            if include_source:
+                source_remaining -= len(raw)
+                if source_remaining < 0:
+                    raise PlanStoreError("plan-test-source-too-large", "256 KiB source budget")
+                entry["source"] = source
             if body:
                 selected = [(name, item) for name, item in functions if test in (name, item.name)]
                 if len(selected) > 1:
@@ -382,6 +402,107 @@ class PlanStore:
             spine = Spine(data)
             self._write_node(spine, node_id)
             self._event("node-upserted", {"id": node_id, "plan_revision": spine.plan_revision()})
+
+    def revise_test(
+        self,
+        *,
+        node_id: str,
+        path: str,
+        expected_manifest_revision: str,
+        expected_file_sha256: str,
+        source: str,
+        reason: str,
+    ) -> dict:
+        """Replace one linked Python proof; current file bytes own manifest/evidence freshness.
+
+        The store reservation serializes supported writers. Interruption after replacement
+        may leave changed bytes without a completed event: inspect before retrying; old
+        evidence still loses credit through the existing content-bound manifest.
+        """
+        _nonempty(reason, "reason")
+        if not isinstance(source, str) or not source.strip():
+            raise PlanStoreError("plan-test-source-invalid", "Provide complete Python source")
+        content = source.encode("utf-8")
+        if len(content) > 256 * 1024:
+            raise PlanStoreError("plan-test-source-too-large", "256 KiB source budget")
+        ast.parse(source, filename=path)
+        relative = PurePosixPath(path)
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != path
+            or ".." in relative.parts
+            or "\\" in path
+            or ":" in path
+            or relative.suffix != ".py"
+        ):
+            raise PlanStoreError("plan-test-path-invalid", "Use a template-relative Python path")
+        template = self.workspace / "template"
+        target = template / relative
+
+        def checked_bytes():
+            # Reject every reparse component, including Windows junctions, before reading.
+            for item in (template, *target.relative_to(template).parents):
+                candidate = item if item == template else template / item
+                info = candidate.lstat()
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise PlanStoreError("plan-test-path-invalid", "Reparse paths are refused")
+            info = target.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400
+                or target.resolve() != target
+            ):
+                raise PlanStoreError("plan-test-path-invalid", "Use an existing regular proof file")
+            raw = target.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != expected_file_sha256:
+                raise PlanStoreError("plan-test-preimage-stale", "Read the current linked source")
+            return raw
+
+        with self._transaction():
+            before = checked_bytes()
+            spine = Spine(self._data())
+            from codex_harness.core.graph import test_dir
+
+            root = spine.node(spine.ids("vision")[0])["fields"]
+            test_root = PurePosixPath(test_dir({"validation": root.get("validation", [])}))
+            if not relative.is_relative_to(test_root) or spine.node(node_id)["kind"] != "test":
+                raise PlanStoreError("plan-test-path-invalid", "Only linked tests under test_dir")
+            manifest = compile_manifest(spine, template)
+            if manifest["planRevision"] != expected_manifest_revision:
+                raise PlanStoreError("plan-test-preimage-stale", "Refresh the current manifest")
+            if path not in {item["path"] for item in self.show_node(node_id)["testFiles"]}:
+                raise PlanStoreError(
+                    "plan-test-path-invalid", "Path is not linked to this test node"
+                )
+            if before == content:
+                raise PlanStoreError("plan-test-unchanged", "Replacement is byte-identical")
+            staged = None
+            try:
+                with NamedTemporaryFile(
+                    dir=target.parent, prefix=".proof-", delete=False
+                ) as stream:
+                    staged = Path(stream.name)
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                checked_bytes()
+                os.replace(staged, target)
+            finally:
+                if staged is not None:
+                    staged.unlink(missing_ok=True)
+            result = {
+                "nodeId": node_id,
+                "path": path,
+                "reason": reason,
+                "beforeSha256": expected_file_sha256,
+                "afterSha256": hashlib.sha256(content).hexdigest(),
+                "previousManifestRevision": expected_manifest_revision,
+                "manifestRevision": compile_manifest(spine, template)["planRevision"],
+                "provenance": "caller-authored-protected-test",
+                "nextAction": "harness_compile, then current audit and authorized review",
+            }
+            self._event("protected-test-revised", result)
+        return result
 
     def _draft_preimage(self, expected_spine_revision: str) -> Spine:
         spine = Spine(self._data())

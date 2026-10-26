@@ -240,9 +240,28 @@ TOOLS = [
         [],
     ),
     _tool(
+        "harness_revise_test",
+        "Replace one existing linked Python protected test under the configured test directory. "
+        "Read harness_show_node include_source=true first; supply the exact manifest and byte "
+        "hash preimage. No evidence, approval, reviewer or worker launch is granted.",
+        {
+            "node_id": STRING,
+            "path": STRING,
+            "expected_manifest_revision": STRING,
+            "expected_file_sha256": STRING,
+            "source": STRING,
+            "reason": STRING,
+        },
+    ),
+    _tool(
         "harness_show_node",
         "Read a node and its linked protected test functions or named body.",
-        {"id": STRING, "body": {"type": "boolean"}, "test": STRING},
+        {
+            "id": STRING,
+            "body": {"type": "boolean"},
+            "test": STRING,
+            "include_source": {"type": "boolean"},
+        },
         ["id"],
     ),
     _tool(
@@ -1814,7 +1833,17 @@ class PlannerServer:
                 or "No matching nodes."
             )
         if name == "harness_show_node":
-            node = show_node(store, args["id"], body=args.get("body", False), test=args.get("test"))
+            if args.get("include_source"):
+                node = store.show_node(
+                    args["id"],
+                    body=args.get("body", False),
+                    test=args.get("test"),
+                    include_source=True,
+                )
+            else:
+                node = show_node(
+                    store, args["id"], body=args.get("body", False), test=args.get("test")
+                )
             self.result_data = node
             lines = [
                 views.data_card(
@@ -1836,7 +1865,12 @@ class PlannerServer:
                     lines.append(f"Test: {file['test']}\n{file['body']}")
                     if file["truncated"]:
                         lines.append("[truncated: 8 KB test body budget]")
+                if "source" in file:
+                    lines.append(f"SHA256: {file['sha256']}\nSource:\n{file['source']}")
             return "\n".join(lines)
+        if name == "harness_revise_test":
+            self.result_data = store.revise_test(**args)
+            return f"Revised protected test: {self.result_data['path']}; compile before reuse."
         if name == "harness_plan_status":
             status = self._status()
             self.result_data = status

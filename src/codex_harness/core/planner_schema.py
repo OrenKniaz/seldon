@@ -512,6 +512,30 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
         result.update(typed_draft_help(tool))
+    if tool == "harness_revise_test":
+        result.update(
+            prepare="Read harness_show_node id=<test-node> include_source=true and current "
+            "harness_plan_status.manifest_revision. Copy the exact testFiles.path and sha256; "
+            "supply complete replacement source and a concrete review/authoring reason.",
+            limits="Revision only: an existing Python file linked to that test node under the "
+            "configured test directory, at most 256 KiB UTF-8. No new files, implementation "
+            "stubs, generated documents, path escape or reparse paths. Stale manifest or raw "
+            "file hashes refuse. Source is syntax-checked, never imported by this writer.",
+            result="Atomic file replacement and a protected-test-revised event containing "
+            "path, caller-authored provenance, reason and before/after hashes. No approval "
+            "or proof credit. Old captured evidence and publications remain history; current "
+            "content must compile, audit and receive an authorized review before publishing.",
+            recovery="After an interrupted call, read current source/status before retrying. "
+            "Replacement may have completed without its event/response; changed bytes still "
+            "invalidate old evidence. This tool does not resolve a review finding itself.",
+        )
+    if tool == "harness_show_node":
+        result["sourceReadback"] = (
+            "For Python proofs, include_source=true returns complete source and raw-byte sha256 "
+            "for linked testFiles, with a 256 KiB total source budget; oversized reads refuse "
+            "rather than supply a truncated replacement. Existing body/test reads keep their "
+            "8 KiB budget. Readback grants no author, reviewer or execution authority."
+        )
     if tool == "harness_audit":
         result.update(
             example={"mode": "prospective"},
