@@ -67,6 +67,117 @@ def prospective(tmp_path):
     return dict(template=template, spine=spine, manifest=compile_manifest(spine, template))
 
 
+@pytest.fixture
+def withheld_audit_bootstrap(tmp_path, monkeypatch):
+    """Finite owned bootstrap, real handles/counts, optional controlled teardown refusal."""
+    import time
+
+    from codex_harness.core import audit_process
+
+    release = tmp_path / "release-owned-bootstrap"
+    state = {"jobs": [], "closed": set(), "refuse": False, "terminations": 0}
+    real_init = audit_process._WindowsJob.__init__
+    real_active = audit_process._WindowsJob.active
+
+    class ObservedApi:
+        def __init__(self, api, job):
+            self.api, self.job = api, job
+
+        def __getattr__(self, name):
+            return getattr(self.api, name)
+
+        def TerminateJobObject(self, *args):
+            state["terminations"] += 1
+            if state["refuse"]:
+                error = PermissionError(5, "Controlled SOURCE-ONLY owned teardown refusal")
+                error.audit_native_failure = "TerminateJobObject"
+                raise error
+            return self.api.TerminateJobObject(*args)
+
+        def CloseHandle(self, handle):
+            result = self.api.CloseHandle(handle)
+            if result and handle == self.job.handle:
+                state["closed"].add(handle)
+            return result
+
+    def observe_init(job):
+        real_init(job)
+        job.api = ObservedApi(job.api, job)
+        state["jobs"].append(job)
+
+    delayed = audit_process._BOOTSTRAP.replace(
+        "send({'kind': 'ready'})",
+        "import time\n_end = time.monotonic() + 10\n"
+        f"while not os.path.exists({str(release)!r}) and time.monotonic() < _end:\n"
+        "    time.sleep(.01)\n"
+        "send({'kind': 'ready'})",
+    )
+    monkeypatch.setattr(audit_process, "_BOOTSTRAP", delayed)
+    monkeypatch.setattr(audit_process._WindowsJob, "__init__", observe_init)
+    try:
+        yield state
+    finally:
+        # Restore only our injected refusal and release the finite trusted fixture.
+        # Query each still-held real Job to zero before closing; never kill by PID.
+        state["refuse"] = False
+        release.write_text("release", encoding="utf-8")
+        for job in state["jobs"]:
+            if job.handle not in state["closed"]:
+                deadline = time.monotonic() + 5
+                while real_active(job) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert real_active(job) == 0
+                assert job.api.CloseHandle(job.handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+@pytest.mark.parametrize("runner_kind", ["unittest", "command"])
+def test_collection_stops_before_next_launch_after_retained_unknown_job(
+    prospective, withheld_audit_bootstrap, monkeypatch, runner_kind
+):
+    """Catch overlapping collection after failed teardown; ordinary failures verify Job zero."""
+    root = prospective["template"]
+    (root / "tests/test_second.py").write_text(
+        "import unittest\nfrom app import value\nclass Second(unittest.TestCase):\n"
+        "    def test_value(self): self.assertEqual(value(), 42)\n"
+    )
+    if runner_kind == "command":
+        data = prospective["spine"].to_dict()
+        for node in data["nodes"]:
+            if node["kind"] == "vision":
+                node["fields"]["verification"] = {
+                    "runner": "command",
+                    "argv": [sys.executable, "{proof}"],
+                    "listArgv": [sys.executable, "-c", "print('tests/test_app.py')", "{proof}"],
+                    "testDir": "tests",
+                    "proofGlob": "test*.py",
+                    "assertPatterns": ["assert"],
+                    "importPatterns": [r"from (\w+) import"],
+                }
+            if node["kind"] == "bead":
+                node["fields"]["proofModule"] = "tests/test_app.py"
+        prospective["spine"] = Spine(data)
+    prospective["manifest"] = compile_manifest(prospective["spine"], root)
+    withheld_audit_bootstrap["refuse"] = True
+    real_run = test_audit.run_audit_process
+    launches = []
+
+    def one_real_launch(*args, **kwargs):
+        assert not launches, "A second collection process was delegated after unknown ownership"
+        launches.append(args[0])
+        kwargs["timeout"] = 0.1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(test_audit, "run_audit_process", one_real_launch)
+    result = audit_prospective_tests(**prospective)
+    assert not result["ok"] and result["redBaseline"] == []
+    assert len(launches) == len(result["collection"]) == 1
+    control = result["collection"][0]["processControl"]
+    assert control["membershipVerifiedBeforePayload"] and control["payloadReleased"] is False
+    assert not control["quiescenceVerified"] and control["jobHandleRetained"]
+    assert control["activeProcessesAfterTeardown"] is None
+
+
 def test_public_empty_plan_audit_cannot_persist_passing_credit(prospective):
     """Catch collection-only audit credit; populated fixtures always supply red obligations.
 

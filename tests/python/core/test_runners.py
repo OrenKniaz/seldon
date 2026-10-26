@@ -30,6 +30,7 @@ TIPSPLIT = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
 VARIATION = Path(__file__).parent / "fixtures/handoff_variation"
 COMMAND = Path(__file__).parent / "fixtures/command_runner"
 prospective = test_test_audit.prospective
+withheld_audit_bootstrap = test_test_audit.withheld_audit_bootstrap
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
@@ -127,6 +128,34 @@ def test_windows_job_timeout_drains_descendant_held_stdout(tmp_path):
     assert "payload-ready" in raised.value.stdout
     assert raised.value.audit_control["quiescenceVerified"]
     assert raised.value.audit_control["activeProcessesAfterTeardown"] == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+@pytest.mark.parametrize("teardown_refused", [False, True])
+def test_windows_expired_unreleased_eof_uses_only_assigned_job_teardown(
+    tmp_path, withheld_audit_bootstrap, teardown_refused
+):
+    """Catch retained live bootstrap or fallback on refusal; natural EOF exits before this path."""
+    withheld_audit_bootstrap["refuse"] = teardown_refused
+    marker = tmp_path / "payload-must-not-run"
+    with pytest.raises(OSError, match="did not reach its private gate") as raised:
+        audit_process.run_audit_process(
+            [sys.executable, "-B", "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"],
+            cwd=tmp_path,
+            timeout=0.1,
+        )
+    assert not marker.exists()
+    control = raised.value.audit_control
+    assert control["membershipVerifiedBeforePayload"] and control["payloadReleased"] is False
+    assert withheld_audit_bootstrap["terminations"] == 1
+    if teardown_refused:
+        assert control["jobHandleRetained"] and not control["quiescenceVerified"]
+        assert control["activeProcessesAfterTeardown"] is None
+        assert control["nativeFailureOperation"] == "TerminateJobObject"
+        assert "Controlled SOURCE-ONLY" in control["unreleasedTeardownWarning"]
+    else:
+        assert control["quiescenceVerified"] and control["activeProcessesAfterTeardown"] == 0
+        assert not control.get("jobHandleRetained")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")

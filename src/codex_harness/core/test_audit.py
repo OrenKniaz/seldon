@@ -167,6 +167,9 @@ def _collect_command(repo: Path, runner: Runner, modules: list[str]) -> list[dic
                 processControl=control,
             )
         )
+        if control and control.get("jobHandleRetained") and not control.get("quiescenceVerified"):
+            collection[-1]["output"] += "\nFurther collection held: owned Job quiescence unverified"
+            break
     return collection
 
 
@@ -1266,6 +1269,15 @@ def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spin
                 )
                 if not passed:
                     fail("prospective-not-collectable", "collection", selector, output)
+                if (
+                    control
+                    and control.get("jobHandleRetained")
+                    and not control.get("quiescenceVerified")
+                ):
+                    collection[-1]["output"] += (
+                        "\nFurther collection held: owned Job quiescence unverified"
+                    )
+                    break
         collection_ready = bool(
             collection
             and all(item["passed"] for item in collection)

@@ -379,7 +379,16 @@ def run_audit_process(
                             control["nativeFailureOperation"] = teardown_error.audit_native_failure
                         control["unreleasedTeardownWarning"] = str(teardown_error)[:256]
             except subprocess.TimeoutExpired:
-                pass
+                if control["membershipVerifiedBeforePayload"] and not native_failed:
+                    unreleased_job_pending = True
+                    try:
+                        job.finish(process, control)
+                        unreleased_job_pending = False
+                    except OSError as teardown_error:
+                        native_failed = bool(getattr(teardown_error, "audit_native_failure", None))
+                        if native_failed:
+                            control["nativeFailureOperation"] = teardown_error.audit_native_failure
+                        control["unreleasedTeardownWarning"] = str(teardown_error)[:256]
         error.audit_control = control
         raise
     finally:
