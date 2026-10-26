@@ -33,6 +33,46 @@ prospective = test_test_audit.prospective
 withheld_audit_bootstrap = test_test_audit.withheld_audit_bootstrap
 
 
+def test_audit_default_stdin_is_eof_while_parent_pipe_stays_open(tmp_path):
+    """Catch inherited idle stdin; the MCP regression writes protocol bytes before auditing."""
+    controller = (
+        "import json,sys\nfrom codex_harness.core.audit_process import run_audit_process\n"
+        "try:\n"
+        " result=run_audit_process([sys.executable,'-B','-c',"
+        "\"import sys;print(repr(sys.stdin.read()))\"],cwd='.',timeout=1)\n"
+        " print(json.dumps(dict(stdout=result.stdout,"
+        "control=getattr(result,'audit_control',None))))\n"
+        "except OSError as error:\n"
+        " print(json.dumps(dict(error=str(error),control=getattr(error,'audit_control',None))))\n"
+        " sys.exit(1)\n"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-B", "-c", controller],
+        cwd=tmp_path,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        code = parent.wait(timeout=15)  # Never write or close parent stdin to make progress.
+        assert not parent.stdin.closed
+        stdout, stderr = parent.stdout.read(), parent.stderr.read()
+        (tmp_path / "observed.json").write_text(stdout, encoding="utf-8")
+        assert code == 0, stdout + stderr
+        observed = json.loads(stdout)
+        assert observed["stdout"] == "''\n"
+        if sys.platform == "win32":
+            assert observed["control"]["quiescenceVerified"]
+            assert observed["control"]["activeProcessesAfterTeardown"] == 0
+    finally:
+        parent.stdin.close()
+        parent.wait(timeout=15)
+        parent.stdout.close()
+        parent.stderr.close()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
 def test_windows_job_contains_canonical_proof_descendant(prospective):
     """Catch descendants surviving proof return; prior runner checks wait only the direct child."""

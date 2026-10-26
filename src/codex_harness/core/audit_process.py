@@ -14,7 +14,7 @@ import time
 
 _BOOTSTRAP = r"""
 import json, msvcrt, os, subprocess, sys
-gate_handle, status_handle = map(int, sys.argv[1:])
+gate_handle, status_handle, stdin_devnull = map(int, sys.argv[1:])
 gate = os.fdopen(msvcrt.open_osfhandle(gate_handle, os.O_RDONLY | os.O_BINARY), 'rb')
 status = os.fdopen(
     msvcrt.open_osfhandle(status_handle, os.O_WRONLY | os.O_BINARY), 'wb', buffering=0)
@@ -32,7 +32,8 @@ try:
     config = json.loads(data)
     child = subprocess.Popen(
         config['args'], cwd=config['cwd'], env=config['env'],
-        stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+        stdin=subprocess.DEVNULL if stdin_devnull else 0,
+        stdout=sys.stdout, stderr=sys.stderr,
         creationflags=subprocess.CREATE_NO_WINDOW)
     code = child.wait()
     send({'kind': 'complete', 'returncode': code})
@@ -199,9 +200,11 @@ class _WindowsJob:
 
 
 def run_audit_process(
-    args, *, cwd, capture_output=True, text=True, timeout=120, env=None, stdin=None
+    args, *, cwd, capture_output=True, text=True, timeout=120, env=None, stdin=subprocess.DEVNULL
 ):
-    """Run one audit command with original payload arguments, environment and stdio."""
+    """Run a noninteractive audit; preserve any explicitly supplied stdin file or pipe."""
+    if stdin is None:
+        stdin = subprocess.DEVNULL
     if sys.platform != "win32":
         return subprocess.run(
             args,
@@ -247,7 +250,16 @@ def run_audit_process(
             for handle in handles:
                 os.set_handle_inheritable(handle, True)
             process = subprocess.Popen(
-                [image, "-I", "-S", "-B", "-c", _BOOTSTRAP, *map(str, handles)],
+                [
+                    image,
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-c",
+                    _BOOTSTRAP,
+                    *map(str, handles),
+                    str(int(stdin == subprocess.DEVNULL)),
+                ],
                 cwd=os.path.dirname(image),
                 stdin=stdin,
                 stdout=subprocess.PIPE if capture_output else None,

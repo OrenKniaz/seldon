@@ -23,6 +23,112 @@ from codex_harness.core.plan_store import PHASES, open_plan_store_readonly
 prospective = test_test_audit.prospective
 
 
+def test_public_stdio_audit_gives_proof_eof_without_closing_control_input(prospective):
+    """Catch proof reading the MCP control pipe; admission tests never read proof stdin."""
+    workspace = prospective["template"].parent
+    done = workspace / "real-engine-returned"
+    (prospective["template"] / "tests/test_app.py").write_text(
+        "import sys, unittest\nfrom app import value\nclass Proof(unittest.TestCase):\n"
+        "    def setUp(self):\n        self.assertEqual(sys.stdin.read(), '')\n"
+        "    def test_value(self):\n        self.assertEqual(value(), 42)\n"
+    )
+    setup, revision = started(prospective)
+    setup.close()
+    bootstrap = (
+        "import runpy,sys\nfrom pathlib import Path\n"
+        "from codex_harness.core import test_audit,runners\n"
+        "real_run=test_audit.run_audit_process\n"
+        "def bounded(*args,**kwargs):\n"
+        " kwargs['timeout']=min(kwargs.get('timeout',120),1)\n"
+        " return real_run(*args,**kwargs)\n"
+        "test_audit.run_audit_process=runners.run_audit_process=bounded\n"
+        "real_engine=test_audit.audit_prospective_tests\n"
+        "def observed(**kwargs):\n"
+        " try:return real_engine(**kwargs)\n"
+        f" finally:Path({str(done)!r}).write_text('returned')\n"
+        "test_audit.audit_prospective_tests=observed\n"
+        f"sys.argv=['planner','--workspace',{str(workspace)!r}]\n"
+        "runpy.run_module('codex_harness.core.mcp_planner',run_name='__main__')\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-B", "-c", bootstrap],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    replies, errors = queue.Queue(), []
+    reader = threading.Thread(
+        target=lambda: [replies.put(json.loads(line)) for line in process.stdout], daemon=True
+    )
+    error_reader = threading.Thread(target=lambda: errors.extend(process.stderr), daemon=True)
+    reader.start()
+    error_reader.start()
+    request_id = 0
+
+    def request(method, params=None):
+        nonlocal request_id
+        request_id += 1
+        message = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+        response = replies.get(timeout=10)
+        assert response["id"] == request_id and "error" not in response, response
+        return response["result"]
+
+    def tool(name, **arguments):
+        return request(
+            "tools/call",
+            {"name": name, "arguments": {"expected_workspace": str(workspace), **arguments}},
+        )["structuredContent"]
+
+    try:
+        request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}})
+        admitted = tool("harness_audit", mode="prospective")
+        attempt_id = admitted["attemptId"]  # Only actual structured identity, never regex text.
+        assert not admitted["proofCreditGranted"]
+        # This marker records real engine return, not its verdict. Avoid sending
+        # more control bytes while the deliberately broken proof may read them.
+        deadline = time.monotonic() + 30
+        while not done.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert done.exists(), "Real engine did not finish within fixture bounds"
+        deadline = time.monotonic() + 10
+        while True:
+            completed = tool("harness_audit_status", id=attempt_id)
+            if completed["state"] not in {"queued", "running"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert completed["state"] == "completed", completed
+        (workspace / "public-observed.json").write_text(json.dumps(completed), encoding="utf-8")
+        assert completed["result"]["ok"], completed["result"]["redBaseline"]
+        assert completed["manifestRevision"] == revision and completed["proofCreditGranted"]
+        if sys.platform == "win32":
+            controls = [item["processControl"] for item in completed["result"]["collection"]]
+            controls.extend(item["processControl"] for item in completed["result"]["redBaseline"])
+            assert all(
+                c["quiescenceVerified"] and c["activeProcessesAfterTeardown"] == 0 for c in controls
+            )
+        assert not process.stdin.closed and request("ping") == {}
+    finally:
+        process.stdin.close()
+        process.wait(timeout=30)
+        reader.join(timeout=2)
+        error_reader.join(timeout=2)
+        process.stdout.close()
+        process.stderr.close()
+        assert process.returncode == 0, "".join(errors)
+    with open_plan_store_readonly(workspace) as saved:
+        retained = saved.audit_attempt(attempt_id)
+        assert retained["result"] == completed["result"]
+        assert retained["engineIdentity"] == completed["engineIdentity"]
+        assert retained["auditId"] == completed["auditId"]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
 def test_public_audit_persists_observed_job_quiescence(prospective):
     """Catch omitted collection/proof containment; helper-only tests miss the durable consumer."""
