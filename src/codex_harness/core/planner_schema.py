@@ -512,6 +512,25 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
         result.update(typed_draft_help(tool))
+    if tool in {"harness_prepare_chat_confirmation", "harness_record_chat_confirmation"}:
+        result["chatConfirmation"] = {
+            "authority": "Distinct caller-mediated chat-confirmation, never native elicitation. "
+            "source_verified=false and human_identity_verified=false. Actor and latest-message "
+            "claim are unverified; SHA-256 binds only the literal supplied UTF-8 quote.",
+            "prepare": "Use gate=align or vision-lock without execution fields. For gate=execution "
+            "use execution={expected_revision,workers,call_cap}; optional max_parallel/timeout. "
+            "The canonical producer binds the full displayed question and current inputs.",
+            "record": "Wait for a separate actual external chat reply to the displayed question. "
+            "Fields: gate, request_id, expected_revision, quoted_message, "
+            "quote_sha256, actor_label. "
+            "Only Approve, No, Cancel or Changes: <text> are parsed; no approve/origin/by "
+            "field is accepted. Do not recycle the preceding native refusal as a new answer.",
+            "consumer": "Recording stores only the decision; no worker admission or launch. "
+            "An approved planning decision permits a separate phase advance. An approved execution "
+            "decision permits separate start/resume with exactly the displayed scope. No, Cancel, "
+            "conditions, missing, stale or mismatched answers grant nothing. Existing valid chat "
+            "credit is reused rather than silently replaced with a native prompt.",
+        }
     if tool == "harness_revise_test":
         result.update(
             prepare="Read harness_show_node id=<test-node> include_source=true and current "

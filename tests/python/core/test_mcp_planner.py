@@ -612,6 +612,8 @@ EXPECTED_TOOLS = {
     "harness_plan_status",
     "harness_understanding_card",
     "harness_record_confirmation",
+    "harness_prepare_chat_confirmation",
+    "harness_record_chat_confirmation",
     "harness_advance",
     "harness_upsert_node",
     "harness_upsert_nodes",
@@ -2310,6 +2312,8 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_packet_view",
             "harness_compile",
             "harness_revise_test",  # Dedicated real writer/audit/invalidation journey.
+            "harness_prepare_chat_confirmation",  # Dedicated public native/chat/consumer journey.
+            "harness_record_chat_confirmation",  # Dedicated public quote/scope/refusal journey.
             "harness_readiness",
             "harness_upsert_nodes",  # Dedicated real mixed-batch/atomic-refusal journey.
             "harness_roundtable",  # Dedicated public protected-producer/receipt journey.

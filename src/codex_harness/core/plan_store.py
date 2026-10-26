@@ -3339,7 +3339,7 @@ class PlanStore:
                 else {
                     "gate": approval_gate,
                     "granted": bool(credit),
-                    "origin": "mcp-client-elicitation" if credit else "unverified-or-unavailable",
+                    "origin": credit["by"] if credit else "unverified-or-unavailable",
                     "approval_id": credit["id"] if credit else None,
                     "plan_revision": credit["plan_revision"] if credit else revision,
                     "human_identity_verified": False,

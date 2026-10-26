@@ -412,9 +412,9 @@ TOOLS = [
     _tool("harness_plan_status", "Show all phases and the canonical pending gate.", {}),
     _tool(
         "harness_plan_resume",
-        "Inspect or reattach by default. Explicit request_execution asks the negotiated native "
+        "Inspect or reattach by default. Explicit request_execution asks a bound native or chat "
         "client to decide the exact worker proposal. Caller declarations cannot approve it; "
-        "actual native approval and shared admission remain required. Capacity is not verified.",
+        "an exact-scope decision and shared admission remain required. Capacity is unverified.",
         {
             "expected_revision": STRING,
             "workers": {
@@ -448,6 +448,44 @@ TOOLS = [
         "and collect a fresh response. "
         "Requires negotiated elicitation; quoted tool arguments cannot approve a gate.",
         {"gate": {"type": "string", "enum": ["align", "vision-lock"]}},
+    ),
+    _tool(
+        "harness_prepare_chat_confirmation",
+        "Offer a fresh caller-mediated question for align, vision-lock or exact worker execution. "
+        "No approval or launch. Identity, supplied message source and recency remain unverified.",
+        {
+            "gate": {"type": "string", "enum": ["align", "vision-lock", "execution"]},
+            "execution": _object(
+                {
+                    "expected_revision": STRING,
+                    "workers": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": _object(
+                            dict.fromkeys(("bead", "provider", "model", "effort"), STRING)
+                        ),
+                    },
+                    "max_parallel": {"type": "integer"},
+                    "timeout": {"type": "integer"},
+                    "call_cap": {"type": "integer"},
+                },
+                ["expected_revision", "workers", "call_cap"],
+            ),
+        },
+        ["gate"],
+    ),
+    _tool(
+        "harness_record_chat_confirmation",
+        "Record only an explicit answer to a displayed chat question: Approve, No, Cancel or "
+        "Changes: <text>. Quote/hash/actor are caller-supplied and unverified. Does not launch.",
+        {
+            "gate": {"type": "string", "enum": ["align", "vision-lock", "execution"]},
+            "request_id": STRING,
+            "expected_revision": STRING,
+            "quoted_message": STRING,
+            "quote_sha256": STRING,
+            "actor_label": STRING,
+        },
     ),
     _tool(
         "harness_advance",
@@ -548,7 +586,7 @@ TOOLS = [
         "harness_worker_start",
         "Start the existing dispatcher once for the exact current publication; return a durable "
         "job ID promptly. Workers implement the product; the planner steers. Requires permission "
-        "through a distinct exact-scope native execution decision. No automatic retry or "
+        "through an exact-scope native or caller-mediated chat decision. No automatic retry or "
         "subscription-capacity verification; call_cap is a local worker-call ceiling.",
         {
             "expected_revision": STRING,
@@ -590,12 +628,12 @@ def resume_card(data):
     state = {
         "held": "Resume held.",
         "reattached": "Original worker job reattached.",
-        "handoff_requested": "Worker handoff requested after native execution approval.",
+        "handoff_requested": "Worker handoff requested after a recorded execution decision.",
     }.get(data.get("state"), "Resume state unavailable.")
     reasons = {
         "plan-missing": "No saved plan exists in this workspace.",
         "host-admission-unavailable": "Resume has no independent host admission authority.",
-        "native-execution-confirmation-required": "An exact native execution decision is required.",
+        "native-execution-confirmation-required": "An exact execution decision is required.",
         "worker-handoff-requested": "Read original job evidence; delivery is unproved.",
         "worker-admission-refused": "Shared worker admission was refused; inspect its originals.",
         "planning-phase-required": "Continue the recorded planning phase before publication proof.",
@@ -1529,6 +1567,39 @@ class PlannerServer:
         )
 
     def _dispatch(self, name: str, args: dict, *, schema_tools=None) -> str:
+        if name == "harness_prepare_chat_confirmation":
+            self.result_data = self._prepare_chat_question(args)
+            return self.result_data["card"]
+        if name == "harness_record_chat_confirmation":
+            from codex_harness.core.planner_confirmations import complete_chat_confirmation
+            from codex_harness.core.planner_execution import complete_chat_execution
+
+            arguments = {key: value for key, value in args.items() if key != "gate"}
+            if args["gate"] == "execution":
+                outcome = complete_chat_execution(self._store(), **arguments)
+            else:
+                outcome = complete_chat_confirmation(self._store(), **args)
+            if outcome["state"] in {"decline", "declined", "cancel", "conditional"}:
+                proposal = {"gate": args["gate"]}
+                if args["gate"] == "execution":
+                    scope = outcome["scope"]
+                    proposal["execution"] = {
+                        "expected_revision": scope["publicationRevision"],
+                        "workers": scope["workers"],
+                        "max_parallel": scope["maxParallel"],
+                        "timeout": scope["timeout"],
+                        "call_cap": scope["callCap"],
+                    }
+                outcome["chatConfirmation"] = self._prepare_chat_question(proposal)
+            self.result_data = outcome
+            body = (
+                f"Chat confirmation {outcome['state']}. Caller-mediated; actor identity, "
+                "message source and recency are unverified. No worker was launched. "
+                "Use a separate advance or exact worker-start after an approved decision."
+            )
+            if "chatConfirmation" in outcome:
+                body += "\n" + outcome["chatConfirmation"]["card"]
+            return body
         if name == "harness_audit_status" and (("id" in args) == ("manifest_revision" in args)):
             raise ValueError("Supply exactly one of id or manifest_revision")
         if name == "harness_plan_resume":
@@ -1902,11 +1973,15 @@ class PlannerServer:
                         " (native MCP client-reported response; "
                         "natural-person identity is not authenticated)"
                     )
+                elif approval["origin"] == "chat-confirmation":
+                    body += (
+                        " (caller-mediated; message source, recency and actor identity unverified)"
+                    )
                 if approval["gate"] == "vision-lock":
                     body += "\nVision lock: " + (
-                        "locked vision (current recorded native credit)"
+                        f"locked vision (current recorded {approval['origin']} credit)"
                         if granted
-                        else "not currently granted; fresh native response required"
+                        else "not granted; fresh bound native or chat confirmation required"
                     )
             row = store.connection.execute(
                 'SELECT "by", statement, plan_revision FROM approvals '
@@ -2094,9 +2169,43 @@ class PlannerServer:
         }
         return connection_reply(reply, self.workspace, status)
 
+    def _prepare_chat_question(self, arguments):
+        from codex_harness.core.planner_confirmations import prepare_chat_confirmation
+        from codex_harness.core.planner_execution import prepare_chat_execution
+
+        if self._pending_confirmation is not None:
+            raise ValueError("confirmation-pending: answer or cancel the displayed native request")
+        if arguments["gate"] == "execution":
+            if "execution" not in arguments:
+                raise ValueError("chat-execution-explicit-proposal-required")
+            question = prepare_chat_execution(self._store(), **arguments["execution"])
+        else:
+            if "execution" in arguments:
+                raise ValueError("chat-planning-question-refuses-execution-fields")
+            question = prepare_chat_confirmation(self._store(), arguments["gate"])
+        return {**question, "source_verified": False, "human_identity_verified": False}
+
+    def _offer_chat_confirmation(self, reply, gate, execution=None):
+        """Preserve the native outcome and append a separately prepared, zero-credit question."""
+        arguments = {"gate": gate}
+        if execution is not None:
+            arguments["execution"] = execution
+        offered = self.call_tool("harness_prepare_chat_confirmation", arguments)
+        reply["structuredContent"] = dict(reply.get("structuredContent", {}))
+        key = "chatConfirmationOfferError" if offered["isError"] else "chatConfirmation"
+        reply["structuredContent"][key] = (
+            offered["content"] if offered["isError"] else offered["structuredContent"]
+        )
+        reply["content"].extend(offered["content"])
+        return reply
+
     def _begin_execution(self, request_id, name, arguments):
         from codex_harness.core.plan_store import open_plan_store_readonly
-        from codex_harness.core.planner_execution import execution_scope, prepare_execution
+        from codex_harness.core.planner_execution import (
+            execution_scope,
+            prepare_execution,
+            require_execution,
+        )
         from codex_harness.core.planner_resume import resume_plan
 
         tool = next(tool for tool in TOOLS if tool["name"] == name)
@@ -2111,17 +2220,6 @@ class PlannerServer:
                 "id": request_id,
                 "result": self._resume_reply(snapshot, error=name == "harness_worker_start"),
             }
-        if not self._elicitation or not self._initialized:
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": self._resume_reply(
-                    snapshot,
-                    error=True,
-                    reason="worker-execution-native-origin-required: use MCP2025-06-18 with "
-                    "elicitation and initialized notification. CLI quotes cannot approve.",
-                ),
-            }
         if self._pending_confirmation is not None:
             raise ValueError("worker-execution-pending: answer or cancel the displayed request")
         if any(key not in arguments for key in ("expected_revision", "workers", "call_cap")):
@@ -2132,6 +2230,27 @@ class PlannerServer:
         )
         with open_plan_store_readonly(self.workspace) as readonly:
             execution_scope(readonly, **proposal)
+        store = self._store()
+        scope = execution_scope(store, **proposal)
+        try:
+            require_execution(store, scope)
+        except ValueError as error:
+            if str(error) != "worker-execution-grant-required":
+                raise
+        else:
+            return {"jsonrpc": "2.0", "id": request_id, "result": self.call_tool(name, arguments)}
+        if not self._elicitation or not self._initialized:
+            reply = self._resume_reply(
+                snapshot,
+                error=True,
+                reason="worker-execution-native-origin-required: native confirmation unavailable. "
+                "A separate caller-mediated chat question is offered below; no approval recorded.",
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": self._offer_chat_confirmation(reply, "execution", proposal),
+            }
         prepared = prepare_execution(self._store(), **proposal)
         wire_id = "seldon-execution-" + uuid4().hex
         self._pending_confirmation = {
@@ -2172,7 +2291,7 @@ class PlannerServer:
             self.workspace, expected_revision=pending["arguments"].get("expected_revision")
         )
         snapshot = {**snapshot, "executionConfirmation": outcome}
-        return self._resume_reply(
+        reply = self._resume_reply(
             snapshot,
             error=True,
             reason=(
@@ -2182,6 +2301,12 @@ class PlannerServer:
                 + (" " + reason if reason else "")
             ),
         )
+        proposal = {
+            key: pending["arguments"][key]
+            for key in ("expected_revision", "workers", "call_cap", "max_parallel", "timeout")
+            if key in pending["arguments"]
+        }
+        return self._offer_chat_confirmation(reply, "execution", proposal)
 
     def _finish_execution(self, response, pending):
         from codex_harness.core.planner_execution import complete_execution
@@ -2232,9 +2357,16 @@ class PlannerServer:
             reason = (
                 reason + "\n" if reason else ""
             ) + "Canonical status unavailable; read harness_plan_status."
+        origin = (
+            "caller-mediated chat; message source, recency and actor identity unverified."
+            if data.get("provenance") == "chat-confirmation"
+            else "native MCP client response; natural-person identity is not authenticated."
+            if data.get("provenance") == "mcp-client-elicitation"
+            else "no native client response; no approval recorded."
+        )
         body = (
-            f"Confirmation {data['state']} for {data['gate']} / {data['plan_revision']}.\n"
-            "Origin: native MCP client response; natural-person identity is not authenticated."
+            f"Confirmation {data['state']} for {data['gate']} / {data['plan_revision']}.\nOrigin: "
+            + origin
         )
         if data.get("content") is not None:
             body += "\nComplete submitted response:\n" + json.dumps(
@@ -2265,16 +2397,53 @@ class PlannerServer:
 
     def _begin_confirmation(self, request_id, arguments):
         from codex_harness.core.planner_confirmation_cards import compact_card
-        from codex_harness.core.planner_confirmations import prepare_confirmation
+        from codex_harness.core.planner_confirmations import approval_credit, prepare_confirmation
 
         tool = next(tool for tool in TOOLS if tool["name"] == "harness_record_confirmation")
         _validate(arguments, tool["inputSchema"])
-        if not self._elicitation or not self._initialized:
-            raise ValueError(
-                "plan-confirmation-origin-unavailable: initialize MCP2025-06-18 with "
-                "capabilities.elicitation={}, then notifications/initialized; "
-                "a native user response is required. CLI quotes cannot replace it."
+        store = self._store()
+        gate, revision = arguments["gate"], store._revision()
+        credit = approval_credit(store, gate, revision)
+        if (
+            credit
+            and credit["by"] == "chat-confirmation"
+            and (
+                store.phase() == gate
+                or gate == "vision-lock"
+                and PHASES.index(store.phase()) > PHASES.index("vision-lock")
             )
+        ):
+            outcome = dict(
+                gate=gate,
+                plan_revision=revision,
+                state="approved",
+                approval_id=credit["id"],
+                provenance="chat-confirmation",
+                human_identity_verified=False,
+                source_verified=False,
+                content=dict(approve=True, statement=credit["statement"], conditions=""),
+                reused=True,
+            )
+            return {"jsonrpc": "2.0", "id": request_id, "result": self._confirmation_reply(outcome)}
+        if not self._elicitation or not self._initialized:
+            outcome = dict(
+                gate=gate,
+                plan_revision=revision,
+                state="unavailable",
+                approval_id=None,
+                provenance="no-client-response",
+                human_identity_verified=False,
+            )
+            reply = self._confirmation_reply(
+                outcome,
+                error=True,
+                reason="plan-confirmation-origin-unavailable: native elicitation is unavailable.",
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": self._offer_chat_confirmation(reply, gate),
+            }
         if self._pending_confirmation is not None:
             raise ValueError("plan-confirmation-pending: answer or cancel the displayed request")
         prepared = prepare_confirmation(self._store(), arguments["gate"])
@@ -2345,6 +2514,8 @@ class PlannerServer:
                 self._store(), pending["request"]["request_id"], "cancel"
             )
             reply = self._confirmation_reply(outcome, error=True, reason=str(error))
+        if outcome["state"] != "approved":
+            reply = self._offer_chat_confirmation(reply, pending["request"]["gate"])
         return {"jsonrpc": "2.0", "id": pending["tool_id"], "result": reply}
 
     def _cancel_confirmation(self, reason, *, preserve_pending=False):
@@ -2366,10 +2537,11 @@ class PlannerServer:
             if preserve_pending
             else complete_confirmation(self._store(), pending["request"]["request_id"], "cancel")
         )
+        reply = self._confirmation_reply(outcome, error=True, reason=reason)
         return {
             "jsonrpc": "2.0",
             "id": pending["tool_id"],
-            "result": self._confirmation_reply(outcome, error=True, reason=reason),
+            "result": self._offer_chat_confirmation(reply, pending["request"]["gate"]),
         }
 
     def expire_confirmation(self):
