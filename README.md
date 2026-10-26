@@ -2,7 +2,7 @@
 
 Seldon wraps supported coding providers through durable planning, review, parallel work, serial integration and evidence. This local extraction keeps the Python package `codex_harness.core`.
 
-The complete [accepted North Star v3](<docs/architecture/October 12 Source of truth/harness-north-star-v3.md>) remains the product goal. Source tests, mocks and clean imports establish bounded implementation evidence; they do not establish actual-worker success or full-vision completion. [Retained obligations](docs/legacy-capability-audit.md) explicitly record remaining capability gaps.
+Planner work follows [North Star v4](docs/NORTH-STAR.md) and the [planner charter](docs/PLANNER-CHARTER-AND-DRIFT-GUARD.md). They supersede conflicting planner sections of [North Star v3](<docs/architecture/October 12 Source of truth/harness-north-star-v3.md>) while retaining its broader product frame. Existing runtime paths stay in place until the scoped migration is measured. Source tests, mocks and clean imports establish bounded implementation evidence; they do not establish actual-worker success or full-vision completion. [Retained obligations](docs/legacy-capability-audit.md) explicitly record remaining capability gaps.
 
 ## Retained open obligations
 
