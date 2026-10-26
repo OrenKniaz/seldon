@@ -1,0 +1,243 @@
+"""Experimental Python CLI observations, not canonical admission or GUI acceptance.
+
+Usage: python -m codex_harness.core.semantic_runner SPEC PRODUCT TARGETS contracts|validation
+Windows Jobs contain normal descendants; product code is trusted, not an OS security sandbox.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
+
+from codex_harness.core.audit_process import run_audit_process
+from codex_harness.core.semantic_schema import LIMIT, argv, path, validate
+
+ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
+MODULE = "codex_harness.core.semantic_runner"
+
+
+def read(file, limit=LIMIT):
+    with file.open("rb") as stream:
+        value = stream.read(limit + 1)
+    if len(value) > limit:
+        raise ValueError("File/output exceeds 16KiB; observation unavailable")
+    return value
+
+
+def capture(cmd, root):
+    env = {k: os.environ[k] for k in ("SYSTEMROOT", "WINDIR") if k in os.environ}
+    env.update(
+        HOME=str(root), USERPROFILE=str(root), TEMP=str(root), TMP=str(root), PYTHONPATH=str(root)
+    )
+    child = Popen(cmd, cwd=root, env=env, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
+    data = [None, None]
+
+    def drain(stream, index):
+        data[index] = stream.read(LIMIT + 1)
+
+    threads = [
+        threading.Thread(target=drain, args=(stream, i), daemon=True)
+        for i, stream in enumerate((child.stdout, child.stderr))
+    ]
+    for thread in threads:
+        thread.start()
+    while child.poll() is None:
+        if any(d is not None and len(d) > LIMIT for d in data):
+            raise ValueError("Product output exceeds 16KiB")
+        time.sleep(0.01)
+    for thread in threads:
+        thread.join()  # The enclosing action watchdog also bounds pipe drain.
+    if any(d is None for d in data):
+        raise OSError("Output observation unavailable")
+    if any(len(d) > LIMIT for d in data):
+        raise ValueError("Product output exceeds 16KiB")
+    return dict(exit=child.returncode, stdout=data[0].decode(), stderr=data[1].decode())
+
+
+def equal(a, b):
+    if type(a) is not type(b) and not (type(a) in (int, float) and type(b) in (int, float)):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(equal(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(equal(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
+def execute(s, root, targets, phase, seconds, deadline):
+    snapshots, results, markers = {}, {}, []
+    for f in s["setup"].get("files", []):
+        file = path(root, f["path"])
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(f["utf8"].encode())
+    for f in s["setup"].get("snapshots", []):
+        snapshots[f["id"]] = read(path(root, f["path"]))
+
+    def expired():
+        print(json.dumps({"state": "ERROR", "reason": "Product action timeout"}), flush=True)
+        os._exit(0)  # Outer held Job reaps the entire owned tree, including pipe holders.
+
+    for a in s["actions"]:
+        budget = min(seconds, deadline - time.monotonic())
+        if budget <= 0:
+            raise TimeoutError("Scenario/run deadline; action unperformed")
+        guard = threading.Timer(budget, expired)
+        guard.start()
+        try:
+            v = a["cli"]
+            binding = targets[v["target"]]
+            args = argv(binding["argv"], root) + argv(v["argv"], root)
+            result = capture([sys.executable, "-B", str(path(root, binding["entry"])), *args], root)
+        finally:
+            guard.cancel()
+        marker = f"SELDON-STUB {v['operation']}"
+        if phase == "contracts" and not (
+            result["exit"] == 3 and marker in result["stderr"].splitlines()
+        ):
+            raise ValueError("Missing standard operation stub marker; no Contracts RED credit")
+        if "SELDON-STUB " in result["stderr"] + result["stdout"]:
+            markers.append(a["id"])
+        results[a["id"]] = result
+    observations = []
+    for o in s["observe"]:
+        actual = results[o["action"]] if "action" in o else None
+        for key, expected in o.items():
+            if key in ("action", "path"):
+                continue
+            valid = True
+            if key in ("exitEquals", "stdoutEquals"):
+                value = actual[key.removesuffix("Equals")]
+            elif key == "stderrNonempty":
+                value = bool(actual["stderr"].strip())
+            elif key == "fileAbsent":
+                value = not path(root, o["path"]).exists()
+            else:
+                raw = actual["stdout"] if key == "stdoutJsonEquals" else read(path(root, o["path"]))
+                if key == "bytesUnchangedFrom":
+                    value, expected = raw == snapshots[expected], True
+                elif key == "fileBytesEquals":
+                    value = raw.decode()
+                else:
+                    try:
+                        value = json.loads(raw)
+                        json.dumps(value, allow_nan=False)
+                    except ValueError:
+                        value, valid = "invalid JSON output", False
+            passed = valid and equal(value, expected)
+            observations.append(
+                dict(
+                    check=key,
+                    passed=passed,
+                    actual=value,
+                    reason="matched" if passed else "observable mismatch",
+                )
+            )
+    if phase == "validation" and markers:
+        raise ValueError("Stub marker remains; final Validation cannot pass")
+    state = "PASS" if all(o["passed"] for o in observations) else "FAIL"
+    return dict(
+        id=s["id"],
+        state=state,
+        reason="observations evaluated",
+        observations=observations,
+        stubActions=markers,
+        actions=results,
+    )
+
+
+def run(
+    document, product, targets, phase, *, action_seconds=3, scenario_seconds=15, run_seconds=45
+):
+    results, scenarios = [], [{"id": None}]
+    try:
+        scenarios = validate(document, product, targets)
+        if phase not in ("contracts", "validation") or os.name != "nt":
+            raise ValueError(
+                "Use contracts/validation; this spike requires Windows Job containment"
+            )
+        budgets = (action_seconds, scenario_seconds, run_seconds)
+        if (
+            not all(type(v) in (int, float) for v in budgets)
+            or not 0 < budgets[0] <= budgets[1] <= budgets[2] <= 120
+        ):
+            raise ValueError("Use positive ordered action/scenario/run budgets <=120s")
+        deadline = time.monotonic() + run_seconds
+        for s in scenarios:
+            end = min(deadline, time.monotonic() + scenario_seconds)
+            if end <= time.monotonic():
+                raise TimeoutError("Run deadline; scenario unperformed")
+            with tempfile.TemporaryDirectory(prefix="seldon-semantic-") as temp:
+                root, count = Path(temp), 0
+                for base, dirs, files in os.walk(product, followlinks=False):
+                    count += len(files) + len(dirs)
+                    if count > 128:
+                        raise ValueError("Product source exceeds128 entries")
+                    for name in [*dirs, *files]:
+                        source = path(product, (Path(base) / name).relative_to(product).as_posix())
+                        if name in files and source.suffix == ".py":
+                            if source.stat().st_size > 262144:
+                                raise ValueError("Product source exceeds256KiB per file")
+                            destination = root / source.relative_to(Path(product).resolve())
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(source, destination)
+                config = root / ".scenario.json"
+                config.write_text(
+                    json.dumps([s, targets, phase, action_seconds, end]), encoding="utf-8"
+                )
+                cmd = [sys.executable, "-B", "-m", MODULE, "--worker", str(config)]
+                completed = run_audit_process(
+                    cmd, cwd=root, timeout=max(0.01, end - time.monotonic())
+                )
+                control = completed.audit_control
+                if (
+                    not control.get("quiescenceVerified")
+                    or control.get("activeProcessesAfterTeardown") != 0
+                ):
+                    raise OSError("Owned cleanup uncertain; stop further scenarios")
+                if completed.returncode or time.monotonic() > end:
+                    raise TimeoutError("Runner failed or scenario deadline expired")
+                result = dict(json.loads(completed.stdout), id=s["id"], cleanup=control)
+                results.append(result)
+                if result["state"] == "ERROR":
+                    break
+    except ERRORS as error:
+        results.append(
+            dict(
+                id=scenarios[min(len(results), len(scenarios) - 1)]["id"],
+                state="ERROR",
+                reason=str(error),
+                cleanup=getattr(error, "audit_control", {}),
+            )
+        )
+    results.extend(
+        dict(id=s["id"], state="ERROR", reason="unperformed after earlier ERROR")
+        for s in scenarios[len(results) :]
+    )
+    return results
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--worker"]:
+        try:
+            s, targets, phase, seconds, deadline = json.loads(read(Path(sys.argv[2]), 131072))
+            result = execute(s, Path.cwd(), targets, phase, seconds, deadline)
+        except ERRORS as error:
+            result = dict(state="ERROR", reason=str(error) or type(error).__name__)
+    else:
+        parser = argparse.ArgumentParser(description=__doc__)
+        for name in ("spec", "product", "targets", "phase"):
+            parser.add_argument(name)
+        args = parser.parse_args()
+        result = run(
+            json.loads(read(Path(args.spec), 65536)),
+            Path(args.product),
+            json.loads(read(Path(args.targets), 65536)),
+            args.phase,
+        )
+    print(json.dumps(result))
