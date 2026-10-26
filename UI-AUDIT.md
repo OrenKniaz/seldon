@@ -43,20 +43,30 @@ Historical vision-lock record (not current approval credit): recorded by chat-co
 - Intake: not recorded
 ...
 ```
-After:
+After (real Pocketboard copy output; 64 lines become 27):
 ```
+Seldon · project: pocket · phase 9/11: publish
+Plan **Pocketboard** · nothing is waiting on you
+Progress: align ✓ · expand ✓ · … · roundtable ✓ · **publish** · execute · accept
 **Where things stand** · Publish (9 of 11)
-Progress: align ✓ · expand ✓ · … · **publish** · execute · accept
 - Vision lock: ✓ approved
-- Test audit: ✓ passing (prospective plan · tests not oracle-verified)
-- Plan review: ✓ current · reviewer: round 1/1 for this revision · 2 total
-- Published: ✓ up to date (bf1f27b2835a)
-- Open: 0 questions · 0 review findings · 0 assumptions
-- Product acceptance: not yet · 0/9 scenarios proved
-- Workers: readiness not-yet
-**Vision:** Tally is the small local Python 3.12 standard-library-only CLI ledger…
-Details (for the agent) · spine 4998c1f65f66 · manifest c9eadbbb06ee · … provenance lines …
+- Test audit: ✓ passing (Prospective plan · tests not oracle-verified)
+- Plan review: ✓ current · Sol6.1-medium: round 1/1 for this revision · 8 total · ⚠ Only one provider …
+- Published: ✓ up to date (8134368b1f96)
+- Open: 0 questions · 0 open findings · 3 assumptions
+- Product acceptance: not yet · 0/19 scenarios proved by recorded runs
+- Worker readiness (advisory): not-yet
+**Vision:** Pocketboard is a small local dashboard for one person's weekly priorities, …
+
+**Details** (for the agent; full data in structured output)
+- Revisions: spine 63fe4834ff5e · manifest 3705b1e5fc5a · published 8134368b1f96
+- Current vision-lock approval: granted; origin: mcp-client-elicitation (…)
+- Historical vision-lock record (not current approval credit): … for c66cd87c5529
+- Outcome planning: reviewer choice RS1 (draft) · full map: harness_waves
+- Connection recovery: if this chat loses Seldon, open a new chat in <project> and call harness_plan_status …
+Next: …
 ```
+The full vision is still shown during Align, Expand and Vision Lock, and whenever the vision is not locked.
 
 ### 2. Every reply opens with three redundant header lines
 - Every reply starts with the project line.
@@ -107,9 +117,9 @@ Reply with exactly one of: **Approve** · **No** · **Cancel** · **Changes: <wh
 …understanding…
 
 ---
-For the agent: request 311b6216… · revision edb77c65… (full ids in structured output)
-Record the user's reply with harness_record_chat_confirmation: quote their latest message verbatim, with its SHA-256 and an actor label. Seldon cannot verify who sent it (unverified); no reply grants nothing.
+For the agent: chat confirmation bc849b43… for revision edb77c65…(full). Show this question to the user exactly as written and wait for their reply. Record it with harness_record_chat_confirmation: quote their latest actual chat message verbatim, with its SHA-256 and an actor label. Actor identity and message source are unverified; the hash binds the quote, not its author. No reply grants nothing.
 ```
+The refusal that carries the question now says `Next: Show the user the chat question below exactly as written and wait for their reply.` Before, it said "retry native confirmation when ready". The workspace line is no longer spliced into the question.
 
 ### 5. Refusals name a code but don't teach the fix
 Before:
@@ -120,9 +130,9 @@ Next: harness_plan_status read-only; inspect the reported blocker, primary resul
 ```
 After: the same lines (the code is kept), followed by:
 ```
-How to fix: the user has not approved this step yet. Show the understanding card, then call harness_record_confirmation gate=align (or the chat question it offers) and wait for their answer.
+How to fix: the user has not approved align for this plan version yet. Show them the understanding card exactly as written, then call harness_record_confirmation gate=align. If the client cannot show the form, show the chat question Seldon offers instead and wait for the user's reply.
 ```
-- There is one "How to fix" line for each common planning refusal: approval, open findings, missing review, missing audit, phase order and stale revision.
+- There is one "How to fix" line for each common planning refusal: approval required/stale, native form unavailable, open questions, open findings, missing audit/review evidence, phase order, invalid phase, gate mismatch and unknown node id.
 - Async-audit and acceptance refusals belong to other lanes and are untouched.
 
 ### 6. When publish needs another review, there is no question for the user, only boilerplate
@@ -133,10 +143,12 @@ How to fix: the user has not approved this step yet. Show the understanding card
 After (with no open findings):
 ```
 **Decision needed: run one more plan review?**
-The plan changed after its last review, so publishing needs a fresh review of the current version.
-Reply **Run review** (uses one review call from your budget) or **Stop** (keep the last published plan).
+The plan changed after its last successful review, so publishing needs a fresh review of this exact version.
+Reply **Run review** to review it now (uses one review call from your budget), or **Stop** to keep the last published plan (21269710aa6f).
+Next: Ask the user the question above and wait; on Run review: …roundtable --reviewer @<reviewer.json> …
 ```
-The "Author repair" instructions now appear only when there are open findings to repair.
+- The "Author repair" instructions now appear only when there are open findings to repair, in both MCP and the CLI.
+- `structuredContent.authorHandoff` is unchanged.
 
 ### 7. Jargon throughout the user-facing text
 Examples:
@@ -173,9 +185,16 @@ After:
   - the next step;
   - beads with their worker state;
   - review status: reviewer, round, open/resolved/deferred findings and quality warnings.
-- Headings are plainer: "Product map", "Product promise".
-- The default palette is a cleaner light/dark neutral, with higher-contrast type.
+- Headings are plainer: "Product map", "Checkpoint", and "No build run is linked to this plan yet · showing plan facts only".
+- The palette tokens are a cleaner neutral graphite (light/navy variants kept), with soft card shadows. Fonts stay at 15px or larger, and body text at 18px, per the browser checks.
 - The existing map, board and chronicle views stay below the panel unchanged, so their tested behaviour is preserved.
+
+## Status of the 10 problems
+Problems 1–10 are all addressed in this branch (see commits). They are only partly addressed in these places:
+- #7: The CLI `Next:` lines still repeat the full `python -m … --workspace "<path>"` prefix.
+- #7: `render_vision` still uses `Label:
+value` lines. Tests pin these lines, and markdown hosts fold them into one paragraph.
+- #10: The older sticky "Where / Blocking / Needs you" strip and the map views were restyled but not restructured.
 
 ## Out of scope / not changed
 - MCP tool argument and result structures, `structuredContent`, and all proof, approval and gate semantics.
