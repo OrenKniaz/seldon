@@ -16,6 +16,7 @@ import signal
 import sqlite3
 import subprocess
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
@@ -71,6 +72,7 @@ def _product_git_head(repo: Path) -> str | None:
     """
     top = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         check=False,
@@ -83,6 +85,7 @@ def _product_git_head(repo: Path) -> str | None:
         return None
     head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         check=False,
@@ -108,6 +111,7 @@ def integrated_revision(repo) -> str:
                 "--exclude-standard",
                 "-z",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
         )
@@ -142,6 +146,7 @@ def _integrated_revision_v1(repo) -> str:
     if head is not None:
         changes = subprocess.run(
             ["git", "-C", str(repo), "diff", "HEAD", "--binary", "--no-ext-diff", "--", "."],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
         )
@@ -155,6 +160,7 @@ def _integrated_revision_v1(repo) -> str:
                 "--exclude-standard",
                 "-z",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
         )
@@ -196,9 +202,11 @@ def _matches(actual: dict, expect: dict) -> bool:
     return True
 
 
-def _cleanup_timed_out_process(process) -> str:
+def _cleanup_timed_out_process(process, scenario_deadline=None) -> str:
     """Bound tree termination and owned-parent reaping by one cleanup deadline."""
     deadline = time.monotonic() + 1.7
+    if scenario_deadline is not None:
+        deadline = min(deadline, scenario_deadline)
     issues = []
     try:
         if os.name == "nt":
@@ -231,7 +239,9 @@ def _cleanup_timed_out_process(process) -> str:
     return "\n".join(issues)
 
 
-def run_scenarios(repo, scenarios, env=None) -> list[dict]:
+def run_scenarios(
+    repo, scenarios, env=None, *, on_result=None, should_stop=None, deadline=None
+) -> list[dict]:
     """Run trusted planner commands, with isolated cwd/HOME/data for each scenario.
 
     {repo}, {home}, {data} and {python} placeholders are available. Environment
@@ -246,9 +256,36 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
 
     repo = Path(repo).resolve()
     results = []
+    halt = None
+    run_deadline = (
+        deadline
+        if deadline is not None
+        else time.monotonic() + sum(60 * len(item.get("steps", [])) + 1.7 for item in scenarios)
+    )
     for scenario in scenarios:
-        result = {"id": scenario["id"], "title": scenario["title"], "steps": [], "passed": False}
+        budget = 60 * len(scenario.get("steps", [])) + 1.7
+        remaining_run = run_deadline - time.monotonic()
+        deadline = min(time.monotonic() + budget, run_deadline)
+        result = {
+            "id": scenario["id"],
+            "title": scenario["title"],
+            "steps": [],
+            "passed": False,
+            "budgetSeconds": budget,
+            "deadlineAt": (
+                datetime.now(UTC) + timedelta(seconds=min(budget, remaining_run))
+            ).isoformat(),
+        }
         results.append(result)
+        if remaining_run <= 1.7:
+            halt = halt or "Whole-run execution deadline exhausted; no additional children admitted"
+        if halt or should_stop and should_stop():
+            result.update(
+                state="unfinished", error=halt or "Acceptance owner stopped; no new child"
+            )
+            if on_result:
+                on_result(copy.deepcopy(result))
+            continue
         # A killed Windows process tree can hold the work dir briefly after
         # taskkill returns; leftover temp files must not fail the scenario.
         with TemporaryDirectory(
@@ -288,8 +325,22 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
             steps = scenario.get("steps", [])
             if not steps:
                 result["error"] = "No executable steps supplied for this vision promise"
+                if on_result:
+                    on_result(copy.deepcopy(result))
                 continue
             for index, step in enumerate(steps):
+                if should_stop and should_stop():
+                    result.update(
+                        state="unfinished", error="Acceptance owner stopped; no new child"
+                    )
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 1.7:
+                    result.update(
+                        state="unfinished",
+                        error="Scenario execution deadline exhausted; no new child",
+                    )
+                    break
                 command = step if isinstance(step, str) else step["command"]
                 for name, value in tokens.items():
                     command = command.replace("{" + name + "}", value)
@@ -303,6 +354,7 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
                 with TemporaryFile() as stdout, TemporaryFile() as stderr:
                     process = subprocess.Popen(
                         command,
+                        stdin=subprocess.DEVNULL,
                         shell=True,
                         cwd=cwd,
                         env=process_env,
@@ -314,11 +366,12 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
                             else {"start_new_session": True}
                         ),
                     )
+                    wait_limit = min(60, max(0, deadline - time.monotonic() - 1.7))
                     try:
-                        process.communicate(timeout=60)
+                        process.communicate(timeout=wait_limit)
                     except subprocess.TimeoutExpired:
                         timed_out = True
-                        cleanup_uncertainty = _cleanup_timed_out_process(process)
+                        cleanup_uncertainty = _cleanup_timed_out_process(process, deadline)
                     record = {
                         "command": command,
                         "stdout": _bounded_output(stdout),
@@ -330,9 +383,12 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
                             else "",
                         ),
                         "exit": None if timed_out else process.returncode,
+                        "timedOut": timed_out,
+                        "timeoutSeconds": wait_limit,
                     }
                     if cleanup_uncertainty:
                         record["cleanupUncertainty"] = cleanup_uncertainty
+                        halt = "Prior child cleanup uncertain; no additional children admitted"
                     record["passed"] = not timed_out and _matches(record, expect)
                 result["steps"].append(record)
                 if not record["passed"]:
@@ -340,6 +396,8 @@ def run_scenarios(repo, scenarios, env=None) -> list[dict]:
             result["passed"] = len(result["steps"]) == len(steps) and all(
                 item["passed"] for item in result["steps"]
             )
+        if on_result:
+            on_result(copy.deepcopy(result))
     return results
 
 
@@ -369,13 +427,15 @@ def run_subject(run) -> str:
     return "product" if (Path(run["repo"]).parent / "evidence" / "run.json").is_file() else "oracle"
 
 
-def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
+def capture_acceptance(store, repo, *, subject=None) -> dict:
+    """Validate and capture the exact inputs before any acceptance child is admitted."""
     if subject not in ("product", "oracle"):
         raise PlanStoreError(
             "acceptance-subject-required",
             "Specify the acceptance subject. Next: harness_accept_run repo=<integrated-repo> "
             "subject=product OR harness_accept_run repo=<reference-repo> subject=oracle",
         )
+    dispatch_digest = None
     if subject == "product":
         product = Path(repo).resolve()
         dispatch_record = product.parent / "evidence" / "run.json"
@@ -383,6 +443,7 @@ def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
             from codex_harness.core.dispatch import STATUS_MOCK_ONLY
 
             run = read_record_json(dispatch_record)
+            dispatch_digest = _hash(run)
             if (
                 run.get("schema") != "codex-harness/plan-run-v1"
                 or not isinstance(run.get("beads"), dict)
@@ -417,32 +478,56 @@ def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
     if not scenarios:
         store.save_acceptance_scenarios(derive_scenarios(spine))
         scenarios = store.acceptance_scenarios()
-    revision = integrated_revision(repo)
-    plan_revision = store._revision()
-    results = run_scenarios(repo, scenarios, env)
+    return dict(
+        repo=str(Path(repo).resolve()),
+        subject=subject,
+        revision=integrated_revision(repo),
+        planRevision=store._revision(),
+        scenarioRevision=_hash(scenarios),
+        scenarios=scenarios,
+        dispatchDigest=dispatch_digest,
+        stepTimeoutSeconds=60,
+        maxExecutionSeconds=sum(60 * len(item.get("steps", [])) + 1.7 for item in scenarios),
+    )
+
+
+def complete_acceptance(store, captured, results) -> dict:
+    """Only a current captured input set may publish a consumable run receipt."""
     with store._transaction():
-        if (
-            integrated_revision(repo) != revision
-            or store._revision() != plan_revision
-            or store.acceptance_scenarios() != scenarios
-        ):
-            raise PlanStoreError("acceptance-revision-changed", "Rerun on the integrated revision")
-        result = {
-            "id": uuid4().hex,
-            "repo": str(Path(repo).resolve()),
-            "subject": subject,
-            "revision": revision,
-            "revisionAlgorithm": "tree-bytes-v2",
-            "planRevision": plan_revision,
-            "scenarioRevision": _hash(scenarios),
-            "results": results,
-            "passed": bool(results) and all(r["passed"] for r in results),
-        }
-        store.connection.execute(
-            "INSERT INTO acceptance_runs VALUES (?, ?)", (result["id"], json.dumps(result))
-        )
-        store._event("acceptance-run", result)
+        return record_acceptance(store, captured, results)
+
+
+def record_acceptance(store, captured, results) -> dict:
+    """Record under the canonical caller's existing write transaction."""
+    if capture_acceptance(store, captured["repo"], subject=captured["subject"]) != captured:
+        raise PlanStoreError("acceptance-revision-changed", "Rerun on the integrated revision")
+    result = {
+        "id": uuid4().hex,
+        "repo": captured["repo"],
+        "subject": captured["subject"],
+        "revision": captured["revision"],
+        "revisionAlgorithm": "tree-bytes-v2",
+        "planRevision": captured["planRevision"],
+        "scenarioRevision": captured["scenarioRevision"],
+        "results": results,
+        "passed": bool(results) and all(r["passed"] for r in results),
+    }
+    store.connection.execute(
+        "INSERT INTO acceptance_runs VALUES (?, ?)", (result["id"], json.dumps(result))
+    )
+    store._event("acceptance-run", result)
     return result
+
+
+def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
+    if store.connection.execute(
+        "SELECT 1 FROM acceptance_attempts "
+        "WHERE state IN ('queued','running','unknown-interrupted') LIMIT 1"
+    ).fetchone():
+        raise PlanStoreError("acceptance-busy", "Existing acceptance owner holds this workspace")
+    captured = capture_acceptance(store, repo, subject=subject)
+    results = run_scenarios(repo, captured["scenarios"], env)
+    return complete_acceptance(store, captured, results)
 
 
 def run_wave_exits(store, run_dir, through_wave_id) -> dict:
@@ -490,6 +575,16 @@ def _raw_scenarios(store) -> list[dict]:
 
 
 def run_invalid_reason(store, run) -> str | None:
+    if store.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='acceptance_attempts'"
+    ).fetchone():
+        attempt = store.connection.execute(
+            "SELECT state,superseded_run_id FROM acceptance_attempts ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if attempt and attempt["state"] in {"queued", "running", "unknown-interrupted"}:
+            return "acceptance-execution-pending"
+        if attempt and run and run["id"] == attempt["superseded_run_id"]:
+            return "acceptance-execution-required"
     try:
         store.locked_acceptance_spine()
     except PlanStoreError:
@@ -528,6 +623,12 @@ def current_run(store) -> dict | None:
 
 
 INVALID_MESSAGES = {
+    "acceptance-execution-pending": (
+        "A newer acceptance attempt is pending or uncertain; prior credit is held."
+    ),
+    "acceptance-execution-required": (
+        "A newer explicit acceptance attempt superseded this run; inspect its retained outcome."
+    ),
     "acceptance-product-required": (
         "Scenarios verified against the reference implementation (dry run); "
         "product acceptance is required."
@@ -553,6 +654,11 @@ INVALID_MESSAGES = {
 
 
 def acceptance_next(reason, repo=None) -> str:
+    if reason in {"acceptance-execution-pending", "acceptance-execution-required"}:
+        return (
+            "harness_accept_status id=<attemptId>; inspect the admitted attempt; "
+            "never replay uncertain work."
+        )
     if reason in ("revision-algorithm-upgraded", "legacy-unbound"):
         return f"harness_accept_rebind repo={json.dumps(repo or '<integrated-repo>')}"
     if reason == "vision-unlocked":

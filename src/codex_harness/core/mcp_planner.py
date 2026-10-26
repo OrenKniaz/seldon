@@ -335,8 +335,14 @@ TOOLS = [
     ),
     _tool(
         "harness_accept_run",
-        "Run acceptance scenarios from fresh user state; name product or oracle (dry run).",
+        "Admit captured acceptance from fresh user state; returns a durable attemptId promptly. "
+        "Read progress/result with harness_accept_status; pending is not acceptance.",
         {"repo": STRING, "subject": {"type": "string", "enum": ["product", "oracle"]}},
+    ),
+    _tool(
+        "harness_accept_status",
+        "Read durable acceptance progress and terminal receipt without resubmitting work.",
+        {"id": STRING},
     ),
     _tool(
         "harness_accept_rebind",
@@ -890,9 +896,11 @@ def show_node(store, node_id: str, *, body=False, test=None) -> dict:
 
 class PlannerServer:
     def __init__(self, workspace: str | Path, *, confirmation_timeout=600):
+        from codex_harness.core.planner_acceptance import AcceptanceOwner
         from codex_harness.core.planner_audits import AuditOwner
 
         self.audits = AuditOwner()
+        self.acceptance = AcceptanceOwner()
         self.workspace = Path(workspace).resolve()
         self.store = None
         self._elicitation = False
@@ -1010,6 +1018,7 @@ class PlannerServer:
             "harness_plan_status",
             "harness_review_policy",
             "harness_audit_status",
+            "harness_accept_status",
         }:
             return self.call_tool(name, arguments, schema_tools=self._wire_tools())
         previous = self.store
@@ -1038,6 +1047,7 @@ class PlannerServer:
             self.store = previous
 
     def close(self) -> None:
+        self.acceptance.close(self.store)
         self.audits.close(self.store)
         if self._pending_confirmation is not None:
             self._cancel_confirmation(
@@ -1119,9 +1129,13 @@ class PlannerServer:
                     or self.result_data["invalid"]
                     or any(row["exitCode"] != 0 for row in self.result_data["reviewers"])
                 )
-                or name == "harness_accept_run"
+                or name in {"harness_accept_run", "harness_accept_status"}
                 and self.result_data
-                and not self.result_data["passed"]
+                and (
+                    self.result_data["state"] in {"failed", "stale", "unknown-interrupted"}
+                    or self.result_data.get("result") is not None
+                    and not self.result_data["result"]["passed"]
+                )
                 or name == "harness_accept_assess"
                 and self.result_data
                 and (
@@ -1277,6 +1291,7 @@ class PlannerServer:
                         "harness_audit",
                         "harness_audit_status",
                         "harness_accept_run",
+                        "harness_accept_status",
                         "harness_accept_review",
                         "harness_accept_assess",
                         "harness_worker_start",
@@ -1363,7 +1378,26 @@ class PlannerServer:
                     "harness_schema tool=harness_accept_scenarios; fill executable steps and "
                     "expectations and save the complete current set with harness_accept_scenarios."
                 )
-        if name == "harness_accept_run" and not error and self.result_data["subject"] == "oracle":
+        if name in {"harness_accept_run", "harness_accept_status"} and self.result_data:
+            attempt = self.result_data
+            if attempt["state"] in {"queued", "running"}:
+                return (
+                    "harness_accept_status id="
+                    + attempt["attemptId"]
+                    + "; pending is not acceptance."
+                )
+            if error:
+                return (
+                    "harness_accept_status id="
+                    + attempt["attemptId"]
+                    + "; inspect retained failure/unfinished evidence; "
+                    "do not replay uncertain work."
+                )
+        if (
+            name in {"harness_accept_run", "harness_accept_status"}
+            and not error
+            and self.result_data["subject"] == "oracle"
+        ):
             return (
                 "harness_accept_run repo=<integrated-product-repo> subject=product; "
                 "the oracle result is a dry run, not product acceptance."
@@ -1558,6 +1592,7 @@ class PlannerServer:
                     "harness_accept_run repo=<integrated-repo> subject=product"
                 ),
                 "harness_accept_run": "harness_accept_review repo=<integrated-repo>",
+                "harness_accept_status": "harness_accept_review repo=<integrated-repo>",
                 "harness_accept_review": (
                     "harness_accept statement=<actual-words> by=<user-or-proxy:name>"
                 ),
@@ -1698,7 +1733,6 @@ class PlannerServer:
             from codex_harness.core.acceptance import (
                 acceptance_review,
                 derive_scenarios,
-                run_acceptance,
             )
 
             store = self._store()
@@ -1711,7 +1745,9 @@ class PlannerServer:
                     )
                 result = {"scenarios": store.acceptance_scenarios()}
             elif name == "harness_accept_run":
-                result = run_acceptance(store, args["repo"], subject=args.get("subject"))
+                result = self.acceptance.start(store, args["repo"], subject=args.get("subject"))
+            elif name == "harness_accept_status":
+                result = self.acceptance.status(store, args["id"])
             elif name == "harness_accept_review":
                 prior_failure = store.latest_review_failure()
                 try:
@@ -1735,8 +1771,10 @@ class PlannerServer:
                     },
                 )
             self.result_data = result
-            if name == "harness_accept_run":
-                return views.acceptance_run_card(result)
+            if name in {"harness_accept_run", "harness_accept_status"}:
+                if result["result"] is not None:
+                    return views.acceptance_run_card(result["result"])
+                return views.data_card("Acceptance attempt", result)
             if name == "harness_accept_review":
                 return views.review_card(result)
             body = views.data_card(name.removeprefix("harness_").replace("_", " ").title(), result)
@@ -2751,6 +2789,7 @@ def main() -> None:
         incoming = queue.Queue()
         audit_completed = object()
         server.audits.wake = lambda: incoming.put(audit_completed)
+        server.acceptance.wake = lambda: incoming.put(audit_completed)
 
         def read_lines():
             try:
@@ -2763,6 +2802,7 @@ def main() -> None:
         while True:
             if server.store is not None:
                 server.audits.drain(server.store)
+                server.acceptance.drain(server.store)
             for response in server.expire_confirmation():
                 print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
             pending = server._pending_confirmation
@@ -2780,6 +2820,7 @@ def main() -> None:
                 print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
                 if server.store is not None:
                     server.audits.dispatch_after_flush(server.store)
+                    server.acceptance.dispatch_after_flush(server.store)
     finally:
         server.close()
 

@@ -56,6 +56,40 @@ Scenario schema/derive return canonical first-moment and every scope-N ID. Deriv
 Use `{repo}`, `{python}`, `{home}`, `{data}`; each scenario starts in fresh empty cwd/HOME/data. Changes stale referenced coverage; resave reviewed scenarios. Planned clean-state first-moment/e2e (`firstMoment:true,cleanState:true`) is not proved until current product runs pass. Missing-file behavior must support first use.
 Explicit `acceptance` spine nodes are supported. Allowed parents: acceptance vision/feature. Read `p schema --kind acceptance` (MCP: `harness_schema kind=acceptance`); apply its prerequisiteNodes, save example.node as acceptance.json, then use `p node --json @acceptance.json` (MCP: `harness_upsert_node node=<node>`). Use current parent IDs and preserve intent. These are draft planning records, not automatic executable coverage or proof: empty fields need executable steps, and current product runs, review and approval remain required.
 `accept-run --subject product|oracle` distinguishes product delivery from reference dry runs. Legacy unspecified subject is product only with sibling evidence/run.json, otherwise oracle. Acceptance review uses distinct existing Codex/Claude capacity and findings/resolve; changed product/plan/scenario/vision needs fresh acceptance. `accept-rebind --repo DIR` reruns legacy-unbound/revision-algorithm-upgraded cases, preserving original approver/proxy references only for unchanged passing products.
+
+**MCP acceptance is asynchronous.** `harness_accept_run repo=<DIR> subject=product|oracle`
+validates and captures the subject, product revision, plan, scenarios and existing
+dispatch evidence, then returns a durable `attemptId`. Follow
+`harness_accept_status id=<attemptId>` on the same workspace connection; do not
+resubmit to poll. Plan status and other tools remain available during execution.
+The canonical serialized writer commits each scenario result as it finishes,
+even without another client call. Pending admission and partial progress grant
+no acceptance. A terminal current result is recorded in the ordinary acceptance
+run store for review and approval; changed captured inputs retain evidence but
+receive no current run credit. Product runs with zero accepted dispatch beads
+are refused before launch; legitimate accepted partial and reused candidates
+remain available for diagnostics.
+
+Each step retains its 60-second wait limit. A scenario has an enforced execution
+deadline of `60 * declared step count + 1.7` seconds, including its existing
+cleanup allowance; later waits shrink to the remaining budget. Progress records
+the actual scenario budget, deadline, timeouts and unfinished work. Child stdin
+is EOF; explicit shell redirections still supply declared input. The captured
+`maxExecutionSeconds` is the sum of these scenario budgets, not a guarantee about
+metadata or filesystem latency. No 900-second client timeout is used as a product
+budget. The whole run also enforces that summed execution deadline from dispatch:
+no new child starts after it expires, and waits use the lesser of the step,
+scenario and whole-run remaining budgets. Admission immediately holds prior
+review/approval credit; a failed new attempt cannot revive the superseded run.
+One attempt owns the workspace at a time; duplicate admission while work
+is pending reuses its ID. After known termination, a separate explicit run is
+fresh execution with a new ID and invalidates earlier review/approval bindings.
+Status calls never execute work. An unobserved owner or uncertain child cleanup holds additional child
+admission with `unknown-interrupted`; restart/status never silently replays work
+or attests quiescence. Old synchronous calls have no retained acceptance child
+identity and cannot be adopted or declared stopped by this new status route.
+The local CLI and legacy rebind remain synchronous.
+
 Interrupted acceptance reviews retain registered attempt originals under .codex-harness/acceptance-review-attempts. Inspect acceptance.reviewAttempts and use `accept-review --repo SAME --resume ID` / MCP resume: no provider launch. Every slot must be complete, valid, nonmocked and match source/candidate/context/native session/model. Missing/unknown telemetry, error events, overflow reshards, stale/changed originals refuse; never edit/move originals or import unregistered external returns. Successful repeat resume is idempotent and preserves dispositions; all gates remain.
 Only record actual user words as `--by user`; delegated acceptance uses `proxy:NAME` (or opus-user-proxy), remains isProxy:true and never real-user identity. Product checks do not prove actual worker delivery; final acceptance must assess the full locked vision.
 

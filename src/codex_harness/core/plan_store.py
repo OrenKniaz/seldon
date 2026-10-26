@@ -156,6 +156,13 @@ class PlanStore:
                 "result_json TEXT NOT NULL, at TEXT NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS acceptance_scenarios (id TEXT PRIMARY KEY, "
                 "scenario_json TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS acceptance_attempts (id TEXT PRIMARY KEY, "
+                "attempt_key TEXT UNIQUE NOT NULL, owner TEXT NOT NULL, state TEXT NOT NULL, "
+                "inputs_json TEXT NOT NULL, progress_json TEXT NOT NULL, result_json TEXT, "
+                "error TEXT, started_at TEXT, deadline_at TEXT, superseded_run_id TEXT)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS acceptance_one_inflight ON "
+                "acceptance_attempts ((1)) WHERE state IN "
+                "('queued','running','unknown-interrupted')",
                 *[
                     f"CREATE TABLE IF NOT EXISTS acceptance_{table} (id TEXT PRIMARY KEY, "
                     "result_json TEXT NOT NULL)"

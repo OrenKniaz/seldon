@@ -571,6 +571,16 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             if command == "accept-review" and args.execution_assessment:
                 arguments["execution_assessment_ids"] = args.execution_assessment
         reply = server.call_tool("harness_" + command.replace("-", "_"), arguments)
+        if command == "accept-run" and not reply["isError"]:
+            attempt_id = reply["structuredContent"]["attemptId"]
+            server.acceptance.dispatch_after_flush(server.store)
+            while server.acceptance.thread and server.acceptance.thread.is_alive():
+                server.acceptance.thread.join(timeout=0.1)
+                server.acceptance.drain(server.store)
+            server.acceptance.drain(server.store)
+            reply = server.call_tool("harness_accept_status", {"id": attempt_id})
+            if reply["structuredContent"]["result"] is not None:
+                reply["structuredContent"] = reply["structuredContent"]["result"]
         for item in reply["content"]:
             item["text"] = item["text"].rsplit("\nNext: ", 1)[0]
         return reply, reply.get("structuredContent")

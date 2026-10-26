@@ -153,6 +153,13 @@ def test_acceptance_next_follows_actual_scenario_and_run_subject(project, subjec
         )
         assert not run["isError"], run
         assert run["structuredContent"]["subject"] == subject
+        assert "harness_accept_status" in next_line(run)
+        server.acceptance.dispatch_after_flush(server.store)
+        server.acceptance.thread.join(timeout=20)
+        assert not server.acceptance.thread.is_alive()
+        server.acceptance.drain(server.store)
+        run = result(server, "harness_accept_status", id=run["structuredContent"]["attemptId"])
+        assert not run["isError"], run
         if subject == "oracle":
             assert "subject=product" in next_line(run)
             assert "harness_accept_review" not in next_line(run)

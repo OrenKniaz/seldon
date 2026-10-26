@@ -119,6 +119,11 @@ def test_provenance_schema_roundtrip_and_strict_legacy(tmp_path, legacy):
 
 
 def test_built_wheel_installed_console_constructs_mock_attempt(tmp_path):
+    """Catch wheel/entrypoint drift, including missing async acceptance public tools.
+
+    Source protocol tests cannot detect an installed console importing an old
+    module or a wheel omitting its new acceptance owner.
+    """
     wheel = os.environ.get("SELDON_PROVENANCE_WHEEL")
     python = os.environ.get("SELDON_PACKAGING_PYTHON")
     if not wheel or not python:
@@ -134,6 +139,27 @@ def test_built_wheel_installed_console_constructs_mock_attempt(tmp_path):
     plan = tmp_path / "plan"
     shutil.copytree(fixture, plan)
     env = {**os.environ, "PYTHONPATH": str(site), "PYTHONDONTWRITEBYTECODE": "1"}
+    mcp = site / ("bin/seldon-mcp.exe" if os.name == "nt" else "bin/seldon-mcp")
+    messages = [
+        dict(jsonrpc="2.0", id=1, method="initialize", params={"capabilities": {}}),
+        dict(jsonrpc="2.0", id=2, method="tools/list"),
+    ]
+    discovery = subprocess.run(
+        [str(mcp), "--workspace", str(tmp_path)],
+        input="\n".join(json.dumps(message) for message in messages) + "\n",
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=20,
+    )
+    assert discovery.returncode == 0, discovery.stderr
+    replies = [json.loads(line) for line in discovery.stdout.splitlines()]
+    tools = {tool["name"]: tool for tool in replies[-1]["result"]["tools"]}
+    assert {"harness_accept_run", "harness_accept_status"} <= tools.keys()
+    assert "subject" in tools["harness_accept_run"]["inputSchema"]["required"]
+    assert "id" in tools["harness_accept_status"]["inputSchema"]["required"]
     command = site / ("bin/run_plan.exe" if os.name == "nt" else "bin/run_plan")
     result = subprocess.run(
         [
