@@ -70,7 +70,9 @@ def validate(document, product, targets):
         snapshots = set()
         for f in array(s["setup"].get("files", [])):
             fields(f, ("path", "utf8"), ("path", "utf8"))
-            path(product, f["path"])
+            source = path(product, f["path"])
+            if source.is_file() and source.suffix.lower() == ".py":
+                raise ValueError("Setup cannot overwrite product Python source")
             if not f["path"].startswith("data/") or type(f["utf8"]) is not str:
                 raise ValueError("Setup writes only UTF-8 data/ fixtures")
         for f in array(s["setup"].get("snapshots", [])):
@@ -106,13 +108,7 @@ def validate(document, product, targets):
             if reference == "path":
                 path(product, o[reference])
             for key, value in o.items():
-                kind = (
-                    int
-                    if key == "exitEquals"
-                    else bool
-                    if key in ("stderrNonempty", "fileAbsent")
-                    else str
-                )
+                kind = {"exitEquals": int, "stderrNonempty": bool, "fileAbsent": bool}.get(key, str)
                 if key not in ("stdoutJsonEquals", "fileJsonEquals") and type(value) is not kind:
                     raise ValueError("Observation has the wrong JSON value type")
                 if key == "bytesUnchangedFrom" and value not in snapshots:

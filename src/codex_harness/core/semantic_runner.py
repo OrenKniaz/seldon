@@ -1,8 +1,5 @@
-"""Experimental Python CLI observations, not canonical admission or GUI acceptance.
-
-Usage: python -m codex_harness.core.semantic_runner SPEC PRODUCT TARGETS contracts|validation
-Windows Jobs contain normal descendants; product code is trusted, not an OS security sandbox.
-"""
+"""Experimental Python CLI observations; not canonical admission or GUI acceptance.
+Windows Jobs contain normal descendants; trusted code, not an OS security sandbox."""
 
 import argparse
 import json
@@ -31,10 +28,8 @@ def read(file, limit=LIMIT):
 
 
 def capture(cmd, root):
-    env = {k: os.environ[k] for k in ("SYSTEMROOT", "WINDIR") if k in os.environ}
-    env.update(
-        HOME=str(root), USERPROFILE=str(root), TEMP=str(root), TMP=str(root), PYTHONPATH=str(root)
-    )
+    env = dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root))
+    env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
     child = Popen(cmd, cwd=root, env=env, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
     data = [None, None]
 
@@ -130,14 +125,8 @@ def execute(s, root, targets, phase, seconds, deadline):
                     except ValueError:
                         value, valid = "invalid JSON output", False
             passed = valid and equal(value, expected)
-            observations.append(
-                dict(
-                    check=key,
-                    passed=passed,
-                    actual=value,
-                    reason="matched" if passed else "observable mismatch",
-                )
-            )
+            reason = "matched" if passed else "observable mismatch"
+            observations.append(dict(check=key, passed=passed, actual=value, reason=reason))
     if phase == "validation" and markers:
         raise ValueError("Stub marker remains; final Validation cannot pass")
     state = "PASS" if all(o["passed"] for o in observations) else "FAIL"
@@ -234,10 +223,7 @@ if __name__ == "__main__":
         for name in ("spec", "product", "targets", "phase"):
             parser.add_argument(name)
         args = parser.parse_args()
-        result = run(
-            json.loads(read(Path(args.spec), 65536)),
-            Path(args.product),
-            json.loads(read(Path(args.targets), 65536)),
-            args.phase,
-        )
+        files = (args.spec, args.targets)
+        spec, targets = [json.loads(read(Path(p), 65536)) for p in files]
+        result = run(spec, Path(args.product), targets, args.phase)
     print(json.dumps(result))
