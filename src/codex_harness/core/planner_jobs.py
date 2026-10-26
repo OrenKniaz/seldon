@@ -172,6 +172,7 @@ def start_worker_job(
         return reattach()
     from codex_harness.core.planner_execution import (
         consume_execution,
+        consumed_execution_provenance,
         execution_scope,
         require_execution,
     )
@@ -209,6 +210,9 @@ def start_worker_job(
         return reattach()
     try:
         execution_id = consume_execution(store, scope, expected_revision)
+        execution_provenance = consumed_execution_provenance(
+            store, execution_id, scope, expected_revision
+        )
         before = _files(template)
         plan = directory / "plan"
         plan.mkdir()
@@ -230,6 +234,7 @@ def start_worker_job(
             "admittedAt": _now(),
             "executionRequestId": execution_id,
             "executionScope": scope,
+            "executionProvenance": execution_provenance,
         }
         request["requestDigest"] = _digest(request)
         write_record_json_once(directory / "request.json", request)
@@ -304,11 +309,23 @@ def worker_job_status(workspace, job_id):
         return {**result, "reason": "Admission incomplete; do not relaunch"}
     request = _request(directory)
     result["options"] = request["options"]
+    has_execution = bool(request.get("executionRequestId") and request.get("executionScope"))
+    # Before this field existed, the execution-original contract was native-only.
+    provenance = request.get("executionProvenance") or (
+        "mcp-client-elicitation" if has_execution else "unverified-or-unavailable"
+    )
+    result["approvalProvenance"] = provenance
     result["nativeApproval"] = (
-        "recorded"
-        if request.get("executionRequestId") and request.get("executionScope")
+        "recorded" if has_execution and provenance == "mcp-client-elicitation" else "unproven"
+    )
+    result["approvalAssurance"] = (
+        "caller-mediated"
+        if provenance == "chat-confirmation"
+        else "client-reported"
+        if has_execution
         else "unproven"
     )
+    result["actorIdentityVerified"] = False
     result["providerCallCap"] = request["options"].get("callCap")
     result["capacityVerified"] = False
     for name in ("started", "terminal"):

@@ -174,6 +174,36 @@ def test_chat_execution_producer_admits_one_canonical_job_and_consumes_grant(pro
     assert len(launches) == 1
     assert job["nativeApproval"] == "unproven"
     assert job["approvalProvenance"] == "chat-confirmation"
+    assert job["approvalAssurance"] == "caller-mediated"
+    assert job["actorIdentityVerified"] is False
+    assert (
+        planner_jobs.worker_job_status(project.workspace, job["jobId"])["approvalProvenance"]
+        == "chat-confirmation"
+    )
+
+
+def test_native_job_status_keeps_its_actual_original_channel(project, monkeypatch):
+    """Catch classifying all new jobs as chat; old native tests miss provenance projection."""
+    options = _published(project)
+    request = execution.prepare_execution(
+        project, options["expected_revision"], options["workers"], timeout=5, call_cap=1
+    )
+    execution.complete_execution(
+        project,
+        request["request_id"],
+        "accept",
+        {"approve": True, "statement": "SOURCE-ONLY native response", "conditions": ""},
+    )
+    monkeypatch.setattr(
+        planner_jobs.subprocess, "Popen", lambda *a, **k: SimpleNamespace(pid=12345)
+    )
+    job = planner_jobs.start_worker_job(
+        project, options["expected_revision"], options["workers"], timeout=5, call_cap=1
+    )
+    assert job["nativeApproval"] == "recorded"
+    assert job["approvalProvenance"] == "mcp-client-elicitation"
+    assert job["approvalAssurance"] == "client-reported"
+    assert job["actorIdentityVerified"] is False
 
 
 @pytest.mark.parametrize("case", ["No", "template-change"])
