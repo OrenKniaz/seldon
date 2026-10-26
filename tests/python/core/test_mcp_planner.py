@@ -600,6 +600,7 @@ EXPECTED_TOOLS = {
     "harness_resolve_findings",
     "harness_accept_scenarios",
     "harness_accept_run",
+    "harness_accept_status",
     "harness_accept_rebind",
     "harness_accept_review",
     "harness_accept_assess",
