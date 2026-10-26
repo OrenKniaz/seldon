@@ -70,9 +70,8 @@ def validate(document, product, targets):
         snapshots = set()
         for f in array(s["setup"].get("files", [])):
             fields(f, ("path", "utf8"), ("path", "utf8"))
-            source = path(product, f["path"])
-            if source.is_file() and source.suffix.lower() == ".py":
-                raise ValueError("Setup cannot overwrite product Python source")
+            if path(product, f["path"]).suffix.lower() == ".py":
+                raise ValueError("Setup is data-only; Python source is unsupported")
             if not f["path"].startswith("data/") or type(f["utf8"]) is not str:
                 raise ValueError("Setup writes only UTF-8 data/ fixtures")
         for f in array(s["setup"].get("snapshots", [])):

@@ -90,10 +90,11 @@ def test_infrastructure_stops_remaining_scenarios(tmp_path, source, reason):
         (("observe", 0, "eval"), True),
         pytest.param("data/cli.py", None, id="entry-collision"),
         pytest.param("data/helper.py", None, id="import-collision"),
+        pytest.param("data/helper.py", "missing", id="new-import-collision"),
     ],
 )
 def test_preflight_refuses_invalid_data_before_any_action(tmp_path, keys, value):
-    """Catch setup replacing owned code; prior data/ref negatives missed source collisions."""
+    """Catch setup supplying code; prior collisions missed creation of a missing imported module."""
     launched = tmp_path / "launched"
     (tmp_path / "tally.py").write_text(f"open({str(launched)!r},'w').write('unexpected')")
     document = scenario()
@@ -102,9 +103,18 @@ def test_preflight_refuses_invalid_data_before_any_action(tmp_path, keys, value)
     targets = TARGETS
     if type(keys) is str:
         (tmp_path / "data").mkdir()
-        (tmp_path / "data/cli.py").write_text("import helper\n")
-        (tmp_path / "data/helper.py").write_text(STUB)
+        entry = GRAMMAR + (
+            "try:\n import helper\nexcept ModuleNotFoundError:\n"
+            " print('SELDON-STUB '+a.operation,file=sys.stderr);sys.exit(3)\n"
+        )
+        (tmp_path / "data/cli.py").write_text(entry)
+        if value != "missing":
+            (tmp_path / "data/helper.py").write_text(STUB)
         targets = {"tally": {"entry": "data/cli.py", "argv": []}}
+        if value == "missing":
+            baseline = run(document, tmp_path, targets, "contracts")
+            (tmp_path / "baseline.json").write_text(json.dumps(baseline))
+            assert baseline[0]["state"] == "FAIL"
         source = f"open({str(launched)!r},'w').write('unexpected');print('true')"
         s["setup"]["files"].append({"path": keys, "utf8": source})
         s["observe"] = [{"action": "add", "stdoutJsonEquals": True}]

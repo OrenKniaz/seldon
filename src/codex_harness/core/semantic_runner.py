@@ -130,14 +130,8 @@ def execute(s, root, targets, phase, seconds, deadline):
     if phase == "validation" and markers:
         raise ValueError("Stub marker remains; final Validation cannot pass")
     state = "PASS" if all(o["passed"] for o in observations) else "FAIL"
-    return dict(
-        id=s["id"],
-        state=state,
-        reason="observations evaluated",
-        observations=observations,
-        stubActions=markers,
-        actions=results,
-    )
+    summary = dict(id=s["id"], state=state, reason="observations evaluated")
+    return dict(summary, observations=observations, stubActions=markers, actions=results)
 
 
 def run(
