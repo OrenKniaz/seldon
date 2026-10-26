@@ -240,3 +240,135 @@ def test_public_native_cancel_or_missing_reply_offers_zero_credit_question(tmp_p
         assert not server.store.status()["approval"]["granted"]
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("current_approved", [False, True])
+def test_superseded_native_timeout_cannot_replace_current_question_or_credit(
+    tmp_path, current_approved
+):
+    """Catch fallback minted by an old timeout; response-only overlap tests lack missing replies."""
+    old, current = PlannerServer(tmp_path), PlannerServer(tmp_path)
+    try:
+        start(old)
+        begin_native(old, gate="align")
+        displayed = begin_native(current, gate="align")
+        current_id = current._pending_confirmation["request"]["request_id"]
+        if current_approved:
+            result = answer_native(
+                current,
+                displayed["id"],
+                approve=True,
+                statement="SOURCE-ONLY current native client",
+                conditions="",
+            )
+            assert result["result"]["structuredContent"]["state"] == "approved"
+        old._pending_confirmation["deadline"] = 0
+        timed_out = old.expire_confirmation()[-1]["result"]
+        assert timed_out["structuredContent"]["state"] == "pending"
+        assert "chatConfirmation" not in timed_out["structuredContent"]
+        from codex_harness.core.planner_confirmations import REQUEST, _records
+
+        assert next(row for _, row in _records(old.store, REQUEST))["request_id"] == current_id
+        if not current_approved:
+            result = answer_native(
+                current,
+                displayed["id"],
+                approve=True,
+                statement="SOURCE-ONLY current native client",
+                conditions="",
+            )
+            assert result["result"]["structuredContent"]["state"] == "approved"
+        assert not tool(current, "harness_advance", to_phase="expand")["isError"]
+    finally:
+        old.close()
+        current.close()
+
+
+def test_fallback_creation_rechecks_original_under_the_canonical_writer(tmp_path, monkeypatch):
+    """Catch a newer native request between read and fallback write; serial cases miss it."""
+    from codex_harness.core import planner_confirmations
+
+    old, current = PlannerServer(tmp_path), PlannerServer(tmp_path)
+    prepare = planner_confirmations.prepare_chat_confirmation
+    newer = []
+
+    def interleave(store, gate, **kwargs):
+        # Schedule another real public producer; the hook supplies no approval or result.
+        newer.append(begin_native(current, gate=gate))
+        return prepare(store, gate, **kwargs)
+
+    try:
+        start(old)
+        displayed = begin_native(old, gate="align")
+        monkeypatch.setattr(planner_confirmations, "prepare_chat_confirmation", interleave)
+        old_reply = answer_native(old, displayed["id"], action="decline")["result"]
+        assert old_reply["structuredContent"]["state"] == "decline"
+        current_reply = answer_native(
+            current,
+            newer[0]["id"],
+            approve=True,
+            statement="SOURCE-ONLY newer native client",
+            conditions="",
+        )["result"]
+        assert current_reply["structuredContent"]["state"] == "approved"
+        assert not tool(current, "harness_advance", to_phase="expand")["isError"]
+    finally:
+        old.close()
+        current.close()
+
+
+def test_execution_fallback_cannot_supersede_interleaved_native_request(project, monkeypatch):
+    """Catch execution's writer missing the planning CAS; leaf success lacks an interleave."""
+    from codex_harness.core import planner_execution
+
+    options = _published(project)
+    proposal = {
+        key: options[key] for key in ("expected_revision", "workers", "timeout", "call_cap")
+    }
+    old, current = PlannerServer(project.workspace), PlannerServer(project.workspace)
+    prepare = planner_execution.prepare_chat_execution
+    newer, launches = [], []
+
+    def interleave(store, **kwargs):
+        newer.append(
+            rpc(current, "tools/call", {"name": "harness_worker_start", "arguments": proposal})
+        )
+        return prepare(store, **kwargs)
+
+    try:
+        for server in (old, current):
+            rpc(
+                server,
+                "initialize",
+                {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"elicitation": {}},
+                },
+            )
+            server.handle_line(
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            )
+        displayed = rpc(old, "tools/call", {"name": "harness_worker_start", "arguments": proposal})
+        assert displayed["method"] == "elicitation/create"
+        monkeypatch.setattr(planner_execution, "prepare_chat_execution", interleave)
+        monkeypatch.setattr(
+            planner_jobs.subprocess,
+            "Popen",
+            lambda *args, **kwargs: launches.append(1) or SimpleNamespace(pid=23456),
+        )
+        response = answer_native(old, displayed["id"], action="decline")["result"]
+        assert response["structuredContent"]["executionConfirmation"]["state"] == "decline"
+        assert "chatConfirmation" not in response["structuredContent"] and launches == []
+        current_reply = answer_native(
+            current,
+            newer[0]["id"],
+            approve=True,
+            statement="SOURCE-ONLY current execution decision",
+            conditions="",
+        )["result"]
+        assert not current_reply["isError"], current_reply
+        assert len(launches) == 1
+        assert current_reply["structuredContent"]["approvalProvenance"] == "mcp-client-elicitation"
+    finally:
+        old.close()
+        current.close()

@@ -234,11 +234,17 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
     return None
 
 
-def prepare_confirmation(store: PlanStore, gate: str, *, _chat=False) -> dict:
+def prepare_confirmation(
+    store: PlanStore, gate: str, *, _chat=False, _expected_request_id=None
+) -> dict:
     """Persist exactly what the native client will display for the current gate."""
     with store._transaction():
         if gate not in ("align", "vision-lock"):
             raise PlanStoreError("plan-gate-invalid", str(gate))
+        if _expected_request_id is not None:
+            latest = next((row for _, row in _records(store, REQUEST) if row["gate"] == gate), None)
+            if latest is None or latest["request_id"] != _expected_request_id:
+                raise ValueError("confirmation-request-superseded")
         phase = store.phase()
         if phase != gate and not (
             gate == "vision-lock" and PHASES.index(phase) > PHASES.index("vision-lock")
@@ -272,9 +278,9 @@ def prepare_confirmation(store: PlanStore, gate: str, *, _chat=False) -> dict:
         return request
 
 
-def prepare_chat_confirmation(store: PlanStore, gate: str) -> dict:
+def prepare_chat_confirmation(store: PlanStore, gate: str, *, _expected_request_id=None) -> dict:
     """Offer a fresh question without interpreting a previous native decline."""
-    return prepare_confirmation(store, gate, _chat=True)
+    return prepare_confirmation(store, gate, _chat=True, _expected_request_id=_expected_request_id)
 
 
 def complete_confirmation(

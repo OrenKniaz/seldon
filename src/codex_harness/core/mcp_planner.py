@@ -1981,7 +1981,10 @@ class PlannerServer:
                     body += "\nVision lock: " + (
                         f"locked vision (current recorded {approval['origin']} credit)"
                         if granted
-                        else "not granted; fresh bound native or chat confirmation required"
+                        else (
+                            "not currently granted; fresh bound native or chat "
+                            "confirmation required"
+                        )
                     )
             row = store.connection.execute(
                 'SELECT "by", statement, plan_revision FROM approvals '
@@ -2169,7 +2172,7 @@ class PlannerServer:
         }
         return connection_reply(reply, self.workspace, status)
 
-    def _prepare_chat_question(self, arguments):
+    def _prepare_chat_question(self, arguments, *, _expected_request_id=None):
         from codex_harness.core.planner_confirmations import prepare_chat_confirmation
         from codex_harness.core.planner_execution import prepare_chat_execution
 
@@ -2178,25 +2181,39 @@ class PlannerServer:
         if arguments["gate"] == "execution":
             if "execution" not in arguments:
                 raise ValueError("chat-execution-explicit-proposal-required")
-            question = prepare_chat_execution(self._store(), **arguments["execution"])
+            question = prepare_chat_execution(
+                self._store(), **arguments["execution"], _expected_request_id=_expected_request_id
+            )
         else:
             if "execution" in arguments:
                 raise ValueError("chat-planning-question-refuses-execution-fields")
-            question = prepare_chat_confirmation(self._store(), arguments["gate"])
+            question = prepare_chat_confirmation(
+                self._store(), arguments["gate"], _expected_request_id=_expected_request_id
+            )
         return {**question, "source_verified": False, "human_identity_verified": False}
 
-    def _offer_chat_confirmation(self, reply, gate, execution=None):
+    def _offer_chat_confirmation(self, reply, gate, execution=None, *, request_id=None):
         """Preserve the native outcome and append a separately prepared, zero-credit question."""
+        if request_id is not None:
+            outcome = reply["structuredContent"].get(
+                "executionConfirmation", reply["structuredContent"]
+            )
+            if outcome["state"] in {"stale", "unproved"}:
+                return reply
         arguments = {"gate": gate}
         if execution is not None:
             arguments["execution"] = execution
-        offered = self.call_tool("harness_prepare_chat_confirmation", arguments)
         reply["structuredContent"] = dict(reply.get("structuredContent", {}))
-        key = "chatConfirmationOfferError" if offered["isError"] else "chatConfirmation"
-        reply["structuredContent"][key] = (
-            offered["content"] if offered["isError"] else offered["structuredContent"]
-        )
-        reply["content"].extend(offered["content"])
+        try:
+            question = self._prepare_chat_question(arguments, _expected_request_id=request_id)
+        except ValueError as error:
+            if str(error) == "confirmation-request-superseded":
+                return reply  # Preserve the newer canonical question or credit.
+            reply["structuredContent"]["chatConfirmationOfferError"] = str(error)
+            reply["content"].append({"type": "text", "text": f"Chat question not offered: {error}"})
+        else:
+            reply["structuredContent"]["chatConfirmation"] = question
+            reply["content"].append({"type": "text", "text": question["card"]})
         return reply
 
     def _begin_execution(self, request_id, name, arguments):
@@ -2306,7 +2323,9 @@ class PlannerServer:
             for key in ("expected_revision", "workers", "call_cap", "max_parallel", "timeout")
             if key in pending["arguments"]
         }
-        return self._offer_chat_confirmation(reply, "execution", proposal)
+        return self._offer_chat_confirmation(
+            reply, "execution", proposal, request_id=pending["request"]["request_id"]
+        )
 
     def _finish_execution(self, response, pending):
         from codex_harness.core.planner_execution import complete_execution
@@ -2515,7 +2534,9 @@ class PlannerServer:
             )
             reply = self._confirmation_reply(outcome, error=True, reason=str(error))
         if outcome["state"] != "approved":
-            reply = self._offer_chat_confirmation(reply, pending["request"]["gate"])
+            reply = self._offer_chat_confirmation(
+                reply, pending["request"]["gate"], request_id=pending["request"]["request_id"]
+            )
         return {"jsonrpc": "2.0", "id": pending["tool_id"], "result": reply}
 
     def _cancel_confirmation(self, reason, *, preserve_pending=False):
@@ -2541,7 +2562,9 @@ class PlannerServer:
         return {
             "jsonrpc": "2.0",
             "id": pending["tool_id"],
-            "result": self._offer_chat_confirmation(reply, pending["request"]["gate"]),
+            "result": self._offer_chat_confirmation(
+                reply, pending["request"]["gate"], request_id=pending["request"]["request_id"]
+            ),
         }
 
     def expire_confirmation(self):

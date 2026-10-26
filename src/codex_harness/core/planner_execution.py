@@ -142,7 +142,15 @@ def _recheck(store, scope):
 
 
 def prepare_execution(
-    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap, _chat=False
+    store,
+    expected_revision,
+    workers,
+    *,
+    max_parallel=2,
+    timeout=900,
+    call_cap,
+    _chat=False,
+    _expected_request_id=None,
 ):
     _canonical_store(store)
     scope = execution_scope(
@@ -180,12 +188,23 @@ def prepare_execution(
         _chat_question(request, expected_revision)
     with store._transaction():
         _recheck(store, scope)
+        if _expected_request_id is not None:
+            latest = next(iter(_records(store, REQUEST)), None)
+            if latest is None or latest["request_id"] != _expected_request_id:
+                raise ValueError("confirmation-request-superseded")
         store._event(REQUEST, request)
     return request
 
 
 def prepare_chat_execution(
-    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap
+    store,
+    expected_revision,
+    workers,
+    *,
+    max_parallel=2,
+    timeout=900,
+    call_cap,
+    _expected_request_id=None,
 ):
     """Fresh question over the same canonical worker scope, without native credit."""
     return prepare_execution(
@@ -196,6 +215,7 @@ def prepare_chat_execution(
         timeout=timeout,
         call_cap=call_cap,
         _chat=True,
+        _expected_request_id=_expected_request_id,
     )
 
 
