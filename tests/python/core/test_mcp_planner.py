@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests.python.core import test_test_audit
 from tests.python.core.planning_support import publication_evidence
 from tests.python.core.test_plan_store import draft_inputs, draft_intake, mock_catalog, mock_choice
 from tests.python.core.test_preflight import inject_mock_discovery
@@ -18,6 +19,7 @@ from codex_harness.core.planner_views import banner, chat_diagram
 from codex_harness.core.spine import MARKDOWN_FILES, load_spine
 
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" / "spine.json"
+revision_proof = test_test_audit.prospective
 
 
 def workspace_wire(server, tool_name, **arguments):
@@ -1772,6 +1774,55 @@ def test_public_test_revision_serializes_competing_authors(revision_server, monk
     assert proof.read_bytes() == before + b"\n# first author\n"
 
 
+@pytest.mark.parametrize("directory,allowed", [("checks", True), ("tests", False)])
+def test_public_test_revision_uses_active_runner_directory(revision_server, directory, allowed):
+    """Catch accepting legacy tests while refusing active checks; default-only tests miss drift."""
+    server = revision_server
+    template = server.workspace / "template"
+    before = (template / "tests/test_app.py").read_bytes()
+    (template / "checks").mkdir()
+    (template / "checks/test_app.py").write_bytes(before)
+    vision = server.store.spine().node("V1")
+    vision["fields"]["requirementFiles"] = ["tests", "checks"]
+    vision["fields"]["verification"] = {
+        "runner": "unittest",
+        "argv": ["-B", "-m", "unittest", "discover", "-s", "checks", "-p"],
+    }
+    call(server, "harness_upsert_node", node=vision)
+    readback = workspace_wire(
+        server,
+        "harness_show_node",
+        expected_workspace=str(server.workspace),
+        id="T",
+        include_source=True,
+    )["structuredContent"]["testFiles"]
+    assert {item["path"] for item in readback} == {"tests/test_app.py", "checks/test_app.py"}
+    revision = server.store.manifest_revision()
+    source = before.decode() + "\n# active runner proof revision\n"
+    response = workspace_wire(
+        server,
+        "harness_revise_test",
+        expected_workspace=str(server.workspace),
+        node_id="T",
+        path=f"{directory}/test_app.py",
+        expected_manifest_revision=revision,
+        expected_file_sha256=hashlib.sha256(before).hexdigest(),
+        source=source,
+        reason="Review repair must stay inside the active runner directory",
+    )
+    if allowed:
+        assert not response["isError"], response
+        assert (template / "checks/test_app.py").read_bytes() == source.encode()
+        assert (template / "tests/test_app.py").read_bytes() == before
+    else:
+        assert response["isError"], response
+        assert "plan-test-path-invalid" in response["content"][0]["text"]
+        assert (template / "tests/test_app.py").read_bytes() == before
+        assert not server.store.connection.execute(
+            "SELECT 1 FROM events WHERE kind='protected-test-revised'"
+        ).fetchone()
+
+
 def test_public_acceptance_contract_derives_complete_executable_coverage(server, monkeypatch):
     def no_process(*args, **kwargs):
         raise AssertionError("Scenario authoring must not execute a command or provider")
@@ -2258,6 +2309,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_resolve_findings",
             "harness_packet_view",
             "harness_compile",
+            "harness_revise_test",  # Dedicated real writer/audit/invalidation journey.
             "harness_readiness",
             "harness_upsert_nodes",  # Dedicated real mixed-batch/atomic-refusal journey.
             "harness_roundtable",  # Dedicated public protected-producer/receipt journey.

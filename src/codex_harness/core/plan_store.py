@@ -463,11 +463,10 @@ class PlanStore:
             spine = Spine(self._data())
             from codex_harness.core.graph import test_dir
 
-            root = spine.node(spine.ids("vision")[0])["fields"]
-            test_root = PurePosixPath(test_dir({"validation": root.get("validation", [])}))
+            manifest = compile_manifest(spine, template)
+            test_root = PurePosixPath(test_dir(manifest))
             if not relative.is_relative_to(test_root) or spine.node(node_id)["kind"] != "test":
                 raise PlanStoreError("plan-test-path-invalid", "Only linked tests under test_dir")
-            manifest = compile_manifest(spine, template)
             if manifest["planRevision"] != expected_manifest_revision:
                 raise PlanStoreError("plan-test-preimage-stale", "Refresh the current manifest")
             if path not in {item["path"] for item in self.show_node(node_id)["testFiles"]}:
