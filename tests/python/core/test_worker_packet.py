@@ -122,6 +122,45 @@ def test_tipsplit_packet_context_and_rules_are_additive(tmp_path):
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude", "copilot"])
+def test_browser_acceptance_does_not_require_optional_worker_tools(tmp_path, provider):
+    """Protect tool-independent proof: browser prose/refs used to invite Playwright.
+
+    Golden packets miss this boundary: preserve the compiled proof and GUI
+    obligations while explicitly deferring browser execution, without proof credit.
+    """
+    plan, repo = _checkout(tmp_path)
+    checks = "Keyboard focus and delete confirmation require browser observation.\n"
+    (repo / "BROWSER-CHECKS.md").write_text(checks, encoding="utf-8")
+    spine_path = plan.root / "spine.json"
+    spine = json.loads(spine_path.read_text())
+    vision = next(node for node in spine["nodes"] if node["kind"] == "vision")
+    vision["fields"]["requirementFiles"].append("BROWSER-CHECKS.md")
+    bead = next(node for node in spine["nodes"] if node["id"] == "B")
+    bead["text"] += "\nBrowser acceptance: " + checks
+    bead["fields"]["capabilityRefs"] = ["browser.playwright"]
+    spine_path.write_text(json.dumps(spine), encoding="utf-8")
+    from codex_harness.core.spine_render import render_into_template
+
+    canonical_spine = load_spine(spine_path)
+    render_into_template(canonical_spine, repo)
+    manifest = compile_manifest(canonical_spine, repo)
+    (plan.root / "sample.json").write_text(json.dumps(manifest), encoding="utf-8")
+    plan = load_plan(plan.root)
+    packet = build_packet(plan, plan.beads["B"], repo, None, provider)
+    assert "Worker proofs use the shell and Python" in packet
+    assert "urllib.request" in packet
+    assert "defer browser checks" in packet
+    assert "no configured browser-tool capability is attested by this packet" in packet
+    assert "capabilityRefs are requests, not configuration or access grants" in packet
+    assert "HTTP checks do not prove rendering, JavaScript, keyboard or focus" in packet
+    assert checks.strip() in packet
+    assert "NEVER change requirement files:" in packet
+    assert "BROWSER-CHECKS.md" in packet
+    assert "python -B -m unittest discover -s tests -p test_cli.py" in packet
+    assert "required worker proof needs an unattested browser tool, report the blocker" in packet
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude", "copilot"])
 def test_packet_denial_overrides_recovery_for_all_providers(tmp_path, provider):
     plan, repo = _checkout(tmp_path)
     packet = build_packet(plan, plan.beads["B"], repo, None, provider)
