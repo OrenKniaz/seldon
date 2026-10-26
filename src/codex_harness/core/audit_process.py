@@ -231,6 +231,8 @@ def run_audit_process(
     native_failed = False
     bootstrap_exited = False
     gate_transfer_started = False
+    ready_started = None
+    bootstrap_status = bytearray()
     try:
         image = job.image()
         control["bootstrapImage"] = image
@@ -271,14 +273,19 @@ def run_audit_process(
 
         def pump():
             for name, fd in list(channels.items()):
+                before = len(buffers[name])
                 if job.read(fd, buffers[name]):
                     del channels[name]
+                if name == "status" and not gate_transfer_started:
+                    bootstrap_status.extend(buffers[name][before:])
+                    del bootstrap_status[:-4096]
             while b"\n" in buffers["status"]:
                 line, _, remainder = buffers["status"].partition(b"\n")
                 buffers["status"][:] = remainder
                 records.append(json.loads(line))
 
-        ready_deadline = time.monotonic() + min(timeout, 5)
+        ready_started = time.monotonic()
+        ready_deadline = ready_started + min(timeout, 5)
         while not records and "status" in channels and time.monotonic() < ready_deadline:
             pump()
             time.sleep(0.005)
@@ -331,6 +338,15 @@ def run_audit_process(
         result.audit_control = control
         return result
     except BaseException as error:
+        if ready_started is not None and not gate_transfer_started:
+            # These channels precede config delivery: trusted bootstrap diagnostics only.
+            control["bootstrapReadyWaitSeconds"] = round(time.monotonic() - ready_started, 6)
+            control["bootstrapStderrTail"] = bytes(buffers["stderr"][-4096:]).decode(
+                "utf-8", errors="replace"
+            )
+            control["bootstrapStatusTail"] = bytes(bootstrap_status).decode(
+                "utf-8", errors="replace"
+            )
         native_failed = bool(getattr(error, "audit_native_failure", None))
         if native_failed:
             control["nativeFailureOperation"] = error.audit_native_failure

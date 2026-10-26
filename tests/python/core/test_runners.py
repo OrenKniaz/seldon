@@ -130,6 +130,39 @@ def test_windows_job_timeout_drains_descendant_held_stdout(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
+def test_windows_bootstrap_failure_reaches_proof_control_with_bounded_diagnostics(
+    prospective, monkeypatch
+):
+    """Catch lost pre-gate diagnostics; success/timeout tests run after bootstrap readiness."""
+    root = prospective["template"]
+    marker = root / "payload-must-not-run"
+    (root / "app.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\ndef value(): return 42\n"
+    )
+    # Execute a real finite trusted child failure; do not supply a subprocess result.
+    failing = audit_process._BOOTSTRAP.replace(
+        "send({'kind': 'ready'})",
+        "sys.stderr.write('x' * 5000 + 'bootstrap-startup-failed');sys.stderr.flush()\n"
+        "status.write(b'partial-private-status');status.close();sys.exit(78)",
+    )
+    monkeypatch.setattr(audit_process, "_BOOTSTRAP", failing)
+    manifest = compile_manifest(prospective["spine"], root)
+    result = runners.validate_proof(root, manifest, "test_app.py", owned_files=("app.py",))
+    assert not result["passed"]
+    assert "did not reach its private gate" in result["output"]
+    assert not marker.exists()
+    control = result["processControl"]
+    assert control["membershipVerifiedBeforePayload"] and control["payloadReleased"] is False
+    assert control["quiescenceVerified"] is False
+    assert control["activeProcessesAfterTeardown"] is None
+    assert not control.get("jobHandleRetained")
+    assert 0 <= control["bootstrapReadyWaitSeconds"] < 5
+    assert len(control["bootstrapStderrTail"]) == 4096
+    assert control["bootstrapStderrTail"].endswith("bootstrap-startup-failed")
+    assert control["bootstrapStatusTail"] == "partial-private-status"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows held-Job containment only")
 def test_windows_job_assignment_refusal_never_releases_payload(tmp_path, monkeypatch):
     """Catch fallback launch/kill after refused assignment; membership success misses refusal."""
     marker = tmp_path / "must-not-run"
