@@ -35,24 +35,34 @@ from codex_harness.core.spine import Spine, load_spine
 lesson_dispatch = test_dispatch.lesson_dispatch
 
 
+def drain_acceptance(owner, store, timeout=20):
+    deadline = time.monotonic() + timeout
+    while owner.thread and owner.thread.is_alive() and time.monotonic() < deadline:
+        owner.thread.join(timeout=0.01)
+        owner.drain(store)
+    assert not owner.thread or not owner.thread.is_alive()
+    owner.drain(store)
+
+
 def finish_public_acceptance(server, admitted):
     """Drive the same serial flush/completion hooks as stdio for direct-call tests."""
     assert not admitted["isError"], admitted
     server.acceptance.dispatch_after_flush(server.store)
-    if server.acceptance.thread:
-        server.acceptance.thread.join(timeout=20)
-        assert not server.acceptance.thread.is_alive()
-    server.acceptance.drain(server.store)
+    drain_acceptance(server.acceptance, server.store)
     return server.call_tool(
         "harness_accept_status", {"id": admitted["structuredContent"]["attemptId"]}
     )
 
 
-def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp_path):
+@pytest.mark.parametrize(
+    "hold", ["scenario", "initial-metadata", "terminal-metadata", "deadline-metadata"]
+)
+def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp_path, hold):
     """Real accepted-partial dispatch through stdio must not monopolize the server.
 
-    Catches the observed 900s blocked status call. Existing direct runner tests
-    never interleave protocol requests with a genuine slow acceptance child.
+    Catches the observed blocked status call at scenario and initial/terminal
+    metadata boundaries. Direct runner tests miss actual interleaved protocol
+    requests and autonomous expiry while genuine capture is held.
     """
     import queue
     import threading
@@ -61,6 +71,11 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
     repo = Path(case["record"]["repo"])
     release = tmp_path / "release"
     started = tmp_path / "started"
+    metadata_started, metadata_release = (
+        tmp_path / "metadata-started",
+        tmp_path / "metadata-release",
+    )
+    finished = tmp_path / "finished"
     script = tmp_path / "controlled.py"
     script.write_text(
         "import time\nfrom pathlib import Path\n"
@@ -68,6 +83,7 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
         "deadline=time.monotonic()+12\n"
         f"while not Path({str(release)!r}).exists() and time.monotonic()<deadline:\n"
         " time.sleep(.02)\n"
+        f"Path({str(finished)!r}).touch()\n"
         "print('controlled completed')\n"
     )
     with PlanStore(case["workspace"]) as store:
@@ -78,14 +94,30 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
             )
             if index == 0:
                 scenario["steps"] = ['"{python}" -c "print(\'controlled completed\')"']
+            if hold == "deadline-metadata":
+                scenario["steps"] = []  # Genuine derived 3.4s budget, no budget override.
         store.save_acceptance_scenarios(scenarios)
     diagnostic = (tmp_path / "server-stderr.txt").open("w", encoding="utf-8")
+    entry = tmp_path / "metadata-server.py"
+    entry.write_text(
+        "import time\nfrom pathlib import Path\n"
+        "from codex_harness.core import acceptance, planner_acceptance, mcp_planner\n"
+        "actual=acceptance.capture_acceptance\nheld=False\n"
+        "def capture(*args, **kwargs):\n global held\n"
+        f" if not held and ({hold!r} in ('initial-metadata','deadline-metadata') or "
+        f"({hold!r}=='terminal-metadata' and Path({str(finished)!r}).exists())):\n"
+        f"  held=True\n  Path({str(metadata_started)!r}).touch()\n"
+        "  until=time.monotonic()+10\n"
+        f"  while not Path({str(metadata_release)!r}).exists() and time.monotonic()<until:\n"
+        "   time.sleep(.02)\n return actual(*args, **kwargs)\n"
+        "acceptance.capture_acceptance=capture\nplanner_acceptance.capture_acceptance=capture\n"
+        "mcp_planner.main()\n"
+    )
     process = subprocess.Popen(
         [
             sys.executable,
             "-B",
-            "-m",
-            "codex_harness.core.mcp_planner",
+            str(entry),
             "--workspace",
             str(case["workspace"]),
         ],
@@ -147,6 +179,35 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
         attempt_id = admitted["result"]["structuredContent"]["attemptId"]
         assert replies.get(timeout=2)["id"] == 2
         assert not release.exists()
+        if hold in {"initial-metadata", "deadline-metadata"}:
+            deadline = time.monotonic() + 3
+            while not metadata_started.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert metadata_started.exists() and not metadata_release.exists()
+            process.stdin.write(json.dumps(dict(jsonrpc="2.0", id=10, method="ping")) + "\n")
+            process.stdin.flush()
+            assert replies.get(timeout=2)["id"] == 10
+            send(14, "harness_accept_status", id=attempt_id)
+            pending = replies.get(timeout=2)["result"]["structuredContent"]
+            assert not pending["productCaptured"] and pending["result"] is None
+            if hold == "deadline-metadata":
+                from codex_harness.core.plan_store import open_plan_store_readonly
+
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with open_plan_store_readonly(case["workspace"]) as snapshot:
+                        state = snapshot.connection.execute(
+                            "SELECT state FROM acceptance_attempts WHERE id=?", (attempt_id,)
+                        ).fetchone()[0]
+                    if state == "unknown-interrupted":
+                        break
+                    time.sleep(0.02)
+                assert state == "unknown-interrupted" and not started.exists()
+                send(15, "harness_accept_status", id=attempt_id)
+                expired = replies.get(timeout=2)["result"]["structuredContent"]
+                assert expired["result"] is None and not expired["productCaptured"]
+                return
+            metadata_release.touch()
         # No MCP poll drives this write: the main thread wakes for each completion.
         from codex_harness.core.plan_store import open_plan_store_readonly
 
@@ -168,6 +229,20 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
         assert pending["startedAt"] and pending["deadlineAt"]
         assert pending["maxExecutionSeconds"] == sum(60 * len(s["steps"]) + 1.7 for s in scenarios)
         release.write_text("release")
+        if hold == "terminal-metadata":
+            deadline = time.monotonic() + 3
+            while not metadata_started.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert metadata_started.exists()
+            send(11, "harness_plan_status")
+            assert replies.get(timeout=2)["id"] == 11
+            process.stdin.write(json.dumps(dict(jsonrpc="2.0", id=12, method="ping")) + "\n")
+            process.stdin.flush()
+            assert replies.get(timeout=2)["id"] == 12
+            send(13, "harness_accept_status", id=attempt_id)
+            checking = replies.get(timeout=2)["result"]["structuredContent"]
+            assert checking["state"] == "running" and checking["result"] is None
+            metadata_release.touch()
         # Completion also persists without polling; the public consumer reads it.
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -187,6 +262,7 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
             assert current_run(store)["id"] == finished["result"]["id"]
     finally:
         release.write_text("release")
+        metadata_release.touch()
         process.stdin.close()
         assert process.wait(timeout=20) == 0
         diagnostic.close()
@@ -227,6 +303,7 @@ def test_acceptance_owner_loss_does_not_replay_or_publish_late_credit(project, t
     try:
         deadline = time.monotonic() + 3
         while not started.exists() and time.monotonic() < deadline:
+            owner.drain(store)
             time.sleep(0.02)
         assert started.exists()
         before = list(store.connection.iterdump())
@@ -251,20 +328,47 @@ def test_acceptance_owner_loss_does_not_replay_or_publish_late_credit(project, t
     assert not store.connection.execute("SELECT 1 FROM acceptance_runs").fetchone()
 
 
-@pytest.mark.parametrize("changed", ["product", "scenarios", "vision"])
-def test_acceptance_finalization_refuses_changed_captured_inputs(project, changed):
+@pytest.mark.parametrize("changed", ["product", "scenarios", "vision", "post-capture"])
+def test_acceptance_finalization_refuses_changed_captured_inputs(project, changed, monkeypatch):
     """Catch granting async credit to changed inputs; sync tests lack the queued-result gap."""
+    import threading
+
+    from codex_harness.core import planner_acceptance
     from codex_harness.core.planner_acceptance import AcceptanceOwner
 
     store, repo = project
+    if changed == "post-capture":
+        to_accept(store)
     fix_product(repo)
+    entered, release = threading.Event(), threading.Event()
+    if changed == "product":
+        actual_capture = planner_acceptance.capture_acceptance
+        calls = []
+
+        def before_terminal(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 3:
+                entered.set()
+                assert release.wait(timeout=8)
+            return actual_capture(*args, **kwargs)
+
+        monkeypatch.setattr(planner_acceptance, "capture_acceptance", before_terminal)
     owner = AcceptanceOwner()
     attempt = owner.start(store, repo, subject="product")
     assert current_run(store) is None
     owner.dispatch_after_flush(store)
-    owner.thread.join(timeout=10)
-    assert not owner.thread.is_alive()
-    if changed == "product":
+    # Let the worker finish but withhold terminal commit for the stale-input interleaving.
+    deadline = time.monotonic() + 10
+    while owner.thread.is_alive() and time.monotonic() < deadline:
+        if changed == "product" and entered.is_set():
+            break
+        if owner.status(store, attempt["attemptId"])["productCaptured"]:
+            owner.thread.join(timeout=0.05)
+        else:
+            owner.drain(store)
+            time.sleep(0.01)
+    assert entered.is_set() if changed == "product" else not owner.thread.is_alive()
+    if changed in {"product", "post-capture"}:
         (repo / "tiny.py").write_text("print('changed after execution')\n")
     elif changed == "scenarios":
         scenarios = store.acceptance_scenarios()
@@ -274,8 +378,33 @@ def test_acceptance_finalization_refuses_changed_captured_inputs(project, change
         vision = store.spine().node("V1")
         vision["text"] += " changed after execution"
         store.upsert_node(vision)
-    owner.drain(store)
+    release.set()
+    drain_acceptance(owner, store)
     result = owner.status(store, attempt["attemptId"])
+    if changed == "post-capture":
+        assert result["state"] == "completed" and result["result"]["passed"]
+        assert current_run(store) is None  # Historical captured PASS is not current proof.
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("Stale product must be refused before any reviewer launch")
+
+        with pytest.raises(PlanStoreError) as review:
+            acceptance_review(store, repo, reviewers=REVIEWERS, runner=forbidden)
+        assert review.value.code == "acceptance-run-required"
+        with pytest.raises(PlanStoreError) as approval:
+            store.accept(by="proxy:source-only", statement="Cannot approve changed product")
+        assert approval.value.code == "product-changed"
+        from codex_harness.core.plan_quality import quality_report
+
+        assert (
+            next(
+                row for row in quality_report(store)["checks"] if row["id"] == "first-moment-proof"
+            )["claim"]
+            != "proved"
+        )
+        assert not store.status()["acceptance"]["accepted"] and store.phase() == "accept"
+        owner.close(store)
+        return
     assert result["state"] == "stale" and result["result"] is None
     assert result["progress"]  # Executed results survive without granting current credit.
     assert not store.connection.execute("SELECT 1 FROM acceptance_runs").fetchone()
@@ -289,10 +418,12 @@ def test_acceptance_queued_revision_change_prevents_child_launch(project, monkey
     store, repo = project
     fix_product(repo)
     previous = run_acceptance(store, repo, subject="product")
-    original = (repo / "tiny.py").read_bytes()
+    original = store.acceptance_scenarios()
     owner = AcceptanceOwner()
     attempt = owner.start(store, repo, subject="product")
-    (repo / "tiny.py").write_text("raise RuntimeError('must not launch')\n")
+    changed = json.loads(json.dumps(original))
+    changed[0]["expect"] = {"exit": 9}
+    store.save_acceptance_scenarios(changed)
 
     def forbidden(*args, **kwargs):
         pytest.fail("Stale acceptance must not launch a scenario child")
@@ -301,7 +432,7 @@ def test_acceptance_queued_revision_change_prevents_child_launch(project, monkey
     owner.dispatch_after_flush(store)
     assert owner.thread is None
     assert owner.status(store, attempt["attemptId"])["state"] == "stale"
-    (repo / "tiny.py").write_bytes(original)
+    store.save_acceptance_scenarios(original)
     assert current_run(store) is None  # A failed new admission cannot revive superseded proof.
     assert store.status()["acceptance"]["invalidReason"] == "acceptance-execution-required"
     assert previous["passed"]
@@ -351,13 +482,11 @@ def test_acceptance_cleanup_uncertainty_holds_future_workspace_admission(project
         else run(command, **kwargs),
     )
     owner.dispatch_after_flush(store)
-    owner.thread.join(timeout=10)
-    assert not owner.thread.is_alive()
-    owner.drain(store)
+    drain_acceptance(owner, store)
     result = owner.status(store, admitted["attemptId"])
     assert len(launched) == 1
     assert result["state"] == "unknown-interrupted"
-    assert result["result"] is not None and not result["result"]["passed"]
+    assert result["result"] is None  # Uncertain cleanup forbids a new metadata child/final receipt.
     assert result["progress"][1]["state"] == "unfinished"
     scenarios = store.acceptance_scenarios()
     scenarios[0]["expect"] = {
@@ -463,14 +592,15 @@ def test_public_acceptance_requires_accepted_dispatch_candidate_not_partial_arti
         saved = tool("harness_accept_scenarios", scenarios=scenarios)
         assert not saved["isError"], saved
         result = tool("harness_accept_run", repo=str(repo), subject="product")
+        if not result["isError"]:
+            result = finish_public_acceptance(server, result)
         if mode == "self-confirmation":
             assert result["isError"], result
-            assert "acceptance-no-delivered-candidate" in result["content"][0]["text"]
+            assert "acceptance-no-delivered-candidate" in result["structuredContent"]["error"]
             assert not marker.exists()
             assert not server.store.connection.execute("SELECT 1 FROM acceptance_runs").fetchone()
         else:
             assert not result["isError"], result
-            result = finish_public_acceptance(server, result)
             assert marker.exists()
             assert result["structuredContent"]["result"]["passed"]
             assert result["structuredContent"]["result"]["results"]
@@ -1316,7 +1446,7 @@ def test_timeout_kills_grandchild_with_inherited_pipes(tmp_path, monkeypatch):
         return original_run(*args, **kwargs)
 
     def communicate(self, *args, **kwargs):
-        if kwargs.get("timeout") == 60:
+        if 3 < kwargs.get("timeout", 0) <= 60:
             kwargs["timeout"] = 1
         return original_communicate(self, *args, **kwargs)
 

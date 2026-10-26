@@ -2807,6 +2807,9 @@ def main() -> None:
                 print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
             pending = server._pending_confirmation
             wait = max(0.01, pending["deadline"] - time.monotonic()) if pending else None
+            acceptance_wait = server.acceptance.wait_timeout()
+            if acceptance_wait is not None:
+                wait = min(wait, acceptance_wait) if wait is not None else acceptance_wait
             try:
                 line = incoming.get(timeout=wait)
             except queue.Empty:

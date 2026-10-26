@@ -63,7 +63,18 @@ def derive_scenarios(spine) -> list[dict]:
     return scenarios
 
 
-def _product_git_head(repo: Path) -> str | None:
+def _metadata_remaining(deadline):
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise PlanStoreError(
+            "acceptance-deadline-exhausted", "Metadata exceeded the captured run budget"
+        )
+    return remaining
+
+
+def _product_git_head(repo: Path, deadline=None) -> str | None:
     """Use Git only when the declared product is its checkout's root.
 
     Git discovers ancestor repositories from plain directories too. Their
@@ -73,6 +84,7 @@ def _product_git_head(repo: Path) -> str | None:
     top = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
         stdin=subprocess.DEVNULL,
+        timeout=_metadata_remaining(deadline),
         capture_output=True,
         text=True,
         check=False,
@@ -86,6 +98,7 @@ def _product_git_head(repo: Path) -> str | None:
     head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         stdin=subprocess.DEVNULL,
+        timeout=_metadata_remaining(deadline),
         capture_output=True,
         text=True,
         check=False,
@@ -93,12 +106,12 @@ def _product_git_head(repo: Path) -> str | None:
     return head.stdout.strip() if head.returncode == 0 else None
 
 
-def integrated_revision(repo) -> str:
+def integrated_revision(repo, *, deadline=None) -> str:
     """Bind evidence to HEAD and actual working files, including untracked code."""
     repo = Path(repo).resolve()
     if not repo.is_dir():
         raise ValueError(f"Repository directory does not exist: {repo}")
-    head = _product_git_head(repo)
+    head = _product_git_head(repo, deadline)
     if head is not None:
         listing = subprocess.run(
             [
@@ -112,22 +125,34 @@ def integrated_revision(repo) -> str:
                 "-z",
             ],
             stdin=subprocess.DEVNULL,
+            timeout=_metadata_remaining(deadline),
             capture_output=True,
             check=True,
         )
         paths = sorted(set(listing.stdout.decode("utf-8").split("\0")) - {""})
     else:
-        paths = sorted(
-            path.relative_to(repo).as_posix() for path in repo.rglob("*") if path.is_file()
-        )
+        paths = []
+        for path in repo.rglob("*"):
+            _metadata_remaining(deadline)
+            if path.is_file():
+                paths.append(path.relative_to(repo).as_posix())
+        paths.sort()
     ignored = {".git", ".codex-harness", "__pycache__", ".pytest_cache", ".ruff_cache"}
     files = []
     for name in paths:
         path = repo / name
         if not ignored.intersection(Path(name).parts):
-            files.append(
-                (name, hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
-            )
+            _metadata_remaining(deadline)
+            digest = None
+            if path.is_file():
+                hasher = hashlib.sha256()
+                with path.open("rb") as source:
+                    while chunk := source.read(64 * 1024):
+                        _metadata_remaining(deadline)
+                        hasher.update(chunk)
+                digest = hasher.hexdigest()
+            files.append((name, digest))
+    _metadata_remaining(deadline)
     return _hash(
         {
             "algorithm": "tree-bytes-v2",
@@ -427,17 +452,37 @@ def run_subject(run) -> str:
     return "product" if (Path(run["repo"]).parent / "evidence" / "run.json").is_file() else "oracle"
 
 
-def capture_acceptance(store, repo, *, subject=None) -> dict:
-    """Validate and capture the exact inputs before any acceptance child is admitted."""
+def acceptance_inputs(store, repo, *, subject=None) -> dict:
+    """Capture only canonical planner state; no product filesystem or subprocess work."""
     if subject not in ("product", "oracle"):
         raise PlanStoreError(
             "acceptance-subject-required",
             "Specify the acceptance subject. Next: harness_accept_run repo=<integrated-repo> "
             "subject=product OR harness_accept_run repo=<reference-repo> subject=oracle",
         )
+    spine = store.locked_acceptance_spine()
+    scenarios = store.acceptance_scenarios()
+    if not scenarios:
+        store.save_acceptance_scenarios(derive_scenarios(spine))
+        scenarios = store.acceptance_scenarios()
+    return dict(
+        repo=str(Path(repo).absolute()),
+        subject=subject,
+        planRevision=store._revision(),
+        scenarioRevision=_hash(scenarios),
+        scenarios=scenarios,
+        stepTimeoutSeconds=60,
+        maxExecutionSeconds=sum(60 * len(item.get("steps", [])) + 1.7 for item in scenarios),
+    )
+
+
+def capture_acceptance(inputs, *, deadline=None) -> dict:
+    """Worker-side actual product/accepted-candidate metadata, never a supplied answer."""
+    _metadata_remaining(deadline)
+    repo, subject = inputs["repo"], inputs["subject"]
+    product = Path(repo).resolve()
     dispatch_digest = None
     if subject == "product":
-        product = Path(repo).resolve()
         dispatch_record = product.parent / "evidence" / "run.json"
         if dispatch_record.is_file():
             from codex_harness.core.dispatch import STATUS_MOCK_ONLY
@@ -473,37 +518,36 @@ def capture_acceptance(store, repo, *, subject=None) -> dict:
                     "Partial integrated artifacts remain retained; they are not accepted beads. "
                     f"Inspect {dispatch_record} and recover the failed/blocked work first.",
                 )
-    spine = store.locked_acceptance_spine()
-    scenarios = store.acceptance_scenarios()
-    if not scenarios:
-        store.save_acceptance_scenarios(derive_scenarios(spine))
-        scenarios = store.acceptance_scenarios()
-    return dict(
-        repo=str(Path(repo).resolve()),
-        subject=subject,
-        revision=integrated_revision(repo),
-        planRevision=store._revision(),
-        scenarioRevision=_hash(scenarios),
-        scenarios=scenarios,
-        dispatchDigest=dispatch_digest,
-        stepTimeoutSeconds=60,
-        maxExecutionSeconds=sum(60 * len(item.get("steps", [])) + 1.7 for item in scenarios),
+    revision = (
+        integrated_revision(product)
+        if deadline is None
+        else integrated_revision(product, deadline=deadline)
     )
+    return {
+        **inputs,
+        "resolvedRepo": str(product),
+        "revision": revision,
+        "dispatchDigest": dispatch_digest,
+    }
 
 
 def complete_acceptance(store, captured, results) -> dict:
     """Only a current captured input set may publish a consumable run receipt."""
+    inputs = acceptance_inputs(store, captured["repo"], subject=captured["subject"])
+    if capture_acceptance(inputs) != captured:
+        raise PlanStoreError("acceptance-revision-changed", "Product changed during acceptance")
     with store._transaction():
         return record_acceptance(store, captured, results)
 
 
-def record_acceptance(store, captured, results) -> dict:
+def record_acceptance(store, captured, results, *, deadline=None) -> dict:
     """Record under the canonical caller's existing write transaction."""
-    if capture_acceptance(store, captured["repo"], subject=captured["subject"]) != captured:
+    current = acceptance_inputs(store, captured["repo"], subject=captured["subject"])
+    if any(captured[key] != value for key, value in current.items()):
         raise PlanStoreError("acceptance-revision-changed", "Rerun on the integrated revision")
     result = {
         "id": uuid4().hex,
-        "repo": captured["repo"],
+        "repo": captured["resolvedRepo"],
         "subject": captured["subject"],
         "revision": captured["revision"],
         "revisionAlgorithm": "tree-bytes-v2",
@@ -512,6 +556,7 @@ def record_acceptance(store, captured, results) -> dict:
         "results": results,
         "passed": bool(results) and all(r["passed"] for r in results),
     }
+    _metadata_remaining(deadline)
     store.connection.execute(
         "INSERT INTO acceptance_runs VALUES (?, ?)", (result["id"], json.dumps(result))
     )
@@ -525,7 +570,7 @@ def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
         "WHERE state IN ('queued','running','unknown-interrupted') LIMIT 1"
     ).fetchone():
         raise PlanStoreError("acceptance-busy", "Existing acceptance owner holds this workspace")
-    captured = capture_acceptance(store, repo, subject=subject)
+    captured = capture_acceptance(acceptance_inputs(store, repo, subject=subject))
     results = run_scenarios(repo, captured["scenarios"], env)
     return complete_acceptance(store, captured, results)
 

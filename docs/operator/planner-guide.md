@@ -58,8 +58,12 @@ Explicit `acceptance` spine nodes are supported. Allowed parents: acceptance vis
 `accept-run --subject product|oracle` distinguishes product delivery from reference dry runs. Legacy unspecified subject is product only with sibling evidence/run.json, otherwise oracle. Acceptance review uses distinct existing Codex/Claude capacity and findings/resolve; changed product/plan/scenario/vision needs fresh acceptance. `accept-rebind --repo DIR` reruns legacy-unbound/revision-algorithm-upgraded cases, preserving original approver/proxy references only for unchanged passing products.
 
 **MCP acceptance is asynchronous.** `harness_accept_run repo=<DIR> subject=product|oracle`
-validates and captures the subject, product revision, plan, scenarios and existing
-dispatch evidence, then returns a durable `attemptId`. Follow
+checks the subject and canonical planner state and returns a durable `attemptId`
+with `productCaptured=false`. This is queued intent, not product validation or
+accepted-candidate credit. The owner captures actual product revision and dispatch
+evidence off the protocol thread, and the serialized writer acknowledges those
+metadata before any scenario child. Missing accepted candidates terminate with a
+retained refusal before scenario launch. Follow
 `harness_accept_status id=<attemptId>` on the same workspace connection; do not
 resubmit to poll. Plan status and other tools remain available during execution.
 The canonical serialized writer commits each scenario result as it finishes,
@@ -70,10 +74,21 @@ receive no current run credit. Product runs with zero accepted dispatch beads
 are refused before launch; legitimate accepted partial and reused candidates
 remain available for diagnostics.
 
+An attempt's result describes the real initial/terminal captured product snapshot,
+not filesystem immutability until the later database commit. Canonical current-run,
+review, approval and proof gates check the actual product again. A later file edit
+can leave a historical captured PASS while refusing all current acceptance credit;
+attempt status explicitly labels that captured-result scope.
+
 Each step retains its 60-second wait limit. A scenario has an enforced execution
 deadline of `60 * declared step count + 1.7` seconds, including its existing
 cleanup allowance; later waits shrink to the remaining budget. Progress records
-the actual scenario budget, deadline, timeouts and unfinished work. Child stdin
+the actual scenario budget, deadline, timeouts and unfinished work. Initial,
+prelaunch and terminal product metadata run off the protocol thread without a
+canonical write transaction. Metadata Git waits and tree hashing use the remaining
+whole-run budget; an owner deadline wake persists UNKNOWN even while a metadata
+operation is stalled, and late results grant no credit or further child launch.
+Child stdin
 is EOF; explicit shell redirections still supply declared input. The captured
 `maxExecutionSeconds` is the sum of these scenario budgets, not a guarantee about
 metadata or filesystem latency. No 900-second client timeout is used as a product

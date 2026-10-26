@@ -155,9 +155,9 @@ def test_acceptance_next_follows_actual_scenario_and_run_subject(project, subjec
         assert run["structuredContent"]["subject"] == subject
         assert "harness_accept_status" in next_line(run)
         server.acceptance.dispatch_after_flush(server.store)
-        server.acceptance.thread.join(timeout=20)
-        assert not server.acceptance.thread.is_alive()
-        server.acceptance.drain(server.store)
+        from tests.python.core.test_acceptance import drain_acceptance
+
+        drain_acceptance(server.acceptance, server.store)
         run = result(server, "harness_accept_status", id=run["structuredContent"]["attemptId"])
         assert not run["isError"], run
         if subject == "oracle":
