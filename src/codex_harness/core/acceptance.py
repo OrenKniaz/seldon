@@ -63,7 +63,11 @@ def derive_scenarios(spine) -> list[dict]:
     return scenarios
 
 
-def _metadata_remaining(deadline):
+def _metadata_remaining(deadline, should_stop=None):
+    if should_stop and should_stop():
+        raise PlanStoreError(
+            "acceptance-owner-stopped", "Owner stopped; no further metadata operation"
+        )
     if deadline is None:
         return None
     remaining = deadline - time.monotonic()
@@ -74,7 +78,7 @@ def _metadata_remaining(deadline):
     return remaining
 
 
-def _product_git_head(repo: Path, deadline=None) -> str | None:
+def _product_git_head(repo: Path, deadline=None, should_stop=None) -> str | None:
     """Use Git only when the declared product is its checkout's root.
 
     Git discovers ancestor repositories from plain directories too. Their
@@ -84,7 +88,7 @@ def _product_git_head(repo: Path, deadline=None) -> str | None:
     top = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
         stdin=subprocess.DEVNULL,
-        timeout=_metadata_remaining(deadline),
+        timeout=_metadata_remaining(deadline, should_stop),
         capture_output=True,
         text=True,
         check=False,
@@ -98,7 +102,7 @@ def _product_git_head(repo: Path, deadline=None) -> str | None:
     head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         stdin=subprocess.DEVNULL,
-        timeout=_metadata_remaining(deadline),
+        timeout=_metadata_remaining(deadline, should_stop),
         capture_output=True,
         text=True,
         check=False,
@@ -106,12 +110,13 @@ def _product_git_head(repo: Path, deadline=None) -> str | None:
     return head.stdout.strip() if head.returncode == 0 else None
 
 
-def integrated_revision(repo, *, deadline=None) -> str:
+def integrated_revision(repo, *, deadline=None, should_stop=None) -> str:
     """Bind evidence to HEAD and actual working files, including untracked code."""
+    _metadata_remaining(deadline, should_stop)
     repo = Path(repo).resolve()
     if not repo.is_dir():
         raise ValueError(f"Repository directory does not exist: {repo}")
-    head = _product_git_head(repo, deadline)
+    head = _product_git_head(repo, deadline, should_stop)
     if head is not None:
         listing = subprocess.run(
             [
@@ -125,7 +130,7 @@ def integrated_revision(repo, *, deadline=None) -> str:
                 "-z",
             ],
             stdin=subprocess.DEVNULL,
-            timeout=_metadata_remaining(deadline),
+            timeout=_metadata_remaining(deadline, should_stop),
             capture_output=True,
             check=True,
         )
@@ -133,7 +138,7 @@ def integrated_revision(repo, *, deadline=None) -> str:
     else:
         paths = []
         for path in repo.rglob("*"):
-            _metadata_remaining(deadline)
+            _metadata_remaining(deadline, should_stop)
             if path.is_file():
                 paths.append(path.relative_to(repo).as_posix())
         paths.sort()
@@ -142,17 +147,21 @@ def integrated_revision(repo, *, deadline=None) -> str:
     for name in paths:
         path = repo / name
         if not ignored.intersection(Path(name).parts):
-            _metadata_remaining(deadline)
+            _metadata_remaining(deadline, should_stop)
             digest = None
             if path.is_file():
                 hasher = hashlib.sha256()
                 with path.open("rb") as source:
-                    while chunk := source.read(64 * 1024):
-                        _metadata_remaining(deadline)
+                    while True:
+                        _metadata_remaining(deadline, should_stop)
+                        chunk = source.read(64 * 1024)
+                        if not chunk:
+                            break
+                        _metadata_remaining(deadline, should_stop)
                         hasher.update(chunk)
                 digest = hasher.hexdigest()
             files.append((name, digest))
-    _metadata_remaining(deadline)
+    _metadata_remaining(deadline, should_stop)
     return _hash(
         {
             "algorithm": "tree-bytes-v2",
@@ -476,9 +485,9 @@ def acceptance_inputs(store, repo, *, subject=None) -> dict:
     )
 
 
-def capture_acceptance(inputs, *, deadline=None) -> dict:
+def capture_acceptance(inputs, *, deadline=None, should_stop=None) -> dict:
     """Worker-side actual product/accepted-candidate metadata, never a supplied answer."""
-    _metadata_remaining(deadline)
+    _metadata_remaining(deadline, should_stop)
     repo, subject = inputs["repo"], inputs["subject"]
     product = Path(repo).resolve()
     dispatch_digest = None
@@ -488,6 +497,7 @@ def capture_acceptance(inputs, *, deadline=None) -> dict:
             from codex_harness.core.dispatch import STATUS_MOCK_ONLY
 
             run = read_record_json(dispatch_record)
+            _metadata_remaining(deadline, should_stop)
             dispatch_digest = _hash(run)
             if (
                 run.get("schema") != "codex-harness/plan-run-v1"
@@ -520,8 +530,8 @@ def capture_acceptance(inputs, *, deadline=None) -> dict:
                 )
     revision = (
         integrated_revision(product)
-        if deadline is None
-        else integrated_revision(product, deadline=deadline)
+        if deadline is None and should_stop is None
+        else integrated_revision(product, deadline=deadline, should_stop=should_stop)
     )
     return {
         **inputs,

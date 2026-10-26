@@ -66,6 +66,10 @@ metadata before any scenario child. Missing accepted candidates terminate with a
 retained refusal before scenario launch. Follow
 `harness_accept_status id=<attemptId>` on the same workspace connection; do not
 resubmit to poll. Plan status and other tools remain available during execution.
+Acceptance status is a job-only durable snapshot: it preserves workspace/schema
+guards and captured result/Next, but does not render whole-plan status, a phase,
+or current-product proof. Current review/approval/proof grants still validate
+actual freshness; a captured PASS alone grants nothing.
 The canonical serialized writer commits each scenario result as it finishes,
 even without another client call. Pending admission and partial progress grant
 no acceptance. A terminal current result is recorded in the ordinary acceptance
@@ -88,6 +92,8 @@ prelaunch and terminal product metadata run off the protocol thread without a
 canonical write transaction. Metadata Git waits and tree hashing use the remaining
 whole-run budget; an owner deadline wake persists UNKNOWN even while a metadata
 operation is stalled, and late results grant no credit or further child launch.
+Owner closure is checked before each subsequent metadata subprocess and hash
+stage. It holds UNKNOWN rather than blindly killing or replaying an operation.
 Child stdin
 is EOF; explicit shell redirections still supply declared input. The captured
 `maxExecutionSeconds` is the sum of these scenario budgets, not a guarantee about

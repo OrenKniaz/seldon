@@ -55,7 +55,8 @@ def finish_public_acceptance(server, admitted):
 
 
 @pytest.mark.parametrize(
-    "hold", ["scenario", "initial-metadata", "terminal-metadata", "deadline-metadata"]
+    "hold",
+    ["scenario", "initial-metadata", "terminal-metadata", "deadline-metadata", "completed-status"],
 )
 def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp_path, hold):
     """Real accepted-partial dispatch through stdio must not monopolize the server.
@@ -76,6 +77,7 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
         tmp_path / "metadata-release",
     )
     finished = tmp_path / "finished"
+    freshness_arm = tmp_path / "freshness-arm"
     script = tmp_path / "controlled.py"
     script.write_text(
         "import time\nfrom pathlib import Path\n"
@@ -111,6 +113,13 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
         f"  while not Path({str(metadata_release)!r}).exists() and time.monotonic()<until:\n"
         "   time.sleep(.02)\n return actual(*args, **kwargs)\n"
         "acceptance.capture_acceptance=capture\nplanner_acceptance.capture_acceptance=capture\n"
+        "real_revision=acceptance.integrated_revision\n"
+        "def revision(*args, **kwargs):\n"
+        f" if Path({str(freshness_arm)!r}).exists():\n"
+        f"  Path({str(metadata_started)!r}).touch()\n  until=time.monotonic()+8\n"
+        f"  while not Path({str(metadata_release)!r}).exists() and time.monotonic()<until:\n"
+        "   time.sleep(.02)\n return real_revision(*args, **kwargs)\n"
+        "acceptance.integrated_revision=revision\n"
         "mcp_planner.main()\n"
     )
     process = subprocess.Popen(
@@ -254,8 +263,20 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
                 break
             time.sleep(0.02)
         assert state == "completed"
+        if hold == "completed-status":
+            freshness_arm.touch()
         send(4, "harness_accept_status", id=attempt_id)
-        finished = replies.get(timeout=2)["result"]["structuredContent"]
+        if hold == "completed-status":
+            process.stdin.write(json.dumps(dict(jsonrpc="2.0", id=16, method="ping")) + "\n")
+            process.stdin.flush()
+        final_reply = replies.get(timeout=2)["result"]
+        finished = final_reply["structuredContent"]
+        if hold == "completed-status":
+            assert replies.get(timeout=2)["id"] == 16
+            assert not metadata_started.exists() and not metadata_release.exists()
+            assert final_reply["jobOnly"] and final_reply["planStatusIncluded"] is False
+            assert "plannerConnection" not in final_reply
+            assert final_reply["workspaceBinding"]["match"] == "matched"
         assert finished["result"]["passed"]
         assert len(finished["progress"]) == len(scenarios)
         with PlanStore(case["workspace"]) as store:
@@ -274,6 +295,62 @@ def test_acceptance_stdio_admission_keeps_status_responsive(lesson_dispatch, tmp
         (tmp_path / "source-case.json").write_text(
             json.dumps(dict(workspace=str(case["workspace"]), repo=str(repo)))
         )
+
+
+def test_acceptance_close_stops_next_real_metadata_child(project, tmp_path, monkeypatch):
+    """Catch Git launch after owner close; prior stop tests only held scenario execution."""
+    import threading
+
+    from codex_harness.core.planner_acceptance import AcceptanceOwner
+
+    store, repo = project
+    fix_product(repo)
+    for command in [
+        ["git", "init", "-q", str(repo)],
+        ["git", "-C", str(repo), "add", "."],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Source fixture",
+            "-c",
+            "user.email=source@example.invalid",
+            "commit",
+            "-qm",
+            "source fixture",
+        ],
+    ]:
+        subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    actual, calls = subprocess.run, []
+    entered, release = threading.Event(), threading.Event()
+
+    def metadata_call(command, **kwargs):
+        result = actual(command, **kwargs)  # Real first Git process, observed/reaped normally.
+        if command[0] == "git":
+            calls.append(command)
+            if len(calls) == 1:
+                entered.set()
+                assert release.wait(timeout=8)
+        return result
+
+    monkeypatch.setattr(subprocess, "run", metadata_call)
+    owner = AcceptanceOwner()
+    attempt = owner.start(store, repo, subject="product")
+    owner.dispatch_after_flush(store)
+    try:
+        assert entered.wait(timeout=3)
+        owner.close(store)
+    finally:
+        release.set()
+        owner.thread.join(timeout=10)
+        assert not owner.thread.is_alive()
+        owner.drain(store)
+        (tmp_path / "metadata-calls.json").write_text(json.dumps(calls))
+    assert len(calls) == 1
+    observed = owner.status(store, attempt["attemptId"])
+    assert observed["state"] == "unknown-interrupted" and observed["result"] is None
+    assert not observed["progress"]
 
 
 def test_acceptance_owner_loss_does_not_replay_or_publish_late_credit(project, tmp_path):

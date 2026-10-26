@@ -983,6 +983,8 @@ class PlannerServer:
             if response.get("method") == "elicitation/create" and "gate" in prepared
             else None
         )
+        if response.get("result", {}).get("jobOnly"):
+            return response  # Workspace binding above remains; no invented plan/phase projection.
         return connection_reply(response, self.workspace, status)
 
     def _workspace_refusal(self, request_id, binding, code):
@@ -1090,8 +1092,48 @@ class PlannerServer:
         self.result_data = {"kind": kind, "mermaid": diagram(spine, kind)}
         return views.chat_diagram(spine, kind)
 
+    def _acceptance_job_status(self, arguments):
+        """Read captured job history without running whole-plan freshness/projection."""
+        try:
+            tool = next(t for t in TOOLS if t["name"] == "harness_accept_status")
+            _validate(arguments, tool["inputSchema"])
+            data = self.acceptance.status(self._store(), arguments["id"])
+            self.result_data = data
+            result = data["result"]
+            failed = data["state"] in {"failed", "stale", "unknown-interrupted"} or bool(
+                result and not result["passed"]
+            )
+            body = (
+                views.acceptance_run_card(result)
+                if result
+                else views.data_card("Acceptance job", data)
+            )
+            next_step = "harness_accept_status id=" + data["attemptId"]
+            if result and not failed:
+                next_step = (
+                    "harness_accept_run repo=<integrated-repo> subject=product"
+                    if data["subject"] == "oracle"
+                    else "harness_accept_review repo=<integrated-repo>"
+                )
+            body += (
+                "\nCaptured snapshot only; current proof/review/approval checks actual freshness."
+            )
+        except Exception as error:
+            data, failed = None, True
+            body = f"{getattr(error, 'code', type(error).__name__)}: {error}"
+            next_step = "Inspect the admitted attempt ID and workspace; do not resubmit work."
+        return {
+            "isError": failed,
+            "jobOnly": True,
+            "planStatusIncluded": False,
+            **({"structuredContent": data} if data is not None else {}),
+            "content": [{"type": "text", "text": body + "\nNext: " + next_step}],
+        }
+
     def call_tool(self, name: str, arguments: dict, *, schema_tools=None) -> dict:
         self.result_data = None
+        if name == "harness_accept_status":
+            return self._acceptance_job_status(arguments)
         operation_error_code = None
         uncertain_dispatch = False
         dispatch_started = False
@@ -1129,7 +1171,7 @@ class PlannerServer:
                     or self.result_data["invalid"]
                     or any(row["exitCode"] != 0 for row in self.result_data["reviewers"])
                 )
-                or name in {"harness_accept_run", "harness_accept_status"}
+                or name == "harness_accept_run"
                 and self.result_data
                 and (
                     self.result_data["state"] in {"failed", "stale", "unknown-interrupted"}
@@ -1378,7 +1420,7 @@ class PlannerServer:
                     "harness_schema tool=harness_accept_scenarios; fill executable steps and "
                     "expectations and save the complete current set with harness_accept_scenarios."
                 )
-        if name in {"harness_accept_run", "harness_accept_status"} and self.result_data:
+        if name == "harness_accept_run" and self.result_data:
             attempt = self.result_data
             if attempt["state"] in {"queued", "running"}:
                 return (
@@ -1393,11 +1435,7 @@ class PlannerServer:
                     + "; inspect retained failure/unfinished evidence; "
                     "do not replay uncertain work."
                 )
-        if (
-            name in {"harness_accept_run", "harness_accept_status"}
-            and not error
-            and self.result_data["subject"] == "oracle"
-        ):
+        if name == "harness_accept_run" and not error and self.result_data["subject"] == "oracle":
             return (
                 "harness_accept_run repo=<integrated-product-repo> subject=product; "
                 "the oracle result is a dry run, not product acceptance."
@@ -1592,7 +1630,6 @@ class PlannerServer:
                     "harness_accept_run repo=<integrated-repo> subject=product"
                 ),
                 "harness_accept_run": "harness_accept_review repo=<integrated-repo>",
-                "harness_accept_status": "harness_accept_review repo=<integrated-repo>",
                 "harness_accept_review": (
                     "harness_accept statement=<actual-words> by=<user-or-proxy:name>"
                 ),
@@ -1746,8 +1783,6 @@ class PlannerServer:
                 result = {"scenarios": store.acceptance_scenarios()}
             elif name == "harness_accept_run":
                 result = self.acceptance.start(store, args["repo"], subject=args.get("subject"))
-            elif name == "harness_accept_status":
-                result = self.acceptance.status(store, args["id"])
             elif name == "harness_accept_review":
                 prior_failure = store.latest_review_failure()
                 try:
@@ -1771,7 +1806,7 @@ class PlannerServer:
                     },
                 )
             self.result_data = result
-            if name in {"harness_accept_run", "harness_accept_status"}:
+            if name == "harness_accept_run":
                 if result["result"] is not None:
                     return views.acceptance_run_card(result["result"])
                 return views.data_card("Acceptance attempt", result)

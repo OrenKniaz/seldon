@@ -180,7 +180,9 @@ class AcceptanceOwner:
 
         def execute():
             try:
-                actual = capture_acceptance(captured, deadline=deadline)
+                actual = capture_acceptance(
+                    captured, deadline=deadline, should_stop=self.stopped.is_set
+                )
                 acknowledged = threading.Event()
                 emit("captured", (actual, acknowledged))
                 while not acknowledged.wait(0.02):
@@ -188,7 +190,10 @@ class AcceptanceOwner:
                         return
                 if self.stopped.is_set():
                     return
-                if capture_acceptance(captured, deadline=deadline) != actual:
+                if (
+                    capture_acceptance(captured, deadline=deadline, should_stop=self.stopped.is_set)
+                    != actual
+                ):
                     raise PlanStoreError(
                         "acceptance-revision-changed", "Product changed before launch"
                     )
@@ -207,13 +212,14 @@ class AcceptanceOwner:
                         "Child cleanup uncertain; no further metadata or scenario children",
                     )
                 elif not self.stopped.is_set():
-                    terminal = capture_acceptance(captured, deadline=deadline)
+                    terminal = capture_acceptance(
+                        captured, deadline=deadline, should_stop=self.stopped.is_set
+                    )
                     emit("complete", (actual, terminal, results))
             except Exception as error:
-                unknown = (
-                    isinstance(error, subprocess.TimeoutExpired)
-                    or getattr(error, "code", None) == "acceptance-deadline-exhausted"
-                )
+                unknown = isinstance(error, subprocess.TimeoutExpired) or getattr(
+                    error, "code", None
+                ) in {"acceptance-deadline-exhausted", "acceptance-owner-stopped"}
                 emit(
                     "unknown" if unknown else "error",
                     f"{getattr(error, 'code', type(error).__name__)}: {error}",
@@ -305,7 +311,10 @@ class AcceptanceOwner:
                         state = "completed"
                     except (PlanStoreError, OSError, ValueError) as failure:
                         state, error = "stale", str(failure)
-                        if getattr(failure, "code", None) == "acceptance-deadline-exhausted":
+                        if getattr(failure, "code", None) in {
+                            "acceptance-deadline-exhausted",
+                            "acceptance-owner-stopped",
+                        }:
                             state = "unknown-interrupted"
                             self.stopped.set()
                 else:
