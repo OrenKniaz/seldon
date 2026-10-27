@@ -4,6 +4,7 @@ import sqlite3
 
 from codex_harness.core.plan_store import PHASES
 from codex_harness.core.planner_vision import render_vision
+from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import _escape, _layers, _projection, diagram, text_fallback
 
 NEXT = {
@@ -422,7 +423,7 @@ def continuation_projection(status: dict, resolution: dict) -> dict:
         action["kind"] = "compile_required"
     elif resolution["audit"]["current"] is None:
         return result
-    elif not resolution["audit"]["current"]:
+    elif not resolution["audit"]["current"] and resolution["audit"].get("applicable", True):
         action["kind"] = "audit_required"
     elif resolution["review"]["current"] is None:
         return result
@@ -582,6 +583,7 @@ def review_resolution_state(store, status: dict) -> dict:
             state["audit"] = {
                 "current": bool(audit),
                 "proofLevel": (audit.get("proofLevel", "oracle-verified") if audit else None),
+                **({"applicable": False} if Spine(store._data()).semantic else {}),
             }
             if state["audit"]["proofLevel"] not in {None, "prospective", "oracle-verified"}:
                 raise ValueError("Unknown recorded audit mode")
@@ -1376,6 +1378,8 @@ def _gate_lines(status: dict) -> list[str]:
         audit_text = "✓ passing" + (
             f" ({status['proofLevelLabel']})" if status.get("proofLevelLabel") else ""
         )
+    elif audit.get("applicable") is False:
+        audit_text = "not applicable in semantic-v1; controller Validation required"
     elif audit.get("current") is False:
         audit_text = "needed for the current plan version"
     else:

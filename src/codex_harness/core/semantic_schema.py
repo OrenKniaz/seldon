@@ -41,7 +41,7 @@ def argv(values, root):
     return result
 
 
-def validate(document, product, targets):
+def validate(document, product, targets, *, require_entries=True):
     if len(json.dumps([document, targets], allow_nan=False).encode()) > 65536:
         raise ValueError("Input exceeds 64KiB")
     fields(document, ("schema", "scenarios"), ("schema", "scenarios"))
@@ -53,7 +53,7 @@ def validate(document, product, targets):
     for binding in targets.values():
         fields(binding, ("entry", "argv"), ("entry", "argv"))
         entry = path(product, binding["entry"])
-        if entry.suffix != ".py" or not entry.is_file():
+        if entry.suffix != ".py" or (require_entries and not entry.is_file()):
             raise ValueError("Declare an existing product Python entry")
         argv(binding["argv"], product)
     ids = set()
@@ -84,7 +84,9 @@ def validate(document, product, targets):
         for a in array(s["actions"], 16):
             fields(a, ("id", "cli", "http", "file"), ("id",))
             if "http" in a or "file" in a:
-                raise ValueError("HTTP/file-only actions unsupported in v1")
+                raise ValueError(
+                    "HTTP/file-only actions unsupported in v1 (unsupported in semantic-v1)"
+                )
             if type(a["id"]) is not str or a["id"] in actions or set(a) != {"id", "cli"}:
                 raise ValueError("Use unique CLI actions")
             actions.add(a["id"])

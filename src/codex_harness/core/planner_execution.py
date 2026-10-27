@@ -82,6 +82,9 @@ def execution_scope(store, expected_revision, workers, *, max_parallel=2, timeou
     from codex_harness.core import planner_jobs as jobs
 
     manifest, template = jobs._publication(store, expected_revision)
+    semantic = manifest.get("planMode") == "semantic-v1"
+    if semantic and max_parallel != 1:
+        raise ValueError("Parallel Build unsupported in semantic-v1; use max_parallel=1")
     selected = jobs._workers(manifest, workers)
     if type(call_cap) is not int or call_cap < len(selected) or call_cap < 1:
         raise ValueError("worker-job-call-cap-required")
@@ -95,7 +98,7 @@ def execution_scope(store, expected_revision, workers, *, max_parallel=2, timeou
         or status["open_clarifications"]
         or resolution["blockingOpenFindings"] != []
         or (
-            resolution["audit"]["current"] is not True
+            (not semantic and resolution["audit"]["current"] is not True)
             or resolution["review"]["current"] is not True
             or check["status"] not in {"pass", "warn"}
         )

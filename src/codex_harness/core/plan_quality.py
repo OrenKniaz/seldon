@@ -290,6 +290,18 @@ def first_moment_proof(spine: Spine) -> tuple[str, dict, str]:
 
 
 def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tuple[str, dict, str]:
+    if spine.semantic and check_id in {"first-moment-proof", "cross-bead-contract"}:
+        manifest = compile_manifest(spine)
+        return (
+            "warn" if check_id == "first-moment-proof" else "pass",
+            {
+                "scenarioIds": [s["id"] for s in manifest["semantic"]["scenarios"]["scenarios"]],
+                "scope": "planned data; controller execution pending",
+            },
+            "First-moment and qualitative acceptance remain unproved."
+            if check_id == "first-moment-proof"
+            else "",
+        )
     if check_id == "first-moment-proof":
         status, evidence, advice = first_moment_proof(spine)
         scenario = next(
@@ -409,6 +421,15 @@ def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tup
     if check_id == "roundtable":
         return _roundtable(store)
     if check_id == "audit":
+        if spine.semantic:
+            return (
+                "pass",
+                {
+                    "applicable": False,
+                    "reason": "semantic-v1: controller proves scenarios during execution",
+                },
+                "",
+            )
         revision = state["manifest_revision"]
         audit = store.passing_audit(revision)
         return (
@@ -419,6 +440,12 @@ def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tup
             else "No passing audit for the current manifest revision; run audit --oracle oracle.",
         )
     if check_id == "proof-level":
+        if spine.semantic:
+            return (
+                "warn",
+                {"proofLevel": None},
+                "Contracts RED is history; Validation PASS is required.",
+            )
         level = state["proofLevel"]
         return (
             "warn" if level == "prospective" else "pass" if level == "oracle-verified" else "fail",
@@ -461,7 +488,7 @@ def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tup
             if (
                 not refs
                 or not bead.get("ownedFiles")
-                or not bead.get("proofModule", "").strip()
+                or (not snapshot.semantic and not bead.get("proofModule", "").strip())
                 or any(dep not in manifest["beads"] for dep in bead.get("dependsOn", []))
                 or any(
                     ref.get("id") not in snapshot.ids("requirement")
@@ -508,7 +535,7 @@ def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tup
         overlaps = {name: sorted(ids) for name, ids in sorted(owners.items()) if len(ids) > 1}
         status = (
             "fail"
-            if overlaps or not plan.beads
+            if (overlaps and not spine.semantic) or not plan.beads
             else "warn"
             if width == 1 and len(plan.beads) > 2
             else "pass"

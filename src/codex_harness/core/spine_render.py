@@ -90,7 +90,9 @@ def render_markdown(spine: Spine) -> dict[str, str]:
 
     plan = ["# Plan", ""]
     root = spine.node(spine.ids("vision")[0])["fields"]
-    if "verification" in root:
+    if spine.semantic:
+        plan.extend(["semantic-v1: Contracts -> Build -> controller Validation", ""])
+    elif "verification" in root:
         verification = "Verification argv: `" + json.dumps(root["verification"]["argv"]) + "`"
         plan.extend([verification, ""])
         requirements[2:2] = [verification, ""]
@@ -113,7 +115,9 @@ def render_markdown(spine: Spine) -> dict[str, str]:
                 f"- Owned files: {', '.join(fields['ownedFiles'])}",
                 f"- Dependencies: {', '.join(fields['dependsOn']) or '(none)'}",
                 f"- Requirement refs: {', '.join(refs) or '(none)'}",
-                f"- Proof: `{fields['proofModule']}`",
+                f"- Semantic phase: {fields['semanticPhase']}"
+                if spine.semantic
+                else f"- Proof: `{fields['proofModule']}`",
                 f"- Provider: {fields.get('provider', '(unspecified)')}",
                 f"- Parents: {', '.join(node['parents']) or '(none)'}",
                 "",
@@ -165,15 +169,28 @@ def render_markdown(spine: Spine) -> dict[str, str]:
             }.items()
         )
     }
-    return {name: f"{_header(body)}\n\n{body}" for name, body in bodies.items()}
+    rendered = {name: f"{_header(body)}\n\n{body}" for name, body in bodies.items()}
+    if spine.semantic:
+        rendered["SCENARIOS.json"] = (
+            json.dumps(
+                {
+                    **{key: root[key] for key in ("scenarios", "targets")},
+                    "contracts": [spine.node(key) for key in spine.ids("design")],
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+    return rendered
 
 
 def render_into_template(spine: Spine, template_dir: str | Path) -> None:
     """Replace derived docs with the current canonical spine projection."""
-    from codex_harness.core.spine import MARKDOWN_FILES, requirement_file_sources
+    from codex_harness.core.spine import requirement_file_sources
 
     template = Path(template_dir)
     # Validate existing targets before writing, including symlinks.
-    requirement_file_sources(template, list(MARKDOWN_FILES))
-    for name, content in render_markdown(spine).items():
+    rendered = render_markdown(spine)
+    requirement_file_sources(template, list(rendered))
+    for name, content in rendered.items():
         (template / name).write_text(content, encoding="utf-8", newline="\n")

@@ -108,6 +108,10 @@ class Spine:
         self._children = _acyclic(self._parents, "spine-cycle")
         if len(self.ids("vision")) != 1:
             raise SpineError("spine-vision-count", "Expected exactly one vision")
+        mode = self.node(self.ids("vision")[0])["fields"].get("planMode", "legacy")
+        if mode not in ("legacy", "semantic-v1"):
+            raise SpineError("spine-schema-invalid", "Unsupported planMode")
+        self.semantic = mode == "semantic-v1"
         for node_id, node in self._nodes.items():
             if any(
                 self._nodes[parent]["kind"] not in ALLOWED_PARENTS[node["kind"]]
@@ -119,6 +123,10 @@ class Spine:
             if node["kind"] == "bead":
                 self._validate_bead(node)
             elif node["kind"] == "test":
+                if self.semantic:
+                    raise SpineError(
+                        "spine-schema-invalid", "semantic-v1 uses scenario data, not test nodes"
+                    )
                 fields = node["fields"]
                 if (
                     not isinstance(fields.get("module"), str)
@@ -148,8 +156,13 @@ class Spine:
         valid = (
             all(_strings(fields.get(key)) for key in ("ownedFiles", "dependsOn", "lessons"))
             and bool(fields["ownedFiles"])
-            and isinstance(fields.get("proofModule"), str)
-            and bool(fields["proofModule"].strip())
+            and (
+                fields.get("semanticPhase") in ("contracts", "build")
+                and "proofModule" not in fields
+                if self.semantic
+                else isinstance(fields.get("proofModule"), str)
+                and bool(fields["proofModule"].strip())
+            )
             and (
                 "provider" not in fields
                 or isinstance(fields["provider"], str)
@@ -224,7 +237,7 @@ class Spine:
                 gaps.append({"id": node_id, "gap": "acceptance scenario has no executable steps"})
             elif node["kind"] == "requirement":
                 kinds = {self._nodes[item]["kind"] for item in self.descendants(node_id)}
-                for kind in ("bead", "test"):
+                for kind in ("bead",) if self.semantic else ("bead", "test"):
                     if kind not in kinds:
                         gaps.append({"id": node_id, "gap": f"requirement-without-{kind}"})
             elif node["kind"] == "bead" and not any(
@@ -412,12 +425,34 @@ def requirement_files_revision(template_dir: str | Path, names: list[str]) -> st
     return _hash(_canonical(file_revisions))
 
 
+def semantic_spec(spine, product=None):
+    from codex_harness.core.semantic_schema import validate
+
+    root = spine.node(spine.ids("vision")[0])["fields"]
+    document, targets = root["scenarios"], root["targets"]
+    validate(document, product or Path.cwd(), targets, require_entries=False)
+    covered = set()
+    for scenario in document["scenarios"]:
+        for field, kind in (("requirementRefs", "requirement"), ("contractRefs", "design")):
+            for ref in scenario[field]:
+                key, _, revision = ref.rpartition("@")
+                if key not in spine.ids(kind) or revision != spine.revision(key):
+                    raise ValueError(f"Stale/unknown semantic reference: {ref}")
+                if kind == "requirement":
+                    covered.add(key)
+    if covered != set(spine.ids("requirement")):
+        raise ValueError("Every requirement needs semantic scenarios")
+    return document, targets, covered
+
+
 def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> dict:
     from codex_harness.core.wave_refine import execution_scope
 
     scope = execution_scope(spine, template_dir)
     root = spine.node(spine.ids("vision")[0])["fields"]
-    if not all(_strings(root.get(key)) for key in ("validation", "requirementFiles")):
+    if not spine.semantic and not all(
+        _strings(root.get(key)) for key in ("validation", "requirementFiles")
+    ):
         raise SpineError("spine-schema-invalid", "Vision requires validation and requirementFiles")
     beads = {}
     for node_id in spine.ids("bead"):
@@ -427,7 +462,11 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         bead = {
             "title": node["title"],
             "ownedFiles": fields["ownedFiles"],
-            "proofModule": fields["proofModule"],
+            **(
+                {"semanticPhase": fields["semanticPhase"]}
+                if spine.semantic
+                else {"proofModule": fields["proofModule"]}
+            ),
             "dependsOn": fields["dependsOn"],
             "requirementRefs": refs,
             "specRefs": [
@@ -445,6 +484,56 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         if "capabilityRefs" in fields:
             bead["capabilityRefs"] = fields["capabilityRefs"]
         beads[node_id] = bead
+    if spine.semantic:
+        if root.get("productSurface", "cli") != "cli" or scope or spine.ids("acceptance"):
+            raise ValueError(
+                "HTTP/GUI/outcome waves unsupported in semantic-v1; use CLI scenario data"
+            )
+        document, targets, covered = semantic_spec(spine, template_dir)
+        phases = {b["semanticPhase"]: key for key, b in beads.items()}
+        if len(beads) != 2 or set(phases) != {"contracts", "build"}:
+            raise ValueError(
+                "Multiple/parallel Build unsupported in semantic-v1; "
+                "declare Contracts and one Build"
+            )
+        if beads[phases["contracts"]]["dependsOn"] or beads[phases["build"]]["dependsOn"] != [
+            phases["contracts"]
+        ]:
+            raise ValueError("semantic-v1 requires Contracts -> Build -> controller Validation")
+        contract_ids = {
+            ref.rpartition("@")[0] for s in document["scenarios"] for ref in s["contractRefs"]
+        }
+        for key in beads:
+            if not covered.issubset(
+                {r["id"] for r in beads[key]["requirementRefs"]}
+            ) or not contract_ids.issubset(spine.ancestors(key)):
+                raise ValueError("Both workers must reference every requirement and contract")
+            if not {binding["entry"] for binding in targets.values()}.issubset(
+                beads[key]["ownedFiles"]
+            ):
+                raise ValueError("Both workers must own the declared CLI entry files")
+        manifest = dict(
+            schema="codex-harness/provider-sample-v1",
+            sample=spine.name,
+            planMode="semantic-v1",
+            semantic={
+                "scenarios": document,
+                "targets": targets,
+                "contracts": [spine.node(key) for key in spine.ids("design")],
+            },
+            validation=[],
+            requirementFiles=[*MARKDOWN_FILES, "SCENARIOS.json"],
+            beads=beads,
+            integration={},
+            planRevision=spine.plan_revision(),
+        )
+        if template_dir is not None:
+            revision = requirement_files_revision(template_dir, manifest["requirementFiles"])
+            manifest.update(
+                requirementFilesRevision=revision,
+                planRevision=_hash(f"{spine.plan_revision()}:{revision}"),
+            )
+        return manifest
     integration_tests = [
         key for key in spine.ids("test") if spine.node(key)["fields"]["level"] == "e2e"
     ]

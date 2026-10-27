@@ -360,6 +360,12 @@ class PlanStore:
 
     def _write_node(self, spine: Spine, node_id: str) -> None:
         node = spine.node(node_id)
+        if node["kind"] == "vision":
+            prior = self.list_nodes("vision")
+            if prior and prior[0]["fields"].get("planMode", "legacy") != node["fields"].get(
+                "planMode", "legacy"
+            ):
+                raise ValueError("planMode is immutable; choose semantic-v1 at plan creation")
         self._classify_vision_edit(node)
         self.connection.execute(
             "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
@@ -390,6 +396,9 @@ class PlanStore:
                 key: value
                 for key, value in fields.items()
                 if key not in ("validation", "requirementFiles")
+                and not (
+                    fields.get("planMode") == "semantic-v1" and key in ("scenarios", "targets")
+                )
             }
 
         if (
@@ -1350,6 +1359,9 @@ class PlanStore:
     def import_spine(self, path: str | Path) -> None:
         spine = load_spine(path)
         with self._transaction():
+            prior = self.list_nodes("vision")
+            if prior and Spine(self._data()).semantic != spine.semantic:
+                raise ValueError("planMode is immutable; no conversion of existing plans")
             for node_id in spine.ids("vision"):
                 self._classify_vision_edit(spine.node(node_id))
             self.connection.execute("DELETE FROM nodes")
@@ -1561,7 +1573,11 @@ class PlanStore:
             return None
         spine = Spine(data)
         fields = spine.node(spine.ids("vision")[0])["fields"]
-        if "validation" not in fields or "requirementFiles" not in fields:
+        if not spine.semantic and ("validation" not in fields or "requirementFiles" not in fields):
+            return None
+        if spine.semantic and not all(key in fields for key in ("scenarios", "targets")):
+            return None
+        if spine.semantic and len(spine.ids("bead")) != 2:
             return None
         template = self.workspace / "template"
         return compile_manifest(spine, template if template.is_dir() else None)["planRevision"]
@@ -1821,6 +1837,8 @@ class PlanStore:
         if revision is None or published is None:
             return False
         manifest = self.published_manifest(published)
+        if manifest.get("planMode") == "semantic-v1":
+            return published == revision
         return manifest.get("sourceManifestRevision", published) == revision and manifest.get(
             "proofLevel", "oracle-verified"
         ) == self.proof_level(revision)
@@ -2236,7 +2254,7 @@ class PlanStore:
                 "unavailable assessment/identity producers cannot be replaced by author claims.",
             )
         missing = []
-        if not self.passing_audit(revision):
+        if not Spine(self._data()).semantic and not self.passing_audit(revision):
             missing.append(
                 "passing audit (audit --oracle oracle, or audit --prospective); "
                 "audit-binding-required: legacy unbound prospective history "
@@ -2254,6 +2272,11 @@ class PlanStore:
     def _check_coverage(spine: Spine, kind: str) -> None:
         from codex_harness.core.wave_refine import execution_scope
 
+        if spine.semantic and kind == "test":
+            from codex_harness.core.spine import semantic_spec
+
+            semantic_spec(spine)
+            return
         scope = execution_scope(spine)
         coverage = spine.coverage_gaps()
         if kind == "bead":
@@ -2414,14 +2437,14 @@ class PlanStore:
             revision = manifest["planRevision"]
             self._check_evidence(revision)
             level = self.proof_level(revision)
-            if level != proof_level:
+            if not spine.semantic and level != proof_level:
                 raise PlanStoreError(
                     "plan-proof-level-required",
                     "Prospective publication requires --proof-level prospective "
                     '--reason "why no oracle"; '
                     "oracle-verified publication requires a passing oracle audit.",
                 )
-            if proof_level == "prospective":
+            if not spine.semantic and proof_level == "prospective":
                 manifest.update(
                     proofLevel="prospective",
                     proofLevelReason=reason.strip(),
@@ -3369,7 +3392,7 @@ class PlanStore:
                 meta["phase"] == "publish"
                 and up_to_date
                 and not open_clarifications
-                and self.passing_audit(current_publication)
+                and (Spine(data).semantic or self.passing_audit(current_publication))
                 and self.successful_reviews(current_publication)
             ):
                 pending = None
@@ -3392,6 +3415,7 @@ class PlanStore:
                 pending = None
             status = {
                 **meta,
+                **({"planMode": "semantic-v1"} if data["nodes"] and Spine(data).semantic else {}),
                 "plan_revision": revision,
                 "approval": approval,
                 "spine_revision": revision,
@@ -3401,6 +3425,8 @@ class PlanStore:
                 if level == "prospective"
                 else ORACLE_LABEL
                 if level
+                else "Semantic scenarios; controller Validation pending"
+                if data["nodes"] and Spine(data).semantic
                 else "Tests not audited",
                 "publication": {
                     "published_revision": meta["published_revision"],
@@ -3408,7 +3434,8 @@ class PlanStore:
                     "up_to_date": up_to_date,
                 },
                 "publishedProofLevel": self.published_manifest(meta["published_revision"]).get(
-                    "proofLevel", "oracle-verified"
+                    "proofLevel",
+                    None if data["nodes"] and Spine(data).semantic else "oracle-verified",
                 )
                 if meta["published_revision"]
                 else None,

@@ -449,6 +449,41 @@ def build_packet(
         # retains refs/identity only, and the manifest need not be named sample.json.
         raw_bead = bead
         bead = plan.beads[raw_bead["id"]]
+    if plan.semantic is not None:
+        phase = raw_bead["semanticPhase"]
+        instruction = (
+            "Write interface stubs and any harness. EVERY operation exits 3 and writes exactly "
+            "one stderr line SELDON-STUB <operation>, using the declared operation."
+            if phase == "contracts"
+            else "Implement the product and your own unit tests. Preserve scenario data, contracts "
+            "and launch bindings. The controller runs identical scenarios for Validation."
+        )
+        packet = "\n\n".join(
+            [
+                f"semantic-v1 {phase}; bead {bead.id}; plan {plan.plan_revision}.",
+                instruction,
+                "Change ONLY: " + ", ".join(bead.owned_files),
+                "Never edit: " + ", ".join(plan.requirement_files),
+                "Stay in this worktree. Do not install, commit, push, read credentials or expand "
+                "permissions. Host/tool/sandbox denials block equivalent routes: stop and report. "
+                "Workers cannot submit verdicts or approve themselves. Report unit test results "
+                "and blockers. For every test name the behavior, regression and missing coverage.",
+                json.dumps(raw_bead, sort_keys=True),
+                json.dumps(dict(plan.semantic), sort_keys=True),
+                *((repo / name).read_text(encoding="utf-8") for name in plan.requirement_files),
+                *(
+                    name + "\n" + (repo / name).read_text(encoding="utf-8")
+                    for name in bead.owned_files
+                    if (repo / name).is_file()
+                ),
+                memory_text or "(no confirmed memory)",
+            ]
+        )
+        if len(packet) > MAX_CHARACTERS:
+            raise ValueError(
+                f"worker packet contract/spec/interfaces exceed {MAX_CHARACTERS} characters"
+            )
+        return packet
     document = repo / "PLAN.md"
     texts = _plan_texts(document.read_text(encoding="utf-8")) if document.exists() else {}
     refs = [{"id": node, "revision": revision} for node, revision in bead.requirement_refs]

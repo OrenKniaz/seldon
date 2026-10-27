@@ -357,6 +357,7 @@ def worker_job_status(workspace, job_id):
             "repo": run["repo"],
             "isMocked": run["isMocked"],
             "didExecuteRealProvider": run["didExecuteRealProvider"],
+            **{key: run[key] for key in ("semanticContracts", "semanticValidation") if key in run},
             "beads": {
                 key: {field: bead.get(field) for field in ("status", "provider", "model", "effort")}
                 for key, bead in run["beads"].items()

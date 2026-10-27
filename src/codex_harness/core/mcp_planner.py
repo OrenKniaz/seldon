@@ -413,7 +413,14 @@ TOOLS = [
         {"id": STRING, "from_agent": STRING, "body": STRING},
     ),
     _tool(
-        "harness_plan_start", "Enter or resume Harness Plan Mode.", {"idea": STRING, "name": STRING}
+        "harness_plan_start",
+        "Enter or resume Harness Plan Mode; mode is immutable after creation.",
+        {
+            "idea": STRING,
+            "name": STRING,
+            "plan_mode": {"type": "string", "enum": ["legacy", "semantic-v1"]},
+        },
+        ["idea", "name"],
     ),
     _tool("harness_plan_status", "Show all phases and the canonical pending gate.", {}),
     _tool(
@@ -1876,11 +1883,28 @@ class PlannerServer:
                         "kind": "vision",
                         "title": args["name"],
                         "text": args["idea"],
-                        "fields": {},
+                        "fields": {"planMode": "semantic-v1"}
+                        if args.get("plan_mode") == "semantic-v1"
+                        else {},
                         "parents": [],
                     }
                 )
+            elif "plan_mode" in args and self.store.spine().semantic != (
+                args["plan_mode"] == "semantic-v1"
+            ):
+                raise ValueError("planMode is immutable; no conversion of existing plans")
             self.result_data = {"id": "V1"}
+            if self.store.spine().semantic:
+                return (
+                    "semantic-v1 resumed (Windows Python CLI only). Planner writes DATA: "
+                    "V1.fields.scenarios uses seldon/scenarios-v1; V1.fields.targets binds "
+                    "target names to {entry, argv}. References are requirement/design id@revision. "
+                    "Design nodes hold contracts. Declare exactly two beads with semanticPhase "
+                    "contracts/build and Build dependsOn Contracts. No proofModule or test nodes. "
+                    "No prospective audit or protected test authoring. Review, publish and packet "
+                    "sufficiency still apply. Execute with max_parallel=1. RED is history; "
+                    "only controller Validation PASS fulfills scenarios. Say 'pause plan' to pause."
+                )
             return "Plan mode resumed. To pause, say 'pause plan'."
         if (
             name == "harness_plan_status"

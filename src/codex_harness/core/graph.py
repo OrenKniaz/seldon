@@ -26,7 +26,7 @@ class Bead:
     owned_files: tuple[str, ...]
     depends_on: tuple[str, ...]
     requirements: tuple[str, ...]
-    proof_module: str
+    proof_module: str | None
     provider: str | None
     requirement_refs: tuple[tuple[str, str], ...] = ()
     spec_refs: tuple[tuple[str, str, str], ...] | None = None
@@ -47,6 +47,7 @@ class Plan:
     plan_revision: str | None = None
     verification: Mapping | None = None
     requirement_files_revision: str | None = None
+    semantic: Mapping | None = None
 
 
 def _string(value: object) -> str:
@@ -193,7 +194,28 @@ def load_plan(path: Path) -> Plan:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict) or not isinstance(manifest["beads"], dict):
             raise PlanError("plan-schema-invalid", "Expected a plan and bead mapping")
-        directory = test_dir(manifest)
+        semantic = manifest.get("planMode") == "semantic-v1"
+        if semantic:
+            from codex_harness.core.semantic_schema import validate
+
+            validate(
+                manifest["semantic"]["scenarios"],
+                manifest_path.parent,
+                manifest["semantic"]["targets"],
+                require_entries=False,
+            )
+            phases = {b.get("semanticPhase"): key for key, b in manifest["beads"].items()}
+            if len(manifest["beads"]) != 2 or set(phases) != {"contracts", "build"}:
+                raise ValueError("Multiple/parallel Build unsupported in semantic-v1")
+            if manifest["beads"][phases["contracts"]].get("dependsOn") != [] or manifest["beads"][
+                phases["build"]
+            ].get("dependsOn") != [phases["contracts"]]:
+                raise ValueError("semantic-v1 requires Contracts -> Build")
+            if any("proofModule" in b for b in manifest["beads"].values()) or manifest.get(
+                "integration"
+            ):
+                raise ValueError("semantic-v1 uses scenario proof, not proofModule")
+        directory = None if semantic else test_dir(manifest)
         beads = {}
         for bead_id, data in manifest["beads"].items():
             if not isinstance(data, dict):
@@ -206,7 +228,7 @@ def load_plan(path: Path) -> Plan:
                 owned_files=_strings(data["ownedFiles"]),
                 depends_on=_strings(data.get("dependsOn", [])),
                 requirements=requirements,
-                proof_module=_string(data["proofModule"]),
+                proof_module=None if semantic else _string(data["proofModule"]),
                 provider=_string(provider) if provider is not None else None,
                 requirement_refs=_requirement_refs(data.get("requirementRefs", []), requirements),
                 spec_refs=_spec_refs(data["specRefs"]) if "specRefs" in data else None,
@@ -238,6 +260,7 @@ def load_plan(path: Path) -> Plan:
             requirement_files_revision=_revision(manifest["requirementFilesRevision"])
             if "requirementFilesRevision" in manifest
             else None,
+            semantic=manifest["semantic"] if semantic else None,
         )
         if "verification" in manifest:
             from codex_harness.core.runners import resolve_runner
@@ -248,7 +271,9 @@ def load_plan(path: Path) -> Plan:
 
     order = topological_order(plan)
     ancestors: dict[str, set[str]] = {}
-    protected = tuple(_file_path(name) for name in (*plan.requirement_files, directory))
+    protected = tuple(
+        _file_path(name) for name in (*plan.requirement_files, *([directory] if directory else []))
+    )
     owners: dict[PurePosixPath, list[str]] = {}
     for bead_id in order:
         bead = plan.beads[bead_id]

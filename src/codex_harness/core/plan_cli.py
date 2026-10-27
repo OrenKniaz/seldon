@@ -296,6 +296,7 @@ def parser() -> argparse.ArgumentParser:
             "--machine-json", dest="machine", action="store_true", default=argparse.SUPPRESS
         )
     commands["schema"].add_argument("--tool", default="harness_upsert_node")
+    commands["start"].add_argument("--plan-mode", choices=["legacy", "semantic-v1"])
     commands["schema"].add_argument("--kind")
     commands["show"].add_argument("id")
     commands["review"].add_argument("id")
@@ -608,7 +609,14 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
         return value
 
     tools = {
-        "start": ("harness_plan_start", lambda: dict(idea=args.idea, name=args.name)),
+        "start": (
+            "harness_plan_start",
+            lambda: dict(
+                idea=args.idea,
+                name=args.name,
+                **({"plan_mode": args.plan_mode} if args.plan_mode else {}),
+            ),
+        ),
         "status": ("harness_plan_status", lambda: {}),
         "resume": (
             "harness_plan_resume",

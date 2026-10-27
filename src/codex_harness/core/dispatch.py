@@ -1572,7 +1572,10 @@ def _attempt_bead(
     owned = {str(PurePosixPath(name.replace("\\", "/"))) for name in bead["ownedFiles"]}
     protected = [
         str(PurePosixPath(name.replace("\\", "/")))
-        for name in (*plan.requirement_files, resolve_runner(plan).test_dir)
+        for name in (
+            *plan.requirement_files,
+            *([] if plan.semantic is not None else [resolve_runner(plan).test_dir]),
+        )
     ]
     requirements_intact = not any(
         path == name or path.startswith(f"{name}/") for path in changed for name in protected
@@ -1715,6 +1718,76 @@ def _integration_candidate(record: dict, bead: dict, repo: Path) -> tuple[str, P
     return state["workerCommit"], root, state
 
 
+def _semantic_identity(plan):
+    from codex_harness.core import semantic_runner, semantic_schema
+
+    return {
+        "planRevision": plan.plan_revision,
+        "scenarioBinding": hashlib.sha256(
+            json.dumps(dict(plan.semantic), sort_keys=True).encode()
+        ).hexdigest(),
+        "contractsRevision": plan.requirement_files_revision,
+        "runner": {
+            Path(m.__file__).name: _file_sha256(m.__file__)
+            for m in (semantic_runner, semantic_schema)
+        },
+    }
+
+
+def _semantic_validation(root, plan, record, phase):
+    from codex_harness.core import semantic_runner
+
+    identity = _semantic_identity(plan)
+    red = record.get("contractsRed")
+    if phase == "build" and (
+        not red or red.get("state") != "RED" or any(red.get(k) != v for k, v in identity.items())
+    ):
+        raise ValueError(
+            "semantic-v1 requires current Contracts RED; scenarios/contracts/runner changed"
+        )
+    results = semantic_runner.run(
+        plan.semantic["scenarios"],
+        root,
+        plan.semantic["targets"],
+        "contracts" if phase == "contracts" else "validation",
+    )
+    expected = plan.semantic["scenarios"]["scenarios"]
+    complete = len(results) == len(expected) and all(
+        r["id"] == s["id"] for r, s in zip(results, expected, strict=True)
+    )
+    red_ok = complete and all(
+        r["state"] == "FAIL" and r.get("stubActions") == [a["id"] for a in s["actions"]]
+        for r, s in zip(results, expected, strict=True)
+    )
+    passed = (
+        phase == "build"
+        and complete
+        and all(r["state"] == "PASS" and not r.get("stubActions") for r in results)
+    )
+    state = (
+        "RED"
+        if phase == "contracts" and red_ok
+        else "PASS"
+        if passed
+        else "ERROR"
+        if phase == "contracts" or any(r["state"] == "ERROR" for r in results)
+        else "FAIL"
+    )
+    return {
+        **identity,
+        "phase": "contracts" if phase == "contracts" else "validation",
+        "state": state,
+        "passed": passed,
+        "admitted": red_ok if phase == "contracts" else passed,
+        "candidateCommit": _git(root, "rev-parse", "HEAD"),
+        "candidateTree": _git(root, "rev-parse", "HEAD^{tree}"),
+        "linkedRed": hashlib.sha256(json.dumps(red, sort_keys=True).encode()).hexdigest()
+        if red
+        else None,
+        "results": results,
+    }
+
+
 def _integrate_bead(
     record: dict,
     bead: dict,
@@ -1768,7 +1841,45 @@ def _integrate_bead(
         "tree": _git(validation_root, "rev-parse", "HEAD^{tree}"),
         "validated": False,
     }
-    if receipt.exists() and binding is not None:
+    if current_plan.semantic is not None:
+        if receipt.exists():
+            prior = read_record_json(receipt)
+            semantic = prior["semantic"]
+            expected = {
+                **_semantic_identity(current_plan),
+                "candidateCommit": integration_commit,
+                "candidateTree": record["candidate"]["tree"],
+            }
+            red = record.get("contractsRed")
+            expected["linkedRed"] = (
+                hashlib.sha256(json.dumps(red, sort_keys=True).encode()).hexdigest()
+                if red
+                else None
+            )
+            if (
+                any(semantic.get(k) != v for k, v in expected.items())
+                or prior.get("recoveryBinding") != binding
+            ):
+                raise ValueError("integration recovery semantic receipt mismatch")
+        else:
+            semantic = _semantic_validation(
+                validation_root, current_plan, record, bead["semanticPhase"]
+            )
+        validation = {"passed": semantic["passed"]}
+        record["integrated"] = {
+            "beadCommit": bead_commit,
+            "integrationCommit": integration_commit,
+            "root": str(validation_root),
+            "receiptPath": str(receipt),
+            "planRevision": record["planRevision"],
+            "requirementRefs": record["requirementRefs"],
+            **_spec_binding(record),
+            "validation": validation,
+            "semantic": semantic,
+            **({"recoveryBinding": binding} if binding is not None else {}),
+        }
+        _write_record(receipt, record["integrated"])
+    elif receipt.exists() and binding is not None:
         integrated = read_record_json(receipt)
         claim = integrated.get("claim", {})
         inputs = _claim_inputs(validation_root, current_plan, record["bead"], integration_commit)
@@ -1815,7 +1926,12 @@ def _integrate_bead(
         _write_record(receipt, record["integrated"])
     record["didRunIntegratedValidation"] = True
     record["candidate"]["validated"] = validation["passed"]
-    if not validation["passed"]:
+    accepted = (
+        record["integrated"]["semantic"]["admitted"]
+        if current_plan.semantic is not None
+        else validation["passed"]
+    )
+    if not accepted:
         record["status"] = (
             "integrated validation failed" if changed else "rejected: no source change"
         )
@@ -1829,7 +1945,7 @@ def _integrate_bead(
     if _git(repo, "rev-parse", "HEAD") == binding["baseIntegration"]:
         _git(repo, "merge", "-q", "--ff-only", integration_commit)
     record["lessonsPromoted"] = []
-    for index, lesson in enumerate(bead.get("lessons", [])):
+    for index, lesson in enumerate(bead.get("lessons", []) if validation["passed"] else []):
         promoted = {**lesson, "entryId": None, "confirmed": False}
         record["lessonsPromoted"].append(promoted)
         try:
@@ -1858,6 +1974,8 @@ def _integrate_bead(
                 "message": f"{type(error).__name__}: {error}",
             }
     record["status"] = STATUS_MOCK_ONLY if record["isMocked"] else "requirement-validated"
+    if current_plan.semantic is not None and bead["semanticPhase"] == "contracts":
+        record["status"] = "contracts-red"
 
 
 def run_plan(
@@ -1899,6 +2017,10 @@ def run_plan(
     if manifest_path.is_dir():
         manifest_path /= "sample.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if plan.semantic is not None and (os.name != "nt" or max_parallel != 1):
+        raise ValueError(
+            "Non-Windows/parallel Build unsupported in semantic-v1; use Windows and max_parallel=1"
+        )
     source_fixture = mock_provider is not None or set(plan.beads).issubset(fake_workers or {})
     _verify_requirement_files(plan, manifest, plan.root / "template", source_fixture=source_fixture)
     order = graph.topological_order(plan)
@@ -2026,7 +2148,9 @@ def run_plan(
         "claims": copy.deepcopy(previous.get("claims", [])) if previous else [],
         "claimSummary": {"retained": [], "impacted": [], "fresh": []},
         "claimIdentityPolicy": {
-            "verification": f"whole {graph.test_dir(plan)}/ + VISION.md + PLAN.md + "
+            "verification": "scenarios/contracts/binding + runner digest; controller receipts"
+            if plan.semantic is not None
+            else f"whole {graph.test_dir(plan)}/ + VISION.md + PLAN.md + "
             "requirementFiles; Git blobs, LF",
             "source": "ownedFiles at candidate commit; Git blobs, LF",
             "dependencies": "transitive prerequisites; explicit proofDependsOn for stubbed proofs; "
@@ -2122,6 +2246,7 @@ def run_plan(
             "validation": {
                 bead_id: _validate(baseline_root, manifest, plan.beads[bead_id].proof_module)
                 for bead_id in order
+                if plan.semantic is None
             },
         }
     _verify_requirement_files(plan, manifest, repo, source_fixture=source_fixture)
@@ -2201,6 +2326,12 @@ def run_plan(
                 and old["didRunIntegratedValidation"]
                 and old["candidate"]["validated"]
             )
+            if plan.semantic is not None:
+                validated = bool(
+                    integrated
+                    and integrated.get("semantic", {}).get("admitted")
+                    and old.get("planRevision") == plan.plan_revision
+                )
             if _hold_permission_guard(old, old_evidence / "attempt"):
                 records[bead_id] = old
                 retained_failures.append(bead_id)
@@ -2388,6 +2519,21 @@ def run_plan(
         if not _check_attempt_provenance(current, owned_files=plan.beads[bead_id].owned_files):
             record["requirementValidation"][order.index(bead_id)]["passed"] = False
             return False
+        if plan.semantic is not None:
+            proof = current["integrated"]["semantic"]
+            original = read_record_json(Path(current["integrated"]["receiptPath"]))
+            if original != current["integrated"] or any(
+                proof.get(k) != v for k, v in _semantic_identity(plan).items()
+            ):
+                current["status"] = "rejected: stale semantic receipt"
+                return False
+            _git(repo, "merge-base", "--is-ancestor", proof["candidateCommit"], "HEAD")
+            if manifest["beads"][bead_id]["semanticPhase"] == "build":
+                record["semanticValidation"] = proof
+                return proof["passed"] and proof["candidateTree"] == _git(
+                    repo, "rev-parse", "HEAD^{tree}"
+                )
+            return proof["state"] == "RED"
         commit = _git(repo, "rev-parse", "HEAD")
         old = latest_claim(bead_id)
         changed = _changed_claim_inputs(old, _claim_inputs(repo, plan, bead_id, commit))
@@ -2477,6 +2623,13 @@ def run_plan(
                             provider=current["provider"],
                             proof_level=manifest.get("proofLevel"),
                         )
+                        if (
+                            plan.semantic is not None
+                            and manifest["beads"][bead_id]["semanticPhase"] == "build"
+                        ):
+                            current["contractsRed"] = copy.deepcopy(
+                                records[plan.beads[bead_id].depends_on[0]]["integrated"]["semantic"]
+                            )
                         current["attempt"] = {
                             "cwd": str(worktree),
                             "baseCommit": base_commit,
@@ -2541,12 +2694,25 @@ def run_plan(
                         if request.get("processId") or request.get("didLaunchMockAttempt"):
                             record["resumeSummary"]["redispatched"].append(bead_id)
                 current["finishedAt"] = _now()
+                if (
+                    plan.semantic is not None
+                    and current["integrated"]
+                    and manifest["beads"][bead_id]["semanticPhase"] == "contracts"
+                ):
+                    record["semanticContracts"] = current["integrated"]["semantic"]
+                if (
+                    plan.semantic is not None
+                    and current["integrated"]
+                    and manifest["beads"][bead_id]["semanticPhase"] == "build"
+                ):
+                    record["semanticValidation"] = current["integrated"]["semantic"]
                 if current["integrated"] and current["integrated"].get("claim"):
                     add_claim(current["integrated"]["claim"])
                 if current["status"] in {
                     "requirement-validated",
                     STATUS_MOCK_ONLY,
                     "already-satisfied",
+                    "contracts-red",
                 }:
                     done.add(bead_id)
                     terminal.add(bead_id)
@@ -2603,7 +2769,7 @@ def run_plan(
             plan.plan_revision,
             manifest.get("integration", {}).get("requirementRefs", []),
         )
-    if previous:
+    if previous and plan.semantic is None:
         # Dispositions describe the final head, including assertions made before
         # a later bead changed overlapping ownership. Never leave an early RETAINED.
         seen = set()
@@ -2644,7 +2810,7 @@ def run_plan(
             STATUS_MOCK_ONLY
             if record["isMocked"]
             else STATUS_VALIDATED
-            if plan.integration_proof_module is not None
+            if plan.integration_proof_module is not None or plan.semantic is not None
             else STATUS_VALIDATED_NO_INTEGRATION
         )
     record.update(status=status, finishedAt=_now(), isLiveProductProof=False)

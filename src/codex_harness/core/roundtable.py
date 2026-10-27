@@ -25,6 +25,7 @@ from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
 from codex_harness.core.provider_call_budget import claim_planning_review_start
+from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
 
@@ -239,6 +240,12 @@ def _total_exhaustion_advice(store, reviewer, revision, total, max_total):
 
 
 def _test_bodies(store: PlanStore, protected=None) -> str:
+    if Spine(store._data()).semantic:
+        return (
+            "## Semantic review\nExactly three jobs: vision expansion within scope, "
+            "vision integrity, and spine trickle-down. Review scenario data and shared contracts; "
+            "code/test review belongs to workers.\n"
+        )
     if not (store.workspace / "template").is_dir():
         return "## Protected requirement tests\n\nNo template available.\n"
     return "\n".join(
@@ -272,8 +279,12 @@ def _packet(
         sections.append(f"## {name}\n\n{documents[name]}")
     sections.append(f"## Bead DAG\n\n```mermaid\n{bead_dag(spine)}```\n")
     sections.append(
-        "## Planned proof (oracle-verified), not a worker build\n\n"
-        "Quality snapshot captured before this review request. Missing or stale "
+        (
+            "## Planned semantic scenarios; no execution proof yet\n\n"
+            if spine.semantic
+            else "## Planned proof (oracle-verified), not a worker build\n\n"
+        )
+        + "Quality snapshot captured before this review request. Missing or stale "
         "review evidence describes the pre-request gate, not failure of this "
         "requested review attempt. Open findings and unmet gates still require action.\n\n"
         + render_quality_card(report)

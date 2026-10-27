@@ -1,6 +1,37 @@
 # Planner guide
 
 The full agreed vision must reach working product with real proof. Trace vision → requirements → beads → code → tests; generated docs reflect the structured plan. Workers should build without guessing, and final acceptance checks the locked vision. Efficiency never replaces depth, actual user decisions or meaningful failure cases.
+
+**Opt-in semantic-v1 (Windows Python CLI).** Choose `harness_plan_start plan_mode=semantic-v1`
+or `p start --plan-mode semantic-v1 --idea "..." --name "..."` when creating a new plan.
+The default remains legacy; existing plans cannot change modes. In this mode the planner
+authors scenario data and semantic contracts; the later protected-test/audit instructions
+in this guide apply only to legacy plans.
+
+Put the closed `seldon/scenarios-v1` document in `V1.fields.scenarios` and explicit
+`{target: {entry: "product.py", argv: []}}` bindings in `V1.fields.targets`.
+Use requirement/design `id@revision` references in each scenario. Design nodes contain
+the complete interface contracts. CLI actions declare `target`, `operation`, and `argv`;
+observations use `semantic_schema`'s finite vocabulary (`exitEquals`, `stdoutEquals`,
+`stdoutJsonEquals`, `stderrNonempty`, and file observations). Setup contains data only.
+Every requirement needs a scenario. Author scenarios before leaving requirements;
+they may then be carried unchanged into the plan.
+
+Declare exactly two beads, each referencing every requirement and contract and owning
+the CLI entry files: `semanticPhase:"contracts"` with no dependencies, then
+`semanticPhase:"build"` depending on Contracts. Omit `proofModule` and test nodes.
+Contracts writes stubs/harness; every operation exits 3 with stderr `SELDON-STUB <operation>`.
+Build implements the product and owns its unit tests. Compilation freezes `SCENARIOS.json`
+and contract data as protected plan inputs. Review still checks expansion, integrity and
+spine; publish and worker-packet sufficiency still apply. Start the existing worker job
+with `max_parallel=1` / `--max-parallel 1` and the ordinary execution authorization.
+The controller must observe every scenario FAIL with its stub marker before Build;
+launch/import failures earn ERROR. RED is retained history, never fulfillment.
+Final Validation reuses the scenarios and requires every scenario PASS without markers.
+`harness_worker_status` reports `run.semanticContracts` and `run.semanticValidation`.
+HTTP, GUI, outcome-wave maps and multiple/parallel Build beads are unsupported in this slice.
+Qualitative/user acceptance and actual-provider qualification remain separate obligations.
+
 Use this guide, public schema/help and the user's project; do not inspect Harness source to discover planning contracts. Detailed [handoff declarations](handoff-contract.md), [verification runners](../architecture/verification-runners.md) and [resume contract](resume-plan.md) expand the relevant steps.
 
 **Start and recover.** Inspect `harness_plan_status` or `p status`; follow `Next:`, then command `--help`, targeted diagnostics and only then a bounded search. Status resumes without changing plan truth. Missing-plan reads create nothing; broken reads and unavailable telemetry remain unknown.
