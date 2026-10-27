@@ -576,6 +576,21 @@ def test_acceptance_cleanup_uncertainty_holds_future_workspace_admission(project
     owner.close(store)
 
 
+def test_acceptance_children_disable_bytecode_even_with_caller_override(tmp_path):
+    """Catch scenario/descendant caches; EOF and isolation tests never import product code."""
+    (tmp_path / "product.py").write_text("VALUE = 1\n")
+    command = (
+        "\"{python}\" -c \"import os,product; assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'\""
+    )
+    results = run_scenarios(
+        tmp_path,
+        [dict(id="cache", title="Cache", steps=[command], expect={"exit": 0})],
+        env={"PYTHONDONTWRITEBYTECODE": "0"},
+    )
+    assert results[0]["passed"], results
+    assert not (tmp_path / "__pycache__").exists()
+
+
 def test_acceptance_children_get_eof_but_explicit_input_redirection_works(tmp_path):
     """Protect noninteractive stdin isolation without dropping declared shell input.
 

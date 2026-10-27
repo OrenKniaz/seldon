@@ -33,6 +33,19 @@ prospective = test_test_audit.prospective
 withheld_audit_bootstrap = test_test_audit.withheld_audit_bootstrap
 
 
+def test_owned_audit_payload_disables_descendant_bytecode(tmp_path):
+    """Catch descendant cache writes; observer -B tests cover only the first interpreter."""
+    (tmp_path / "product.py").write_text("VALUE = 1\n")
+    child = "import os,product;assert os.environ['PYTHONDONTWRITEBYTECODE']=='1'"
+    result = audit_process.run_audit_process(
+        [sys.executable, "-c", child],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "0"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "__pycache__").exists()
+
+
 def test_audit_default_stdin_is_eof_while_parent_pipe_stays_open(tmp_path):
     """Catch inherited idle stdin; the MCP regression writes protocol bytes before auditing."""
     controller = (

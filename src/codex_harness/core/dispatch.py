@@ -754,7 +754,7 @@ def _run_provider(
     # can keep open after the controller's process has exited.
     events_path, stderr_path = attempt_dir / "events.jsonl", attempt_dir / "stderr.txt"
     request["denialCapabilities"] = dict(DENIAL_CAPABILITIES)
-    effective_environment = {**os.environ, **launch.environment}
+    effective_environment = {**os.environ, **launch.environment, "PYTHONDONTWRITEBYTECODE": "1"}
     request["environmentIndicators"] = {
         name: effective_environment.get(name)
         for name in ("CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_CI")
@@ -2089,7 +2089,28 @@ def run_plan(
     else:
         shutil.copytree(plan.root / "template", repo)
         _verify_requirement_files(plan, manifest, repo, source_fixture=source_fixture)
+        metadata = repo / ".git"
+        if metadata.exists() or metadata.is_symlink():
+            raise ValueError("dispatch repository metadata must be newly owned")
         _git(repo, "init", "-q", "-b", "integration")
+        exclude = metadata / "info/exclude"
+        for path in (metadata, exclude.parent, exclude):
+            if path.is_symlink() or (
+                path.exists() and getattr(path.lstat(), "st_file_attributes", 0) & 0x400
+            ):
+                raise ValueError("dispatch repository metadata redirected")
+        if (
+            any(
+                Path(_git(repo, "rev-parse", "--path-format=absolute", option)) != metadata
+                for option in ("--git-dir", "--git-common-dir")
+            )
+            or Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"))
+            != exclude
+        ):
+            raise ValueError("dispatch repository metadata outside owned repository")
+        exclude.parent.mkdir(exist_ok=True)
+        with exclude.open("ab") as stream:
+            stream.write(b"\n__pycache__/\n*.pyc\n")
         _git(repo, "add", "-A")
         baseline = _commit(repo, "Sample baseline: documented requirement and fixed validation")
         baseline_root = run_dir / "baseline"

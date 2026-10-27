@@ -348,6 +348,7 @@ def run_scenarios(
                 TMPDIR=str(root),
                 PYTHONPATH=str(repo),
                 PYTHONNOUSERSITE="1",
+                PYTHONDONTWRITEBYTECODE="1",
             )
             process_env.update(HOMEDRIVE=home.drive, HOMEPATH=str(home)[len(home.drive) :])
             tokens = {

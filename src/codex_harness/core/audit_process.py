@@ -203,6 +203,7 @@ def run_audit_process(
     args, *, cwd, capture_output=True, text=True, timeout=120, env=None, stdin=subprocess.DEVNULL
 ):
     """Run a noninteractive audit; preserve any explicitly supplied stdin file or pipe."""
+    env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
     if stdin is None:
         stdin = subprocess.DEVNULL
     if sys.platform != "win32":
