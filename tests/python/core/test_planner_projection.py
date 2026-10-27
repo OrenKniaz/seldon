@@ -50,7 +50,7 @@ def test_incomplete_expansion_reports_semantic_gap_without_approval(change, path
         source_only_confirmation(store, "align")
         store.advance("expand", by="planner")
         before = list(store.connection.iterdump())
-        with pytest.raises(PlanStoreError, match="Show the Expansion card first"):
+        with pytest.raises(PlanStoreError, match="Expansion required before Vision Lock"):
             store.advance("vision-lock", by="planner")
         assert list(store.connection.iterdump()) == before
 

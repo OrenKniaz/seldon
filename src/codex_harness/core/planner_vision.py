@@ -14,7 +14,12 @@ SECTIONS = (
 )
 
 EXPANSION_NEXT = (
-    "Show the Expansion card first: mode, 3–7 upgrades, quality bar, done; get accept/reject/defer."
+    "Expansion required before Vision Lock. Record it with harness_upsert_node on the vision "
+    "node: fields.expansion = {mode: product|quality, reason, upgrades: [3–7 x {id, text, kind, "
+    "impact, disposition: accept|reject|defer}]} plus nonblank quality_bar and done_feels_like "
+    "(harness_schema vision has the rules). Dispositions are proposals; the single Vision Lock "
+    "question shows them for the user's accept/reject/defer. There is no separate Expand "
+    "confirmation or card tool."
 )
 
 

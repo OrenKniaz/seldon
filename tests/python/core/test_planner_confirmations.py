@@ -42,7 +42,7 @@ def test_missing_expansion_refuses_entry_without_changing_phase_or_credit(store)
     source_only_confirmation(store, "align")
     store.advance("expand", by="planner")
     before = database_records(store)
-    with pytest.raises(PlanStoreError, match="Show the Expansion card first"):
+    with pytest.raises(PlanStoreError, match="Expansion required before Vision Lock"):
         store.advance("vision-lock", by="planner")
     assert store.phase() == "expand" and database_records(store) == before
 
