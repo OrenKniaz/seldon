@@ -399,3 +399,11 @@ def test_bare_scenario_refs_compile_and_stale_pins_still_fail(semantic_plan):
     scenario["scenarios"][0]["requirementRefs"] = ["R@old"]
     with pytest.raises(ValueError, match="Stale/unknown semantic reference"):
         compile_manifest(Spine(data))
+
+
+def test_semantic_review_packet_scopes_reviewers_to_three_jobs(semantic_plan):
+    """A real run looped on edge-case findings; semantic reviewers must not review test depth."""
+    store, _ = semantic_plan
+    packet = review_packet(store)
+    assert "Review only three things" in packet
+    assert "Look for missing features or edge cases" not in packet

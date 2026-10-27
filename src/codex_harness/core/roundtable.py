@@ -298,13 +298,25 @@ def _packet(
         + json.dumps(spine.to_dict(), ensure_ascii=False, sort_keys=True)
         + "\n```\n"
     )
-    sections.append(
-        "## Review instructions\n\n"
-        "Look for missing features or edge cases versus the vision; requirements without "
+    focus = (
+        "Review only three things. (1) Expansion within scope: a clear improvement the "
+        "vision invites but the plan misses, or scope the vision does not ask for. "
+        "(2) Vision integrity: every locked vision item, requirement and user-stated "
+        "scenario reaches the plan unweakened. (3) Spine trickle-down: vision, requirements, "
+        "contracts, scenarios and beads link completely and consistently. Scenarios must "
+        "cover each requirement's stated behaviour; further edge cases and test depth are "
+        "the Build worker's unit-test job, so report them as note at most. Use blocker or "
+        "major only for a break in (1)-(3). Do not review code or test completeness.\n"
+        if spine.semantic
+        else "Look for missing features or edge cases versus the vision; requirements without "
         "real verification; weak concurrency or file ownership; risky design choices; "
         "and scope that is too shallow (mocked or basic instead of the real vision). "
         "Return actionable findings tied to exact spine items and suggest fixes.\n"
-        "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
+    )
+    sections.append(
+        "## Review instructions\n\n"
+        + focus
+        + "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
         'have exactly {"node_id", "severity", "finding", "suggestion"}. All values are '
         "strings; finding must be nonempty. Severity is blocker, major, minor or note. "
         'node_id must be one of the ids below, or "plan" for plan-wide findings. '
