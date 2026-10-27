@@ -16,6 +16,8 @@ def _excerpt(value):
 
 def compact_card(request):
     """Keep controls reachable; full scope stays in the stored card and node view."""
+    if request["gate"] == "vision-lock":
+        return f"Revision: {request['plan_revision']}\n{request['card']}"
     vision = request["vision"]
     sections = {item["label"]: item["text"] for item in vision_projection(vision)["sections"]}
     return (

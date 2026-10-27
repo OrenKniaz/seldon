@@ -2297,10 +2297,19 @@ class PlanStore:
                     "plan-phase-order", "Advance one phase or return to an earlier phase"
                 )
             revision = self._revision()
+            spine = Spine(self._data())
+            if to_phase == "vision-lock" or current == "vision-lock" and target > index:
+                from codex_harness.core.planner_vision import expansion_status
+
+                visions = spine.ids("vision")
+                status = expansion_status(
+                    spine.node(visions[0]) if len(visions) == 1 else {"fields": {}}
+                )
+                if status["gaps"]:
+                    raise PlanStoreError("plan-expansion-required", status["next"])
             if target > index:
                 if index > PHASES.index("vision-lock"):
                     self._check_approval("vision-lock", revision)
-                spine = Spine(self._data())
                 if current in ("align", "vision-lock"):
                     if statement is not None:
                         self.approve(current, by=by, statement=statement)

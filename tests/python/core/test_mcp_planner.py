@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core import test_test_audit
-from tests.python.core.planning_support import publication_evidence
+from tests.python.core.planning_support import publication_evidence, source_only_expansion
 from tests.python.core.test_plan_store import draft_inputs, draft_intake, mock_catalog, mock_choice
 from tests.python.core.test_preflight import inject_mock_discovery
 
@@ -1010,6 +1010,7 @@ def test_native_response_correlation_replay_and_full_words(server, version):
 def test_native_status_uses_current_credit_and_distinguishes_history(server, change):
     """Protocol -> real store -> chat status; no providers or human identity proof."""
     start(server)
+    source_only_expansion(server.store)
     native_confirm(server, "align")
     call(server, "harness_advance", to_phase="expand")
     call(server, "harness_advance", to_phase="vision-lock")
@@ -1063,6 +1064,7 @@ def test_native_status_uses_current_credit_and_distinguishes_history(server, cha
 
 def test_native_status_keeps_legacy_statement_without_approval_credit(server):
     start(server)
+    source_only_expansion(server.store)
     native_confirm(server, "align")
     call(server, "harness_advance", to_phase="expand")
     call(server, "harness_advance", to_phase="vision-lock")
@@ -1838,6 +1840,7 @@ def test_public_acceptance_contract_derives_complete_executable_coverage(server,
         "scope_in": ["Round cents", "Show each diner's share"],
     }
     call(server, "harness_upsert_node", node=vision)
+    source_only_expansion(server.store)
     native_confirm(server, "align")
     call(server, "harness_advance", to_phase="expand")
     call(server, "harness_advance", to_phase="vision-lock")
@@ -2180,6 +2183,7 @@ def add_fixture(server):
             node = pending.pop(key)
             call(server, "harness_upsert_node", node=node)
             written.add(key)
+    source_only_expansion(server._store())
 
 
 @pytest.mark.parametrize("version", ["2024-11-05", "2025-03-26", "2025-06-18", "future", None])
@@ -2671,6 +2675,7 @@ def test_mcp_wave_confirmation_refuses_without_mutation(tmp_path, arguments):
 def test_mcp_advance_confirmation_cannot_substitute_vision_gate(server, gate, target):
     start(server)
     if gate == "vision-lock":
+        source_only_expansion(server.store)
         native_confirm(server, "align", "Synthetic align")
         call(server, "harness_advance", to_phase="expand")
         call(server, "harness_advance", to_phase="vision-lock")

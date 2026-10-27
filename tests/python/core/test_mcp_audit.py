@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core import test_test_audit
+from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.test_mcp_planner import native_confirmation_result
 
 from codex_harness.core.mcp_planner import PlannerServer
@@ -364,6 +365,7 @@ def started(prospective):
         nodes.append(node)
     saved = invoke(server, "harness_upsert_nodes", nodes=nodes)
     assert not saved["isError"], saved
+    source_only_expansion(server.store)
     compiled = invoke(server, "harness_compile")
     assert not compiled["isError"], compiled
     while server.store.phase() != "roundtable":

@@ -196,6 +196,20 @@ Problems 1–10 are all addressed in this branch (see commits). They are only pa
 value` lines. Tests pin these lines, and markdown hosts fold them into one paragraph.
 - #10: The older sticky "Where / Blocking / Needs you" strip and the map views were restyled but not restructured.
 
+## Expansion follow-up
+
+Expansion follow-up (2026-10-27, owner: planner store/confirmation): RED source tests
+reproduced entry to Vision Lock without expansion and missing whole-lock wording.
+This slice adds the structural gate, teaching refusal and explicit confirmation scope;
+the existing lossless vision renderer displays the fields. Exit check: canonical MCP
+upsert, SQLite reopen, complete question, one correlated reply and downstream refs.
+Source evidence only; the next two real runs and v3 accepted-upgrade measure remain CC-owned.
+Baseline also exposed intermittent acceptance-owner failures (left unchanged):
+`test_execution_uncertain_older_reservation_cannot_be_cleared_without_capture` raised
+`acceptance-revision-changed`; `test_review_continuation_uses_current_gate_with_retained_afs[open]`
+returned an error. Both passed in the final run; exit test: stable repeated owning-case results.
+
 ## Out of scope / not changed
+
 - MCP tool argument and result structures, `structuredContent`, and all proof, approval and gate semantics.
 - Owned by other lanes: async acceptance, audit helper attribution, worker packets, and dispatch.

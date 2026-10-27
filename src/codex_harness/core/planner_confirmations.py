@@ -202,9 +202,16 @@ def _understanding(vision: dict) -> str:
 def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str:
     """The exact stored text of a planning confirmation request (one shared writer)."""
     heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
+    expansion = (
+        "This single Vision Lock response confirms the expansion mode and reason, "
+        "each upgrade's proposed dispositions, quality bar and done definition. "
+        if gate == "vision-lock"
+        else ""
+    )
     return (
         f"{heading} for revision {revision[:12]}.\n"
-        "Read the whole understanding below and approve only if it is right. "
+        + expansion
+        + "Read the whole understanding below and approve only if it is right. "
         "To ask for changes, say what to change; a conditional answer does not approve "
         "this step.\n\n" + _understanding(vision)
     )

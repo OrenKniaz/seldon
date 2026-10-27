@@ -8,6 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from tests.python.core.planning_support import source_only_expansion
 
 from codex_harness.core.mcp_planner import PlannerServer
 
@@ -93,6 +94,8 @@ def test_public_vision_schema_populates_native_done_summary_without_losing_detai
         assert not invoke(
             server, "harness_plan_start", idea="Source-only schema example", name="Schema demo"
         )["isError"]
+        source_only_expansion(server._store())
+        example["fields"]["expansion"] = server.store.spine().node("V1")["fields"]["expansion"]
         assert not invoke(server, "harness_upsert_node", node=example)["isError"]
         assert invoke(server, "harness_advance", to_phase="expand")["isError"]
 
@@ -111,11 +114,10 @@ def test_public_vision_schema_populates_native_done_summary_without_losing_detai
         requested = begin_native(server, gate="vision-lock")
         assert requested["method"] == "elicitation/create"
         card = requested["params"]["message"]
-        assert "Summary only" in card and f"harness_show_node id={example['id']}" in card
-        primary_done = next(
-            line.removeprefix("Done: ") for line in card.splitlines() if line.startswith("Done: ")
-        )
-        assert primary_done == done
+        assert f"Done:\n{done}" in card
+        assert "proposed dispositions" in card
+        for upgrade in example["fields"]["expansion"]["upgrades"]:
+            assert all(value in card for value in upgrade.values())
         # The real bridge persisted the complete scope, not just the native summary.
         full_request = json.loads(
             server.store.connection.execute(

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from tests.python.core import test_planner_replay_gaps
-from tests.python.core.planning_support import source_only_confirmation
+from tests.python.core.planning_support import source_only_confirmation, source_only_expansion
 from tests.python.core.test_planner_resume import _published
 
 from codex_harness.core import planner_confirmations as confirmation
@@ -42,6 +42,7 @@ def store(tmp_path):
 def test_decline_then_fresh_chat_reply_reaches_real_planning_consumer(store, gate, target):
     """Protect new explicit authority; native-only tests intentionally reject caller quotes."""
     if gate == "vision-lock":
+        source_only_expansion(store)
         source_only_confirmation(store, "align")
         store.advance("expand", by="source-test")
         store.advance("vision-lock", by="source-test")

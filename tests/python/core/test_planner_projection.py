@@ -3,15 +3,56 @@
 import argparse
 from copy import deepcopy
 
+import pytest
+from tests.python.core.planning_support import source_only_confirmation, source_only_expansion
+
 from codex_harness.core.mcp_planner import TOOLS, PlannerServer
 from codex_harness.core.plan_cli import batch_nodes, parser
-from codex_harness.core.plan_store import open_plan_store
+from codex_harness.core.plan_store import PlanStoreError, open_plan_store
 from codex_harness.core.planner_confirmations import _understanding
 from codex_harness.core.planner_guidance import NEXT_TARGETS, planning_turn
 from codex_harness.core.planner_schema import node_example
 from codex_harness.core.planner_views import status_card
-from codex_harness.core.planner_vision import render_vision, vision_projection
+from codex_harness.core.planner_vision import expansion_status, render_vision, vision_projection
 from codex_harness.core.status_api import snapshot
+
+
+@pytest.mark.parametrize(
+    "change,path",
+    [
+        (lambda f: f["expansion"].update(mode="auto"), "expansion.mode"),
+        (lambda f: f["expansion"].update(reason=" "), "expansion.reason"),
+        (lambda f: f["expansion"].update(upgrades=[]), "expansion.upgrades"),
+        (lambda f: f["expansion"]["upgrades"][1].update(id="1"), "expansion.upgrades[1].id"),
+        (lambda f: f["expansion"]["upgrades"][0].update(impact=""), "expansion.upgrades[0].impact"),
+        (
+            lambda f: f["expansion"]["upgrades"][0].update(
+                disposition=None, confirmed=True, by="user"
+            ),
+            "expansion.upgrades[0].disposition",
+        ),
+        (lambda f: f.update(quality_bar=False, quality="Don't fall back"), "quality_bar"),
+        (lambda f: f.update(done_feels_like=[]), "done_feels_like"),
+    ],
+)
+def test_incomplete_expansion_reports_semantic_gap_without_approval(change, path, tmp_path):
+    """Catch populated-but-incomplete drafts; projection tests only cover rendering."""
+    with open_plan_store(tmp_path) as store:
+        _, vision = node_example("vision")
+        store.upsert_node(vision)
+        source_only_expansion(store)
+        vision = store.spine().node("V1")
+        complete = expansion_status(vision)
+        assert complete["gaps"] == [] and complete["untracedAcceptedUpgradeRefs"] is None
+        change(vision["fields"])
+        assert path in {gap["path"] for gap in expansion_status(vision)["gaps"]}
+        store.upsert_node(vision)
+        source_only_confirmation(store, "align")
+        store.advance("expand", by="planner")
+        before = list(store.connection.iterdump())
+        with pytest.raises(PlanStoreError, match="Show the Expansion card first"):
+            store.advance("vision-lock", by="planner")
+        assert list(store.connection.iterdump()) == before
 
 
 def test_stored_vision_reaches_summary_and_cockpit_without_alias_or_detail_loss(tmp_path):

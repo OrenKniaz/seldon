@@ -18,6 +18,30 @@ from codex_harness.core.test_audit import audit_revised_tests
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
 
 
+def source_only_expansion(store):
+    """Synthetic proposed choices, never user consent or product acceptance."""
+    vision = store.spine().node("V1")
+    vision["fields"].update(
+        quality_bar="Retain every cent",
+        done_feels_like="Shares add up",
+        expansion=dict(
+            mode="quality",
+            reason="Precise CLI scope",
+            upgrades=[
+                dict(
+                    id=str(i),
+                    text=f"Upgrade {i}",
+                    kind="risk",
+                    impact=f"Impact {i}",
+                    disposition=choice,
+                )
+                for i, choice in enumerate(("accept", "reject", "defer"), 1)
+            ],
+        ),
+    )
+    store.upsert_node(vision)
+
+
 def source_only_confirmation(store, gate, *, statement="SOURCE-ONLY synthetic native response"):
     """Exercise real gate storage with a synthetic client form, never human/runtime proof.
 
@@ -37,6 +61,8 @@ def source_only_confirmation(store, gate, *, statement="SOURCE-ONLY synthetic na
 
 def source_only_vision_lock(store, *, statement="SOURCE-ONLY synthetic vision response"):
     """Drive initial fixture alignment/lock through real phase and native-store contracts."""
+    if "expansion" not in store.spine().node("V1")["fields"]:
+        source_only_expansion(store)
     if store.phase() == "align":
         source_only_confirmation(store, "align")
         store.advance("expand", by="source-test")

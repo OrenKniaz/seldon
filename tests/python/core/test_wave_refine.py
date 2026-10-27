@@ -8,6 +8,7 @@ import sys
 from copy import deepcopy
 
 import pytest
+from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.test_plan_store import draft_inputs, draft_node
 
 from codex_harness.core.plan_cli import main
@@ -42,6 +43,7 @@ def setup_wave(workspace, *, locked=False, two_sketches=False):
             requirementFiles=[],
         )
         store.upsert_node(vision)
+        source_only_expansion(store)
         x1 = store.spine().node("X1")
         x1["fields"].update(
             waveBoundaryIntegrationTestId="T1", waveBoundaryIntegrationModule="test_first.py"

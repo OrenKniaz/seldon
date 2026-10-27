@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import source_only_confirmation
+from tests.python.core.planning_support import source_only_confirmation, source_only_expansion
 
 from codex_harness.core.plan_store import PlanStoreError, open_plan_store
 from codex_harness.core.planner_confirmations import complete_confirmation, prepare_confirmation
@@ -17,6 +17,7 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit/spine
 def store(tmp_path):
     with open_plan_store(tmp_path) as store:
         store.import_spine(FIXTURE)
+        source_only_expansion(store)
         yield store
 
 
@@ -31,6 +32,63 @@ def answer(**updates):
 
 def approvals(store):
     return [dict(row) for row in store.connection.execute("SELECT * FROM approvals")]
+
+
+def test_missing_expansion_refuses_entry_without_changing_phase_or_credit(store):
+    """Catch the unguarded Expand exit; existing tests only guard approval gates."""
+    node = store.spine().node("V1")
+    del node["fields"]["expansion"]
+    store.upsert_node(node)
+    source_only_confirmation(store, "align")
+    store.advance("expand", by="planner")
+    before = database_records(store)
+    with pytest.raises(PlanStoreError, match="Show the Expansion card first"):
+        store.advance("vision-lock", by="planner")
+    assert store.phase() == "expand" and database_records(store) == before
+
+
+def test_whole_lock_displays_expansion_and_confirms_one_revision(store):
+    """Catch undisplayed expansion choices; Align card tests miss whole-lock scope."""
+    node = store.spine().node("V1")
+    from codex_harness.core.mcp_planner import PlannerServer
+    from codex_harness.core.planner_vision import expansion_status
+
+    server = PlannerServer(store.workspace)
+    try:
+        assert not server.call_tool("harness_upsert_node", {"node": node})["isError"]
+    finally:
+        server.close()
+    source_only_confirmation(store, "align")
+    store.advance("expand", by="planner")
+    store.advance("vision-lock", by="planner")
+    request = prepare_confirmation(store, "vision-lock")
+    from codex_harness.core.planner_confirmation_cards import compact_card
+
+    assert request["card"] in compact_card(request)
+    assert "proposed dispositions" in request["card"]
+    for words in ("quality", "Precise CLI scope", "Retain every cent", "Shares add up"):
+        assert words in request["card"]
+    for upgrade in node["fields"]["expansion"]["upgrades"]:
+        assert all(value in request["card"] for value in upgrade.values())
+    assert not store.status()["approval"]["granted"]
+    with open_plan_store(store.workspace) as reopened:
+        result = complete_confirmation(reopened, request["request_id"], "accept", answer())
+        assert result["state"] == "approved"
+        reopened.advance("features", by="planner")
+        assert reopened.phase() == "features"
+        assert expansion_status(reopened.spine().node("V1"), downstream_nodes=[])[
+            "untracedAcceptedUpgradeRefs"
+        ] == ["1"]
+        decision = reopened.spine().node("D1")
+        decision["fields"]["expansionRefs"] = ["1"]
+        reopened.upsert_node(decision)
+        assert (
+            expansion_status(reopened.spine().node("V1"), downstream_nodes=[decision])[
+                "untracedAcceptedUpgradeRefs"
+            ]
+            == []
+        )
+        assert reopened.spine().node("V1") == node
 
 
 def recorded_reviewer(store, *, catalog_update=None):

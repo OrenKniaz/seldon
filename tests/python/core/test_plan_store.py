@@ -14,6 +14,7 @@ from tests.python.core.planning_support import (
     publication_evidence,
     source_controller_roundtable,
     source_only_confirmation,
+    source_only_expansion,
 )
 
 from codex_harness.core.graph import PlanError, load_plan
@@ -617,6 +618,8 @@ def _link_r6(store):
 
 
 def _to(store, phase):
+    if store.phase() == "align" and "expansion" not in store.spine().node("V1")["fields"]:
+        source_only_expansion(store)
     if phase == "publish":
         publication_evidence(store)
     while PHASES.index(store.phase()) < PHASES.index(phase):
@@ -738,6 +741,7 @@ def test_inline_approval_refuses_and_native_confirmation_survives_unchanged_repl
 
 
 def test_demo_cross_gate_and_new_revision_quoted_words_cannot_approve(store):
+    source_only_expansion(store)
     source_only_confirmation(store, "align", statement="Yes, that matches what I want.")
     store.advance("expand", by="planner")
     store.advance("vision-lock", by="planner")

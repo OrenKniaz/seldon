@@ -13,6 +13,68 @@ SECTIONS = (
     ("Assumptions", ("assumptions",)),
 )
 
+EXPANSION_NEXT = (
+    "Show the Expansion card first: mode, 3–7 upgrades, quality bar, done; get accept/reject/defer."
+)
+
+
+def expansion_status(vision: dict, *, downstream_nodes: list[dict] | None = None) -> dict:
+    """Assess declared semantics only; dispositions never establish user consent."""
+    fields = vision["fields"]
+    expansion = fields.get("expansion")
+    expansion = expansion if isinstance(expansion, dict) else {}
+    gaps, accepted, ids = [], [], set()
+
+    def gap(path, message):
+        gaps.append(dict(path=path, message=message))
+
+    def text(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    if expansion.get("mode") not in ("product", "quality"):
+        gap("expansion.mode", "Choose product or quality.")
+    if not text(expansion.get("reason")):
+        gap("expansion.reason", "Explain the mode in one line.")
+    upgrades = expansion.get("upgrades")
+    if not isinstance(upgrades, list) or not 3 <= len(upgrades) <= 7:
+        gap("expansion.upgrades", "Propose 3–7 upgrades.")
+    for index, upgrade in enumerate(upgrades if isinstance(upgrades, list) else []):
+        path = f"expansion.upgrades[{index}]"
+        if not isinstance(upgrade, dict):
+            gap(path, "Record an upgrade object.")
+            continue
+        identity = upgrade.get("id")
+        if not text(identity) or identity in ids:
+            gap(path + ".id", "Use a locally unique stable ID.")
+        else:
+            ids.add(identity)
+            if upgrade.get("disposition") == "accept":
+                accepted.append(identity)
+        for key in ("text", "kind", "impact"):
+            if not text(upgrade.get(key)):
+                gap(path + "." + key, "Record nonblank text.")
+        if upgrade.get("disposition") not in ("accept", "reject", "defer"):
+            gap(path + ".disposition", "Propose accept, reject or defer for confirmation.")
+    for heading, aliases in SECTIONS[5:7]:
+        value = next((fields[key] for key in aliases if key in fields), None)
+        if not (text(value) or isinstance(value, list) and value and all(map(text, value))):
+            gap(aliases[0], f"Record the {heading.lower()} baseline.")
+    linked = {
+        ref
+        for node in downstream_nodes or []
+        if node["kind"] in ("requirement", "decision", "acceptance")
+        for ref in node["fields"].get("expansionRefs", [])
+        if isinstance(ref, str)
+    }
+    return dict(
+        gaps=gaps,
+        acceptedUpgradeRefs=accepted,
+        untracedAcceptedUpgradeRefs=(
+            None if downstream_nodes is None else [ref for ref in accepted if ref not in linked]
+        ),
+        next=EXPANSION_NEXT,
+    )
+
 
 def label(key: str) -> str:
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", key).replace("_", " ").capitalize()
