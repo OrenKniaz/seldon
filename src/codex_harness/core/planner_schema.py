@@ -629,7 +629,9 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "{path: 'data/x.json'}. Setup writes only data/ UTF-8 fixtures.",
             "observe": "action observations: exitEquals, stdoutEquals, stdoutJsonEquals, "
             "stderrNonempty. path observations: fileJsonEquals, fileBytesEquals, fileAbsent, "
-            "bytesUnchangedFrom (a setup snapshot id).",
+            "bytesUnchangedFrom (a setup snapshot id). An observation names one action or one "
+            "path, not both; path observations run after the last action, so split a scenario "
+            "to check files between actions.",
             "refs": "requirementRefs/contractRefs are id@revision of requirement/design nodes.",
             "fieldExample": {
                 "targets": {"app": {"entry": "app_cli.py", "argv": []}},

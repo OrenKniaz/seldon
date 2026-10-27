@@ -1580,7 +1580,14 @@ class PlanStore:
         if spine.semantic and len(spine.ids("bead")) != 2:
             return None
         template = self.workspace / "template"
-        return compile_manifest(spine, template if template.is_dir() else None)["planRevision"]
+        try:
+            return compile_manifest(spine, template if template.is_dir() else None)["planRevision"]
+        except ValueError as error:
+            # While status is read, an invalid semantic document is a planning gap.
+            if not (spine.semantic and getattr(self, "_reading_status", False)):
+                raise
+            self._manifest_error = str(error)
+            return None
 
     def record_audit(self, revision: str, result: dict) -> str:
         with self._transaction():
@@ -3348,6 +3355,18 @@ class PlanStore:
         return rebind_acceptance(self, repo)
 
     def status(self) -> dict:
+        self._reading_status, self._manifest_error = True, None
+        try:
+            status = self._status()
+        finally:
+            self._reading_status = False
+        if self._manifest_error:
+            vision = self.spine().ids("vision")[0]
+            gap = dict(gap="semantic-scenarios-invalid", id=vision, message=self._manifest_error)
+            status["coverage_gaps"] = [*status["coverage_gaps"], gap]
+        return status
+
+    def _status(self) -> dict:
         from codex_harness.core.acceptance import acceptance_status
         from codex_harness.core.roundtable import review_totals
 

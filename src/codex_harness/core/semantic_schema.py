@@ -107,6 +107,12 @@ def validate(document, product, targets, *, require_entries=True):
             raise ValueError("Declare product actions and finite observations")
         for o in s["observe"]:
             fields(o, ["action", "path", *ACTION, *FILE])
+            if "action" in o and "path" in o:
+                raise ValueError(
+                    "An observation targets one action or one path, not both. File observations "
+                    "are checked after the scenario's last action; to check files between "
+                    "actions, split into separate scenarios."
+                )
             reference = "action" if "action" in o else "path"
             allowed = ACTION if reference == "action" else FILE
             fields(o, [reference, *allowed], (reference,))

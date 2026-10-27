@@ -359,3 +359,31 @@ def test_schema_help_scenario_example_validates_and_errors_name_keys(tmp_path):
     bad["scenarios"][0]["steps"] = []
     with pytest.raises(ValueError, match=r"unknown \['steps'\]"):
         validate(bad, tmp_path, example["targets"], require_entries=False)
+
+
+def test_mixed_action_path_observation_teaches_split(tmp_path):
+    """Planners tried per-action file checks; the refusal must say how to express them."""
+    from codex_harness.core.planner_schema import schema_help
+    from codex_harness.core.semantic_schema import validate
+
+    tools = [{"name": "harness_upsert_node", "inputSchema": {}}]
+    example = schema_help(tools, kind="vision")["semanticScenarios"]["fieldExample"]
+    bad = json.loads(json.dumps(example["scenarios"]))
+    bad["scenarios"][0]["observe"][1]["action"] = "a1"
+    with pytest.raises(ValueError, match="split into separate scenarios"):
+        validate(bad, tmp_path, example["targets"], require_entries=False)
+
+
+def test_status_reports_invalid_semantic_scenarios_as_a_gap(semantic_plan):
+    """Invalid scenario data must stay a readable planning gap, not unavailable status."""
+    store, _ = semantic_plan
+    original = store.spine().node("V1")
+    vision = json.loads(json.dumps(original))
+    vision["fields"]["scenarios"]["scenarios"][0]["observe"] = [{"steps": []}]
+    store.upsert_node(vision)
+    try:
+        gaps = [g for g in store.status()["coverage_gaps"] if g["gap"].startswith("semantic")]
+        assert gaps and "unknown ['steps']" in gaps[0]["message"]
+    finally:
+        store.upsert_node(original)
+    assert not [g for g in store.status()["coverage_gaps"] if g["gap"].startswith("semantic")]
