@@ -387,3 +387,15 @@ def test_status_reports_invalid_semantic_scenarios_as_a_gap(semantic_plan):
     finally:
         store.upsert_node(original)
     assert not [g for g in store.status()["coverage_gaps"] if g["gap"].startswith("semantic")]
+
+
+def test_bare_scenario_refs_compile_and_stale_pins_still_fail(semantic_plan):
+    """Planners cannot see node revisions; bare IDs must work, explicit pins stay checked."""
+    store, _ = semantic_plan
+    data = store.spine().to_dict()
+    scenario = next(n for n in data["nodes"] if n["kind"] == "vision")["fields"]["scenarios"]
+    scenario["scenarios"][0].update(requirementRefs=["R"], contractRefs=["CLI"])
+    assert compile_manifest(Spine(data))["planRevision"]
+    scenario["scenarios"][0]["requirementRefs"] = ["R@old"]
+    with pytest.raises(ValueError, match="Stale/unknown semantic reference"):
+        compile_manifest(Spine(data))

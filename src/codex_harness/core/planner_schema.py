@@ -632,7 +632,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "bytesUnchangedFrom (a setup snapshot id). An observation names one action or one "
             "path, not both; path observations run after the last action, so split a scenario "
             "to check files between actions.",
-            "refs": "requirementRefs/contractRefs are id@revision of requirement/design nodes.",
+            "refs": "requirementRefs/contractRefs are requirement/design node IDs, e.g. R1; "
+            "an optional @revision pin is checked when present.",
             "fieldExample": {
                 "targets": {"app": {"entry": "app_cli.py", "argv": []}},
                 "scenarios": {
@@ -640,8 +641,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
                     "scenarios": [
                         {
                             "id": "S1",
-                            "requirementRefs": ["R1@<revision>"],
-                            "contractRefs": ["G1@<revision>"],
+                            "requirementRefs": ["R1"],
+                            "contractRefs": ["G1"],
                             "setup": {
                                 "files": [{"path": "data/db.json", "utf8": "[]"}],
                                 "snapshots": [{"id": "before", "path": "data/db.json"}],

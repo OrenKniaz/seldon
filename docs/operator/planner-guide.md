@@ -10,7 +10,7 @@ in this guide apply only to legacy plans.
 
 Put the closed `seldon/scenarios-v1` document in `V1.fields.scenarios` and explicit
 `{target: {entry: "product.py", argv: []}}` bindings in `V1.fields.targets`.
-Use requirement/design `id@revision` references in each scenario. Design nodes contain
+Reference requirement/design nodes by ID (e.g. `R1`) in each scenario. Design nodes contain
 the complete interface contracts. CLI actions declare `target`, `operation`, and `argv`;
 observations use `semantic_schema`'s finite vocabulary (`exitEquals`, `stdoutEquals`,
 `stdoutJsonEquals`, `stderrNonempty`, and file observations). Setup contains data only.

@@ -435,8 +435,8 @@ def semantic_spec(spine, product=None):
     for scenario in document["scenarios"]:
         for field, kind in (("requirementRefs", "requirement"), ("contractRefs", "design")):
             for ref in scenario[field]:
-                key, _, revision = ref.rpartition("@")
-                if key not in spine.ids(kind) or revision != spine.revision(key):
+                key, pinned, revision = ref.partition("@")
+                if key not in spine.ids(kind) or pinned and revision != spine.revision(key):
                     raise ValueError(f"Stale/unknown semantic reference: {ref}")
                 if kind == "requirement":
                     covered.add(key)
@@ -501,7 +501,7 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         ]:
             raise ValueError("semantic-v1 requires Contracts -> Build -> controller Validation")
         contract_ids = {
-            ref.rpartition("@")[0] for s in document["scenarios"] for ref in s["contractRefs"]
+            ref.partition("@")[0] for s in document["scenarios"] for ref in s["contractRefs"]
         }
         for key in beads:
             if not covered.issubset(

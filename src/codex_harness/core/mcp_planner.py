@@ -1898,7 +1898,8 @@ class PlannerServer:
                 return (
                     "semantic-v1 resumed (Windows Python CLI only). Planner writes DATA: "
                     "V1.fields.scenarios uses seldon/scenarios-v1; V1.fields.targets binds "
-                    "target names to {entry, argv}. References are requirement/design id@revision. "
+                    "target names to {entry, argv}. References are requirement/design node IDs "
+                    "(optional @revision pin). "
                     "Design nodes hold contracts. Declare exactly two beads with semanticPhase "
                     "contracts/build and Build dependsOn Contracts. No proofModule or test nodes. "
                     "No prospective audit or protected test authoring. Review, publish and packet "
