@@ -345,3 +345,17 @@ def test_legacy_still_requires_protected_tests_and_proof_modules(semantic_plan):
         Spine(data)
     plan = load_plan(store.workspace)
     assert plan.semantic and plan.beads["B"].proof_module is None
+
+
+def test_schema_help_scenario_example_validates_and_errors_name_keys(tmp_path):
+    """The taught example must pass the real validator; refusals must name the bad keys."""
+    from codex_harness.core.planner_schema import schema_help
+    from codex_harness.core.semantic_schema import validate
+
+    tools = [{"name": "harness_upsert_node", "inputSchema": {}}]
+    example = schema_help(tools, kind="vision")["semanticScenarios"]["fieldExample"]
+    assert validate(example["scenarios"], tmp_path, example["targets"], require_entries=False)
+    bad = json.loads(json.dumps(example["scenarios"]))
+    bad["scenarios"][0]["steps"] = []
+    with pytest.raises(ValueError, match=r"unknown \['steps'\]"):
+        validate(bad, tmp_path, example["targets"], require_entries=False)

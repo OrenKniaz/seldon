@@ -9,8 +9,14 @@ FILE = "fileJsonEquals fileBytesEquals fileAbsent bytesUnchangedFrom".split()
 
 
 def fields(value, allowed, required=()):
-    if not isinstance(value, dict) or set(value) - set(allowed) or set(required) - value.keys():
-        raise ValueError("Unknown/missing fields; use the semantic-v1 vocabulary")
+    if not isinstance(value, dict):
+        raise ValueError(f"Unknown/missing fields; expected an object with {sorted(allowed)}")
+    unknown, missing = set(value) - set(allowed), set(required) - value.keys()
+    if unknown or missing:
+        raise ValueError(
+            f"Unknown/missing fields: unknown {sorted(unknown)}, missing {sorted(missing)}; "
+            f"allowed {sorted(allowed)}. See harness_schema kind=vision semanticScenarios."
+        )
 
 
 def path(root, name):

@@ -618,6 +618,52 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "suite can reference requirements across features. These are existing compiler "
             "limits, not additional authoring or approval gates.",
         }
+        result["semanticScenarios"] = {
+            "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
+            "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
+            "keep every other field and its exact wording).",
+            "launch": "Each action runs python -B <entry> <target argv> <action argv> from the "
+            "product root. For a python -m package, add a thin entry file that calls "
+            "runpy.run_module('<package>', run_name='__main__').",
+            "argv": "Plain strings may not contain / \\ : or ..; pass sandbox paths as "
+            "{path: 'data/x.json'}. Setup writes only data/ UTF-8 fixtures.",
+            "observe": "action observations: exitEquals, stdoutEquals, stdoutJsonEquals, "
+            "stderrNonempty. path observations: fileJsonEquals, fileBytesEquals, fileAbsent, "
+            "bytesUnchangedFrom (a setup snapshot id).",
+            "refs": "requirementRefs/contractRefs are id@revision of requirement/design nodes.",
+            "fieldExample": {
+                "targets": {"app": {"entry": "app_cli.py", "argv": []}},
+                "scenarios": {
+                    "schema": "seldon/scenarios-v1",
+                    "scenarios": [
+                        {
+                            "id": "S1",
+                            "requirementRefs": ["R1@<revision>"],
+                            "contractRefs": ["G1@<revision>"],
+                            "setup": {
+                                "files": [{"path": "data/db.json", "utf8": "[]"}],
+                                "snapshots": [{"id": "before", "path": "data/db.json"}],
+                            },
+                            "actions": [
+                                {
+                                    "id": "a1",
+                                    "cli": {
+                                        "target": "app",
+                                        "operation": "list",
+                                        "argv": ["--db", {"path": "data/db.json"}, "list"],
+                                    },
+                                }
+                            ],
+                            "observe": [
+                                {"action": "a1", "exitEquals": 0, "stdoutJsonEquals": []},
+                                {"path": "data/db.json", "bytesUnchangedFrom": "before"},
+                            ],
+                            "verdict": "all",
+                        }
+                    ],
+                },
+            },
+        }
         result["compilationMetadata"] = {
             "owner": "The existing vision node's fields; not arguments to harness_compile.",
             "requiredWhen": "Required before compile, not at initial vision authoring.",

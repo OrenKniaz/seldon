@@ -2275,7 +2275,10 @@ class PlanStore:
         if spine.semantic and kind == "test":
             from codex_harness.core.spine import semantic_spec
 
-            semantic_spec(spine)
+            try:
+                semantic_spec(spine)
+            except ValueError as error:
+                raise PlanStoreError("plan-semantic-scenarios-invalid", str(error)) from error
             return
         scope = execution_scope(spine)
         coverage = spine.coverage_gaps()
