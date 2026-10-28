@@ -198,6 +198,11 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         ]
         == revision
     )
+    # Worker start pre-gates on resume; semantic plans have no audit to hold on.
+    from codex_harness.core.planner_resume import resume_plan
+
+    held = resume_plan(store.workspace, expected_revision=revision)
+    assert held["reasonCode"] == "native-execution-confirmation-required", held
     monkeypatch.setattr(worker_packet, "MAX_CHARACTERS", 10)
     with pytest.raises(ValueError, match="exceed"):
         packet_view(store, "B")

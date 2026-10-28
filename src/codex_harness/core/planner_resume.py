@@ -249,7 +249,7 @@ def resume_plan(
                 return finish()
             if resolution["audit"]["current"] is None:
                 return finish()
-            if not resolution["audit"]["current"]:
+            if not resolution["audit"]["current"] and resolution["audit"].get("applicable", True):
                 result.update(
                     reasonCode="canonical-prerequisite",
                     nextAction={
