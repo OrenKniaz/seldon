@@ -469,8 +469,11 @@ def build_packet(
                 "Workers cannot submit verdicts or approve themselves. Report unit test results "
                 "and blockers. For every test name the behavior, regression and missing coverage.",
                 json.dumps(raw_bead, sort_keys=True),
-                json.dumps(dict(plan.semantic), sort_keys=True),
-                *((repo / name).read_text(encoding="utf-8") for name in plan.requirement_files),
+                # SCENARIOS.json already carries the manifest's semantic block verbatim.
+                *(
+                    name + "\n" + (repo / name).read_text(encoding="utf-8")
+                    for name in plan.requirement_files
+                ),
                 *(
                     name + "\n" + (repo / name).read_text(encoding="utf-8")
                     for name in bead.owned_files

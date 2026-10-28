@@ -167,6 +167,8 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         store.publish(by="source-test", export_dir=store.workspace / "published")
     packet = packet_view(store, "B")["packet"]
     assert "SCENARIOS.json" in packet and "Hello" in packet and "Implement the product" in packet
+    # The scenario spec is large; it must appear once, not inline and again as a file.
+    assert packet.count('"first-moment"') == 1
     assert "vision expansion" in review_packet(store)
     assert store.passing_audit(manifest["planRevision"]) is None
     state = store.status()
