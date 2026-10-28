@@ -207,18 +207,57 @@ def _understanding(vision: dict) -> str:
 
 def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str:
     """The exact stored text of a planning confirmation request (one shared writer)."""
+    from codex_harness.core.planner_vision import readable, vision_projection
+
+    def excerpt(text, limit):
+        if len(text) <= limit:
+            return text
+        head = text[: limit - 1]
+        return (head.rsplit(". ", 1)[0] + "." if ". " in head else head.rpartition(" ")[0]) + "…"
+
+    projection = vision_projection(vision)
+    projection["sections"][0]["text"] = vision["text"].replace("\r\n", "\n").split("\n\n", 1)[0]
+    lines = [projection["title"]]
+    for section in (projection["sections"][i] for i in (0, 3, 4, 5, 6)):
+        label, text = section["label"], section["text"]
+        short = excerpt(text, 599 if label == "Vision" else 300)
+        if label == "Vision" and text != vision["text"] and not short.endswith("…"):
+            short += "…"
+        lines.append(f"{label}:\n{short}")
+        if label == "Vision" or short != text:
+            lines.append("Full vision: template/VISION.md")
+    fields = vision["fields"]
+    expansion = fields.get("expansion", {})
+    for upgrade in expansion.get("upgrades", []):
+        value = " | ".join(
+            str(upgrade.get(k, "Not recorded")) for k in ("id", "disposition", "text")
+        )
+        lines.append(" ".join(value.splitlines()))
+    scenarios = fields.get("scenarios", [])
+    if isinstance(scenarios, dict):
+        scenarios = scenarios.get("scenarios", [])
+    lines.append("Scenarios:" if scenarios else "Scenarios: Not recorded")
+    for scenario in scenarios:
+        if isinstance(scenario, dict):
+            intent = "; ".join(
+                f"{a['id'].replace('_', ' ').replace('-', ' ')} ({a['cli']['operation']})"
+                for a in scenario.get("actions", [])
+            )
+            scenario = f"{scenario['id']}: {intent or 'Intent not recorded'}"
+        lines.append(" ".join(readable(scenario).splitlines()))
+    lines.append("Full scenarios: template/VISION.md and template/SCENARIOS.json")
+    understanding = "\n".join(lines)
     heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
     if gate == "vision-lock":
         return (
             f"{heading} for revision {revision[:12]}.\n"
-            "Expansion proposed dispositions, quality bar and done definition:\n\n"
-            + _understanding(vision)
+            "Expansion proposed dispositions, quality bar and done definition:\n\n" + understanding
         )
     return (
         f"{heading} for revision {revision[:12]}.\n"
         + "Read the whole understanding below and approve only if it is right. "
         "To ask for changes, say what to change; a conditional answer does not approve "
-        "this step.\n\n" + _understanding(vision)
+        "this step.\n\n" + understanding
     )
 
 

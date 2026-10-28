@@ -34,6 +34,204 @@ def approvals(store):
     return [dict(row) for row in store.connection.execute("SELECT * FROM approvals")]
 
 
+@pytest.mark.parametrize("gate", ["align", "vision-lock"])
+def test_actual_run3_vision_is_excerpted_without_changing_saved_authority(tmp_path, gate):
+    """Catch the real 7k character field size failure missed by the small scenario fixture."""
+    from tests.python.core.test_mcp_planner import workspace_wire
+
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    node = json.loads(
+        (Path(__file__).parents[2] / "fixtures/tally-run3-vision.json").read_text(encoding="utf-8")
+    )
+    server = PlannerServer(tmp_path)
+    try:
+        for tool, arguments in [
+            ("harness_plan_start", dict(idea=node["text"], name="Tally", plan_mode="semantic-v1")),
+            ("harness_upsert_node", dict(node=node)),
+        ]:
+            result = workspace_wire(server, tool, expected_workspace=str(tmp_path), **arguments)
+            assert not result["isError"], result
+        store = server.store
+        if gate == "vision-lock":
+            source_only_confirmation(store, "align")
+            store.advance("expand", by="source-test")
+            store.advance("vision-lock", by="source-test")
+        revision, before = store.spine().plan_revision(), approvals(store)
+        result = workspace_wire(
+            server, "harness_prepare_chat_confirmation", gate=gate, expected_workspace=str(tmp_path)
+        )
+        assert not result["isError"], result
+        request = result["structuredContent"]
+        prefix, body = result["content"][0]["text"].split("<<<SHOW-VERBATIM\n", 1)
+        card, footer = body.split("\nSHOW-VERBATIM>>>", 1)
+        (tmp_path / f"actual-{gate}-question.txt").write_text(request["card"], encoding="utf-8")
+        assert len(card) <= 2500, (len(card), card)
+        assert "do not summarise, shorten or add to it" in prefix
+        assert "Full vision: template/VISION.md" in card
+        assert card.endswith("Full scenarios: template/VISION.md and template/SCENARIOS.json")
+        assert node["text"].replace("\r\n", "\n").split("\n\n", 1)[0] in card and "…" in card
+        for key in ("scope_in", "scope_out", "quality_bar", "done_feels_like"):
+            assert node["fields"][key][:100] in card
+        for scenario in node["fields"]["scenarios"]["scenarios"]:
+            assert any(line.startswith(scenario["id"] + ":") for line in card.splitlines())
+        for upgrade in node["fields"]["expansion"]["upgrades"]:
+            assert any(
+                upgrade["id"] in line and upgrade["disposition"] in line and upgrade["text"] in line
+                for line in card.splitlines()
+            )
+        assert "exitEquals" not in card and "fileJsonEquals" not in card
+        assert request["request_id"] in footer and revision in footer
+        assert "quote their latest actual chat message verbatim" in footer
+        saved = store._latest_draft_event("confirmation-requested")
+        assert saved["vision"] == store.spine().node(node["id"]) == node
+        assert saved["card"] == request["card"] and saved["request_id"] == request["request_id"]
+        assert saved["plan_revision"] == revision == store.spine().plan_revision()
+        assert approvals(store) == before and not store.status()["approval"]["granted"]
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("prefix", ["Complete sentence. ", ""])
+def test_excerpt_cuts_at_sentence_or_word_boundary_and_keeps_full_words(store, prefix):
+    """Catch partial-word cuts and lost scope; retained run3 has a short first paragraph."""
+    node = store.spine().node("V1")
+    text = prefix + "wholeword " * 100
+    node["text"] = text + "\n\nSecond paragraph must remain stored."
+    node["fields"]["scope_in"] = text
+    store.upsert_node(node)
+    request = prepare_confirmation(store, "align")
+    card = request["card"]
+    vision = card.split("Vision:\n", 1)[1].split("\nFull vision:", 1)[0]
+    scope = card.split("Scope in:\n", 1)[1].split("\nFull vision:", 1)[0]
+    for actual, limit in ((vision, 600), (scope, 300)):
+        assert len(actual) <= limit and actual.endswith("…")
+        assert actual[:-1] == (prefix.strip() if prefix else " ".join(actual[:-1].split()))
+        assert text.startswith(actual[:-1])
+        if not prefix:
+            assert actual.endswith("wholeword…")
+    assert request["vision"] == store.spine().node("V1") == node
+    assert approvals(store) == []
+
+
+@pytest.mark.parametrize("gate", ["align", "vision-lock"])
+def test_six_scenario_question_is_short_complete_and_revision_bound(store, gate):
+    """Catch full scenario data overwhelming chat; existing card fixtures have no scenarios."""
+    from tests.python.core.test_mcp_planner import workspace_wire
+
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    node = store.spine().node("V1")
+    node.update(title="Tally", text="Track local expenses exactly through a small offline CLI.")
+    intents = [
+        "read_empty_ledger",
+        "add_and_list_records",
+        "total_exact_decimals",
+        "filter_by_category",
+        "reject_invalid_amounts",
+        "preserve_corrupt_data",
+    ]
+    node["fields"].update(
+        users="One local user",
+        first_user_moment="Add lunch and read the total",
+        scope_in="Add, list, total and category filters with local JSON storage",
+        scope_out="No networking, GUI or currency conversion",
+        scenarios={
+            "schema": "seldon/scenarios-v1",
+            "scenarios": [
+                dict(
+                    id=f"S{i}",
+                    requirementRefs=["R1"],
+                    contractRefs=["CLI"],
+                    setup={"files": [{"path": "data/ledger.json", "utf8": "[]"}]},
+                    actions=[
+                        dict(
+                            id=intent,
+                            cli=dict(
+                                target="tally",
+                                operation="list",
+                                argv=["--db", {"path": "data/ledger.json"}, "list"],
+                            ),
+                        )
+                    ],
+                    observe=[
+                        dict(action=intent, exitEquals=0, stdoutEquals="[]\n"),
+                        {"path": "data/ledger.json", "fileJsonEquals": []},
+                    ],
+                    verdict="all",
+                )
+                for i, intent in enumerate(intents, 1)
+            ],
+        },
+    )
+    server = PlannerServer(store.workspace)
+    try:
+        result = workspace_wire(
+            server, "harness_upsert_node", node=node, expected_workspace=str(store.workspace)
+        )
+        assert not result["isError"], result
+        if gate == "vision-lock":
+            # Source-only prerequisite response; the tested question remains unanswered.
+            source_only_confirmation(store, "align")
+            store.advance("expand", by="source-test")
+            store.advance("vision-lock", by="source-test")
+        revision = store.spine().plan_revision()
+        before = approvals(store)
+        result = workspace_wire(
+            server,
+            "harness_prepare_chat_confirmation",
+            gate=gate,
+            expected_workspace=str(store.workspace),
+        )
+        assert not result["isError"], result
+        request = result["structuredContent"]
+        text = result["content"][0]["text"]
+        prefix, body = text.split("<<<SHOW-VERBATIM\n", 1)
+        card, footer = body.split("\nSHOW-VERBATIM>>>", 1)
+        (store.workspace / f"{gate}-question.txt").write_text(text, encoding="utf-8")
+        assert len(card) <= 2500, (len(card), card)
+        assert "do not summarise, shorten or add to it" in prefix
+        assert card.endswith("Full scenarios: template/VISION.md and template/SCENARIOS.json")
+        for key in (
+            "scope_in",
+            "scope_out",
+            "quality_bar",
+            "done_feels_like",
+        ):
+            assert node["fields"][key] in card
+        assert node["text"] in card
+        for i, intent in enumerate(intents, 1):
+            assert any(
+                f"S{i}" in line and intent.replace("_", " ") in line for line in card.splitlines()
+            )
+        for upgrade in node["fields"]["expansion"]["upgrades"]:
+            assert any(
+                all(upgrade[key] in line for key in ("id", "text", "disposition"))
+                for line in card.splitlines()
+            )
+        assert "exitEquals" not in card and "fileJsonEquals" not in card
+        assert request["request_id"] in footer and revision in footer
+        assert "quote their latest actual chat message verbatim" in footer
+        saved = store._latest_draft_event("confirmation-requested")
+        assert {**saved, "source_verified": False, "human_identity_verified": False} == request
+        assert saved["vision"] == node
+        assert request["plan_revision"] == store.spine().plan_revision() == revision
+        assert approvals(store) == before and not store.status()["approval"]["granted"]
+    finally:
+        server.close()
+
+
+def test_incomplete_expansion_stays_readable_without_consent(store):
+    """Catch an Align crash on missing upgrade words; the existing gap test removes expansion."""
+    node = store.spine().node("V1")
+    del node["fields"]["expansion"]["upgrades"][0]["impact"]
+    store.upsert_node(node)
+    request = prepare_confirmation(store, "align")
+    assert "Not recorded" in request["card"]
+    assert "Upgrade 1" in request["card"]
+    assert request["vision"] == node and approvals(store) == []
+
+
 def test_missing_expansion_refuses_entry_without_changing_phase_or_credit(store):
     """Catch the unguarded Expand exit; existing tests only guard approval gates."""
     node = store.spine().node("V1")
@@ -66,10 +264,10 @@ def test_whole_lock_displays_expansion_and_confirms_one_revision(store):
 
     assert request["card"] in compact_card(request)
     assert "proposed dispositions" in request["card"]
-    for words in ("quality", "Precise CLI scope", "Retain every cent", "Shares add up"):
+    for words in ("quality", "Retain every cent", "Shares add up"):
         assert words in request["card"]
     for upgrade in node["fields"]["expansion"]["upgrades"]:
-        assert all(value in request["card"] for value in upgrade.values())
+        assert all(upgrade[key] in request["card"] for key in ("id", "text", "disposition"))
     assert not store.status()["approval"]["granted"]
     with open_plan_store(store.workspace) as reopened:
         result = complete_confirmation(reopened, request["request_id"], "accept", answer())
@@ -420,30 +618,14 @@ def test_request_card_and_response_survive_reopen_exactly(store):
     store.upsert_node(node)
     request = prepare_confirmation(store, "align")
     assert request["vision"] == node
-    for label in (
-        "Vision",
-        "Users",
-        "First moment",
-        "Scope in",
-        "Scope out",
-        "Quality",
-        "Done",
-        "Assumptions",
-    ):
+    for label in ("Vision", "Scope in", "Scope out", "Quality", "Done"):
         assert f"{label}:\n" in request["card"]
-    for key in (
-        "vision",
-        "users",
-        "first_user_moment",
-        "scope_in",
-        "scope_out",
-        "quality_bar",
-        "done_feels_like",
-    ):
+    for key in ("scope_out", "quality_bar", "done_feels_like"):
         assert node["fields"][key] in request["card"]
-    assert node["text"] in request["card"]
-    assert "- Only dollars\n- Tip is a whole percent" in request["card"]
-    assert "Boundary condition:\nPreserve this full custom detail" in request["card"]
+    assert node["fields"]["scope_in"] not in request["card"]
+    assert "Full vision: template/VISION.md" in request["card"]
+    # Complete words/aliases/custom details stay in the saved authority, not the excerpt.
+    assert request["vision"] == node
     assert '"fields"' not in request["card"]
     assert '"kind"' not in request["card"]
     assert "requirementFiles" not in request["card"]
