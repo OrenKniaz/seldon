@@ -230,3 +230,13 @@ def test_chat_execution_refusal_or_changed_inputs_never_creates_job(project, mon
             project, options["expected_revision"], options["workers"], timeout=5, call_cap=1
         )
     assert not (project.workspace / ".codex-harness/worker-jobs").exists()
+
+
+def test_uppercase_quote_hash_is_accepted_and_stored_normalized():
+    """A real planner sent PowerShell-style uppercase hex for an exact 'Approve' and was refused."""
+    quote = "Approve"
+    upper = hashlib.sha256(quote.encode("utf-8")).hexdigest().upper()
+    _, _, evidence = confirmation._chat_evidence("r", "rev", quote, upper, "user")
+    assert evidence["quote_sha256"] == upper.lower()
+    with pytest.raises(ValueError, match="exact UTF-8 bytes"):
+        confirmation._chat_evidence("r", "rev", quote + "\n", upper, "user")

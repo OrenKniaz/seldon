@@ -52,8 +52,12 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
         or not actor_label.strip()
     ):
         raise ValueError("chat-confirmation-quote-and-actor-required")
-    if hashlib.sha256(quoted_message.encode("utf-8")).hexdigest() != quote_sha256:
-        raise ValueError("chat-confirmation-quote-hash-mismatch")
+    expected = hashlib.sha256(quoted_message.encode("utf-8")).hexdigest()
+    if not isinstance(quote_sha256, str) or quote_sha256.strip().lower() != expected:
+        raise ValueError(
+            "chat-confirmation-quote-hash-mismatch: quote_sha256 must be the hex SHA-256 of "
+            "quoted_message's exact UTF-8 bytes (no added newline)"
+        )
     choice = quoted_message.strip()
     conditions = ""
     if choice.casefold() not in {"approve", "no", "cancel"}:
@@ -68,7 +72,7 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
         request_id=request_id,
         revision=expected_revision,
         quoted_message=quoted_message,
-        quote_sha256=quote_sha256,
+        quote_sha256=expected,
         actor_label=actor_label,
         actor_identity_verified=False,
         source_claim="latest-external-chat-message",
