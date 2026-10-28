@@ -113,7 +113,17 @@ def execute(s, root, targets, phase, seconds, deadline):
             elif key == "fileAbsent":
                 value = not path(root, o["path"]).exists()
             else:
-                raw = actual["stdout"] if key == "stdoutJsonEquals" else read(path(root, o["path"]))
+                try:
+                    raw = (
+                        actual["stdout"]
+                        if key == "stdoutJsonEquals"
+                        else read(path(root, o["path"]))
+                    )
+                except FileNotFoundError:
+                    observations.append(
+                        dict(check=key, passed=False, actual=None, reason="product file missing")
+                    )
+                    continue
                 if key == "bytesUnchangedFrom":
                     value, expected = raw == snapshots[expected], True
                 elif key == "fileBytesEquals":

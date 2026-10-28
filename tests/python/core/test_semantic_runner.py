@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +30,48 @@ p.add_argument('amount'); a=p.parse_args()
 """
 STUB = GRAMMAR + "print('SELDON-STUB '+a.operation, file=sys.stderr); sys.exit(3)\n"
 PRODUCT = GRAMMAR + "print('amount must be positive', file=sys.stderr); sys.exit(2)\n"
+
+
+@pytest.mark.parametrize("check,expected", [("fileJsonEquals", []), ("fileBytesEquals", "[]")])
+def test_missing_product_output_fails_then_persisted_output_passes(
+    tmp_path, monkeypatch, check, expected
+):
+    """Protect output RED→GREEN; existing file tests always materialize the observed file."""
+    # Worker cwd changes: keep this test independent of the known relative-path import bug.
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3] / "src"))
+    document = scenario()
+    s = document["scenarios"][0]
+    s["setup"] = {}
+    s["observe"] = [{"path": "data/ledger.json", check: expected}]
+    entry = tmp_path / "tally.py"
+    entry.write_text(STUB)
+    red = run(document, tmp_path, TARGETS, "contracts")[0]
+    assert red["state"] == "FAIL", red
+    assert red["stubActions"] == ["add"]
+    assert red["observations"] == [
+        dict(check=check, passed=False, actual=None, reason="product file missing")
+    ]
+    assert red["cleanup"]["quiescenceVerified"]
+    entry.write_text(GRAMMAR)
+    assert run(document, tmp_path, TARGETS, "validation")[0]["state"] == "FAIL"
+    entry.write_text(
+        GRAMMAR + "from pathlib import Path\n"
+        "db=Path(a.db); db.parent.mkdir(parents=True); db.write_text('[]')\n"
+    )
+    green = run(document, tmp_path, TARGETS, "validation")[0]
+    assert green["state"] == "PASS", green
+    assert green["cleanup"]["quiescenceVerified"]
+
+
+def test_missing_setup_snapshot_remains_error(tmp_path, monkeypatch):
+    """Protect setup errors; post-action output coverage cannot detect a missing preimage."""
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3] / "src"))
+    (tmp_path / "tally.py").write_text(STUB)
+    document = scenario()
+    document["scenarios"][0]["setup"]["files"] = []
+    result = run(document, tmp_path, TARGETS, "contracts")[0]
+    assert result["state"] == "ERROR", result
+    assert "ledger.json" in result["reason"]
 
 
 def test_tally_stub_fail_then_implemented_fixture_cli_pass(tmp_path):
