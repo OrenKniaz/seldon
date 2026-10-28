@@ -634,9 +634,72 @@ def test_bare_scenario_refs_compile_and_stale_pins_still_fail(semantic_plan):
         compile_manifest(Spine(data))
 
 
-def test_semantic_review_packet_scopes_reviewers_to_three_jobs(semantic_plan):
+def test_semantic_review_packet_keeps_three_jobs_and_adds_scenario_feasibility(semantic_plan):
     """A real run looped on edge-case findings; semantic reviewers must not review test depth."""
     store, _ = semantic_plan
     packet = review_packet(store)
-    assert "Review only three things" in packet
+    assert "Review only four things" in packet
+    for job in (
+        "Expansion within scope",
+        "Vision integrity",
+        "Spine trickle-down",
+        "Scenario feasibility",
+    ):
+        assert job in packet
+    assert "files, parent dirs, prior state" in packet
+    assert "each negative scenario's missing precondition is deliberate" in packet
+    assert "major only for a break in (1)-(4)" in packet
     assert "Look for missing features or edge cases" not in packet
+
+
+def test_public_dirs_example_compiles_to_real_runner_with_deliberate_negative(semantic_plan):
+    """Catch teaching/compile/runner drift; standalone setup tests bypass the typed producer."""
+    from codex_harness.core.semantic_runner import run
+
+    store, _ = semantic_plan
+    server = PlannerServer(store.workspace)
+    try:
+        result = server.call_tool("harness_schema", {"kind": "vision"})
+        assert not result["isError"], result
+        example = result["structuredContent"]["semanticScenarios"]["fieldExample"]
+        document = example["scenarios"]
+        positive = document["scenarios"][0]
+        assert positive["setup"]["dirs"] == ["data"]
+        positive["setup"] = {"dirs": positive["setup"]["dirs"]}
+        positive.update(requirementRefs=["R"], contractRefs=["CLI"])
+        positive["observe"] = [
+            {"action": "a1", "exitEquals": 0, "stdoutJsonEquals": []},
+            {"path": "data/db.json", "fileJsonEquals": []},
+        ]
+        document["scenarios"].append(
+            dict(
+                positive,
+                id="missing-parent-negative",
+                setup={},
+                observe=[
+                    {"action": "a1", "exitEquals": 2, "stderrNonempty": True},
+                    {"path": "data/db.json", "fileAbsent": True},
+                ],
+            )
+        )
+        example["targets"]["app"]["entry"] = "hello.py"  # Existing fixture-owned entry.
+        vision = store.spine().node("V1")
+        vision["fields"].update(scenarios=document, targets=example["targets"])
+        result = server.call_tool("harness_upsert_node", {"node": vision})
+        assert not result["isError"], result
+        compiled = store.compile_template(store.workspace / "template")["semantic"]
+        product = store.workspace / "template"
+        (product / "hello.py").write_text(
+            "import argparse,sys\nfrom pathlib import Path\n"
+            "p=argparse.ArgumentParser();p.add_argument('--db');p.add_argument('operation')\n"
+            "db=Path(p.parse_args().db)\n"
+            "if not db.parent.is_dir():\n print('missing parent',file=sys.stderr);sys.exit(2)\n"
+            "assert not any(db.parent.iterdir())\n"
+            "db.write_text('[]',encoding='utf-8');print('[]')\n",
+            encoding="utf-8",
+        )
+        results = run(compiled["scenarios"], product, compiled["targets"], "validation")
+        assert [r["state"] for r in results] == ["PASS", "PASS"], results
+        assert all(r["cleanup"]["quiescenceVerified"] for r in results)
+    finally:
+        server.close()

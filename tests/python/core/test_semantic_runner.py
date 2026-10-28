@@ -33,6 +33,23 @@ PRODUCT = GRAMMAR + "print('amount must be positive', file=sys.stderr); sys.exit
 
 
 @pytest.mark.parametrize(
+    "dirs", ["data", [None], ["../escape"], [".config"], ["data/helper.py"], ["data/alias."]]
+)
+def test_unsafe_setup_dirs_are_refused_before_product_action(tmp_path, dirs):
+    """Catch dirs bypassing data-only preflight; existing escape tests only supply files/argv."""
+    marker = tmp_path / "launched"
+    (tmp_path / "tally.py").write_text(
+        f"open({str(marker)!r},'w').write('unexpected')", encoding="utf-8"
+    )
+    document = scenario()
+    document["scenarios"][0]["setup"]["dirs"] = dirs
+    result = run(document, tmp_path, TARGETS, "validation")
+    assert result[0]["state"] == "ERROR", result
+    assert not result[0].get("cleanup")  # Preflight rejects before held payload release.
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
     "ending,expected,state",
     [
         ("\n", "1.00\n", "PASS"),

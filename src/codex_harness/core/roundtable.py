@@ -243,8 +243,9 @@ def _total_exhaustion_advice(store, reviewer, revision, total, max_total):
 def _test_bodies(store: PlanStore, protected=None) -> str:
     if Spine(store._data()).semantic:
         return (
-            "## Semantic review\nExactly three jobs: vision expansion within scope, "
-            "vision integrity, and spine trickle-down. Review scenario data and shared contracts; "
+            "## Semantic review\nExactly four jobs: vision expansion within scope, "
+            "vision integrity, spine trickle-down, and scenario feasibility. "
+            "Review scenario data and shared contracts; "
             "code/test review belongs to workers.\n"
         )
     if not (store.workspace / "template").is_dir():
@@ -300,14 +301,17 @@ def _packet(
         + "\n```\n"
     )
     focus = (
-        "Review only three things. (1) Expansion within scope: a clear improvement the "
+        "Review only four things. (1) Expansion within scope: a clear improvement the "
         "vision invites but the plan misses, or scope the vision does not ask for. "
         "(2) Vision integrity: every locked vision item, requirement and user-stated "
         "scenario reaches the plan unweakened. (3) Spine trickle-down: vision, requirements, "
         "contracts, scenarios and beads link completely and consistently. Scenarios must "
         "cover each requirement's stated behaviour; further edge cases and test depth are "
-        "the Build worker's unit-test job, so report them as note at most. Use blocker or "
-        "major only for a break in (1)-(3). Do not review code or test completeness.\n"
+        "the Build worker's unit-test job, so report them as note at most. "
+        "(4) Scenario feasibility: each positive scenario's setup satisfies the preconditions "
+        "the brief/requirements state (files, parent dirs, prior state); "
+        "each negative scenario's missing precondition is deliberate. Use blocker or "
+        "major only for a break in (1)-(4). Do not review code or test completeness.\n"
         if spine.semantic
         else "Look for missing features or edge cases versus the vision; requirements without "
         "real verification; weak concurrency or file ownership; risky design choices; "

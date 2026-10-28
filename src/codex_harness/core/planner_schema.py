@@ -626,7 +626,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "product root. For a python -m package, add a thin entry file that calls "
             "runpy.run_module('<package>', run_name='__main__').",
             "argv": "Plain strings may not contain / \\ : or ..; pass sandbox paths as "
-            "{path: 'data/x.json'}. Setup writes only data/ UTF-8 fixtures.",
+            "{path: 'data/x.json'}. Setup writes only data/ UTF-8 fixtures. Optional setup.dirs "
+            "declares empty data/ directories; parents are never inferred from CLI paths.",
             "observe": "action observations: exitEquals, stdoutEquals, stdoutJsonEquals, "
             "stderrNonempty. path observations: fileJsonEquals, fileBytesEquals, fileAbsent, "
             "bytesUnchangedFrom (a setup snapshot id). An observation names one action or one "
@@ -644,6 +645,7 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
                             "requirementRefs": ["R1"],
                             "contractRefs": ["G1"],
                             "setup": {
+                                "dirs": ["data"],
                                 "files": [{"path": "data/db.json", "utf8": "[]"}],
                                 "snapshots": [{"id": "before", "path": "data/db.json"}],
                             },

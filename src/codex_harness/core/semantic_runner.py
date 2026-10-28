@@ -67,6 +67,8 @@ def equal(a, b):
 
 def execute(s, root, targets, phase, seconds, deadline):
     snapshots, results, markers = {}, {}, []
+    for directory in s["setup"].get("dirs", []):
+        path(root, directory).mkdir(parents=True, exist_ok=True)
     for f in s["setup"].get("files", []):
         file = path(root, f["path"])
         file.parent.mkdir(parents=True, exist_ok=True)

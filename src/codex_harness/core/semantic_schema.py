@@ -72,7 +72,13 @@ def validate(document, product, targets, *, require_entries=True):
         for key in ("requirementRefs", "contractRefs"):
             if not array(s[key]) or any(type(r) is not str or not r for r in s[key]):
                 raise ValueError("Declare requirement and contract references")
-        fields(s["setup"], ("files", "snapshots"))
+        fields(s["setup"], ("dirs", "files", "snapshots"))
+        for directory in array(s["setup"].get("dirs", [])):
+            resolved = path(product, directory)
+            if (
+                directory != "data" and not directory.startswith("data/")
+            ) or resolved.suffix.lower() == ".py":
+                raise ValueError("Setup creates only data/ directories, not Python source paths")
         snapshots = set()
         for f in array(s["setup"].get("files", [])):
             fields(f, ("path", "utf8"), ("path", "utf8"))

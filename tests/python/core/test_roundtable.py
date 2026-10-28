@@ -1742,6 +1742,17 @@ def test_available_defaults_override_and_single_provider(store, monkeypatch):
     assert seen == ["custom-codex"]
 
 
+def test_feasibility_job_does_not_expand_legacy_review(tmp_path):
+    """Catch leaking the fourth job to legacy plans; semantic packet tests select another branch."""
+    with PlanStore(tmp_path) as store:
+        store.import_spine(FIXTURE)
+        before = list(store.connection.iterdump())
+        packet = review_packet(store)
+        assert "Look for missing features or edge cases versus the vision" in packet
+        assert "Scenario feasibility" not in packet and "Exactly four jobs" not in packet
+        assert list(store.connection.iterdump()) == before
+
+
 def test_packet_documents_dag_quality_fields_and_instructions(store):
     before = list(store.connection.iterdump())
     packet = review_packet(store)
