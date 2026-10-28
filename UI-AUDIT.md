@@ -209,6 +209,30 @@ Baseline also exposed intermittent acceptance-owner failures (left unchanged):
 `acceptance-revision-changed`; `test_review_continuation_uses_current_gate_with_retained_afs[open]`
 returned an error. Both passed in the final run; exit test: stable repeated owning-case results.
 
+## Vision Lock habits follow-up (2026-10-28)
+
+- Evidence: the reported Tally run summarised the unseen lock card and repeatedly
+  rewrote V1 after locking. Owners: planner confirmations/MCP presentation and PlanStore.
+- Charter rules 3/5/8: show the full decision and refuse incidental semantic-v1 wording
+  changes with a teaching error. Scope: wording/shape and an explicit reopen argument;
+  legacy edit behavior, tools, providers and acceptance authority stay outside this slice.
+- Exit check: canonical semantic plan → lock → MCP upsert refuses text/title/intent
+  changes atomically; explicit reopen marks stale; scenario edits remain allowed;
+  prepared chat result starts with the instruction and encloses the complete card.
+  Source checks establish these boundaries; real planner compliance remains unproven.
+- Test environment: `C:/t9v` is denied by the session filesystem boundary; use the
+  writable `C:/Users/oren/codex-harness/t9v` for both candidate and base comparison.
+- Validation: six new regression cases pass; the final wire/wording selection has
+  16 passes. Ruff check/format passes. Production delta: +33 net lines, zero new tools.
+- Inherited failures: all 29 distinct candidate failures reproduce against HEAD:
+  semantic wiring (6), planfix2 (9), planfix5 (10), status API (4). Owning test/store,
+  CLI and acceptance lanes retain these as follow-ups; exit: those cases pass in
+  the same environment. No unrelated repairs were made. The raw suite counted the
+  semantic file twice due slash variants (35 failed / 309 passed); lists are deduplicated.
+- Git stash was denied at the external worktree index. Comparison instead restored
+  HEAD file contents temporarily, with exact-byte backups and automatic restoration;
+  all five slice files were verified restored. No commit, publication or provider run.
+
 ## Out of scope / not changed
 
 - MCP tool argument and result structures, `structuredContent`, and all proof, approval and gate semantics.

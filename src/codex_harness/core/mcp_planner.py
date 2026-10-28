@@ -522,8 +522,10 @@ TOOLS = [
                     "parents": STRINGS,
                     "fields": {"type": "object"},
                 }
-            )
+            ),
+            "reopen_vision_lock": {"type": "boolean"},
         },
+        ["node"],
     ),
     _tool(
         "harness_upsert_nodes",
@@ -978,6 +980,9 @@ class PlannerServer:
         if isinstance(response.get("result"), dict) and "content" in response["result"]:
             result = response["result"]
             result["workspaceBinding"] = binding
+            if result.get("structuredContent", {}).get("channel") == "chat-confirmation":
+                result["content"][0]["text"] += "\n" + self._binding_text(binding)
+                return response
             for item in result["content"]:
                 if item.get("type") == "text":
                     first, separator, rest = item["text"].partition("\n")
@@ -1377,15 +1382,20 @@ class PlannerServer:
             "content": [
                 {
                     "type": "text",
-                    "text": views.response(
+                    "text": views.response(status, "", next_step)
+                    if name == "harness_prepare_chat_confirmation" and not is_error
+                    else views.response(
                         status, body, next_step, tracker=name == "harness_plan_status"
                     ),
                 }
             ],
         }
-        return connection_reply(
+        reply = connection_reply(
             reply, self.workspace, status, show_recovery=name == "harness_plan_status"
         )
+        if name == "harness_prepare_chat_confirmation" and not is_error:
+            reply["content"][0]["text"] = body + "\n\n" + reply["content"][0]["text"]
+        return reply
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
         if name == "harness_review_policy" and not error:
@@ -2169,7 +2179,9 @@ class PlannerServer:
                 body += "\n" + self._diagram(kind)
             return body
         if name == "harness_upsert_node":
-            store.upsert_node(args["node"])
+            store.upsert_node(
+                args["node"], reopen_vision_lock=args.get("reopen_vision_lock", False)
+            )
             self.result_data = {"id": args["node"]["id"]}
             return f"Changed node: {args['node']['id']} (upserted)."
         if name == "harness_remove_node":

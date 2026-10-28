@@ -358,7 +358,7 @@ class PlanStore:
             return hashlib.sha256(b"").hexdigest()
         return Spine(data).plan_revision()
 
-    def _write_node(self, spine: Spine, node_id: str) -> None:
+    def _write_node(self, spine: Spine, node_id: str, *, reopen_vision_lock=False) -> None:
         node = spine.node(node_id)
         if node["kind"] == "vision":
             prior = self.list_nodes("vision")
@@ -366,7 +366,7 @@ class PlanStore:
                 "planMode", "legacy"
             ):
                 raise ValueError("planMode is immutable; choose semantic-v1 at plan creation")
-        self._classify_vision_edit(node)
+        self._classify_vision_edit(node, reopen_vision_lock=reopen_vision_lock)
         self.connection.execute(
             "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
             "kind=excluded.kind, title=excluded.title, text=excluded.text, "
@@ -384,7 +384,7 @@ class PlanStore:
             ),
         )
 
-    def _classify_vision_edit(self, node: dict) -> None:
+    def _classify_vision_edit(self, node: dict, *, reopen_vision_lock=False) -> None:
         if node["kind"] != "vision" or not self._meta()["vision_locked_revision"]:
             return
         row = self.connection.execute("SELECT * FROM nodes WHERE id=?", (node["id"],)).fetchone()
@@ -401,6 +401,26 @@ class PlanStore:
                 )
             }
 
+        if node["fields"].get("planMode") == "semantic-v1" and not reopen_vision_lock:
+            locked = json.loads(self._meta()["locked_vision_json"])
+            before = {f"fields.{key}": value for key, value in intent(locked["fields"]).items()}
+            after = {f"fields.{key}": value for key, value in intent(node["fields"]).items()}
+            before.update(text=locked["text"], title=locked["title"])
+            after.update(text=node["text"], title=node["title"])
+            changed = sorted(
+                key
+                for key in before.keys() | after.keys()
+                if key not in before or key not in after or before[key] != after[key]
+            )
+            if changed:
+                raise PlanStoreError(
+                    "vision-locked-wording",
+                    f"Differing keys: {', '.join(changed)}. Vision wording is locked. "
+                    f"Resend {node['id']} with the locked text/title/fields verbatim "
+                    "(only scenarios/targets may change). If the user asked to change "
+                    "the vision, pass reopen_vision_lock=true.",
+                )
+
         if (
             row["text"] != node["text"]
             or row["title"] != node["title"]
@@ -409,14 +429,14 @@ class PlanStore:
             self.connection.execute("UPDATE meta SET vision_lock_stale=1")
             self._event("vision-lock-stale", {"id": node["id"]})
 
-    def upsert_node(self, node: dict) -> None:
+    def upsert_node(self, node: dict, *, reopen_vision_lock: bool = False) -> None:
         with self._transaction():
             data = self._data()
             node_id = node.get("id") if isinstance(node, dict) else None
             data["nodes"] = [item for item in data["nodes"] if item["id"] != node_id]
             data["nodes"].append(node)
             spine = Spine(data)
-            self._write_node(spine, node_id)
+            self._write_node(spine, node_id, reopen_vision_lock=reopen_vision_lock)
             self._event("node-upserted", {"id": node_id, "plan_revision": spine.plan_revision()})
 
     def revise_test(

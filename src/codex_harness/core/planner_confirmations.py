@@ -30,13 +30,15 @@ def _chat_question(request, revision):
         "align": "the Align understanding below",
         "vision-lock": "the Vision Lock below",
     }.get(request.get("gate"), "the worker execution below")
-    # The user's decision comes first; the agent's recording rules go in a footer.
+    # Bound the user-facing text; recording rules stay outside the markers.
     request["card"] = (
+        "Your reply must be exactly the text between the markers, copied in full; "
+        "do not summarise, shorten or add to it.\n\n<<<SHOW-VERBATIM\n"
         f"**Your decision: approve {subject}?**\n"
         "Reply with exactly one of: **Approve** · **No** · **Cancel** · "
-        "**Changes: <what to change>**\n\n" + request["card"].rstrip() + "\n\n---\n"
+        "**Changes: <what to change>**\n\n" + request["card"].rstrip() + "\nSHOW-VERBATIM>>>\n\n"
         f"For the agent: chat confirmation {request['request_id']} for revision {revision}. "
-        "Show this question to the user exactly as written and wait for their reply. "
+        "Wait for their reply. "
         "Record it with harness_record_chat_confirmation: quote their latest actual chat "
         "message verbatim, with its SHA-256 and an actor label. Actor identity and message "
         "source are unverified; the hash binds the quote, not its author. "
@@ -206,15 +208,14 @@ def _understanding(vision: dict) -> str:
 def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str:
     """The exact stored text of a planning confirmation request (one shared writer)."""
     heading = f"Confirm {gate}" if phase == gate else f"Renew vision lock during {phase}"
-    expansion = (
-        "This single Vision Lock response confirms the expansion mode and reason, "
-        "each upgrade's proposed dispositions, quality bar and done definition. "
-        if gate == "vision-lock"
-        else ""
-    )
+    if gate == "vision-lock":
+        return (
+            f"{heading} for revision {revision[:12]}.\n"
+            "Expansion proposed dispositions, quality bar and done definition:\n\n"
+            + _understanding(vision)
+        )
     return (
         f"{heading} for revision {revision[:12]}.\n"
-        + expansion
         + "Read the whole understanding below and approve only if it is right. "
         "To ask for changes, say what to change; a conditional answer does not approve "
         "this step.\n\n" + _understanding(vision)

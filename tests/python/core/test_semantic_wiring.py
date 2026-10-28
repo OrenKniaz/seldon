@@ -119,6 +119,111 @@ def workers(*, stub=STUB, product=PRODUCT, tamper=False):
     return {"C": contracts, "B": build}
 
 
+def lock_vision(store):
+    source_only_expansion(store)
+    for phase in PHASES[1 : PHASES.index("vision-lock") + 2]:
+        if store.phase() in {"align", "vision-lock"}:
+            source_only_confirmation(store, store.phase())
+        store.advance(phase, by="source-test")
+
+
+@pytest.mark.parametrize("key", ["text", "title", "quality_bar"])
+def test_locked_vision_refuses_incidental_wording_without_mutation(semantic_plan, key):
+    """Protect locked wording; catches silent rewrites that scenario-runner tests never upsert."""
+    store, _ = semantic_plan
+    lock_vision(store)
+    original = store.spine().node("V1")
+    changed = store.spine().node("V1")
+    (changed if key in {"text", "title"} else changed["fields"])[key] += " revised"
+    revision = store._revision()
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_upsert_node", {"node": changed})
+        assert reply["isError"] and "vision-locked-wording" in str(reply)
+        assert key in str(reply) and "reopen_vision_lock=true" in str(reply)
+    finally:
+        server.close()
+    assert store.spine().node("V1") == original and store._revision() == revision
+    assert not store._meta()["vision_lock_stale"]
+
+
+def test_locked_vision_explicit_reopen_marks_lock_stale(semantic_plan):
+    """Protect deliberate edits; catches a dropped MCP reopen flag absent in store-only tests."""
+    store, _ = semantic_plan
+    lock_vision(store)
+    changed = store.spine().node("V1")
+    changed["text"] += " revised"
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool(
+            "harness_upsert_node", {"node": changed, "reopen_vision_lock": True}
+        )
+        assert not reply["isError"], reply
+    finally:
+        server.close()
+    assert store.spine().node("V1") == changed and store._meta()["vision_lock_stale"]
+
+
+def test_locked_vision_allows_scenario_only_edit(semantic_plan):
+    """Protect post-lock spec work; catches overbroad locking absent in pre-lock compile tests."""
+    store, _ = semantic_plan
+    lock_vision(store)
+    changed = store.spine().node("V1")
+    changed["fields"]["scenarios"]["scenarios"][0]["id"] = "revised-first-moment"
+    store.upsert_node(changed)
+    assert store.spine().node("V1") == changed and not store._meta()["vision_lock_stale"]
+
+
+def test_vision_lock_chat_result_leads_with_verbatim_instruction(semantic_plan):
+    """Protect full card display; catches MCP prefix/summary cues missed by native-card tests."""
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    source_only_confirmation(store, "align")
+    store.advance("expand", by="source-test")
+    store.advance("vision-lock", by="source-test")
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.handle_line(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "harness_prepare_chat_confirmation",
+                        "arguments": {
+                            "gate": "vision-lock",
+                            "expected_workspace": str(store.workspace),
+                        },
+                    },
+                }
+            )
+        )["result"]
+        assert not reply["isError"], reply
+        text = reply["content"][0]["text"]
+        instruction = (
+            "Your reply must be exactly the text between the markers, copied in full; "
+            "do not summarise, shorten or add to it."
+        )
+        assert text.startswith(instruction)
+        before, card = text.split("<<<SHOW-VERBATIM\n", 1)
+        card, footer = card.split("\nSHOW-VERBATIM>>>", 1)
+        assert instruction in before and "For the agent:" in footer
+        for words in (
+            "Offline greeting CLI",
+            "first-moment",
+            "Retain every cent",
+            "Shares add up",
+            "accept",
+            "reject",
+            "defer",
+        ):
+            assert words in card
+        assert "For the agent:" not in card
+    finally:
+        server.close()
+
+
 def execute(store, *, work_root=None, **kwargs):
     return dispatch.run_plan(
         store.workspace,
