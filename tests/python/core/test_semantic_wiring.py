@@ -415,7 +415,8 @@ def test_review_carry_refuses_unreviewed_scope_or_ineligible_findings(semantic_p
     if change in {"vision-text", "unrelated"}:
         item = store.spine().node("V1" if change == "vision-text" else "B")
         item["text"] += " New scope"
-        store.upsert_node(item)
+        # A deliberate vision change reopens the lock; carry must still refuse it.
+        store.upsert_node(item, reopen_vision_lock=change == "vision-text")
         store.compile_template(store.workspace / "template")
     elif change == "template":
         (store.workspace / "template/extra.txt").write_text("unreviewed template change")
