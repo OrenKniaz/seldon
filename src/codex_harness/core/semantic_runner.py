@@ -108,6 +108,8 @@ def execute(s, root, targets, phase, seconds, deadline):
             valid = True
             if key in ("exitEquals", "stdoutEquals"):
                 value = actual[key.removesuffix("Equals")]
+                if key == "stdoutEquals":
+                    value = value.replace("\r\n", "\n")
             elif key == "stderrNonempty":
                 value = bool(actual["stderr"].strip())
             elif key == "fileAbsent":

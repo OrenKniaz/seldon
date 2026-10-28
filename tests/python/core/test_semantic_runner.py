@@ -32,6 +32,64 @@ STUB = GRAMMAR + "print('SELDON-STUB '+a.operation, file=sys.stderr); sys.exit(3
 PRODUCT = GRAMMAR + "print('amount must be positive', file=sys.stderr); sys.exit(2)\n"
 
 
+@pytest.mark.parametrize(
+    "ending,expected,state",
+    [
+        ("\n", "1.00\n", "PASS"),
+        ("", "1.00\n", "FAIL"),
+        ("\r", "1.00\n", "FAIL"),
+        ("\n", "1.00 \n", "FAIL"),
+        ("\n", "1.00\r\n", "FAIL"),
+    ],
+    ids=["crlf-print", "missing-newline", "bare-cr", "spacing", "expected-unchanged"],
+)
+def test_process_text_equality_normalizes_only_actual_crlf(tmp_path, ending, expected, state):
+    """Protect portable print equality without stripping; existing CLI tests omit newlines."""
+    (tmp_path / "tally.py").write_text(
+        "import sys\nsys.stdout.reconfigure(newline='\\r\\n')\n"
+        "sys.stderr.reconfigure(newline='\\r\\n')\n"
+        f"print('1.00', end={ending!r})\nprint('diagnostic', file=sys.stderr)\n"
+    )
+    document = scenario()
+    document["scenarios"][0]["observe"] = [
+        {"action": "add", "stdoutEquals": expected, "stderrNonempty": True}
+    ]
+    result = run(document, tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == state, result
+    assert result["actions"]["add"]["stdout"] == "1.00" + ending.replace("\n", "\r\n")
+    assert result["actions"]["add"]["stderr"] == "diagnostic\r\n"
+    assert document["scenarios"][0]["observe"][0]["stdoutEquals"] == expected
+    assert result["cleanup"]["quiescenceVerified"]
+
+
+def test_crlf_file_rewrite_stays_byte_mismatch(tmp_path):
+    """Catch newline normalization leaking into files; prior preservation test changes spaces."""
+    (tmp_path / "tally.py").write_text(
+        GRAMMAR + "from pathlib import Path\nPath(a.db).write_bytes(b'[]\\r\\n')\n"
+    )
+    document = scenario()
+    s = document["scenarios"][0]
+    s["setup"]["files"][0]["utf8"] = "[]\n"
+    s["observe"] = [
+        {"path": "data/ledger.json", "fileBytesEquals": "[]\n", "bytesUnchangedFrom": "before"}
+    ]
+    result = run(document, tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == "FAIL", result
+    assert [o["passed"] for o in result["observations"]] == [False, False]
+    assert result["observations"][0]["actual"] == "[]\r\n"
+    assert result["cleanup"]["quiescenceVerified"]
+
+
+def test_process_json_string_newlines_remain_exact(tmp_path):
+    """Catch normalization before JSON decoding; existing JSON checks cover types, not text."""
+    (tmp_path / "tally.py").write_text("import json\nprint(json.dumps('line\\r\\n'))\n")
+    document = scenario()
+    document["scenarios"][0]["observe"] = [{"action": "add", "stdoutJsonEquals": "line\n"}]
+    result = run(document, tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == "FAIL", result
+    assert result["observations"][0]["actual"] == "line\r\n"
+
+
 @pytest.mark.parametrize("check,expected", [("fileJsonEquals", []), ("fileBytesEquals", "[]")])
 def test_missing_product_output_fails_then_persisted_output_passes(
     tmp_path, monkeypatch, check, expected
