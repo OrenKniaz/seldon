@@ -315,6 +315,126 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         packet_view(store, "B")
 
 
+def review_with_findings(store, *, severity="major"):
+    source_only_expansion(store)
+    while store.phase() != "roundtable":
+        if store.phase() in {"align", "vision-lock"}:
+            source_only_confirmation(store, store.phase())
+        store.advance(PHASES[PHASES.index(store.phase()) + 1], by="source-test")
+    revision = store.compile_template(store.workspace / "template")["planRevision"]
+    result = source_controller_roundtable(
+        store,
+        process_stub=lambda *_: (
+            0,
+            json.dumps(
+                [
+                    dict(node_id=key, severity=severity, finding=message, suggestion="Repair it")
+                    for key, message in (
+                        ("F", "Clarify greeting scenario"),
+                        ("D", "Document choice"),
+                    )
+                ]
+            ),
+        ),
+        reviewers=[
+            {"name": "source-codex", "provider": "codex"},
+            {"name": "source-claude", "provider": "claude"},
+        ],
+        executable_for=lambda p: p,
+    )
+    assert result["invalid"] == 0 and result["findings"] == 4, result
+    return revision
+
+
+def repair_review_scenarios(store, *, leave_open=False):
+    from codex_harness.core.roundtable import findings
+
+    vision = store.spine().node("V1")
+    vision["fields"]["scenarios"]["scenarios"][0]["setup"]["files"] = [
+        {"path": "data/input.txt", "utf8": "hello"}
+    ]
+    store.upsert_node(vision)
+    store.compile_template(store.workspace / "template")
+    store.resolve_findings(
+        [
+            dict(
+                id=row["id"],
+                status="resolved" if row["node_id"] == "F" else "deferred",
+                resolution="Scenario repaired; choice deferred with rationale",
+            )
+            for row in findings(store)
+            if not leave_open or row["node_id"] != "D"
+        ]
+    )
+
+
+def test_review_carries_scenario_and_named_repairs_through_publication(semantic_plan):
+    """Protect repair→publish; catch redundant reviews missed by clean-review tests."""
+    from codex_harness.core.planner_views import status_card
+
+    store, _ = semantic_plan
+    original = review_with_findings(store)
+    repair_review_scenarios(store)
+    for repair in ("First clarification", "Second clarification"):
+        feature = store.spine().node("F")
+        feature["text"] = repair
+        store.upsert_node(feature)
+        current = store.compile_template(store.workspace / "template")["planRevision"]
+        assert current != original
+        reviews = store.successful_reviews(current)
+        assert len(reviews) == 2
+        assert all(r["carriedForward"] and r["carriedFromRevision"] == original for r in reviews)
+    state = store.status()
+    assert state["reviewResolution"]["review"]["current"] is True
+    assert state["reviewResolution"]["review"]["carriedForward"] is True
+    assert state["reviewResolution"]["nextAction"]["kind"] == "attempt_phase_advance"
+    assert "carried forward" in state["reviewResolution"]["nextAction"]["message"]
+    assert "review current (carried forward after repairs)" in status_card(state, [])
+    store.advance("publish", by="source-test")
+    published = store.publish(by="source-test", export_dir=store.workspace / "published")
+    assert published == current
+    assert store.status()["pending_gate"] is None
+    selection = [
+        dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium") for b in ("C", "B")
+    ]
+    scope = planner_execution.execution_scope(
+        store, published, selection, max_parallel=1, call_cap=2
+    )
+    assert scope["publicationRevision"] == published
+    assert store.connection.execute("SELECT count(*) FROM review_runs").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(
+    "change", ["vision-text", "open", "blocker", "unrelated", "template", "old-row", "policy"]
+)
+def test_review_carry_refuses_unreviewed_scope_or_ineligible_findings(semantic_plan, change):
+    """Protect review boundaries; catch stale credit missed by exact-revision tests."""
+    store, _ = semantic_plan
+    review_with_findings(store, severity="blocker" if change == "blocker" else "major")
+    repair_review_scenarios(store, leave_open=change == "open")
+    if change in {"vision-text", "unrelated"}:
+        item = store.spine().node("V1" if change == "vision-text" else "B")
+        item["text"] += " New scope"
+        store.upsert_node(item)
+        store.compile_template(store.workspace / "template")
+    elif change == "template":
+        (store.workspace / "template/extra.txt").write_text("unreviewed template change")
+    elif change == "old-row":
+        store.connection.execute("UPDATE review_runs SET nodesDigest=NULL")
+    elif change == "policy":
+        store.record_plan_review_policy(
+            [dict(name="source-codex", provider="codex", required=True)], store.manifest_revision()
+        )
+    current = store.manifest_revision()
+    assert not store.successful_reviews(current)
+    assert store.status()["reviewResolution"]["review"]["current"] is False
+    with pytest.raises(
+        ValueError,
+        match="successful review|review policy|renewed approval|open roundtable findings",
+    ):
+        store.advance("publish", by="source-test")
+
+
 def test_canonical_plan_contracts_red_build_validation_pass(semantic_plan):
     """Protect producer→dispatch→real CLI success; catches RED-as-proof and final rerun of stubs."""
     store, manifest = semantic_plan

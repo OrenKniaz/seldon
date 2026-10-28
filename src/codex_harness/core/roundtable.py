@@ -106,6 +106,7 @@ def _table(store: PlanStore) -> None:
         ("shardDetails", "TEXT"),
         ("truncatedNodes", "TEXT"),
         ("reshardedFrom", "TEXT"),
+        ("nodesDigest", "TEXT"),
     ):
         if name not in columns:
             store.connection.execute(f"ALTER TABLE review_runs ADD COLUMN {name} {kind}")
@@ -2145,13 +2146,15 @@ def run_roundtable(
         if store.manifest_revision() != revision:
             raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
         _table(store)
+        snapshot = json.dumps(store.review_nodes_digest()) if spine.semantic else None
         store.connection.executemany(
             "INSERT INTO review_runs "
             "(id, round_id, plan_revision, reviewer, provider, model, exit_code, "
             "findings, invalid, started_at, finished_at, packetBound, outOfPacketTools, "
-            "shards, shardDetails, truncatedNodes, reshardedFrom, isMocked, didRunProvider) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            runs,
+            "shards, shardDetails, truncatedNodes, reshardedFrom, isMocked, didRunProvider, "
+            "nodesDigest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(*run, snapshot) for run in runs],
         )
         for item_id, reviewer, provider, revision, item, at in pending:
             store.connection.execute(

@@ -438,6 +438,8 @@ def continuation_projection(status: dict, resolution: dict) -> dict:
             cliArguments=["advance", "--to", "publish"],
             expectedPostState={"phase": "publish"},
         )
+        if resolution["review"].get("carriedForward"):
+            action["message"] = resolution["review"]["message"]
     elif phase == "publish" and not status.get("publication", {}).get("up_to_date"):
         action["kind"] = "attempt_publication"
     else:
@@ -591,6 +593,10 @@ def review_resolution_state(store, status: dict) -> dict:
             if not all(known(item) for item in ids):
                 raise ValueError("Unknown current review identity")
             state["review"] = {"current": bool(ids), "successfulReviewIds": sorted(ids)}
+            if any(row.get("carriedForward") for row in reviews):
+                state["review"].update(
+                    carriedForward=True, message="review current (carried forward after repairs)"
+                )
             if state["phase"] in {"roundtable", "publish", "execute"}:
                 quality, evidence, advice = _roundtable(store)
                 check = dict(status=quality, evidence=evidence, advice=advice)
@@ -1388,6 +1394,8 @@ def _gate_lines(status: dict) -> list[str]:
     rounds = "; ".join(f"{row['reviewer']}: {row['text']}" for row in status["roundtable"])
     if review.get("current"):
         review_text = "✓ current" + (f" · {rounds}" if rounds else "")
+        if review.get("carriedForward"):
+            review_text = review["message"]
         if review.get("qualityStatus") in {"warn", "fail"} and review.get("advice"):
             review_text += f" · ⚠ {_short(review['advice'], 140)}"
     elif review.get("current") is False:

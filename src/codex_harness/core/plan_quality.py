@@ -78,6 +78,9 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
     if latest is None:
         return "fail", {"roundId": None}, "Run and record the cross-provider roundtable."
     runs = store.successful_reviews(revision)
+    if stale and any(row.get("carriedForward") for row in runs):
+        stale = False
+        latest = next(row for row in runs if row.get("carriedForward"))
     attempted = {
         row[0]
         for row in store.connection.execute(

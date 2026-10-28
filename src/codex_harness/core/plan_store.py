@@ -26,6 +26,7 @@ from codex_harness.core.spine import (
     compile_manifest,
     impact,
     load_spine,
+    requirement_file_sources,
     save_spine,
 )
 from codex_harness.core.spine_render import render_markdown
@@ -2218,6 +2219,67 @@ class PlanStore:
         result["eligible"] = not result["reasons"]
         return result
 
+    def review_nodes_digest(self) -> dict | None:
+        """Bind semantic review repairs to original nodes and non-derived template bytes."""
+        spine = Spine(self._data())
+        if not spine.semantic:
+            return None
+
+        def digest(value):
+            return hashlib.sha256(_json(value).encode()).hexdigest()
+
+        nodes = {}
+        for node in spine.to_dict()["nodes"]:
+            item = deepcopy(node)
+            if item["kind"] == "vision":
+                repairs = {key: item["fields"].pop(key, None) for key in ("scenarios", "targets")}
+                nodes[item["id"]] = dict(intent=digest(item), repairs=digest(repairs))
+            else:
+                nodes[item["id"]] = digest(item)
+        template = self.workspace / "template"
+        rendered = render_markdown(spine)
+        files = {}
+        if template.is_dir():
+            sources = requirement_file_sources(template, [p.name for p in template.iterdir()])
+            for name, path in sources.items():
+                raw = path.read_bytes()
+                files[name] = (
+                    "derived"
+                    if name in rendered and raw == rendered[name].encode("utf-8")
+                    else hashlib.sha256(raw).hexdigest()
+                )
+        return dict(nodes=nodes, files=files)
+
+    def _review_repairs_match(self, row: dict, current: dict) -> bool:
+        saved = json.loads(row["nodesDigest"])
+        if saved["files"] != current["files"]:
+            return False
+        findings = [
+            dict(item)
+            for item in self.connection.execute(
+                "SELECT * FROM review_findings WHERE round_id=?", (row["round_id"],)
+            )
+        ]
+        if any(
+            f["status"] not in {"resolved", "rejected", "deferred"} or f["severity"] == "blocker"
+            for f in findings
+        ):
+            return False
+        allowed = {f["node_id"] for f in findings}
+        allowed.update(key for f in findings for key in json.loads(f.get("nodeIds") or "[]"))
+        before, after = saved["nodes"], current["nodes"]
+        for key in before.keys() | after.keys():
+            left, right = before.get(key), after.get(key)
+            if isinstance(left, dict) or isinstance(right, dict):
+                if not left or not right or left["intent"] != right["intent"]:
+                    return False
+                # Scenario/target edits are repairs only when the round raised findings.
+                if left["repairs"] != right["repairs"] and not findings:
+                    return False
+            elif left != right and key not in allowed:
+                return False
+        return True
+
     def successful_reviews(self, revision: str) -> list[dict]:
         """Latest explicitly real successful run per provider; unknown history is excluded."""
         exists = self.connection.execute(
@@ -2240,15 +2302,28 @@ class PlanStore:
             <= columns
         ):
             return []
+        policy = self.plan_review_policy_state(revision)
+        carry = (
+            "nodesDigest" in columns
+            and not policy["active"]
+            and Spine(self._data()).semantic
+            and revision is not None
+            and revision == self.manifest_revision()
+        )
+        snapshot = self.review_nodes_digest() if carry else None
         latest = {}
         for row in self.connection.execute(
-            "SELECT * FROM review_runs WHERE plan_revision=? AND exit_code=0 AND invalid=0 "
+            "SELECT * FROM review_runs WHERE (plan_revision=? OR ?) AND exit_code=0 AND invalid=0 "
             "AND isMocked=0 AND didRunProvider=1 ORDER BY finished_at DESC, id DESC",
-            (revision,),
+            (revision, bool(carry)),
         ):
-            latest.setdefault(row["provider"], dict(row))
+            row = dict(row)
+            if row["plan_revision"] != revision:
+                if not row.get("nodesDigest") or not self._review_repairs_match(row, snapshot):
+                    continue
+                row.update(carriedForward=True, carriedFromRevision=row["plan_revision"])
+            latest.setdefault(row["provider"], row)
         result = [latest[key] for key in sorted(latest)]
-        policy = self.plan_review_policy_state(revision)
         if policy["active"] and revision == self.manifest_revision():
             allowed = set(policy["successfulReviewIds"])
             # Resolve latest per required/optional slot before provider aggregation;

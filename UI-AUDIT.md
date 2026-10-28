@@ -232,6 +232,24 @@ returned an error. Both passed in the final run; exit test: stable repeated owni
 - Git stash was denied at the external worktree index. Comparison instead restored
   HEAD file contents temporarily, with exact-byte backups and automatic restoration;
   all five slice files were verified restored. No commit, publication or provider run.
+## Review repair follow-up (2026-10-28)
+
+Owner: PlanStore review currency and planner views. Semantic scenario repairs previously
+discarded review credit and requested another full roundtable. The source regression
+reproduced zero current reviews after finding repair. This slice retains the original
+review snapshot and carries credit only across eligible repairs without an active policy;
+generated canonical projections may change, other template bytes must remain unchanged.
+Charter rule 8: remove redundant review rounds after repairs. Budget: ≤120 net production
+lines, zero new tools; active policies and legacy review behavior remain outside this slice.
+Exit check: resolve/defer the round's findings, repair scenarios and named nodes across
+revisions, publish once, then pass execution admission with carried-forward status.
+Controller-stub evidence only; actual-provider and full-product acceptance remain unproven.
+Baseline/candidate comparison retained the same 174 unique failing/error test IDs
+(78 failed executions, 102 setup errors each). Repeated symptoms include missing expansion
+in legacy fixtures and child CLI imports under relative PYTHONPATH=src; left unchanged.
+Owners: owning test fixtures and child invocation setup. Exit: affected cases consume
+canonical expansion and import the package in their actual child working directory.
+One directory-symlink test skipped for unavailable Windows privilege in both runs.
 
 ## Out of scope / not changed
 
