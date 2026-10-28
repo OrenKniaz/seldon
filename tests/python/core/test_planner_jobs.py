@@ -402,3 +402,55 @@ def test_worker_selection_requires_explicit_supported_tuple(fixture, invalid):
     ):
         jobs.start_worker_job(store, store.revision, workers, call_cap=16)
     assert launches == []
+
+
+def test_job_that_ended_before_any_provider_launch_readmits_on_fresh_grant(fixture, monkeypatch):
+    """Protect stranded publications; catches a Seldon prelaunch bug burning the only job."""
+    store, workers, launches = fixture
+    directory = Path(admit(fixture)["evidenceDir"])
+    beads = {
+        bead: {"attempt": None, "didRunProvider": False, "status": "prelaunch failed: X"}
+        for bead in store.manifest["beads"]
+    }
+
+    def prelaunch_failure(plan, *, work_root, **kwargs):
+        record = {"runId": "r1", "status": "plan-failed: prelaunch failed", "beads": beads}
+        record.update(didExecuteRealProvider=False, isMocked=False, planRevision=store.revision)
+        record["repo"] = str(work_root / "r1/repo")
+        (work_root / "r1/evidence").mkdir(parents=True)
+        write_record_json_once(work_root / "r1/evidence/run.json", record)
+        return record
+
+    monkeypatch.setattr(jobs.dispatch, "run_plan", prelaunch_failure)
+    jobs.execute_worker_job(store.workspace, store.revision)
+    status = jobs.worker_job_status(store.workspace, store.revision)
+    assert "fresh worker execution approval" in status["reason"]
+    # The consumed grant alone only reattaches; no relaunch without a new approval.
+    assert jobs.start_worker_job(store, store.revision, workers, call_cap=16) == status
+    assert len(launches) == 1
+    source_grant(store, store.revision, workers)
+    readmitted = jobs.start_worker_job(store, store.revision, workers, call_cap=16)
+    assert readmitted["status"] == "unknown" and len(launches) == 2
+    assert (directory.parent / f"{directory.name}.prelaunch-failed-1/terminal.json").is_file()
+
+
+def test_job_whose_provider_ran_is_never_readmitted(fixture, monkeypatch):
+    store, workers, launches = fixture
+    admit(fixture)
+    beads = {bead: {"attempt": {}, "didRunProvider": True} for bead in store.manifest["beads"]}
+
+    def provider_failure(plan, *, work_root, **kwargs):
+        record = {"runId": "r1", "status": "plan-failed: worker failed", "beads": beads}
+        record.update(didExecuteRealProvider=True, isMocked=False, planRevision=store.revision)
+        record["repo"] = str(work_root / "r1/repo")
+        (work_root / "r1/evidence").mkdir(parents=True)
+        write_record_json_once(work_root / "r1/evidence/run.json", record)
+        return record
+
+    monkeypatch.setattr(jobs.dispatch, "run_plan", provider_failure)
+    jobs.execute_worker_job(store.workspace, store.revision)
+    status = jobs.worker_job_status(store.workspace, store.revision)
+    assert "fresh worker execution approval" not in status["reason"]
+    source_grant(store, store.revision, workers)
+    assert jobs.start_worker_job(store, store.revision, workers, call_cap=16) == status
+    assert len(launches) == 1

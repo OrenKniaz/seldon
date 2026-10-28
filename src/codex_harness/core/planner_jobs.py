@@ -168,7 +168,10 @@ def start_worker_job(
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
         return worker_job_status(store.workspace, expected_revision)
 
-    if directory.is_dir():
+    # A job that ended before any provider launched may be re-admitted under a
+    # fresh execution grant; the old namespace is kept beside it as evidence.
+    stranded = directory.is_dir() and _ended_before_launch(directory)
+    if directory.is_dir() and not stranded:
         return reattach()
     from codex_harness.core.planner_execution import (
         consume_execution,
@@ -202,6 +205,11 @@ def start_worker_job(
         "callCap": call_cap,
     }
     directory.parent.mkdir(parents=True, exist_ok=True)
+    if stranded:
+        index = 1
+        while directory.with_name(f"{directory.name}.prelaunch-failed-{index}").exists():
+            index += 1
+        directory.rename(directory.with_name(f"{directory.name}.prelaunch-failed-{index}"))
     try:
         directory.mkdir()
     except FileExistsError:
@@ -378,7 +386,32 @@ def worker_job_status(workspace, job_id):
             "A terminal record does not establish controller exit or current child liveness; "
             "do not relaunch ambiguous work."
         )
+        if _ended_before_launch(_directory(workspace, job_id)):
+            result["reason"] = (
+                "Ended before any provider launched. Request a fresh worker execution "
+                "approval; harness_worker_start then re-admits this publication."
+            )
     return result
+
+
+def _ended_before_launch(directory):
+    """Terminal job whose every bead stopped before a provider attempt existed."""
+    try:
+        terminal = read_record_json(_inside(directory, directory / "terminal.json"))
+        runs = list((directory / "runs").glob("*/evidence/run.json"))
+        records = [read_record_json(_inside(directory, path)) for path in runs]
+    except (OSError, ValueError):
+        return False
+    return (
+        terminal.get("status") == "completed"
+        and terminal.get("dispatchStatus", "").startswith("plan-failed: ")
+        and len(records) == 1
+        and records[0].get("didExecuteRealProvider") is False
+        and all(
+            bead.get("attempt") is None and bead.get("didRunProvider") is False
+            for bead in records[0].get("beads", {}).values()
+        )
+    )
 
 
 def execute_worker_job(workspace, job_id):
