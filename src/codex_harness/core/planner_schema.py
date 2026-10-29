@@ -6,6 +6,14 @@ from codex_harness.core.spine import ALLOWED_PARENTS
 
 FIELD_RULES = {
     "vision": (
+        "For a new plan, author vision.text as a short product statement plus a full-brief "
+        "pointer, rather than pasting the brief. If PRODUCT-BRIEF.md is the existing source, "
+        "use Full brief: PRODUCT-BRIEF.md; otherwise use the actual source path. Replace the "
+        "example's <actual source path> only with that real source; do not invent a missing "
+        "file or force a different path. Preserve the complete detailed brief and its source "
+        "provenance unchanged, and derive all requirements/scenarios from it: a pointer does "
+        "not discard or narrow scope. This teaching does not migrate, truncate or rewrite "
+        "existing user-authored or locked visions. "
         "Optional understanding-card fields: vision, users, first_user_moment "
         "(alias firstUserMoment), scope_in (scopeIn), scope_out (scopeOut), "
         "quality_bar (qualityBar, quality), done_feels_like (doneFeelsLike, done), "
@@ -256,6 +264,7 @@ def node_example(kind):
     """Small planning examples, never observations or evidence of acceptance."""
     vision = _node("vision", "V1", [])
     if kind == "vision":
+        vision["text"] += "\n\nFull brief: <actual source path>"
         vision["fields"] = {
             "vision": vision["text"],
             "users": ["A person submitting parser input"],

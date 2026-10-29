@@ -28,6 +28,48 @@ def invoke(server, tool_name, **arguments):
     )["result"]
 
 
+@pytest.mark.parametrize("source", ["PRODUCT-BRIEF.md", "specs/accepted-spec.md"])
+def test_public_short_vision_example_preserves_actual_brief_and_existing_long_vision(
+    tmp_path, source
+):
+    """Catch brief copying or a fake path; existing schema examples have no source document."""
+    brief = "Preserve exact parser requirements, edge cases and acceptance details.\n" * 120
+    document = tmp_path / source
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_bytes(brief.encode("utf-8"))
+    original_bytes = document.read_bytes()
+    server = PlannerServer(tmp_path)
+    try:
+        assert not invoke(server, "harness_plan_start", idea=brief, name="Parser")["isError"]
+        original = deepcopy(server.store.spine().node("V1"))
+        guide = invoke(server, "harness_schema", kind="vision")["structuredContent"]
+        # Teaching/help does not migrate or truncate any existing user-authored vision.
+        assert server.store.spine().node("V1") == original
+        shown = invoke(server, "harness_show_node", id="V1")["structuredContent"]
+        assert shown["text"] == original["text"] == brief
+        status = invoke(server, "harness_plan_status")
+        assert brief in status["content"][0]["text"]
+        node = deepcopy(guide["example"]["node"])
+        taught = node["text"]
+        assert "<actual source path>" in taught, taught
+        node["text"] = taught.replace("<actual source path>", source)
+        node["fields"]["vision"] = node["text"]
+        assert len(node["text"]) < 300 and source in node["text"]
+        assert brief not in node["text"]
+        result = invoke(server, "harness_upsert_node", node=node)
+        assert not result["isError"], result
+        saved = invoke(server, "harness_show_node", id="V1")["structuredContent"]
+        assert saved["text"] == node["text"] and saved["fields"] == node["fields"]
+        assert document.read_bytes() == original_bytes
+        if source != "PRODUCT-BRIEF.md":
+            assert not (tmp_path / "PRODUCT-BRIEF.md").exists()
+            assert "PRODUCT-BRIEF.md" not in saved["text"]
+        assert invoke(server, "harness_advance", to_phase="expand")["isError"]
+        assert not server.store.status()["approval"]["granted"]
+    finally:
+        server.close()
+
+
 def test_public_compile_help_populates_existing_vision_metadata_and_compiles(tmp_path):
     """Protect schema-first compile: omitted argv/path shapes caused a live refusal.
 

@@ -447,7 +447,9 @@ TOOLS = [
     ),
     _tool(
         "harness_understanding_card",
-        "Record and show understanding; ask the user to confirm before advancing.",
+        "Author a short product statement with a pointer to the actual full brief, not a "
+        "copy of the brief (harness_schema kind=vision). Record and show understanding; "
+        "ask the user to confirm before advancing.",
         {
             **dict.fromkeys(
                 ("vision", "users", "first_user_moment", "scope_in", "scope_out"), STRING
