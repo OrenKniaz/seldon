@@ -1334,6 +1334,60 @@ def scope_store(tmp_path_factory):
         yield store
 
 
+@pytest.fixture
+def coverage_store(scope_store):
+    vision = scope_store.spine().node("V1")
+    vision["text"] = "Review this CLI.\nFull brief: docs/brief.md"
+    vision["fields"]["scenarios"]["scenarios"][0]["id"] = "S_CURRENT"
+    scope_store.upsert_node(vision, reopen_vision_lock=True)
+    path = scope_store.workspace / "docs/brief.md"
+    path.parent.mkdir()
+    path.write_text(
+        "Use the public module from another current directory.\n"
+        "N is an ASCII decimal integer.\nExisting unopenable files exit 2.\n",
+        encoding="utf-8",
+    )
+    return scope_store
+
+
+def test_current_brief_clause_walk_reaches_packet_and_all_shards(coverage_store):
+    """Catch omitted source clauses/shard context; prior packets only carried spine prose."""
+    store = coverage_store
+    brief = (store.workspace / "docs/brief.md").read_bytes().decode("utf-8")
+    packet = review_packet(store)
+    assert brief in packet and "S_CURRENT" in packet
+    assert "Clause (verbatim) | Scenario ID(s) or GAP" in packet
+    assert "working notes" in packet and "all actual gaps in this first review" in packet
+    assert "Reply with ONLY a JSON array" in packet
+    for key in ("F", "B"):
+        feature = store.spine().node(key)
+        feature["text"] += " retained feature context " * 3000
+        store.upsert_node(feature)
+    shards = roundtable.packet_shards(store, "codex", token_budget=12000)
+    assert len(shards) > 1
+    assert all(brief in shard["packet"] and "S_CURRENT" in shard["packet"] for shard in shards)
+    assert all("Clause (verbatim) | Scenario ID(s) or GAP" in shard["packet"] for shard in shards)
+    (store.workspace / "docs/brief.md").write_text("CURRENT REVISED CLAUSE", encoding="utf-8")
+    assert "CURRENT REVISED CLAUSE" in review_packet(store)
+    assert brief not in review_packet(store)
+
+
+@pytest.mark.parametrize("reference", [None, "docs/missing.md", "../outside.md"])
+def test_brief_packet_reports_missing_reference_without_ambient_fallback(coverage_store, reference):
+    """Catch reading unrelated/outside documents as authority; old packets never loaded a brief."""
+    store = coverage_store
+    (store.workspace / "PRODUCT-BRIEF.md").write_text("UNRELATED AMBIENT DOCUMENT")
+    (store.workspace.parent / "outside.md").write_text("OUTSIDE DOCUMENT")
+    vision = store.spine().node("V1")
+    vision["text"] = "Review this CLI; ignore old docs/PRODUCT-BRIEF.md." + (
+        f"\nFull brief: {reference}" if reference else ""
+    )
+    store.upsert_node(vision, reopen_vision_lock=True)
+    packet = review_packet(store)
+    assert "Full brief source unresolved" in packet
+    assert "UNRELATED AMBIENT DOCUMENT" not in packet and "OUTSIDE DOCUMENT" not in packet
+
+
 def scoped_review(
     store,
     monkeypatch,

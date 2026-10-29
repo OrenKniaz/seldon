@@ -721,6 +721,10 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             }
         else:
             reply = server.call_tool(tool, arguments())
+        if command == "schema" and not args.machine and not reply["isError"]:
+            reply["content"][0]["text"] = json.dumps(
+                reply["structuredContent"], ensure_ascii=False, indent=2
+            )
         if command in ("show", "nodes"):
             for item in reply["content"]:
                 item["text"] = item["text"].rsplit("\nNext: ", 1)[0]

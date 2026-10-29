@@ -540,7 +540,22 @@ def test_first_proof_authoring_help_exposes_stub_and_audit_prerequisites_without
         server.close()
 
 
+def test_cli_schema_keeps_full_human_contract_and_compact_machine_view(tmp_path, capsys):
+    """Catch compact MCP text hiding CLI help; wire-consumption tests miss CLI rendering."""
+    from codex_harness.core.plan_cli import main
+
+    request = ["schema", "--kind", "bead"]
+    assert main(["--workspace", str(tmp_path), *request]) == 0
+    human = capsys.readouterr().out
+    assert '"inputSchema"' in human and '"ownedFiles"' in human
+    assert main(["--workspace", str(tmp_path), "--json", *request]) == 0
+    machine = json.loads(capsys.readouterr().out)
+    assert "inputSchema" in machine["data"] and "ownedFiles" in machine["data"]["fieldRules"]
+    assert '"inputSchema"' not in machine["text"]
+
+
 def test_schema_discovery_before_start_has_usable_examples_without_creating_plan(tmp_path):
+    """Catch duplicate schema text; field-only checks miss a verbose copy beside structured data."""
     # A cold planner cannot recover by reading source. tools/list only describes
     # fields as an opaque object, so it misses the bead/test repair contract.
     server = PlannerServer(tmp_path)
@@ -548,6 +563,9 @@ def test_schema_discovery_before_start_has_usable_examples_without_creating_plan
         guide = invoke(server, "harness_schema", kind="bead")
         assert not guide["isError"], guide
         data = guide["structuredContent"]
+        text = guide["content"][0]["text"]
+        assert "structuredContent" in text and '"inputSchema"' not in text
+        assert len(text.encode("utf-8")) < 2000
         assert not (tmp_path / ".codex-harness").exists()
         assert data["inputSchema"]["additionalProperties"] is False
         assert "ownedFiles" in data["fieldRules"]

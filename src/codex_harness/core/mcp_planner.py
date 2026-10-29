@@ -176,6 +176,9 @@ TOOLS = [
         "harness_roundtable",
         "Run the existing protected roundtable with explicit authorized reviewers. "
         "Inspect harness_schema tool=harness_roundtable first; offerings do not prove access. "
+        "Before requesting semantic review, walk every full-brief clause in working notes: "
+        "clause -> scenario ID(s) or GAP with rationale. Repair required gaps; unsupported "
+        "obligations stay required/unproven or explicitly deferred. No coverage certification. "
         "Uses the same synchronous producer and review gates as CLI roundtable.",
         {
             "reviewers": {
@@ -1737,7 +1740,10 @@ class PlannerServer:
                     else None
                 )
                 self.result_data["closureExample"] = views.closure_declaration_example(store)
-            return json.dumps(self.result_data, ensure_ascii=False, indent=2)
+            return (
+                "Complete schema, examples, and field rules are in structuredContent. "
+                "Use its inputSchema and examples with actual plan IDs."
+            )
         if name == "harness_preflight":
             self.result_data = preflight_report(self.workspace, **args)
             return render_preflight(self.result_data)
