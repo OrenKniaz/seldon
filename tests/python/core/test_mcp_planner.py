@@ -22,6 +22,106 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" 
 revision_proof = test_test_audit.prospective
 
 
+def test_status_summary_full_fetch_and_pending_question_preserve_canonical_authority(
+    tmp_path, capsys
+):
+    """Catch default bulk echoes or compacted gate words; old status tests have small visions."""
+    from codex_harness.core import plan_cli
+
+    server = PlannerServer(tmp_path)
+    words = "Keep every accepted scenario and detailed requirement unchanged.\n" * 160
+    try:
+        started = workspace_wire(
+            server,
+            "harness_plan_start",
+            expected_workspace=str(tmp_path),
+            idea="Ledger",
+            name="Ledger",
+        )
+        assert not started["isError"], started
+        node = dict(
+            id="V1",
+            kind="vision",
+            title="Ledger",
+            text=words,
+            parents=[],
+            fields={"scope_in": words, "done_feels_like": words},
+        )
+        assert not workspace_wire(
+            server, "harness_upsert_node", expected_workspace=str(tmp_path), node=node
+        )["isError"]
+        before = server._status()
+        revision = before["plan_revision"]
+        compact_reply = workspace_wire(
+            server, "harness_plan_status", expected_workspace=str(tmp_path)
+        )
+        assert not compact_reply["isError"], compact_reply
+        compact = compact_reply["structuredContent"]
+        summary = compact["visionProjection"]
+        assert summary["isSummary"] is True
+        assert summary["nodeId"] == node["id"] and summary["planRevision"] == revision
+        assert summary["nodeRevision"] == server.store.spine().revision(node["id"])
+        assert "Summary only" in compact_reply["content"][0]["text"]
+        assert {k: v for k, v in compact.items() if k != "visionProjection"} == {
+            k: v for k, v in before.items() if k != "visionProjection"
+        }
+        assert server._status() == before and server.store.spine().node("V1") == node
+        full_reply = workspace_wire(
+            server, "harness_plan_status", expected_workspace=str(tmp_path), full=True
+        )
+        assert full_reply["structuredContent"] == before
+        assert words in full_reply["content"][0]["text"]
+        fetched = workspace_wire(
+            server, summary["fullFetch"]["tool"], **summary["fullFetch"]["arguments"]
+        )
+        assert fetched["structuredContent"]["text"] == words
+        schema = workspace_wire(server, "harness_schema", tool="harness_plan_status")[
+            "structuredContent"
+        ]
+        assert schema["inputSchema"]["properties"]["full"]["type"] == "boolean"
+        assert plan_cli.main(["--workspace", str(tmp_path), "--json", "status"]) == 0
+        cli = json.loads(capsys.readouterr().out)
+        assert cli["status"]["visionProjection"]["isSummary"] is True
+        assert cli["status"]["pending_gate"] == before["pending_gate"]
+        assert plan_cli.main(["--workspace", str(tmp_path), "--json", "show", node["id"]]) == 0
+        assert json.loads(capsys.readouterr().out)["data"]["text"] == words
+        sizes = {
+            key: len(json.dumps(reply, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            for key, reply in (("summary", compact_reply), ("full", full_reply))
+        }
+        assert sizes["summary"] < sizes["full"] // 2, sizes
+        (tmp_path / "status-bytes.json").write_text(json.dumps(sizes), encoding="utf-8")
+        pending = workspace_wire(
+            server,
+            "harness_prepare_chat_confirmation",
+            gate="align",
+            expected_workspace=str(tmp_path),
+        )["structuredContent"]
+        saved = server.store._latest_draft_event("confirmation-requested")
+        assert saved["vision"] == node and saved["card"] == pending["card"]
+        assert saved["plan_revision"] == revision and saved["request_id"] == pending["request_id"]
+        assert "<<<SHOW-VERBATIM\n" in pending["card"] and "\nSHOW-VERBATIM>>>" in pending["card"]
+        assert words[:60] in pending["card"]
+        after = workspace_wire(server, "harness_plan_status", expected_workspace=str(tmp_path))[
+            "structuredContent"
+        ]
+        assert after["pending_gate"] == before["pending_gate"] and not after["approval"]["granted"]
+        assert workspace_wire(
+            server, "harness_advance", expected_workspace=str(tmp_path), to_phase="expand"
+        )["isError"]
+        wrong = workspace_wire(
+            server, "harness_plan_status", expected_workspace=str(tmp_path / "foreign"), full=True
+        )
+        assert wrong["isError"] and "workspace-mismatch" in wrong["content"][0]["text"]
+        assert workspace_wire(
+            server, "harness_plan_status", expected_workspace=str(tmp_path), full="yes"
+        )["isError"]
+        assert server.store.spine().node("V1") == node and server.store.phase() == "align"
+        assert server.store._latest_draft_event("confirmation-requested") == saved
+    finally:
+        server.close()
+
+
 def workspace_wire(server, tool_name, **arguments):
     """Actual unscoped wire; never fill missing caller intent from the server."""
     return server.handle_line(

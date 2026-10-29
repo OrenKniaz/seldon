@@ -453,7 +453,10 @@ def build_packet(
         phase = raw_bead["semanticPhase"]
         instruction = (
             "Write interface stubs and any harness. EVERY operation exits 3 and writes exactly "
-            "one stderr line SELDON-STUB <operation>, using the declared operation."
+            "one stderr line SELDON-STUB <operation>, using the declared operation. "
+            "Write SELDON-STUB <operation> for the declared operation to stderr and exit 3 before "
+            "argument parsing, importing product modules, or product I/O. "
+            "Do not print unrelated operation markers."
             if phase == "contracts"
             else "Implement the product and your own unit tests. Preserve scenario data, contracts "
             "and launch bindings. The controller runs identical scenarios for Validation."

@@ -531,6 +531,14 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
         result.update(typed_draft_help(tool))
+    if tool == "harness_plan_status":
+        result["presentation"] = (
+            "Default status labels visionProjection as a summary with node/plan revisions "
+            "and fullFetch tool arguments. full=true returns the complete status/projection. "
+            "CLI status uses the summary; CLI show <nodeId> reads the complete node. "
+            "All gate, proof, approval, freshness and workspace bindings remain canonical. "
+            "A summary grants nothing and never replaces a complete confirmation question."
+        )
     if tool in {"harness_prepare_chat_confirmation", "harness_record_chat_confirmation"}:
         result["chatConfirmation"] = {
             "authority": "Distinct caller-mediated chat-confirmation, never native elicitation. "

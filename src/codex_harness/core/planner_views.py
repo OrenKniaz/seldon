@@ -1446,7 +1446,17 @@ def status_card(status: dict, questions: list[dict]) -> str:
     projection = status.get("visionProjection")
     if projection:
         # The full understanding matters before the lock; afterwards one line is enough.
-        if phase in {"align", "expand", "vision-lock"} or not status.get("vision_locked_revision"):
+        if projection.get("isSummary"):
+            lines.append(f"\n**Vision summary:** {projection['title']}")
+            lines.append(
+                f"Summary only for {projection['nodeId']} at node {projection['nodeRevision']} "
+                f"(plan {projection['planRevision']}). Full vision: "
+                f"harness_show_node id={projection['nodeId']}; "
+                "full status: harness_plan_status full=true."
+            )
+        elif phase in {"align", "expand", "vision-lock"} or not status.get(
+            "vision_locked_revision"
+        ):
             lines.append("\n" + render_vision(projection))
         else:
             sections = {item["label"]: item["text"] for item in projection.get("sections", [])}

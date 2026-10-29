@@ -52,6 +52,8 @@ def _json(value: object) -> str:
 
 
 def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
+    from codex_harness.core.roundtable import advisory_finding_ids
+
     exists = store.connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
     ).fetchone()
@@ -96,7 +98,10 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
     rows = store.connection.execute(query + " ORDER BY id").fetchall()
     reviewers = sorted({row["reviewer"] for row in runs if row["reviewer"]})
     providers = sorted({row["provider"] for row in runs if row["provider"]})
-    unresolved = [row["id"] for row in rows if row["status"] == "open"]
+    advisory = advisory_finding_ids(store)
+    unresolved = [
+        row["id"] for row in rows if row["status"] == "open" and row["id"] not in advisory
+    ]
     addressed = sum(
         row["status"] == "resolved"
         or row["status"] == "rejected"
@@ -116,6 +121,7 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
         "addressed": addressed,
         "open": len(unresolved),
         "openFindingIds": unresolved,
+        "advisoryFindingIds": sorted(advisory),
     }
     policy = store.plan_review_policy_state(revision)
     if policy["active"]:

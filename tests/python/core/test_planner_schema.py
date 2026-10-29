@@ -47,7 +47,7 @@ def test_public_short_vision_example_preserves_actual_brief_and_existing_long_vi
         assert server.store.spine().node("V1") == original
         shown = invoke(server, "harness_show_node", id="V1")["structuredContent"]
         assert shown["text"] == original["text"] == brief
-        status = invoke(server, "harness_plan_status")
+        status = invoke(server, "harness_plan_status", full=True)
         assert brief in status["content"][0]["text"]
         node = deepcopy(guide["example"]["node"])
         taught = node["text"]

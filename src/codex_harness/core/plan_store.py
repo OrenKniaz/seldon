@@ -2040,8 +2040,9 @@ class PlanStore:
         ]
 
     def _prospective_closure_facts(self, adopted_at: str, revision: str) -> list[dict]:
-        from codex_harness.core.roundtable import findings
+        from codex_harness.core.roundtable import advisory_finding_ids, findings
 
+        advisory = advisory_finding_ids(self)
         declarations = [
             json.loads(row[0])
             for row in self.connection.execute(
@@ -2050,7 +2051,11 @@ class PlanStore:
         ]
         result = []
         for row in findings(self, expand=True):
-            if row.get("stage") == "readiness" or row["created_at"] < adopted_at:
+            if (
+                row.get("stage") == "readiness"
+                or row["created_at"] < adopted_at
+                or row["id"] in advisory
+            ):
                 continue
             declaration = next(
                 (item for item in reversed(declarations) if row["id"] in item["memberIds"]), None
@@ -2244,21 +2249,34 @@ class PlanStore:
             for name, path in sources.items():
                 raw = path.read_bytes()
                 files[name] = (
-                    "derived"
+                    {"derived": hashlib.sha256(raw).hexdigest()}
                     if name in rendered and raw == rendered[name].encode("utf-8")
                     else hashlib.sha256(raw).hexdigest()
                 )
         return dict(nodes=nodes, files=files)
 
     def _review_repairs_match(self, row: dict, current: dict) -> bool:
+        from codex_harness.core.roundtable import advisory_finding_ids
+
         saved = json.loads(row["nodesDigest"])
-        if saved["files"] != current["files"]:
+        before_files, after_files = saved["files"], current["files"]
+        if before_files.keys() != after_files.keys():
             return False
+        for name, left in before_files.items():
+            right = after_files[name]
+            if isinstance(right, dict) and (left == "derived" or isinstance(left, dict)):
+                continue  # Current canonical render; retain legacy derived-marker credit.
+            if isinstance(left, dict) and set(left) == {"derived"}:
+                left = left["derived"]  # Retained bytes from the reviewed canonical render.
+            if left != right:
+                return False
+        advisory = advisory_finding_ids(self, row["plan_revision"])
         findings = [
             dict(item)
             for item in self.connection.execute(
                 "SELECT * FROM review_findings WHERE round_id=?", (row["round_id"],)
             )
+            if item["id"] not in advisory
         ]
         if any(
             f["status"] not in {"resolved", "rejected", "deferred"} or f["severity"] == "blocker"
@@ -2405,10 +2423,14 @@ class PlanStore:
         ]
 
     def _check_publish(self) -> None:
-        from codex_harness.core.roundtable import findings
+        from codex_harness.core.roundtable import advisory_finding_ids, findings
 
         self._check_approval("vision-lock", self._revision())
-        if any(row.get("stage", "roundtable") != "readiness" for row in findings(self, "open")):
+        advisory = advisory_finding_ids(self)
+        if any(
+            row.get("stage", "roundtable") != "readiness" and row["id"] not in advisory
+            for row in findings(self, "open", expand=True)
+        ):
             raise PlanStoreError("plan-findings-open", "Resolve open roundtable findings")
         if self._open("clarifications"):
             raise PlanStoreError("plan-clarifications-open", "Resolve open clarifications")

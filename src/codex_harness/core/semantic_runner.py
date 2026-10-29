@@ -97,7 +97,11 @@ def execute(s, root, targets, phase, seconds, deadline):
         if phase == "contracts" and not (
             result["exit"] == 3 and marker in result["stderr"].splitlines()
         ):
-            raise ValueError("Missing standard operation stub marker; no Contracts RED credit")
+            raise ValueError(
+                "Missing standard operation stub marker; no Contracts RED credit. "
+                "Write SELDON-STUB <operation> for the declared operation to stderr and exit 3 "
+                "before argument parsing, importing product modules, or product I/O."
+            )
         if "SELDON-STUB " in result["stderr"] + result["stdout"]:
             markers.append(a["id"])
         results[a["id"]] = result

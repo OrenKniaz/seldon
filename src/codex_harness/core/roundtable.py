@@ -117,6 +117,8 @@ def _table(store: PlanStore) -> None:
         ("kind", "TEXT"),
         ("nodeIds", "TEXT"),
         ("readiness_review_id", "TEXT"),
+        ("classification", "TEXT"),
+        ("scope_reason", "TEXT"),
     ):
         if name not in columns:
             store.connection.execute(f"ALTER TABLE review_findings ADD COLUMN {name} {kind}")
@@ -322,7 +324,13 @@ def _packet(
         "## Review instructions\n\n"
         + focus
         + "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
-        'have exactly {"node_id", "severity", "finding", "suggestion"}. All values are '
+        'have exactly {"node_id", "severity", "finding", "suggestion", "classification", '
+        '"scope_reason"}. Classification is defect-in-plan or beyond-brief; scope_reason '
+        "must explain the judgment against the packet's brief/requirements. Optionality is "
+        "reviewer judgment, never machine-certified coverage or a human waiver. Explicitly "
+        "brief-required obligations are defects, including unsupported required setup: retain "
+        "them as required/unproven or explicitly recorded deferral, never fulfilled. Only "
+        "extra coverage beyond those obligations is beyond-brief and advisory. All values are "
         "strings; finding must be nonempty. Severity is blocker, major, minor or note. "
         'node_id must be one of the ids below, or "plan" for plan-wide findings. '
         "Use [] if there are no findings.\nAllowed node ids: "
@@ -721,6 +729,55 @@ def _assessment_hash(value):
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
     ).hexdigest()
+
+
+def _scope_hash(row):
+    mutable = {"status", "resolution", "resolved_at", "cluster_id"}
+    return _assessment_hash({key: value for key, value in row.items() if key not in mutable})
+
+
+def advisory_finding_ids(store, revision=None):
+    """Unchanged judgments at their origin or eligible carry; unknown stays blocking."""
+    columns = {r[1] for r in store.connection.execute("PRAGMA table_info(review_findings)")}
+    if not {"classification", "scope_reason"} <= columns:
+        return set()
+    target, advisory = revision or store.manifest_revision(), set()
+    rows = [
+        dict(r)
+        for r in store.connection.execute(
+            "SELECT * FROM review_findings WHERE classification='beyond-brief'",
+        )
+    ]
+    for event in store.connection.execute(
+        "SELECT payload_json FROM events WHERE kind='roundtable-completed'"
+    ):
+        evidence = json.loads(event[0])
+        for row in rows:
+            if evidence.get("scopeJudgments", {}).get(row["id"]) != _scope_hash(row):
+                continue
+            run = store.connection.execute(
+                "SELECT * FROM review_runs WHERE round_id=? AND reviewer=? AND provider=?",
+                (row["round_id"], row["reviewer"], row["provider"]),
+            ).fetchone()
+            if run and row["scope_reason"].strip():
+                run = dict(run)
+                if (
+                    run["exit_code"] == run["invalid"] == 0
+                    and run["isMocked"] == 0
+                    and run["didRunProvider"] == run["packetBound"] == 1
+                    and evidence.get("scopeReviews", {}).get(run["id"]) == _assessment_hash(run)
+                    and (
+                        run["plan_revision"] == target
+                        or (
+                            revision is None
+                            and not store._plan_review_policies()
+                            and Spine(store._data()).semantic
+                            and store._review_repairs_match(run, store.review_nodes_digest())
+                        )
+                    )
+                ):
+                    advisory.add(row["id"])
+    return advisory
 
 
 def _assessment_directory(store, snapshot):
@@ -1253,6 +1310,9 @@ def _merge_finding(merged, item):
         merged[key] = item
         return
     prior = merged[key]
+    if item.get("classification") != prior.get("classification"):
+        prior["classification"] = "defect-in-plan"
+        prior["scope_reason"] = "Conflicting shard judgments; retain required defect"
     if _SEVERITIES.index(item["severity"]) < _SEVERITIES.index(prior["severity"]):
         prior["severity"], prior["suggestion"] = item["severity"], item["suggestion"]
     prior["outOfPacketTools"] = sorted(set(prior["outOfPacketTools"] + item["outOfPacketTools"]))
@@ -1366,10 +1426,18 @@ def _last_array(output: str) -> list:
 
 
 def _invalid_reason(item, known: set[str]) -> str | None:
-    if not isinstance(item, dict) or set(item) != _FIELDS:
+    if not isinstance(item, dict) or set(item) not in (
+        _FIELDS,
+        _FIELDS | {"classification", "scope_reason"},
+    ):
         return "Finding must have exactly node_id, severity, finding and suggestion"
     if not all(isinstance(value, str) for value in item.values()):
         return "Finding fields must be strings"
+    if "classification" in item and (
+        item["classification"] not in {"defect-in-plan", "beyond-brief"}
+        or not item["scope_reason"].strip()
+    ):
+        return "Finding scope requires a known classification and nonblank scope_reason"
     if item["node_id"] not in known:
         return "Unknown spine node_id"
     if item["severity"] not in _SEVERITIES:
@@ -2165,8 +2233,8 @@ def run_roundtable(
                 "INSERT INTO review_findings "
                 "(id, reviewer, provider, status, plan_revision, node_id, severity, "
                 "finding, suggestion, created_at, round_id, packetBound, "
-                "outOfPacketTools, outOfShard) "
-                "VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "outOfPacketTools, outOfShard, classification, scope_reason) "
+                "VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     item_id,
                     reviewer,
@@ -2181,9 +2249,23 @@ def run_roundtable(
                     item["packetBound"],
                     json.dumps(item["outOfPacketTools"]),
                     item["outOfShard"],
+                    item.get("classification", "defect-in-plan"),
+                    item.get("scope_reason", ""),
                 ),
             )
         result["clusters"] = store.cluster_review_findings(result["roundId"])
+        result["scopeJudgments"] = {
+            row["id"]: _scope_hash(dict(row))
+            for row in store.connection.execute(
+                "SELECT * FROM review_findings WHERE round_id=?", (result["roundId"],)
+            )
+        }
+        result["scopeReviews"] = {
+            row["id"]: _assessment_hash(dict(row))
+            for row in store.connection.execute(
+                "SELECT * FROM review_runs WHERE round_id=?", (result["roundId"],)
+            )
+        }
         result["packetBound"] = all(item["packetBound"] for item in result["reviewers"])
         result["outOfPacketTools"] = sorted(
             {tool for item in result["reviewers"] for tool in item["outOfPacketTools"]}

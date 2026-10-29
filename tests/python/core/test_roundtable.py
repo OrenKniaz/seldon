@@ -2,10 +2,12 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import source_only_confirmation
+from tests.python.core.planning_support import source_only_confirmation, source_only_vision_lock
+from tests.python.core.test_semantic_wiring import semantic_plan as _semantic_plan
 
 from codex_harness.core import roundtable
 from codex_harness.core.plan_quality import quality_report
@@ -1320,6 +1322,150 @@ def finding(node_id="R1", severity="major"):
         "finding": "Real verification is missing",
         "suggestion": "Add an end-to-end proof of the requirement",
     }
+
+
+@pytest.fixture
+def scope_store(tmp_path_factory):
+    for store, _ in _semantic_plan.__wrapped__(tmp_path_factory):
+        source_only_vision_lock(store)
+        while store.phase() != "roundtable":
+            store.advance(PHASES[PHASES.index(store.phase()) + 1], by="source-test")
+        store.compile_template(store.workspace / "template")
+        yield store
+
+
+def scoped_review(
+    store,
+    monkeypatch,
+    *,
+    classification="beyond-brief",
+    reason="Extra test depth",
+    required=False,
+    mocked=False,
+):
+    """Local transport double: real packet/parse/store, no provider or supplied gate verdict."""
+    item = dict(finding("R"), classification=classification, scope_reason=reason)
+    if classification == "beyond-brief":
+        item["finding"] = "Consider optional random-input greeting fuzz scenarios"
+    if classification is None:
+        item = finding("R")
+
+    def source_process(launch, cwd, timeout):
+        # The child emits reviewer input, never a PASS or publication decision.
+        payload = (
+            dict(item, classification="defect-in-plan" if launch.cli == "codex" else "beyond-brief")
+            if classification == "mixed"
+            else item
+        )
+        extra = (
+            [dict(finding("F"), classification="defect-in-plan", scope_reason="Clarify greeting")]
+            if required
+            else []
+        )
+        response = reviewer_stream(launch.cli, [payload, *extra], uses_tools=False)
+        program = "import sys; sys.stdin.read(); print(sys.argv[1])"
+        child = subprocess.run(
+            [sys.executable, "-B", "-c", program, response],
+            input=launch.stdin_text,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            cwd=cwd,
+            timeout=timeout,
+        )
+        return child.returncode, child.stdout, child.stderr
+
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    monkeypatch.setattr(roundtable, "_run", source_process)
+    return run_roundtable(store, reviewers=REVIEWERS, runner=source_process if mocked else None)
+
+
+def repair_required_scope(store):
+    node = store.spine().node("F")
+    node["text"] += " Clarify required greeting"
+    store.upsert_node(node)
+    store.resolve_findings(
+        [
+            dict(id=row["id"], status="resolved", resolution="Clarified greeting")
+            for row in findings(store)
+            if row["node_id"] == "F"
+        ]
+    )
+    store.compile_template(store.workspace / "template")
+
+
+def test_reviewer_optionality_reaches_publication_and_closure_without_hiding(
+    scope_store, monkeypatch
+):
+    """Catch open advisory invalidating required repairs; old tests separated these flows."""
+    store = scope_store
+    scoped_review(store, monkeypatch, required=True)
+    repair_required_scope(store)
+    rows = findings(store, "open", expand=True)
+    assert len(rows) == 2 and all(row["classification"] == "beyond-brief" for row in rows)
+    with PlanStore(store.workspace) as reopened:
+        assert check(reopened)["status"] == "pass"
+        reopened.advance("publish", by="source-test")
+        assert (
+            reopened.publish(by="source-test", export_dir=store.workspace / "published")
+            == reopened.manifest_revision()
+        )
+        assert reopened.connection.execute("SELECT count(*) FROM review_runs").fetchone()[0] == 2
+        assert findings(reopened, "open", expand=True) == rows
+
+
+@pytest.mark.parametrize(
+    "case",
+    "required legacy stale tampered reclassified review-tampered mixed mocked policy".split(),
+)
+def test_scope_judgment_cannot_silently_exempt_unbound_findings(scope_store, monkeypatch, case):
+    """Catch exemptions surviving binding loss; prior tests have no scope ingest record."""
+    store = scope_store
+    scoped_review(
+        store,
+        monkeypatch,
+        classification={
+            "required": "defect-in-plan",
+            "legacy": None,
+            "reclassified": None,
+            "mixed": "mixed",
+        }.get(case, "beyond-brief"),
+        required=True,
+        mocked=case == "mocked",
+    )
+    repair_required_scope(store)
+    if case == "stale":
+        node = store.spine().node("D")
+        node["text"] += " changed reviewed decision"
+        store.upsert_node(node)
+        source_only_confirmation(store, "vision-lock", statement="Approve updated revision")
+    if case == "tampered":
+        store.connection.execute("UPDATE review_findings SET scope_reason='Changed after ingest'")
+    if case == "reclassified":
+        store.connection.execute(
+            "UPDATE review_findings SET classification='beyond-brief', scope_reason='Author claim'"
+        )
+    if case == "review-tampered":
+        store.connection.execute("UPDATE review_runs SET shardDetails='[]'")
+    if case == "policy":
+        store.record_plan_review_policy(
+            [dict(name="codex-reviewer", provider="codex", required=True)],
+            store.manifest_revision(),
+        )
+    with pytest.raises(PlanStoreError, match="Resolve open roundtable findings"):
+        store._check_publish()
+    assert store._prospective_closure_facts("", store.manifest_revision())
+
+
+@pytest.mark.parametrize("classification,reason", [("unknown", "why"), ("beyond-brief", " ")])
+def test_scope_parser_refuses_unknown_or_unreasoned_judgment(
+    scope_store, monkeypatch, classification, reason
+):
+    """Catch malformed optionality accepted as authority; old parser has only four fields."""
+    store = scope_store
+    result = scoped_review(store, monkeypatch, classification=classification, reason=reason)
+    assert result["invalid"] == 2 and not findings(store)
+    assert check(store)["status"] == "fail"
 
 
 def test_recorded_review_cli_mcp_and_read_only(store):

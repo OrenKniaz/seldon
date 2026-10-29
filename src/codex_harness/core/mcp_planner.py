@@ -422,7 +422,12 @@ TOOLS = [
         },
         ["idea", "name"],
     ),
-    _tool("harness_plan_status", "Show all phases and the canonical pending gate.", {}),
+    _tool(
+        "harness_plan_status",
+        "Show canonical gates and a labelled vision summary; full=true returns complete status.",
+        {"full": {"type": "boolean"}},
+        [],
+    ),
     _tool(
         "harness_plan_resume",
         "Inspect or reattach by default. Explicit request_execution asks a bound native or chat "
@@ -2079,6 +2084,27 @@ class PlannerServer:
             return f"Revised protected test: {self.result_data['path']}; compile before reuse."
         if name == "harness_plan_status":
             status = self._status()
+            if not args.get("full", False) and status.get("visionProjection"):
+                spine = store.spine()
+                vision_id = spine.ids("vision")[0]
+                status = {
+                    **status,
+                    "visionProjection": {
+                        "title": status["visionProjection"]["title"],
+                        "sections": [],
+                        "isSummary": True,
+                        "nodeId": vision_id,
+                        "nodeRevision": spine.revision(vision_id),
+                        "planRevision": status["plan_revision"],
+                        "fullFetch": {
+                            "tool": "harness_show_node",
+                            "arguments": {
+                                "id": vision_id,
+                                "expected_workspace": str(self.workspace),
+                            },
+                        },
+                    },
+                }
             self.result_data = status
             questions = [
                 dict(row)
@@ -2141,7 +2167,12 @@ class PlannerServer:
                 outcome = views.outcome_summary(waves)
                 if outcome:
                     details.append(outcome)
-            body += "\n\n**Details** (for the agent; full data in structured output)\n"
+            data_label = (
+                "gate data"
+                if (status.get("visionProjection") or {}).get("isSummary")
+                else "full data"
+            )
+            body += f"\n\n**Details** (for the agent; {data_label} in structured output)\n"
             body += "\n".join(details)
             return body
         if name == "harness_understanding_card":
