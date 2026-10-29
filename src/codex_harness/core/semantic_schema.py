@@ -2,6 +2,7 @@
 
 import base64
 import json
+import sys
 from pathlib import Path
 
 LIMIT = 16384
@@ -57,6 +58,17 @@ def argv(values, root):
     return result
 
 
+def target_entry(binding):
+    if "entry" in binding:
+        return binding["entry"]
+    module = binding["module"]
+    if type(module) is not str or not all(part.isidentifier() for part in module.split(".")):
+        raise ValueError("Module must name a dotted Python package")
+    if module.split(".")[0] in sys.stdlib_module_names:
+        raise ValueError("Module targets must not name standard-library packages")
+    return module.replace(".", "/") + "/__main__.py"
+
+
 def validate(document, product, targets, *, require_entries=True):
     if len(json.dumps([document, targets], allow_nan=False).encode()) > 65536:
         raise ValueError("Input exceeds 64KiB")
@@ -67,10 +79,18 @@ def validate(document, product, targets, *, require_entries=True):
     if type(targets) is not dict:
         raise ValueError("Declare target bindings")
     for binding in targets.values():
-        fields(binding, ("entry", "argv"), ("entry", "argv"))
-        entry = path(product, binding["entry"])
+        fields(binding, ("entry", "module", "argv"), ("argv",))
+        if len(set(binding) & {"entry", "module"}) != 1:
+            raise ValueError("Declare exactly one entry or module target")
+        entry = path(product, target_entry(binding))
         if entry.suffix != ".py" or (require_entries and not entry.is_file()):
-            raise ValueError("Declare an existing product Python entry")
+            raise ValueError(
+                "Declare an existing product Python entry or module package __main__.py"
+            )
+        if "module" in binding and require_entries:
+            count = len(binding["module"].split("."))
+            if not all((p / "__init__.py").is_file() for p in list(entry.parents)[:count]):
+                raise ValueError("Module package paths require owned __init__.py files")
         argv(binding["argv"], product)
     ids = set()
     for s in scenarios:

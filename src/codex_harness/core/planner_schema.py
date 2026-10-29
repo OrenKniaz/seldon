@@ -639,11 +639,11 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
             "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
             "keep every other field and its exact wording).",
-            "launch": "Each action runs python -B <entry> <target argv> <action argv> from the "
-            "product root by default. Optional action.cwd names a setup-created directory, "
-            "e.g. 'data/caller'; PYTHONPATH remains the product root. For python -m, use an entry "
-            "calling "
-            "runpy.run_module('<package>', run_name='__main__').",
+            "launch": "Targets use exactly one entry or module plus argv. Prefer module for "
+            "python -m: {module: 'app', argv: []} -> python -B -m app <target argv> <action argv>. "
+            "entry uses python -B <entry>. Both workers own module __main__.py (Contracts stub). "
+            "Modules need __init__.py at every level and non-stdlib names. Optional action.cwd "
+            "is setup-created, e.g. 'data/caller'; default cwd and PYTHONPATH are product root.",
             "argv": "Plain strings may not contain / \\ : or ..; pass sandbox paths as "
             "{path: 'data/x.json'}. Setup files use exactly one utf8 or strict base64 string, "
             "e.g. {path: 'data/raw.bin', base64: '/w=='} for byte FF; only data/ fixtures. "

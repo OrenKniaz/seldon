@@ -23,6 +23,38 @@ def scenario():
 
 
 TARGETS = {"tally": {"entry": "tally.py", "argv": []}}
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"module": "missing"},
+        {"module": "probe", "entry": "tally.py"},
+        {},
+        {"module": "../outside"},
+        {"module": "C:/outside"},
+        {"module": "probe..sub"},
+        {"module": "probe/sub"},
+        {"module": 1},
+        {"module": "unittest"},
+        {"module": "namespace"},
+    ],
+)
+def test_invalid_module_bindings_are_errors_before_launch(tmp_path, binding):
+    """Catch missing/unsafe module admission; existing binding negatives use entry only."""
+    marker = tmp_path / "launched"
+    (tmp_path / "tally.py").write_text(f"open({str(marker)!r},'w').write('unexpected')")
+    for name in ("unittest", "namespace"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "__main__.py").write_text("print('unexpected')")
+    result = run(scenario(), tmp_path, {"tally": dict(binding, argv=[])}, "validation")[0]
+    (tmp_path / "module-observation.json").write_text(json.dumps(result))
+    assert result["state"] == "ERROR", result
+    assert not result.get("cleanup") and not marker.exists()
+    if binding == {"module": "missing"}:
+        assert "module" in result["reason"] and "__main__.py" in result["reason"]
+
+
 GRAMMAR = """import argparse, sys
 p=argparse.ArgumentParser(); p.add_argument('--db')
 p.add_argument('operation', choices=['add']); p.add_argument('category')
@@ -30,6 +62,27 @@ p.add_argument('amount'); a=p.parse_args()
 """
 STUB = GRAMMAR + "print('SELDON-STUB '+a.operation, file=sys.stderr); sys.exit(3)\n"
 PRODUCT = GRAMMAR + "print('amount must be positive', file=sys.stderr); sys.exit(2)\n"
+
+
+@pytest.mark.parametrize("broken,state", [(True, "FAIL"), (False, "PASS")])
+def test_module_uses_owned_root_over_regular_caller_package(tmp_path, broken, state):
+    """Catch cwd shadowing a validated package; namespace checks miss two regular packages."""
+    for name in ("probe", "data/caller/probe"):
+        package = tmp_path / name
+        package.mkdir(parents=True)
+        (package / "__init__.py").touch()
+        source = (
+            "raise RuntimeError('root package broken')\n" if broken and name == "probe" else PRODUCT
+        )
+        (package / "__main__.py").write_text(source, encoding="utf-8")
+    document = scenario()
+    item = document["scenarios"][0]
+    item["setup"]["dirs"] = ["data/caller"]
+    item["actions"][0]["cwd"] = "data/caller"
+    result = run(document, tmp_path, {"tally": {"module": "probe", "argv": []}}, "validation")[0]
+    (tmp_path / "caller-shadow-observation.json").write_text(json.dumps(result))
+    assert result["state"] == state, result
+    assert result["cleanup"]["quiescenceVerified"]
 
 
 @pytest.mark.parametrize(

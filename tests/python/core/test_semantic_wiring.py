@@ -556,6 +556,77 @@ def test_review_carry_refuses_unreviewed_scope_or_ineligible_findings(semantic_p
         store.advance("publish", by="source-test")
 
 
+def test_stored_module_binding_dispatches_real_minus_m_from_caller_cwd(semantic_plan):
+    """Catch entry-only compile/launch drift; existing dispatch fixtures execute wrappers."""
+    store, _ = semantic_plan
+    vision = store.spine().node("V1")
+    vision["fields"]["targets"] = {"greet": {"module": "probe", "argv": ["payload.bin"]}}
+    s = vision["fields"]["scenarios"]["scenarios"][0]
+    s["setup"] = {"files": [{"path": "data/caller/payload.bin", "utf8": "word"}]}
+    s["actions"][0].update(cwd="data/caller")
+    s["actions"][0]["cli"]["argv"] = ["tail"]
+    expected = dict(
+        launch=["-B", "-m", "probe", "payload.bin", "tail"],
+        cwd="caller",
+        body="word",
+        package="probe",
+    )
+    s["observe"] = [
+        {"action": "hello", "exitEquals": 0, "stdoutJsonEquals": expected, "stderrEquals": ""}
+    ]
+    store.upsert_node(vision)
+    with pytest.raises(ValueError, match="Both workers must own"):
+        store.compile_template(store.workspace / "template")
+    for key in ("C", "B"):
+        bead = store.spine().node(key)
+        bead["fields"]["ownedFiles"] = ["probe/__main__.py", "probe/__init__.py"]
+        store.upsert_node(bead)
+    manifest = store.compile_template(store.workspace / "template")
+    (store.workspace / "sample.json").write_text(json.dumps(manifest))
+    packet = worker_packet.build_packet(
+        load_plan(store.workspace),
+        {**manifest["beads"]["C"], "id": "C"},
+        store.workspace / "template",
+        None,
+    )
+    assert '"module": "probe"' in packet and "probe/__main__.py" in packet
+
+    def write(root, source):
+        (root / "probe").mkdir(exist_ok=True)
+        (root / "probe/__init__.py").touch()
+        (root / "probe/__main__.py").write_text(source, encoding="utf-8")
+
+    record = dispatch.run_plan(
+        store.workspace,
+        work_root=store.workspace / "runs",
+        max_parallel=1,
+        fake_workers={
+            "C": lambda root: write(root, STUB),
+            "B": lambda root: write(
+                root,
+                "import json,sys\nfrom pathlib import Path\n"
+                "print(json.dumps(dict(launch=sys.orig_argv[1:],cwd=Path.cwd().name,"
+                "body=Path(sys.argv[1]).read_text(),package=__package__)))\n",
+            ),
+        },
+    )
+    assert record["status"] == dispatch.STATUS_MOCK_ONLY, record
+    red = record["beads"]["C"]["integrated"]["semantic"]
+    green = record["semanticValidation"]
+    assert red["state"] == "RED" and not red["passed"]
+    assert green["state"] == "PASS" and green["passed"] and green["linkedRed"]
+    assert red["scenarioBinding"] == green["scenarioBinding"]
+    actual = green["results"][0]["actions"]["hello"]
+    assert json.loads(actual["stdout"]) == expected and actual["stderr"] == ""
+    assert all(
+        r["cleanup"]["quiescenceVerified"] and r["cleanup"]["activeProcessesAfterTeardown"] == 0
+        for r in red["results"] + green["results"]
+    )
+    saved = json.loads((Path(record["repo"]).parent / "evidence/run.json").read_text())
+    assert saved["semanticValidation"] == green
+    assert not record["isLiveProductProof"]
+
+
 def test_canonical_plan_contracts_red_build_validation_pass(semantic_plan):
     """Protect producer→dispatch→real CLI success; catches RED-as-proof and final rerun of stubs."""
     store, manifest = semantic_plan

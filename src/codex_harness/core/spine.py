@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
 from codex_harness.core.graph import PlanError, test_dir, validate_capability_refs
+from codex_harness.core.semantic_schema import target_entry
 
 SCHEMA = "codex-harness/spine-v1"
 MARKDOWN_FILES = ("PLAN.md", "REQUIREMENTS.md", "TRACE.md", "VISION.md")
@@ -508,10 +509,12 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
                 {r["id"] for r in beads[key]["requirementRefs"]}
             ) or not contract_ids.issubset(spine.ancestors(key)):
                 raise ValueError("Both workers must reference every requirement and contract")
-            if not {binding["entry"] for binding in targets.values()}.issubset(
+            if not {target_entry(binding) for binding in targets.values()}.issubset(
                 beads[key]["ownedFiles"]
             ):
-                raise ValueError("Both workers must own the declared CLI entry files")
+                raise ValueError(
+                    "Both workers must own declared CLI entry files or module __main__.py"
+                )
         manifest = dict(
             schema="codex-harness/provider-sample-v1",
             sample=spine.name,

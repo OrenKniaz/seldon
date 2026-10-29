@@ -46,6 +46,8 @@ def read(file, limit=LIMIT):
 
 def capture(cmd, root, cwd=None):
     env = dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root))
+    if cmd[2] == "-m":
+        env["PYTHONSAFEPATH"] = "1"
     env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
     child = Popen(cmd, cwd=cwd or root, env=env, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
     data = [None, None]
@@ -107,8 +109,13 @@ def execute(s, root, targets, phase, seconds, deadline):
             v = a["cli"]
             binding = targets[v["target"]]
             args = argv(binding["argv"], root) + argv(v["argv"], root)
+            launch = (
+                ["-m", binding["module"]]
+                if "module" in binding
+                else [str(path(root, binding["entry"]))]
+            )
             result = capture(
-                [sys.executable, "-B", str(path(root, binding["entry"])), *args],
+                [sys.executable, "-B", *launch, *args],
                 root,
                 path(root, a["cwd"]) if "cwd" in a else root,
             )
