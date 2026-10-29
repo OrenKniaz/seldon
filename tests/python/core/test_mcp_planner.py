@@ -584,6 +584,7 @@ def test_wire_workspace_correct_projects_and_stale_connection(tmp_path):
 
 
 def test_wire_workspace_cold_discovery_and_schema_without_store(tmp_path):
+    """Protect discoverable user-only reopening guidance; binding checks miss silent rewording."""
     workspace = tmp_path / "missing-plan"
     server = PlannerServer(workspace)
     try:
@@ -601,6 +602,13 @@ def test_wire_workspace_cold_discovery_and_schema_without_store(tmp_path):
         schema = workspace_wire(server, "harness_schema", tool="harness_plan_start")
         assert "expected_workspace" in schema["structuredContent"]["inputSchema"]["required"]
         assert "unauthenticated" in schema["content"][0]["text"]
+        upsert = workspace_wire(server, "harness_schema", tool="harness_upsert_node")
+        assert (
+            "explicitly asks"
+            in upsert["structuredContent"]["inputSchema"]["properties"]["reopen_vision_lock"][
+                "description"
+            ]
+        )
         assert server.store is None and not workspace.exists()
     finally:
         server.close()

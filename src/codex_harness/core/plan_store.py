@@ -418,8 +418,11 @@ class PlanStore:
                     "vision-locked-wording",
                     f"Differing keys: {', '.join(changed)}. Vision wording is locked. "
                     f"Resend {node['id']} with the locked text/title/fields verbatim "
-                    "(only scenarios/targets may change). If the user asked to change "
-                    "the vision, pass reopen_vision_lock=true.",
+                    "(only scenarios/targets may change). Put new detail into requirements. "
+                    "Use reopen_vision_lock=true only when the user's latest reply explicitly "
+                    "asks to change the approved vision, quality or done text; never for your own "
+                    "rewording, clarification or implementation consequences. Reopening costs "
+                    "the user another Vision Lock approval.",
                 )
 
         if (

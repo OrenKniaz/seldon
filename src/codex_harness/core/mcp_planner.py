@@ -533,7 +533,13 @@ TOOLS = [
                     "fields": {"type": "object"},
                 }
             ),
-            "reopen_vision_lock": {"type": "boolean"},
+            "reopen_vision_lock": {
+                "type": "boolean",
+                "description": "Only when the user's latest reply explicitly asks to change the "
+                "approved vision, quality or done text. Never use it for your own rewording, "
+                "clarification or implementation consequences; record those as requirements, "
+                "notes or findings instead. Reopening costs the user another Vision Lock approval.",
+            },
         },
         ["node"],
     ),
