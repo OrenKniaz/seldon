@@ -1,10 +1,13 @@
 """Closed data vocabulary for the experimental Python CLI slice; no proof authority."""
 
+import base64
 import json
 from pathlib import Path
 
 LIMIT = 16384
-ACTION = "exitEquals stdoutEquals stdoutJsonEquals stderrNonempty".split()
+ACTION = (
+    "exitEquals stdoutEquals stdoutJsonEquals stderrNonempty stderrEquals stderrContains".split()
+)
 FILE = "fileJsonEquals fileBytesEquals fileAbsent bytesUnchangedFrom".split()
 
 
@@ -34,6 +37,13 @@ def array(value, maximum=32):
     if type(value) is not list or len(value) > maximum:
         raise ValueError("Use a finite JSON array")
     return value
+
+
+def content(f):
+    keys = set(f) & {"utf8", "base64"}
+    if len(keys) != 1 or type(f[next(iter(keys))]) is not str:
+        raise ValueError("Setup content must be exactly one utf8 or base64 string")
+    return f["utf8"].encode() if "utf8" in f else base64.b64decode(f["base64"], validate=True)
 
 
 def argv(values, root):
@@ -81,11 +91,12 @@ def validate(document, product, targets, *, require_entries=True):
                 raise ValueError("Setup creates only data/ directories, not Python source paths")
         snapshots = set()
         for f in array(s["setup"].get("files", [])):
-            fields(f, ("path", "utf8"), ("path", "utf8"))
+            fields(f, ("path", "utf8", "base64"), ("path",))
             if path(product, f["path"]).suffix.lower() == ".py":
                 raise ValueError("Setup is data-only; Python source is unsupported")
-            if not f["path"].startswith("data/") or type(f["utf8"]) is not str:
-                raise ValueError("Setup writes only UTF-8 data/ fixtures")
+            if not f["path"].startswith("data/"):
+                raise ValueError("Setup writes only data/ fixtures")
+            content(f)
         for f in array(s["setup"].get("snapshots", [])):
             fields(f, ("id", "path"), ("id", "path"))
             path(product, f["path"])
@@ -94,13 +105,19 @@ def validate(document, product, targets, *, require_entries=True):
             snapshots.add(f["id"])
         actions = set()
         for a in array(s["actions"], 16):
-            fields(a, ("id", "cli", "http", "file"), ("id",))
+            fields(a, ("id", "cli", "cwd", "http", "file"), ("id",))
             if "http" in a or "file" in a:
                 raise ValueError(
                     "HTTP/file-only actions unsupported in v1 (unsupported in semantic-v1)"
                 )
-            if type(a["id"]) is not str or a["id"] in actions or set(a) != {"id", "cli"}:
+            if type(a["id"]) is not str or a["id"] in actions or not {"id", "cli"} <= set(a):
                 raise ValueError("Use unique CLI actions")
+            if "cwd" in a:
+                cwd = path(product, a["cwd"])
+                created = [path(product, d) for d in s["setup"].get("dirs", [])]
+                created += [path(product, f["path"]).parent for f in s["setup"].get("files", [])]
+                if not any(cwd == p or cwd in p.parents for p in created):
+                    raise ValueError("Action cwd must be a directory created by setup")
             actions.add(a["id"])
             v = a["cli"]
             fields(v, ("target", "operation", "argv"), ("target", "operation", "argv"))

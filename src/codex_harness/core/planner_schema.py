@@ -640,14 +640,22 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
             "keep every other field and its exact wording).",
             "launch": "Each action runs python -B <entry> <target argv> <action argv> from the "
-            "product root. For a python -m package, add a thin entry file that calls "
+            "product root by default. Optional action.cwd names a setup-created directory, "
+            "e.g. 'data/caller'; PYTHONPATH remains the product root. For python -m, use an entry "
+            "calling "
             "runpy.run_module('<package>', run_name='__main__').",
             "argv": "Plain strings may not contain / \\ : or ..; pass sandbox paths as "
-            "{path: 'data/x.json'}. Setup writes only data/ UTF-8 fixtures. Optional setup.dirs "
+            "{path: 'data/x.json'}. Setup files use exactly one utf8 or strict base64 string, "
+            "e.g. {path: 'data/raw.bin', base64: '/w=='} for byte FF; only data/ fixtures. "
+            "setup.dirs "
             "declares empty data/ directories; parents are never inferred from CLI paths.",
             "observe": "action observations: exitEquals, stdoutEquals, stdoutJsonEquals, "
-            "stderrNonempty. path observations: fileJsonEquals, fileBytesEquals, fileAbsent, "
-            "bytesUnchangedFrom (a setup snapshot id). An observation names one action or one "
+            "stderrNonempty, stderrEquals (exact, including empty), stderrContains (substring). "
+            "JSON equality preserves types, including integer versus float. path observations: "
+            "fileJsonEquals, fileBytesEquals, fileAbsent, bytesUnchangedFrom (a setup snapshot id; "
+            "files compare raw bytes, directories compare all entries and file bytes, "
+            "<=128 entries). "
+            "An observation names one action or one "
             "path, not both; path observations run after the last action, so split a scenario "
             "to check files between actions.",
             "refs": "requirementRefs/contractRefs are requirement/design node IDs, e.g. R1; "
@@ -663,12 +671,16 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
                             "contractRefs": ["G1"],
                             "setup": {
                                 "dirs": ["data"],
-                                "files": [{"path": "data/db.json", "utf8": "[]"}],
+                                "files": [
+                                    {"path": "data/db.json", "utf8": "[]"},
+                                    {"path": "data/raw.bin", "base64": "/w=="},
+                                ],
                                 "snapshots": [{"id": "before", "path": "data/db.json"}],
                             },
                             "actions": [
                                 {
                                     "id": "a1",
+                                    "cwd": "data",
                                     "cli": {
                                         "target": "app",
                                         "operation": "list",

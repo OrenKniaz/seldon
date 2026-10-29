@@ -151,6 +151,98 @@ def test_locked_vision_refuses_incidental_wording_without_mutation(semantic_plan
     assert not store._meta()["vision_lock_stale"]
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["", "float", "stderr", "error", "create", "mkdir", "rewrite", "remove"],
+)
+def test_stored_byte_cwd_scenarios_detect_observable_contract_violations(semantic_plan, mutation):
+    """Catch byte/cwd/type/text/tree false passes; existing compiled fixtures use root/text only."""
+    from codex_harness.core.semantic_runner import run
+
+    store, _ = semantic_plan
+    vision = store.spine().node("V1")
+    scenarios = []
+    for content, exit_code in [({"utf8": "x"}, 0), ({"base64": "/w=="}, 2)]:
+        scenarios.append(
+            dict(
+                id=f"bytes-{exit_code}",
+                requirementRefs=["R"],
+                contractRefs=["CLI"],
+                setup=dict(
+                    files=[
+                        dict(path="data/caller/payload.bin", **content),
+                        dict(path="data/caller/sibling", utf8="keep"),
+                    ],
+                    dirs=["data/caller/empty"],
+                    snapshots=[dict(id="tree", path="data/caller")],
+                ),
+                actions=[
+                    dict(
+                        id="a",
+                        cwd="data/caller",
+                        cli=dict(target="greet", operation="hello", argv=["payload.bin"]),
+                    )
+                ],
+                observe=[
+                    dict(
+                        action="a",
+                        exitEquals=exit_code,
+                        **(
+                            dict(stdoutJsonEquals={"bytes": 1}, stderrEquals="")
+                            if exit_code == 0
+                            else dict(stdoutEquals="", stderrContains="payload.bin")
+                        ),
+                    ),
+                    dict(path="data/caller", bytesUnchangedFrom="tree"),
+                ],
+                verdict="all",
+            )
+        )
+    vision["fields"]["scenarios"]["scenarios"] = scenarios
+    store.upsert_node(vision)
+    compiled = store.compile_template(store.workspace / "template")["semantic"]
+    product = store.workspace / "template"
+    (product / "hello.py").write_text(
+        "import runpy\nrunpy.run_module('probe', run_name='__main__')\n", encoding="utf-8"
+    )
+    changes = {
+        "": "",
+        "float": "size = float(size)",
+        "stderr": "print(' ', file=sys.stderr)",
+        "error": "label = 'unrelated'",
+        "create": "Path('extra').write_bytes(b'new')",
+        "mkdir": "Path('new-empty').mkdir()",
+        "rewrite": "Path('sibling').write_bytes(b'changed')",
+        "remove": "Path('empty').rmdir()",
+    }
+    if not mutation:
+        (product / "probe.py").write_text(STUB, encoding="utf-8")
+        red = run(compiled["scenarios"], product, compiled["targets"], "contracts")
+        assert [r["state"] for r in red] == ["FAIL", "FAIL"], red
+    (product / "probe.py").write_text(
+        "import json,sys\nfrom pathlib import Path\n"
+        "assert Path.cwd().name == 'caller'\n"
+        "raw = Path(sys.argv[1]).read_bytes()\nsize = len(raw)\nlabel = sys.argv[1]\n"
+        + changes[mutation]
+        + "\n"
+        "if raw == b'\\xff':\n print('invalid '+label,file=sys.stderr);sys.exit(2)\n"
+        "print(json.dumps({'bytes':size}))\n",
+        encoding="utf-8",
+    )
+    results = run(compiled["scenarios"], product, compiled["targets"], "validation")
+    assert [r["state"] for r in results] == (
+        ["PASS", "PASS"]
+        if not mutation
+        else ["PASS", "FAIL"]
+        if mutation == "error"
+        else ["FAIL", "PASS"]
+        if mutation in ("float", "stderr")
+        else ["FAIL", "FAIL"]
+    ), results
+    assert all(r["cleanup"]["quiescenceVerified"] for r in results)
+    assert all(r["cleanup"]["activeProcessesAfterTeardown"] == 0 for r in results)
+
+
 def test_locked_vision_explicit_reopen_marks_lock_stale(semantic_plan):
     """Protect deliberate edits; catches a dropped MCP reopen flag absent in store-only tests."""
     store, _ = semantic_plan
@@ -713,6 +805,7 @@ def test_public_dirs_example_compiles_to_real_runner_with_deliberate_negative(se
                 positive,
                 id="missing-parent-negative",
                 setup={},
+                actions=[{k: v for k, v in positive["actions"][0].items() if k != "cwd"}],
                 observe=[
                     {"action": "a1", "exitEquals": 2, "stderrNonempty": True},
                     {"path": "data/db.json", "fileAbsent": True},

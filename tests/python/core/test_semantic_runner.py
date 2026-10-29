@@ -280,3 +280,72 @@ def test_byte_preservation_detects_json_equivalent_mutation(tmp_path):
     assert result["state"] == "FAIL", result
     checks = {o["check"]: o["passed"] for o in result["observations"]}
     assert checks["bytesUnchangedFrom"] is False and checks["fileJsonEquals"] is True
+
+
+@pytest.mark.parametrize(
+    "fixture,cwd",
+    [
+        ({"base64": "!invalid"}, "data"),
+        ({"base64": "/w==", "utf8": "x"}, "data"),
+        ({}, "data"),
+        ({"base64": 3}, "data"),
+        ({"base64": "/w==", "path": "data/source.PY"}, "data"),
+        ({"base64": "/w==", "path": "data/source.py. "}, "data"),
+        ({"base64": "/w=="}, "../escape"),
+        ({"base64": "/w=="}, "data/missing"),
+        ({"base64": "/w=="}, "data/ledger.json"),
+    ],
+)
+def test_byte_fixture_and_cwd_errors_prevent_product_launch(tmp_path, fixture, cwd):
+    """Catch new vocabulary bypassing preflight/source guards; old negatives use utf8/root cwd."""
+    marker = tmp_path / "launched"
+    (tmp_path / "tally.py").write_text(
+        f"open({str(marker)!r},'w').write('unexpected')", encoding="utf-8"
+    )
+    document = scenario()
+    item = document["scenarios"][0]
+    item["setup"]["files"] = [dict({"path": "data/ledger.json"}, **fixture)]
+    item["actions"][0]["cwd"] = cwd
+    result = run(document, tmp_path, TARGETS, "contracts")
+    assert result[0]["state"] == "ERROR", result
+    assert not result[0].get("cleanup")
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("ending,state", [(b"\r\n", "PASS"), (b"", "FAIL")])
+def test_stderr_equals_normalizes_actual_crlf_without_inventing_newline(tmp_path, ending, state):
+    """Catch raw stderr equality rejecting Windows text; stdout newline cases miss stderrEquals."""
+    (tmp_path / "tally.py").write_text(
+        f"import sys\nsys.stderr.buffer.write({b'bad input' + ending!r})\n", encoding="utf-8"
+    )
+    document = scenario()
+    observation = {"action": "add", "stderrEquals": "bad input\n"}
+    document["scenarios"][0]["observe"] = [observation]
+    result = run(document, tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == state, result
+    assert result["actions"]["add"]["stderr"] == "bad input" + ending.decode()
+    assert observation["stderrEquals"] == "bad input\n"
+    assert result["cleanup"]["quiescenceVerified"]
+
+
+@pytest.mark.parametrize("change", ["overflow", "junction"])
+def test_unobservable_directory_snapshot_is_error_not_contracts_red(tmp_path, change):
+    """Catch incomplete tree credit for overflow/junctions; old snapshots only read files."""
+    source = (
+        "for i in range(129): Path('data',str(i)).touch()"
+        if change == "overflow"
+        else "import subprocess\nPath('target').mkdir()\n"
+        "subprocess.run(['cmd','/c','mklink','/J',str(Path('data/alias').resolve()),"
+        "str(Path('target').resolve())],check=True)"
+    )
+    (tmp_path / "tally.py").write_text(
+        "from pathlib import Path\nimport sys\n" + source + "\n"
+        "print('SELDON-STUB add',file=sys.stderr);sys.exit(3)\n",
+        encoding="utf-8",
+    )
+    document = scenario()
+    document["scenarios"][0]["setup"]["snapshots"] = [dict(id="before", path="data")]
+    document["scenarios"][0]["observe"] = [dict(path="data", bytesUnchangedFrom="before")]
+    result = run(document, tmp_path, TARGETS, "contracts")[0]
+    assert result["state"] == "ERROR" and "snapshot" in result["reason"], result
+    assert result["cleanup"]["quiescenceVerified"]

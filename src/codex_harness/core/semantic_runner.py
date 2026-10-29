@@ -13,13 +13,30 @@ from pathlib import Path
 from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
-from codex_harness.core.semantic_schema import LIMIT, argv, path, validate
+from codex_harness.core.semantic_schema import LIMIT, argv, content, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
 MODULE = "codex_harness.core.semantic_runner"
 
 
 def read(file, limit=LIMIT):
+    if file.is_dir():
+        entries, pending = [], [file]
+        while pending:
+            for p in pending.pop().iterdir():
+                if p.is_symlink() or p.is_junction():
+                    raise ValueError("Directory snapshots cannot observe links/junctions")
+                entries.append(p)
+                if len(entries) > 128:
+                    raise ValueError("Directory snapshot exceeds128 entries")
+                if p.is_dir():
+                    pending.append(p)
+        return {
+            p.relative_to(file).as_posix(): None
+            if p.is_dir()
+            else read(path(file, p.relative_to(file).as_posix()), limit)
+            for p in entries
+        }
     with file.open("rb") as stream:
         value = stream.read(limit + 1)
     if len(value) > limit:
@@ -27,10 +44,10 @@ def read(file, limit=LIMIT):
     return value
 
 
-def capture(cmd, root):
+def capture(cmd, root, cwd=None):
     env = dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root))
     env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
-    child = Popen(cmd, cwd=root, env=env, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
+    child = Popen(cmd, cwd=cwd or root, env=env, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
     data = [None, None]
 
     def drain(stream, index):
@@ -56,7 +73,7 @@ def capture(cmd, root):
 
 
 def equal(a, b):
-    if type(a) is not type(b) and not (type(a) in (int, float) and type(b) in (int, float)):
+    if type(a) is not type(b):
         return False
     if isinstance(a, dict):
         return a.keys() == b.keys() and all(equal(a[k], b[k]) for k in a)
@@ -72,7 +89,7 @@ def execute(s, root, targets, phase, seconds, deadline):
     for f in s["setup"].get("files", []):
         file = path(root, f["path"])
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_bytes(f["utf8"].encode())
+        file.write_bytes(content(f))
     for f in s["setup"].get("snapshots", []):
         snapshots[f["id"]] = read(path(root, f["path"]))
 
@@ -90,7 +107,11 @@ def execute(s, root, targets, phase, seconds, deadline):
             v = a["cli"]
             binding = targets[v["target"]]
             args = argv(binding["argv"], root) + argv(v["argv"], root)
-            result = capture([sys.executable, "-B", str(path(root, binding["entry"])), *args], root)
+            result = capture(
+                [sys.executable, "-B", str(path(root, binding["entry"])), *args],
+                root,
+                path(root, a["cwd"]) if "cwd" in a else root,
+            )
         finally:
             guard.cancel()
         marker = f"SELDON-STUB {v['operation']}"
@@ -112,12 +133,14 @@ def execute(s, root, targets, phase, seconds, deadline):
             if key in ("action", "path"):
                 continue
             valid = True
-            if key in ("exitEquals", "stdoutEquals"):
+            if key in ("exitEquals", "stdoutEquals", "stderrEquals"):
                 value = actual[key.removesuffix("Equals")]
-                if key == "stdoutEquals":
+                if key in ("stdoutEquals", "stderrEquals"):
                     value = value.replace("\r\n", "\n")
             elif key == "stderrNonempty":
                 value = bool(actual["stderr"].strip())
+            elif key == "stderrContains":
+                value, expected = expected in actual["stderr"], True
             elif key == "fileAbsent":
                 value = not path(root, o["path"]).exists()
             else:
