@@ -55,6 +55,7 @@ def project(tmp_path):
         server,
         "harness_plan_start",
         name="Capability reference proof",
+        plan_mode="legacy",
         idea="Carry requested tool references into worker instructions",
     )
     for identity, kind, parents, fields in [

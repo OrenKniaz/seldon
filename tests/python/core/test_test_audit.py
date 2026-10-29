@@ -192,7 +192,9 @@ def test_public_empty_plan_audit_cannot_persist_passing_credit(prospective):
     workspace = root.parent
     server = PlannerServer(workspace)
     try:
-        assert not invoke(server, "harness_plan_start", idea="Draft only", name="Empty")["isError"]
+        assert not invoke(
+            server, "harness_plan_start", plan_mode="legacy", idea="Draft only", name="Empty"
+        )["isError"]
         vision = {**prospective["spine"].node("V"), "id": "V1"}
         assert not invoke(server, "harness_upsert_node", node=vision)["isError"]
         compiled = invoke(server, "harness_compile")

@@ -104,7 +104,18 @@ def test_item3_audit_has_untruncated_failure_artifacts(project):
 def test_item4_created_entities_return_ids(project):
     w = project.workspace
     assert (
-        cli(w, "start", "--idea", "Answer", "--name", "Answer", machine=True)["data"]["id"] == "V1"
+        cli(
+            w,
+            "start",
+            "--plan-mode",
+            "legacy",
+            "--idea",
+            "Answer",
+            "--name",
+            "Answer",
+            machine=True,
+        )["data"]["id"]
+        == "V1"
     )
     question = cli(w, "ask", "--question", "Who?", machine=True)["data"]["id"]
     cli(w, "answer", "--id", question, "--text", "Operator")
@@ -192,12 +203,16 @@ def test_item6_metadata_keeps_lock_vision_edit_requires_reapproval(project, batc
 
 
 def test_item7_cli_wording_uses_commands_mcp_keeps_tools(tmp_path):
-    output = cli(tmp_path, "start", "--idea", "Tiny", "--name", "Tiny", machine=True)
+    output = cli(
+        tmp_path, "start", "--plan-mode", "legacy", "--idea", "Tiny", "--name", "Tiny", machine=True
+    )
     assert "card --vision" in output["next"]
     assert "harness_" not in json.dumps(output).replace("harness_record_confirmation", "")
     with_server = PlannerServer(tmp_path)
     try:
-        reply = with_server.call_tool("harness_plan_start", {"idea": "Tiny", "name": "Tiny"})
+        reply = with_server.call_tool(
+            "harness_plan_start", {"plan_mode": "legacy", "idea": "Tiny", "name": "Tiny"}
+        )
         assert "harness_understanding_card" in reply["content"][0]["text"]
     finally:
         with_server.close()

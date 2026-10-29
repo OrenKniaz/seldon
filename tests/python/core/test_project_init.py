@@ -561,6 +561,7 @@ def test_installed_wheel_registration_starts_bound_canonical_planner(tmp_path):
                 "params": {
                     "name": "harness_plan_start",
                     "arguments": {
+                        "plan_mode": "legacy",
                         "idea": "A local fixture planner",
                         "name": "Product A",
                         "expected_workspace": str(workspace),

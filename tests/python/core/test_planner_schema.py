@@ -40,7 +40,9 @@ def test_public_short_vision_example_preserves_actual_brief_and_existing_long_vi
     original_bytes = document.read_bytes()
     server = PlannerServer(tmp_path)
     try:
-        assert not invoke(server, "harness_plan_start", idea=brief, name="Parser")["isError"]
+        assert not invoke(
+            server, "harness_plan_start", plan_mode="legacy", idea=brief, name="Parser"
+        )["isError"]
         original = deepcopy(server.store.spine().node("V1"))
         guide = invoke(server, "harness_schema", kind="vision")["structuredContent"]
         # Teaching/help does not migrate or truncate any existing user-authored vision.
@@ -134,7 +136,11 @@ def test_public_vision_schema_populates_native_done_summary_without_losing_detai
         detail = "Retained extra done_means words: accepted edge cases and complete intent."
         example["fields"]["done_means"] = detail
         assert not invoke(
-            server, "harness_plan_start", idea="Source-only schema example", name="Schema demo"
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Source-only schema example",
+            name="Schema demo",
         )["isError"]
         source_only_expansion(server._store())
         example["fields"]["expansion"] = server.store.spine().node("V1")["fields"]["expansion"]
@@ -268,7 +274,13 @@ def test_ordinary_reviewer_action_schema_is_cold_unbound_and_distinct_from_intak
 def test_emitted_intake_draft_roundtrips_public_parser_and_store(tmp_path):
     server = PlannerServer(tmp_path)
     try:
-        invoke(server, "harness_plan_start", idea="Reject malformed parser input", name="Parser")
+        invoke(
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Reject malformed parser input",
+            name="Parser",
+        )
         guide, payload = typed_template(server, "harness_intake")
         assert payload["node"]["fields"]["confirmation"] is None
         result = invoke(server, "harness_intake", **payload)
@@ -292,7 +304,13 @@ def test_emitted_catalog_and_choice_drafts_require_actual_supplied_bindings(tmp_
 
     server = PlannerServer(tmp_path)
     try:
-        invoke(server, "harness_plan_start", idea="Review parser behavior", name="Parser")
+        invoke(
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Review parser behavior",
+            name="Parser",
+        )
         catalog_guide, payload = typed_template(server, "harness_reviewer_catalog")
         assert payload["catalog"]["id"] is None and payload["catalog"]["observedAt"] is None
         assert payload["catalog"]["providers"] == []
@@ -425,7 +443,7 @@ def test_cli_emitted_intake_template_roundtrips_from_another_cwd(tmp_path):
         assert process.returncode == 0, process.stderr or process.stdout
         return json.loads(process.stdout)
 
-    call("start", "--idea", "Reject malformed input", "--name", "Parser")
+    call("start", "--plan-mode", "legacy", "--idea", "Reject malformed input", "--name", "Parser")
     guide = call("schema", "--tool", "harness_intake")["data"]
     for index, node in enumerate(guide["prerequisiteNodes"]):
         path = tmp_path / f"node-{index}.json"
@@ -447,7 +465,13 @@ def test_typed_draft_invalid_bindings_refuse_atomically(tmp_path, fault):
 
     server = PlannerServer(tmp_path)
     try:
-        invoke(server, "harness_plan_start", idea="Reject malformed input", name="Parser")
+        invoke(
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Reject malformed input",
+            name="Parser",
+        )
         _, payload = typed_template(server, "harness_intake")
         repaired = deepcopy(payload)
         tool, expected = "harness_intake", "value-shape-invalid"
@@ -570,9 +594,13 @@ def test_schema_discovery_before_start_has_usable_examples_without_creating_plan
         assert data["inputSchema"]["additionalProperties"] is False
         assert "ownedFiles" in data["fieldRules"]
         assert data["allowedParentKinds"] == ["decision", "design", "requirement"]
-        assert not invoke(server, "harness_plan_start", idea="Recover invalid plans", name="Demo")[
-            "isError"
-        ]
+        assert not invoke(
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Recover invalid plans",
+            name="Demo",
+        )["isError"]
         for node in data["prerequisiteNodes"]:
             assert not invoke(server, "harness_upsert_node", node=node)["isError"]
         assert not invoke(server, "harness_upsert_node", **data["example"])["isError"]
@@ -602,7 +630,7 @@ def test_invalid_fields_explain_rule_and_repair_without_mutating_store(
     # Generic argument-type tests never reach the canonical kind validator.
     server = PlannerServer(tmp_path)
     try:
-        invoke(server, "harness_plan_start", idea="Parse input", name="Parser")
+        invoke(server, "harness_plan_start", plan_mode="legacy", idea="Parse input", name="Parser")
         vision = {
             "id": "V1",
             "kind": "vision",
@@ -654,7 +682,7 @@ def test_each_discovered_example_passes_real_store_and_preserves_open_fields(tmp
     # the returned payload itself, including the intentionally open fields object.
     server = PlannerServer(tmp_path)
     try:
-        invoke(server, "harness_plan_start", idea="Parser", name="Parser")
+        invoke(server, "harness_plan_start", plan_mode="legacy", idea="Parser", name="Parser")
         guide = invoke(server, "harness_schema", kind=kind)["structuredContent"]
         for node in guide["prerequisiteNodes"]:
             assert not invoke(server, "harness_upsert_node", node=node)["isError"]
@@ -914,7 +942,13 @@ def test_first_typed_refusal_teaches_owner_contract_then_supported_diagnostic(
 
     server = PlannerServer(tmp_path)
     try:
-        invoke(server, "harness_plan_start", idea="Preserve accepted task", name="Draft")
+        invoke(
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Preserve accepted task",
+            name="Draft",
+        )
         revision = server.store.spine().plan_revision()
         events = server.store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         refusal = invoke(server, tool)
@@ -975,7 +1009,15 @@ def test_guide_acceptance_node_route_roundtrips_without_proof_credit(tmp_path, c
         return result
 
     # The currently supported parser is a positive baseline control; the guide is the defect.
-    call("start", "--idea", "Describe planned acceptance", "--name", "Acceptance contract")
+    call(
+        "start",
+        "--plan-mode",
+        "legacy",
+        "--idea",
+        "Describe planned acceptance",
+        "--name",
+        "Acceptance contract",
+    )
     schema = call("schema", "--kind", "acceptance")["data"]
     assert schema["kind"] == "acceptance"
     assert schema["allowedParentKinds"] == ["feature", "vision"]
@@ -1040,7 +1082,10 @@ def test_cli_missing_intake_waves_next_reaches_complete_schema_then_preflight(tm
         result = main(["--workspace", str(tmp_path), "--json", *args])
         return result, json.loads(capsys.readouterr().out)
 
-    assert call("start", "--idea", "A bounded task", "--name", "Draft")[0] == 0
+    assert (
+        call("start", "--plan-mode", "legacy", "--idea", "A bounded task", "--name", "Draft")[0]
+        == 0
+    )
     code, missing = call("waves")
     assert code == 0 and missing["data"]["intake"] is None
     assert missing["next"].endswith("schema --tool harness_intake")

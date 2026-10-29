@@ -34,7 +34,16 @@ def git(repo, *args):
 
 def setup_wave(workspace, *, locked=False, two_sketches=False):
     workspace.mkdir(exist_ok=True)
-    cli(workspace, "start", "--idea", "Retain two outcomes", "--name", "links")
+    cli(
+        workspace,
+        "start",
+        "--plan-mode",
+        "legacy",
+        "--idea",
+        "Retain two outcomes",
+        "--name",
+        "links",
+    )
     with open_plan_store(workspace) as store:
         inputs = draft_inputs(store)
         vision = store.spine().node("V1")

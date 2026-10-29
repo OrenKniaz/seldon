@@ -155,7 +155,7 @@ def test_existing_chat_resume_returns_persisted_hold_without_starting_workers(tm
     assert not rpc(
         server,
         "harness_plan_start",
-        {"idea": "Small saved idea", "name": "Saved"},
+        {"plan_mode": "legacy", "idea": "Small saved idea", "name": "Saved"},
         expected_workspace=tmp_path,
     )["isError"]
     server.close()
@@ -220,7 +220,7 @@ def test_malformed_resume_cannot_reopen_writable_store_or_approve(tmp_path, tran
     assert not rpc(
         server,
         "harness_plan_start",
-        {"idea": "Saved", "name": "Saved"},
+        {"plan_mode": "legacy", "idea": "Saved", "name": "Saved"},
         expected_workspace=tmp_path,
     )["isError"]
     server.close()

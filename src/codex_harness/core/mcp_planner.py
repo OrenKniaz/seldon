@@ -417,11 +417,18 @@ TOOLS = [
     ),
     _tool(
         "harness_plan_start",
-        "Enter or resume Harness Plan Mode; mode is immutable after creation.",
+        "Enter or resume Harness Plan Mode; mode is immutable after creation. "
+        "New plans default to semantic-v1 for Python 3.12 CLI products (python -m pkg or a .py "
+        "entry); pass legacy for anything else (web, GUI, services, non-Python).",
         {
             "idea": STRING,
             "name": STRING,
-            "plan_mode": {"type": "string", "enum": ["legacy", "semantic-v1"]},
+            "plan_mode": {
+                "type": "string",
+                "enum": ["legacy", "semantic-v1"],
+                "description": "Default semantic-v1 for Python 3.12 CLI products (python -m pkg "
+                "or a .py entry). Pass legacy for anything else (web, GUI, services, non-Python).",
+            },
         },
         ["idea", "name"],
     ),
@@ -1913,7 +1920,7 @@ class PlannerServer:
                         "title": args["name"],
                         "text": args["idea"],
                         "fields": {"planMode": "semantic-v1"}
-                        if args.get("plan_mode") == "semantic-v1"
+                        if args.get("plan_mode") != "legacy"
                         else {},
                         "parents": [],
                     }

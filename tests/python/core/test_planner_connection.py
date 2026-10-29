@@ -36,6 +36,7 @@ def test_connection_identity_survives_new_server_on_same_durable_plan(tmp_path):
             server,
             "harness_plan_start",
             expected_workspace=str(project),
+            plan_mode="legacy",
             idea="Count local events",
             name="A different plan title",
         )
@@ -87,7 +88,12 @@ def test_wrong_project_reply_keeps_refusal_before_store_access(tmp_path, monkeyp
     server = PlannerServer(bound)
     try:
         refused = wire(
-            server, "harness_plan_start", expected_workspace=str(intended), idea="x", name="x"
+            server,
+            "harness_plan_start",
+            expected_workspace=str(intended),
+            plan_mode="legacy",
+            idea="x",
+            name="x",
         )
         payload = refused["result"]
         assert payload["isError"]

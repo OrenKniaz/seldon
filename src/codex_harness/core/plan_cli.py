@@ -296,7 +296,12 @@ def parser() -> argparse.ArgumentParser:
             "--machine-json", dest="machine", action="store_true", default=argparse.SUPPRESS
         )
     commands["schema"].add_argument("--tool", default="harness_upsert_node")
-    commands["start"].add_argument("--plan-mode", choices=["legacy", "semantic-v1"])
+    commands["start"].add_argument(
+        "--plan-mode",
+        choices=["legacy", "semantic-v1"],
+        help="New plans default to semantic-v1 for Python 3.12 CLI products (python -m pkg or "
+        "a .py entry). Pass legacy for anything else (web, GUI, services, non-Python).",
+    )
     commands["schema"].add_argument("--kind")
     commands["show"].add_argument("id")
     commands["review"].add_argument("id")

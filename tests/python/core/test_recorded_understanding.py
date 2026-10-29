@@ -30,7 +30,13 @@ def test_public_understanding_aliases_reach_shipped_consumer_without_metadata(tm
     if done_key == "both":
         vision["fields"]["doneFeelsLike"] = "Retained secondary alias words."
     try:
-        call(server, "harness_plan_start", idea="Track habits locally", name="Fixture")
+        call(
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Track habits locally",
+            name="Fixture",
+        )
         call(server, "harness_upsert_node", node=vision)
         request = begin_native(server)
         report = snapshot(workspace=tmp_path)

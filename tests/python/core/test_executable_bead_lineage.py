@@ -27,9 +27,9 @@ def planned(workspace, *, disconnected):
     )
     server = PlannerServer(tmp_path)
     try:
-        assert not invoke(server, "harness_plan_start", idea="Linked work", name="Lineage")[
-            "isError"
-        ]
+        assert not invoke(
+            server, "harness_plan_start", plan_mode="legacy", idea="Linked work", name="Lineage"
+        )["isError"]
         vision = invoke(server, "harness_show_node", id="V1")["structuredContent"]
         vision = {k: vision[k] for k in ("id", "kind", "title", "text", "parents", "fields")}
         vision["fields"].update(

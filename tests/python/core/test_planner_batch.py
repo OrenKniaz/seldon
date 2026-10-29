@@ -25,7 +25,9 @@ def invoke(server, tool_name, **arguments):
 
 
 def start(server):
-    assert not invoke(server, "harness_plan_start", idea="Parser", name="Parser")["isError"]
+    assert not invoke(
+        server, "harness_plan_start", plan_mode="legacy", idea="Parser", name="Parser"
+    )["isError"]
     guide = invoke(server, "harness_schema", tool="harness_upsert_nodes")
     assert not guide["isError"]
     guide = guide["structuredContent"]

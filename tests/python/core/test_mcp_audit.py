@@ -355,9 +355,9 @@ def finished_audit(server, **arguments):
 
 def started(prospective):
     server = PlannerServer(prospective["template"].parent)
-    assert not invoke(server, "harness_plan_start", idea="Source-only red stub", name="Audit")[
-        "isError"
-    ]
+    assert not invoke(
+        server, "harness_plan_start", plan_mode="legacy", idea="Source-only red stub", name="Audit"
+    )["isError"]
     nodes = []
     for original in prospective["spine"].to_dict()["nodes"]:
         node = {**original, "id": "V1" if original["id"] == "V" else original["id"]}

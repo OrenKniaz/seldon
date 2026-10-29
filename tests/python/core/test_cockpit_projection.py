@@ -397,7 +397,13 @@ def confirmation_snapshots(tmp_path):
     workspace.mkdir()
     server = PlannerServer(workspace)
     try:
-        call(server, "harness_plan_start", idea="Track habits locally", name="Daily tracker")
+        call(
+            server,
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Track habits locally",
+            name="Daily tracker",
+        )
         store = server._store()
         store.upsert_node(
             dict(

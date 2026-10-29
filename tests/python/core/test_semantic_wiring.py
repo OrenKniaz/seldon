@@ -329,22 +329,37 @@ def execute(store, *, work_root=None, **kwargs):
     )
 
 
-def test_mode_is_opt_in_and_creation_only(tmp_path):
-    """Protect legacy default and durable mode; catches resume conversion missed by runner tests."""
+@pytest.mark.parametrize("mode", [None, "legacy", "semantic-v1"])
+def test_mode_defaults_only_at_creation_and_survives_resume(tmp_path, mode):
+    """Catch default/resume conversion and explicit conflicts; runner tests bypass plan start."""
     server = PlannerServer(tmp_path)
-    assert not server.call_tool("harness_plan_start", dict(idea="CLI", name="legacy"))["isError"]
-    assert not server.store.spine().semantic
+    args = dict(idea="CLI", name="saved")
+    if mode is not None:
+        args["plan_mode"] = mode
+    assert not server.call_tool("harness_plan_start", args)["isError"]
+    semantic = mode != "legacy"
+    assert server.store.spine().semantic == semantic
+    if semantic:
+        assert server.store.spine().node("V1")["fields"]["planMode"] == "semantic-v1"
+    revision = server.store.spine().plan_revision()
+    server.close()
+    server = PlannerServer(tmp_path)
+    assert not server.call_tool("harness_plan_start", dict(idea="Ignored", name="saved"))["isError"]
+    assert server.store.spine().semantic == semantic
+    assert server.store.spine().plan_revision() == revision
+    conflicting = "legacy" if semantic else "semantic-v1"
     refused = server.call_tool(
-        "harness_plan_start", dict(idea="CLI", name="legacy", plan_mode="semantic-v1")
+        "harness_plan_start", dict(idea="CLI", name="saved", plan_mode=conflicting)
     )
     assert refused["isError"] and "immutable" in str(refused)
     vision = server.store.spine().node("V1")
-    vision["fields"]["planMode"] = "semantic-v1"
+    vision["fields"]["planMode"] = conflicting
     with pytest.raises(ValueError, match="immutable"):
         server.store.upsert_node(vision)
     server.close()
     with open_plan_store(tmp_path) as reopened:
-        assert not reopened.spine().semantic
+        assert reopened.spine().semantic == semantic
+        assert reopened.spine().plan_revision() == revision
 
 
 def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(

@@ -35,6 +35,7 @@ def test_status_summary_full_fetch_and_pending_question_preserve_canonical_autho
             server,
             "harness_plan_start",
             expected_workspace=str(tmp_path),
+            plan_mode="legacy",
             idea="Ledger",
             name="Ledger",
         )
@@ -159,7 +160,12 @@ def test_public_ordinary_reviewer_choice_confirmation_is_durable_and_scoped(tmp_
         return reply["structuredContent"]
 
     try:
-        invoke("harness_plan_start", idea="Explicit reviewer choice", name="Tester action")
+        invoke(
+            "harness_plan_start",
+            plan_mode="legacy",
+            idea="Explicit reviewer choice",
+            name="Tester action",
+        )
         catalog = invoke(
             "harness_reviewer_catalog",
             catalog=mock_catalog(),
@@ -250,7 +256,8 @@ def test_wire_workspace_missing_intent_cannot_resume_other_project(tmp_path, mon
         project.mkdir()
         seed = PlannerServer(project)
         assert not seed.call_tool(
-            "harness_plan_start", {"idea": project.name, "name": project.name}
+            "harness_plan_start",
+            {"plan_mode": "legacy", "idea": project.name, "name": project.name},
         )["isError"]
         seed.close()
     before = {str(p): workspace_files(p) for p in (habits, tally)}
@@ -269,7 +276,9 @@ def test_wire_workspace_missing_intent_cannot_resume_other_project(tmp_path, mon
     monkeypatch.setattr(subprocess, "Popen", no_provider)
     cached, other = PlannerServer(habits), PlannerServer(tally)
     try:
-        reply = workspace_wire(cached, "harness_plan_start", idea="Tally", name="Tally")
+        reply = workspace_wire(
+            cached, "harness_plan_start", plan_mode="legacy", idea="Tally", name="Tally"
+        )
         print(json.dumps({"missingIntentResponse": reply, "openedStores": len(opens)}))
         assert reply["isError"], reply  # Baseline silently resumes the bound Habits plan.
         assert "workspace-assertion-required" in reply["content"][0]["text"]
@@ -292,7 +301,9 @@ def public_test_reviewer_choice(server):
         assert not reply["isError"], reply
         return reply["structuredContent"]
 
-    invoke("harness_plan_start", idea="Public action controls", name="Test choice")
+    invoke(
+        "harness_plan_start", plan_mode="legacy", idea="Public action controls", name="Test choice"
+    )
     catalog = invoke(
         "harness_reviewer_catalog",
         catalog=mock_catalog(),
@@ -540,6 +551,7 @@ def test_wire_workspace_correct_projects_and_stale_connection(tmp_path):
             result = workspace_wire(
                 server,
                 "harness_plan_start",
+                plan_mode="legacy",
                 idea=project.name,
                 name=project.name,
                 expected_workspace=str(project / "unused" / ".."),
@@ -556,6 +568,7 @@ def test_wire_workspace_correct_projects_and_stale_connection(tmp_path):
                 refused = workspace_wire(
                     cached,
                     "harness_plan_start",
+                    plan_mode="legacy",
                     idea="Second",
                     name="Second",
                     expected_workspace=json.loads(config.read_text())["workspace"],
@@ -572,6 +585,7 @@ def test_wire_workspace_correct_projects_and_stale_connection(tmp_path):
             resumed = workspace_wire(
                 server,
                 "harness_plan_start",
+                plan_mode="legacy",
                 idea="Existing intent",
                 name="Resume",
                 expected_workspace=str(project),
@@ -626,6 +640,8 @@ def test_wire_workspace_preserves_explicit_cli_producer(tmp_path, capsys):
                 str(project),
                 "--json",
                 "start",
+                "--plan-mode",
+                "legacy",
                 "--idea",
                 "Explicit CLI",
                 "--name",
@@ -643,9 +659,9 @@ def test_wire_workspace_existing_discovery_never_opens_writable_store(tmp_path, 
     from codex_harness.core import mcp_planner
 
     seed = PlannerServer(tmp_path)
-    assert not seed.call_tool("harness_plan_start", {"idea": "Actual plan", "name": "Existing"})[
-        "isError"
-    ]
+    assert not seed.call_tool(
+        "harness_plan_start", {"plan_mode": "legacy", "idea": "Actual plan", "name": "Existing"}
+    )["isError"]
     expected = seed._status()
     seed.close()
     before = workspace_files(tmp_path)
@@ -1458,7 +1474,7 @@ def test_native_stdio_request_response_keeps_original_tool_id(tmp_path):
             method="tools/call",
             params={
                 "name": "harness_plan_start",
-                "arguments": {"idea": "Native demo", "name": "Native demo"},
+                "arguments": {"plan_mode": "legacy", "idea": "Native demo", "name": "Native demo"},
             },
         ),
         dict(
@@ -1581,7 +1597,13 @@ def server(tmp_path):
 
 
 def start(server):
-    return call(server, "harness_plan_start", idea="Split the bill fairly", name="tip-split")
+    return call(
+        server,
+        "harness_plan_start",
+        plan_mode="legacy",
+        idea="Split the bill fairly",
+        name="tip-split",
+    )
 
 
 @pytest.fixture
@@ -2329,7 +2351,9 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             return native_confirm(server, args["gate"], args["user_statement"])
         return call(server, tool_name, **args)
 
-    assert "phase 1/11: align" in run("harness_plan_start", idea="Split fairly", name="tip-split")
+    assert "phase 1/11: align" in run(
+        "harness_plan_start", plan_mode="legacy", idea="Split fairly", name="tip-split"
+    )
     assert "approval:align" in run("harness_plan_status")
     assert "Durable plan resume" in run("harness_plan_resume")
     run("harness_schema", kind="requirement")
@@ -2524,7 +2548,7 @@ def test_restart_resumes_without_overwriting_vision(server, tmp_path):
     assert invalid.splitlines()[0].startswith("Seldon · project: ")
     assert banner(before) in invalid.splitlines()
     assert "phase 2/11: expand" in call(
-        server, "harness_plan_start", idea="Other idea", name="Other name"
+        server, "harness_plan_start", plan_mode="legacy", idea="Other idea", name="Other name"
     )
     assert server.store.status() == before
     assert server.store.spine().node("V1")["text"] == "Split the bill fairly"
@@ -2568,7 +2592,7 @@ def test_unstarted_errors_and_mutating_notifications(server, tmp_path):
                     "method": "tools/call",
                     "params": {
                         "name": "harness_plan_start",
-                        "arguments": {"idea": "bad", "name": "bad"},
+                        "arguments": {"plan_mode": "legacy", "idea": "bad", "name": "bad"},
                     },
                 }
             )
@@ -2594,7 +2618,7 @@ def test_stdio_subprocess_protocol_and_recovery(tmp_path):
             "method": "tools/call",
             "params": {
                 "name": "harness_plan_start",
-                "arguments": {"idea": "Fair shares", "name": "Diners 🧭"},
+                "arguments": {"plan_mode": "legacy", "idea": "Fair shares", "name": "Diners 🧭"},
             },
         },
         {

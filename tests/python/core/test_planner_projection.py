@@ -62,7 +62,9 @@ def test_stored_vision_reaches_summary_and_cockpit_without_alias_or_detail_loss(
     """
     server = PlannerServer(tmp_path)
     try:
-        reply = server.call_tool("harness_plan_start", {"idea": "Parser", "name": "Parser"})
+        reply = server.call_tool(
+            "harness_plan_start", {"plan_mode": "legacy", "idea": "Parser", "name": "Parser"}
+        )
         assert not reply["isError"]
         _, vision = node_example("vision")
         vision["fields"].pop("done_feels_like")
@@ -125,9 +127,9 @@ def test_planning_turn_uses_real_coverage_after_atomic_requirements_and_tests_wr
     """
     server = PlannerServer(tmp_path)
     try:
-        assert not server.call_tool("harness_plan_start", {"idea": "Parser", "name": "Parser"})[
-            "isError"
-        ]
+        assert not server.call_tool(
+            "harness_plan_start", {"plan_mode": "legacy", "idea": "Parser", "name": "Parser"}
+        )["isError"]
         store = server._store()
         assert planning_turn(store.spine())["stage"] == "features"
         _, feature = node_example("feature")

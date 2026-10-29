@@ -159,8 +159,29 @@ def test_preflight_existing_store_and_invalid_inputs_never_open_state(started, m
 
 @pytest.fixture
 def started(tmp_path):
-    cli(tmp_path, "start", "--idea", "Tiny", "--name", "Tiny")
+    cli(tmp_path, "start", "--plan-mode", "legacy", "--idea", "Tiny", "--name", "Tiny")
     return tmp_path
+
+
+@pytest.mark.parametrize("mode", [None, "legacy", "semantic-v1"])
+def test_cli_start_preserves_creation_mode_on_resume(tmp_path, capsys, mode):
+    """Catch CLI defaults overwriting saved modes; MCP tests do not exercise argparse forwarding."""
+    command = ["--workspace", str(tmp_path), "--json", "start", "--idea", "CLI", "--name", "Saved"]
+    flags = [] if mode is None else ["--plan-mode", mode]
+    assert main(command + flags) == 0
+    assert not json.loads(capsys.readouterr().out)["isError"]
+    with open_plan_store(tmp_path) as store:
+        assert store.spine().semantic == (mode != "legacy")
+        revision = store.spine().plan_revision()
+    assert main(command) == 0
+    assert not json.loads(capsys.readouterr().out)["isError"]
+    conflict = "semantic-v1" if mode == "legacy" else "legacy"
+    assert main(command + ["--plan-mode", conflict]) != 0
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["isError"] and "immutable" in refused["text"]
+    with open_plan_store(tmp_path) as store:
+        assert store.spine().semantic == (mode != "legacy")
+        assert store.spine().plan_revision() == revision
 
 
 def test_next_chain_once_in_machine_and_first_command_in_text(started):
@@ -404,6 +425,8 @@ def test_guide_example_stops_at_synthetic_review_gate(tmp_path):
                 source_only_confirmation(store, gate)
             continue
         args = shlex.split(line.replace("<Q>", question or "<Q>"))
+        if args[0] == "start":
+            args += ["--plan-mode", "legacy"]
         if args[0] == "roundtable":
             args += ["--test-only-review-output", str(tmp_path / "response.json")]
         if args == ["advance", "--to", "publish"]:
