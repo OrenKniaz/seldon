@@ -648,7 +648,9 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "{path: 'data/x.json'}. Setup files use exactly one utf8 or strict base64 string, "
             "e.g. {path: 'data/raw.bin', base64: '/w=='} for byte FF; only data/ fixtures. "
             "setup.dirs "
-            "declares empty data/ directories; parents are never inferred from CLI paths.",
+            "declares empty data/ directories; parents are never inferred from CLI paths. "
+            'Relative argv: {"path": "data/note.txt", "relative": true} with cwd data/caller '
+            "emits ../note.txt; relative is optional but must be true (binding argv uses root).",
             "observe": "action observations: exitEquals, stdoutEquals, stdoutJsonEquals, "
             "stderrNonempty, stderrEquals (exact, including empty), stderrContains (substring). "
             "JSON equality preserves types, including integer versus float. path observations: "

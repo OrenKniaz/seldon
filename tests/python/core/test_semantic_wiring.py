@@ -556,17 +556,22 @@ def test_review_carry_refuses_unreviewed_scope_or_ineligible_findings(semantic_p
         store.advance("publish", by="source-test")
 
 
-def test_stored_module_binding_dispatches_real_minus_m_from_caller_cwd(semantic_plan):
-    """Catch entry-only compile/launch drift; existing dispatch fixtures execute wrappers."""
+def test_stored_module_binding_dispatches_relative_argv_from_caller_cwd(semantic_plan):
+    """Catch cwd/argv drift through the canonical producer; other fixtures use absolute args."""
     store, _ = semantic_plan
     vision = store.spine().node("V1")
-    vision["fields"]["targets"] = {"greet": {"module": "probe", "argv": ["payload.bin"]}}
+    vision["fields"]["targets"] = {
+        "greet": {"module": "probe", "argv": [{"path": "payload.bin", "relative": True}]}
+    }
     s = vision["fields"]["scenarios"]["scenarios"][0]
-    s["setup"] = {"files": [{"path": "data/caller/payload.bin", "utf8": "word"}]}
+    s["setup"] = {
+        "dirs": ["data/caller"],
+        "files": [{"path": "data/note.txt", "utf8": "word"}],
+    }
     s["actions"][0].update(cwd="data/caller")
-    s["actions"][0]["cli"]["argv"] = ["tail"]
+    s["actions"][0]["cli"]["argv"] = [{"path": "data/note.txt", "relative": True}]
     expected = dict(
-        launch=["-B", "-m", "probe", "payload.bin", "tail"],
+        launch=["-B", "-m", "probe", "payload.bin", "../note.txt"],
         cwd="caller",
         body="word",
         package="probe",
@@ -606,7 +611,7 @@ def test_stored_module_binding_dispatches_real_minus_m_from_caller_cwd(semantic_
                 root,
                 "import json,sys\nfrom pathlib import Path\n"
                 "print(json.dumps(dict(launch=sys.orig_argv[1:],cwd=Path.cwd().name,"
-                "body=Path(sys.argv[1]).read_text(),package=__package__)))\n",
+                "body=Path(sys.argv[2]).read_text(),package=__package__)))\n",
             ),
         },
     )

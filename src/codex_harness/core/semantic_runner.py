@@ -108,7 +108,8 @@ def execute(s, root, targets, phase, seconds, deadline):
         try:
             v = a["cli"]
             binding = targets[v["target"]]
-            args = argv(binding["argv"], root) + argv(v["argv"], root)
+            cwd = path(root, a["cwd"]) if "cwd" in a else root
+            args = argv(binding["argv"], root) + argv(v["argv"], root, cwd)
             launch = (
                 ["-m", binding["module"]]
                 if "module" in binding
@@ -117,7 +118,7 @@ def execute(s, root, targets, phase, seconds, deadline):
             result = capture(
                 [sys.executable, "-B", *launch, *args],
                 root,
-                path(root, a["cwd"]) if "cwd" in a else root,
+                cwd,
             )
         finally:
             guard.cancel()

@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -47,14 +48,21 @@ def content(f):
     return f["utf8"].encode() if "utf8" in f else base64.b64decode(f["base64"], validate=True)
 
 
-def argv(values, root):
+def argv(values, root, cwd=None):
     result = []
     for value in array(values, 64):
         if type(value) is str and not any(c in value for c in ("/", "\\", ":", "\x00", "..")):
             result.append(value)
         else:
-            fields(value, ("path",), ("path",))
-            result.append(str(path(root, value["path"])))
+            fields(value, ("path", "relative"), ("path",))
+            if "relative" in value and value["relative"] is not True:
+                raise ValueError("relative must be true when present")
+            resolved = path(root, value["path"])
+            result.append(
+                os.path.relpath(resolved, root if cwd is None else cwd).replace("\\", "/")
+                if value.get("relative")
+                else str(resolved)
+            )
     return result
 
 
@@ -145,7 +153,7 @@ def validate(document, product, targets, *, require_entries=True):
                 raise ValueError("Action references an unknown target")
             if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
                 raise ValueError("Declare a literal operation marker")
-            argv(v["argv"], product)
+            argv(v["argv"], product, path(product, a["cwd"]) if "cwd" in a else product)
         if not actions or not array(s["observe"]):
             raise ValueError("Declare product actions and finite observations")
         for o in s["observe"]:

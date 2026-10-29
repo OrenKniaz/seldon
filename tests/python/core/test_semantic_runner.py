@@ -25,6 +25,19 @@ def scenario():
 TARGETS = {"tally": {"entry": "tally.py", "argv": []}}
 
 
+@pytest.mark.parametrize("relative", [False, None, 0, 1, "true", [], {}])
+def test_invalid_relative_flag_is_rejected_before_launch(tmp_path, relative):
+    """Catch truthiness accepting non-true flags; existing negatives lack relative argv."""
+    (tmp_path / "tally.py").write_text("raise AssertionError('unexpected launch')")
+    document = scenario()
+    document["scenarios"][0]["actions"][0]["cli"]["argv"] = [
+        {"path": "data/ledger.json", "relative": relative}
+    ]
+    result = run(document, tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == "ERROR" and "relative must be true" in result["reason"]
+    assert not result.get("cleanup")
+
+
 @pytest.mark.parametrize(
     "binding",
     [
@@ -255,6 +268,7 @@ def test_infrastructure_stops_remaining_scenarios(tmp_path, source, reason):
         (("actions", 1), {"id": "later", "file": {}}),
         (("setup", "files", 0, "path"), "../outside"),
         (("actions", 0, "cli", "argv"), [{"path": "../outside"}]),
+        (("actions", 0, "cli", "argv"), [{"path": "../outside", "relative": True}]),
         (("actions", 0, "cli", "target"), "missing"),
         (("observe", 1, "bytesUnchangedFrom"), "missing"),
         (("observe", 0, "exitEquals"), True),
