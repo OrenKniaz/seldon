@@ -457,6 +457,123 @@ def _tiny_plan(tmp_path: Path, *, dependent: bool = False) -> Path:
     return plan
 
 
+@pytest.mark.parametrize("worker_committed", [False, True])
+def test_dispatch_stages_sparse_owned_files_and_deletions(tmp_path, worker_committed):
+    """Integrate actual edits when owned scope includes absent and deleted paths.
+
+    Catches Contracts staging a not-yet-created Build file (Git128) and restaging
+    committed deletions; existing dispatch fixtures create every owned file.
+    """
+    plan = _tiny_plan(tmp_path)
+    manifest_path = plan / "sample.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["beads"]["B"]
+    manifest["beads"]["A"]["ownedFiles"] += ["later.css", "obsolete.css"]
+    manifest_path.write_text(json.dumps(manifest))
+    (plan / "template/obsolete.css").write_text("obsolete")
+
+    def worker(root):
+        (root / "A.py").write_text("VALUE = 1\n")
+        (root / "obsolete.css").unlink()
+        if worker_committed:
+            _git(root, "add", "-A")
+            _commit(root, "worker edit and deletion")
+
+    record = run_plan(plan, work_root=tmp_path / "runs", fake_workers={"A": worker})
+    assert record["status"] == STATUS_MOCK_ONLY, record
+    repo = Path(record["repo"])
+    assert _git(repo, "show", "HEAD:A.py") == "VALUE = 1"
+    assert not (repo / "obsolete.css").exists() and not (repo / "later.css").exists()
+    assert record["beads"]["A"]["integrated"]["validation"]["passed"]
+
+
+def test_dispatch_git_trust_is_exact_and_command_local(tmp_path, monkeypatch):
+    """Run real Git under its different-owner simulation without persisting trust.
+
+    Catches a missing per-command exemption or global trust write; ordinary
+    dispatch tests create repositories owned by their own process principal.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    config = (repo / ".git/config").read_bytes()
+    global_config = tmp_path / "global-config-must-not-be-created"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    rejected = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
+    )
+    assert rejected.returncode == 128 and "dubious ownership" in rejected.stderr
+    assert _git(repo, "status", "--porcelain") == ""
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q")
+    rejected_other = subprocess.run(
+        ["git", "-c", f"safe.directory={repo.as_posix()}", "-C", str(other), "status"],
+        capture_output=True,
+        text=True,
+    )
+    assert rejected_other.returncode == 128 and "dubious ownership" in rejected_other.stderr
+    assert not global_config.exists() and (repo / ".git/config").read_bytes() == config
+
+
+@pytest.mark.parametrize("text", [False, True])
+def test_dispatch_git_failure_preserves_bounded_stderr(tmp_path, text):
+    """Keep real binary/text Git diagnostics bounded in failure evidence and errors.
+
+    Catches CalledProcessError dropping stderr and binary decoding failures;
+    successful Git fixtures never exercise the error-reporting boundary.
+    """
+    from codex_harness.core.dispatch import _git_run
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "evidence").mkdir()
+    _git(repo, "init", "-q")
+    bad_object = "missing-object-" + "x" * 5000
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        _git_run(repo, "cat-file", "-p", bad_object, text=text)
+    failure = json.loads((tmp_path / "evidence/git-failures.jsonl").read_text())
+    assert failure["returncode"] == 128
+    assert failure["stderr"] == caught.value.stderr and len(failure["stderr"]) == 4096
+    assert "fatal:" in failure["stderr"] and failure["stderr"] in str(caught.value)
+
+
+def test_dispatch_git_staging_failure_reaches_terminal_evidence(tmp_path):
+    """Expose a real Git index-lock failure through dispatch and its saved terminal run.
+
+    Catches the UX2 opaque Git128 status; helper-only diagnostics do not prove
+    the worker→integrator→run-record failure path preserves the original cause.
+    """
+    plan = _tiny_plan(tmp_path, dependent=True)
+    _bind_protected(plan)
+    locks = []
+
+    def worker(root):
+        (root / "A.py").write_text("VALUE = 1\n")
+        lock = Path(_git(root, "rev-parse", "--git-path", "index.lock"))
+        lock.write_text("held by another Git operation")
+        locks.append(lock)
+
+    try:
+        record = run_plan(
+            plan,
+            work_root=tmp_path / "runs",
+            fake_workers={"A": worker, "B": lambda _: pytest.fail("Blocked B must never run")},
+        )
+    finally:
+        for lock in locks:
+            lock.unlink()
+    assert "stderr: fatal:" in record["status"] and "index.lock" in record["status"]
+    assert record["beads"]["B"]["status"] == "blocked: dependency A failed"
+    evidence = Path(record["repo"]).parent / "evidence"
+    saved = json.loads((evidence / "run.json").read_text())
+    failure = json.loads((evidence / "git-failures.jsonl").read_text())
+    assert saved["status"] == record["status"] and failure["stderr"] in record["status"]
+    assert failure["command"][-3:] == ["add", "--", "A.py"]
+
+
 def _tiny_audited_plan(tmp_path: Path) -> Path:
     """Give canonical source fixtures an actual owned-call red expectation.
 

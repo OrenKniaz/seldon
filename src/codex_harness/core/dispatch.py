@@ -257,10 +257,30 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+class _GitError(subprocess.CalledProcessError):
+    def __str__(self) -> str:
+        return f"{super().__str__()} stderr: {self.stderr}"
+
+
+def _git_run(cwd: Path, *args: str, ok=(0,), **kwargs):
+    # Dispatch owns these repositories/worktrees; trust only this exact invocation.
+    command = ["git", "-c", f"safe.directory={cwd.resolve().as_posix()}", "-C", str(cwd), *args]
+    result = subprocess.run(command, capture_output=True, **kwargs)
+    if result.returncode not in ok:
+        stderr = result.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        failure = dict(command=command, returncode=result.returncode, stderr=stderr[:4096])
+        evidence = cwd.parent / "evidence"
+        if evidence.is_dir():
+            with (evidence / "git-failures.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(failure) + "\n")
+        raise _GitError(result.returncode, command, result.stdout, failure["stderr"])
+    return result
+
+
 def _git(cwd: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True
-    ).stdout.strip()
+    return _git_run(cwd, *args, text=True).stdout.strip()
 
 
 def _commit(cwd: Path, message: str) -> str:
@@ -296,11 +316,7 @@ def _verify_requirement_files(
 
 def _validation_inputs(cwd: Path) -> tuple[str, bool]:
     """Observe tracked working bytes and index, even with Git's trust flags set."""
-    listing = subprocess.run(
-        ["git", "-C", str(cwd), "ls-files", "--stage", "-z"],
-        capture_output=True,
-        check=True,
-    ).stdout
+    listing = _git_run(cwd, "ls-files", "--stage", "-z").stdout
     head = _git(cwd, "rev-parse", "HEAD")
     digest = hashlib.sha256(head.encode() + b"\0" + listing)
     working = hashlib.sha256()
@@ -331,9 +347,7 @@ def _validation_inputs(cwd: Path) -> tuple[str, bool]:
         normalized = content.replace(b"\r\n", b"\n") if content is not None else b""
         size = len(normalized) if content is not None else 2**64 - 1
         working.update(name.encode("utf-8") + b"\0" + size.to_bytes(8, "big") + normalized)
-    index = subprocess.run(
-        ["git", "-C", str(cwd), "diff", "--cached", "--quiet", head], check=False
-    )
+    index = _git_run(cwd, "diff", "--cached", "--quiet", head, ok=(0, 1))
     # Match the canonical claim's LF-normalized blob identity; inspect actual
     # files rather than Git status, which may trust assume-unchanged/skip flags.
     committed = (
@@ -377,11 +391,7 @@ def _content_identity(repo: Path, commit: str, names) -> str:
     names = {str(PurePosixPath(name.replace("\\", "/"))) for name in names}
     if not names:
         return hashlib.sha256().hexdigest()
-    listing = subprocess.run(
-        ["git", "-C", str(repo), "ls-tree", "-rz", "--name-only", commit, "--", *sorted(names)],
-        capture_output=True,
-        check=True,
-    )
+    listing = _git_run(repo, "ls-tree", "-rz", "--name-only", commit, "--", *sorted(names))
     tracked = {path.decode("utf-8") for path in listing.stdout.split(b"\0") if path}
     paths = tracked | {
         name
@@ -390,11 +400,12 @@ def _content_identity(repo: Path, commit: str, names) -> str:
     }
     # Read all blobs in one subprocess; Git's batch protocol preserves exact
     # bytes (including trailing newlines), unlike the text-oriented _git helper.
-    result = subprocess.run(
-        ["git", "-C", str(repo), "cat-file", "--batch", "-z"],
+    result = _git_run(
+        repo,
+        "cat-file",
+        "--batch",
+        "-z",
         input="".join(f"{commit}:{path}\0" for path in sorted(tracked)).encode("utf-8"),
-        capture_output=True,
-        check=True,
     )
     blobs = {}
     cursor = 0
@@ -730,12 +741,7 @@ def _update_efficiency(record: dict) -> None:
 
 
 def _changed_paths(cwd: Path) -> list[str]:
-    raw = subprocess.run(
-        ["git", "-C", str(cwd), "status", "--porcelain", "-z", "--untracked-files=all"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    raw = _git_run(cwd, "status", "--porcelain", "-z", "--untracked-files=all", text=True).stdout
     paths = [entry[3:] for entry in raw.split("\0") if len(entry) > 3]
     return sorted(path for path in paths if _source_path(path))
 
@@ -1287,11 +1293,7 @@ def read_completed_execution_evidence(
         disposition.get(key) != value for key, value in expected.items()
     ):
         raise ValueError("execution-current-selected-proof-required")
-    ancestry = subprocess.run(
-        ["git", "-C", str(repo), "merge-base", "--is-ancestor", original_commit, commit],
-        capture_output=True,
-        check=False,
-    )
+    ancestry = _git_run(repo, "merge-base", "--is-ancestor", original_commit, commit, ok=(0, 1))
     if ancestry.returncode:
         raise ValueError("execution-original-candidate-not-ancestor")
     if commit != original_commit:
@@ -1630,7 +1632,6 @@ def _integration_candidate(record: dict, bead: dict, repo: Path) -> tuple[str, P
     else:
         if branches or root.exists():
             raise ValueError("integration recovery candidate has no bound state")
-        _git(worker, "add", "--", *bead["ownedFiles"])
         state = {
             **identity,
             "baseIntegration": _git(repo, "rev-parse", "HEAD"),
@@ -1828,7 +1829,9 @@ def _integrate_bead(
     validation_root = repo
     candidate_ref = None
     if changed:
-        _git(worktree, "add", "--", *bead["ownedFiles"])
+        staged = sorted(set(record["attempt"]["changedPaths"]) & set(_changed_paths(worktree)))
+        if staged:
+            _git(worktree, "add", "--", *staged)
         changed_paths = _git(
             worktree, "diff", "--cached", "--name-only", record["attempt"]["baseCommit"]
         ).splitlines()
