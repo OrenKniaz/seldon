@@ -106,6 +106,12 @@ def test_codex_agents_routes_products_and_preserves_user_bytes(
     assert b"before Seldon's plan is published and worker execution is approved" in merged
     assert b"higher-priority user instructions" in merged
     assert b"Unrelated discussion and maintenance need no extra process" in merged
+    assert (
+        b"Existing project files (briefs, docs, specs, any file not created by Seldon) are "
+        b"read-only inputs during planning; never overwrite, rewrite, rename or summarize "
+        b"them in place. Plan content lives in Seldon (harness tools). Only workers change "
+        b"product files, after the execution go-ahead."
+    ) in merged
     bom = b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b""
     assert merged.startswith(bom + b"<!-- seldon-init v1 begin -->\n")
     assert merged.endswith(original[len(bom) :])

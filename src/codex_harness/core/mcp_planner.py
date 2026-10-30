@@ -453,7 +453,11 @@ TOOLS = [
         "(HTML/CSS/vanilla JS, no build/network); pass legacy for everything else. "
         "For semantic-v1, author vision.fields.scenarios + vision.fields.targets during Vision, "
         "before advancing to tech-stack. "
-        "At Align, offer optional setup once in one compact question; omission never blocks Align.",
+        "At Align, offer optional setup once in one compact question; omission never blocks Align. "
+        "Existing project files (briefs, docs, specs, any file not created by Seldon) are "
+        "read-only inputs during planning; never overwrite, rewrite, rename or summarize "
+        "them in place. Plan content lives in Seldon (harness tools). Only workers change "
+        "product files, after the execution go-ahead.",
         {
             "idea": STRING,
             "name": STRING,

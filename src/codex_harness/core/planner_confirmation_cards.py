@@ -26,6 +26,13 @@ def compact_card(request):
         f"Users: {_excerpt(sections['Users'])}\n"
         f"Scope in: {_excerpt(sections['Scope in'])}\n"
         f"Done: {_excerpt(sections['Done'])}\n"
+        + (
+            "Taste questions: answer unknowns; proposed values are suggested — change or confirm.\n"
+            "Who is this for, and what should they do?\n"
+            "Tone, 1–3 reference sites/adjectives, brand colours/fonts?\nRequired sections?\n"
+            if request["gate"] == "align" and vision["fields"].get("productSurface") == "web"
+            else ""
+        )
         + (f"Taste: {sections['Taste']}\n" if "Taste" in sections else "")
         + (f"Design refs: {sections['Design refs']}\n" if "Design refs" in sections else "")
         + f"Summary only. Review full details: harness_show_node id={vision['id']}. "

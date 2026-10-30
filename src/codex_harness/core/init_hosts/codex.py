@@ -19,6 +19,10 @@ def render_agents(text, *, remove=False):
         "Do not write product source directly before Seldon's plan is published and worker "
         "execution is approved. Preserve Align/Vision/execution gates and higher-priority user "
         "instructions. Unrelated discussion and maintenance need no extra process.\n"
+        "Existing project files (briefs, docs, specs, any file not created by Seldon) are "
+        "read-only inputs during planning; never overwrite, rewrite, rename or summarize "
+        "them in place. Plan content lives in Seldon (harness tools). Only workers change "
+        "product files, after the execution go-ahead.\n"
         f"{end}\n\n"
     )
     if start in text or end in text:

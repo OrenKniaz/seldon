@@ -264,6 +264,13 @@ def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str
         if label == "Vision" or short != text:
             lines.append("Full vision: template/VISION.md")
     fields = vision["fields"]
+    if gate in ("align", "align+vision-lock") and fields.get("productSurface") == "web":
+        lines.append(
+            "Taste questions: answer any unknowns; proposed values below are "
+            "suggested — change or confirm, never silently decided facts.\n"
+            "Who is this for, and what should they do?\n"
+            "Tone, 1–3 reference sites/adjectives, brand colours/fonts?\nRequired sections?"
+        )
     for key in ("taste", "designRefs"):
         if key in fields:
             lines.append(f"{key}:\n{readable(fields[key])}")

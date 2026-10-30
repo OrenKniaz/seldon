@@ -2838,7 +2838,7 @@ def mcp_wave_plan(workspace):
 
 
 def test_advance_advertises_optional_confirmation_transport(server):
-    """Catch missing flow/confirmation teaching in discovery; wire execution tests miss it."""
+    """Protect discovery guidance, including input preservation; gate tests miss host edits."""
     tools = rpc(server, "tools/list")["result"]["tools"]
     start = next(tool for tool in tools if tool["name"] == "harness_plan_start")
     assert (
@@ -2846,6 +2846,12 @@ def test_advance_advertises_optional_confirmation_transport(server):
         in start["description"]
     )
     assert "before advancing to tech-stack" in start["description"]
+    assert (
+        "Existing project files (briefs, docs, specs, any file not created by Seldon) are "
+        "read-only inputs during planning; never overwrite, rewrite, rename or summarize "
+        "them in place. Plan content lives in Seldon (harness tools). Only workers change "
+        "product files, after the execution go-ahead."
+    ) in start["description"]
     advance = next(tool for tool in tools if tool["name"] == "harness_advance")
     assert "Advance phases: " + " -> ".join(PHASES) in advance["description"]
     assert (

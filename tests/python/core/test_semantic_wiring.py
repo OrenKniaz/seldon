@@ -68,7 +68,7 @@ def web_plan(semantic_plan):
 
 
 def test_web_canonical_reopen_compile_packets_and_a_card_keep_visual_intent(web_plan):
-    """Catch lost taste, decoded binary refs and CLI-only cards; CLI fixtures lack visuals."""
+    """Protect web intent and explicit taste questions/defaults; CLI cards lack visual choices."""
     from codex_harness.core.planner_confirmation_cards import compact_card
     from codex_harness.core.planner_confirmations import confirmation_card
 
@@ -78,9 +78,18 @@ def test_web_canonical_reopen_compile_packets_and_a_card_keep_visual_intent(web_
         vision = reopened.spine().node("V1")
         card = confirmation_card("align", "align", reopened._revision(), vision)
         compact = compact_card(
-            dict(gate="align", vision=vision, plan_revision=reopened._revision())
+            dict(gate="align", vision=vision, plan_revision=reopened._revision(), card=card)
         )
         assert "Calm" in card and "direction.png" in card
+        assert "suggested — change or confirm, never silently decided facts" in card
+        assert "suggested — change or confirm" in compact
+        for question in (
+            "Who is this for, and what should they do?",
+            "Tone, 1–3 reference sites/adjectives, brand colours/fonts?",
+            "Required sections?",
+        ):
+            assert question in card
+            assert question in compact
         assert "Calm" in compact and "direction.png" in compact
         assert reopened.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
         plan = load_plan(store.workspace)
