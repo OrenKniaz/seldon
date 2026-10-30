@@ -638,7 +638,9 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
         result["semanticScenarios"] = {
             "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
             "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
-            "keep every other field and its exact wording).",
+            "keep every other field and its exact wording). Each nested scenario record allows "
+            "only these keys: id, requirementRefs, contractRefs, setup, actions, observe, verdict. "
+            "Do not add title, description or extra metadata to scenario records.",
             "launch": "Targets use exactly one entry or module plus argv. Prefer module for "
             "python -m: {module: 'app', argv: []} -> python -B -m app <target argv> <action argv>. "
             "entry uses python -B <entry>. Both workers own module __main__.py (Contracts stub). "

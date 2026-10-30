@@ -213,10 +213,12 @@ TOOLS = [
     ),
     _tool(
         "harness_compile",
-        "Compile the current canonical plan using this workspace's existing template directory "
-        "and authored protected test files. Render canonical requirement documents and record "
-        "the bound manifest; return it for readback. No approval, review, publication, worker "
-        "or provider execution. Refresh compilation after plan or protected-file changes.",
+        "Compile the current canonical plan using this workspace's template directory. "
+        "Before first compile, create workspace/template as an ordinary directory. "
+        "In semantic-v1 mode, author scenario data, not protected Python test or stub source; "
+        "legacy mode uses authored protected test files. Render canonical requirement documents "
+        "and record the bound manifest; return it for readback. No approval, review, publication, "
+        "worker or provider execution. Refresh compilation after plan or protected-file changes.",
         {},
     ),
     _tool(
