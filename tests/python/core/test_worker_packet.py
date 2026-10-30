@@ -805,7 +805,12 @@ def test_packet_intent_is_explicit_linked_bounded_and_digested(tmp_path):
             },
         ),
         dict(kind="requirement", id=plan.beads["B"].requirements[0], text="Exact linked wording."),
-        dict(kind="requirement", id="UNLINKED", text="UNRELATED INTENT MUST NOT APPEAR"),
+        dict(
+            kind="requirement",
+            id="UNLINKED",
+            title="Other scope",
+            text="UNRELATED INTENT MUST NOT APPEAR",
+        ),
     ]
     expected = (
         "Exact vision\n\nKeep café data local.\n\nQuality:\nNo silent data loss."
@@ -813,6 +818,7 @@ def test_packet_intent_is_explicit_linked_bounded_and_digested(tmp_path):
         + plan.beads["B"].requirements[0]
         + ": Exact linked wording."
     )
+    expected += "\n\nUNLINKED: Other scope"
     packet = build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)
     assert "## User intent\n" + expected in packet
     assert (
@@ -830,11 +836,70 @@ def test_packet_intent_is_explicit_linked_bounded_and_digested(tmp_path):
     nodes[0]["text"] = "é" * 5000
     (repo / "tipsplit/cli.py").write_text("#" + "x" * 50_000)
     packet = build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)
-    excerpt = ("Exact vision\n\n" + "é" * 5000)[:2000]
-    assert "## User intent\n" + excerpt + "\n[intent truncated to 2000 characters]" in packet
+    excerpt = packet.split("## User intent\n")[1].split("\nSHA-256")[0]
+    assert "\u00e9" * 5000 in excerpt
     assert hashlib.sha256(excerpt.encode()).hexdigest() in packet
     assert len(packet) <= MAX_CHARACTERS
-    # Mandatory visual intent must refuse overflow; the preceding check allows prose truncation.
+    # Visual metadata and long prose now survive together within the packet budget.
     nodes[0]["fields"]["taste"] = {"tone": "Quiet", "sourceRef": "user:42"}
-    with pytest.raises(ValueError, match="Mandatory taste/designRefs"):
+    packet = build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)
+    assert '"tone": "Quiet"' in packet and "\u00e9" * 5000 in packet
+
+
+@pytest.mark.parametrize("spare", [40, 9000])
+def test_intent_degrades_whole_requirements_in_priority_order(tmp_path, spare):
+    """Catch nondeterministic scope loss/digests under real packet pressure, absent in goldens."""
+
+    plan, repo = _checkout(tmp_path)
+
+    own = plan.beads["B"].requirements[0]
+
+    vision = dict(kind="vision", title="Locked", text="Verbatim summary", fields={})
+
+    requirements = [
+        dict(kind="requirement", id="Z", title="Other title", text="NEVER OTHER BODY"),
+        dict(kind="requirement", id=own, text="Own requirement wording"),
+        dict(kind="requirement", id="A", title="First other title", text="NEVER OTHER BODY"),
+        dict(kind="requirement", id="ZZ", title="TOO LARGE" * 1000, text="unused"),
+    ]
+
+    core_packet = build_packet(plan, plan.beads["B"], repo, "m", intent_nodes=[vision])
+
+    memory = "m" * (MAX_CHARACTERS - len(core_packet) - spare + 1)
+
+    nodes = [vision, *requirements]
+
+    packet = build_packet(plan, plan.beads["B"], repo, memory, intent_nodes=nodes)
+
+    excerpt = packet.split("## User intent\n")[1].split("\nSHA-256")[0]
+
+    expected = f"Locked\n\nVerbatim summary\n\n{own}: Own requirement wording"
+
+    if spare == 9000:
+        expected += "\n\nA: First other title\n\nZ: Other title"
+
+    assert excerpt == expected
+
+    assert hashlib.sha256(expected.encode()).hexdigest() in packet
+
+    assert "NEVER OTHER BODY" not in packet and "TOO LARGE" not in excerpt
+
+    assert len(packet) <= MAX_CHARACTERS
+
+    assert packet == build_packet(
+        plan, plan.beads["B"], repo, memory, intent_nodes=[vision, *reversed(requirements)]
+    )
+
+
+def test_intent_core_exceeding_packet_budget_names_sizes(tmp_path):
+    """Catch silent core truncation/opaque prelaunch errors; spec-overflow tests have no intent."""
+
+    plan, repo = _checkout(tmp_path)
+
+    nodes = [dict(kind="vision", title="Locked", text="v" * 44_000, fields={})]
+
+    with pytest.raises(
+        ValueError,
+        match=r"ERROR core 44008 total \d+ exceeds 44000",
+    ):
         build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)

@@ -1939,3 +1939,86 @@ def test_compact_public_responses_keep_canonical_detail_and_next_actions(semanti
         )
     finally:
         server.close()
+
+
+def test_ux2_sized_canonical_vision_builds_both_packets_with_verbatim_core(web_plan):
+    """Catch the 2k prelaunch refusal through real persistence/compile, beyond small refs."""
+    store, _ = web_plan
+    vision = store.spine().node("V1")
+    # slot-33 public coord/ux2-turn5-calls.json: title 26, text 243, Quality 441,
+    # Done 272, taste JSON 525 chars; turn-3 R1 text 889. Turn-6 refused prelaunch.
+    vision.update(
+        title="Daymark pocket sketchbooks",
+        text=(
+            "Daymark: a curious, optimistic and tactile sketchbook landing page for"
+            " design-conscious commuters and university students.\n\nFull brief: "
+            "PRODUCT-BRIEF.md (unchanged copy of C:/Users/oren/codex-"
+            "harness/work/sprint-20261029/ux2-PRODUCT-BRIEF.md)."
+        ),
+    )
+    vision["fields"]["quality_bar"] = (
+        "Editorial and playful; curious, optimistic and tactile. Deliberate "
+        "hierarchy, cohesive typography, purposeful spacing and original "
+        "product composition. Readable mobile/desktop layouts, usable "
+        "navigation, tap-friendly controls, keyboard focus, sensible headings, "
+        "WCAG AA contrast, reduced motion, resolved local assets, zero console "
+        "errors/external requests and no horizontal scroll. Separate browser "
+        "visual judgment for beauty and brand fit."
+    )
+    vision["fields"]["done_feels_like"] = (
+        "Root index.html opens directly from the filesystem as a polished "
+        "Daymark landing page. All requested sections, navigation, CTA and "
+        "controls work honestly locally. Final delivery names the absolute "
+        "entry path, completed checks and any unperformed visual or behavior "
+        "checks."
+    )
+    vision["fields"]["taste"] = {
+        "audience": (
+            "Design-conscious commuters and university students who sketch and "
+            "capture small ideas between places."
+        ),
+        "brand": (
+            "Daymark; cream, ink black and vermilion; system fonts and original local artwork."
+        ),
+        "references": [],
+        "requiredSections": [
+            "Hero and primary CTA",
+            "Compact notebook collection",
+            "Everyday uses",
+            "Tactile construction and craft story",
+            "Small FAQ",
+            "Footer",
+        ],
+        "sourceRef": "Unchanged PRODUCT-BRIEF.md plus user's Changes message.",
+        "tone": "Curious, optimistic and tactile; editorial and playful.",
+    }
+    store.upsert_node(vision)
+    requirement = store.spine().node("R")
+    requirement["text"] = "Landing page scope. " + "r" * (889 - 20)
+    store.upsert_node(requirement)
+    manifest = store.compile_template(store.workspace / "template")
+    (store.workspace / "sample.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with open_plan_store(store.workspace) as reopened:
+        plan = load_plan(store.workspace)
+        for key in ("C", "B"):
+            packet = worker_packet.build_packet(
+                plan,
+                plan.beads[key],
+                store.workspace / "template",
+                None,
+                intent_nodes=reopened.spine().to_dict()["nodes"],
+            )
+            excerpt = packet.split("## User intent\n")[1].split("\nSHA-256")[0]
+            for value in (
+                vision["title"],
+                vision["text"],
+                vision["fields"]["quality_bar"],
+                vision["fields"]["done_feels_like"],
+                requirement["text"],
+            ):
+                assert value in excerpt
+            for field in ("taste", "designRefs"):
+                assert json.dumps(vision["fields"][field], ensure_ascii=False) in excerpt
+            assert len(excerpt) > 2000
+            assert hashlib.sha256(excerpt.encode()).hexdigest() in packet
+            assert len(packet) <= worker_packet.MAX_CHARACTERS
