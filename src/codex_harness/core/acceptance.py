@@ -23,8 +23,10 @@ from uuid import uuid4
 
 from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import roundtable
+from codex_harness.core import spine as plan_spine
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
+from codex_harness.core.semantic_runner import run as run_semantic
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
 
@@ -274,7 +276,7 @@ def _cleanup_timed_out_process(process, scenario_deadline=None) -> str:
 
 
 def run_scenarios(
-    repo, scenarios, env=None, *, on_result=None, should_stop=None, deadline=None
+    repo, scenarios, env=None, *, on_result=None, should_stop=None, deadline=None, semantic=False
 ) -> list[dict]:
     """Run trusted planner commands, with isolated cwd/HOME/data for each scenario.
 
@@ -317,6 +319,18 @@ def run_scenarios(
             result.update(
                 state="unfinished", error=halt or "Acceptance owner stopped; no new child"
             )
+            if on_result:
+                on_result(copy.deepcopy(result))
+            continue
+        if semantic:
+            document, targets = scenario["semantic"]
+            seconds = min(45, _metadata_remaining(deadline, should_stop) - 1.7)
+            raw = run_semantic(document, repo, targets, "validation", run_seconds=seconds)[0]
+            if raw["state"] == "ERROR":
+                halt = raw["reason"] or "Semantic ERROR"
+                if not raw.get("cleanup", {}).get("quiescenceVerified"):
+                    raw["cleanupUncertainty"] = halt
+            result.update(passed=raw["state"] == "PASS", semantic=raw, error=raw["reason"])
             if on_result:
                 on_result(copy.deepcopy(result))
             continue
@@ -471,11 +485,25 @@ def acceptance_inputs(store, repo, *, subject=None) -> dict:
             "subject=product OR harness_accept_run repo=<reference-repo> subject=oracle",
         )
     spine = store.locked_acceptance_spine()
+    spine = plan_spine.Spine(store._data()) if spine.semantic else spine
     scenarios = store.acceptance_scenarios()
+    if spine.semantic:
+        document, targets, _ = plan_spine.semantic_spec(spine)
+        scenarios = [
+            dict(
+                id=s["id"],
+                title=s["id"],
+                # Authored actions are budget units; the semantic runner owns their oracle.
+                steps=s["actions"],
+                semantic=[dict(document, scenarios=[s]), targets],
+            )
+            for s in document["scenarios"]
+        ]
     if not scenarios:
         store.save_acceptance_scenarios(derive_scenarios(spine))
         scenarios = store.acceptance_scenarios()
     return dict(
+        **({"semantic": True} if spine.semantic else {}),
         repo=str(Path(repo).absolute()),
         subject=subject,
         planRevision=store._revision(),
@@ -582,7 +610,7 @@ def run_acceptance(store, repo, env=None, *, subject=None) -> dict:
     ).fetchone():
         raise PlanStoreError("acceptance-busy", "Existing acceptance owner holds this workspace")
     captured = capture_acceptance(acceptance_inputs(store, repo, subject=subject))
-    results = run_scenarios(repo, captured["scenarios"], env)
+    results = run_scenarios(repo, captured["scenarios"], env, semantic=captured.get("semantic"))
     return complete_acceptance(store, captured, results)
 
 
@@ -652,6 +680,9 @@ def run_invalid_reason(store, run) -> str | None:
     raw = _raw_scenarios(store)
     legacy_unbound = any("nodeRevisions" not in item for item in raw)
     scenarios = store.acceptance_scenarios()
+    if plan_spine.Spine(store._data()).semantic:
+        scenarios = acceptance_inputs(store, run["repo"], subject=run_subject(run))["scenarios"]
+        legacy_unbound = False
     if legacy_unbound:
         if run["scenarioRevision"] != _hash(raw) or any(
             item.get("status") == "stale" for item in scenarios if "nodeRevisions" in item

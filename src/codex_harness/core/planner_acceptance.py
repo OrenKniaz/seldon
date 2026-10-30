@@ -203,9 +203,12 @@ class AcceptanceOwner:
                     on_result=lambda result: emit("progress", result),
                     should_stop=self.stopped.is_set,
                     deadline=deadline,
+                    semantic=captured.get("semantic"),
                 )
                 if any(
-                    step.get("cleanupUncertainty") for item in results for step in item["steps"]
+                    step.get("cleanupUncertainty")
+                    for item in results
+                    for step in [*item["steps"], item.get("semantic", {})]
                 ):
                     emit(
                         "unknown",

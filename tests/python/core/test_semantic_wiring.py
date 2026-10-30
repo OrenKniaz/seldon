@@ -131,6 +131,63 @@ def lock_vision(store):
         store.advance(phase, by="source-test")
 
 
+@pytest.fixture
+def semantic_acceptance_product(semantic_plan):
+    store, _ = semantic_plan
+    lock_vision(store)
+    # Canonical spec work after lock must supersede the snapshot's old scenario ID.
+    vision = store.spine().node("V1")
+    vision["fields"]["scenarios"]["scenarios"][0]["id"] = "authored-greeting"
+    store.upsert_node(vision)
+    product = store.workspace / "product"
+    product.mkdir()
+    (product / "hello.py").write_text(PRODUCT, encoding="utf-8")
+    return store, product
+
+
+@pytest.mark.parametrize("output,passed", [(PRODUCT, True), ("print('Wrong')\n", False)])
+def test_semantic_accept_cli_runs_canonical_product(semantic_acceptance_product, output, passed):
+    """Catch legacy prose execution/false PASS; prior CLI tests author legacy commands only."""
+    import subprocess
+    import sys
+
+    from codex_harness.core.acceptance import current_run
+
+    store, product = semantic_acceptance_product
+    (product / "hello.py").write_text(output, encoding="utf-8")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "codex_harness.core.plan_cli",
+            "--workspace",
+            str(store.workspace),
+            "--json",
+            "accept-run",
+            "--repo",
+            str(product),
+            "--subject",
+            "product",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert completed.returncode == (0 if passed else 2), completed.stdout + completed.stderr
+    reply = json.loads(completed.stdout)["data"]
+    assert reply["passed"] is passed, reply
+    assert [r["id"] for r in reply["results"]] == ["authored-greeting"], reply
+    observation = reply["results"][0]["semantic"]
+    assert observation["state"] == ("PASS" if passed else "FAIL"), observation
+    assert observation["actions"]["hello"]["stdout"].replace("\r\n", "\n") == (
+        "Hello" if passed else "Wrong\n"
+    )
+    assert observation["cleanup"]["quiescenceVerified"]
+    assert current_run(store)["id"] == reply["id"]
+
+
 @pytest.mark.parametrize("key", ["text", "title", "quality_bar"])
 def test_locked_vision_refuses_incidental_wording_without_mutation(semantic_plan, key):
     """Protect locked wording; catches silent rewrites that scenario-runner tests never upsert."""

@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.python.core import test_dispatch
+from tests.python.core import test_dispatch, test_semantic_wiring
 from tests.python.core.planning_support import (
     publication_evidence,
     source_only_confirmation,
@@ -33,6 +33,179 @@ from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 from codex_harness.core.spine import Spine, load_spine
 
 lesson_dispatch = test_dispatch.lesson_dispatch
+semantic_plan = test_semantic_wiring.semantic_plan
+semantic_acceptance_product = test_semantic_wiring.semantic_acceptance_product
+
+
+def test_legacy_public_scenarios_metadata_cannot_replace_declared_oracle(project):
+    """Protect legacy commands; catches AS-1's false PASS, missed by semantic-only admissions."""
+    from codex_harness.core.acceptance import _hash
+
+    store, repo = project
+    assert not store.spine().semantic
+    (repo / "hello.py").write_text("print('Hello', end='')\n", encoding="utf-8")
+    document = {
+        "schema": "seldon/scenarios-v1",
+        "scenarios": [
+            dict(
+                id="unrelated-greeting",
+                requirementRefs=["R6"],
+                contractRefs=["CLI"],
+                setup={},
+                actions=[dict(id="hello", cli=dict(target="greet", operation="hello", argv=[]))],
+                observe=[dict(action="hello", exitEquals=0, stdoutEquals="Hello")],
+                verdict="all",
+            )
+        ],
+    }
+    scenarios = derive_scenarios(store.locked_acceptance_spine())
+    declared = [(s["steps"], s["expect"]) for s in scenarios]
+    for scenario in scenarios:
+        scenario["semantic"] = [document, {"greet": {"entry": "hello.py", "argv": []}}]
+    server = PlannerServer(store.workspace)
+    try:
+        response = server.handle_line(
+            json.dumps(
+                dict(
+                    jsonrpc="2.0",
+                    id=71,
+                    method="tools/call",
+                    params=dict(
+                        name="harness_accept_scenarios",
+                        arguments=dict(
+                            expected_workspace=str(store.workspace),
+                            scenarios=scenarios,
+                        ),
+                    ),
+                )
+            )
+        )["result"]
+        assert not response["isError"], response
+    finally:
+        server.close()
+    saved = store.acceptance_scenarios()
+    assert [(s["steps"], s["expect"]) for s in saved] == declared
+    result = run_acceptance(store, repo, subject="product")
+    assert result["passed"] is False, result
+    assert [r["id"] for r in result["results"]] == [s["id"] for s in saved]
+    for row in result["results"]:
+        assert not row["passed"] and len(row["steps"]) == 1, row
+        assert row["steps"][0]["exit"] == 2 and "File not found" in row["steps"][0]["stderr"]
+        assert "semantic" not in row
+    assert result["scenarioRevision"] == _hash(saved)
+    assert current_run(store)["id"] == result["id"]
+
+
+@pytest.mark.parametrize("passed", [True, False])
+def test_semantic_accept_public_owner_and_sync_share_real_oracle(
+    semantic_acceptance_product, passed
+):
+    """Catch async/sync divergence and fake IDs; legacy tests never consume semantic data."""
+    store, repo = semantic_acceptance_product
+    if not passed:
+        (repo / "hello.py").write_text("print('Wrong')\n", encoding="utf-8")
+    synchronous = run_acceptance(store, repo, subject="product")
+    server = PlannerServer(store.workspace)
+    try:
+        admitted = server.call_tool("harness_accept_run", dict(repo=str(repo), subject="product"))
+        terminal = finish_public_acceptance(server, admitted)["structuredContent"]
+        assert terminal["state"] == "completed", terminal
+        for result in (synchronous, terminal["result"]):
+            assert result["passed"] is passed, result
+            assert [r["id"] for r in result["results"]] == ["authored-greeting"]
+            assert result["results"][0]["semantic"]["state"] == ("PASS" if passed else "FAIL")
+        assert current_run(store)["id"] == terminal["result"]["id"]
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("link", ["unlinked", "unknown", "stale", "empty"])
+def test_semantic_accept_refuses_invalid_coverage_before_admission(
+    semantic_acceptance_product, link
+):
+    """Catch admitted uncovered promises; legacy refusal tests have no semantic reference guard."""
+    from tests.python.core.test_semantic_wiring import node
+
+    store, repo = semantic_acceptance_product
+    if link == "unlinked":
+        store.upsert_node(node("R2", "requirement", ["F"]))
+    else:
+        vision = store.spine().node("V1")
+        suite = vision["fields"]["scenarios"]["scenarios"]
+        if link == "empty":
+            suite.clear()
+        else:
+            suite[0]["requirementRefs"] = ["missing" if link == "unknown" else "R@old"]
+        store.upsert_node(vision)
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_accept_run", dict(repo=str(repo), subject="product"))
+        assert reply["isError"], reply
+        assert any(word in str(reply) for word in ("Every requirement", "reference", "1..16"))
+        assert not store.connection.execute("SELECT 1 FROM acceptance_attempts").fetchone()
+        assert not server.acceptance.thread and not server.acceptance.prepared
+        with pytest.raises(ValueError):
+            run_acceptance(store, repo, subject="product")
+    finally:
+        server.close()
+
+
+def test_semantic_accept_target_change_revokes_credit(semantic_acceptance_product):
+    """Catch stale target credit and snapshot reuse; prior freshness tests mutate legacy rows."""
+    store, repo = semantic_acceptance_product
+    result = run_acceptance(store, repo, subject="product")
+    assert result["passed"] and current_run(store)["id"] == result["id"]
+    vision = store.spine().node("V1")
+    vision["fields"]["targets"]["greet"]["argv"] = ["changed"]
+    store.upsert_node(vision)
+    assert current_run(store) is None
+    from codex_harness.core.acceptance import acceptance_inputs
+
+    assert (
+        acceptance_inputs(store, repo, subject="product")["scenarioRevision"]
+        != result["scenarioRevision"]
+    )
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_semantic_accept_error_stops_later_scenario_and_holds_unknown_cleanup(
+    semantic_acceptance_product, monkeypatch, uncertain
+):
+    """Catch ERROR continuation/false termination; legacy cleanup tests bypass the semantic Job."""
+    from codex_harness.core import semantic_runner
+
+    store, repo = semantic_acceptance_product
+    vision = store.spine().node("V1")
+    second = json.loads(json.dumps(vision["fields"]["scenarios"]["scenarios"][0]))
+    second["id"] = "must-not-launch"
+    vision["fields"]["scenarios"]["scenarios"].append(second)
+    store.upsert_node(vision)
+    (repo / "hello.py").write_text("import time\ntime.sleep(10)\n", encoding="utf-8")
+    launch = semantic_runner.run_audit_process
+    calls = []
+
+    def observed_launch(*args, **kwargs):
+        calls.append(args)
+        if uncertain:
+            raise OSError("Injected held-Job observation loss; no PASS supplied")
+        return launch(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_runner, "run_audit_process", observed_launch)
+    server = PlannerServer(store.workspace)
+    try:
+        admitted = server.call_tool("harness_accept_run", dict(repo=str(repo), subject="product"))
+        terminal = finish_public_acceptance(server, admitted)["structuredContent"]
+        assert len(calls) == 1
+        assert terminal["state"] == ("unknown-interrupted" if uncertain else "completed"), terminal
+        assert terminal["progress"][1]["state"] == "unfinished"
+        assert current_run(store) is None if uncertain else not terminal["result"]["passed"]
+        if uncertain:
+            assert terminal["result"] is None
+            again = server.call_tool("harness_accept_run", dict(repo=str(repo), subject="product"))
+            assert again["structuredContent"]["attemptId"] == terminal["attemptId"]
+            assert len(calls) == 1
+    finally:
+        server.close()
 
 
 def drain_acceptance(owner, store, timeout=20):
