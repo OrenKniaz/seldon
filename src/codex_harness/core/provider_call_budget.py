@@ -288,6 +288,17 @@ def claim_planning_review_start(store, reviewer):
         original, claims = _planning_review_originals(store)
         if original is None:
             return None
+        from codex_harness.core.planner_confirmations import combined_credit
+
+        authority = combined_credit(store, "review-budget")
+        if authority:
+            scope = authority["scopes"]["review-budget"]
+            if {k: v for k, v in scope.items() if k != "reviewers"} != original:
+                raise ValueError("planning-review-budget-consent-required")
+            if {
+                k: reviewer.get(k) for k in ("name", "provider", "model", "effort")
+            } not in scope.get("reviewers", []):
+                raise ValueError("planning-reviewer-consent-required")
         if len(claims) >= original["maxStarts"]:
             raise ValueError("planning-review-start-cap-exhausted")
         ordinal = len(claims) + 1

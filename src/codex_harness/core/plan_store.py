@@ -1480,7 +1480,11 @@ class PlanStore:
         return self._meta()["phase"]
 
     def _approve(self, gate: str, by: str, statement: str) -> str:
-        if gate not in ("align", "vision-lock"):
+        gates = (
+            "align vision-lock plan-lock reviewer-selection review-budget "
+            "publish execution validation"
+        )
+        if gate not in gates.split():
             raise PlanStoreError("plan-gate-invalid", gate)
         _nonempty(by, "by")
         _nonempty(statement, "statement")
@@ -2453,6 +2457,12 @@ class PlanStore:
                 )
             revision = self._revision()
             spine = Spine(self._data())
+            if current == "plan" and to_phase == "roundtable" and statement is None:
+                from codex_harness.core.planner_confirmations import combined_credit
+
+                credit = combined_credit(self, "plan-lock")
+                if credit:
+                    statement, by = credit["response"]["content"]["statement"], "user"
             if to_phase == "vision-lock" or current == "vision-lock" and target > index:
                 from codex_harness.core.planner_vision import expansion_status
 
@@ -2614,6 +2624,9 @@ class PlanStore:
                 self.connection.execute("UPDATE meta SET published_revision=?", (revision,))
                 if row is not None:
                     self._event("publication-selected", {"plan_revision": revision, "by": by})
+            from codex_harness.core.planner_execution import bind_candidate_execution
+
+            bind_candidate_execution(self, manifest)
             self._export(snapshot, Path(export_dir))
         return revision
 

@@ -18,6 +18,7 @@ from codex_harness.core.planner_confirmations import (
     _response_channel,
 )
 from codex_harness.core.planner_views import review_resolution_state
+from codex_harness.core.spine import Spine, compile_manifest
 
 REQUEST = "worker-execution-requested"
 RESPONSE = "worker-execution-responded"
@@ -44,9 +45,9 @@ def _canonical_store(store):
         raise ValueError("worker-execution-canonical-store-required")
 
 
-def _control_digest(store):
+def _control_digest(store, exclude_event=None):
     """Raw canonical prerequisites; safe inside an existing writer transaction."""
-    from codex_harness.core.planner_jobs import _digest
+    from codex_harness.core.planner_jobs import _digest, _files
 
     originals = {}
     for table in (
@@ -71,17 +72,34 @@ def _control_digest(store):
                 " WHERE kind NOT IN ('worker-execution-requested', "
                 "'worker-execution-responded', 'worker-execution-consumed')"
             )
+            if exclude_event is not None:
+                query += f" AND id != {int(exclude_event)}"
         originals[table] = [
             list(row) for row in store.connection.execute(query + " ORDER BY rowid")
         ]
+    if exclude_event is not None:
+        template = store.workspace / "template"
+        originals["template"] = _files(template) if template.is_dir() else None
     return _digest(originals)
 
 
-def execution_scope(store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap):
+def execution_scope(
+    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap, _candidate=False
+):
     """Read canonical scope; no event, approval, launch or provider query."""
     from codex_harness.core import planner_jobs as jobs
 
-    manifest, template = jobs._publication(store, expected_revision)
+    if _candidate:
+        _canonical_store(store)
+        manifest, template = store._manifest(Spine(store._data())), store.workspace / "template"
+        if (
+            manifest.get("planMode") != "semantic-v1"
+            or manifest["planRevision"] != expected_revision
+            or store.phase() != "plan"
+        ):
+            raise ValueError("worker-execution-frozen-semantic-candidate-required")
+    else:
+        manifest, template = jobs._publication(store, expected_revision)
     semantic = manifest.get("planMode") == "semantic-v1"
     if semantic and max_parallel != 1:
         raise ValueError("Parallel Build unsupported in semantic-v1; use max_parallel=1")
@@ -90,26 +108,27 @@ def execution_scope(store, expected_revision, workers, *, max_parallel=2, timeou
         raise ValueError("worker-job-call-cap-required")
     if type(max_parallel) is not int or max_parallel < 1 or not jobs._valid_timeout(timeout):
         raise ValueError("worker-execution-limits-invalid")
-    status = store.status()
-    resolution = review_resolution_state(store, status)
-    check = next(c for c in quality_report(store)["checks"] if c["id"] == "roundtable")
-    if (
-        (status["vision_lock_stale"] if "vision_lock_stale" in status else False)
-        or status["open_clarifications"]
-        or resolution["blockingOpenFindings"] != []
-        or (
-            (not semantic and resolution["audit"]["current"] is not True)
-            or resolution["review"]["current"] is not True
-            or check["status"] not in {"pass", "warn"}
-        )
-    ):
-        raise ValueError("worker-execution-canonical-prerequisite")
+    if not _candidate:
+        status = store.status()
+        resolution = review_resolution_state(store, status)
+        check = next(c for c in quality_report(store)["checks"] if c["id"] == "roundtable")
+        if (
+            (status["vision_lock_stale"] if "vision_lock_stale" in status else False)
+            or status["open_clarifications"]
+            or resolution["blockingOpenFindings"] != []
+            or (
+                (not semantic and resolution["audit"]["current"] is not True)
+                or resolution["review"]["current"] is not True
+                or check["status"] not in {"pass", "warn"}
+            )
+        ):
+            raise ValueError("worker-execution-canonical-prerequisite")
     return dict(
         workspace=str(store.workspace.resolve()),
         publicationRevision=expected_revision,
-        spineRevision=status["spine_revision"],
-        sourceManifestRevision=status["manifest_revision"],
-        phase=status["phase"],
+        spineRevision=store._revision(),
+        sourceManifestRevision=manifest.get("sourceManifestRevision", expected_revision),
+        phase=store.phase(),
         manifestDigest=jobs._digest(manifest),
         templateFiles=jobs._files(template),
         workers=selected,
@@ -120,10 +139,33 @@ def execution_scope(store, expected_revision, workers, *, max_parallel=2, timeou
     )
 
 
+def bind_candidate_execution(store, manifest):
+    """Seal the checked publication control preimage; retain the original consent preimage."""
+    from codex_harness.core import planner_jobs as jobs
+    from codex_harness.core.planner_confirmations import combined_credit
+
+    bundle = combined_credit(store, "execution")
+    if bundle is None:
+        return
+    candidate = bundle["scopes"]["execution"]
+    if candidate["manifestDigest"] != jobs._digest(manifest):
+        raise ValueError("worker-execution-candidate-stale")
+    if any(r["request_id"] == bundle["request_id"] for r in _records(store, REQUEST)):
+        return
+    scope = {**candidate, "phase": store.phase(), "canonicalControlDigest": _control_digest(store)}
+    request = dict(
+        request_id=bundle["request_id"],
+        scope=scope,
+        channel=bundle.get("channel", NATIVE),
+        response_revision=bundle["plan_revision"],
+    )
+    store._event(REQUEST, request)
+    store._event(RESPONSE, {**bundle["response"], "scope": scope})
+
+
 def _recheck(store, scope):
     """Transaction-safe: never call status/spine, which own their read transactions."""
     from codex_harness.core import planner_jobs as jobs
-    from codex_harness.core.spine import Spine, compile_manifest
 
     meta = store._meta()
     current = compile_manifest(Spine(store._data()), store.workspace / "template")

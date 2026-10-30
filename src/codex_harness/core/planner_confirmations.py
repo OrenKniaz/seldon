@@ -29,6 +29,8 @@ def _chat_question(request, revision):
     subject = {
         "align": "the Align understanding below",
         "vision-lock": "the Vision Lock below",
+        "align+vision-lock": "understanding, Align and Vision Lock together",
+        "plan-execution": "these plan, reviewer, budget, publish, execution and validation limits",
     }.get(request.get("gate"), "the worker execution below")
     # Bound the user-facing text; recording rules stay outside the markers.
     request["card"] = (
@@ -92,7 +94,7 @@ def _response_channel(request, response, revision):
             saved = response["chat"]
             action, content, evidence = _chat_evidence(
                 request["request_id"],
-                revision,
+                request.get("response_revision", revision),
                 saved["quoted_message"],
                 saved["quote_sha256"],
                 saved["actor_label"],
@@ -126,7 +128,7 @@ def reviewer_selection_scope(node: dict, catalog: dict, author_sessions: dict) -
     )
 
 
-def reviewer_confirmation_target(store: PlanStore, before: Spine, node_id: str) -> tuple:
+def reviewer_confirmation_target(store, before, node_id, *, allow_existing=False) -> tuple:
     """Resolve only the current recorded choice and current catalog in the transaction."""
     if not isinstance(node_id, str) or node_id not in before.ids("decision"):
         raise PlanStoreError("plan-reviewer-confirmation-target-invalid", str(node_id))
@@ -145,6 +147,9 @@ def reviewer_confirmation_target(store: PlanStore, before: Spine, node_id: str) 
     # Includes exact catalog ID/digest and all existing compatibility validation.
     scope = reviewer_selection_scope(node, catalog["catalog"], event["authorSessions"])
     if node["fields"]["confirmation"] is not None:
+        if allow_existing:
+            validate_reviewer_record_scope(store, node, catalog["catalog"], event["authorSessions"])
+            return node, catalog["catalog"], event["authorSessions"], scope
         raise PlanStoreError("plan-reviewer-confirmation-already-recorded", node_id)
     if any(
         record["nodeId"] == node_id and record["scopeDigest"] == scope
@@ -174,6 +179,18 @@ def validate_reviewer_record_scope(
     intake.validate_selection(catalog, node["fields"], author_sessions)
     authority = node["fields"].get("confirmation")
     if authority is None:
+        bundle = combined_credit(store, "reviewer-selection")
+        if bundle and bundle["scopes"]["reviewer-selection"] == reviewer_selection_scope(
+            node, catalog, author_sessions
+        ):
+            node["fields"]["confirmation"] = dict(
+                approvalId=bundle["request_id"],
+                eventId=bundle["responseEvent"],
+                origin="user",
+                statement=bundle["response"]["content"]["statement"],
+                sourceRef="combined-confirmation",
+                authorizedScopeDigest=bundle["scopes"]["reviewer-selection"],
+            )
         return
     records = list(_records(store, REVIEWER_CONFIRMATION))
     known = next(
@@ -184,7 +201,9 @@ def validate_reviewer_record_scope(
         ),
         None,
     )
-    if known is None and not authority["sourceRef"].startswith("reviewer-confirmation:event:"):
+    if known is None and not authority["sourceRef"].startswith(
+        ("reviewer-confirmation:event:", "combined-confirmation")
+    ):
         return  # Existing caller-supplied authority is not promoted to generated evidence.
     if known is None:
         raise PlanStoreError("plan-reviewer-confirmation-record-invalid", node["id"])
@@ -284,16 +303,17 @@ def _records(store: PlanStore, kind: str):
 def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
     """Read original correlated records; supplied words/by fields alone earn no credit."""
     requests = {row["request_id"]: row for _, row in _records(store, REQUEST)}
-    latest = next((row for _, row in _records(store, REQUEST) if row["gate"] == gate), None)
+    latest = next((r for r in requests.values() if gate in r.get("scopes", [r["gate"]])), None)
     for _, response in _records(store, RESPONSE):
-        if response.get("state") != "approved" or response.get("gate") != gate:
+        if response.get("state") != "approved" or gate not in response.get(
+            "approval_ids", {response.get("gate"): None}
+        ):
             continue
         request = requests.get(response.get("request_id"))
         content = response.get("content")
         if (
             not request
             or request != latest
-            or request.get("gate") != gate
             or response.get("phase") != request.get("phase")
             or request.get("plan_revision") != revision
             or response.get("plan_revision") != revision
@@ -305,7 +325,8 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
         ):
             continue
         approval = store.connection.execute(
-            "SELECT * FROM approvals WHERE id=?", (response.get("approval_id"),)
+            "SELECT * FROM approvals WHERE id=?",
+            (response.get("approval_ids", {}).get(gate, response.get("approval_id")),),
         ).fetchone()
         if (
             approval
@@ -319,20 +340,22 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
 
 
 def prepare_confirmation(
-    store: PlanStore, gate: str, *, _chat=False, _expected_request_id=None
-) -> dict:
+    store, gate, *, _chat=False, _expected_request_id=None, execution=None, reviewer_node_id=None
+):
     """Persist exactly what the native client will display for the current gate."""
     with store._transaction():
-        if gate not in ("align", "vision-lock"):
+        if gate not in ("align", "vision-lock", "align+vision-lock", "plan-execution"):
             raise PlanStoreError("plan-gate-invalid", str(gate))
+        if gate in {"align+vision-lock", "plan-execution"} and not _chat:
+            raise ValueError("combined-consent-requires-exact-chat-response")
         if _expected_request_id is not None:
             latest = next((row for _, row in _records(store, REQUEST) if row["gate"] == gate), None)
             if latest is None or latest["request_id"] != _expected_request_id:
                 raise ValueError("confirmation-request-superseded")
         phase = store.phase()
-        if phase != gate and not (
-            gate == "vision-lock" and PHASES.index(phase) > PHASES.index("vision-lock")
-        ):
+        if phase != {"align+vision-lock": "align", "plan-execution": "plan"}.get(
+            gate, gate
+        ) and not (gate == "vision-lock" and PHASES.index(phase) > PHASES.index("vision-lock")):
             raise PlanStoreError("plan-confirmation-gate-mismatch", f"Current phase is {phase}")
         spine = Spine(store._data())
         visions = spine.ids("vision")
@@ -349,15 +372,65 @@ def prepare_confirmation(
             card=card,
             vision=vision,
         )
+        if gate == "align+vision-lock":
+            from codex_harness.core.planner_vision import expansion_status
+
+            if expansion_status(vision)["gaps"]:
+                raise PlanStoreError("plan-expansion-required", "Prepare expansion before consent")
+            request["scopes"] = {g: revision for g in ("align", "vision-lock")}
+        if gate == "plan-execution":
+            from codex_harness.core.planner_execution import _control_digest, execution_scope
+            from codex_harness.core.provider_call_budget import planning_review_budget
+
+            budget = planning_review_budget(store)
+            if execution is None or budget is None:
+                raise ValueError("combined-execution-and-review-budget-required")
+            execution = execution_scope(store, **execution, _candidate=True)
+            request["scopes"] = {
+                "plan-lock": revision,
+                "publish": execution["manifestDigest"],
+                "review-budget": {k: v for k, v in budget.items() if k != "spentAdmissions"},
+                "execution": execution,
+                "validation": execution,
+            }
+            request["scopes"]["review-budget"]["reviewers"] = []
+            selected = store._latest_draft_event("reviewer-selection-recorded")
+            reviewer_node_id = reviewer_node_id or (selected or {}).get("nodeId")
+            if reviewer_node_id:
+                request["reviewer_node_id"] = reviewer_node_id
+                node, _, _, scope = reviewer_confirmation_target(
+                    store, spine, reviewer_node_id, allow_existing=True
+                )
+                request["reviewer"] = node
+                request["scopes"]["reviewer-selection"] = scope
+                request["scopes"]["review-budget"]["reviewers"] = [
+                    {
+                        **{k: r[k] for k in ("name", "provider", "model")},
+                        "effort": r["effort"].get("value"),
+                    }
+                    for r in node["fields"]["reviewers"]
+                ]
+        if "scopes" in request:
+            from codex_harness.core.planner_execution import _control_digest
+
+            request.update(workspace=str(store.workspace), controlDigest=_control_digest(store, 0))
+            request["card"] += "\nCovered gates and limits:\n" + json.dumps(request["scopes"])
+            request["card"] += (
+                f"\nWorkspace: {store.workspace}\nCandidate: {revision}\n"
+                f"Controls: {request['controlDigest']}\n"
+                + json.dumps(store._data(), ensure_ascii=False)
+            )
         if _chat:
             _chat_question(request, revision)
         store._event(REQUEST, request)
         return request
 
 
-def prepare_chat_confirmation(store: PlanStore, gate: str, *, _expected_request_id=None) -> dict:
+def prepare_chat_confirmation(store, gate, *, _expected_request_id=None, **scope):
     """Offer a fresh question without interpreting a previous native decline."""
-    return prepare_confirmation(store, gate, _chat=True, _expected_request_id=_expected_request_id)
+    return prepare_confirmation(
+        store, gate, _chat=True, _expected_request_id=_expected_request_id, **scope
+    )
 
 
 def complete_confirmation(
@@ -435,15 +508,22 @@ def _complete_confirmation(
             is not None
             or next(_records(store, REQUEST))[1]["request_id"] != request_id
         )
+        if "scopes" in request:
+            from codex_harness.core.planner_execution import _control_digest
+
+            stale = stale or _control_digest(store, request_event) != request["controlDigest"]
         state = "stale" if stale else action
         approval_id = None
+        approval_ids = {}
         if not stale and action == "accept":
             if content["conditions"] != "":
                 state = "conditional"
             elif not content["approve"]:
                 state = "declined"
             else:
-                approval_id = store._approve(request["gate"], channel, content["statement"])
+                for gate in request.get("scopes", {request["gate"]: None}):
+                    approval_ids[gate] = store._approve(gate, channel, content["statement"])
+                approval_id = approval_ids.get(request["gate"])
                 state = "approved"
         outcome = dict(
             request_id=request_id,
@@ -459,5 +539,33 @@ def _complete_confirmation(
         )
         if chat is not None:
             outcome["chat"] = chat
+        if "scopes" in request:
+            outcome["approval_ids"] = approval_ids
         store._event(RESPONSE, outcome)
         return outcome
+
+
+def combined_credit(store, gate):
+    """Resolve one original response and its gate-specific scope, never supplied authority."""
+    request = next((r for _, r in _records(store, REQUEST) if gate in r.get("scopes", {})), None)
+    if not request:
+        return None
+    revision = store._revision()
+    if request["workspace"] != str(store.workspace) or not approval_credit(store, gate, revision):
+        raise ValueError("combined-consent-required")
+    if "execution" in request["scopes"]:
+        from codex_harness.core.planner_jobs import _files
+
+        if _files(store.workspace / "template") != request["scopes"]["execution"]["templateFiles"]:
+            raise ValueError("combined-inputs-stale")
+    if request.get("reviewer_node_id"):
+        current = reviewer_confirmation_target(
+            store, Spine(store._data()), request["reviewer_node_id"], allow_existing=True
+        )
+        if current[3] != request["scopes"]["reviewer-selection"]:
+            raise ValueError("combined-reviewer-scope-stale")
+    event, response = next(
+        (e, r) for e, r in _records(store, RESPONSE) if r["request_id"] == request["request_id"]
+    )
+    request.update(response=response, responseEvent=event)
+    return request
