@@ -430,8 +430,21 @@ def semantic_spec(spine, product=None):
     from codex_harness.core.semantic_schema import validate
 
     root = spine.node(spine.ids("vision")[0])["fields"]
+    for field in ("scenarios", "targets"):
+        if not isinstance(root.get(field), dict):
+            raise ValueError(
+                f"Missing/malformed {field}; author vision.fields.{field} as an object. "
+                "See harness_schema kind=vision semanticScenarios."
+            )
     document, targets = root["scenarios"], root["targets"]
-    validate(document, product or Path.cwd(), targets, require_entries=False)
+    try:
+        validate(document, product or Path.cwd(), targets, require_entries=False)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"Invalid scenarios/targets: {error}. Author scenarios with schema, scenarios, "
+            "requirementRefs and contractRefs, plus targets bindings; "
+            "see harness_schema kind=vision semanticScenarios."
+        ) from error
     covered = set()
     for scenario in document["scenarios"]:
         for field, kind in (("requirementRefs", "requirement"), ("contractRefs", "design")):

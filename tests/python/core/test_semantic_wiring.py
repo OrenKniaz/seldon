@@ -131,6 +131,63 @@ def lock_vision(store):
         store.advance(phase, by="source-test")
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("scenarios",),
+        ("targets",),
+        ("scenarios", "schema"),
+        ("scenarios", "scenarios"),
+        ("scenarios", "scenarios", 0, "requirementRefs"),
+        ("scenarios", "scenarios", 0, "contractRefs"),
+    ],
+)
+@pytest.mark.parametrize("malformed", [False, True], ids=["missing", "null"])
+def test_semantic_advance_teaches_incomplete_required_fields(semantic_plan, path, malformed):
+    """Catch raw key/type errors at public advance; runner tests bypass partial authoring."""
+    store, _ = semantic_plan
+    lock_vision(store)
+    store.advance("requirements", by="source-test")
+    vision = store.spine().node("V1")
+    parent = vision["fields"]
+    for key in path[:-1]:
+        parent = parent[key]
+    if malformed:
+        parent[path[-1]] = None
+    else:
+        del parent[path[-1]]
+    store.upsert_node(vision)
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
+        assert reply["isError"], reply
+        message = str(reply)
+        assert "plan-semantic-scenarios-invalid" in message
+        assert str(path[-1]) in message
+        assert "harness_schema kind=vision semanticScenarios" in message
+        assert "unexpected tool-input-or-operation-error" not in message
+        assert store.phase() == "requirements"
+    finally:
+        server.close()
+
+
+def test_semantic_advance_admits_complete_canonical_data_unchanged(semantic_plan):
+    """Catch accidental gate tightening; compile-only success never advances canonical state."""
+    store, manifest = semantic_plan
+    lock_vision(store)
+    store.advance("requirements", by="source-test")
+    before = store.spine().to_dict()
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
+        assert not reply["isError"], reply
+        assert store.phase() == "tech-stack"
+        assert store.spine().to_dict() == before
+        assert compile_manifest(store.spine())["semantic"] == manifest["semantic"]
+    finally:
+        server.close()
+
+
 @pytest.fixture
 def semantic_acceptance_product(semantic_plan):
     store, _ = semantic_plan
