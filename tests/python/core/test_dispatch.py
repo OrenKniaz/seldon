@@ -670,7 +670,11 @@ def test_dispatch_attempts_overlap_and_integrate_without_ownership_conflict(tmp_
         plan,
         work_root=tmp_path / "runs",
         max_parallel=2,
+        setup={"githubLogin": "dispatch-user"},
         fake_workers={bead_id: worker(bead_id) for bead_id in ("A", "B")},
+    )
+    assert all(
+        "GitHub must be dispatch-user." in bead["prompt"] for bead in record["beads"].values()
     )
     assert sorted(arrivals) == ["A", "B"]
     assert record["status"] == STATUS_MOCK_ONLY

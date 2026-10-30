@@ -17,6 +17,7 @@ from codex_harness.core.mcp_planner import (
     _validate,
     resume_next,
     resume_status,
+    validate_setup,
 )
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PHASES
@@ -61,6 +62,7 @@ def batch_nodes(server: PlannerServer, nodes: list) -> str:
     schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == "harness_upsert_node")
     for node in nodes:
         _validate({"node": node}, schema)
+        validate_setup(node.get("fields", {}).get("setup", {}), server.workspace)
     if len({node["id"] for node in nodes}) != len(nodes):
         raise ValueError("Duplicate node ids in batch")
     return write_batch_nodes(server._store(), nodes, lambda node: _validate({"node": node}, schema))
@@ -302,6 +304,7 @@ def parser() -> argparse.ArgumentParser:
         help="New plans default to semantic-v1 for Python 3.12 CLI products (python -m pkg or "
         "a .py entry). Pass legacy for anything else (web, GUI, services, non-Python).",
     )
+    commands["start"].add_argument("--setup", help="Optional setup JSON object")
     commands["schema"].add_argument("--kind")
     commands["show"].add_argument("id")
     commands["review"].add_argument("id")
@@ -617,6 +620,7 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
         "start": (
             "harness_plan_start",
             lambda: dict(
+                **({"setup": read_json(args.setup)} if args.setup is not None else {}),
                 idea=args.idea,
                 name=args.name,
                 **({"plan_mode": args.plan_mode} if args.plan_mode else {}),

@@ -430,6 +430,7 @@ def build_packet(
     memory_text: str | None,
     provider: str = "codex",
     proof_level: str | None = None,
+    setup: dict | None = None,
 ) -> str:
     """Supply ownership, full served spec, current files, interfaces and exact proof.
 
@@ -678,6 +679,8 @@ def build_packet(
         )
         if runner.single_test is not None:
             verification += "\nSingle-test argv template: " + json.dumps(runner.single_test)
+    setup = setup or {}
+    account = f"GitHub must be {setup['githubLogin']}. " if setup.get("githubLogin") else ""
     sections = [
         "## 1. Contract (v1)\n"
         f"Your job: implement bead {bead.id}. Change ONLY: {', '.join(bead.owned_files)}.\n"
@@ -705,8 +708,8 @@ def build_packet(
         "to native CLI workers. Use available capabilities only when useful for this "
         "bead; MagicPath is an example for relevant design work, not routine coding. "
         "Before using a connected service, verify the intended account and permissions "
-        "with supported read-only discovery; GitHub must be OrenKniaz, never fall back "
-        "to a work account. If identity or access is unavailable or uncertain, report "
+        "with supported read-only discovery. "
+        f"{account}If identity or access is unavailable or uncertain, report "
         "that limitation and do not use the capability. Discovery and use remain "
         "subject to this packet's ownership, tool and denial rules; do not read "
         "credentials or unrelated configuration, install plugins, add subscriptions "

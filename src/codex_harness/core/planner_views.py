@@ -1462,6 +1462,8 @@ def status_card(status: dict, questions: list[dict]) -> str:
             sections = {item["label"]: item["text"] for item in projection.get("sections", [])}
             summary = sections.get("Vision") or projection.get("title") or ""
             lines.append(f"**Vision:** {_short(summary, 220)}")
+    if phase == "align":
+        lines.append(setup_card(status.get("setup", {})))
     if status.get("planningTurn"):
         turn = status["planningTurn"]
         lines.append("\n" + turn["status"] + "\n" + turn["guidance"])
@@ -1558,6 +1560,17 @@ def chat_diagram(spine, kind: str) -> str:
     else:
         fallback = text_fallback(spine, kind).rstrip()
     return f"**Diagram: {kind}**\n{note}\n```mermaid\n{full.rstrip()}\n```\n{fallback}"
+
+
+def setup_card(setup: dict) -> str:
+    labels = {
+        "projectFolder": "Project folder",
+        "gitName": "Git name",
+        "gitEmail": "Git email",
+        "githubLogin": "GitHub login",
+        "repoUrl": "Repository address",
+    }
+    return "\n".join(f"- {labels[key]}: {_inline(value)}" for key, value in setup.items())
 
 
 def understanding_card(

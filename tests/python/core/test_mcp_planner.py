@@ -13,6 +13,7 @@ from tests.python.core.planning_support import publication_evidence, source_only
 from tests.python.core.test_plan_store import draft_inputs, draft_intake, mock_catalog, mock_choice
 from tests.python.core.test_preflight import inject_mock_discovery
 
+from codex_harness.core import graph, worker_packet
 from codex_harness.core.mcp_planner import PHASE_DIAGRAMS, TOOLS, PlannerServer
 from codex_harness.core.plan_store import PHASES, open_plan_store
 from codex_harness.core.planner_views import banner, chat_diagram
@@ -2527,6 +2528,9 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
     )
     run("harness_remove_node", id="temporary")
     add_fixture(server)
+    node = server.store.spine().node("V1")
+    node["fields"]["setup"] = {"githubLogin": "kickoff-user"}
+    run("harness_upsert_node", node=node)
     seen.add("harness_upsert_node")
     before_inspection = list(server.store.connection.iterdump())
     assert "Inspection only" in run("harness_review_policy")
@@ -2559,6 +2563,12 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             ).fetchone()[0]
             run("harness_review", id=review_id)
             revision = server.store.status()["published_revision"]
+            # Frozen identity reaches real packets; draft/golden tests miss this producer.
+            plan = graph.load_plan(tmp_path / "plan" / revision / "manifest.json")
+            packet = worker_packet.build_packet(
+                plan, plan.beads["A"], tmp_path / "template", None, setup=node["fields"]["setup"]
+            )
+            assert "GitHub must be kickoff-user." in packet
             assert revision in published
             assert "Wave 1 (single bead): A" in published
             assert "Wave 2 (single bead): B" in published
@@ -3087,3 +3097,48 @@ def test_mcp_closure_schema_example_records_unverified_and_holds_publication(tmp
             assert list(store.connection.iterdump()) == before_inspection
         finally:
             instance.close()
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        {"projectFolder": ".."},
+        {"repoUrl": "https://user:secret123@github.com/a/b"},
+        {"repoUrl": "https://github.com/a/b?token=secret123"},
+    ],
+)
+def test_setup_refused_before_store_or_echo(server, tmp_path, setup):
+    """Protect confinement/secrecy before writes; previous starts had no setup boundary."""
+    reply = call(server, "harness_plan_start", error=True, idea="Tiny", name="Tiny", setup=setup)
+    assert "secret123" not in reply
+    assert not (tmp_path / ".codex-harness/plan.sqlite3").exists()
+
+
+def test_setup_start_resume_and_node_edit(server, tmp_path):
+    """Protect durable optional choices; old mode-resume tests miss identity loss/overwrite."""
+    setup = dict(
+        projectFolder=str(tmp_path),
+        gitName="Sample User",
+        gitEmail="sample@example.test",
+        githubLogin="sample-user",
+        repoUrl="https://github.com/sample-user/demo",
+    )
+    call(server, "harness_plan_start", idea="Tiny", name="Tiny", setup=setup)
+    assert server.store.spine().node("V1")["fields"]["setup"] == setup
+    server.close()
+    server = PlannerServer(tmp_path)
+    try:
+        resumed = call(server, "harness_plan_start", idea="Tiny", name="Tiny", setup={})
+        assert "GitHub login: sample-user" in resumed and "Git name: Sample User" in resumed
+        assert "sample-user" in call(server, "harness_plan_status")
+        node = server.store.spine().node("V1")
+        node["fields"]["setup"]["githubLogin"] = "edited-user"
+        call(server, "harness_upsert_node", node=node)
+        assert "edited-user" in call(server, "harness_plan_start", idea="Tiny", name="Tiny")
+        revision = server.store.spine().plan_revision()
+        node["fields"]["setup"]["repoUrl"] = "https://a:secret123@github.com/a/b"
+        refused = call(server, "harness_upsert_nodes", error=True, nodes=[node])
+        assert "secret123" not in refused
+        assert server.store.spine().plan_revision() == revision
+    finally:
+        server.close()

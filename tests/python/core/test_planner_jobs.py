@@ -242,6 +242,7 @@ def test_exact_publication_snapshot_options_and_ordinary_dispatch(fixture, monke
                 timeout=73,
                 max_provider_calls=16,
                 execution_job=directory,
+                setup={},
             ),
         )
     ]

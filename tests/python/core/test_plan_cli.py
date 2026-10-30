@@ -851,3 +851,12 @@ def test_direct_public_policy_warning_and_ordinary_reciprocal(tmp_path, adopt):
             )
         )
         assert len(rows) == 1 and rows[0][1] == rows[0][2]
+
+
+def test_cli_setup_survives_restart(tmp_path):
+    """Protect argparse-to-store-to-card flow; MCP tests cannot detect dropped CLI setup."""
+    setup = dict(githubLogin="cli-user", gitName="CLI User")
+    cli(tmp_path, "start", "--idea", "Tiny", "--name", "Tiny", "--setup", json.dumps(setup))
+    with open_plan_store(tmp_path) as store:
+        assert store.spine().node("V1")["fields"]["setup"] == setup
+    assert "GitHub login: cli-user" in cli(tmp_path, "start", "--idea", "Tiny", "--name", "Tiny")

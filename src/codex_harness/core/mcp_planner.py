@@ -13,6 +13,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import uuid4
 
 from codex_harness.core import planner_views as views
@@ -446,10 +447,12 @@ TOOLS = [
         "New plans default to semantic-v1 for Python 3.12 CLI products (python -m pkg or a .py "
         "entry); pass legacy for anything else (web, GUI, services, non-Python). "
         "For semantic-v1, author vision.fields.scenarios + vision.fields.targets during Vision, "
-        "before advancing to tech-stack.",
+        "before advancing to tech-stack. "
+        "At Align, offer optional setup once in one compact question; omission never blocks Align.",
         {
             "idea": STRING,
             "name": STRING,
+            "setup": {"type": "object"},
             "plan_mode": {
                 "type": "string",
                 "enum": ["legacy", "semantic-v1"],
@@ -809,6 +812,33 @@ def resume_next(data=None, *, cli_prefix=None):
     )
 
 
+def validate_setup(setup, workspace):
+    keys = {"projectFolder", "gitName", "gitEmail", "githubLogin", "repoUrl"}
+    if (
+        not isinstance(setup, dict)
+        or setup.keys() - keys
+        or any(not isinstance(value, str) or not value.strip() for value in setup.values())
+    ):
+        raise ValueError("setup accepts only the five documented optional strings")
+    if "repoUrl" in setup:
+        url = urlsplit(unquote(setup["repoUrl"]))
+        if (
+            re.match(r"^[^/@\s]+:[^/@\s]+@", setup["repoUrl"])
+            or url.password is not None
+            or url.username not in (None, "git")
+            or any(
+                re.search(r"token|password|secret|credential|authorization|api.?key", key, re.I)
+                for key, _ in parse_qsl(url.query)
+            )
+        ):
+            raise ValueError("Repository URL contains credentials; supply a clean address")
+    if "projectFolder" in setup:
+        folder = Path(setup["projectFolder"]).expanduser()
+        folder = (workspace / folder).resolve()
+        if not folder.is_dir() or folder != workspace.resolve():
+            raise ValueError("Folder mismatch: reconnect Seldon there; server workspace is fixed")
+
+
 def _validate(value, schema: dict, label="arguments") -> None:
     expected = schema["type"]
     types = {
@@ -878,6 +908,7 @@ def packet_view(store, bead_id: str, provider: str = "codex") -> dict:
             None,
             provider=provider,
             proof_level=manifest.get("proofLevel"),
+            setup=store.spine().node(store.spine().ids("vision")[0])["fields"].get("setup", {}),
         )
     result = {"packet": packet, "characters": len(packet), "bytes": len(packet.encode("utf-8"))}
     if manifest.get("semantic"):
@@ -1171,6 +1202,7 @@ class PlannerServer:
             if status["plan_revision"] != hashlib.sha256(b"").hexdigest():
                 spine = self.store.spine()
                 status["visionProjection"] = vision_projection(spine.node(spine.ids("vision")[0]))
+                status["setup"] = spine.node(spine.ids("vision")[0])["fields"].get("setup", {})
                 if status["phase"] in {"features", "requirements", "plan"}:
                     status["planningTurn"] = planning_turn(spine)
             return status
@@ -1526,7 +1558,9 @@ class PlannerServer:
                 text = "Compact detail; include_detail=true returns originals."
                 if name == "harness_plan_status" and data.get("visionProjection"):
                     text += " Summary only: " + data["visionProjection"]["title"]
-                reply["content"][0]["text"] = views.response(status, text, next_step)
+                # The status card is the user-facing view (incl. Align setup); keep it.
+                if name != "harness_plan_status":
+                    reply["content"][0]["text"] = views.response(status, text, next_step)
                 reply = connection_reply(reply, self.workspace, status)
                 if terminal and previous == digest:
                     reply["structuredContent"] = {
@@ -2092,6 +2126,7 @@ class PlannerServer:
             self.result_data = result
             return views.data_card("Workspace mail", result)
         if name == "harness_plan_start":
+            validate_setup(args.get("setup", {}), self.workspace)
             if self.store is None:
                 self.store = open_plan_store(self.workspace, args["name"])
             # Empty stores cannot make a Spine; the empty revision is canonical.
@@ -2102,9 +2137,14 @@ class PlannerServer:
                         "kind": "vision",
                         "title": args["name"],
                         "text": args["idea"],
-                        "fields": {"planMode": "semantic-v1"}
-                        if args.get("plan_mode") != "legacy"
-                        else {},
+                        "fields": {
+                            **(
+                                {"planMode": "semantic-v1"}
+                                if args.get("plan_mode") != "legacy"
+                                else {}
+                            ),
+                            **({"setup": args["setup"]} if "setup" in args else {}),
+                        },
                         "parents": [],
                     }
                 )
@@ -2113,9 +2153,12 @@ class PlannerServer:
             ):
                 raise ValueError("planMode is immutable; no conversion of existing plans")
             self.result_data = {"id": "V1"}
+            node = self.store.spine().node(self.store.spine().ids("vision")[0])
+            setup_card = views.setup_card(node["fields"].get("setup", {}))
             if self.store.spine().semantic:
                 return (
-                    "semantic-v1 resumed (Windows Python CLI only). Planner writes DATA: "
+                    setup_card
+                    + "\nsemantic-v1 resumed (Windows Python CLI only). Planner writes DATA: "
                     "V1.fields.scenarios uses seldon/scenarios-v1; V1.fields.targets binds "
                     "target names to {entry, argv}. References are requirement/design node IDs "
                     "(optional @revision pin). "
@@ -2125,7 +2168,7 @@ class PlannerServer:
                     "sufficiency still apply. Execute with max_parallel=1. RED is history; "
                     "only controller Validation PASS fulfills scenarios. Say 'pause plan' to pause."
                 )
-            return "Plan mode resumed. To pause, say 'pause plan'."
+            return setup_card + "\nPlan mode resumed. To pause, say 'pause plan'."
         if (
             name == "harness_plan_status"
             and self.store is None
@@ -2140,6 +2183,7 @@ class PlannerServer:
             # Preserve the CLI's input-validation-before-store ordering.
             for node in args["nodes"]:
                 _validate({"node": node}, node_schema)
+                validate_setup(node.get("fields", {}).get("setup", {}), self.workspace)
             if len({node["id"] for node in args["nodes"]}) != len(args["nodes"]):
                 raise ValueError("Duplicate node ids in batch")
             body = batch_nodes(
@@ -2147,6 +2191,8 @@ class PlannerServer:
             )
             self.result_data = {"ids": [node["id"] for node in args["nodes"]]}
             return body
+        if name == "harness_upsert_node":
+            validate_setup(args["node"].get("fields", {}).get("setup", {}), self.workspace)
         store = self._store()
         if name == "harness_review_policy":
             self.result_data = views.plan_review_policy_contract(store)
@@ -2398,7 +2444,8 @@ class PlannerServer:
                 if text not in existing:
                     store.add_assumption(text, [vision_id])
             self.result_data = {"id": vision_id}
-            return views.understanding_card(**args)
+            body = views.understanding_card(**args)
+            return body + "\n" + views.setup_card(node["fields"].get("setup", {}))
         if name == "harness_record_confirmation":
             raise ValueError(
                 "plan-confirmation-origin-unavailable: use harness_record_confirmation gate="

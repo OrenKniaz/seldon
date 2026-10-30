@@ -438,6 +438,8 @@ def execute_worker_job(workspace, job_id):
         with open_plan_store(workspace) as store:
             if _publication(store, job_id)[0] != manifest:
                 raise ValueError("worker-job-publication-changed-before-launch")
+            spine = store.spine()
+            setup = spine.node(spine.ids("vision")[0])["fields"].get("setup", {})
         workers = _workers(manifest, request["options"]["workers"])
         run = dispatch.run_plan(
             plan,
@@ -449,6 +451,7 @@ def execute_worker_job(workspace, job_id):
             timeout=request["options"]["timeout"],
             max_provider_calls=request["options"]["callCap"],
             execution_job=directory,
+            setup=setup,
         )
         terminal.update(status="completed", runId=run["runId"], dispatchStatus=run["status"])
     except Exception as error:

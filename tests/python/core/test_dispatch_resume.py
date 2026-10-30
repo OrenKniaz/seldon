@@ -42,14 +42,20 @@ def test_dispatch_resume_recovers_worker_blocker_without_duplicate_mail(tmp_path
         )
 
     first = run_plan(
-        plan, work_root=tmp_path / "runs", mock_provider="reference", fake_workers={"A": blocked}
+        plan,
+        work_root=tmp_path / "runs",
+        mock_provider="reference",
+        fake_workers={"A": blocked},
+        setup={"githubLogin": "resume-user"},
     )
+    assert "GitHub must be resume-user." in first["beads"]["A"]["prompt"]
     mailbox = Mailbox(first["memoryWorkspace"])
     before = mailbox.inbox("planner")
     resumed = run_plan(
         plan,
         work_root=tmp_path / "unused",
         resume_run_dir=_run_dir(first),
+        setup={"githubLogin": "resume-user"},
         mock_provider="reference",
         fake_workers={"A": lambda path: pytest.fail("Completed blocked attempt relaunched")},
     )

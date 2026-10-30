@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -84,7 +85,8 @@ def test_legacy_packets_match_narrative_revision_bytes(tmp_path, fixture):
                 "MagicPath is an example for relevant design work, not routine coding" in guidance
             )
             assert "verify the intended account and permissions" in guidance
-            assert "GitHub must be OrenKniaz, never fall back to a work account" in guidance
+            assert "OrenKniaz" not in guidance
+            assert "GitHub must be" not in guidance
             assert "subject to this packet's ownership, tool and denial rules" in guidance
             assert "do not read credentials or unrelated configuration" in guidance
             assert "install plugins, add subscriptions or paid capacity" in guidance
@@ -758,3 +760,30 @@ function internal() { HIDDEN_BODY(); }
     )[1]
     assert len(payload.encode()) <= 8000
     assert "[truncated for context byte limit]" in payload
+
+
+def test_packet_ignores_parent_project_database(tmp_path, monkeypatch):
+    """Protect isolation; ancestor lookup leaks identity, absent in golden fixtures."""
+    from codex_harness.core.plan_store import open_plan_store
+
+    plan, repo = _checkout(tmp_path)
+    with open_plan_store(tmp_path) as store:
+        store.upsert_node(
+            dict(
+                id="V1",
+                kind="vision",
+                title="Parent",
+                text="Foreign project",
+                fields={"setup": {"githubLogin": "foreign-user"}},
+                parents=[],
+            )
+        )
+
+    def refuse_foreign_database(*args, **kwargs):
+        pytest.fail("Packet construction consulted a parent project database")
+
+    monkeypatch.setattr(sqlite3, "connect", refuse_foreign_database)
+    packet = build_packet(plan, plan.beads["B"], repo, None)
+    assert "GitHub must be" not in packet and "foreign-user" not in packet
+    explicit = build_packet(plan, plan.beads["B"], repo, None, setup={"githubLogin": "caller-user"})
+    assert "GitHub must be caller-user." in explicit

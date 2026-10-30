@@ -14,6 +14,8 @@ FIELD_RULES = {
         "provenance unchanged, and derive all requirements/scenarios from it: a pointer does "
         "not discard or narrow scope. This teaching does not migrate, truncate or rewrite "
         "existing user-authored or locked visions. "
+        "Optional setup: projectFolder, gitName, gitEmail, githubLogin, repoUrl strings; "
+        "Never read credentials or git config except --get user.name or --get user.email. "
         "Optional understanding-card fields: vision, users, first_user_moment "
         "(alias firstUserMoment), scope_in (scopeIn), scope_out (scopeOut), "
         "quality_bar (qualityBar, quality), done_feels_like (doneFeelsLike, done), "
