@@ -2013,6 +2013,8 @@ def test_public_acceptance_contract_derives_complete_executable_coverage(server,
 def test_public_compile_then_packet_current_manifest_without_execution(
     server, tmp_path, monkeypatch
 ):
+    """Protect current-manifest packet gates; catch stale reads beyond semantic happy paths."""
+
     def no_process(*args, **kwargs):
         raise AssertionError(
             "Compilation and packet inspection must not launch a worker or provider"
@@ -2047,7 +2049,7 @@ def test_public_compile_then_packet_current_manifest_without_execution(
     assert server.store.phase() == before_phase
     assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
     event_count = server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
-    call(server, "harness_packet_view", id="A", provider="codex")
+    call(server, "harness_packet_view", id="A", provider="codex", include_packet=True)
     packet = server.result_data
     assert packet["bytes"] == len(packet["packet"].encode("utf-8")) > 0
     assert packet["characters"] == len(packet["packet"])
@@ -2077,13 +2079,21 @@ def test_public_compile_then_packet_current_manifest_without_execution(
     server.close()
     with open_plan_store(tmp_path) as reopened:
         assert reopened.manifest_revision() == manifest["planRevision"]
-    call(server, "harness_packet_view", id="A", provider="codex")
+    call(server, "harness_packet_view", id="A", provider="codex", include_packet=True)
     assert server.result_data == packet
+    for include_packet in (False, True):
+        unknown = call(
+            server, "harness_packet_view", error=True, id="unknown", include_packet=include_packet
+        )
+        assert "Unknown bead: unknown" in unknown
     protected = next((template / "tests").rglob("test_*.py"))
     original = protected.read_bytes()
     protected.write_bytes(original + b"\n# Changed protected test input\n")
-    stale = call(server, "harness_packet_view", error=True, id="A", provider="codex")
-    assert "harness_compile" in stale
+    for include_packet in (False, True):
+        stale = call(
+            server, "harness_packet_view", error=True, id="A", include_packet=include_packet
+        )
+        assert "harness_compile" in stale
     protected.write_bytes(original)
     bead = server.store.spine().node("A")
     bead["text"] += " Current revised plan."

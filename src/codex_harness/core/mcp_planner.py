@@ -221,8 +221,14 @@ TOOLS = [
     ),
     _tool(
         "harness_packet_view",
-        "Read the exact worker packet and its size from the current compiled or published plan.",
-        {"id": STRING, "provider": {"type": "string", "enum": ["codex", "claude", "copilot"]}},
+        "Read worker packet size metadata from the current compiled or published plan. "
+        "Summary by default; include_packet=true returns exact full text for debugging. "
+        "Reviewers receive their canonical packets independently.",
+        {
+            "id": STRING,
+            "provider": {"type": "string", "enum": ["codex", "claude", "copilot"]},
+            "include_packet": {"type": "boolean", "default": False},
+        },
         ["id"],
     ),
     _tool(
@@ -1054,6 +1060,9 @@ class PlannerServer:
         return connection_reply(response, self.workspace, show_recovery=True)
 
     def _wire_call_tool(self, name, arguments):
+        if name == "harness_packet_view" and isinstance(arguments, dict):
+            # CLI/internal calls retain full packet output; only MCP defaults to size.
+            arguments = {"include_packet": False, **arguments}
         if name not in {
             "harness_schema",
             "harness_preflight",
@@ -2049,7 +2058,11 @@ class PlannerServer:
             return render_readiness(self.result_data)
         if name == "harness_packet_view":
             self.result_data = packet_view(store, args["id"], args.get("provider", "codex"))
-            return self.result_data["packet"] + (
+            packet = self.result_data["packet"]
+            if not args.get("include_packet", True):
+                del self.result_data["packet"]
+                packet = "Summary only; include_packet=true for full debugging text."
+            return packet + (
                 f"\nPacket size: {self.result_data['characters']} characters; "
                 f"{self.result_data['bytes']} bytes"
             )

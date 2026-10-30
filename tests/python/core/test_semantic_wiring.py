@@ -363,9 +363,13 @@ def test_mode_defaults_only_at_creation_and_survives_resume(tmp_path, mode):
 
 
 def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
-    semantic_plan, monkeypatch
+    semantic_plan, monkeypatch, capsys
 ):
-    """Protect data-only planning; catches hidden legacy gates that standalone runner tests miss."""
+    """Protect semantic packet/gates; catch default bulk echoes missed by direct-builder tests."""
+    from tests.python.core.test_mcp_planner import rpc, workspace_wire
+
+    from codex_harness.core import plan_cli
+
     store, manifest = semantic_plan
     assert "proofModule" not in manifest["beads"]["B"]
     assert not store.spine().ids("test") and not store.spine().coverage_gaps()
@@ -381,10 +385,52 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
     assert "passing audit" not in str(error.value)
     with pytest.raises(ValueError, match="Enter publish"):
         store.publish(by="source-test", export_dir=store.workspace / "published")
-    packet = packet_view(store, "B")["packet"]
+    canonical = packet_view(store, "B")
+    packet = canonical["packet"]
     assert "SCENARIOS.json" in packet and "Hello" in packet and "Implement the product" in packet
     # The scenario spec is large; it must appear once, not inline and again as a file.
     assert packet.count('"first-moment"') == 1
+    before = list(store.connection.iterdump())
+    server = PlannerServer(store.workspace)
+    try:
+
+        def read(tool_name="harness_packet_view", **arguments):
+            reply = workspace_wire(
+                server, tool_name, expected_workspace=str(store.workspace), **arguments
+            )
+            assert not reply["isError"], reply
+            return reply
+
+        summary = read(id="B")
+        assert summary["structuredContent"] == {
+            "characters": len(packet),
+            "bytes": len(packet.encode("utf-8")),
+        }
+        assert packet not in summary["content"][0]["text"]
+        assert "Summary only; include_packet=true" in summary["content"][0]["text"]
+        assert read(id="B", include_packet=False) == summary
+        full = read(id="B", include_packet=True)
+        assert full["structuredContent"] == canonical
+        assert packet in full["content"][0]["text"]
+        schema = read("harness_schema", tool="harness_packet_view")["structuredContent"]
+        assert schema["inputSchema"]["properties"]["include_packet"] == {
+            "type": "boolean",
+            "default": False,
+        }
+        tools = rpc(server, "tools/list")["result"]["tools"]
+        teaching = next(tool for tool in tools if tool["name"] == "harness_packet_view")
+        assert "Reviewers receive their canonical packets independently" in teaching["description"]
+        assert plan_cli.main(["--workspace", str(store.workspace), "--json", "packet", "B"]) == 0
+        assert json.loads(capsys.readouterr().out)["data"] == canonical
+        sizes = {
+            key: len(json.dumps(reply, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            for key, reply in (("default", summary), ("full", full))
+        }
+        assert sizes["default"] < sizes["full"], sizes
+        (store.workspace / "packet-bytes.json").write_text(json.dumps(sizes), encoding="utf-8")
+    finally:
+        server.close()
+    assert list(store.connection.iterdump()) == before
     assert "vision expansion" in review_packet(store)
     assert store.passing_audit(manifest["planRevision"]) is None
     state = store.status()
