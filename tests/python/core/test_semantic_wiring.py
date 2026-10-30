@@ -171,6 +171,81 @@ def test_semantic_advance_teaches_incomplete_required_fields(semantic_plan, path
         server.close()
 
 
+@pytest.mark.parametrize("tool", ["harness_upsert_node", "harness_upsert_nodes"])
+@pytest.mark.parametrize(
+    "problem", ["contract", "requirement", "both", "operation", "ready", "bead"]
+)
+def test_semantic_writes_report_canonical_gaps_without_refusal(semantic_plan, tool, problem):
+    """Catch late/duplicated checks or refused writes; advance tests never inspect write replies."""
+    store, _ = semantic_plan
+    lock_vision(store)
+    store.advance("requirements", by="source-test")
+    if problem == "bead":
+        store.advance("tech-stack", by="source-test")
+        store.advance("plan", by="source-test")
+    vision = store.spine().node("V1")
+    scenario = vision["fields"]["scenarios"]["scenarios"][0]
+    batch = []
+    if problem in {"contract", "both"}:
+        scenario["contractRefs"] = ["D1"]
+    if problem in {"requirement", "both"}:
+        # A real canonical producer adds the requirement before the consumer checks coverage.
+        requirement = node("R6", "requirement", ["F"])
+        if tool == "harness_upsert_nodes":
+            batch.append(requirement)
+        else:
+            store.upsert_node(requirement)
+    if problem == "operation":
+        del scenario["actions"][0]["cli"]["operation"]
+    item = vision
+    if problem == "bead":
+        item = store.spine().node("B")
+        item["fields"]["dependsOn"] = []
+    server = PlannerServer(store.workspace)
+    try:
+        events = store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+        batch.append(item)
+        args = {"node": item} if tool == "harness_upsert_node" else {"nodes": batch}
+        reply = server.call_tool(tool, args)
+        assert not reply["isError"], reply
+        assert store.spine().node(item["id"]) == item
+        assert store.connection.execute("SELECT count(*) FROM events").fetchone()[
+            0
+        ] == events + len(batch)
+        assert store.phase() == ("plan" if problem == "bead" else "requirements")
+        gaps = reply["structuredContent"]["openGaps"]
+        text = reply["content"][0]["text"]
+        assert text.splitlines()[-1].startswith("Next: ")
+        assert sum(line.startswith("Next: ") for line in text.splitlines()) == 1
+        if tool == "harness_upsert_nodes":
+            assert reply["structuredContent"]["ids"] == [n["id"] for n in batch]
+        if problem == "ready":
+            assert gaps == [] and "Open before" not in text
+        else:
+            assert (
+                gaps
+                and "Open before " + ("roundtable" if problem == "bead" else "tech-stack") in text
+            )
+            if problem in {"contract", "both"}:
+                assert "D1 missing/stale (contractRefs in first-moment)" in gaps
+            if problem in {"requirement", "both"}:
+                assert "R6 uncovered by any scenario" in gaps
+            if problem == "operation":
+                assert "operation" in str(gaps)
+            if problem == "bead":
+                assert "Contracts -> Build" in str(gaps)
+            assert text.splitlines()[-2].startswith("Open before ")
+        # The authoritative gate must still reject exactly the same persisted bad data.
+        next_phase = "roundtable" if problem == "bead" else "tech-stack"
+        advance = server.call_tool("harness_advance", {"to_phase": next_phase})
+        assert advance["isError"] == (problem != "ready"), advance
+        if gaps:
+            assert all(gap in str(advance) for gap in gaps)
+            assert store.phase() == ("plan" if problem == "bead" else "requirements")
+    finally:
+        server.close()
+
+
 def test_semantic_advance_admits_complete_canonical_data_unchanged(semantic_plan):
     """Catch chained gate bypass/event loss; single-step tests miss repair -> plan journeys."""
     store, manifest = semantic_plan

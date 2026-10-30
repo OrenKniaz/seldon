@@ -445,20 +445,27 @@ def semantic_spec(spine, product=None):
             "requirementRefs and contractRefs, plus targets bindings; "
             "see harness_schema kind=vision semanticScenarios."
         ) from error
-    covered = set()
+    covered, gaps, messages = set(), [], []
     for scenario in document["scenarios"]:
         for field, kind in (("requirementRefs", "requirement"), ("contractRefs", "design")):
             for ref in scenario[field]:
                 key, pinned, revision = ref.partition("@")
                 if key not in spine.ids(kind) or pinned and revision != spine.revision(key):
-                    raise ValueError(
+                    gaps.append(f"{ref} missing/stale ({field} in {scenario['id']})")
+                    messages.append(
                         f"Stale/unknown semantic reference: {ref}; "
                         f"author {kind} node {key} ({field}) with a fresh ref before advancing"
                     )
                 if kind == "requirement":
                     covered.add(key)
-    if covered != set(spine.ids("requirement")):
-        raise ValueError("Every requirement needs semantic scenarios")
+    gaps.extend(
+        f"{key} uncovered by any scenario"
+        for key in sorted(set(spine.ids("requirement")) - covered)
+    )
+    if gaps:
+        error = ValueError("; ".join([*messages, *gaps]))
+        error.open_gaps = gaps
+        raise error
     return document, targets, covered
 
 

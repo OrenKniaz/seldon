@@ -1327,6 +1327,24 @@ class PlannerServer:
                 if self.result_data is None:
                     self.result_data = dict(contract=contract, holdReasons=[str(error)])
             is_error = True
+        if not is_error and name in {"harness_upsert_node", "harness_upsert_nodes"}:
+            store = self._store()
+            spine = store.spine()
+            if spine.semantic:
+                from codex_harness.core.spine import semantic_spec
+
+                gaps = []
+                try:
+                    semantic_spec(spine)
+                    if store.phase() == "plan":
+                        store._check_coverage(spine, "bead")
+                        store._manifest(spine)
+                except (ValueError, OSError) as error:
+                    gaps = getattr(error, "open_gaps", [str(error)])
+                self.result_data = {**(self.result_data or {}), "openGaps": gaps}
+                if gaps:
+                    phase = "roundtable" if store.phase() == "plan" else "tech-stack"
+                    body += f"\nOpen before {phase}: " + "; ".join(gaps)
         status_available = True
         try:
             status = (
