@@ -499,3 +499,264 @@ def test_source_inventory_excludes_metadata_files(tmp_path, metadata_file):
     result = run(scenario(), tmp_path, TARGETS, "validation")[0]
     assert result["state"] == "PASS", result
     assert result["cleanup"]["quiescenceVerified"]
+
+
+WEB_TARGET = {"page": {"kind": "web", "entry": "index.html"}}
+WEB_PAGE = """<!doctype html><html><meta charset="utf-8"><title>Fixture</title>
+<style>body{margin:16px;color:#111;background:white;font:16px Arial}
+a,button{color:#111;background:white} :focus{outline:2px solid black}
+@media(prefers-reduced-motion:no-preference){h1{animation:fade .1s}}
+@keyframes fade{from{opacity:.95}to{opacity:1}}</style>
+<h1>Welcome</h1><p>Useful content</p><a href="#details">Details</a>
+<button onclick="document.querySelector('#extra').hidden=false">Reveal</button>
+<section id="details"><h2>Details section</h2><p id="extra" hidden>Revealed content</p></section>
+</html>"""
+
+
+def web_document():
+    from codex_harness.core.semantic_schema import WEB
+
+    actions = [
+        {
+            "id": f"web-{width}-{motion}",
+            "web": {
+                "target": "page",
+                "operation": "visit",
+                "viewport": {"width": width, "height": height},
+                "reducedMotion": motion,
+                "steps": [
+                    {"op": "open"},
+                    {"op": "assertVisible", "locator": {"text": "Welcome"}},
+                    {"op": "key", "key": "Tab"},
+                    {"op": "assertFocus", "locator": {"role": "link", "name": "Details"}},
+                    {"op": "key", "key": "Enter"},
+                    {"op": "assertFragment", "fragment": "#details"},
+                    {"op": "click", "locator": {"selector": "button"}},
+                    {"op": "assertVisible", "locator": {"text": "Revealed content"}},
+                    {"op": "key", "key": "Escape"},
+                ],
+            },
+        }
+        for width, height in [(375, 812), (1440, 900)]
+        for motion in ["no-preference", "reduce"]
+    ]
+    return {
+        "schema": "seldon/scenarios-v1",
+        "scenarios": [
+            {
+                "id": "web",
+                "requirementRefs": ["R1@1"],
+                "contractRefs": ["page@1"],
+                "setup": {},
+                "actions": actions,
+                "observe": [
+                    {
+                        "action": a["id"],
+                        **{
+                            k: 0 if k in ("consoleErrors", "externalRequests") else True
+                            for k in WEB
+                        },
+                    }
+                    for a in actions
+                ],
+                "verdict": "all",
+            }
+        ],
+    }
+
+
+@pytest.fixture(scope="module")
+def web_browser_ready(tmp_path_factory):
+    """Retain one real readiness attempt and native privilege failures without browser proof."""
+    root = tmp_path_factory.mktemp("web-browser-readiness")
+    (root / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+    result = run(web_document(), root, WEB_TARGET, "validation", evidence_dir=root.parent / "pngs")[
+        0
+    ]
+    receipt = root.parent / "web-browser-readiness.json"
+    receipt.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    reason = result.get("reason", "")
+    if (
+        result["state"] == "ERROR"
+        and "GPU process exited unexpectedly: exit_code=-1073741790" in reason
+    ):
+        assert result["cleanup"]["quiescenceVerified"]
+        assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
+        pytest.skip(f"Chromium sandbox child access denied (0xC0000022); actual ERROR: {receipt}")
+    assert result["state"] == "PASS", result
+    return result
+
+
+def test_web_real_page_all_gates_input_and_retained_evidence(web_browser_ready):
+    """Protect real DOM→input→gates/PNG integration; CLI tests never render a page."""
+    import hashlib
+
+    result = web_browser_ready
+    assert result["state"] == "PASS", result
+    assert result["cleanup"]["membershipVerifiedBeforePayload"]
+    assert result["cleanup"]["quiescenceVerified"]
+    for action in result["actions"].values():
+        assert action["toolchain"]["playwright"] == "1.59.1"
+        assert len(action["toolchain"]["identity"]) == 4
+        assert len(action["artifacts"]) == 2
+        for artifact in action["artifacts"]:
+            file = Path(artifact["path"])
+            assert (
+                file.is_file()
+                and hashlib.sha256(file.read_bytes()).hexdigest() == artifact["sha256"]
+            )
+
+
+@pytest.mark.parametrize(
+    "broken,check",
+    [
+        ('<div style="width:2000px">Wide</div>', "noHorizontalOverflow"),
+        ('<p style="color:#aaa">Low contrast</p>', "textContrastAA"),
+        ('<script>fetch("https://example.invalid/x").catch(()=>{})</script>', "externalRequests"),
+        ('<script>new WebSocket("wss://example.invalid/socket")</script>', "externalRequests"),
+        ('<script>console.error("Broken")</script>', "consoleErrors"),
+        ('<script>throw Error("Broken script")</script>', "consoleErrors"),
+        ("<h1>Second main heading</h1>", "headingStructure"),
+        ("<h4>Skipped heading</h4>", "headingStructure"),
+        (
+            "<style>h1{animation:move 10s infinite}"
+            "@keyframes move{to{transform:translateX(2px)}}</style>",
+            "reducedMotionRespected",
+        ),
+        (
+            "<script>document.querySelector('h1').animate([{opacity:1},{opacity:.9}],"
+            "{duration:10000,iterations:Infinity})</script>",
+            "reducedMotionRespected",
+        ),
+        (
+            "<style>button{transition:transform 8s}</style><script>"
+            "document.querySelector('button').addEventListener('click',e=>"
+            "e.target.style.transform='translateX(2px)')</script>",
+            "reducedMotionRespected",
+        ),
+        (
+            "<script>document.querySelector('button').addEventListener('click',()=>"
+            "document.querySelector('#extra').style.color='#aaa')</script>",
+            "textContrastAA",
+        ),
+        ("missing", "assertVisible"),
+        (
+            '<p style="background:rgba(0,0,0,.9);color:rgba(255,255,255,.1)">Alpha</p>',
+            "textContrastAA",
+        ),
+    ],
+)
+def test_web_broken_rendering_fails_owning_check(tmp_path, broken, check, web_browser_ready):
+    """Protect browser gate attribution for real defects; good-page/CLI probes miss failures."""
+    page = WEB_PAGE.replace("Welcome", "Missing") if broken == "missing" else WEB_PAGE + broken
+    (tmp_path / "index.html").write_text(page, encoding="utf-8")
+    result = run(web_document(), tmp_path, WEB_TARGET, "validation")[0]
+    assert result["state"] == "FAIL", result
+    assert any(o["check"] == check and not o["passed"] for o in result["observations"]), result
+    assert result["cleanup"]["quiescenceVerified"]
+
+
+def test_web_observed_stub_red_unperformed_interaction_and_validation_rejection(
+    tmp_path, web_browser_ready
+):
+    """Protect attributable browser RED and marker refusal; CLI stderr/exit-3 cannot prove DOM."""
+    (tmp_path / "index.html").write_text("<h1>SELDON-STUB visit</h1>", encoding="utf-8")
+    result = run(web_document(), tmp_path, WEB_TARGET, "contracts")[0]
+    assert result["state"] == "FAIL", result
+    assert len(result["stubActions"]) == 4
+    assert all(
+        [s["check"] for s in a["steps"]] == ["open", "assertVisible"]
+        for a in result["actions"].values()
+    )
+    assert run(web_document(), tmp_path, WEB_TARGET, "validation")[0]["state"] == "ERROR"
+    (tmp_path / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+    result = run(web_document(), tmp_path, WEB_TARGET, "contracts")[0]
+    assert result["state"] == "ERROR" and "Web RED requires" in result["reason"], result
+
+
+@pytest.mark.parametrize(
+    "source,reason",
+    [
+        ('<p style="background:linear-gradient(white,black)">Unknown contrast</p>', "Unresolved"),
+        ('<canvas width="10" height="10"></canvas>', "Uninspectable"),
+        (
+            "<script>requestAnimationFrame(function tick(){requestAnimationFrame(tick)})</script>",
+            "Uninspectable",
+        ),
+    ],
+)
+def test_web_unobservable_rendering_is_error(tmp_path, source, reason, web_browser_ready):
+    """Reject unknown contrast/motion; measurable gate failures miss uninspectable rendering."""
+    (tmp_path / "index.html").write_text(WEB_PAGE + source, encoding="utf-8")
+    result = run(web_document(), tmp_path, WEB_TARGET, "validation")[0]
+    assert result["state"] == "ERROR" and reason in result["reason"], result
+    assert result["cleanup"]["quiescenceVerified"]
+
+
+def test_web_missing_tool_is_prelaunch_error(tmp_path, monkeypatch):
+    """Reject missing tools even with a short remaining deadline; CLI budgets miss web clamping."""
+    (tmp_path / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+    monkeypatch.setenv("SELDON_WEB_NODE", str(tmp_path / "absent-node.exe"))
+    result = run(web_document(), tmp_path, WEB_TARGET, "contracts", run_seconds=1)[0]
+    assert result["state"] == "ERROR" and "Web tool missing: node" in result["reason"], result
+    assert result["cleanup"]["childLaunched"] is False
+
+
+def test_web_hung_renderer_timeout_reaps_browser_children(tmp_path, web_browser_ready):
+    """Protect real hung-renderer teardown; CLI timeout never starts Chromium descendants."""
+    (tmp_path / "index.html").write_text(
+        WEB_PAGE + "<script>while(true){}</script>", encoding="utf-8"
+    )
+    result = run(
+        web_document(),
+        tmp_path,
+        WEB_TARGET,
+        "contracts",
+        action_seconds=2,
+        scenario_seconds=5,
+        run_seconds=8,
+    )[0]
+    assert result["state"] == "ERROR" and "timeout" in result["reason"].lower(), result
+    assert result["cleanup"]["membershipVerifiedBeforePayload"]
+    assert result["cleanup"]["activeProcessesBeforeTeardown"] > 0
+    assert result["cleanup"]["quiescenceVerified"]
+    assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
+
+
+def test_web_missing_bounded_png_is_evidence_only(tmp_path, web_browser_ready):
+    """Protect evidence-only PNGs; other browser tests never exceed the screenshot height cap."""
+    (tmp_path / "index.html").write_text(
+        WEB_PAGE + '<div style="height:13000px"></div>', encoding="utf-8"
+    )
+    result = run(web_document(), tmp_path, WEB_TARGET, "validation")[0]
+    assert result["state"] == "PASS", result
+    assert all(png["missing"] for a in result["actions"].values() for png in a["artifacts"])
+
+
+@pytest.mark.parametrize(
+    "invalid", ["eval", "url", "flags", "active-setup", "coverage", "gate", "ambiguous-action"]
+)
+def test_web_closed_data_refuses_executable_or_incomplete_journeys(tmp_path, invalid):
+    """Reject executable/incomplete web data before launch; CLI admission has no web vocabulary."""
+    (tmp_path / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+    document = web_document()
+    item = document["scenarios"][0]
+    journey = item["actions"][0]["web"]
+    if invalid == "eval":
+        journey["steps"].append({"op": "eval", "script": "alert(1)"})
+    elif invalid == "url":
+        journey["steps"][0]["url"] = "https://example.invalid"
+    elif invalid == "flags":
+        journey["launchFlags"] = ["--no-sandbox"]
+    elif invalid == "active-setup":
+        item["setup"] = {"files": [{"path": "data/payload.txt", "utf8": "alert(1)"}]}
+    elif invalid == "coverage":
+        item["actions"].pop()
+        item["observe"].pop()
+    elif invalid == "gate":
+        del item["observe"][0]["textContrastAA"]
+    else:
+        item["actions"][0]["cli"] = {"target": "page", "operation": "visit", "argv": []}
+    result = run(document, tmp_path, WEB_TARGET, "validation")[0]
+    assert result["state"] == "ERROR", result
+    assert result["cleanup"]["childLaunched"] is False

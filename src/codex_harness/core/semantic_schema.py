@@ -1,4 +1,4 @@
-"""Closed data vocabulary for the experimental Python CLI slice; no proof authority."""
+"""Closed data vocabulary for Python CLI and local web observations; no proof authority."""
 
 import base64
 import json
@@ -11,6 +11,60 @@ ACTION = (
     "exitEquals stdoutEquals stdoutJsonEquals stderrNonempty stderrEquals stderrContains".split()
 )
 FILE = "fileJsonEquals fileBytesEquals fileAbsent bytesUnchangedFrom".split()
+WEB = (
+    "noHorizontalOverflow consoleErrors externalRequests "
+    "textContrastAA headingStructure reducedMotionRespected"
+).split()
+
+
+def web_journey(v, targets):
+    fields(
+        v,
+        ("target", "operation", "viewport", "reducedMotion", "steps"),
+        ("target", "operation", "viewport", "reducedMotion", "steps"),
+    )
+    if type(v["target"]) is not str or targets.get(v["target"], {}).get("kind") != "web":
+        raise ValueError("Web journey requires a web target")
+    fields(v["viewport"], ("width", "height"), ("width", "height"))
+    if tuple(v["viewport"][k] for k in ("width", "height")) not in ((375, 812), (1440, 900)) or any(
+        type(v["viewport"][k]) is not int for k in ("width", "height")
+    ):
+        raise ValueError("Web viewports are 375x812 and 1440x900")
+    if v["reducedMotion"] not in ("reduce", "no-preference"):
+        raise ValueError("Declare a reducedMotion preference")
+    steps = array(v["steps"])
+    if not steps or steps[0] != {"op": "open"}:
+        raise ValueError("Journey must start with open")
+    for index, step in enumerate(steps):
+        fields(step, ("op", "locator", "key", "fragment"), ("op",))
+        op = step["op"]
+        operand = {
+            "open": None,
+            "assertVisible": "locator",
+            "click": "locator",
+            "key": "key",
+            "assertFocus": "locator",
+            "assertFragment": "fragment",
+        }
+        if op not in operand or set(step) != {"op", *([operand[op]] if operand[op] else [])}:
+            raise ValueError("Unknown web step or operands")
+        if op == "open" and index:
+            raise ValueError("Open occurs once at the start")
+        if "locator" in step:
+            loc = step["locator"]
+            fields(loc, ("text", "selector", "role", "name"))
+            if set(loc) not in ({"text"}, {"selector"}, {"role", "name"}) or any(
+                type(x) is not str or not x or len(x) > 256 for x in loc.values()
+            ):
+                raise ValueError("Use one text, CSS selector, or role/name locator")
+            if "selector" in loc and ">>" in loc["selector"]:
+                raise ValueError("Use plain CSS selectors without locator engines")
+        if op == "key" and step["key"] not in ("Tab", "Enter", "Escape"):
+            raise ValueError("Supported keys: Tab/Enter/Escape")
+        if op == "assertFragment" and (
+            type(step["fragment"]) is not str or not step["fragment"].startswith("#")
+        ):
+            raise ValueError("Declare a fragment beginning with #")
 
 
 def fields(value, allowed, required=()):
@@ -86,7 +140,15 @@ def validate(document, product, targets, *, require_entries=True):
         raise ValueError("Use seldon/scenarios-v1 with 1..16 scenarios")
     if type(targets) is not dict:
         raise ValueError("Declare target bindings")
+    coverage = {}
     for binding in targets.values():
+        if isinstance(binding, dict) and binding.get("kind") == "web":
+            fields(binding, ("kind", "entry"), ("kind", "entry"))
+            if binding["entry"] != "index.html" or (
+                require_entries and not path(product, binding["entry"]).is_file()
+            ):
+                raise ValueError("Web targets require index.html")
+            continue
         fields(binding, ("entry", "module", "argv"), ("argv",))
         if len(set(binding) & {"entry", "module"}) != 1:
             raise ValueError("Declare exactly one entry or module target")
@@ -122,6 +184,12 @@ def validate(document, product, targets, *, require_entries=True):
             fields(f, ("path", "utf8", "base64"), ("path",))
             if path(product, f["path"]).suffix.lower() == ".py":
                 raise ValueError("Setup is data-only; Python source is unsupported")
+            if any(b.get("kind") == "web" for b in targets.values()):
+                if path(product, f["path"]).suffix.lower() != ".json":
+                    raise ValueError(
+                        "Web setup writes only finite JSON data, never browser content"
+                    )
+                json.dumps(json.loads(content(f)), allow_nan=False)
             if not f["path"].startswith("data/"):
                 raise ValueError("Setup writes only data/ fixtures")
             content(f)
@@ -131,15 +199,27 @@ def validate(document, product, targets, *, require_entries=True):
             if type(f["id"]) is not str or f["id"] in snapshots:
                 raise ValueError("Use unique snapshot ids")
             snapshots.add(f["id"])
-        actions = set()
+        actions, web_actions = set(), set()
         for a in array(s["actions"], 16):
-            fields(a, ("id", "cli", "cwd", "http", "file"), ("id",))
+            fields(a, ("id", "cli", "web", "cwd", "http", "file"), ("id",))
             if "http" in a or "file" in a:
                 raise ValueError(
                     "HTTP/file-only actions unsupported in v1 (unsupported in semantic-v1)"
                 )
-            if type(a["id"]) is not str or a["id"] in actions or not {"id", "cli"} <= set(a):
+            if type(a["id"]) is not str or a["id"] in actions or len(set(a) & {"cli", "web"}) != 1:
                 raise ValueError("Use unique CLI actions")
+            if "web" in a:
+                fields(a, ("id", "web"), ("id", "web"))
+                web_journey(a["web"], targets)
+                v = a["web"]
+                if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
+                    raise ValueError("Declare a literal operation marker")
+                coverage.setdefault((v["target"], v["operation"]), set()).add(
+                    (v["viewport"]["width"], v["reducedMotion"])
+                )
+                actions.add(a["id"])
+                web_actions.add(a["id"])
+                continue
             if "cwd" in a:
                 cwd = path(product, a["cwd"])
                 created = [path(product, d) for d in s["setup"].get("dirs", [])]
@@ -154,12 +234,23 @@ def validate(document, product, targets, *, require_entries=True):
                 content(v["stdin"])
             if type(v["target"]) is not str or v["target"] not in targets:
                 raise ValueError("Action references an unknown target")
+            if targets[v["target"]].get("kind") == "web":
+                raise ValueError("CLI action requires a Python target")
             if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
                 raise ValueError("Declare a literal operation marker")
             argv(v["argv"], product, path(product, a["cwd"]) if "cwd" in a else product)
         if not actions or not array(s["observe"]):
             raise ValueError("Declare product actions and finite observations")
         for o in s["observe"]:
+            if isinstance(o, dict) and o.get("action") in web_actions:
+                fields(o, ("action", *WEB), ("action", *WEB))
+                if any(
+                    type(o[k]) is not (int if k in ("consoleErrors", "externalRequests") else bool)
+                    or o[k] != (0 if k in ("consoleErrors", "externalRequests") else True)
+                    for k in WEB
+                ):
+                    raise ValueError("Web gates require true or zero error/request counts")
+                continue
             fields(o, ["action", "path", *ACTION, *FILE])
             if "action" in o and "path" in o:
                 raise ValueError(
@@ -180,4 +271,11 @@ def validate(document, product, targets, *, require_entries=True):
                     raise ValueError("Observation has the wrong JSON value type")
                 if key == "bytesUnchangedFrom" and value not in snapshots:
                     raise ValueError("Observation references an unknown snapshot")
+        if any(sum(o.get("action") == a for o in s["observe"]) != 1 for a in web_actions):
+            raise ValueError("Each web journey requires exactly one complete gate observation")
+    if any(
+        c != {(w, m) for w in (375, 1440) for m in ("reduce", "no-preference")}
+        for c in coverage.values()
+    ):
+        raise ValueError("Each web operation requires both viewports and motion preferences")
     return scenarios

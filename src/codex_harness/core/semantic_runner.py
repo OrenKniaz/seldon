@@ -1,7 +1,8 @@
-"""Experimental Python CLI observations; not canonical admission or GUI acceptance.
+"""Python CLI and local web observations; not canonical admission or GUI acceptance.
 Windows Jobs contain normal descendants; trusted code, not an OS security sandbox."""
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -9,15 +10,52 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
-from codex_harness.core.semantic_schema import LIMIT, argv, content, path, validate
+from codex_harness.core.semantic_schema import LIMIT, WEB, argv, content, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
 MODULE = "codex_harness.core.semantic_runner"
 SOURCE_IGNORED = {".git", ".codex-harness", "__pycache__", ".pytest_cache", ".ruff_cache"}
+
+
+def web_toolchain(config, evidence):
+    defaults = dict(
+        node="C:/nvm4w/nodejs/node.exe",
+        playwright="C:/Users/oren/codex-harness/ui/node_modules/@playwright/test",
+        chromium=str(
+            Path(os.environ.get("LOCALAPPDATA", ""))
+            / "ms-playwright/chromium-1217/chrome-win64/chrome.exe"
+        ),
+    )
+    config = config or {}
+    if set(config) - defaults.keys():
+        raise ValueError("Unknown web tool configuration")
+    locations = {
+        k: str(Path(config.get(k) or os.environ.get("SELDON_WEB_" + k.upper()) or v).resolve())
+        for k, v in defaults.items()
+    }
+    locations["adapter"] = str(Path(__file__).with_name("semantic_web.cjs").resolve())
+    identities = {}
+    for key, location in locations.items():
+        file = Path(location) / "package.json" if key == "playwright" else Path(location)
+        if not file.is_file():
+            raise ValueError(f"Web tool missing: {key}: {file}; configure SELDON_WEB_{key.upper()}")
+        with file.open("rb") as stream:
+            identities[key] = dict(
+                path=str(file), sha256=hashlib.file_digest(stream, "sha256").hexdigest()
+            )
+    if json.loads(Path(identities["playwright"]["path"]).read_text())["version"] != "1.59.1":
+        raise ValueError("Web tool requires Playwright 1.59.1")
+    locations.update(
+        identity=identities,
+        evidence=str(Path(evidence or tempfile.mkdtemp(prefix="seldon-web-evidence-")).resolve()),
+    )
+    Path(locations["evidence"]).mkdir(parents=True, exist_ok=True)
+    return locations
 
 
 def read(file, limit=LIMIT):
@@ -45,11 +83,13 @@ def read(file, limit=LIMIT):
     return value
 
 
-def capture(cmd, root, cwd=None, payload=None):
+def capture(cmd, root, cwd=None, payload=None, *, browser=False):
     env = dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root))
     if cmd[2] == "-m":
         env["PYTHONSAFEPATH"] = "1"
     env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
+    if browser:
+        env["DEBUG"] = "pw:browser"
     stdin = DEVNULL if payload is None else PIPE
     child = Popen(cmd, cwd=cwd or root, env=env, stdin=stdin, stdout=PIPE, stderr=PIPE)
     data = [None, None]
@@ -92,7 +132,7 @@ def equal(a, b):
     return a == b
 
 
-def execute(s, root, targets, phase, seconds, deadline):
+def execute(s, root, targets, phase, seconds, deadline, web=None):
     snapshots, results, markers = {}, {}, []
     for directory in s["setup"].get("dirs", []):
         path(root, directory).mkdir(parents=True, exist_ok=True)
@@ -108,12 +148,40 @@ def execute(s, root, targets, phase, seconds, deadline):
         os._exit(0)  # Outer held Job reaps the entire owned tree, including pipe holders.
 
     for a in s["actions"]:
-        budget = min(seconds, deadline - time.monotonic())
+        budget = min(30 if "web" in a else seconds, deadline - time.monotonic())
         if budget <= 0:
             raise TimeoutError("Scenario/run deadline; action unperformed")
         guard = threading.Timer(budget, expired)
         guard.start()
         try:
+            if "web" in a:
+                request = root / ".web-request.json"
+                request.write_text(
+                    json.dumps(
+                        dict(
+                            journey=a["web"],
+                            tools=web,
+                            root=str(root),
+                            phase=phase,
+                            seconds=min(seconds, 10),
+                            remaining=budget,
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+                captured = capture([web["node"], web["adapter"], str(request)], root, browser=True)
+                if captured["exit"]:
+                    raise ValueError("Web adapter launch failed: " + captured["stderr"][:512])
+                result = json.loads(captured["stdout"])
+                if result.get("state") == "ERROR":
+                    result["reason"] += "\n" + captured["stderr"][-8192:]
+                    return dict(
+                        state="ERROR", reason=result["reason"], actions={**results, a["id"]: result}
+                    )
+                results[a["id"]] = result
+                if result["marker"]:
+                    markers.append(a["id"])
+                continue
             v = a["cli"]
             binding = targets[v["target"]]
             cwd = path(root, a["cwd"]) if "cwd" in a else root
@@ -146,6 +214,18 @@ def execute(s, root, targets, phase, seconds, deadline):
     observations = []
     for o in s["observe"]:
         actual = results[o["action"]] if "action" in o else None
+        if actual is not None and "checks" in actual:
+            observations.extend(actual["steps"])
+            observations.extend(
+                dict(
+                    check=k,
+                    passed=equal(actual["checks"][k], o[k]),
+                    actual=actual["checks"][k],
+                    reason="browser observation",
+                )
+                for k in WEB
+            )
+            continue
         for key, expected in o.items():
             if key in ("action", "path"):
                 continue
@@ -193,14 +273,35 @@ def execute(s, root, targets, phase, seconds, deadline):
 
 
 def run(
-    document, product, targets, phase, *, action_seconds=3, scenario_seconds=15, run_seconds=45
+    document,
+    product,
+    targets,
+    phase,
+    *,
+    action_seconds=None,
+    scenario_seconds=None,
+    run_seconds=None,
+    web_config=None,
+    evidence_dir=None,
 ):
     results, scenarios = [], [{"id": None}]
     cleanup = dict(quiescenceVerified=True, activeProcessesAfterTeardown=0, childLaunched=False)
     try:
         scenarios = validate(document, product, targets)
+        is_web = any(b.get("kind") == "web" for b in targets.values())
+        action_seconds = action_seconds if action_seconds is not None else (10 if is_web else 3)
+        scenario_seconds = (
+            scenario_seconds if scenario_seconds is not None else (30 if is_web else 15)
+        )
+        run_seconds = run_seconds if run_seconds is not None else (90 if is_web else 45)
         if phase not in ("contracts", "validation") or os.name != "nt":
             raise ValueError("Use contracts/validation on Windows (held Job required)")
+        if is_web and all(
+            type(v) in (int, float) for v in (action_seconds, scenario_seconds, run_seconds)
+        ):
+            run_seconds = min(run_seconds, 90)
+            scenario_seconds = min(scenario_seconds, 30, run_seconds)
+            action_seconds = min(action_seconds, 10, scenario_seconds)
         budgets = (action_seconds, scenario_seconds, run_seconds)
         if (
             not all(type(v) in (int, float) for v in budgets)
@@ -208,12 +309,19 @@ def run(
         ):
             raise ValueError("Use positive ordered action/scenario/run budgets <=120s")
         deadline = time.monotonic() + run_seconds
+        web = web_toolchain(web_config, evidence_dir) if is_web else None
         for s in scenarios:
             end = min(deadline, time.monotonic() + scenario_seconds)
             if end <= time.monotonic():
                 raise TimeoutError("Run deadline; scenario unperformed")
-            with tempfile.TemporaryDirectory(prefix="seldon-semantic-") as temp:
+            with ExitStack() as stack:
+                temp = tempfile.mkdtemp(prefix="seldon-semantic-")
                 root, count = Path(temp), 0
+                stack.callback(
+                    lambda root=root, control=cleanup: shutil.rmtree(root)
+                    if control.get("quiescenceVerified")
+                    else None
+                )
                 for base, dirs, files in os.walk(product, followlinks=False):
                     dirs[:] = [name for name in dirs if name not in SOURCE_IGNORED]
                     files = [name for name in files if name not in SOURCE_IGNORED]
@@ -221,8 +329,33 @@ def run(
                     if count > 128:
                         raise ValueError("Product source exceeds128 entries")
                     for name in [*dirs, *files]:
+                        raw = Path(base) / name
+                        if raw.is_symlink() or raw.is_junction():
+                            raise ValueError("Product source cannot contain links/junctions")
                         source = path(product, (Path(base) / name).relative_to(product).as_posix())
-                        if name in files and source.suffix == ".py":
+                        if name in files and (
+                            source.suffix == ".py"
+                            or (
+                                is_web
+                                and source.suffix.lower()
+                                in {
+                                    ".html",
+                                    ".css",
+                                    ".js",
+                                    ".json",
+                                    ".txt",
+                                    ".csv",
+                                    ".png",
+                                    ".jpg",
+                                    ".jpeg",
+                                    ".svg",
+                                    ".webp",
+                                    ".ico",
+                                    ".woff",
+                                    ".woff2",
+                                }
+                            )
+                        ):
                             if source.stat().st_size > 262144:
                                 raise ValueError("Product source exceeds256KiB per file")
                             destination = root / source.relative_to(Path(product).resolve())
@@ -230,20 +363,20 @@ def run(
                             shutil.copyfile(source, destination)
                 config = root / ".scenario.json"
                 config.write_text(
-                    json.dumps([s, targets, phase, action_seconds, end]), encoding="utf-8"
+                    json.dumps([s, targets, phase, action_seconds, end, web]), encoding="utf-8"
                 )
                 cmd = [sys.executable, "-B", "-m", MODULE, "--worker", str(config)]
-                cleanup = {}  # Launch may create children even if it raises without a receipt.
+                cleanup.clear()  # Launch may create children even if it raises without a receipt.
                 completed = run_audit_process(
                     cmd, cwd=root, timeout=max(0.01, end - time.monotonic())
                 )
                 control = completed.audit_control
+                cleanup.update(control)
                 if (
                     not control.get("quiescenceVerified")
                     or control.get("activeProcessesAfterTeardown") != 0
                 ):
                     raise OSError("Owned cleanup uncertain; stop further scenarios")
-                cleanup = control
                 if completed.returncode or time.monotonic() > end:
                     raise TimeoutError("Runner failed or scenario deadline expired")
                 result = dict(json.loads(completed.stdout), id=s["id"], cleanup=control)
@@ -269,8 +402,8 @@ def run(
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--worker"]:
         try:
-            s, targets, phase, seconds, deadline = json.loads(read(Path(sys.argv[2]), 131072))
-            result = execute(s, Path.cwd(), targets, phase, seconds, deadline)
+            s, targets, phase, seconds, deadline, web = json.loads(read(Path(sys.argv[2]), 131072))
+            result = execute(s, Path.cwd(), targets, phase, seconds, deadline, web)
         except ERRORS as error:
             result = dict(state="ERROR", reason=str(error) or type(error).__name__)
     else:
