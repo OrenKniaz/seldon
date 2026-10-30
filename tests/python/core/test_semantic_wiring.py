@@ -172,13 +172,18 @@ def test_semantic_advance_teaches_incomplete_required_fields(semantic_plan, path
 
 
 def test_semantic_advance_admits_complete_canonical_data_unchanged(semantic_plan):
-    """Catch accidental gate tightening; compile-only success never advances canonical state."""
+    """Protect ordered recovery and admission; compile-only tests miss public phase refusals."""
     store, manifest = semantic_plan
     lock_vision(store)
     store.advance("requirements", by="source-test")
     before = store.spine().to_dict()
     server = PlannerServer(store.workspace)
     try:
+        refused = server.call_tool("harness_advance", {"to_phase": "plan"})
+        assert refused["isError"], refused
+        assert "plan-phase-order" in str(refused)
+        assert "advance to tech-stack next" in str(refused)
+        assert store.phase() == "requirements"
         reply = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
         assert not reply["isError"], reply
         assert store.phase() == "tech-stack"
@@ -1000,12 +1005,17 @@ def test_legacy_still_requires_protected_tests_and_proof_modules(semantic_plan):
 
 
 def test_schema_help_scenario_example_validates_and_errors_name_keys(tmp_path):
-    """The taught example must pass the real validator; refusals must name the bad keys."""
+    """Catch late scenario authoring or invalid help; runner tests bypass schema teaching."""
     from codex_harness.core.planner_schema import schema_help
     from codex_harness.core.semantic_schema import validate
 
     tools = [{"name": "harness_upsert_node", "inputSchema": {}}]
-    example = schema_help(tools, kind="vision")["semanticScenarios"]["fieldExample"]
+    teaching = schema_help(tools, kind="vision")["semanticScenarios"]
+    flow = teaching["phaseFlow"]
+    assert "During Vision, author vision.fields.scenarios + vision.fields.targets" in flow
+    assert "then advance one phase at a time" in flow
+    assert "From requirements, tech-stack is next, then plan" in flow
+    example = teaching["fieldExample"]
     assert validate(example["scenarios"], tmp_path, example["targets"], require_entries=False)
     bad = json.loads(json.dumps(example["scenarios"]))
     bad["scenarios"][0]["steps"] = []

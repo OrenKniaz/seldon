@@ -433,7 +433,9 @@ TOOLS = [
         "harness_plan_start",
         "Enter or resume Harness Plan Mode; mode is immutable after creation. "
         "New plans default to semantic-v1 for Python 3.12 CLI products (python -m pkg or a .py "
-        "entry); pass legacy for anything else (web, GUI, services, non-Python).",
+        "entry); pass legacy for anything else (web, GUI, services, non-Python). "
+        "For semantic-v1, author vision.fields.scenarios + vision.fields.targets during Vision, "
+        "before advancing to tech-stack.",
         {
             "idea": STRING,
             "name": STRING,
@@ -533,7 +535,9 @@ TOOLS = [
     ),
     _tool(
         "harness_advance",
-        "Advance one phase; never skip a gate. Only for plan -> roundtable, carry the user's "
+        "Advance one phase at a time: align -> expand -> vision-lock -> features -> "
+        "requirements -> tech-stack -> plan -> roundtable -> publish -> execute -> accept. "
+        "From requirements, tech-stack is next. Only for plan -> roundtable, carry the user's "
         "exact supplied confirmation words in user_statement, with optional by=user or "
         "proxy:<name>. Supplied words default to user; a bare advance remains planner-origin.",
         {"to_phase": STRING, "user_statement": STRING, "by": STRING},

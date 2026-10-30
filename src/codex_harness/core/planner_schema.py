@@ -637,6 +637,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
         }
         result["semanticScenarios"] = {
             "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
+            "phaseFlow": "During Vision, author vision.fields.scenarios + vision.fields.targets; "
+            "then advance one phase at a time. From requirements, tech-stack is next, then plan.",
             "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
             "keep every other field and its exact wording). Each nested scenario record allows "
             "only these keys: id, requirementRefs, contractRefs, setup, actions, observe, verdict. "
