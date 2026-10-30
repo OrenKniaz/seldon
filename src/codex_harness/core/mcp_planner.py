@@ -25,7 +25,7 @@ from codex_harness.core.plan_store import (
     open_plan_store_readonly,
 )
 from codex_harness.core.planner_connection import connection_reply
-from codex_harness.core.planner_guidance import planning_turn
+from codex_harness.core.planner_guidance import BATCH_GUIDANCE, planning_turn
 from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.planner_schema import node_error_help, schema_help
 from codex_harness.core.planner_vision import vision_projection
@@ -596,8 +596,8 @@ TOOLS = [
     ),
     _tool(
         "harness_upsert_nodes",
-        "Save one feature's requirements and tests in one atomic canonical node batch; "
-        "inspect harness_schema tool=harness_upsert_nodes before first use.",
+        "Save all features, requirements and design nodes of a phase in one atomic batch. "
+        "Author all phase nodes in one batch; use returned revisions and openGaps directly.",
         {"nodes": {"type": "array", "items": {"type": "object"}, "minItems": 1}},
     ),
     _tool("harness_remove_node", "Remove a node without children or references.", {"id": STRING}),
@@ -687,7 +687,11 @@ TOOLS = [
         "harness_worker_status",
         "Reattach to recorded worker-job and dispatcher evidence. Never launch or infer live "
         "workers from an old running snapshot. Product checks alone are not worker delivery.",
-        {"job_id": STRING, "include_detail": {"type": "boolean"}},
+        {
+            "job_id": STRING,
+            "include_detail": {"type": "boolean"},
+            "wait_seconds": {"type": "number", "default": 120, "minimum": 0, "maximum": 600},
+        },
         ["job_id"],
     ),
 ]
@@ -775,7 +779,7 @@ def resume_next(data=None, *, cli_prefix=None):
     if kind == "inspect_worker_job" and action.get("jobId"):
         return route(
             "worker-status --job-id " + action["jobId"],
-            "harness_worker_status job_id=" + action["jobId"],
+            "harness_worker_status job_id=" + action["jobId"] + " wait_seconds=120",
         )
     if kind == "host_admission_unavailable":
         return (
@@ -1792,7 +1796,7 @@ class PlannerServer:
             and self.result_data
             and self.result_data.get("jobId")
         ):
-            return "harness_worker_status job_id=" + self.result_data["jobId"]
+            return "harness_worker_status job_id=" + self.result_data["jobId"] + " wait_seconds=120"
         if (
             name in {"harness_publish", "harness_plan_status"}
             and not error
@@ -1926,6 +1930,18 @@ class PlannerServer:
             )
         if status.get("open_clarifications"):
             return "Answer the open questions with harness_answer before advancing."
+        if status.get("planMode") == "semantic-v1":
+            if status["phase"] in {"features", "requirements", "tech-stack"}:
+                if (self.result_data or {}).get("openGaps") == []:
+                    return "harness_advance to_phase=plan; every intermediate gate still runs."
+                return BATCH_GUIDANCE
+            if status["phase"] == "plan":
+                if name == "harness_compile":
+                    return "harness_advance to_phase=roundtable; existing review gates apply."
+                return (
+                    "harness_compile; use harness_upsert_nodes only for missing Contracts/Build "
+                    "beads or reported gaps."
+                )
         if status["phase"] in {"roundtable", "publish"}:
             resolution = status.get("reviewResolution")
             if resolution and resolution["nextAction"]["kind"] != "not_applicable":
@@ -2191,6 +2207,16 @@ class PlannerServer:
             node = self.store.spine().node(self.store.spine().ids("vision")[0])
             setup_card = views.setup_card(node["fields"].get("setup", {}))
             if self.store.spine().semantic:
+                guide = schema_help(TOOLS, kind="vision")
+                self.result_data["schemaDigest"] = {
+                    "visionFields": {
+                        **guide["example"]["node"]["fields"],
+                        "planMode": "semantic-v1",
+                    },
+                    "visionRules": guide["fieldRules"],
+                    "semanticScenarios": guide["semanticScenarios"],
+                }
+                self.result_data["authoringGuidance"] = BATCH_GUIDANCE
                 return (
                     setup_card
                     + "\nsemantic-v1 resumed (Windows Python CLI only). Planner writes DATA: "
@@ -2202,6 +2228,10 @@ class PlannerServer:
                     "No prospective audit or protected test authoring. Review, publish and packet "
                     "sufficiency still apply. Execute with max_parallel=1. RED is history; "
                     "only controller Validation PASS fulfills scenarios. Say 'pause plan' to pause."
+                    "\n"
+                    "Use schemaDigest for vision/scenarios throughout this plan; no per-phase "
+                    "harness_schema calls needed (still available for unfamiliar details).\n"
+                    + BATCH_GUIDANCE
                 )
             return setup_card + "\nPlan mode resumed. To pause, say 'pause plan'."
         if (
@@ -2224,8 +2254,13 @@ class PlannerServer:
             body = batch_nodes(
                 self._store(), args["nodes"], lambda node: _validate({"node": node}, node_schema)
             )
-            self.result_data = {"ids": [node["id"] for node in args["nodes"]]}
-            return body
+            spine = self._store().spine()
+            self.result_data = {
+                "ids": [node["id"] for node in args["nodes"]],
+                "revisions": {node["id"]: spine.revision(node["id"]) for node in args["nodes"]},
+                "plan_revision": spine.plan_revision(),
+            }
+            return body + "\n" + BATCH_GUIDANCE
         if name == "harness_upsert_node":
             validate_setup(args["node"].get("fields", {}).get("setup", {}), self.workspace)
         store = self._store()
@@ -2621,7 +2656,9 @@ class PlannerServer:
                 self.result_data = (
                     planner_jobs.start_worker_job(store, **args)
                     if name == "harness_worker_start"
-                    else planner_jobs.worker_job_status(self.workspace, args["job_id"])
+                    else planner_jobs.worker_job_status(
+                        self.workspace, args["job_id"], wait_seconds=args.get("wait_seconds", 120)
+                    )
                 )
             except Exception:
                 if name == "harness_worker_start":

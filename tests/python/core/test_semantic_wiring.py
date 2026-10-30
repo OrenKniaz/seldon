@@ -219,8 +219,24 @@ def test_semantic_writes_report_canonical_gaps_without_refusal(semantic_plan, to
         assert sum(line.startswith("Next: ") for line in text.splitlines()) == 1
         if tool == "harness_upsert_nodes":
             assert reply["structuredContent"]["ids"] == [n["id"] for n in batch]
+            assert reply["structuredContent"]["revisions"] == {
+                n["id"]: store.spine().revision(n["id"]) for n in batch
+            }
+            assert reply["structuredContent"]["plan_revision"] == store.spine().plan_revision()
+            assert "no harness_show_node/harness_plan_status read-back" in text
         if problem == "ready":
             assert gaps == [] and "Open before" not in text
+            assert text.splitlines()[-1] == (
+                "Next: harness_advance to_phase=plan; every intermediate gate still runs."
+            )
+            if tool == "harness_upsert_nodes":
+                # The normal status-card consumer must still render the semantic turn;
+                # write-only tests miss missing display fields in the guidance contract.
+                status = server.call_tool("harness_plan_status", {})
+                assert not status["isError"], status
+                turn = status["structuredContent"]["planningTurn"]
+                assert turn["schemaTarget"] is None
+                assert "harness_upsert_nodes" in turn["writeTarget"]["mcp"]
         else:
             assert (
                 gaps
@@ -1214,7 +1230,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
             assert "harness_accept_run" in hint and "If they agree" not in hint
             for tool, arguments in (
                 ("harness_plan_status", {}),
-                ("harness_worker_status", {"job_id": job.name}),
+                ("harness_worker_status", {"job_id": job.name, "wait_seconds": 0}),
             ):
                 reply = server.call_tool(tool, arguments)
                 assert not reply["isError"], reply
@@ -1381,11 +1397,27 @@ def test_schema_help_scenario_example_validates_and_errors_name_keys(tmp_path):
     from codex_harness.core.semantic_schema import validate
 
     tools = [{"name": "harness_upsert_node", "inputSchema": {}}]
-    teaching = schema_help(tools, kind="vision")["semanticScenarios"]
+    server = PlannerServer(tmp_path)
+    try:
+        started = server.call_tool("harness_plan_start", dict(idea="Parser", name="Parser"))
+        assert not started["isError"], started
+        digest = started["structuredContent"]["schemaDigest"]
+        teaching = digest["semanticScenarios"]
+        assert teaching == schema_help(tools, kind="vision")["semanticScenarios"]
+        assert "scope_in" in digest["visionFields"]
+        assert digest["visionFields"]["planMode"] == "semantic-v1"
+        assert "expansion" in digest["visionRules"]
+        guidance = started["structuredContent"]["authoringGuidance"]
+        assert "all features+requirements+design nodes" in guidance
+        assert "ONE harness_upsert_nodes" in guidance
+        assert "Product files are owned by workers" in guidance
+        assert "no per-phase harness_schema calls needed" in started["content"][0]["text"]
+    finally:
+        server.close()
     flow = teaching["phaseFlow"]
     assert "During Vision, author vision.fields.scenarios + vision.fields.targets" in flow
-    assert "then advance one phase at a time" in flow
-    assert "From requirements, tech-stack is next, then plan" in flow
+    assert "one forward harness_advance to_phase=plan" in flow
+    assert "every intermediate gate still runs" in flow
     example = teaching["fieldExample"]
     assert validate(example["scenarios"], tmp_path, example["targets"], require_entries=False)
     bad = json.loads(json.dumps(example["scenarios"]))

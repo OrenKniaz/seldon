@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+from codex_harness.core.planner_guidance import BATCH_GUIDANCE
 from codex_harness.core.spine import ALLOWED_PARENTS
 
 FIELD_RULES = {
@@ -640,7 +641,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teachin
         result["semanticScenarios"] = {
             "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
             "phaseFlow": "During Vision, author vision.fields.scenarios + vision.fields.targets; "
-            "then advance one phase at a time. From requirements, tech-stack is next, then plan.",
+            "then batch all phase nodes and use one forward harness_advance to_phase=plan; "
+            "every intermediate gate still runs; no chain crosses consent or roundtable.",
             "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
             "keep every other field and its exact wording). Each nested scenario record allows "
             "only these keys: id, requirementRefs, contractRefs, setup, actions, observe, verdict. "
@@ -745,10 +747,9 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teachin
         result.update(
             prerequisiteNodes=[node for node in prerequisites if node != requirement],
             example={"nodes": [requirement, test]},
-            exampleUse="Use actual feature/requirement IDs. Record one feature's requirements "
-            "and tests together; the whole batch validates and saves atomically or none saves. "
+            exampleUse=BATCH_GUIDANCE + " Batches validate and save atomically or none saves. "
             "Order within the batch does not matter; duplicate IDs refuse. "
-            "Read harness_schema kind=requirement and kind=test at first use.",
+            "For legacy plans, read kind=requirement and kind=test schemas at first use.",
             authority="The existing canonical node writer and Spine validation are shared with "
             "CLI node --json @feature-nodes.jsonl. No approvals or product proof are granted.",
         )

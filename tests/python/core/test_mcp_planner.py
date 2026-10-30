@@ -968,8 +968,7 @@ def test_review_continuation_uses_current_gate_with_retained_afs(tmp_path, monke
                 ),
             )
             assert (
-                refused["isError"]
-                and "native reviewer evidence" in refused["content"][0]["text"]
+                refused["isError"] and "native reviewer evidence" in refused["content"][0]["text"]
             )
             assert store.status()["acceptance"]["accepted"] is False
             assert (
@@ -1467,7 +1466,7 @@ def test_worker_mcp_start_status_reconnect_preserve_one_admission(
             "tools/call",
             {
                 "name": "harness_worker_status",
-                "arguments": {"job_id": data["jobId"], "include_detail": True},
+                "arguments": {"job_id": data["jobId"], "include_detail": True, "wait_seconds": 0},
             },
         )["result"]
         assert status["structuredContent"] == data
@@ -1512,7 +1511,7 @@ def test_worker_mcp_start_status_reconnect_preserve_one_admission(
                 assert "If they agree" in hint
                 assert "terminal status via harness_accept_status" in hint
             else:
-                assert hint == "harness_worker_status job_id=" + data["jobId"]
+                assert hint == "harness_worker_status job_id=" + data["jobId"] + " wait_seconds=120"
         store.advance("execute", by="source-test")
         legacy = rpc(client, "tools/call", {"name": "harness_plan_status"})["result"]
         assert not legacy["isError"], legacy

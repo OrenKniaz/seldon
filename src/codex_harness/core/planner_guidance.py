@@ -11,9 +11,31 @@ NEXT_TARGETS = {
     "scenarios": ("accept-scenarios", "harness_accept_scenarios"),
 }
 
+BATCH_GUIDANCE = (
+    "Author all features+requirements+design nodes of this phase in ONE harness_upsert_nodes "
+    "call; include decisions and beads when ready, preserving accepted scope and wording. "
+    "Use returned revisions + openGaps; no harness_show_node/harness_plan_status read-back "
+    "is needed after successful writes. In features/requirements/tech-stack with openGaps "
+    "empty, use one forward harness_advance "
+    "to_phase=plan (furthest pre-roundtable phase); every intermediate gate still runs. "
+    "Product files are owned by workers; verify via Seldon tools/scenarios, do not grep/search "
+    "the filesystem."
+)
+
 
 def planning_turn(spine) -> dict:
     """Choose the next small authoring turn from stored traceability, not call caps."""
+    if spine.semantic:
+        return {
+            "stage": "semantic",
+            "kind": None,
+            "featureId": None,
+            "requirementIds": spine.ids("requirement"),
+            "status": "Plan turn: semantic · batch all phase nodes",
+            "schemaTarget": None,
+            "writeTarget": {"mcp": "harness_upsert_nodes nodes=<all phase nodes>"},
+            "guidance": BATCH_GUIDANCE,
+        }
     features = spine.ids("feature")
     requirements = spine.ids("requirement")
     tests = spine.ids("test")

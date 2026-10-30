@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -292,12 +293,24 @@ def start_worker_job(
     return worker_job_status(store.workspace, expected_revision)
 
 
-def worker_job_status(workspace, job_id):
+def worker_job_status(workspace, job_id, *, wait_seconds=0):
     """Read durable observations only, including after a new MCP connection.
 
     No terminal original means UNKNOWN, even if launch/started records exist.
     A PID and an old running snapshot are never evidence of current liveness.
     """
+    if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 600:
+        raise ValueError("wait_seconds must be between 0 and 600")
+    if wait_seconds:
+        deadline = time.monotonic() + wait_seconds
+        initial = current = worker_job_status(workspace, job_id)
+        while "terminal" not in current and current == initial:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1, remaining))
+            current = worker_job_status(workspace, job_id)
+        return current
     directory = _directory(workspace, job_id)
     if not directory.is_dir():
         raise ValueError("worker-job-not-found")

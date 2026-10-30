@@ -8,6 +8,7 @@ import copy
 import json
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -381,6 +382,88 @@ def test_dispatch_snapshot_is_observed_without_claiming_liveness_or_delivery(fix
     path.write_text(json.dumps(run))
     with pytest.raises(ValueError, match="dispatch-identity-mismatch"):
         jobs.worker_job_status(store.workspace, store.revision)
+
+
+def test_worker_status_wait_returns_early_on_dispatch_change(fixture):
+    """Protect waiting on progress even while top-level status stays unknown.
+
+    A loop comparing only status would miss bead progress; snapshot tests never wait.
+    Real durable records pass through the MCP adapter and existing job-status reader.
+    """
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    store, _, _ = fixture
+    directory = Path(admit(fixture)["evidenceDir"])
+    run_dir = directory / "runs/source-only-run"
+    (run_dir / "evidence").mkdir(parents=True)
+    run = dict(
+        runId="source-only-run",
+        planRevision=store.revision,
+        repo=str(run_dir / "repo"),
+        isMocked=True,
+        didExecuteRealProvider=False,
+        status="running",
+        beads={},
+    )
+    server = PlannerServer(store.workspace)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+
+        def update():
+            time.sleep(0.15)
+            write_record_json_once(run_dir / "evidence/run.json", run)
+
+        future = executor.submit(update)
+        started = time.monotonic()
+        try:
+            reply = server.call_tool(
+                "harness_worker_status",
+                dict(
+                    job_id=store.revision,
+                    wait_seconds=5,
+                    include_detail=True,
+                ),
+            )
+        finally:
+            server.close()
+        elapsed = time.monotonic() - started
+        future.result(timeout=5)
+    assert not reply["isError"], reply
+    assert elapsed < 4
+    data = reply["structuredContent"]
+    assert data["status"] == "unknown" and data["run"]["status"] == "running"
+    assert not data["harnessDeliveryProven"] and data["didRunProvider"] is False
+    assert "wait_seconds=120" in reply["content"][0]["text"]
+
+
+def test_worker_status_wait_times_out_without_inventing_progress(fixture):
+    """Catch immediate return or oversleep on unchanged jobs; snapshot tests miss timing."""
+    store, _, _ = fixture
+    initial = admit(fixture)
+    started = time.monotonic()
+    result = jobs.worker_job_status(store.workspace, store.revision, wait_seconds=0.15)
+    assert 0.15 <= time.monotonic() - started < 2
+    assert result == initial
+
+
+@pytest.mark.parametrize("wait_seconds", [-1, 601])
+def test_worker_status_rejects_unbounded_wait_at_public_boundary(fixture, wait_seconds):
+    """Bound server occupancy; ordinary snapshot tests never supply wait arguments."""
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    store, _, _ = fixture
+    admit(fixture)
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool(
+            "harness_worker_status",
+            dict(
+                job_id=store.revision,
+                wait_seconds=wait_seconds,
+            ),
+        )
+        assert reply["isError"] and "between 0 and 600" in str(reply)
+    finally:
+        server.close()
 
 
 @pytest.mark.parametrize(
