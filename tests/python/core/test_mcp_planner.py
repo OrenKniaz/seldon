@@ -98,6 +98,7 @@ def test_status_summary_full_fetch_and_pending_question_preserve_canonical_autho
             server,
             "harness_prepare_chat_confirmation",
             gate="align",
+            include_detail=True,
             expected_workspace=str(tmp_path),
         )["structuredContent"]
         saved = server.store._latest_draft_event("confirmation-requested")

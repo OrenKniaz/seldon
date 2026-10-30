@@ -81,6 +81,7 @@ def test_public_vision_lock_question_handles_accepted_cli_without_operation(tmp_
         result = workspace_wire(
             server,
             "harness_prepare_chat_confirmation",
+            include_detail=True,
             gate="vision-lock",
             expected_workspace=str(store.workspace),
         )
@@ -153,7 +154,11 @@ def test_actual_run3_vision_is_excerpted_without_changing_saved_authority(tmp_pa
             store.advance("vision-lock", by="source-test")
         revision, before = store.spine().plan_revision(), approvals(store)
         result = workspace_wire(
-            server, "harness_prepare_chat_confirmation", gate=gate, expected_workspace=str(tmp_path)
+            server,
+            "harness_prepare_chat_confirmation",
+            gate=gate,
+            include_detail=True,
+            expected_workspace=str(tmp_path),
         )
         assert not result["isError"], result
         request = result["structuredContent"]
@@ -274,6 +279,7 @@ def test_six_scenario_question_is_short_complete_and_revision_bound(store, gate)
         result = workspace_wire(
             server,
             "harness_prepare_chat_confirmation",
+            include_detail=True,
             gate=gate,
             expected_workspace=str(store.workspace),
         )

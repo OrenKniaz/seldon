@@ -22,8 +22,181 @@ project = test_planner_replay_gaps.project
 semantic_plan = test_semantic_wiring.semantic_plan
 
 
+@pytest.mark.parametrize("gate", ["align", "align+vision-lock", "plan-execution"])
+def test_prepare_compact_wire_preserves_card_originals_and_reuses_only_unchanged(
+    semantic_plan, gate
+):
+    """Protect real producer -> MCP bytes and reuse without replaying control preimages.
+
+    Catches altered approval text, lost limits, stale reuse and duplicate requests;
+    existing consent-credit journeys inspect authority but never bound response size.
+    """
+    from tests.python.core.planning_support import source_only_expansion
+    from tests.python.core.test_planner_chat_confirmations import prepare_combined_b
+
+    store, _ = semantic_plan
+    arguments = dict(gate=gate)
+    if gate == "plan-execution":
+        _, options = prepare_combined_b(store)
+        arguments["execution"] = options
+    else:
+        source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+
+    def size(value):
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+
+    try:
+        compact = tool(server, "harness_prepare_chat_confirmation", **arguments)
+        assert not compact["isError"], compact
+        original = json.loads(
+            store.connection.execute(
+                "SELECT payload_json FROM events ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+        data = compact["structuredContent"]
+        assert original["card"].encode() in compact["content"][0]["text"].encode()
+        assert size(compact) < 50_000
+        assert size(data) < 8_000
+        assert data["card"]["count"] == len(original["card"])
+        assert set(data["covered_gates"]) == set(original.get("scopes", {gate: None}))
+        if gate == "plan-execution":
+            scope = data["scopes"]["execution"]
+            for key in ("workers", "callCap", "timeout", "maxParallel"):
+                assert scope[key] == original["scopes"]["execution"][key]
+            assert scope["templateFiles"]["count"] == len(
+                original["scopes"]["execution"]["templateFiles"]
+            )
+        event_count = store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        full = tool(server, "harness_prepare_chat_confirmation", include_detail=True, **arguments)
+        assert not full["isError"]
+        assert full["structuredContent"] == {
+            **original,
+            "source_verified": False,
+            "human_identity_verified": False,
+        }
+        assert full["content"][0]["text"].encode() == compact["content"][0]["text"].encode()
+        repeated = tool(server, "harness_prepare_chat_confirmation", **arguments)
+        assert repeated["structuredContent"] == dict(
+            request_id=data["request_id"], digest=data["digest"]
+        )
+        assert len(repeated["content"][0]["text"].splitlines()) == 1
+        assert size(repeated) < 2_000
+        assert store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == event_count
+        print(
+            f"COMPACT2 {gate}: full={size(full)} default={size(compact)} repeated={size(repeated)}"
+        )
+        if gate == "plan-execution":
+            (store.workspace / "template" / "compact2-protected.txt").write_text(
+                "changed protected template\n"
+            )
+        else:
+            # A real separate producer supersedes this connection's unanswered offer.
+            from codex_harness.core.planner_confirmations import prepare_chat_confirmation
+
+            prepare_chat_confirmation(store, gate)
+        refreshed = tool(server, "harness_prepare_chat_confirmation", **arguments)
+        assert not refreshed["isError"], refreshed
+        assert refreshed["structuredContent"]["request_id"] != data["request_id"]
+        assert "<<<SHOW-VERBATIM" in refreshed["content"][0]["text"]
+        assert not record(server, refreshed["structuredContent"], "No")["isError"]
+        after_response = tool(server, "harness_prepare_chat_confirmation", **arguments)
+        assert (
+            after_response["structuredContent"]["request_id"]
+            != refreshed["structuredContent"]["request_id"]
+        )
+    finally:
+        server.close()
+
+
 def tool(server, name, **arguments):
     return workspace_wire(server, name, expected_workspace=str(server.workspace), **arguments)
+
+
+@pytest.mark.parametrize("reply", ["Approve but not execution", "Changes: narrow scope", "Approve"])
+def test_bound_response_attempt_reoffers_full_question_even_when_rejected(semantic_plan, reply):
+    """Catch rejected prose preserving the compact cache despite a bound response attempt.
+
+    Existing response tests cover durable response events; grammar rejection occurs
+    before those events and previously left the same question suppressed forever.
+    """
+    from tests.python.core.planning_support import source_only_expansion
+
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+    try:
+        first = tool(
+            server,
+            "harness_prepare_chat_confirmation",
+            gate="align+vision-lock",
+            include_detail=True,
+        )
+        assert not first["isError"], first
+        original = first["structuredContent"]
+        repeated = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")
+        assert repeated["structuredContent"]["request_id"] == original["request_id"]
+        assert len(repeated["content"][0]["text"].splitlines()) == 1
+        count = store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        response = record(server, original, reply)
+        if reply == "Approve but not execution":
+            assert response["isError"] and "chat-confirmation-choice-unclear" in str(response)
+            assert store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == count
+        else:
+            assert not response["isError"], response
+            assert response["structuredContent"]["state"] == (
+                "approved" if reply == "Approve" else "conditional"
+            )
+        assert store.status()["approval"]["granted"] is (reply == "Approve")
+        fresh = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")
+        assert not fresh["isError"], fresh
+        assert fresh["structuredContent"]["request_id"] != original["request_id"]
+        saved = store._latest_draft_event("confirmation-requested")
+        assert saved["card"].encode() in fresh["content"][0]["text"].encode()
+        assert "<<<SHOW-VERBATIM" in fresh["content"][0]["text"]
+        assert saved["request_id"] == fresh["structuredContent"]["request_id"]
+    finally:
+        server.close()
+
+
+def test_execution_repeat_after_response_requires_a_new_question(project):
+    """Catch reuse after an execution response excluded by the control digest.
+
+    Planning gate tests use a different event kind; existing execution journeys
+    consume consent but never prepare the identical proposal again afterwards.
+    """
+    options = _published(project)
+    proposal = {k: options[k] for k in ("expected_revision", "workers", "timeout", "call_cap")}
+    server = PlannerServer(project.workspace)
+    try:
+        first = tool(
+            server, "harness_prepare_chat_confirmation", gate="execution", execution=proposal
+        )
+        assert not first["isError"], first
+        data = first["structuredContent"]
+        full = tool(
+            server,
+            "harness_prepare_chat_confirmation",
+            gate="execution",
+            execution=proposal,
+            include_detail=True,
+        )
+        assert full["structuredContent"]["scope"]["workers"] == proposal["workers"]
+        assert full["structuredContent"]["card"].encode() in first["content"][0]["text"].encode()
+        repeat = tool(
+            server, "harness_prepare_chat_confirmation", gate="execution", execution=proposal
+        )
+        assert repeat["structuredContent"]["request_id"] == data["request_id"]
+        assert len(repeat["content"][0]["text"].splitlines()) == 1
+        assert not record(server, {**data, "gate": "execution"}, "No")["isError"]
+        fresh = tool(
+            server, "harness_prepare_chat_confirmation", gate="execution", execution=proposal
+        )
+        assert not fresh["isError"], fresh
+        assert fresh["structuredContent"]["request_id"] != data["request_id"]
+        assert "<<<SHOW-VERBATIM" in fresh["content"][0]["text"]
+    finally:
+        server.close()
 
 
 def record(server, question, quote="Approve"):
@@ -89,6 +262,7 @@ def test_run22_renew_reviewers_with_stale_selection_retains_shared_cap(
     def question():
         return public(
             "harness_prepare_chat_confirmation",
+            include_detail=True,
             gate="plan-execution",
             reviewer_node_id="RS1",
             execution=options,
@@ -241,9 +415,9 @@ def test_run22_vision_edit_after_a_requires_fresh_vision_reply(semantic_plan):
         refused = tool(server, "harness_advance", to_phase="features")
         assert refused["isError"] and "plan-approval-stale" in str(refused)
         assert store.phase() == "vision-lock" and not store.status()["approval"]["granted"]
-        fresh = tool(server, "harness_prepare_chat_confirmation", gate="vision-lock")[
-            "structuredContent"
-        ]
+        fresh = tool(
+            server, "harness_prepare_chat_confirmation", gate="vision-lock", include_detail=True
+        )["structuredContent"]
         assert fresh["vision_revision"] != a["vision_revision"]
         assert fresh["card_digest"] == hashlib.sha256(fresh["card"].encode()).hexdigest()
         assert record(server, fresh)["structuredContent"]["state"] == "approved"

@@ -529,6 +529,7 @@ TOOLS = [
         "No approval or launch. Identity, supplied message source and recency remain unverified.",
         {
             "gate": {"type": "string", "enum": CHAT_GATES},
+            "include_detail": {"type": "boolean"},
             "reviewer_node_id": STRING,
             "execution": _object(
                 {
@@ -1038,6 +1039,7 @@ class PlannerServer:
         self._pending_confirmation = None
         self._confirmation_timeout = confirmation_timeout
         self._schema_teaching, self._terminal_digests = set(), {}
+        self._chat_prepared, self._chat_shown = None, set()
 
     def _wire_tools(self):
         """Wire assertions are caller intent, never authenticated host context."""
@@ -1102,6 +1104,9 @@ class PlannerServer:
         if isinstance(response.get("result"), dict) and "content" in response["result"]:
             result = response["result"]
             result["workspaceBinding"] = binding
+            if result["content"][0].get("text", "").startswith("Existing request "):
+                result["content"][0]["text"] += "; " + self._binding_text(binding)
+                return response
             if result.get("structuredContent", {}).get("channel") == "chat-confirmation":
                 result["content"][0]["text"] += "\n" + self._binding_text(binding)
                 return response
@@ -1557,6 +1562,31 @@ class PlannerServer:
         )
         if name == "harness_prepare_chat_confirmation" and not is_error:
             reply["content"][0]["text"] = body + "\n\n" + reply["content"][0]["text"]
+            data = self.result_data
+            digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+            binding = (data["request_id"], digest)
+            if not arguments.get("include_detail"):
+
+                def summary(value, key=""):
+                    if key in {"card", "vision", "reviewer", "templateFiles"}:
+                        encoded = json.dumps(value, sort_keys=True).encode()
+                        return dict(count=len(value), digest=hashlib.sha256(encoded).hexdigest())
+                    if isinstance(value, dict):
+                        return {k: summary(v, k) for k, v in value.items()}
+                    return value
+
+                reply["structuredContent"] = summary(data)
+                reply["structuredContent"].update(
+                    digest=digest,
+                    covered_gates=list(data.get("scopes", {data.get("gate", "execution"): None})),
+                    next_action=next_step,
+                )
+                if binding in self._chat_shown:
+                    reply["structuredContent"] = dict(request_id=data["request_id"], digest=digest)
+                    reply["content"][0]["text"] = (
+                        f"Existing request {data['request_id']} digest {digest}; Next: {next_step}"
+                    )
+            self._chat_shown.add(binding)
         if not is_error and name == "harness_schema" and "semanticScenarios" in self.result_data:
             teaching = self.result_data["semanticScenarios"]
             digest = hashlib.sha256(json.dumps(teaching, sort_keys=True).encode()).hexdigest()
@@ -1977,9 +2007,27 @@ class PlannerServer:
 
     def _dispatch(self, name: str, args: dict, *, schema_tools=None) -> str:
         if name == "harness_prepare_chat_confirmation":
-            self.result_data = self._prepare_chat_question(args)
+            from codex_harness.core.planner_execution import _control_digest
+
+            store = self._store()
+            proposal = {k: v for k, v in args.items() if k != "include_detail"}
+            with store._transaction():
+                proposal["_event_id"] = store.connection.execute(
+                    "SELECT MAX(id) FROM events"
+                ).fetchone()[0]
+                cached = self._chat_prepared
+                reuse = cached and cached[:2] == (proposal, _control_digest(store, 0))
+            self.result_data = cached[2] if reuse else self._prepare_chat_question(args)
+            with store._transaction():
+                latest = store.connection.execute(
+                    "SELECT id,payload_json FROM events ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if json.loads(latest[1]).get("request_id") == self.result_data["request_id"]:
+                    proposal["_event_id"] = latest[0]
+                    self._chat_prepared = proposal, _control_digest(store, 0), self.result_data
             return self.result_data["card"]
         if name == "harness_record_chat_confirmation":
+            self._chat_prepared = None
             from codex_harness.core.planner_confirmations import complete_chat_confirmation
             from codex_harness.core.planner_execution import complete_chat_execution
 
