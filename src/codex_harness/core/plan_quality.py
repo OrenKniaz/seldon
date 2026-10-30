@@ -38,7 +38,7 @@ QUESTIONS = (
     ("concurrency-ownership", "Are beads spread for concurrency and ownership?", "plan"),
     ("cross-bead-contract", "Are cross-bead interfaces exercised by consumer proofs?", "plan"),
     ("worker-readiness", "Can cold-start workers implement and verify their packets?", "plan"),
-    ("roundtable", "Did the cross-subscription roundtable run, and was it helpful?", "roundtable"),
+    ("roundtable", "Did the roundtable run, and was it helpful?", "roundtable"),
     ("audit", "Did the current manifest pass its test audit?", "roundtable"),
     ("proof-level", "Were the tests verified against a reference implementation?", "roundtable"),
     ("guesswork", "Is the process efficient, or full of guesswork?", "publish"),
@@ -136,9 +136,22 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
                 "Targeted assessment/observed-separation producers are unavailable; "
                 "author claims cannot certify closure.",
             )
-    passed = len(reviewers) >= 2 and len(providers) >= 2 and not unresolved
+    labeled = {
+        record["roundId"]
+        for (payload,) in store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='roundtable-completed'"
+        )
+        if (record := json.loads(payload)).get("reviewIndependence") == "single-provider"
+    }
+    single = len(reviewers) >= 2 and len(providers) == 1 and all(
+        row["round_id"] in labeled for row in runs
+    )
+    evidence.update({"reviewIndependence": "single-provider"} if single else {})
+    passed = len(reviewers) >= 2 and (len(providers) >= 2 or single) and not unresolved
     advice = "" if passed else "Resolve all open findings."
-    if len(providers) == 1:
+    if single:
+        advice = "Single-provider review; only one provider was available. " + advice
+    elif len(providers) == 1:
         advice = (
             "Only one provider is available in the successful review set; "
             "cross-subscription evidence is missing. " + advice

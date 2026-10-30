@@ -653,12 +653,26 @@ def default_reviewers(*, executable_for=None) -> list[dict]:
     executable_for may be a provider-to-executable mapping or a callable. A
     missing/None override marks that provider unavailable.
     """
-    return [
+    selected = [
         dict(reviewer)
         for reviewer in _REVIEWERS
         if (executable := _executable(reviewer["provider"], executable_for))
         and shutil.which(executable)
     ]
+
+    if len(selected) == 1:
+        selected.append({**selected[0], "name": selected[0]["name"] + "-2"})
+    return selected
+
+
+def coverage(selected, *, executable_for=None):
+    providers = {item["provider"] for item in selected}
+    if len(selected) < 2 or len(providers) != 1:
+        return {}
+    available = {r["provider"] for r in _REVIEWERS if _executable(r["provider"], executable_for)}
+    if providers != available or len(selected) != 2:
+        raise ValueError(f"Cross-subscription required; also available: {available - providers}")
+    return {"reviewIndependence": "single-provider"}
 
 
 def _run(launch, cwd: Path, timeout: int, *, raw=False):
@@ -2195,6 +2209,8 @@ def run_roundtable(
                 used + 1,
                 total + 1,
             )
+        result.update(coverage(selected, executable_for=executable_for))
+        for reviewer in selected:
             store.connection.execute(
                 "INSERT INTO review_attempts VALUES (?, ?, ?, ?)",
                 (
@@ -2396,6 +2412,9 @@ def findings(store: PlanStore, status=None, *, expand=False) -> list[dict]:
 
 def render_roundtable_card(result: dict, findings: list[dict]) -> str:
     lines = [f"Roundtable: plan {result['planRevision'][:12]}"]
+    if result.get("reviewIndependence") == "single-provider":
+        lines.append("Reviewed by two {provider} reviewers; only one provider was available."
+                     .format_map(result["reviewers"][0]))
     lines.append(f"Cross-subscription: {str(result['crossSubscription']).lower()}")
     lines.append(f"Round budget: {result.get('maxRounds', 2)} per reviewer per revision")
     for reviewer in result["reviewers"]:
@@ -2435,7 +2454,7 @@ def render_roundtable_card(result: dict, findings: list[dict]) -> str:
     lines.extend(["", "Next:"])
     if not result["reviewers"]:
         lines.append("- Make a provider executable available and run the roundtable.")
-    elif not result["crossSubscription"]:
+    elif not result["crossSubscription"] and not result.get("reviewIndependence"):
         lines.append("- Run the second provider when available for cross-subscription review.")
     if result["invalid"]:
         lines.append("- Correct rejected-unparsed responses and rerun the affected reviewers.")

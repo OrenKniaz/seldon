@@ -1178,11 +1178,9 @@ def _prepare_acceptance_review(
     if run is None or Path(run["repo"]) != Path(repo).resolve():
         raise PlanStoreError("acceptance-run-required", "Run scenarios on the current revision")
     selected = roundtable.default_reviewers() if reviewers is None else list(reviewers)
-    if len({item["provider"] for item in selected}) < 2:
-        raise ValueError("Acceptance review requires cross-subscription reviewers")
-    if len({item["provider"] for item in selected}) != len(selected) or len(
-        {item["name"] for item in selected}
-    ) != len(selected):
+    if len(selected) < 2 or len({item["name"] for item in selected}) != len(selected):
+        raise ValueError("Two distinct reviewers required (cross-subscription when available)")
+    if not roundtable.coverage(selected) and len({r["provider"] for r in selected}) < len(selected):
         raise ValueError("Acceptance reviewers/providers must be distinct")
     support_args = (
         {"execution_assessment_ids": execution_assessment_ids}
@@ -1365,6 +1363,8 @@ def _acceptance_reviewer_findings(run, reviewer, record, parts):
 
 
 def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, resumed=False):
+    if len({item["provider"] for item in result["reviewers"]}) == 1:
+        result["reviewIndependence"] = "single-provider"
     result["outOfPacketTools"] = sorted(
         {tool for item in result["reviewers"] for tool in item["outOfPacketTools"]}
     )

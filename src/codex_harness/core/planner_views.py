@@ -1310,6 +1310,9 @@ def acceptance_run_card(run: dict) -> str:
 
 def review_card(result: dict, *, details=False) -> str:
     lines = [f"**Review: {result.get('roundId', result.get('id', 'acceptance'))}**"]
+    if result.get("reviewIndependence") == "single-provider":
+        lines.append("Reviewed by two {provider} reviewers; only one provider was available."
+                     .format_map(result["reviewers"][0]))
     if result.get("findingCountsScope"):
         lines.append("Findings scope: " + result["findingCountsScope"])
     for row in result["reviewers"]:

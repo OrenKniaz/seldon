@@ -3341,3 +3341,59 @@ def test_execution_af_history_is_selected_without_revalidating_old_product(tmp_p
         assert list(store.connection.iterdump()) == before
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    "available,same",
+    [("codex", True), ("codex claude", True), ("codex copilot", True), ("codex claude", False)],
+)
+def test_provider_availability_governs_public_acceptance_review(
+    project, monkeypatch, available, same
+):
+    """Protect one-provider acceptance and disclosure; old tests only used cross-provider pairs.
+
+    Catches refusal for Codex-only users, accidental relaxation with Claude present,
+    lost persistence labels, and a downstream acceptance gate still demanding two providers.
+    Provider responses are source controls, never actual provider-execution evidence.
+    """
+    from codex_harness.core import roundtable
+
+    store, repo = project
+    fix_product(repo)
+    run = run_acceptance(store, repo, subject="product")
+    selected = [REVIEWERS[0], {**REVIEWERS[0], "name": "codex-second"}] if same else REVIEWERS
+    monkeypatch.setattr(
+        roundtable,
+        "_executable",
+        lambda provider, _: sys.executable if provider in available.split() else None,
+    )
+    calls = []
+
+    def response(*args, **kwargs):
+        calls.append(args[0])
+        return 0, "[]"
+
+    monkeypatch.setattr(roundtable, "_run", response)
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool(
+            "harness_accept_review", {"repo": str(repo), "reviewers": selected}
+        )
+    finally:
+        server.close()
+    if same and "claude" in available:
+        assert reply["isError"] and available.split()[1] in reply["content"][0]["text"]
+        assert not calls
+        return
+    assert not reply["isError"], reply
+    result = json.loads(
+        store.connection.execute("SELECT result_json FROM acceptance_reviews").fetchone()[0]
+    )
+    assert len(calls) == 2
+    assert (result.get("reviewIndependence") == "single-provider") is same
+    assert store.acceptance_review_guard(run["id"]) is None
+    if same:
+        assert (
+            "Reviewed by two codex reviewers; only one provider was available."
+            in reply["content"][0]["text"]
+        )

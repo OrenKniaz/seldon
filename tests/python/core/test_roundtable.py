@@ -1949,7 +1949,10 @@ def test_available_defaults_override_and_single_provider(store, monkeypatch):
     monkeypatch.setattr(roundtable.shutil, "which", lambda executable: executable)
     assert default_reviewers() == REVIEWERS
     overrides = {"codex": "custom-codex", "claude": None}
-    assert default_reviewers(executable_for=overrides) == REVIEWERS[:1]
+    assert default_reviewers(executable_for=overrides) == [
+        REVIEWERS[0],
+        {**REVIEWERS[0], "name": "codex-reviewer-2"},
+    ]
     seen = []
 
     def runner(launch, cwd, timeout):
@@ -1957,12 +1960,12 @@ def test_available_defaults_override_and_single_provider(store, monkeypatch):
         return 0, json.dumps([finding()])
 
     result = run_roundtable(store, executable_for=overrides.get, runner=runner)
-    assert result["crossSubscription"] is False and seen == ["custom-codex"]
+    assert result["crossSubscription"] is False and seen == ["custom-codex", "custom-codex"]
     monkeypatch.setattr(roundtable.shutil, "which", lambda executable: None)
     assert default_reviewers() == []
     empty = run_roundtable(store, runner=runner)
     assert empty["reviewers"] == [] and empty["crossSubscription"] is False
-    assert seen == ["custom-codex"]
+    assert seen == ["custom-codex", "custom-codex"]
 
 
 def test_feasibility_job_does_not_expand_legacy_review(tmp_path):

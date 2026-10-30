@@ -969,7 +969,7 @@ def test_review_continuation_uses_current_gate_with_retained_afs(tmp_path, monke
             )
             assert (
                 refused["isError"]
-                and "native cross-subscription evidence" in refused["content"][0]["text"]
+                and "native reviewer evidence" in refused["content"][0]["text"]
             )
             assert store.status()["acceptance"]["accepted"] is False
             assert (

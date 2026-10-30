@@ -1080,7 +1080,12 @@ def main(argv=None) -> int:
                     'start --idea "<idea>" --name "<name>"'
                 )
             else:
-                next_step = next_command(server, status)
+                next_step = next_command(
+                    server,
+                    server.result_data
+                    if args.command == "status" and not reply["isError"]
+                    else status,
+                )
             if args.command in {"worker-start", "worker-status"} and data and not reply["isError"]:
                 next_step = (
                     f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '

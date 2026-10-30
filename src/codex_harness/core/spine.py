@@ -463,7 +463,7 @@ def semantic_spec(spine, product=None):
         for key in sorted(set(spine.ids("requirement")) - covered)
     )
     if gaps:
-        error = ValueError("; ".join([*messages, *gaps]))
+        error = ValueError("Check semantic scenario references: " + "; ".join([*messages, *gaps]))
         error.open_gaps = gaps
         raise error
     return document, targets, covered

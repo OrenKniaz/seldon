@@ -2349,7 +2349,7 @@ class PlanStore:
                 if not row.get("nodesDigest") or not self._review_repairs_match(row, snapshot):
                     continue
                 row.update(carriedForward=True, carriedFromRevision=row["plan_revision"])
-            latest.setdefault(row["provider"], row)
+            latest.setdefault((row["provider"], row["reviewer"]), row)
         result = [latest[key] for key in sorted(latest)]
         if policy["active"] and revision == self.manifest_revision():
             allowed = set(policy["successfulReviewIds"])
@@ -2364,12 +2364,7 @@ class PlanStore:
                 )
                 if row["id"] in allowed
             ]
-            result = []
-            providers = set()
-            for row in eligible:
-                if row["provider"] not in providers:
-                    providers.add(row["provider"])
-                    result.append(row)
+            result = eligible
         return result
 
     def _check_evidence(self, revision: str) -> None:
@@ -3422,7 +3417,9 @@ class PlanStore:
                 isinstance(reviewers, list)
                 and reviewers
                 and all(native_reviewer(reviewer) for reviewer in reviewers)
-                and len({reviewer["provider"] for reviewer in reviewers}) >= 2
+                and (len({reviewer["provider"] for reviewer in reviewers}) >= 2
+                     or review.get("reviewIndependence") == "single-provider"
+                     and len({reviewer.get("name", "") for reviewer in reviewers} - {""}) >= 2)
             ):
                 return None
         return "acceptance-review-required"
@@ -3468,7 +3465,7 @@ class PlanStore:
                 message = (
                     "Resolve open clarifications"
                     if review_guard == "plan-clarifications-open"
-                    else "Review the current scenario run with native cross-subscription evidence"
+                    else "Review the current scenario run with native reviewer evidence"
                 )
                 raise PlanStoreError(review_guard, message)
             approval = {

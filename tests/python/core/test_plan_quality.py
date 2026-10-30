@@ -621,3 +621,63 @@ def test_repeatability_detects_changing_outputs(store, monkeypatch, surface):
 
     monkeypatch.setattr(plan_quality, surface, changing)
     assert checks(store)["repeatable"]["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    "available,same", [("codex", True), ("codex claude", True), ("codex claude", False)]
+)
+def test_available_provider_coverage_flows_from_roundtable_to_quality(
+    store, monkeypatch, available, same
+):
+    """Catch provider deduplication losing the second review; old quality tests used two providers.
+
+    Protect current-revision canonical roundtable persistence through its quality consumer,
+    including truthful single-provider labels and refusal when another provider exists.
+    Existing checks miss discovery during stored reads and exhausted explicit requests.
+    Controlled provider responses establish source integration only.
+    """
+    import sys
+
+    from tests.python.core.planning_support import source_only_expansion
+
+    from codex_harness.core import roundtable
+
+    source_only_expansion(store)
+    advance(store, "roundtable")
+    selected = [REVIEWERS[0], {**REVIEWERS[0], "name": "second"}] if same else REVIEWERS
+    monkeypatch.setattr(
+        roundtable,
+        "_executable",
+        lambda provider, _: sys.executable if provider in available.split() else None,
+    )
+    if same and "claude" in available:
+        before = list(store.connection.iterdump())
+        with pytest.raises(ValueError, match="claude"):
+            source_controller_roundtable(
+                store, reviewers=selected, process_stub=lambda *_: (0, "[]")
+            )
+        assert list(store.connection.iterdump()) == before
+        return
+    result = source_controller_roundtable(
+        store, reviewers=selected, process_stub=lambda *_: (0, "[]")
+    )
+
+    def forbidden_discovery(*_):
+        pytest.fail("Recorded coverage and exhausted explicit reviews must not discover providers")
+
+    monkeypatch.setattr(roundtable, "_executable", forbidden_discovery)
+    before = list(store.connection.iterdump())
+    with pytest.raises(PlanStoreError, match="used 1/1"):
+        roundtable.run_roundtable(store, reviewers=selected, max_total=1)
+    assert list(store.connection.iterdump()) == before
+    check = checks(store)["roundtable"]
+    assert check["status"] == "pass", check
+    assert len(store.successful_reviews(store.manifest_revision())) == 2
+    assert (check["evidence"].get("reviewIndependence") == "single-provider") is same
+    assert (result.get("reviewIndependence") == "single-provider") is same
+    if same:
+        assert (
+            "Reviewed by two codex reviewers; only one provider was available."
+            in roundtable.render_roundtable_card(result, [])
+        )
+        assert "cross-subscription evidence is missing" not in check["advice"]
