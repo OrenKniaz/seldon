@@ -44,6 +44,11 @@ PHASE_DIAGRAMS = {
 }
 STRING = {"type": "string", "minLength": 1}
 STRINGS = {"type": "array", "items": STRING}
+CHAT_GATES = ["align", "vision-lock", "execution", "align+vision-lock", "plan-execution"]
+B_NEXT = (
+    "Needs your go-ahead (B): return to plan, compile, then "
+    "harness_prepare_chat_confirmation gate=plan-execution; wait for the actual reply."
+)
 
 
 def _object(properties: dict, required=None) -> dict:
@@ -493,8 +498,8 @@ TOOLS = [
     _tool(
         "harness_understanding_card",
         "Author a short product statement with a pointer to the actual full brief, not a "
-        "copy of the brief (harness_schema kind=vision). Record and show understanding; "
-        "ask the user to confirm before advancing.",
+        "copy of the brief (harness_schema kind=vision). Semantic-v1: prepare expansion first; "
+        "this card creates combined understanding/scope consent A when ready.",
         {
             **dict.fromkeys(
                 ("vision", "users", "first_user_moment", "scope_in", "scope_out"), STRING
@@ -506,15 +511,21 @@ TOOLS = [
         "harness_record_confirmation",
         "Ask the native MCP client to display the exact gate/revision "
         "and collect a fresh response. "
-        "Requires negotiated elicitation; quoted tool arguments cannot approve a gate.",
-        {"gate": {"type": "string", "enum": ["align", "vision-lock"]}},
+        "Semantic-v1 defaults to chat; interaction=native requires the user's explicit request "
+        "and negotiated elicitation. Quoted tool arguments cannot approve a native gate.",
+        {
+            "gate": {"type": "string", "enum": ["align", "vision-lock"]},
+            "interaction": {"type": "string", "enum": ["chat", "native"]},
+        },
+        ["gate"],
     ),
     _tool(
         "harness_prepare_chat_confirmation",
-        "Offer a fresh caller-mediated question for align, vision-lock or exact worker execution. "
+        "Offer chat consent: semantic-v1 A=align+vision-lock, B=plan-execution; or single gates. "
         "No approval or launch. Identity, supplied message source and recency remain unverified.",
         {
-            "gate": {"type": "string", "enum": ["align", "vision-lock", "execution"]},
+            "gate": {"type": "string", "enum": CHAT_GATES},
+            "reviewer_node_id": STRING,
             "execution": _object(
                 {
                     "expected_revision": STRING,
@@ -539,7 +550,7 @@ TOOLS = [
         "Record only an explicit answer to a displayed chat question: Approve, No, Cancel or "
         "Changes: <text>. Quote/hash/actor are caller-supplied and unverified. Does not launch.",
         {
-            "gate": {"type": "string", "enum": ["align", "vision-lock", "execution"]},
+            "gate": {"type": "string", "enum": CHAT_GATES},
             "request_id": STRING,
             "expected_revision": STRING,
             "quoted_message": STRING,
@@ -747,6 +758,8 @@ def resume_card(data):
 def resume_next(data=None, *, cli_prefix=None):
     """Render only supported routes from the shared advisory action contract."""
     data = data or {}
+    if data.get("reasonCode") == "plan-b-consent-required":
+        return B_NEXT
     action = data.get("nextAction", {})
     kind = action.get("kind")
 
@@ -1422,7 +1435,8 @@ class PlannerServer:
             body += "\n- Acceptance invalid: " + acceptance["invalidMessage"]
         next_step = (
             self._next(name, arguments, status, is_error, operation_error_code)
-            if status_available and not uncertain_dispatch
+            if status_available
+            and (not uncertain_dispatch or operation_error_code == "plan-b-consent-required")
             else "harness_plan_status read-only; inspect the reported blocker, "
             "primary result and saved IDs. "
             "Do not repeat a completed or uncertain mutation; inspect its recorded effect first."
@@ -1476,9 +1490,11 @@ class PlannerServer:
                 and "passing audit" not in error_message
                 and handoff.get("memberCount") == 0
             ):
-                # Nothing to repair: the user decides whether to spend another review.
-                body += "\n" + views.publish_review_question(status)
-                next_step = "Ask the user the question above and wait; on Run review: " + next_step
+                if status.get("planMode") != "semantic-v1":
+                    body += "\n" + views.publish_review_question(status)
+                    next_step = (
+                        "Ask the user the question above and wait; on Run review: " + next_step
+                    )
             else:
                 body += "\n" + views.author_handoff_card(handoff)
         reply = {
@@ -1616,6 +1632,8 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if error_code == "plan-b-consent-required":
+            return B_NEXT
         job = self.result_data or {}
         if (
             status.get("planMode") == "semantic-v1"
@@ -1634,9 +1652,8 @@ class PlannerServer:
             and not self.store.connection.execute("SELECT 1 FROM acceptance_attempts").fetchone()
         ):
             return (
-                "Validation is not final acceptance. Tell the user final acceptance against "
-                "their brief is next; offer to run harness_accept_run. If they agree, run it "
-                "and report its terminal status via harness_accept_status."
+                "harness_accept_run repo=<integrated-repo> subject=product; B covers validation. "
+                "Poll harness_accept_status; C waits for evidence and review."
             )
         if name == "harness_review_policy" and not error:
             revision = self.result_data["example"]["expectedManifestRevision"]
@@ -1790,7 +1807,7 @@ class PlannerServer:
                 return views.review_resolution_next(status["reviewResolution"])
             return (
                 "harness_plan_resume; inspect existing job state first. Execution requires "
-                "exact workers, an explicit call_cap and a separate native decision; "
+                "exact workers and call_cap matching B (otherwise fresh chat consent); "
                 "this guidance does not authorize a launch."
             )
         if name == "harness_preflight":
@@ -1839,7 +1856,11 @@ class PlannerServer:
                     "A later disposition mutation stales current support; support never clears "
                     "findings or native final acceptance."
                 )
-            return acceptance.get("next", "harness_plan_status")
+            return (
+                views.semantic_consent_next(status, {})
+                if status.get("planMode") == "semantic-v1"
+                else acceptance.get("next", "harness_plan_status")
+            )
         if (
             error
             and status.get("reviewResolution")
@@ -1856,6 +1877,18 @@ class PlannerServer:
                 "Correct the reported blocker, then retry this tool; "
                 "harness_plan_status shows the current gate."
             )
+        if status.get("planMode") == "semantic-v1":
+            from codex_harness.core.planner_confirmations import approval_credit
+
+            hint = views.semantic_consent_next(
+                status,
+                self.result_data or {},
+                plan_authorized=bool(
+                    approval_credit(self.store, "plan-lock", status["plan_revision"])
+                ),
+            )
+            if hint:
+                return hint
         if name.startswith("harness_accept"):
             return self._accept_next(name).removeprefix("\nNext: ")
         if name == "harness_understanding_card":
@@ -1933,7 +1966,9 @@ class PlannerServer:
                 outcome = complete_chat_execution(self._store(), **arguments)
             else:
                 outcome = complete_chat_confirmation(self._store(), **args)
-            if outcome["state"] in {"decline", "declined", "cancel", "conditional"}:
+            if outcome["state"] in {"decline", "declined", "cancel", "conditional"} and args[
+                "gate"
+            ] not in {"align+vision-lock", "plan-execution"}:
                 proposal = {"gate": args["gate"]}
                 if args["gate"] == "execution":
                     scope = outcome["scope"]
@@ -2444,6 +2479,16 @@ class PlannerServer:
                 if text not in existing:
                     store.add_assumption(text, [vision_id])
             self.result_data = {"id": vision_id}
+            if spine.semantic:
+                from codex_harness.core.planner_vision import expansion_status
+
+                if store.phase() == "align" and not expansion_status(node)["gaps"]:
+                    self.result_data = self._prepare_chat_question({"gate": "align+vision-lock"})
+                    return self.result_data["card"]
+                return (
+                    "Understanding draft saved. Prepare proposed expansion dispositions, "
+                    "quality and Done before consent A."
+                )
             body = views.understanding_card(**args)
             return body + "\n" + views.setup_card(node["fields"].get("setup", {}))
         if name == "harness_record_confirmation":
@@ -2630,10 +2675,13 @@ class PlannerServer:
                 self._store(), **arguments["execution"], _expected_request_id=_expected_request_id
             )
         else:
-            if "execution" in arguments:
+            if "execution" in arguments and arguments["gate"] != "plan-execution":
                 raise ValueError("chat-planning-question-refuses-execution-fields")
             question = prepare_chat_confirmation(
-                self._store(), arguments["gate"], _expected_request_id=_expected_request_id
+                self._store(),
+                arguments["gate"],
+                _expected_request_id=_expected_request_id,
+                **{k: arguments[k] for k in ("execution", "reviewer_node_id") if k in arguments},
             )
         return {**question, "source_verified": False, "human_identity_verified": False}
 
@@ -2671,6 +2719,7 @@ class PlannerServer:
 
     def _begin_execution(self, request_id, name, arguments):
         from codex_harness.core.plan_store import open_plan_store_readonly
+        from codex_harness.core.planner_confirmations import combined_credit
         from codex_harness.core.planner_execution import (
             execution_scope,
             prepare_execution,
@@ -2684,6 +2733,9 @@ class PlannerServer:
         snapshot = resume_plan(self.workspace, expected_revision=arguments.get("expected_revision"))
         if snapshot["state"] == "reattached":
             return {"jsonrpc": "2.0", "id": request_id, "result": self.call_tool(name, arguments)}
+        if snapshot.get("canonicalStatus"):
+            with open_plan_store_readonly(self.workspace) as readonly:
+                combined_credit(readonly, "execution")
         if snapshot["reasonCode"] != "native-execution-confirmation-required":
             return {
                 "jsonrpc": "2.0",
@@ -2709,7 +2761,7 @@ class PlannerServer:
                 raise
         else:
             return {"jsonrpc": "2.0", "id": request_id, "result": self.call_tool(name, arguments)}
-        if not self._elicitation or not self._initialized:
+        if store.spine().semantic or not self._elicitation or not self._initialized:
             reply = self._resume_reply(
                 snapshot,
                 error=True,
@@ -2897,6 +2949,15 @@ class PlannerServer:
                 reused=True,
             )
             return {"jsonrpc": "2.0", "id": request_id, "result": self._confirmation_reply(outcome)}
+        if store.spine().semantic and arguments.get("interaction") != "native":
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": self.call_tool(
+                    "harness_prepare_chat_confirmation",
+                    {"gate": "align+vision-lock" if gate == "align" else gate},
+                ),
+            }
         if not self._elicitation or not self._initialized:
             outcome = dict(
                 gate=gate,
@@ -3135,7 +3196,9 @@ class PlannerServer:
                             "result": self._resume_reply(
                                 {
                                     "state": "held",
-                                    "reasonCode": "worker-admission-refused",
+                                    "reasonCode": getattr(
+                                        error, "code", "worker-admission-refused"
+                                    ),
                                     "canonicalStatus": None,
                                     "nextAction": {"kind": "request_native_execution"},
                                     "job": None,

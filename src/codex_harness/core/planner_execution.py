@@ -347,7 +347,15 @@ def _complete_execution(store, request_id, action, content=None, *, chat=None):
 
 
 def require_execution(store, scope):
+    from codex_harness.core.planner_confirmations import _b_required, combined_credit
+
     _canonical_store(store)
+    bundle = combined_credit(store, "execution")
+    if bundle and any(
+        scope[k] != bundle["scopes"]["execution"][k]
+        for k in "workers callCap maxParallel timeout manifestDigest publicationRevision".split()
+    ):
+        raise _b_required("worker-execution-grant-required: outside approved B")
     requests, responses = _records(store, REQUEST), _records(store, RESPONSE)
     if not requests:
         raise ValueError("worker-execution-grant-required")

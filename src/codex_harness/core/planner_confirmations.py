@@ -26,6 +26,15 @@ NATIVE = "mcp-client-elicitation"
 
 def _chat_question(request, revision):
     request.update(channel=CHAT, choices=["Approve", "No", "Cancel", "Changes: <text>"])
+    effect = {
+        "align+vision-lock": (
+            "Approve confirms understanding and locks this scope and these expansion decisions."
+        ),
+        "plan-execution": (
+            "Approve authorizes this plan, these review budgets, publication after review passes, "
+            "execution and validation within these limits."
+        ),
+    }.get(request.get("gate"), "")
     subject = {
         "align": "the Align understanding below",
         "vision-lock": "the Vision Lock below",
@@ -38,7 +47,10 @@ def _chat_question(request, revision):
         "do not summarise, shorten or add to it.\n\n<<<SHOW-VERBATIM\n"
         f"**Your decision: approve {subject}?**\n"
         "Reply with exactly one of: **Approve** · **No** · **Cancel** · "
-        "**Changes: <what to change>**\n\n" + request["card"].rstrip() + "\nSHOW-VERBATIM>>>\n\n"
+        "**Changes: <what to change>**\n\n"
+        + (effect + "\n\n" if effect else "")
+        + request["card"].rstrip()
+        + "\nSHOW-VERBATIM>>>\n\n"
         f"For the agent: chat confirmation {request['request_id']} for revision {revision}. "
         "Wait for their reply. "
         "Record it with harness_record_chat_confirmation: quote their latest actual chat "
@@ -545,25 +557,38 @@ def _complete_confirmation(
         return outcome
 
 
+def _b_required(reason):
+    return PlanStoreError("plan-b-consent-required", "Needs your go-ahead (B): " + reason)
+
+
 def combined_credit(store, gate):
     """Resolve one original response and its gate-specific scope, never supplied authority."""
     request = next((r for _, r in _records(store, REQUEST) if gate in r.get("scopes", {})), None)
     if not request:
+        if (
+            gate in {"plan-lock", "review-budget", "publish", "execution", "validation"}
+            and any(
+                r["gate"] == "align+vision-lock" and r["state"] == "approved"
+                for _, r in _records(store, RESPONSE)
+            )
+            and Spine(store._data()).semantic
+        ):
+            raise _b_required("prepare and approve plan-execution for this candidate.")
         return None
     revision = store._revision()
     if request["workspace"] != str(store.workspace) or not approval_credit(store, gate, revision):
-        raise ValueError("combined-consent-required")
+        raise _b_required("combined-consent-required")
     if "execution" in request["scopes"]:
         from codex_harness.core.planner_jobs import _files
 
         if _files(store.workspace / "template") != request["scopes"]["execution"]["templateFiles"]:
-            raise ValueError("combined-inputs-stale")
+            raise _b_required("combined-inputs-stale")
     if request.get("reviewer_node_id"):
         current = reviewer_confirmation_target(
             store, Spine(store._data()), request["reviewer_node_id"], allow_existing=True
         )
         if current[3] != request["scopes"]["reviewer-selection"]:
-            raise ValueError("combined-reviewer-scope-stale")
+            raise _b_required("combined-reviewer-scope-stale")
     event, response = next(
         (e, r) for e, r in _records(store, RESPONSE) if r["request_id"] == request["request_id"]
     )

@@ -27,6 +27,51 @@ NEXT = {
 }
 
 
+def semantic_consent_next(status, result, *, plan_authorized=False):
+    """Three decisions; missing information and changed scope still require a reply."""
+    if result.get("channel") == "chat-confirmation":
+        return "Show request; wait for the actual reply, then harness_record_chat_confirmation."
+    if (
+        result.get("gate") in {"align+vision-lock", "plan-execution"}
+        and result.get("state") != "approved"
+    ):
+        return "Stop; address the actual response before preparing fresh consent."
+    if status.get("open_clarifications"):
+        return "Ask the genuine missing-information question; record it with harness_answer."
+    phase = status["phase"]
+    if phase in {"align", "vision-lock"}:
+        if status.get("approval", {}).get("granted"):
+            return "harness_advance to_phase=" + ("expand" if phase == "align" else "features")
+        return (
+            "Prepare understanding, proposed expansion dispositions, quality and Done; "
+            "harness_understanding_card creates durable A."
+            if phase == "align"
+            else "harness_prepare_chat_confirmation gate=vision-lock; obtain fresh scope consent."
+        )
+    if phase == "expand":
+        return "harness_advance to_phase=vision-lock; A already covers the displayed expansion."
+    if phase == "plan":
+        return (
+            "harness_advance to_phase=roundtable; use B within its recorded limits."
+            if plan_authorized
+            else (
+                "harness_compile; register shared review/acceptance-review ceilings with CLI "
+                "review-budget; harness_prepare_chat_confirmation gate=plan-execution with exact "
+                "execution and reviewer_node_id. Show plan/waves/files, reviewer/worker tuples, "
+                "ceilings, call_cap, concurrency and timeouts."
+            )
+        )
+    if phase == "accept":
+        acceptance = status.get("acceptance", {})
+        if acceptance.get("invalidReason") == "acceptance-approval-required":
+            return (
+                "C: Does this delivery meet the locked vision? "
+                "Wait for owner words, then harness_accept."
+            )
+        return acceptance.get("next", "harness_plan_status")
+    return None
+
+
 def execution_assessment_contract():
     """Owning public schema; drafts/observations are never launch authorization."""
 

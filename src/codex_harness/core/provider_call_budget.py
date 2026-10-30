@@ -285,21 +285,23 @@ def claim_planning_review_start(store, reviewer):
     the process started. Worker job guards stay separate.
     """
     with store._transaction():
+        from codex_harness.core.planner_confirmations import _b_required, combined_credit
+
+        authority = combined_credit(store, "review-budget")
         original, claims = _planning_review_originals(store)
         if original is None:
             return None
-        from codex_harness.core.planner_confirmations import combined_credit
-
-        authority = combined_credit(store, "review-budget")
         if authority:
             scope = authority["scopes"]["review-budget"]
             if {k: v for k, v in scope.items() if k != "reviewers"} != original:
-                raise ValueError("planning-review-budget-consent-required")
+                raise _b_required("planning-review-budget-consent-required")
             if {
                 k: reviewer.get(k) for k in ("name", "provider", "model", "effort")
             } not in scope.get("reviewers", []):
-                raise ValueError("planning-reviewer-consent-required")
+                raise _b_required("planning-reviewer-consent-required")
         if len(claims) >= original["maxStarts"]:
+            if authority:
+                raise _b_required("planning-review-start-cap-exhausted; stop, no ceiling reset")
             raise ValueError("planning-review-start-cap-exhausted")
         ordinal = len(claims) + 1
         record = dict(

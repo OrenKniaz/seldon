@@ -392,6 +392,27 @@ def test_bundle_through_review_publication_and_once_only_execution(
         node = store.spine().node("B")
         node["title"] += " changed"
         store.upsert_node(node)
+        from tests.python.core.test_mcp_chat_confirmations import tool
+
+        from codex_harness.core.mcp_planner import PlannerServer
+
+        server = PlannerServer(store.workspace)
+        try:
+            assert not tool(server, "harness_advance", to_phase="plan")["isError"]
+            compiled = tool(server, "harness_compile", include_detail=True)
+            assert not compiled["isError"] and "gate=plan-execution" in str(compiled)
+            changed = {**options, "expected_revision": store.manifest_revision()}
+            fresh = tool(
+                server,
+                "harness_prepare_chat_confirmation",
+                gate="plan-execution",
+                execution=changed,
+            )
+            assert not fresh["isError"], fresh
+            assert fresh["structuredContent"]["request_id"] != request["request_id"]
+            assert approval_credit(store, "execution", store._revision()) is None
+        finally:
+            server.close()
     if change == "files":
         (store.workspace / "template/unseen.txt").write_text("unapproved input")
     if change in {"candidate", "files"}:
@@ -409,6 +430,31 @@ def test_bundle_through_review_publication_and_once_only_execution(
         options["call_cap"] += 1
     scope = execution.execution_scope(store, **options)
     if change:
+        from tests.python.core.test_mcp_chat_confirmations import record, tool
+
+        from codex_harness.core.mcp_planner import PlannerServer
+
+        # R1: even an approved standalone execution grant cannot override approved B.
+        # The former mismatch-only case had no competing grant and missed this bypass.
+        server = PlannerServer(store.workspace)
+        launches = []
+        try:
+            offered = tool(
+                server, "harness_prepare_chat_confirmation", gate="execution", execution=options
+            )
+            assert not offered["isError"], offered
+            assert not record(server, offered["structuredContent"])["isError"]
+            with monkeypatch.context() as child:
+                child.setattr(
+                    planner_jobs.subprocess,
+                    "Popen",
+                    lambda *a, **k: launches.append(1) or SimpleNamespace(pid=12345),
+                )
+                denied = tool(server, "harness_worker_start", **options)
+            assert denied["isError"] and "Needs your go-ahead (B)" in str(denied), denied
+            assert not launches
+        finally:
+            server.close()
         with pytest.raises(ValueError, match="grant-required"):
             execution.consume_execution(store, scope, revision)
     else:

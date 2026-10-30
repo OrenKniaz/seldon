@@ -2452,11 +2452,11 @@ class PlanStore:
                 )
             revision = self._revision()
             spine = Spine(self._data())
-            if current == "plan" and to_phase == "roundtable" and statement is None:
+            if current == "plan" and to_phase == "roundtable":
                 from codex_harness.core.planner_confirmations import combined_credit
 
                 credit = combined_credit(self, "plan-lock")
-                if credit:
+                if credit and statement is None:
                     statement, by = credit["response"]["content"]["statement"], "user"
             if to_phase == "vision-lock" or current == "vision-lock" and target > index:
                 from codex_harness.core.planner_vision import expansion_status
@@ -2561,6 +2561,9 @@ class PlanStore:
                 "plan-prospective-reason-required", "Record why no oracle is available"
             )
         with self._transaction():
+            from codex_harness.core.planner_confirmations import combined_credit
+
+            combined_credit(self, "publish")
             if self.phase() != "publish":
                 raise PlanStoreError(
                     "plan-publish-phase-required", "Enter publish before publishing"

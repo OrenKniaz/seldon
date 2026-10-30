@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from tests.python.core import test_planner_replay_gaps
+from tests.python.core import test_planner_replay_gaps, test_semantic_wiring
 from tests.python.core.test_mcp_planner import (
     answer_native,
     begin_native,
@@ -19,6 +19,7 @@ from codex_harness.core import planner_jobs
 from codex_harness.core.mcp_planner import PlannerServer
 
 project = test_planner_replay_gaps.project
+semantic_plan = test_semantic_wiring.semantic_plan
 
 
 def tool(server, name, **arguments):
@@ -39,6 +40,429 @@ def record(server, question, quote="Approve"):
         quote_sha256=hashlib.sha256(quote.encode()).hexdigest(),
         actor_label="source-only external tester; identity and source unverified",
     )
+
+
+@pytest.mark.parametrize("interaction", [None, "native"])
+def test_semantic_defaults_to_chat_even_with_elicitation(semantic_plan, interaction):
+    """Catch capability negotiation silently prompting exec users; legacy fallback tests cannot.
+
+    Only an explicit native interaction may issue elicitation; no response is invented.
+    """
+    from tests.python.core.planning_support import source_only_expansion
+
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+    try:
+        rpc(
+            server,
+            "initialize",
+            {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}},
+        )
+        server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        response = rpc(
+            server,
+            "tools/call",
+            {
+                "name": "harness_record_confirmation",
+                "arguments": {
+                    "gate": "align",
+                    **({"interaction": interaction} if interaction else {}),
+                },
+            },
+        )
+        if interaction:
+            assert response["method"] == "elicitation/create"
+        else:
+            question = response["result"]["structuredContent"]
+            assert question["gate"] == "align+vision-lock" and server._pending_confirmation is None
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "state,registered",
+    [("absent", False), ("absent", True), ("pending", True), ("declined", True), ("stale", True)],
+)
+def test_combined_a_requires_b_before_public_spend_publish_or_execution(
+    semantic_plan, monkeypatch, state, registered
+):
+    """CT-1: omitting B cannot select legacy authority; happy journeys always prepare B.
+
+    The absent/unregistered case catches the admission early return; other cases protect
+    missing, unanswered, declined and changed-candidate consent at real public consumers.
+    """
+    import sys
+
+    from tests.python.core.planning_support import source_only_expansion
+    from tests.python.core.test_planner_confirmations import recorded_reviewer
+
+    from codex_harness.core import plan_cli, provider_call_budget, roundtable
+    from codex_harness.core.plan_store import PHASES
+
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+    launches = []
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: launches.append("review") or (0, "[]"))
+    monkeypatch.setattr(
+        planner_jobs.subprocess, "Popen", lambda *a, **k: pytest.fail("No worker before B")
+    )
+    try:
+        a = tool(
+            server,
+            "harness_understanding_card",
+            vision="Offline greeting CLI",
+            users="CLI user",
+            first_user_moment="Read Hello",
+            scope_in="Offline greeting",
+            scope_out="GUI",
+            assumptions=[],
+        )
+        assert not a["isError"] and not record(server, a["structuredContent"])["isError"]
+        for phase in PHASES[1 : PHASES.index("plan") + 1]:
+            assert not tool(server, "harness_advance", to_phase=phase)["isError"]
+        _, reviewer, _ = recorded_reviewer(store)
+        assert not tool(server, "harness_compile")["isError"]
+        if registered:
+            assert (
+                plan_cli.main(
+                    [
+                        "--workspace",
+                        str(store.workspace),
+                        "review-budget",
+                        "--campaign",
+                        "CT-1",
+                        "--max-starts",
+                        "2",
+                    ]
+                )
+                == 0
+            )
+        options = dict(
+            expected_revision=store.manifest_revision(),
+            max_parallel=1,
+            timeout=5,
+            call_cap=2,
+            workers=[
+                dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
+                for b in ("C", "B")
+            ],
+        )
+        if state != "absent":
+            b = tool(
+                server,
+                "harness_prepare_chat_confirmation",
+                gate="plan-execution",
+                execution=options,
+                reviewer_node_id=reviewer["id"],
+            )
+            assert not b["isError"], b
+            if state in {"declined", "stale"}:
+                assert not record(
+                    server, b["structuredContent"], "No" if state == "declined" else "Approve"
+                )["isError"]
+            if state == "stale":
+                changed = store.spine().node("B")
+                changed["title"] += " changed after B"
+                assert not tool(server, "harness_upsert_node", node=changed)["isError"]
+        for name, args in [
+            ("harness_advance", dict(to_phase="roundtable", user_statement="Legacy-looking words")),
+            (
+                "harness_roundtable",
+                dict(
+                    reviewers=[
+                        dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high")
+                    ],
+                    max_rounds=1,
+                    max_total=1,
+                    timeout=5,
+                ),
+            ),
+            ("harness_publish", {}),
+            ("harness_worker_start", options),
+        ]:
+            response = tool(server, name, **args)
+            assert response["isError"], response
+            assert (
+                "Needs your go-ahead (B)" in response["content"][0]["text"].rsplit("Next: ", 1)[1]
+            ), response
+        budget = provider_call_budget.planning_review_budget(store)
+        assert not launches and (budget is None or budget["spentAdmissions"] == 0)
+        assert store.status()["published_revision"] is None
+        assert not (store.workspace / "plan" / "revisions").exists()
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "offered", ["unanswered", "declined", "stale", "superseded", "approved_history"]
+)
+def test_native_after_card_uses_effective_native_credits(semantic_plan, monkeypatch, offered):
+    """CT-3: an obsolete A offer must not force B after actual native approval.
+
+    The earlier prompt-only test never consumed native credits through review spending;
+    Superseded unapproved offers grant nothing; CC rule R2 keeps an actually approved A sticky.
+    """
+    import sys
+
+    from tests.python.core.planning_support import source_only_expansion
+
+    from codex_harness.core import plan_cli, provider_call_budget, roundtable
+    from codex_harness.core.plan_store import PHASES
+
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+    launches = []
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: launches.append(1) or (0, "[]"))
+    try:
+        rpc(
+            server,
+            "initialize",
+            {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}},
+        )
+        server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        fields = dict(
+            vision="Offline greeting CLI",
+            users="CLI user",
+            first_user_moment="Read Hello",
+            scope_in="Offline greeting",
+            scope_out="GUI",
+            assumptions=[],
+        )
+        card = tool(server, "harness_understanding_card", **fields)
+        assert not card["isError"], card
+        if offered == "declined":
+            assert (
+                record(server, card["structuredContent"], "No")["structuredContent"]["state"]
+                == "declined"
+            )
+        if offered in {"superseded", "approved_history"}:
+            if offered == "approved_history":
+                assert (
+                    record(server, card["structuredContent"])["structuredContent"]["state"]
+                    == "approved"
+                )
+            newer = tool(server, "harness_understanding_card", **fields)
+            assert (
+                not newer["isError"]
+                and newer["structuredContent"]["request_id"]
+                != card["structuredContent"]["request_id"]
+            )
+        if offered == "stale":
+            vision = store.spine().node("V1")
+            vision["text"] += " Clarified before approval."
+            assert not tool(server, "harness_upsert_node", node=vision)["isError"]
+            assert (
+                record(server, card["structuredContent"])["structuredContent"]["state"] == "stale"
+            )
+        for phase in PHASES[1 : PHASES.index("plan") + 1]:
+            if store.phase() in {"align", "vision-lock"}:
+                form = rpc(
+                    server,
+                    "tools/call",
+                    {
+                        "name": "harness_record_confirmation",
+                        "arguments": {"gate": store.phase(), "interaction": "native"},
+                    },
+                )
+                assert form["method"] == "elicitation/create", form
+                completed = answer_native(
+                    server,
+                    form["id"],
+                    approve=True,
+                    statement="SOURCE-ONLY explicit native approval",
+                    conditions="",
+                )["result"]
+                assert (
+                    not completed["isError"]
+                    and completed["structuredContent"]["provenance"] == "mcp-client-elicitation"
+                )
+            assert not tool(server, "harness_advance", to_phase=phase)["isError"]
+        assert not tool(server, "harness_compile")["isError"]
+        assert (
+            plan_cli.main(
+                [
+                    "--workspace",
+                    str(store.workspace),
+                    "review-budget",
+                    "--campaign",
+                    "CT-3",
+                    "--max-starts",
+                    "2",
+                ]
+            )
+            == 0
+        )
+        advanced = tool(server, "harness_advance", to_phase="roundtable")
+        reviewed = tool(
+            server,
+            "harness_roundtable",
+            reviewers=[dict(name="native", provider="codex", model="gpt-6.1-sol", effort="medium")],
+            max_rounds=1,
+            max_total=1,
+            timeout=5,
+        )
+        held = offered == "approved_history"
+        assert advanced["isError"] is held and reviewed["isError"] is held, reviewed
+        assert launches == ([] if held else [1])
+        assert provider_call_budget.planning_review_budget(store)["spentAdmissions"] == int(
+            not held
+        )
+        if held:
+            assert "Needs your go-ahead (B)" in str(reviewed)
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["changed_native_vision", "stale_scope", "first_b_after_native_vision", "native_a_explicit_b"],
+)
+def test_b_binds_mixed_approval_routes_until_fresh_consent(semantic_plan, monkeypatch, route):
+    """CT-4: mixed A channels must not erase B or its requirement after approved A.
+
+    Prior tests renewed both native gates before any approved A, and always used combined
+    A before B; they missed stale scope, one native renewal and explicit B after native A.
+    """
+    import sys
+
+    from tests.python.core.planning_support import source_only_expansion
+    from tests.python.core.test_planner_confirmations import recorded_reviewer
+
+    from codex_harness.core import plan_cli, provider_call_budget, roundtable
+    from codex_harness.core.plan_store import PHASES
+
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+    launches = []
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: launches.append(1) or (0, "[]"))
+
+    def native(gate):
+        form = rpc(
+            server,
+            "tools/call",
+            {
+                "name": "harness_record_confirmation",
+                "arguments": {"gate": gate, "interaction": "native"},
+            },
+        )
+        assert form.get("method") == "elicitation/create", form
+        result = answer_native(
+            server, form["id"], approve=True, statement="SOURCE-ONLY scope approval", conditions=""
+        )["result"]
+        assert not result["isError"], result
+
+    try:
+        rpc(
+            server,
+            "initialize",
+            {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}},
+        )
+        server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        if route != "native_a_explicit_b":
+            a = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")
+            assert not a["isError"] and not record(server, a["structuredContent"])["isError"]
+        for phase in PHASES[1 : PHASES.index("plan") + 1]:
+            if route == "native_a_explicit_b" and store.phase() in {"align", "vision-lock"}:
+                native(store.phase())
+            assert not tool(server, "harness_advance", to_phase=phase)["isError"]
+        _, reviewer, _ = recorded_reviewer(store)
+        assert not tool(server, "harness_compile")["isError"]
+        assert (
+            plan_cli.main(
+                [
+                    "--workspace",
+                    str(store.workspace),
+                    "review-budget",
+                    "--campaign",
+                    "CT-4",
+                    "--max-starts",
+                    "2",
+                ]
+            )
+            == 0
+        )
+        options = dict(
+            expected_revision=store.manifest_revision(),
+            max_parallel=1,
+            timeout=5,
+            call_cap=2,
+            workers=[
+                dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
+                for b in ("C", "B")
+            ],
+        )
+        if route != "first_b_after_native_vision":
+            b = tool(
+                server,
+                "harness_prepare_chat_confirmation",
+                gate="plan-execution",
+                execution=options,
+                reviewer_node_id=reviewer["id"],
+            )
+            assert not b["isError"] and not record(server, b["structuredContent"])["isError"]
+        if route != "native_a_explicit_b":
+            vision = store.spine().node("V1")
+            vision["fields"]["scope_in"] = "Explicitly revised greeting scope"
+            assert not tool(server, "harness_upsert_node", node=vision, reopen_vision_lock=True)[
+                "isError"
+            ]
+            if route != "stale_scope":
+                native("vision-lock")
+            assert not tool(server, "harness_compile")["isError"]
+        advanced = tool(server, "harness_advance", to_phase="roundtable")
+        assert advanced["isError"] is (route != "native_a_explicit_b"), advanced
+        refused = tool(
+            server,
+            "harness_roundtable",
+            reviewers=[
+                dict(name="unlisted", provider="codex", model="gpt-6.1-sol", effort="xhigh")
+            ],
+            max_rounds=1,
+            max_total=1,
+            timeout=5,
+        )
+        assert refused["isError"] and "Needs your go-ahead (B)" in str(refused), refused
+        assert tool(server, "harness_publish")["isError"]
+        assert (
+            not launches
+            and provider_call_budget.planning_review_budget(store)["spentAdmissions"] == 0
+        )
+        assert store.status()["published_revision"] is None
+        # The same ordinary path recovers only within a matching approved B.
+        if route != "native_a_explicit_b":
+            if route == "stale_scope":
+                native("vision-lock")
+            assert not tool(server, "harness_compile")["isError"]
+            fresh = tool(
+                server,
+                "harness_prepare_chat_confirmation",
+                gate="plan-execution",
+                execution={**options, "expected_revision": store.manifest_revision()},
+                reviewer_node_id=reviewer["id"],
+            )
+            assert (
+                not fresh["isError"] and not record(server, fresh["structuredContent"])["isError"]
+            )
+            assert not tool(server, "harness_advance", to_phase="roundtable")["isError"]
+        reviewed = tool(
+            server,
+            "harness_roundtable",
+            reviewers=[dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high")],
+            max_rounds=1,
+            max_total=1,
+            timeout=5,
+        )
+        assert not reviewed["isError"] and launches == [1], reviewed
+        assert provider_call_budget.planning_review_budget(store)["spentAdmissions"] == 1
+    finally:
+        server.close()
 
 
 @pytest.mark.parametrize("native", ["decline", "unavailable"])
