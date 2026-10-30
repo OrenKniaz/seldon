@@ -2708,17 +2708,30 @@ def test_empty_scenarios_and_unchecked_intermediate_step_cannot_pass(project):
 
 
 def test_cli_and_mcp_acceptance_paths_and_next(project, monkeypatch, capsys):
+    """Protect one plan banner on refusal/success; prior happy paths missed double wrapping."""
     # The low-level _run facade below is a SOURCE-ONLY native-shaped producer
     # control; these calls never launch subscriptions or prove actual acceptance.
     store, repo = project
     to_accept(store)
     fix_product(repo)
+    refused = cli(
+        store.workspace,
+        "accept-run",
+        "--subject",
+        "product",
+        "--repo",
+        str(repo / "missing"),
+        machine=True,
+        code=2,
+    )
+    assert refused["text"].count("\nPlan **") == 1
     output = cli(store.workspace, "accept-scenarios", "--derive", machine=True)
     assert len(output["data"]["scenarios"]) == 2
     output = cli(
         store.workspace, "accept-run", "--subject", "product", "--repo", str(repo), machine=True
     )
     assert output["data"]["passed"]
+    assert output["text"].count("\nPlan **") == 1
     monkeypatch.setattr("codex_harness.core.roundtable._run", lambda *args: (0, "[]"))
     monkeypatch.setattr("codex_harness.core.roundtable._executable", lambda *args: "test-provider")
     assert (
@@ -2834,8 +2847,16 @@ def test_acceptance_packet_includes_helpers_and_saved_scenarios(project):
     assert len(seen) == 2 and all(item["shards"] == 1 for item in result["reviewers"])
 
 
-def assert_strict_response_contract(packet, known):
-    assert 'have exactly {"node_id", "severity", "finding", "suggestion"}' in packet
+def assert_strict_response_contract(packet, known, *, scoped):
+    if scoped:
+        assert (
+            'have exactly {"node_id", "severity", "finding", "suggestion", "classification", '
+            '"scope_reason"}' in packet
+        )
+        assert "Classification is defect-in-plan or beyond-brief" in packet
+        assert "scope_reason must explain the judgment" in packet
+    else:
+        assert 'have exactly {"node_id", "severity", "finding", "suggestion"}' in packet
     assert "All values are strings; finding must be nonempty." in packet
     assert "Severity is blocker, major, minor or note." in packet
     assert 'node_id must be one of the ids below, or "plan" for plan-wide findings.' in packet
@@ -2853,7 +2874,7 @@ def test_acceptance_response_contract_matches_strict_parser(project):
 
     def runner(launch, cwd, timeout):
         seen.append(launch.cli)
-        assert_strict_response_contract(launch.stdin_text, store.spine().ids())
+        assert_strict_response_contract(launch.stdin_text, store.spine().ids(), scoped=False)
         assert "suggestion must be one string" in launch.stdin_text
         assert "an empty string may mean no suggested fix" in launch.stdin_text
         return 0, "[]"  # Explicit mocked unit output, not provider evidence.
@@ -2975,7 +2996,7 @@ def test_acceptance_every_shard_merges_binding_and_findings(project):
 
     def runner(launch, cwd, timeout):
         counts[launch.cli] += 1
-        assert_strict_response_contract(launch.stdin_text, store.spine().ids())
+        assert_strict_response_contract(launch.stdin_text, store.spine().ids(), scoped=True)
         assert run["revision"] in launch.stdin_text
         assert "lockedVision" in launch.stdin_text and "scenarioResults" in launch.stdin_text
         item = {

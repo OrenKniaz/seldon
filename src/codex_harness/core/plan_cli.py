@@ -592,6 +592,8 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 reply["structuredContent"] = reply["structuredContent"]["result"]
         for item in reply["content"]:
             item["text"] = item["text"].rsplit("\nNext: ", 1)[0]
+            if command == "accept-run" and reply.get("jobOnly"):
+                item["text"] = planner_views.banner(server._status()) + "\n" + item["text"]
         return reply, reply.get("structuredContent")
 
     def decision():
@@ -659,7 +661,10 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 call_cap=args.call_cap,
             ),
         ),
-        "worker-status": ("harness_worker_status", lambda: dict(job_id=args.job_id)),
+        "worker-status": (
+            "harness_worker_status",
+            lambda: dict(job_id=args.job_id, include_detail=True),
+        ),
         "schema": (
             "harness_schema",
             lambda: dict(tool=args.tool, **({"kind": args.kind} if args.kind else {})),

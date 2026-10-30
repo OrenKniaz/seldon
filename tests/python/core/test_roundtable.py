@@ -1801,6 +1801,8 @@ def test_two_providers_store_columns_quality_resolutions_and_event(store, tmp_pa
         "clusteredWith",
         "memberCount",
         "memberIds",
+        "classification",
+        "scope_reason",
     }
     assert {row["provider"] for row in rows} == {"codex", "claude"}
     assert all(row["status"] == "open" and row["resolved_at"] is None for row in rows)

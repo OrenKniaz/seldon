@@ -8,6 +8,7 @@ from tests.python.core.planning_support import (
     publication_evidence,
     source_controller_roundtable,
     source_only_confirmation,
+    source_only_expansion,
 )
 
 from codex_harness.core.plan_quality import quality_report, render_quality_card
@@ -21,6 +22,7 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" 
 def store(tmp_path):
     with open_plan_store(tmp_path) as result:
         result.import_spine(FIXTURE)
+        source_only_expansion(result)
         vision = result.spine().node("V1")
         vision["fields"].update(
             users=["diners"],
@@ -390,6 +392,7 @@ def test_alignment_threshold_and_late_questions(store):
 def test_fewer_than_three_questions_before_lock(tmp_path):
     with open_plan_store(tmp_path) as store:
         store.import_spine(FIXTURE)
+        source_only_expansion(store)
         vision = store.spine().node("V1")
         vision["fields"].update(
             {key: "filled" for key in ("users", "first_user_moment", "scope_in", "scope_out")}
@@ -491,6 +494,7 @@ def test_clean_reviewer_counts_with_addressed_finding(store, status):
         "addressed": 1,
         "open": 0,
         "openFindingIds": [],
+        "advisoryFindingIds": [],
     }
     assert list(store.connection.iterdump()) == before
 

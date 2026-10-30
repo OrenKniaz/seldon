@@ -161,13 +161,13 @@ Create project `oracle/mini_one.py`: `def inc(n): return n + 1`; `oracle/mini_tw
 A new project needs no Git commit: the template baseline runs the oracle against protected proofs in temporary copies.
 Save `features.jsonl` (V1 keeps the card fields and adds compilation metadata):
 ```jsonl
-{"id":"V1","kind":"vision","title":"Mini","text":"Increment then double","parents":[],"fields":{"vision":"Increment then double","users":"CLI user","first_user_moment":"Get 6","scope_in":"Two functions","scope_out":"GUI","assumptions":[],"validation":["-m","unittest","discover","-s","tests_cli","-p"],"requirementFiles":["tests_cli"]}}
+{"id":"V1","kind":"vision","title":"Mini","text":"Increment then double","parents":[],"fields":{"vision":"Increment then double","users":"CLI user","first_user_moment":"Get 6","scope_in":"Two functions","scope_out":"GUI","assumptions":[],"validation":["-m","unittest","discover","-s","tests_cli","-p"],"requirementFiles":["tests_cli"],"quality_bar":"Deterministic arithmetic through both functions","done_feels_like":"Get 6 from the complete increment-then-double path","expansion":{"mode":"quality","reason":"Precise two-function CLI scope","upgrades":[{"id":"composed","text":"Verify the composed first moment","kind":"risk","impact":"Catch integration mistakes","disposition":"accept"},{"id":"negative","text":"Add negative-input examples","kind":"quality","impact":"Clarify arithmetic edges","disposition":"defer"},{"id":"history","text":"Keep calculation history","kind":"delight","impact":"Recall earlier results","disposition":"reject"}]}}}
 {"id":"F1","kind":"feature","title":"Arithmetic","text":"Increment then double","parents":["V1"],"fields":{}}
 {"id":"S1","kind":"story","title":"Calculate","text":"As a CLI user I get 6","parents":["F1"],"fields":{}}
 ```
 Save `requirements.jsonl`:
 ```jsonl
-{"id":"R1","kind":"requirement","title":"Increment","text":"inc(2) returns 3","parents":["S1"],"fields":{}}
+{"id":"R1","kind":"requirement","title":"Increment","text":"inc(2) returns 3","parents":["S1"],"fields":{"expansionRefs":["composed"]}}
 {"id":"R2","kind":"requirement","title":"Double increment","text":"twice(2) returns 6","parents":["S1"],"fields":{}}
 {"id":"T1","kind":"test","title":"Increment proof","text":"Observed increment","parents":["R1"],"fields":{"module":"test_one.py","level":"unit"}}
 {"id":"T2","kind":"test","title":"Double proof","text":"Observed composed result","parents":["R2"],"fields":{"module":"test_two.py","level":"unit"}}
@@ -189,11 +189,11 @@ p card --vision "Increment then double" --users "CLI user" --first-moment "Get 6
 p advance --to expand
 p ask --question "Use Python stdlib?" --node V1
 p answer --id "<Q>" --text "Yes, per the supplied mini scope."
+p node --json "@features.jsonl"
 p advance --to vision-lock
 p diagram --kind user-journey
 # Native MCP: harness_record_confirmation gate=vision-lock; answer the displayed card.
 p advance --to features
-p node --json "@features.jsonl"
 p diagram --kind feature-map
 p advance --to requirements
 p node --json "@requirements.jsonl"
