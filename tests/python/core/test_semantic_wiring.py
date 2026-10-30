@@ -172,7 +172,7 @@ def test_semantic_advance_teaches_incomplete_required_fields(semantic_plan, path
 
 
 def test_semantic_advance_admits_complete_canonical_data_unchanged(semantic_plan):
-    """Protect ordered recovery and admission; compile-only tests miss public phase refusals."""
+    """Protect phase-aware repair and admission; compile-only tests miss misleading MCP refusals."""
     store, manifest = semantic_plan
     lock_vision(store)
     store.advance("requirements", by="source-test")
@@ -183,9 +183,28 @@ def test_semantic_advance_admits_complete_canonical_data_unchanged(semantic_plan
         assert refused["isError"], refused
         assert "plan-phase-order" in str(refused)
         assert "advance to tech-stack next" in str(refused)
+        assert refused["structuredContent"]["currentPhase"] == "requirements"
+        assert refused["structuredContent"]["nextPhase"] == "tech-stack"
+        assert "Still in requirements; next legal phase: tech-stack." in str(refused)
         assert store.phase() == "requirements"
+        vision = store.spine().node("V1")
+        original = vision["fields"]["scenarios"]["scenarios"][0]["contractRefs"]
+        vision["fields"]["scenarios"]["scenarios"][0]["contractRefs"] = ["D1"]
+        store.upsert_node(vision)
+        refused = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
+        assert refused["isError"], refused
+        assert "author design node D1 (contractRefs)" in str(refused)
+        assert refused["structuredContent"]["currentPhase"] == "requirements"
+        assert refused["structuredContent"]["nextPhase"] == "tech-stack"
+        assert "Still in requirements; next legal phase: tech-stack." in str(refused)
+        assert store.phase() == "requirements"
+        vision["fields"]["scenarios"]["scenarios"][0]["contractRefs"] = original
+        store.upsert_node(vision)
         reply = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
         assert not reply["isError"], reply
+        assert "Entered tech-stack planning phase." in str(reply)
+        assert "currentPhase" not in reply.get("structuredContent", {})
+        assert "nextPhase" not in reply.get("structuredContent", {})
         assert store.phase() == "tech-stack"
         assert store.spine().to_dict() == before
         assert compile_manifest(store.spine())["semantic"] == manifest["semantic"]

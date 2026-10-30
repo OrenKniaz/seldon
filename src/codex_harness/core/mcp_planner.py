@@ -1056,7 +1056,7 @@ class PlannerServer:
             return response  # Workspace binding above remains; no invented plan/phase projection.
         return connection_reply(response, self.workspace, status)
 
-    def _workspace_refusal(self, request_id, binding, code):
+    def _workspace_refusal(self, request_id, binding, code, name=None):
         # No status/store reads here: even formatting a normal error can open a store.
         response = {
             "jsonrpc": "2.0",
@@ -1080,6 +1080,12 @@ class PlannerServer:
                 ],
             },
         }
+        if name == "harness_advance":
+            result = response["result"]
+            result["structuredContent"].update(currentPhase="unknown", nextPhase="unknown")
+            result["content"][0]["text"] += (
+                "\nCurrent phase unknown; next legal phase: unknown (workspace binding refused)."
+            )
         return connection_reply(response, self.workspace, show_recovery=True)
 
     def _wire_call_tool(self, name, arguments):
@@ -1445,6 +1451,14 @@ class PlannerServer:
                 }
             ],
         }
+        if is_error and name == "harness_advance":
+            current, next_phase = status["phase"], "unknown"
+            if current in PHASES:
+                next_phase = (PHASES[PHASES.index(current) + 1 :] or [None])[0]
+            phase = dict(currentPhase=current, nextPhase=next_phase)
+            reply.setdefault("structuredContent", {}).update(phase)
+            text = f"\nStill in {current}; next legal phase: {next_phase or 'none'}."
+            reply["content"][0]["text"] += text
         reply = connection_reply(
             reply, self.workspace, status, show_recovery=name == "harness_plan_status"
         )
@@ -2911,7 +2925,7 @@ class PlannerServer:
             }:
                 code = "workspace-assertion-required"
             if code:
-                return self._workspace_refusal(request_id, binding, code)
+                return self._workspace_refusal(request_id, binding, code, name)
             if isinstance(arguments, dict):
                 arguments = {
                     key: value for key, value in arguments.items() if key != "expected_workspace"

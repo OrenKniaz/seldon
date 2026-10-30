@@ -495,6 +495,7 @@ def test_public_ordinary_choice_two_bound_projects_keep_distinct_records(tmp_pat
     [
         ("harness_plan_start", {"idea": "Tally", "name": "Tally"}),
         ("harness_worker_start", {}),
+        ("harness_advance", {"to_phase": "tech-stack"}),
         ("harness_plan_resume", {"request_execution": True}),
         ("harness_record_confirmation", {"gate": "align"}),
         (
@@ -506,6 +507,7 @@ def test_public_ordinary_choice_two_bound_projects_keep_distinct_records(tmp_pat
 def test_wire_workspace_refuses_before_store_or_native_interception(
     tmp_path, monkeypatch, tool, arguments
 ):
+    """Protect pre-binding isolation and truthful phase unknowns; normal refusals read status."""
     from codex_harness.core import mcp_planner
 
     bound, expected = tmp_path / "bound", tmp_path / "expected"
@@ -532,6 +534,10 @@ def test_wire_workspace_refuses_before_store_or_native_interception(
             reply = workspace_wire(server, tool, **arguments, **context)
             assert reply["isError"] and code in reply["content"][0]["text"], reply
             assert reply["workspaceBinding"]["clientWorkspaceVerified"] is False
+            if tool == "harness_advance":
+                assert reply["structuredContent"]["currentPhase"] == "unknown"
+                assert reply["structuredContent"]["nextPhase"] == "unknown"
+                assert "next legal phase: unknown" in reply["content"][0]["text"]
             assert (
                 str(bound) in reply["content"][0]["text"]
                 and str(supplied) in reply["content"][0]["text"]

@@ -451,7 +451,10 @@ def semantic_spec(spine, product=None):
             for ref in scenario[field]:
                 key, pinned, revision = ref.partition("@")
                 if key not in spine.ids(kind) or pinned and revision != spine.revision(key):
-                    raise ValueError(f"Stale/unknown semantic reference: {ref}")
+                    raise ValueError(
+                        f"Stale/unknown semantic reference: {ref}; "
+                        f"author {kind} node {key} ({field}) with a fresh ref before advancing"
+                    )
                 if kind == "requirement":
                     covered.add(key)
     if covered != set(spine.ids("requirement")):
