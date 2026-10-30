@@ -1,6 +1,55 @@
 """One read-only projection of the canonical stored vision, without approval credit."""
 
+import hashlib
 import re
+from pathlib import PurePosixPath
+
+from codex_harness.core.semantic_schema import array, fields, path
+
+
+def design_references(vision_fields, workspace, *, allow_missing=False):
+    """Check visual material at its owning filesystem boundary; never execute/decode it."""
+    refs = array(vision_fields.get("designRefs", []), 16)
+    for ref in refs:
+        keys = ("path", "type", "sha256", "provenance", "use")
+        fields(ref, keys, keys)
+        if any(not isinstance(ref[k], str) or not ref[k].strip() for k in keys):
+            raise ValueError("designRefs descriptors require nonblank strings")
+        name = ref["path"]
+        relative = PurePosixPath(name)
+        file = path(workspace, name)
+        if (
+            relative.as_posix() != name
+            or ".." in relative.parts
+            or any(
+                p.is_symlink() or p.is_junction()
+                for p in (workspace / relative, *(workspace / p for p in relative.parents))
+            )
+        ):
+            raise ValueError("designRefs require canonical relative paths without reparse points")
+        if (file.exists() or not allow_missing) and (
+            not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != ref["sha256"]
+        ):
+            raise ValueError(f"designRefs missing or SHA-256 mismatch: {name}")
+    return refs
+
+
+def taste_fields(fields):
+    """Map declared taste into the displayed quality/Done baseline, without consent."""
+    result = dict(fields)
+    taste = fields.get("taste", {})
+    if not isinstance(taste, dict) or not taste:
+        return result
+    for target, keys in (
+        ("quality_bar", ("tone", "references", "brand")),
+        ("done_feels_like", ("audience", "requiredSections")),
+    ):
+        aliases = next(a for _, a in SECTIONS if a[0] == target)
+        baseline = next((fields[k] for k in aliases if k in fields), "Not recorded")
+        detail = readable({k: taste.get(k, "Not recorded") for k in keys})
+        result[target] = f"{readable(baseline)}\nTaste:\n{detail}"
+    return result
+
 
 SECTIONS = (
     ("Vision", ("vision",)),
@@ -105,7 +154,7 @@ def vision_projection(vision: dict) -> dict:
     Missing fields alone get 'Not recorded'. Empty/null/false values remain recorded
     values, and extra fields retain their complete words rather than disappearing.
     """
-    fields = vision["fields"]
+    fields = taste_fields(vision["fields"])
     used = {"validation", "requirementFiles", "schema"}
     sections = []
     for heading, aliases in SECTIONS:

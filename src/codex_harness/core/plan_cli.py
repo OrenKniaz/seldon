@@ -301,8 +301,8 @@ def parser() -> argparse.ArgumentParser:
     commands["start"].add_argument(
         "--plan-mode",
         choices=["legacy", "semantic-v1"],
-        help="New plans default to semantic-v1 for Python 3.12 CLI products (python -m pkg or "
-        "a .py entry). Pass legacy for anything else (web, GUI, services, non-Python).",
+        help="New plans default to semantic-v1 for Python CLIs AND single static web pages "
+        "(HTML/CSS/vanilla JS, no build/network); use legacy for everything else.",
     )
     commands["start"].add_argument("--setup", help="Optional setup JSON object")
     commands["schema"].add_argument("--kind")

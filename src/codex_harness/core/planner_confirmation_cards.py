@@ -26,7 +26,9 @@ def compact_card(request):
         f"Users: {_excerpt(sections['Users'])}\n"
         f"Scope in: {_excerpt(sections['Scope in'])}\n"
         f"Done: {_excerpt(sections['Done'])}\n"
-        f"Summary only. Review full details: harness_show_node id={vision['id']}. "
+        + (f"Taste: {sections['Taste']}\n" if "Taste" in sections else "")
+        + (f"Design refs: {sections['Design refs']}\n" if "Design refs" in sections else "")
+        + f"Summary only. Review full details: harness_show_node id={vision['id']}. "
         "Approve the full displayed revision, or request changes in Conditions. "
         "Leave Conditions empty only for unconditional approval."
     )

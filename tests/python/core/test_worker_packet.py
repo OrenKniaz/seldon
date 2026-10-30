@@ -377,6 +377,7 @@ def test_manifest_test_directory_commands_and_real_proof_paths(
     assert "-s tests -p" not in packet
     assert packet == build_packet(plan, plan.beads["B"], repo, None)
     assert len(packet) <= MAX_CHARACTERS
+
     shutil.copy2(plan.root / "reference/tipsplit/cli.py", repo / "tipsplit/cli.py")
     result = subprocess.run(
         [sys.executable, *command.split()[1:]], cwd=repo, capture_output=True, text=True
@@ -833,3 +834,7 @@ def test_packet_intent_is_explicit_linked_bounded_and_digested(tmp_path):
     assert "## User intent\n" + excerpt + "\n[intent truncated to 2000 characters]" in packet
     assert hashlib.sha256(excerpt.encode()).hexdigest() in packet
     assert len(packet) <= MAX_CHARACTERS
+    # Mandatory visual intent must refuse overflow; the preceding check allows prose truncation.
+    nodes[0]["fields"]["taste"] = {"tone": "Quiet", "sourceRef": "user:42"}
+    with pytest.raises(ValueError, match="Mandatory taste/designRefs"):
+        build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)

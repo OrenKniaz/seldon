@@ -28,6 +28,55 @@ def invoke(server, tool_name, **arguments):
     )["result"]
 
 
+@pytest.mark.parametrize(
+    "invalid", ["outside", "absolute", "alias", "hash", "missing", "descriptor"]
+)
+def test_web_reference_authoring_refuses_invalid_material_without_writes(tmp_path, invalid):
+    """Catch workspace escape/hash loss at the canonical writer; schema prose cannot enforce it."""
+    import hashlib
+
+    image = tmp_path / "design.png"
+    image.write_bytes(b"\x89PNG\xff")
+    server = PlannerServer(tmp_path)
+    try:
+        started = invoke(server, "harness_plan_start", idea="Static landing page", name="Web")
+        assert not started["isError"], started
+        teaching = str(started["structuredContent"]["schemaDigest"])
+        assert "Who is this for" in teaching and "Required sections?" in teaching
+        assert "productSurface: web" in teaching
+        vision = server.store.spine().node("V1")
+        ref = dict(
+            path="design.png",
+            type="image",
+            sha256=hashlib.sha256(image.read_bytes()).hexdigest(),
+            provenance="user:42",
+            use="Spacing",
+        )
+        if invalid == "outside":
+            ref["path"] = "../design.png"
+        elif invalid == "absolute":
+            ref["path"] = str(image)
+        elif invalid == "alias":
+            ref["path"] = "design.png."
+        elif invalid == "hash":
+            ref["sha256"] = "0" * 64
+        elif invalid == "missing":
+            ref["path"] = "missing.png"
+        else:
+            ref["instructions"] = "not a visual descriptor"
+        vision["fields"].update(productSurface="web", designRefs=[ref])
+        revision = server.store._revision()
+        events = server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+        refused = invoke(server, "harness_upsert_node", node=vision)
+        assert refused["isError"], refused
+        assert server.store._revision() == revision
+        assert (
+            server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0] == events
+        )
+    finally:
+        server.close()
+
+
 @pytest.mark.parametrize("source", ["PRODUCT-BRIEF.md", "specs/accepted-spec.md"])
 def test_public_short_vision_example_preserves_actual_brief_and_existing_long_vision(
     tmp_path, source

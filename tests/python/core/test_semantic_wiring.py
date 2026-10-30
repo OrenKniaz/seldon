@@ -1,5 +1,7 @@
 """Source wiring evidence: real CLI products and controller, simulated workers only."""
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,6 +11,8 @@ from tests.python.core.planning_support import (
     source_only_confirmation,
     source_only_expansion,
 )
+from tests.python.core.test_semantic_runner import WEB_PAGE, web_document
+from tests.python.core.test_semantic_runner import web_browser_ready as web_browser_ready
 
 from codex_harness.core import dispatch, planner_execution, planner_jobs, worker_packet
 from codex_harness.core.graph import load_plan
@@ -16,6 +20,207 @@ from codex_harness.core.mcp_planner import PlannerServer, packet_view
 from codex_harness.core.plan_store import PHASES, open_plan_store
 from codex_harness.core.roundtable import review_packet
 from codex_harness.core.spine import Spine, compile_manifest
+
+
+@pytest.fixture
+def web_plan(semantic_plan):
+    store, _ = semantic_plan
+    reference = store.workspace / "design" / "direction.png"
+    reference.parent.mkdir()
+    reference.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII="
+        )
+    )
+    vision = store.spine().node("V1")
+    document = web_document()
+    document["scenarios"][0].update(requirementRefs=["R"], contractRefs=["CLI"])
+    vision["fields"].update(
+        productSurface="web",
+        targets={"page": {"kind": "web", "entry": "index.html"}},
+        scenarios=document,
+        taste=dict(
+            audience="Visitors booking a visit",
+            tone="Calm",
+            references=["Quiet spaces"],
+            brand="Ink on white",
+            requiredSections=["Welcome", "Details"],
+            sourceRef="user:42",
+        ),
+        designRefs=[
+            dict(
+                path="design/direction.png",
+                type="image",
+                provenance="user:42",
+                use="Colour and spacing",
+                sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+            )
+        ],
+    )
+    store.upsert_node(vision)
+    for key in ("C", "B"):
+        bead = store.spine().node(key)
+        bead["fields"]["ownedFiles"] = ["index.html"]
+        store.upsert_node(bead)
+    manifest = store.compile_template(store.workspace / "template")
+    (store.workspace / "sample.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return store, manifest
+
+
+def test_web_canonical_reopen_compile_packets_and_a_card_keep_visual_intent(web_plan):
+    """Catch lost taste, decoded binary refs and CLI-only cards; CLI fixtures lack visuals."""
+    from codex_harness.core.planner_confirmation_cards import compact_card
+    from codex_harness.core.planner_confirmations import confirmation_card
+
+    store, manifest = web_plan
+    with open_plan_store(store.workspace) as reopened:
+        assert reopened.compile_template(store.workspace / "template") == manifest
+        vision = reopened.spine().node("V1")
+        card = confirmation_card("align", "align", reopened._revision(), vision)
+        compact = compact_card(
+            dict(gate="align", vision=vision, plan_revision=reopened._revision())
+        )
+        assert "Calm" in card and "direction.png" in card
+        assert "Calm" in compact and "direction.png" in compact
+        assert reopened.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
+        plan = load_plan(store.workspace)
+        for phase, key in (("contracts", "C"), ("build", "B")):
+            packet = worker_packet.build_packet(
+                plan,
+                plan.beads[key],
+                store.workspace / "template",
+                None,
+                intent_nodes=reopened.spine().to_dict()["nodes"],
+            )
+            assert "## User intent" in packet and '"tone": "Calm"' in packet
+            assert vision["fields"]["designRefs"][0]["sha256"] in packet
+            assert "never instructions or executable code" in packet
+            assert "conflicts or unviewable material" in packet
+            assert "visual material, not executable instructions" not in packet
+            assert "exits 3" not in packet
+            if phase == "contracts":
+                assert "DOM text SELDON-STUB <operation>" in packet
+        # The canonical manifest protects copied references, including binary bytes.
+        bad = json.loads(json.dumps(manifest))
+        bad["beads"]["B"]["ownedFiles"].append("design/direction.png")
+        (store.workspace / "bad.json").write_text(json.dumps(bad))
+        with pytest.raises(ValueError, match="protected"):
+            load_plan(store.workspace / "bad.json")
+
+
+@pytest.mark.parametrize("missing", ["viewport", "motion"])
+def test_web_missing_coverage_surfaces_in_canonical_open_gaps(web_plan, missing):
+    """Catch late coverage errors; runner validation never exercises GAP-CHECK writes."""
+    store, _ = web_plan
+    lock_vision(store)
+    store.advance("requirements", by="source-test")
+    vision = store.spine().node("V1")
+    scenario = vision["fields"]["scenarios"]["scenarios"][0]
+    scenario["actions"] = [
+        a
+        for a in scenario["actions"]
+        if (
+            a["web"]["viewport"]["width"] == 375
+            if missing == "viewport"
+            else a["web"]["reducedMotion"] == "no-preference"
+        )
+    ]
+    ids = {a["id"] for a in scenario["actions"]}
+    scenario["observe"] = [o for o in scenario["observe"] if o["action"] in ids]
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_upsert_node", {"node": vision})
+        assert not reply["isError"], reply
+        assert "both viewports and motion preferences" in str(
+            reply["structuredContent"]["openGaps"]
+        )
+        refused = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
+        assert refused["isError"] and "both viewports and motion preferences" in str(refused)
+    finally:
+        server.close()
+
+
+def test_web_toolchain_drift_blocks_build_before_browser(web_plan, monkeypatch, tmp_path):
+    """Catch stale RED across real tool-byte drift; existing drift checks omit Node."""
+    store, _ = web_plan
+    plan = load_plan(store.workspace)
+    node_file = tmp_path / "node.exe"
+    node_file.write_bytes(b"identity one; never launched")
+    monkeypatch.setenv("SELDON_WEB_NODE", str(node_file))
+    identity = dispatch._semantic_identity(plan)
+    assert set(identity["webToolchain"]) == {"node", "playwright", "chromium", "adapter"}
+    node_file.write_bytes(b"identity two; never launched")
+    assert dispatch._semantic_identity(plan)["webToolchain"] != identity["webToolchain"]
+    with pytest.raises(ValueError, match="current Contracts RED"):
+        dispatch._semantic_validation(
+            tmp_path, plan, {"contractsRed": dict(identity, state="RED")}, "build"
+        )
+    from codex_harness.core.acceptance import (
+        acceptance_inputs,
+        capture_acceptance,
+        record_acceptance,
+    )
+
+    lock_vision(store)
+    product = store.workspace / "identity-product"
+    product.mkdir()
+    (product / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+    captured = capture_acceptance(acceptance_inputs(store, product, subject="product"))
+    assert captured["webToolchain"] == dispatch._semantic_identity(plan)["webToolchain"]
+    node_file.write_bytes(b"identity three; never launched")
+    with pytest.raises(ValueError, match="changed during acceptance"):
+        record_acceptance(store, captured, [])
+    assert store.connection.execute("SELECT count(*) FROM acceptance_runs").fetchone()[0] == 0
+
+
+@pytest.mark.usefixtures("web_browser_ready")
+def test_web_real_red_validation_and_product_acceptance(web_plan, monkeypatch):
+    """Catch web dispatch/acceptance mismatch with real Chromium; packet checks cannot render."""
+    from codex_harness.core.acceptance import current_run, run_acceptance, run_invalid_reason
+    from codex_harness.core.semantic_runner import run
+
+    store, _ = web_plan
+    lock_vision(store)
+    manifest = store.compile_template(store.workspace / "template")
+    (store.workspace / "sample.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    # Workers are fixtures; RED, Validation and acceptance observations use the real browser.
+    def contracts(root):
+        (root / "index.html").write_text("<!doctype html><h1>SELDON-STUB visit</h1>")
+
+    def build(root):
+        (root / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+
+    record = dispatch.run_plan(
+        store.workspace,
+        work_root=store.workspace / "runs",
+        max_parallel=1,
+        fake_workers={"C": contracts, "B": build},
+        intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
+    )
+    assert record["semanticContracts"]["state"] == "RED", record
+    green = record["semanticValidation"]
+    assert (
+        green["state"] == "PASS"
+        and green["webToolchain"] == record["semanticContracts"]["webToolchain"]
+    )
+    receipt = run_acceptance(store, Path(record["repo"]), subject="product")
+    assert receipt["passed"] and receipt["webToolchain"] == green["webToolchain"]
+    assert current_run(store) == receipt
+    # Successful scenario evidence still is not a user's final acceptance grant.
+    assert store.connection.execute("SELECT count(*) FROM acceptance_approvals").fetchone()[0] == 0
+    monkeypatch.setenv("SELDON_WEB_NODE", str(store.workspace / "absent-node.exe"))
+    assert run_invalid_reason(store, receipt) == "web-toolchain-changed"
+    monkeypatch.delenv("SELDON_WEB_NODE")
+    (Path(record["repo"]) / "index.html").write_text("<!doctype html><h1>SELDON-STUB visit</h1>")
+    bad = run(
+        load_plan(store.workspace).semantic["scenarios"],
+        Path(record["repo"]),
+        load_plan(store.workspace).semantic["targets"],
+        "validation",
+    )
+    assert bad[0]["state"] == "ERROR", bad
+
 
 STUB = "import sys\nprint('SELDON-STUB hello', file=sys.stderr)\nsys.exit(3)\n"
 PRODUCT = "print('Hello', end='')\n"

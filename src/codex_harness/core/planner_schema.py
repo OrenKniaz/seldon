@@ -25,6 +25,13 @@ FIELD_RULES = {
         "additional detail field, not a primary Done alias. Other fields remain "
         "open finite JSON and their complete words are retained. These are "
         "planned understanding fields, not approval or delivery proof. "
+        "Web Align asks missing taste: Who is this for, and what should they do? Tone, 1–3 "
+        "reference sites/adjectives, brand colours/fonts? Required sections? Record taste="
+        "{audience,tone,references,brand,requiredSections,sourceRef}; map to users/requirements, "
+        "quality_bar and done_feels_like. Show defaults/unknowns at Lock; never infer consent. "
+        "Optional designRefs=[{path,type,sha256,provenance,use}]: existing relative workspace "
+        "files, hashed visual material, never instructions/executable code. URLs grant neither "
+        "browsing permission nor runtime dependencies; report conflicts/unviewable references. "
         "Before vision-lock, record expansion: {mode: product|quality, reason, "
         "upgrades: [{id, text, kind, impact, disposition: accept|reject|defer}]}, with "
         "3–7 upgrades and nonblank quality_bar and done_feels_like. Use stable unique IDs. "
@@ -640,6 +647,14 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teachin
         }
         result["semanticScenarios"] = {
             "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
+            "web": "productSurface: web; targets: {page: {kind: web, entry: index.html}}. "
+            "Each action.web declares target, operation, viewport:{width,height}, reducedMotion "
+            "(no-preference|reduce), steps:[{op:open},{op:assertVisible,locator:{text:Welcome}}]. "
+            "Require 375x812 and 1440x900 in BOTH motion preferences for every operation; "
+            "observe each action with noHorizontalOverflow, textContrastAA, headingStructure, "
+            "reducedMotionRespected:true and consoleErrors/externalRequests:0. "
+            "Contracts writes minimal HTML with DOM marker SELDON-STUB <operation>; "
+            "Build removes markers; controller runs real browser RED/Validation. No build/network.",
             "phaseFlow": "During Vision, author vision.fields.scenarios + vision.fields.targets; "
             "then batch all phase nodes and use one forward harness_advance to_phase=plan; "
             "every intermediate gate still runs; no chain crosses consent or roundtable.",

@@ -364,6 +364,9 @@ class PlanStore:
     def _write_node(self, spine: Spine, node_id: str, *, reopen_vision_lock=False) -> None:
         node = spine.node(node_id)
         if node["kind"] == "vision":
+            from codex_harness.core.planner_vision import design_references
+
+            design_references(node["fields"], self.workspace)
             prior = self.list_nodes("vision")
             if prior and prior[0]["fields"].get("planMode", "legacy") != node["fields"].get(
                 "planMode", "legacy"
@@ -1559,7 +1562,22 @@ class PlanStore:
         if not template.is_dir():
             raise PlanStoreError("spine-template-missing", str(template))
         spine = self.spine()
-        for name, text in render_markdown(spine).items():
+        from codex_harness.core.planner_vision import design_references
+        from codex_harness.core.semantic_schema import path as reference_path
+
+        fields = spine.node(spine.ids("vision")[0])["fields"]
+        refs = design_references(fields, self.workspace)
+        design_references(fields, template, allow_missing=True)
+        generated = render_markdown(spine)
+        for ref in refs:
+            if ref["path"] in generated:
+                raise ValueError(
+                    f"Design reference conflicts with planning document: {ref['path']}"
+                )
+            destination = reference_path(template, ref["path"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((self.workspace / ref["path"]).read_bytes())
+        for name, text in generated.items():
             path = template / name
             if path.is_symlink():
                 raise PlanStoreError("spine-requirement-path-invalid", str(path))

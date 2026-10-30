@@ -258,6 +258,9 @@ def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str
         if label == "Vision" or short != text:
             lines.append("Full vision: template/VISION.md")
     fields = vision["fields"]
+    for key in ("taste", "designRefs"):
+        if key in fields:
+            lines.append(f"{key}:\n{readable(fields[key])}")
     expansion = fields.get("expansion", {})
     for upgrade in expansion.get("upgrades", []):
         value = " | ".join(
@@ -272,7 +275,7 @@ def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str
         if isinstance(scenario, dict):
             intent = "; ".join(
                 f"{a['id'].replace('_', ' ').replace('-', ' ')} "
-                f"({a['cli'].get('operation', 'Operation not recorded')})"
+                f"({a.get('cli', a.get('web', {})).get('operation', 'Operation not recorded')})"
                 for a in scenario.get("actions", [])
             )
             scenario = f"{scenario['id']}: {intent or 'Intent not recorded'}"

@@ -439,6 +439,11 @@ def semantic_spec(spine, product=None):
     document, targets = root["scenarios"], root["targets"]
     try:
         validate(document, product or Path.cwd(), targets, require_entries=False)
+        if any(
+            (t.get("kind") == "web") != (root.get("productSurface") == "web")
+            for t in targets.values()
+        ):
+            raise ValueError("Web targets require productSurface web; CLI targets require cli")
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
             f"Invalid scenarios/targets: {error}. Author scenarios with schema, scenarios, "
@@ -509,10 +514,12 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
             bead["capabilityRefs"] = fields["capabilityRefs"]
         beads[node_id] = bead
     if spine.semantic:
-        if root.get("productSurface", "cli") != "cli" or scope or spine.ids("acceptance"):
-            raise ValueError(
-                "HTTP/GUI/outcome waves unsupported in semantic-v1; use CLI scenario data"
-            )
+        if (
+            root.get("productSurface", "cli") not in ("cli", "web")
+            or scope
+            or spine.ids("acceptance")
+        ):
+            raise ValueError("Other surfaces unsupported in semantic-v1; use Python CLI/static web")
         document, targets, covered = semantic_spec(spine, template_dir)
         phases = {b["semanticPhase"]: key for key, b in beads.items()}
         if len(beads) != 2 or set(phases) != {"contracts", "build"}:
@@ -536,7 +543,7 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
                 beads[key]["ownedFiles"]
             ):
                 raise ValueError(
-                    "Both workers must own declared CLI entry files or module __main__.py"
+                    "Both workers must own entry files (web: index.html) or module __main__.py"
                 )
         manifest = dict(
             schema="codex-harness/provider-sample-v1",
@@ -546,9 +553,14 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
                 "scenarios": document,
                 "targets": targets,
                 "contracts": [spine.node(key) for key in spine.ids("design")],
+                **({"designRefs": root["designRefs"]} if "designRefs" in root else {}),
             },
             validation=[],
-            requirementFiles=[*MARKDOWN_FILES, "SCENARIOS.json"],
+            requirementFiles=[
+                *MARKDOWN_FILES,
+                "SCENARIOS.json",
+                *(r["path"] for r in root.get("designRefs", [])),
+            ],
             beads=beads,
             integration={},
             planRevision=spine.plan_revision(),

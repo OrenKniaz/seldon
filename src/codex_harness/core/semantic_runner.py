@@ -50,6 +50,8 @@ def web_toolchain(config, evidence):
             )
     if json.loads(Path(identities["playwright"]["path"]).read_text())["version"] != "1.59.1":
         raise ValueError("Web tool requires Playwright 1.59.1")
+    if evidence is False:
+        return identities
     locations.update(
         identity=identities,
         evidence=str(Path(evidence or tempfile.mkdtemp(prefix="seldon-web-evidence-")).resolve()),

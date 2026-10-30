@@ -449,8 +449,8 @@ TOOLS = [
     _tool(
         "harness_plan_start",
         "Enter or resume Harness Plan Mode; mode is immutable after creation. "
-        "New plans default to semantic-v1 for Python 3.12 CLI products (python -m pkg or a .py "
-        "entry); pass legacy for anything else (web, GUI, services, non-Python). "
+        "New plans default to semantic-v1 for Python CLIs AND single static web pages "
+        "(HTML/CSS/vanilla JS, no build/network); pass legacy for everything else. "
         "For semantic-v1, author vision.fields.scenarios + vision.fields.targets during Vision, "
         "before advancing to tech-stack. "
         "At Align, offer optional setup once in one compact question; omission never blocks Align.",
@@ -461,8 +461,8 @@ TOOLS = [
             "plan_mode": {
                 "type": "string",
                 "enum": ["legacy", "semantic-v1"],
-                "description": "Default semantic-v1 for Python 3.12 CLI products (python -m pkg "
-                "or a .py entry). Pass legacy for anything else (web, GUI, services, non-Python).",
+                "description": "Default semantic-v1 for Python CLIs AND single static web pages "
+                "(HTML/CSS/vanilla JS, no build/network). Pass legacy for everything else.",
             },
         },
         ["idea", "name"],
@@ -2221,10 +2221,12 @@ class PlannerServer:
                 self.result_data["authoringGuidance"] = BATCH_GUIDANCE
                 return (
                     setup_card
-                    + "\nsemantic-v1 resumed (Windows Python CLI only). Planner writes DATA: "
+                    + "\nsemantic-v1 resumed (Windows Python CLIs AND single static web pages; "
+                    "HTML/CSS/vanilla JS, no build/network; everything else stays legacy). "
+                    "Planner writes DATA: "
                     "V1.fields.scenarios uses seldon/scenarios-v1; V1.fields.targets binds "
-                    "target names to {entry, argv}. References are requirement/design node IDs "
-                    "(optional @revision pin). "
+                    "CLI: {entry, argv}; web: {kind:web, entry:index.html}, productSurface:web. "
+                    "References are requirement/design node IDs (optional @revision pin). "
                     "Design nodes hold contracts. Declare exactly two beads with semanticPhase "
                     "contracts/build and Build dependsOn Contracts. No proofModule or test nodes. "
                     "No prospective audit or protected test authoring. Review, publish and packet "

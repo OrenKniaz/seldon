@@ -26,7 +26,7 @@ from codex_harness.core import roundtable
 from codex_harness.core import spine as plan_spine
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
-from codex_harness.core.semantic_runner import SOURCE_IGNORED
+from codex_harness.core.semantic_runner import SOURCE_IGNORED, web_toolchain
 from codex_harness.core.semantic_runner import run as run_semantic
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
@@ -563,6 +563,11 @@ def capture_acceptance(inputs, *, deadline=None, should_stop=None) -> dict:
     )
     return {
         **inputs,
+        **(
+            {"webToolchain": web_toolchain(None, False)}
+            if inputs.get("semantic") and "web" in inputs["scenarios"][0]["steps"][0]
+            else {}
+        ),
         "resolvedRepo": str(product),
         "revision": revision,
         "dispatchDigest": dispatch_digest,
@@ -583,6 +588,9 @@ def record_acceptance(store, captured, results, *, deadline=None) -> dict:
     current = acceptance_inputs(store, captured["repo"], subject=captured["subject"])
     if any(captured[key] != value for key, value in current.items()):
         raise PlanStoreError("acceptance-revision-changed", "Rerun on the integrated revision")
+    tools = captured.get("webToolchain")
+    if tools is not None and tools != web_toolchain(None, False):
+        raise PlanStoreError("acceptance-revision-changed", "Web tools changed during acceptance")
     result = {
         "id": uuid4().hex,
         "repo": captured["resolvedRepo"],
@@ -592,6 +600,7 @@ def record_acceptance(store, captured, results, *, deadline=None) -> dict:
         "planRevision": captured["planRevision"],
         "scenarioRevision": captured["scenarioRevision"],
         "results": results,
+        **({"webToolchain": captured["webToolchain"]} if "webToolchain" in captured else {}),
         "passed": bool(results) and all(r["passed"] for r in results),
     }
     _metadata_remaining(deadline)
@@ -676,6 +685,12 @@ def run_invalid_reason(store, run) -> str | None:
         return "acceptance-scenarios-required"
     if run["planRevision"] != store._revision():
         return "plan-changed"
+    if "webToolchain" in run:
+        try:
+            if run["webToolchain"] != web_toolchain(None, False):
+                return "web-toolchain-changed"
+        except (OSError, ValueError):
+            return "web-toolchain-changed"
     raw = _raw_scenarios(store)
     legacy_unbound = any("nodeRevisions" not in item for item in raw)
     scenarios = store.acceptance_scenarios()
@@ -723,6 +738,7 @@ INVALID_MESSAGES = {
         "The revision algorithm was upgraded; the v1 product revision still matches."
     ),
     "product-changed": "The product revision has changed or its repository is unavailable.",
+    "web-toolchain-changed": "The web toolchain changed; rerun with the current tools.",
     "legacy-unbound": (
         "The saved legacy scenarios lack node revision bindings; their raw hash still matches "
         "the acceptance run. Rebind to back-fill bindings and rerun all scenarios."

@@ -1723,6 +1723,11 @@ def _semantic_identity(plan):
 
     return {
         "planRevision": plan.plan_revision,
+        **(
+            {"webToolchain": semantic_runner.web_toolchain(None, False)}
+            if any(t.get("kind") == "web" for t in plan.semantic["targets"].values())
+            else {}
+        ),
         "scenarioBinding": hashlib.sha256(
             json.dumps(dict(plan.semantic), sort_keys=True).encode()
         ).hexdigest(),
