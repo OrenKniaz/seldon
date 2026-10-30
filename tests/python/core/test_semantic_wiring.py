@@ -172,26 +172,18 @@ def test_semantic_advance_teaches_incomplete_required_fields(semantic_plan, path
 
 
 def test_semantic_advance_admits_complete_canonical_data_unchanged(semantic_plan):
-    """Protect phase-aware repair and admission; compile-only tests miss misleading MCP refusals."""
+    """Catch chained gate bypass/event loss; single-step tests miss repair -> plan journeys."""
     store, manifest = semantic_plan
     lock_vision(store)
     store.advance("requirements", by="source-test")
     before = store.spine().to_dict()
     server = PlannerServer(store.workspace)
     try:
-        refused = server.call_tool("harness_advance", {"to_phase": "plan"})
-        assert refused["isError"], refused
-        assert "plan-phase-order" in str(refused)
-        assert "advance to tech-stack next" in str(refused)
-        assert refused["structuredContent"]["currentPhase"] == "requirements"
-        assert refused["structuredContent"]["nextPhase"] == "tech-stack"
-        assert "Still in requirements; next legal phase: tech-stack." in str(refused)
-        assert store.phase() == "requirements"
         vision = store.spine().node("V1")
         original = vision["fields"]["scenarios"]["scenarios"][0]["contractRefs"]
         vision["fields"]["scenarios"]["scenarios"][0]["contractRefs"] = ["D1"]
         store.upsert_node(vision)
-        refused = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
+        refused = server.call_tool("harness_advance", {"to_phase": "plan"})
         assert refused["isError"], refused
         assert "author design node D1 (contractRefs)" in str(refused)
         assert refused["structuredContent"]["currentPhase"] == "requirements"
@@ -200,14 +192,100 @@ def test_semantic_advance_admits_complete_canonical_data_unchanged(semantic_plan
         assert store.phase() == "requirements"
         vision["fields"]["scenarios"]["scenarios"][0]["contractRefs"] = original
         store.upsert_node(vision)
-        reply = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
+
+        def records():
+            return [
+                (row[0], json.loads(row[1]))
+                for row in store.connection.execute(
+                    "SELECT kind, payload_json FROM events ORDER BY id"
+                )
+            ]
+
+        start = len(records())
+        reply = server.call_tool("harness_advance", {"to_phase": "plan"})
         assert not reply["isError"], reply
-        assert "Entered tech-stack planning phase." in str(reply)
+        assert "Entered plan planning phase." in str(reply)
         assert "currentPhase" not in reply.get("structuredContent", {})
         assert "nextPhase" not in reply.get("structuredContent", {})
-        assert store.phase() == "tech-stack"
+        assert store.phase() == "plan"
+        chained = records()[start:]
+        assert [(kind, event["from"], event["to"]) for kind, event in chained] == [
+            ("phase-advanced", "requirements", "tech-stack"),
+            ("phase-advanced", "tech-stack", "plan"),
+        ]
+        same = server.call_tool("harness_advance", {"to_phase": "plan"})
+        assert same["isError"] and "plan-phase-order" in str(same)
+        assert not server.call_tool("harness_advance", {"to_phase": "requirements"})["isError"]
+        start = len(records())
+        for phase in ("tech-stack", "plan"):
+            assert not server.call_tool("harness_advance", {"to_phase": phase})["isError"]
+        assert records()[start:] == chained
         assert store.spine().to_dict() == before
         assert compile_manifest(store.spine())["semantic"] == manifest["semantic"]
+    finally:
+        server.close()
+
+
+def test_semantic_advance_chain_retains_steps_before_first_refusal(semantic_plan):
+    """Catch whole-chain rollback; the requirements-start test has no earlier successful step."""
+    store, _ = semantic_plan
+    lock_vision(store)
+    vision = store.spine().node("V1")
+    del vision["fields"]["scenarios"]["scenarios"][0]["actions"][0]["cli"]["operation"]
+    store.upsert_node(vision)
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_advance", {"to_phase": "plan"})
+        assert reply["isError"] and "plan-semantic-scenarios-invalid" in str(reply)
+        assert reply["structuredContent"]["currentPhase"] == "requirements"
+        assert reply["structuredContent"]["nextPhase"] == "tech-stack"
+        assert store.phase() == "requirements"
+        events = store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='phase-advanced' ORDER BY id"
+        ).fetchall()
+        assert [(json.loads(row[0])["from"], json.loads(row[0])["to"]) for row in events][-1] == (
+            "features",
+            "requirements",
+        )
+        server.close()
+        with open_plan_store(store.workspace) as reopened:
+            assert reopened.phase() == "requirements"
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "current,target,consent",
+    [
+        ("align", "requirements", {}),
+        ("expand", "features", {}),
+        ("vision-lock", "requirements", {}),
+        ("requirements", "roundtable", {}),
+        ("requirements", "publish", {}),
+        ("tech-stack", "roundtable", {}),
+        ("plan", "publish", {}),
+        ("requirements", "plan", {"user_statement": "Approve"}),
+        ("requirements", "plan", {"by": "user"}),
+    ],
+)
+def test_semantic_advance_chain_keeps_strict_boundaries(semantic_plan, current, target, consent):
+    """Catch consent/review crossing; single-step gate tests cannot detect eager chain writes."""
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    while PHASES.index(store.phase()) < PHASES.index(current):
+        if store.phase() in {"align", "vision-lock"}:
+            source_only_confirmation(store, store.phase())
+        store.advance(PHASES[PHASES.index(store.phase()) + 1], by="source-test")
+    before = store.connection.execute("SELECT * FROM events ORDER BY id").fetchall()
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_advance", {"to_phase": target, **consent})
+        assert reply["isError"], reply
+        expected = "Confirmation fields require" if consent else "plan-phase-order"
+        assert expected in str(reply)
+        assert reply["structuredContent"]["currentPhase"] == current
+        assert store.phase() == current
+        assert store.connection.execute("SELECT * FROM events ORDER BY id").fetchall() == before
     finally:
         server.close()
 

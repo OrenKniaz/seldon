@@ -2824,8 +2824,11 @@ def test_advance_advertises_optional_confirmation_transport(server):
     )
     assert "before advancing to tech-stack" in start["description"]
     advance = next(tool for tool in tools if tool["name"] == "harness_advance")
-    assert "Advance one phase at a time: " + " -> ".join(PHASES) in advance["description"]
-    assert "From requirements, tech-stack is next" in advance["description"]
+    assert "Advance phases: " + " -> ".join(PHASES) in advance["description"]
+    assert (
+        "May move forward through pre-roundtable phases; each gate still applies"
+        in advance["description"]
+    )
     schema = advance["inputSchema"]
     assert set(schema["properties"]) == {"to_phase", "user_statement", "by", "expected_workspace"}
     assert schema["required"] == ["to_phase", "expected_workspace"]

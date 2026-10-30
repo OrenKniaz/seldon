@@ -541,9 +541,10 @@ TOOLS = [
     ),
     _tool(
         "harness_advance",
-        "Advance one phase at a time: align -> expand -> vision-lock -> features -> "
+        "Advance phases: align -> expand -> vision-lock -> features -> "
         "requirements -> tech-stack -> plan -> roundtable -> publish -> execute -> accept. "
-        "From requirements, tech-stack is next. Only for plan -> roundtable, carry the user's "
+        "May move forward through pre-roundtable phases; each gate still applies. "
+        "Only for plan -> roundtable, carry the user's "
         "exact supplied confirmation words in user_statement, with optional by=user or "
         "proxy:<name>. Supplied words default to user; a bare advance remains planner-origin.",
         {"to_phase": STRING, "user_statement": STRING, "by": STRING},
@@ -2309,7 +2310,16 @@ class PlannerServer:
                 by = args.get("by", "user")
                 if by != "user" and not (by.startswith("proxy:") and by[6:].strip()):
                     raise ValueError("Confirmation by must be user or proxy:<name>")
-            store.advance(args["to_phase"], by=by, statement=statement)
+            steps = [args["to_phase"]]
+            if args["to_phase"] in PHASES:
+                start, end = PHASES.index(store.phase()), PHASES.index(args["to_phase"])
+                if start + 1 < end < PHASES.index("roundtable") and not {
+                    "align",
+                    "vision-lock",
+                }.intersection(PHASES[start:end]):
+                    steps = PHASES[start + 1 : end + 1]
+            for phase in steps:
+                store.advance(phase, by=by, statement=statement)
             body = f"Entered {args['to_phase']} planning phase."
             kind = PHASE_DIAGRAMS.get(args["to_phase"])
             if kind:
