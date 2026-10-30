@@ -1475,6 +1475,28 @@ class PlannerServer:
         return reply
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        job = self.result_data or {}
+        if (
+            status.get("planMode") == "semantic-v1"
+            and status.get("phase") in {"execute", "accept"}
+            and (revision := status.get("published_revision"))
+        ):
+            from codex_harness.core.planner_jobs import _directory, worker_job_status
+
+            if _directory(self.workspace, revision).is_dir():
+                job = worker_job_status(self.workspace, revision)
+        if (
+            not error
+            and job.get("run", {}).get("semanticValidation", {}).get("state") == "PASS"
+            and not status.get("acceptance", {}).get("lastRunSubject")
+            # Any attempt, even queued, means the offer was taken; status hints take over.
+            and not self.store.connection.execute("SELECT 1 FROM acceptance_attempts").fetchone()
+        ):
+            return (
+                "Validation is not final acceptance. Tell the user final acceptance against "
+                "their brief is next; offer to run harness_accept_run. If they agree, run it "
+                "and report its terminal status via harness_accept_status."
+            )
         if name == "harness_review_policy" and not error:
             revision = self.result_data["example"]["expectedManifestRevision"]
             reasons = status.get("reviewPolicy", {}).get("reasons", [])
@@ -1612,16 +1634,6 @@ class PlannerServer:
             and self.result_data
             and self.result_data.get("jobId")
         ):
-            if (
-                self.result_data.get("status") == "completed"
-                and self.result_data.get("run", {}).get("semanticValidation", {}).get("state")
-                == "PASS"
-            ):
-                return (
-                    "Validation is not final acceptance. Tell the user final acceptance against "
-                    "their brief is next; offer to run harness_accept_run. If they agree, run it "
-                    "and report its terminal status via harness_accept_status."
-                )
             return "harness_worker_status job_id=" + self.result_data["jobId"]
         if (
             name in {"harness_publish", "harness_plan_status"}
@@ -2413,7 +2425,9 @@ class PlannerServer:
             return (
                 f"Worker job {self.result_data['jobId']}: {self.result_data['status']}\n"
                 + "Workers implement; the planner steers. Read original dispatch evidence before "
-                "claiming delivery. Current liveness: " + self.result_data["liveness"]
+                f"claiming delivery. Current liveness: {self.result_data['liveness']}"
+                + "\nVerify behavior through Seldon scenarios; do not change file permissions/ACLs "
+                "or system settings for ad-hoc checks."
             )
         raise ValueError(f"Unknown tool: {name}")
 

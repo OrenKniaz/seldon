@@ -1414,7 +1414,8 @@ def test_worker_mcp_start_status_reconnect_preserve_one_admission(
 ):
     """Protect admission and delivery guidance through persisted jobs, without providers.
 
-    Catch a poll-only hint after Validation PASS; the old reconnect check had no run outcome.
+    Catch a poll-only hint after Validation PASS and accidental legacy phase changes;
+    the old reconnect check had no run outcome or plan-status check.
     """
     from types import SimpleNamespace
 
@@ -1501,6 +1502,13 @@ def test_worker_mcp_start_status_reconnect_preserve_one_admission(
                 assert "terminal status via harness_accept_status" in hint
             else:
                 assert hint == "harness_worker_status job_id=" + data["jobId"]
+        store.advance("execute", by="source-test")
+        legacy = rpc(client, "tools/call", {"name": "harness_plan_status"})["result"]
+        assert not legacy["isError"], legacy
+        assert "planMode" not in legacy["structuredContent"]
+        assert legacy["content"][0]["text"].split("Next: ", 1)[1] == (
+            "Follow worker progress and proof against the published revision."
+        )
     finally:
         client.close()
 

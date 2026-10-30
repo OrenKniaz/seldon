@@ -871,8 +871,26 @@ def test_stored_module_binding_dispatches_relative_argv_from_caller_cwd(semantic
 
 
 def test_canonical_plan_contracts_red_build_validation_pass(semantic_plan):
-    """Protect producer→dispatch→real CLI success; catches RED-as-proof and final rerun of stubs."""
+    """Protect producer→dispatch→CLI→next action; catch dropped acceptance after reconnect.
+
+    Worker-only reply tests miss phase/status projections and terminal acceptance suppression.
+    """
+    from codex_harness.core.acceptance import run_acceptance
+
     store, manifest = semantic_plan
+    lock_vision(store)
+    for phase in PHASES[PHASES.index(store.phase()) + 1 : PHASES.index("roundtable") + 1]:
+        store.advance(phase, by="source-test")
+    manifest = store.compile_template(store.workspace / "template")
+    (store.workspace / "sample.json").write_text(json.dumps(manifest))
+    source_controller_roundtable(
+        store,
+        process_stub=lambda *_: (0, "[]"),
+        reviewers=[dict(name="source-reviewer", provider="codex")],
+        executable_for=lambda p: p,
+    )
+    store.advance("publish", by="source-test")
+    store.publish(by="source-test", export_dir=store.workspace / "published")
     packet = worker_packet.build_packet(
         load_plan(store.workspace),
         {**manifest["beads"]["C"], "id": "C"},
@@ -913,6 +931,33 @@ def test_canonical_plan_contracts_red_build_validation_pass(semantic_plan):
     )
     assert resumed["status"] == dispatch.STATUS_MOCK_ONLY, resumed
     assert resumed["semanticValidation"] == green
+
+    server = PlannerServer(store.workspace)
+    try:
+        for phase in ("execute", "accept"):
+            advanced = server.call_tool("harness_advance", {"to_phase": phase})
+            assert not advanced["isError"], advanced
+            hint = advanced["content"][0]["text"].split("Next: ", 1)[1]
+            assert "offer to run harness_accept_run" in hint
+            for tool, arguments in (
+                ("harness_plan_status", {}),
+                ("harness_worker_status", {"job_id": job.name}),
+            ):
+                reply = server.call_tool(tool, arguments)
+                assert not reply["isError"], reply
+                assert reply["content"][0]["text"].split("Next: ", 1)[1] == hint
+        result = run_acceptance(store, record["repo"], subject="product")
+        assert result["passed"], result
+    finally:
+        server.close()
+    # A fresh connection must read the terminal run, rather than offer it again.
+    server = PlannerServer(store.workspace)
+    try:
+        reply = server.call_tool("harness_plan_status", {})
+        assert not reply["isError"], reply
+        assert "Validation is not final acceptance" not in reply["content"][0]["text"]
+    finally:
+        server.close()
 
 
 @pytest.mark.parametrize(
