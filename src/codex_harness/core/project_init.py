@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from datetime import UTC, datetime
 from importlib.metadata import distribution
 from pathlib import Path
 
@@ -20,6 +21,70 @@ from codex_harness.core.preflight import preflight_report
 IGNORE_START = f"# {MARKER} begin\n"
 IGNORE_END = f"# {MARKER} end\n"
 STORE_MARKER = ".codex-harness/.seldon-init"
+
+
+def offline_reviewers(user_models=None):
+    """Read offerings only; cache freshness is bounded to 24 hours, never entitlement."""
+    from codex_harness.core.intake import _model, canonical_digest
+    from codex_harness.core.roundtable import _executable
+
+    cache = Path.home() / ".codex/models_cache.json"
+    models, metadata = [], {}
+    try:
+        mtime = cache.stat().st_mtime
+        if 0 <= datetime.now(UTC).timestamp() - mtime <= 86400:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            version = data.get("client_version")
+            if version is not None and not isinstance(version, str):
+                raise ValueError("Invalid cache version")
+            metadata = {"mtime": mtime, "version": version}
+            for row in data["models"]:
+                slug = _model(row["slug"])
+                levels = row["supported_reasoning_levels"]
+                if not isinstance(levels, list):
+                    raise ValueError("Invalid cached levels")
+                if not levels and (slug, None) not in models:
+                    models.append((slug, None))
+                for level in levels:
+                    effort = level["effort"]
+                    if not isinstance(effort, str) or not effort.strip():
+                        raise ValueError("Invalid cached effort")
+                    if (slug, effort) not in models:
+                        models.append((slug, effort))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        models, metadata = [], {}
+    supplied = user_models if user_models is not None else {}
+    if not isinstance(supplied, dict) or set(supplied) - {"codex", "claude", "copilot"}:
+        raise ValueError("Expected supported provider-to-model mapping")
+    providers = []
+    for provider in ("codex", "claude", "copilot"):
+        executable = _executable(provider, None)
+        choices = [
+            {"model": slug, "effort": ({"kind": "named", "value": effort}
+                                      if effort else {"kind": "unsupported"}),
+             "availability": "offered", "reviewPathSupported": False,
+             "reason": "unverified; cached, not entitlement"}
+            for slug, effort in (models if provider == "codex" else [])
+        ]
+        if provider in supplied:
+            choices.append({"model": _model(supplied[provider]), "effort": {"kind": "unsupported"},
+                            "availability": "unknown", "reviewPathSupported": False,
+                            "reason": "user-supplied model; unverified"})
+        evidence = {"executable": executable, "cache": metadata if provider == "codex" else {},
+                    "choices": choices}
+        providers.append({
+            "provider": provider, "executable": executable, "executableDigest": None,
+            "version": None, "installed": bool(executable), "authentication": "unknown",
+            "discovery": "observed" if choices else "unknown", "choices": choices,
+            "source": {"kind": "provider-local-metadata", "reference":
+                       ("~/.codex/models_cache.json " if provider == "codex" else "resolver ")
+                       + json.dumps(evidence["cache"]),
+                       "digest": canonical_digest(evidence)},
+            "reason": ("cached, not entitlement" if provider == "codex" and models
+                       else "model list unknown")
+                       + "; installed != authenticated; remaining usage unknown",
+        })
+    return providers
 
 
 def project_root(value):
@@ -144,6 +209,8 @@ def guide(root, name):
         f"Project: {root}\n\n"
         "Open a chat in this folder and describe what to build, "
         'e.g. "Build a small word-count CLI."\n\n'
+        "At Align, show available review providers/models and ask the user to pick "
+        "reviewers (deferrable until review).\n"
         "Host integrations are experimental until their actual planning journey is verified.\n"
         "Codex: open this folder and choose Trust. Claude Code: approve the project server\n"
         "when prompted. VS Code: review/approve seldon in workspace MCP configuration.\n\n"

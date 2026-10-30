@@ -1,10 +1,6 @@
-"""Activation regressions, absent from prior planner/provider tests.
+"""Activation writer and offline reviewer observation proofs.
 
-These tests protect the new filesystem writer boundary. They catch overwritten
-host settings, rerun drift, cross-project replacement and deletion of unowned
-files; existing planner tests do not call project activation at all.
-Installed-command/MCP integration is additionally proven from the built wheel.
-"""
+Real files catch overwrite, resolver and cache bugs absent from injected value tests."""
 
 import json
 import os
@@ -18,6 +14,41 @@ import pytest
 
 from codex_harness.core import project_init, seldon_cli
 from codex_harness.core.init_hosts import HOSTS, server_entry
+
+
+@pytest.fixture
+def offline_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    def no_launch(*args, **kwargs):
+        raise AssertionError("Offline observation must not launch a process")
+    monkeypatch.setattr(subprocess, "Popen", no_launch)
+    for name in ("codex", "claude", "copilot"):
+        executable = tmp_path / (name + (".cmd" if os.name == "nt" else ""))
+        executable.write_text("exit 99\n")
+        executable.chmod(0o755)
+    cache = tmp_path / ".codex/models_cache.json"
+    cache.parent.mkdir()
+    cache.write_text(json.dumps({"client_version": "fixture-1", "identity": "PRIVATE",
+        "tokens": "SECRET", "models": [{"slug": "observed-model", "identity": "PRIVATE",
+        "supported_reasoning_levels": [{"effort": "high", "description": "SECRET"}]}]}))
+    return cache
+
+
+@pytest.mark.parametrize("state", ["absent", "stale", "malformed"])
+def test_offline_catalog_unknown_without_usable_cache(offline_cache, state):
+    """Prevent stale or broken metadata claiming offerings; prior tests inject valid catalogs."""
+    from codex_harness.core.intake import validate_catalog
+    if state == "absent":
+        offline_cache.unlink()
+    elif state == "stale":
+        os.utime(offline_cache, (1, 1))
+    else:
+        offline_cache.write_text("{")
+    rows = validate_catalog({"discovery": "offline"})["providers"]
+    assert all(not p["choices"] and "model list unknown" in p["reason"] for p in rows)
+    assert all(p["installed"] and p["authentication"] == "unknown" for p in rows)
 
 
 def options(path, **values):

@@ -1,4 +1,4 @@
-"""Pure intake and reviewer values; no discovery, approval creation or execution.
+"""Intake and reviewer values; explicit offline observations, no provider execution.
 
 Missing derived catalog hashes are computed; supplied hashes must match. Choice
 hashes cover exactly provider, executable, executableDigest, version, model and
@@ -13,10 +13,10 @@ import json
 import re
 from collections import Counter
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Literal, TypedDict
-from uuid import UUID
+from uuid import UUID, uuid4
 
 Recipe = Literal["baseline-amendment", "coherent-plan", "outcome-waves"]
 Value = dict[str, Any]
@@ -302,12 +302,19 @@ def _model(value: Any) -> str:
 
 
 def validate_catalog(observation: Value) -> ReviewerCatalogV1:
-    """Normalize injected evidence only. Preserve ordered providers and choices.
+    """Normalize supplied evidence or an explicit offline request; preserve choice order.
 
     Catalog entries are offerings, never access or review-path proof. Legacy
     available claims are normalized to offered; actual launches observe access.
     No wall-clock expiry is invented: freshness is selection's exact catalog binding.
     """
+    if isinstance(observation, dict) and observation.get("discovery") == "offline":
+        from codex_harness.core.project_init import offline_reviewers
+
+        _object(observation, "discovery", "offline observation", "userModels")
+        observation = {"schema": "dot-reviewer-catalog-v1", "id": f"RC-{uuid4()}",
+                       "observedAt": datetime.now(UTC).isoformat(),
+                       "providers": offline_reviewers(observation.get("userModels"))}
     canonical_digest(observation)
     result = deepcopy(_object(observation, "schema id observedAt providers", "catalog", "digest"))
     _enum(result["schema"], ("dot-reviewer-catalog-v1",), "catalog.schema")

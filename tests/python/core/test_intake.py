@@ -1,10 +1,11 @@
-"""Value-boundary proofs with injected observations, never provider discovery."""
+"""Value-boundary proofs, plus explicit offline observations without provider launches."""
 
 import hashlib
 import json
 from copy import deepcopy
 
 import pytest
+from tests.python.core.test_project_init import offline_cache  # noqa: F401
 
 from codex_harness.core.intake import (
     canonical_digest,
@@ -13,6 +14,29 @@ from codex_harness.core.intake import (
     validate_selection,
 )
 from codex_harness.core.spine import Spine
+
+
+def test_offline_producer_reaches_catalog_event(offline_cache, tmp_path):  # noqa: F811
+    """Catch dropped provenance/privacy across real writer; supplied fixtures miss producer."""
+    from tests.python.core.test_plan_store import draft_inputs
+
+    from codex_harness.core.plan_store import open_plan_store
+    with open_plan_store(tmp_path) as store:
+        draft_inputs(store)
+        result = store.record_reviewer_catalog({"discovery": "offline", "userModels":
+            {"claude": "user-model", "copilot": "user-model"}}, store.spine().plan_revision())
+        catalog = result["catalog"]
+        rows = catalog["providers"]
+        choice = rows[0]["choices"][0]
+        assert (choice["model"], choice["effort"]["value"]) == ("observed-model", "high")
+        assert "cached, not entitlement" in choice["reason"]
+        assert all("unverified" in p["choices"][0]["reason"] for p in rows)
+        assert all("remaining usage unknown" in p["reason"] and p["source"]["digest"] for p in rows)
+        assert "fixture-1" in rows[0]["source"]["reference"]
+        assert "SECRET" not in json.dumps(catalog) and "PRIVATE" not in json.dumps(catalog)
+        event = store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='reviewer-catalog-recorded'").fetchone()
+        assert json.loads(event[0])["catalog"] == catalog
 
 HASH = "a" * 64
 
