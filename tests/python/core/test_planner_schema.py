@@ -94,7 +94,9 @@ def test_public_compile_help_populates_existing_vision_metadata_and_compiles(tmp
         assert not invoke(server, "harness_upsert_node", node=node)["isError"]
         original = deepcopy(node)
         vision_help = invoke(server, "harness_schema", kind="vision")["structuredContent"]
-        compile_help = invoke(server, "harness_schema", tool="harness_compile")["structuredContent"]
+        compile_help = invoke(
+            server, "harness_schema", tool="harness_compile", include_teaching=True
+        )["structuredContent"]
         observe = compile_help["semanticScenarios"]["observe"]
         assert 'stderrEquals="message\\n" proves exact framing' in observe
         assert "stderrContains alone proves neither line count nor absence of traceback" in observe

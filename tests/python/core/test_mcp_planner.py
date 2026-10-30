@@ -63,8 +63,9 @@ def test_status_summary_full_fetch_and_pending_question_preserve_canonical_autho
         assert summary["nodeId"] == node["id"] and summary["planRevision"] == revision
         assert summary["nodeRevision"] == server.store.spine().revision(node["id"])
         assert "Summary only" in compact_reply["content"][0]["text"]
-        assert {k: v for k, v in compact.items() if k != "visionProjection"} == {
-            k: v for k, v in before.items() if k != "visionProjection"
+        summarized = {"visionProjection", "continuation", "reviewResolution", "digest"}
+        assert {k: v for k, v in compact.items() if k not in summarized} == {
+            k: v for k, v in before.items() if k not in summarized
         }
         assert server._status() == before and server.store.spine().node("V1") == node
         full_reply = workspace_wire(
@@ -1146,7 +1147,9 @@ def test_native_status_uses_current_credit_and_distinguishes_history(server, cha
     call(server, "harness_advance", to_phase="vision-lock")
     native_confirm(server, "vision-lock", "Synthetic native vision confirmation")
     call(server, "harness_advance", to_phase="features")
-    original = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
+    original = rpc(
+        server, "tools/call", {"name": "harness_plan_status", "arguments": {"include_detail": True}}
+    )["result"]
     original_text = original["content"][0]["text"]
     assert original["structuredContent"]["approval"]["granted"]
     assert "Current vision-lock approval: granted" in original_text
@@ -1173,7 +1176,9 @@ def test_native_status_uses_current_credit_and_distinguishes_history(server, cha
                 statement="Before approval, review",
                 conditions="First show the findings digest.",
             )
-    current = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
+    current = rpc(
+        server, "tools/call", {"name": "harness_plan_status", "arguments": {"include_detail": True}}
+    )["result"]
     status, text = current["structuredContent"], current["content"][0]["text"]
     if change == "metadata":
         assert status["approval"]["granted"] and not status["vision_lock_stale"]
@@ -1201,7 +1206,9 @@ def test_native_status_keeps_legacy_statement_without_approval_credit(server):
     # Explicit legacy fixture: a historical row is not a native client response.
     with server.store._transaction():
         server.store._approve("vision-lock", "proxy:historical", "Historical words remain intact")
-    result = rpc(server, "tools/call", {"name": "harness_plan_status"})["result"]
+    result = rpc(
+        server, "tools/call", {"name": "harness_plan_status", "arguments": {"include_detail": True}}
+    )["result"]
     status, text = result["structuredContent"], result["content"][0]["text"]
     assert not status["approval"]["granted"]
     assert "Current vision-lock approval: not granted" in text
@@ -1457,7 +1464,10 @@ def test_worker_mcp_start_status_reconnect_preserve_one_admission(
         status = rpc(
             client,
             "tools/call",
-            {"name": "harness_worker_status", "arguments": {"job_id": data["jobId"]}},
+            {
+                "name": "harness_worker_status",
+                "arguments": {"job_id": data["jobId"], "include_detail": True},
+            },
         )["result"]
         assert status["structuredContent"] == data
         assert "harness_worker_status job_id=" in status["content"][0]["text"]
@@ -2142,7 +2152,9 @@ def test_public_compile_then_packet_current_manifest_without_execution(
             target.write_bytes(source.read_bytes())
     before_phase = server.store.phase()
     before_packet = call(server, "harness_packet_view", error=True, id="A", provider="codex")
-    reply = rpc(server, "tools/call", {"name": "harness_compile", "arguments": {}})["result"]
+    reply = rpc(
+        server, "tools/call", {"name": "harness_compile", "arguments": {"include_detail": True}}
+    )["result"]
     print(json.dumps({"packetBeforeCompile": before_packet, "publicCompile": reply}))
     assert not reply["isError"], reply
     manifest = reply["structuredContent"]
@@ -2344,7 +2356,9 @@ def test_draft_tools_same_store_reopen_and_unmet_chat(tmp_path):
         server.close()
         reopened = invoke("harness_waves")
         assert reopened == projected
-        assert "Outcome 2" in invoke("harness_plan_status")["content"][0]["text"]
+        assert (
+            "Outcome 2" in invoke("harness_plan_status", include_detail=True)["content"][0]["text"]
+        )
         stale = rpc(server, "tools/call", dict(name="harness_wave_map", arguments=inputs))["result"]
         assert stale["isError"] and "plan-spine-stale" in stale["content"][0]["text"]
     finally:
@@ -2475,7 +2489,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
     assert "phase 1/11: align" in run(
         "harness_plan_start", plan_mode="legacy", idea="Split fairly", name="tip-split"
     )
-    assert "approval:align" in run("harness_plan_status")
+    assert "approval:align" in run("harness_plan_status", include_detail=True)
     assert "Durable plan resume" in run("harness_plan_resume")
     run("harness_schema", kind="requirement")
     card = run(

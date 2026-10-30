@@ -513,7 +513,7 @@ def typed_draft_help(tool):
     return result
 
 
-def schema_help(tools, *, tool="harness_upsert_node", kind=None):
+def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teaching=False):
     """Return actual transport schema plus advisory help for canonical node fields."""
     contract = next((item for item in tools if item["name"] == tool), None)
     if contract is None:
@@ -523,8 +523,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
     result = {
         "tool": tool,
         "inputSchema": deepcopy(contract["inputSchema"]),
-        "tools": [item["name"] for item in tools],
-        "nodeKinds": list(ALLOWED_PARENTS),
+        "tools": [tool],
+        "nodeKinds": [kind or "requirement"] if tool == "harness_upsert_node" else [],
         "authority": "MCP input validation and PlanStore/Spine remain authoritative; "
         "examples are planned content, not approval, proof or phase completion.",
     }
@@ -752,6 +752,19 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
         )
         return result
     if tool == "harness_upsert_node":
+        relevant = {
+            "vision": {"semanticScenarios", "compilationMetadata"},
+            "test": {"proofAuthoring", "compilationLimits"},
+            "bead": {"proofAuthoring"},
+        }.get(kind or "requirement", set())
+        for key in (
+            "proofAuthoring",
+            "compilationLimits",
+            "semanticScenarios",
+            "compilationMetadata",
+        ):
+            if key not in relevant:
+                result.pop(key, None)
         kind = kind or "requirement"
         if kind not in ALLOWED_PARENTS:
             raise ValueError(f"Unknown node kind: {kind}; choose one of {list(ALLOWED_PARENTS)}")

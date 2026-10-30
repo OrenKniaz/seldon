@@ -93,7 +93,11 @@ TOOLS = [
         "harness_schema",
         "Read existing tool input contracts and actionable canonical node examples; "
         "does not create a plan, approve gates or establish proof.",
-        {"tool": STRING, "kind": {"type": "string", "enum": list(ALLOWED_PARENTS)}},
+        {
+            "tool": STRING,
+            "kind": {"type": "string", "enum": list(ALLOWED_PARENTS)},
+            "include_teaching": {"type": "boolean"},
+        },
         [],
     ),
     _tool(
@@ -229,7 +233,8 @@ TOOLS = [
         "legacy mode uses authored protected test files. Render canonical requirement documents "
         "and record the bound manifest; return it for readback. No approval, review, publication, "
         "worker or provider execution. Refresh compilation after plan or protected-file changes.",
-        {},
+        {"include_detail": {"type": "boolean"}},
+        [],
     ),
     _tool(
         "harness_packet_view",
@@ -457,7 +462,7 @@ TOOLS = [
     _tool(
         "harness_plan_status",
         "Show canonical gates and a labelled vision summary; full=true returns complete status.",
-        {"full": {"type": "boolean"}},
+        {"full": {"type": "boolean"}, "include_detail": {"type": "boolean"}},
         [],
     ),
     _tool(
@@ -668,7 +673,8 @@ TOOLS = [
         "harness_worker_status",
         "Reattach to recorded worker-job and dispatcher evidence. Never launch or infer live "
         "workers from an old running snapshot. Product checks alone are not worker delivery.",
-        {"job_id": STRING},
+        {"job_id": STRING, "include_detail": {"type": "boolean"}},
+        ["job_id"],
     ),
 ]
 
@@ -977,6 +983,7 @@ class PlannerServer:
         self._initialized = False
         self._pending_confirmation = None
         self._confirmation_timeout = confirmation_timeout
+        self._schema_teaching, self._terminal_digests = set(), {}
 
     def _wire_tools(self):
         """Wire assertions are caller intent, never authenticated host context."""
@@ -1492,7 +1499,87 @@ class PlannerServer:
         )
         if name == "harness_prepare_chat_confirmation" and not is_error:
             reply["content"][0]["text"] = body + "\n\n" + reply["content"][0]["text"]
+        if not is_error and name == "harness_schema" and "semanticScenarios" in self.result_data:
+            teaching = self.result_data["semanticScenarios"]
+            digest = hashlib.sha256(json.dumps(teaching, sort_keys=True).encode()).hexdigest()
+            binding = (status.get("plan_revision"), digest)
+            if binding in self._schema_teaching and not arguments.get("include_teaching"):
+                reply["structuredContent"]["semanticScenarios"] = {
+                    "digest": digest,
+                    "reference": "harness_schema kind=vision include_teaching=true",
+                }
+            self._schema_teaching.add(binding)
+        if not is_error and name in {
+            "harness_plan_status",
+            "harness_worker_status",
+            "harness_compile",
+        }:
+            data = reply["structuredContent"]
+            digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+            terminal = name == "harness_worker_status" and "terminal" in data
+            previous = self._terminal_digests.get(arguments.get("job_id"))
+            if terminal:
+                self._terminal_digests[arguments["job_id"]] = digest
+            if not (arguments.get("include_detail") or arguments.get("full")):
+                reply["structuredContent"] = self._compact(data)
+                reply["structuredContent"]["digest"] = digest
+                text = "Compact detail; include_detail=true returns originals."
+                if name == "harness_plan_status" and data.get("visionProjection"):
+                    text += " Summary only: " + data["visionProjection"]["title"]
+                reply["content"][0]["text"] = views.response(status, text, next_step)
+                reply = connection_reply(reply, self.workspace, status)
+                if terminal and previous == digest:
+                    reply["structuredContent"] = {
+                        "jobId": data["jobId"],
+                        "status": data["status"],
+                        "digest": digest,
+                    }
+                    reply["content"][0]["text"] = f"unchanged since {digest}; Next: {next_step}"
         return reply
+
+    @staticmethod
+    def _compact(data):
+        """Keep gates/scalars; summarize bulky evidence without changing canonical data."""
+        bulk = {"semantic", "semanticContracts", "semanticValidation", "beads"}
+        bulk |= {"continuation", "reviewResolution"}
+
+        def summary(value):
+            encoded = json.dumps(value, sort_keys=True).encode()
+            result = {"digest": hashlib.sha256(encoded).hexdigest(), "count": len(value)}
+            if isinstance(value, dict):
+                result.update({k: v for k, v in value.items() if not isinstance(v, dict | list)})
+            failures = []
+
+            def visit(row, path=""):
+                if isinstance(row, dict):
+                    if (
+                        row.get("passed") is False
+                        or row.get("status") in {"failed", "blocked"}
+                        or row.get("state") in {"FAIL", "ERROR"}
+                    ):
+                        failure = {
+                            k: v
+                            for k, v in row.items()
+                            if k in {"reason", "reasons", "error", "state", "status"}
+                        }
+                        failures.append(dict(id=row.get("id", path), **failure))
+                    for key, child in row.items():
+                        visit(child, f"{path}/{key}")
+                elif isinstance(row, list):
+                    for index, child in enumerate(row):
+                        visit(child, f"{path}/{index}")
+
+            visit(value)
+            return dict(result, failures=failures)
+
+        return {
+            k: summary(v)
+            if k in bulk and isinstance(v, dict | list)
+            else PlannerServer._compact(v)
+            if isinstance(v, dict)
+            else v
+            for k, v in data.items()
+        }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
         job = self.result_data or {}
@@ -2207,7 +2294,9 @@ class PlannerServer:
             return f"Revised protected test: {self.result_data['path']}; compile before reuse."
         if name == "harness_plan_status":
             status = self._status()
-            if not args.get("full", False) and status.get("visionProjection"):
+            if not (args.get("full") or args.get("include_detail")) and status.get(
+                "visionProjection"
+            ):
                 spine = store.spine()
                 vision_id = spine.ids("vision")[0]
                 status = {
@@ -2440,7 +2529,7 @@ class PlannerServer:
                 self.result_data = (
                     planner_jobs.start_worker_job(store, **args)
                     if name == "harness_worker_start"
-                    else planner_jobs.worker_job_status(self.workspace, **args)
+                    else planner_jobs.worker_job_status(self.workspace, args["job_id"])
                 )
             except Exception:
                 if name == "harness_worker_start":

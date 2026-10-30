@@ -1379,3 +1379,133 @@ def test_public_dirs_example_compiles_to_real_runner_with_deliberate_negative(se
         assert all(r["cleanup"]["quiescenceVerified"] for r in results)
     finally:
         server.close()
+
+
+def test_compact_public_responses_keep_canonical_detail_and_next_actions(semantic_plan):
+    """Protect MCP replay size and evidence reachability after real semantic compilation.
+
+    Catches bulk scenario replay, lost failure reasons, stale teaching and changed Next
+    actions; existing fixture tests inspect canonical producers rather than MCP projections.
+    """
+    from codex_harness.core.semantic_runner import run
+
+    store, manifest = semantic_plan
+    server = PlannerServer(store.workspace)
+
+    def call(name, **args):
+        reply = server.call_tool(name, args)
+        assert not reply["isError"], reply
+        return reply
+
+    def size(reply):
+        return len(json.dumps(reply, separators=(",", ":")).encode())
+
+    def next_action(reply):
+        return reply["content"][0]["text"].rsplit("Next: ", 1)[1]
+
+    try:
+        first = call("harness_schema", kind="vision")
+        teaching = first["structuredContent"]["semanticScenarios"]
+        again = call("harness_schema", kind="vision")
+        assert "digest" in again["structuredContent"]["semanticScenarios"]
+        assert (
+            call("harness_schema", kind="vision", include_teaching=True)["structuredContent"][
+                "semanticScenarios"
+            ]
+            == teaching
+        )
+        vision = store.spine().node("V1")
+        vision["text"] += " A revised plan."
+        store.upsert_node(vision)
+        assert (
+            call("harness_schema", kind="vision")["structuredContent"]["semanticScenarios"]
+            == teaching
+        )
+        for kind in ("vision", "feature", "requirement", "decision", "design", "test", "bead"):
+            reply = call("harness_schema", kind=kind)
+            assert size(reply) < 15000
+            if kind != "vision":
+                assert "semanticScenarios" not in reply["structuredContent"]
+                assert "compilationMetadata" not in reply["structuredContent"]
+        for name in ("harness_plan_status", "harness_compile"):
+            compact = call(name)
+            full = call(name, include_detail=True)
+            assert size(compact) < 6000
+            assert next_action(compact) == next_action(full)
+            assert compact["structuredContent"]["digest"]
+            if name == "harness_compile":
+                assert full["structuredContent"] == store.compile_template(
+                    store.workspace / "template"
+                )
+                assert compact["structuredContent"]["beads"]["count"] == len(manifest["beads"])
+            else:
+                assert full["structuredContent"] == server._status()
+                assert (
+                    compact["structuredContent"]["approval"]
+                    == full["structuredContent"]["approval"]
+                )
+        # Real semantic runner -> durable dispatcher readback -> MCP, with no provider launch.
+        product = store.workspace / "product"
+        product.mkdir()
+        (product / "hello.py").write_text("print('Wrong', end='')\n")
+        semantic = store.compile_template(store.workspace / "template")["semantic"]
+        evidence = dict(
+            results=run(semantic["scenarios"], product, semantic["targets"], "validation")
+        )
+        assert evidence["results"][0]["state"] == "FAIL"
+        job_id = manifest["planRevision"]
+        directory = planner_jobs._directory(store.workspace, job_id)
+        directory.mkdir(parents=True)
+        request = dict(
+            schema=planner_jobs.SCHEMA, jobId=job_id, publicationRevision=job_id, options={}
+        )
+        request["requestDigest"] = planner_jobs._digest(request)
+        (directory / "request.json").write_text(json.dumps(request))
+        (directory / "terminal.json").write_text(
+            json.dumps(dict(requestDigest=request["requestDigest"], status="completed"))
+        )
+        run_dir = directory / "runs" / "source-only"
+        (run_dir / "evidence").mkdir(parents=True)
+        record = dict(
+            runId="source-only",
+            planRevision=job_id,
+            repo=str(run_dir / "repo"),
+            isMocked=True,
+            didExecuteRealProvider=False,
+            status="failed",
+            beads={},
+            semanticValidation=evidence,
+        )
+        (run_dir / "evidence" / "run.json").write_text(json.dumps(record))
+        compact = call("harness_worker_status", job_id=job_id)
+        full = call("harness_worker_status", job_id=job_id, include_detail=True)
+        assert full["structuredContent"] == planner_jobs.worker_job_status(store.workspace, job_id)
+        assert full["structuredContent"]["run"]["semanticValidation"] == evidence
+        assert size(compact) < 6000
+        failures = compact["structuredContent"]["run"]["semanticValidation"]["failures"]
+        assert any(row["id"] == "first-moment" for row in failures)
+        assert any(row.get("reason") == "observable mismatch" for row in failures)
+        repeated = call("harness_worker_status", job_id=job_id)
+        assert len(repeated["content"][0]["text"].splitlines()) == 1
+        assert repeated["content"][0]["text"].startswith("unchanged since ")
+        assert next_action(repeated) == next_action(compact) == next_action(full)
+        assert size(repeated) < 2000
+        # A changed terminal snapshot must be returned, even on the same connection.
+        record["status"] = "blocked"
+        (run_dir / "evidence" / "run.json").write_text(json.dumps(record))
+        changed = call("harness_worker_status", job_id=job_id)
+        assert changed["structuredContent"]["run"]["status"] == "blocked"
+        print(
+            "COMPACT_BYTES",
+            json.dumps(
+                dict(
+                    schema_first=size(first),
+                    schema_repeat=size(again),
+                    worker=size(compact),
+                    worker_full=size(full),
+                    worker_repeat=size(repeated),
+                )
+            ),
+        )
+    finally:
+        server.close()
