@@ -1406,7 +1406,10 @@ def native_worker_project(tmp_path, monkeypatch):
 def test_worker_mcp_start_status_reconnect_preserve_one_admission(
     native_worker_project, monkeypatch
 ):
-    """Real canonical grant/job persistence; synthetic native client and process return."""
+    """Protect admission and delivery guidance through persisted jobs, without providers.
+
+    Catch a poll-only hint after Validation PASS; the old reconnect check had no run outcome.
+    """
     from types import SimpleNamespace
 
     from tests.python.core import test_planner_resume
@@ -1453,6 +1456,47 @@ def test_worker_mcp_start_status_reconnect_preserve_one_admission(
         assert "harness_worker_status job_id=" in status["content"][0]["text"]
         client.close()
     assert len(launches) == 1
+
+    directory = Path(data["evidenceDir"])
+    request = json.loads((directory / "request.json").read_text(encoding="utf-8"))
+    (directory / "terminal.json").write_text(
+        json.dumps({"requestDigest": request["requestDigest"], "status": "completed"}),
+        encoding="utf-8",
+    )
+    run_dir = directory / "runs" / "source-only" / "evidence"
+    run_dir.mkdir(parents=True)
+    run = {
+        "planRevision": data["jobId"],
+        "runId": "source-only",
+        "repo": str(run_dir.parent / "repo"),
+        "status": "plan-validated",
+        "isMocked": False,
+        "didExecuteRealProvider": False,
+        "beads": {},
+    }
+    client = PlannerServer(store.workspace)
+    try:
+        for validation in (None, "FAIL", "PASS"):
+            if validation is not None:
+                run["semanticValidation"] = {"state": validation}
+            (run_dir / "run.json").write_text(json.dumps(run), encoding="utf-8")
+            status = rpc(
+                client,
+                "tools/call",
+                {"name": "harness_worker_status", "arguments": {"job_id": data["jobId"]}},
+            )["result"]
+            assert not status["isError"], status
+            hint = status["content"][0]["text"].split("Next: ", 1)[1]
+            if validation == "PASS":
+                assert "Validation is not final acceptance" in hint
+                assert "against their brief is next" in hint
+                assert "offer to run harness_accept_run" in hint
+                assert "If they agree" in hint
+                assert "terminal status via harness_accept_status" in hint
+            else:
+                assert hint == "harness_worker_status job_id=" + data["jobId"]
+    finally:
+        client.close()
 
 
 def test_native_stdio_request_response_keeps_original_tool_id(tmp_path):

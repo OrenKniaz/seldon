@@ -1590,6 +1590,16 @@ class PlannerServer:
             and self.result_data
             and self.result_data.get("jobId")
         ):
+            if (
+                self.result_data.get("status") == "completed"
+                and self.result_data.get("run", {}).get("semanticValidation", {}).get("state")
+                == "PASS"
+            ):
+                return (
+                    "Validation is not final acceptance. Tell the user final acceptance against "
+                    "their brief is next; offer to run harness_accept_run. If they agree, run it "
+                    "and report its terminal status via harness_accept_status."
+                )
             return "harness_worker_status job_id=" + self.result_data["jobId"]
         if (
             name in {"harness_publish", "harness_plan_status"}
