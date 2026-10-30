@@ -14,7 +14,7 @@ import tomllib
 from importlib.metadata import distribution
 from pathlib import Path
 
-from codex_harness.core.init_hosts import HOSTS, MARKER, claude, server_entry
+from codex_harness.core.init_hosts import HOSTS, MARKER, claude, codex, server_entry
 from codex_harness.core.preflight import preflight_report
 
 IGNORE_START = f"# {MARKER} begin\n"
@@ -280,6 +280,16 @@ def run_init(args):
         if args.remove and host == "codex" and read_entry(host, after):
             print("Codex policy retained: ownership unknown; remove manually if desired.")
         print(f"{host}: {path} - experimental; {writer.GUIDANCE}")
+    if "codex" in selected or args.remove:
+        path = local_path(root, "AGENTS.md")
+        before = read_text(path)
+        after = codex.render_agents(before, remove=args.remove)
+        if args.check and after != before:
+            raise ValueError(f"{path}: missing or changed owned guidance")
+        if args.check:
+            print(f"codex: {path} - owned guidance verified")
+        if not args.check and after != before:
+            changes.append((path, before, after))
     marker_path = local_path(root, STORE_MARKER)
     doc_path = local_path(root, "SELDON.md")
     ignore_path = local_path(root, ".gitignore")

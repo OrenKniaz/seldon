@@ -11,6 +11,24 @@ START = "# seldon-init v1 begin"
 END = "# seldon-init v1 end"
 
 
+def render_agents(text, *, remove=False):
+    start, end = "<!-- seldon-init v1 begin -->", "<!-- seldon-init v1 end -->"
+    block = (
+        f"{start}\nFor requests to plan, build or implement a product in this project, use Seldon "
+        "harness_plan_start first; no special wording or plan mode request is needed.\n"
+        "Do not write product source directly before Seldon's plan is published and worker "
+        "execution is approved. Preserve Align/Vision/execution gates and higher-priority user "
+        "instructions. Unrelated discussion and maintenance need no extra process.\n"
+        f"{end}\n\n"
+    )
+    if start in text or end in text:
+        if text.count(start) != 1 or text.count(end) != 1 or block not in text:
+            raise ValueError("Malformed or changed AGENTS.md ownership block")
+        return text.replace(block, "", 1) if remove else text
+    index = int(text.startswith("\ufeff"))
+    return text if remove else text[:index] + block + text[index:]
+
+
 def render(text, entry, *, remove=False, yes=False, approval_mode=None):
     data = tomllib.loads(text)
     if not isinstance(data.get("mcp_servers", {}), dict):

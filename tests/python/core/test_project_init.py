@@ -46,6 +46,92 @@ def snapshot(root):
     return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
+@pytest.mark.parametrize(
+    "original",
+    [
+        b"",
+        b"user notes",
+        b"user\nnotes\n",
+        b"user\r\nnotes\r\n",
+        b"user\r\nnotes",
+        "שלום".encode(),
+        "\ufeffשלום\r\nno final newline".encode(),
+    ],
+)
+def test_codex_agents_routes_products_and_preserves_user_bytes(
+    project, original, monkeypatch, capsys
+):
+    """Catch AGENTS overwrite/newline drift and lost routing through init/check/remove.
+
+    Existing registration tests never consume project guidance. Only the unrelated
+    installed-server handshake is stubbed; owned guidance uses the real init path.
+    """
+    target = project / "AGENTS.md"
+    if original:
+        target.write_bytes(original)
+    assert project_init.run_init(options(project, host="codex")) == 0
+    merged = target.read_bytes()
+    assert b"harness_plan_start first" in merged
+    assert b"before Seldon's plan is published and worker execution is approved" in merged
+    assert b"higher-priority user instructions" in merged
+    assert b"Unrelated discussion and maintenance need no extra process" in merged
+    bom = b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b""
+    assert merged.startswith(bom + b"<!-- seldon-init v1 begin -->\n")
+    assert merged.endswith(original[len(bom) :])
+    # Exercise an owned span between user prefix/suffix, including a UTF-8 BOM.
+    prefix = "user prefix Ω\r\n".encode()
+    target.write_bytes(bom + prefix + merged[len(bom) :])
+    before = snapshot(project)
+    assert project_init.run_init(options(project, host="codex")) == 0
+    monkeypatch.setattr(project_init, "server_check", lambda *_: None)
+    assert project_init.run_init(options(project, host=None, check=True)) == 0
+    assert "AGENTS.md - owned guidance verified" in capsys.readouterr().out
+    assert snapshot(project) == before
+    assert project_init.run_init(options(project, host=None, remove=True)) == 0
+    assert target.read_bytes() == bom + prefix + original[len(bom) :]
+    before = snapshot(project)
+    assert project_init.run_init(options(project, host=None, remove=True)) == 0
+    assert snapshot(project) == before
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed", "duplicate", "reversed", "start", "end"])
+@pytest.mark.parametrize("action", ["init", "check", "remove"])
+def test_codex_agents_invalid_ownership_refuses_all_writes(project, monkeypatch, damage, action):
+    """Catch partial writes or check accepting bad guidance; config-marker tests omit AGENTS."""
+    project_init.run_init(options(project, host="codex"))
+    target = project / "AGENTS.md"
+    block = target.read_bytes()
+    start, end = b"<!-- seldon-init v1 begin -->", b"<!-- seldon-init v1 end -->"
+    damaged = {
+        "missing": b"user text without routing",
+        "changed": block.replace(b"harness_plan_start", b"harness_plan_status"),
+        "duplicate": block + block,
+        "reversed": end + b"\n" + start,
+        "start": start,
+        "end": end,
+    }[damage]
+    target.write_bytes(damaged)
+    monkeypatch.setattr(
+        project_init, "server_check", lambda *_: pytest.fail("unexpected handshake")
+    )
+    before = snapshot(project)
+    args = options(
+        project,
+        host=None if action != "init" else "codex",
+        check=action == "check",
+        remove=action == "remove",
+    )
+    if damage == "missing" and action != "check":
+        assert project_init.run_init(args) == 0
+        assert (
+            target.read_bytes() == damaged if action == "remove" else damaged in target.read_bytes()
+        )
+    else:
+        with pytest.raises(ValueError, match="AGENTS.md"):
+            project_init.run_init(args)
+        assert snapshot(project) == before
+
+
 @pytest.mark.parametrize("case", ["fresh", "legacy", "owned-custom", "unowned-custom"])
 def test_codex_request_budget_preserves_user_timeout_and_tool_policy(project, case):
     """Protect reading budget through the real writer, replacement and removal.
@@ -248,7 +334,7 @@ def test_malformed_claude_permission_policy_refuses_all_writes(project):
 
 
 def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(project):
-    """Catch replacement of another MCP server or store data across init/remove."""
+    """Catch user-setting loss and owned-only AGENTS retention; old removal omitted guidance."""
     (project / ".codex").mkdir()
     original_toml = '# keep\nmodel = "user-choice"\n[mcp_servers.other]\ncommand = "other"\n'
     (project / ".codex/config.toml").write_text(original_toml, encoding="utf-8")
@@ -273,6 +359,7 @@ def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(proje
     assert project_init.run_init(options(project, remove=True, host=None)) == 0
     assert (project / ".codex-harness/plan.sqlite3").read_bytes() == b"existing plan stays"
     assert not (project / "SELDON.md").exists()
+    assert (project / "AGENTS.md").read_bytes() == b""
     assert (project / ".codex/config.toml").read_bytes().startswith(original_toml_bytes)
     remaining = tomllib.loads((project / ".codex/config.toml").read_text())
     assert remaining["mcp_servers"]["seldon"] == {
@@ -284,12 +371,13 @@ def test_all_hosts_preserve_unrelated_settings_rerun_and_remove_only_owned(proje
 
 
 def test_dry_run_prints_complete_files_but_creates_nothing(project, capsys):
-    """Catch mkdir/store creation hidden inside rendering or discovery."""
+    """Catch hidden writes or missing guidance previews; prior dry-run checked only configs."""
     assert project_init.run_init(options(project, dry_run=True)) == 0
     assert snapshot(project) == {}
     assert list(project.iterdir()) == []
     output = capsys.readouterr().out
     assert "mcp_servers.seldon" in output and "mcpServers" in output
+    assert "harness_plan_start first" in output
     assert str(project.resolve()) in output and "Would update" in output
 
 
@@ -309,7 +397,8 @@ def test_wrong_workspace_conflict_is_refused_before_any_write(project, host):
 
 
 def test_unowned_docs_and_servers_survive_remove(project):
-    """Catch overly broad marker deletion treating all Seldon-named files as owned."""
+    """Catch unowned-file deletion; prior removal checked docs/servers but omitted AGENTS."""
+    (project / "AGENTS.md").write_bytes("\ufeffmy instructions\r\nno final newline".encode())
     (project / "SELDON.md").write_text("my notes")
     (project / ".mcp.json").write_text('{"mcpServers":{"seldon":{"command":"mine"}}}')
     before = snapshot(project)
@@ -343,21 +432,28 @@ def test_malformed_config_aborts_whole_preparation(project):
     assert snapshot(project) == before
 
 
-def test_redirected_paths_and_store_roots_are_refused(project):
-    """Catch writes outside the project via a user-supplied host-directory link."""
+@pytest.mark.parametrize("relative", [".codex", "AGENTS.md"])
+def test_redirected_paths_and_store_roots_are_refused(project, relative):
+    """Catch redirected writes; prior host-directory coverage missed the AGENTS file target."""
     store = project / ".codex-harness"
     store.mkdir()
     with pytest.raises(ValueError, match="inside a Seldon store"):
         project_init.run_init(options(store))
     outside = project.parent / (project.name + "-outside")
     outside.mkdir()
+    destination = outside if relative == ".codex" else outside / "user-agents.md"
+    if relative == "AGENTS.md":
+        destination.write_bytes(b"user guidance")
+    before = snapshot(project)
+    outside_before = snapshot(outside)
     try:
-        (project / ".codex").symlink_to(outside, target_is_directory=True)
+        (project / relative).symlink_to(destination, target_is_directory=relative == ".codex")
     except OSError as error:
         pytest.skip(f"Windows symlink privilege unavailable: {error}")
     with pytest.raises(ValueError, match="redirected"):
         project_init.run_init(options(project))
-    assert list(outside.iterdir()) == []
+    assert snapshot(outside) == outside_before
+    assert {p: b for p, b in snapshot(project).items() if p != Path(relative)} == before
 
 
 def test_check_requires_registration_and_marker(project):
