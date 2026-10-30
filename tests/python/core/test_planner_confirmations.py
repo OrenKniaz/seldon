@@ -13,6 +13,100 @@ from codex_harness.core.planner_confirmations import complete_confirmation, prep
 FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit/spine.json"
 
 
+def test_public_vision_lock_question_handles_accepted_cli_without_operation(tmp_path):
+    """Protect draft-to-card handoff; full-operation card fixtures miss run13b's KeyError."""
+    from tests.python.core.test_mcp_planner import workspace_wire
+
+    from codex_harness.core.mcp_planner import PlannerServer
+    from codex_harness.core.semantic_schema import validate
+
+    server = PlannerServer(tmp_path)
+    started = workspace_wire(
+        server,
+        "harness_plan_start",
+        idea="Count stdin words",
+        name="TextMeter",
+        plan_mode="semantic-v1",
+        expected_workspace=str(tmp_path),
+    )
+    assert not started["isError"], started
+    store = server.store
+    source_only_expansion(store)
+    source_only_confirmation(store, "align")
+    store.advance("expand", by="source-test")
+    node = store.spine().node("V1")
+    node["fields"].update(
+        planMode="semantic-v1",
+        targets={"textmeter": {"module": "textmeter", "argv": []}},
+        scenarios={
+            "schema": "seldon/scenarios-v1",
+            "scenarios": [
+                {
+                    "id": "S1",
+                    "requirementRefs": ["R1"],
+                    "contractRefs": ["D1"],
+                    "setup": {"dirs": ["data/caller"]},
+                    "actions": [
+                        {
+                            "id": "words",
+                            "cwd": "data/caller",
+                            "cli": {
+                                "target": "textmeter",
+                                "argv": [],
+                                "stdin": {"utf8": "one\té\nthree  "},
+                            },
+                        }
+                    ],
+                    "observe": [
+                        {
+                            "action": "words",
+                            "exitEquals": 0,
+                            "stdoutJsonEquals": {"count": 3, "unit": "words"},
+                            "stderrEquals": "",
+                        }
+                    ],
+                    "verdict": "all",
+                }
+            ],
+        },
+    )
+    try:
+        for tool, args in [
+            ("harness_upsert_node", {"node": node}),
+            ("harness_advance", {"to_phase": "vision-lock"}),
+        ]:
+            result = workspace_wire(server, tool, expected_workspace=str(store.workspace), **args)
+            assert not result["isError"], result["content"][0]["text"]
+        revision, before = store.spine().plan_revision(), approvals(store)
+        result = workspace_wire(
+            server,
+            "harness_prepare_chat_confirmation",
+            gate="vision-lock",
+            expected_workspace=str(store.workspace),
+        )
+        assert not result["isError"], result
+        request = result["structuredContent"]
+        assert "S1: words (Operation not recorded)" in request["card"]
+        assert request["vision"] == node and request["plan_revision"] == revision
+        saved = store._latest_draft_event("confirmation-requested")
+        assert saved["vision"] == node and saved["plan_revision"] == revision
+        assert saved["card"] == request["card"] and saved["request_id"] == request["request_id"]
+        assert request["human_identity_verified"] is False and request["source_verified"] is False
+        assert request["request_id"] in result["content"][0]["text"]
+        assert store.spine().node("V1") == node and approvals(store) == before
+        assert not store.status()["approval"]["granted"]
+        # Displaying incomplete intent must not certify it for execution.
+        with pytest.raises(ValueError, match=r"missing \['operation'\]"):
+            validate(
+                node["fields"]["scenarios"],
+                tmp_path,
+                node["fields"]["targets"],
+                require_entries=False,
+            )
+    finally:
+        server.close()
+
+
 @pytest.fixture
 def store(tmp_path):
     with open_plan_store(tmp_path) as store:

@@ -240,7 +240,8 @@ def confirmation_card(gate: str, phase: str, revision: str, vision: dict) -> str
     for scenario in scenarios:
         if isinstance(scenario, dict):
             intent = "; ".join(
-                f"{a['id'].replace('_', ' ').replace('-', ' ')} ({a['cli']['operation']})"
+                f"{a['id'].replace('_', ' ').replace('-', ' ')} "
+                f"({a['cli'].get('operation', 'Operation not recorded')})"
                 for a in scenario.get("actions", [])
             )
             scenario = f"{scenario['id']}: {intent or 'Intent not recorded'}"
