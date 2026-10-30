@@ -1656,6 +1656,58 @@ def start(server):
     )
 
 
+def test_roundtable_schema_refuses_unknown_provider_before_dispatch(server):
+    """Catch raw caller-provider lookups; existing wire tests use supported reviewers only."""
+    start(server)
+    schema = workspace_wire(server, "harness_schema", tool="harness_roundtable")
+    providers = schema["structuredContent"]["inputSchema"]["properties"]["reviewers"]["items"][
+        "properties"
+    ]["provider"]["enum"]
+    assert set(providers) == {"claude", "codex", "copilot"}
+    before = list(server.store.connection.iterdump())
+    reply = workspace_wire(
+        server,
+        "harness_roundtable",
+        expected_workspace=str(server.workspace),
+        reviewers=[dict(name="reviewer", provider="openai", model="unused", effort="medium")],
+    )
+    text = reply["content"][0]["text"]
+    assert reply["isError"] and "must be one of" in text
+    assert all(provider in text for provider in providers)
+    assert "KeyError" not in text and "unexpected" not in text
+    assert list(server.store.connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("runner", ["unittest", "command"])
+def test_show_unknown_node_teaches_listing_without_lookup_error(server, runner):
+    """Catch unknown-ID lookups in both readers; existing show tests only fetch known IDs."""
+    start(server)
+    if runner == "command":
+        vision = server.store.spine().node("V1")
+        vision["fields"]["verification"] = {
+            "runner": "command",
+            "argv": ["python", "proof.py", "{proof}"],
+            "testDir": "tests",
+            "proofGlob": "*.py",
+        }
+        call(server, "harness_upsert_node", node=vision)
+    before = list(server.store.connection.iterdump())
+    reply = workspace_wire(
+        server,
+        "harness_show_node",
+        expected_workspace=str(server.workspace),
+        id="missing-node",
+    )
+    text = reply["content"][0]["text"]
+    assert reply["isError"] and "Unknown node: missing-node" in text
+    assert "harness_nodes" in text and "KeyError" not in text
+    known = workspace_wire(
+        server, "harness_show_node", expected_workspace=str(server.workspace), id="V1"
+    )
+    assert not known["isError"] and known["structuredContent"]["id"] == "V1"
+    assert list(server.store.connection.iterdump()) == before
+
+
 @pytest.fixture
 def revision_server(revision_proof):
     from tests.python.core.test_mcp_audit import started

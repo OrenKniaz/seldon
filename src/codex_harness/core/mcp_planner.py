@@ -29,6 +29,7 @@ from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.planner_schema import node_error_help, schema_help
 from codex_harness.core.planner_vision import vision_projection
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
+from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
 from codex_harness.core.spine import ALLOWED_PARENTS
 from codex_harness.core.spine_diagrams import diagram
 
@@ -188,7 +189,12 @@ TOOLS = [
             "reviewers": {
                 "type": "array",
                 "minItems": 1,
-                "items": _object(dict.fromkeys(("name", "provider", "model", "effort"), STRING)),
+                "items": _object(
+                    {
+                        **dict.fromkeys(("name", "model", "effort"), STRING),
+                        "provider": {**STRING, "enum": list(PROVIDER_TOKEN_BUDGETS)},
+                    }
+                ),
             },
             "max_rounds": {"type": "integer", "minimum": 1},
             "max_total": {"type": "integer", "minimum": 1},
@@ -917,6 +923,8 @@ def show_node(store, node_id: str, *, body=False, test=None) -> dict:
         return store.show_node(node_id, body=body, test=test)
     if body and not test:
         raise ValueError("--body requires --test <name>")
+    if node_id not in spine.ids():
+        raise ValueError(f"Unknown node: {node_id}; use harness_nodes for available IDs")
     node = spine.node(node_id)
     result = {**node, "children": spine.children(node_id), "testFiles": []}
     if node["kind"] not in ("requirement", "test"):

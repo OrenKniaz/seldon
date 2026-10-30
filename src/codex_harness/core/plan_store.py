@@ -260,6 +260,8 @@ class PlanStore:
         if body and not test:
             raise ValueError("--body requires --test <name>")
         nodes = {node["id"]: node for node in self.list_nodes()}
+        if node_id not in nodes:
+            raise ValueError(f"Unknown node: {node_id}; use harness_nodes for available IDs")
         node = nodes[node_id]
         result = {
             **node,

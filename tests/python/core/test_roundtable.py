@@ -6,7 +6,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import source_only_confirmation, source_only_vision_lock
+from tests.python.core.planning_support import (
+    source_only_confirmation,
+    source_only_expansion,
+    source_only_vision_lock,
+)
 from tests.python.core.test_semantic_wiring import semantic_plan as _semantic_plan
 
 from codex_harness.core import roundtable
@@ -1307,6 +1311,7 @@ def store(tmp_path):
         bead = store.spine().node("A")
         bead["parents"].append("R6")
         store.upsert_node(bead)
+        source_only_expansion(store)
         while store.phase() != "roundtable":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
@@ -1924,6 +1929,20 @@ def test_unparsed_streams_and_errors_are_reported(store, output):
     assert result["invalid"] == 1 and result["findings"] == 0
     assert result["reviewers"][0]["rejected"][0]["status"] == "rejected-unparsed"
     assert not findings(store)
+
+
+def test_unknown_roundtable_provider_refuses_before_budget_lookup_or_attempt(store):
+    """Catch CLI/core provider KeyErrors; supported-provider tests and MCP enum miss this path."""
+    before = list(store.connection.iterdump())
+    with pytest.raises(ValueError) as refused:
+        run_roundtable(
+            store,
+            reviewers=[dict(name="reviewer", provider="openai", model="unused", effort="medium")],
+        )
+    message = str(refused.value)
+    assert message == "Unknown provider 'openai'; use one of: claude, codex, copilot"
+    assert "KeyError" not in message
+    assert list(store.connection.iterdump()) == before
 
 
 def test_available_defaults_override_and_single_provider(store, monkeypatch):

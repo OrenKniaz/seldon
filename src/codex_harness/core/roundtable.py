@@ -413,6 +413,10 @@ def packet_shards(
     views. Every shard repeats vision, decisions, unassigned global constraints,
     quality and acceptance scenarios. No provider is invoked by this function.
     """
+    if provider not in PROVIDER_TOKEN_BUDGETS:
+        raise ValueError(
+            f"Unknown provider {provider!r}; use one of: {', '.join(PROVIDER_TOKEN_BUDGETS)}"
+        )
     budget = PROVIDER_TOKEN_BUDGETS[provider] if token_budget is None else token_budget
     if type(budget) is not int or budget < 1:
         raise ValueError("token budget must be a positive integer")
@@ -1297,6 +1301,10 @@ def _review_dossier(
     only the final dossier contributes findings and admission status.
     """
     provider = reviewer["provider"]
+    if provider not in PROVIDER_TOKEN_BUDGETS:
+        raise ValueError(
+            f"Unknown provider {provider!r}; use one of: {', '.join(PROVIDER_TOKEN_BUDGETS)}"
+        )
     budget = PROVIDER_TOKEN_BUDGETS[provider] if token_budget is None else token_budget
     if shards is None:
         shards = packet_shards(store, provider, token_budget=budget, **packet_options)
