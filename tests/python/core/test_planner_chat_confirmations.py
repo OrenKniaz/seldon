@@ -356,7 +356,8 @@ def prepare_combined_b(store, selection="new"):
 
 
 @pytest.mark.parametrize(
-    "change", [None, "stale-files", "candidate", "files", "workers", "cap", "failed-review"]
+    "change",
+    [None, "stale-files", "candidate", "files", "workers", "cap", "failed-review", "control"],
 )
 def test_bundle_through_review_publication_and_once_only_execution(
     semantic_plan, monkeypatch, change
@@ -424,11 +425,35 @@ def test_bundle_through_review_publication_and_once_only_execution(
     store.advance("publish", by="source-test")
     revision = store.publish(by="source-test", export_dir=store.workspace / "published")
     assert revision == options["expected_revision"]
+    # Run 22: ordinary execution entry must retain B, including its worker/cap refusals.
+    store.advance("execute", by="source-test")
     if change == "workers":
         options["workers"][0]["model"] = "changed-model"
     if change == "cap":
         options["call_cap"] += 1
     scope = execution.execution_scope(store, **options)
+    if change == "control":
+        # Protect the transaction recheck: ignoring the whole control digest would admit
+        # changed controls after scope capture; worker/cap mismatch tests cannot catch it.
+        from tests.python.core.test_mcp_chat_confirmations import tool
+
+        from codex_harness.core.mcp_planner import PlannerServer
+
+        server = PlannerServer(store.workspace)
+        try:
+            asked = tool(
+                server, "harness_ask", question="Confirm existing detail?", node_ids=["V1"]
+            )
+            assert not asked["isError"]
+            assert not tool(
+                server, "harness_answer", id=asked["structuredContent"]["id"], answer="Same detail"
+            )["isError"]
+            with pytest.raises(ValueError, match="scope-stale"):
+                execution.consume_execution(store, scope, revision)
+            assert execution._records(store, execution.CONSUMED) == []
+        finally:
+            server.close()
+        return
     if change:
         from tests.python.core.test_mcp_chat_confirmations import record, tool
 

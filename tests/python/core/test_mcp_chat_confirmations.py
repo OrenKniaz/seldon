@@ -42,6 +42,216 @@ def record(server, question, quote="Approve"):
     )
 
 
+def test_run22_renew_reviewers_with_stale_selection_retains_shared_cap(
+    semantic_plan, monkeypatch, capsys
+):
+    """Renew RS1 through public producers and B into actual review admission.
+
+    Catch old RS1 blocking its replacement, stale B spending, or cap reset; prior
+    CS-1 cases select once and never refresh the catalog after a spent review.
+    Only provider execution and external replies are simulated, not authority/admission.
+    """
+    import sys
+    from copy import deepcopy
+
+    from tests.python.core.planning_support import source_only_expansion
+    from tests.python.core.test_plan_store import mock_catalog, mock_choice
+
+    from codex_harness.core import plan_cli, roundtable
+    from codex_harness.core import provider_call_budget as budget
+    from codex_harness.core.plan_store import PHASES
+    from codex_harness.core.planner_confirmations import combined_credit
+
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+    launches = []
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: launches.append(a) or (0, "[]"))
+
+    def public(name, **arguments):
+        result = tool(server, name, **arguments)
+        assert not result["isError"], result
+        return result.get("structuredContent")
+
+    def catalog(observation):
+        return public(
+            "harness_reviewer_catalog",
+            catalog=observation,
+            expected_spine_revision=store._revision(),
+        )["catalog"]
+
+    def select(node):
+        return public(
+            "harness_reviewer_choice", node=node, expected_spine_revision=store._revision()
+        )
+
+    def question():
+        return public(
+            "harness_prepare_chat_confirmation",
+            gate="plan-execution",
+            reviewer_node_id="RS1",
+            execution=options,
+        )
+
+    def review(reviewer):
+        return tool(
+            server,
+            "harness_roundtable",
+            reviewers=[reviewer],
+            max_rounds=2,
+            max_total=4,
+            timeout=10,
+        )
+
+    try:
+        a = public("harness_prepare_chat_confirmation", gate="align+vision-lock")
+        assert record(server, a)["structuredContent"]["state"] == "approved"
+        for phase in PHASES[1 : PHASES.index("plan") + 1]:
+            public("harness_advance", to_phase=phase)
+        old_catalog = catalog(mock_catalog())
+        node = mock_choice(old_catalog)
+        node["id"] = "RS1"
+        select(node)
+        public("harness_compile")
+        assert (
+            plan_cli.main(
+                [
+                    "--workspace",
+                    str(store.workspace),
+                    "review-budget",
+                    "--campaign",
+                    "run22",
+                    "--max-starts",
+                    "4",
+                    "--machine-json",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        options = dict(
+            expected_revision=store.manifest_revision(),
+            max_parallel=1,
+            timeout=5,
+            call_cap=2,
+            workers=[
+                dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
+                for b in ("C", "B")
+            ],
+        )
+        old_b = question()
+        assert record(server, old_b)["structuredContent"]["state"] == "approved"
+        old_tuple = old_b["scopes"]["review-budget"]["reviewers"][0]
+        public("harness_advance", to_phase="roundtable")
+        assert not review(old_tuple)["isError"]
+        assert len(launches) == budget.planning_review_budget(store)["spentAdmissions"] == 1
+        public("harness_advance", to_phase="plan")
+
+        observation = mock_catalog()
+        observation["id"] = "RC-00000000-0000-0000-0000-000000000022"
+        observation["providers"][0]["choices"][0]["effort"]["value"] = "medium"
+        claude = deepcopy(observation["providers"][0])
+        claude.update(provider="claude", executable="C:/mock/claude.exe")
+        claude["choices"][0]["model"] = "claude-sonnet-5-5"
+        observation["providers"].append(claude)
+        current = catalog(observation)
+        with pytest.raises(ValueError, match="reviewer-catalog-stale"):
+            combined_credit(store, "review-budget")
+        with pytest.raises(ValueError):
+            budget.claim_planning_review_start(store, old_tuple)
+        replacement = mock_choice(current)
+        replacement["id"] = "RS1"
+        replacement["fields"]["stages"] = ["plan", "full-vision"]
+        choice = current["providers"][1]["choices"][0]
+        replacement["fields"]["reviewers"].append(
+            dict(
+                name="claude-reviewer",
+                provider="claude",
+                **{key: choice[key] for key in ("choiceId", "model", "effort")},
+            )
+        )
+        saved = select(replacement)
+        assert saved["selection"]["confirmation"] is None
+        assert store.spine().node("RS1")["fields"]["catalogId"] == current["id"]
+        public("harness_compile")
+        options["expected_revision"] = store.manifest_revision()
+        fresh = question()
+        tuples = fresh["scopes"]["review-budget"]["reviewers"]
+        assert tuples == [
+            dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="medium"),
+            dict(
+                name="claude-reviewer",
+                provider="claude",
+                model="claude-sonnet-5-5",
+                effort="medium",
+            ),
+        ]
+        assert all(t["model"] in fresh["card"] for t in tuples)
+        assert fresh["request_id"] != old_b["request_id"]
+        for reviewer in (old_tuple, *tuples):
+            with pytest.raises(ValueError, match="combined-consent-required"):
+                budget.claim_planning_review_start(store, reviewer)
+        assert budget.planning_review_budget(store)["spentAdmissions"] == 1
+        assert record(server, fresh)["structuredContent"]["state"] == "approved"
+        assert combined_credit(store, "review-budget")["request_id"] == fresh["request_id"]
+        public("harness_advance", to_phase="roundtable")
+        refused = review(old_tuple)
+        assert refused["isError"] and "planning-reviewer-consent-required" in str(refused)
+        assert len(launches) == budget.planning_review_budget(store)["spentAdmissions"] == 1
+        for reviewer in tuples:
+            admitted = review(reviewer)
+            assert not admitted["isError"], str(admitted)
+        assert len(launches) == budget.planning_review_budget(store)["spentAdmissions"] == 3
+        # Same admission owner is used by acceptance reviews; no new campaign allowance.
+        assert budget.claim_planning_review_start(store, tuples[1]) == 4
+        with pytest.raises(ValueError, match="cap-exhausted"):
+            budget.claim_planning_review_start(store, tuples[0])
+        assert budget.planning_review_budget(store)["maxStarts"] == 4
+        assert budget.planning_review_budget(store)["spentAdmissions"] == 4
+    finally:
+        server.close()
+
+
+def test_run22_vision_edit_after_a_requires_fresh_vision_reply(semantic_plan):
+    """Protect displayed intent: catch an early anchor crediting changed vision wording.
+
+    Prior stale-reply tests edit before answering; run 22 needs content invalidation after A
+    but before leaving Vision Lock, followed by supported fresh approval recovery.
+    """
+    from tests.python.core.planning_support import source_only_expansion
+
+    store, _ = semantic_plan
+    source_only_expansion(store)
+    server = PlannerServer(store.workspace)
+    try:
+        a = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")[
+            "structuredContent"
+        ]
+        assert record(server, a)["structuredContent"]["state"] == "approved"
+        for phase in ("expand", "vision-lock"):
+            assert not tool(server, "harness_advance", to_phase=phase)["isError"]
+        vision = store.spine().node("V1")
+        vision["text"] += " Changed user-visible promise after A."
+        refused = tool(server, "harness_upsert_node", node=vision)
+        assert refused["isError"] and "vision-locked-wording" in str(refused)
+        assert not tool(server, "harness_upsert_node", node=vision, reopen_vision_lock=True)[
+            "isError"
+        ]
+        refused = tool(server, "harness_advance", to_phase="features")
+        assert refused["isError"] and "plan-approval-stale" in str(refused)
+        assert store.phase() == "vision-lock" and not store.status()["approval"]["granted"]
+        fresh = tool(server, "harness_prepare_chat_confirmation", gate="vision-lock")[
+            "structuredContent"
+        ]
+        assert fresh["vision_revision"] != a["vision_revision"]
+        assert fresh["card_digest"] == hashlib.sha256(fresh["card"].encode()).hexdigest()
+        assert record(server, fresh)["structuredContent"]["state"] == "approved"
+        assert not tool(server, "harness_advance", to_phase="features")["isError"]
+    finally:
+        server.close()
+
+
 @pytest.mark.parametrize("interaction", [None, "native"])
 def test_semantic_defaults_to_chat_even_with_elicitation(semantic_plan, interaction):
     """Catch capability negotiation silently prompting exec users; legacy fallback tests cannot.

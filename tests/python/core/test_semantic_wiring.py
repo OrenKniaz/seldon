@@ -1254,14 +1254,16 @@ def test_stored_module_binding_dispatches_relative_argv_from_caller_cwd(semantic
     assert not record["isLiveProductProof"]
 
 
-@pytest.mark.parametrize("clarification", [False, True])
+@pytest.mark.parametrize("clarification,run22", [(False, False), (True, False), (False, True)])
 def test_canonical_plan_contracts_red_build_validation_pass(
-    semantic_plan, monkeypatch, clarification
+    semantic_plan, monkeypatch, clarification, run22
 ):
     """Protect public A/B/C→dispatch→CLI→acceptance, with one genuine clarification when needed.
 
     Catches duplicate stops, native elicitation and premature acceptance; separate-gate tests
     never consume the combined public requests through review, publish and final acceptance.
+    Run 22 authors subordinate scope after A at Vision Lock and advances to Execute before
+    starting workers; the original journey authored everything before A and started at Publish.
     """
     import sys
     from copy import deepcopy
@@ -1296,6 +1298,14 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         server, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}}
     )
     server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+    if run22:
+        authored = store.spine().to_dict()["nodes"]
+        vision = store.spine().node("V1")
+        targets = vision["fields"].pop("targets")
+        scenarios = vision["fields"].pop("scenarios")
+        call("harness_upsert_node", node=vision)
+        for key in ("B", "C", "CLI", "D", "R", "F"):
+            call("harness_remove_node", id=key)
     source_only_expansion(store)  # Proposed dispositions only; no confirmation credit.
     if clarification:
         question = call(
@@ -1328,6 +1338,14 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     assert persisted["card"] == a["card"] and a["card"] in card["content"][0]["text"]
     assert set(a["scopes"]) == {"align", "vision-lock"}
     approve(a)
+    if run22:
+        call("harness_advance", to_phase="expand")
+        call("harness_advance", to_phase="vision-lock")
+        vision = store.spine().node("V1")
+        vision["fields"].update(targets=targets, scenarios=scenarios)
+        call("harness_upsert_nodes", nodes=[n for n in authored if n["id"] != "V1"] + [vision])
+        assert store._revision() != a["plan_revision"]
+        assert store.status()["approval"]["granted"]
     for phase in PHASES[PHASES.index(store.phase()) + 1 : PHASES.index("roundtable") + 1]:
         if phase == "roundtable":
             break
@@ -1398,6 +1416,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     call("harness_roundtable", reviewers=reviewers, max_rounds=1, max_total=2, timeout=5)
     call("harness_advance", to_phase="publish")
     call("harness_publish")
+    if run22:
+        call("harness_advance", to_phase="execute")
     packet = worker_packet.build_packet(
         load_plan(store.workspace),
         {**manifest["beads"]["C"], "id": "C"},
@@ -1439,7 +1459,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     assert resumed["semanticValidation"] == green
 
     try:
-        for phase in ("execute", "accept"):
+        for phase in ("accept",) if run22 else ("execute", "accept"):
             advanced = call("harness_advance", to_phase=phase)
             hint = advanced["content"][0]["text"].split("Next: ", 1)[1]
             assert "harness_accept_run" in hint and "If they agree" not in hint

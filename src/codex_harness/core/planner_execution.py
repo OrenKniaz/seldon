@@ -16,6 +16,7 @@ from codex_harness.core.planner_confirmations import (
     _chat_evidence,
     _chat_question,
     _response_channel,
+    combined_credit,
 )
 from codex_harness.core.planner_views import review_resolution_state
 from codex_harness.core.spine import Spine, compile_manifest
@@ -45,7 +46,7 @@ def _canonical_store(store):
         raise ValueError("worker-execution-canonical-store-required")
 
 
-def _control_digest(store, exclude_event=None):
+def _control_digest(store, exclude_event=None, *, execution_transition=False):
     """Raw canonical prerequisites; safe inside an existing writer transaction."""
     from codex_harness.core.planner_jobs import _digest, _files
 
@@ -74,8 +75,15 @@ def _control_digest(store, exclude_event=None):
             )
             if exclude_event is not None:
                 query += f" AND id != {int(exclude_event)}"
+            if execution_transition:
+                query += (
+                    " AND NOT (kind='phase-advanced' "
+                    "AND json_extract(payload_json, '$.from')='publish' "
+                    "AND json_extract(payload_json, '$.to')='execute')"
+                )
         originals[table] = [
-            list(row) for row in store.connection.execute(query + " ORDER BY rowid")
+            dict(row, phase="publish") if table == "meta" and execution_transition else list(row)
+            for row in store.connection.execute(query + " ORDER BY rowid")
         ]
     if exclude_event is not None:
         template = store.workspace / "template"
@@ -123,7 +131,7 @@ def execution_scope(
             )
         ):
             raise ValueError("worker-execution-canonical-prerequisite")
-    return dict(
+    scope = dict(
         workspace=str(store.workspace.resolve()),
         publicationRevision=expected_revision,
         spineRevision=store._revision(),
@@ -137,6 +145,14 @@ def execution_scope(
         callCap=call_cap,
         canonicalControlDigest=_control_digest(store),
     )
+    if (
+        not _candidate
+        and store.phase() in {"publish", "execute"}
+        and combined_credit(store, "execution")
+    ):
+        scope.pop("phase")
+        scope["canonicalControlDigest"] = _control_digest(store, execution_transition=True)
+    return scope
 
 
 def bind_candidate_execution(store, manifest):
@@ -152,7 +168,11 @@ def bind_candidate_execution(store, manifest):
         raise ValueError("worker-execution-candidate-stale")
     if any(r["request_id"] == bundle["request_id"] for r in _records(store, REQUEST)):
         return
-    scope = {**candidate, "phase": store.phase(), "canonicalControlDigest": _control_digest(store)}
+    scope = {
+        **candidate,
+        "canonicalControlDigest": _control_digest(store, execution_transition=True),
+    }
+    scope.pop("phase")
     request = dict(
         request_id=bundle["request_id"],
         scope=scope,
@@ -175,11 +195,16 @@ def _recheck(store, scope):
     if (
         str(store.workspace.resolve()) != scope["workspace"]
         or meta["published_revision"] != scope["publicationRevision"]
-        or meta["phase"] != scope["phase"]
+        or (
+            meta["phase"] != scope["phase"]
+            if "phase" in scope
+            else meta["phase"] not in {"publish", "execute"}
+        )
         or store._revision() != scope["spineRevision"]
         or current["planRevision"] != scope["sourceManifestRevision"]
         or jobs._files(store.workspace / "template") != scope["templateFiles"]
-        or _control_digest(store) != scope["canonicalControlDigest"]
+        or _control_digest(store, execution_transition="phase" not in scope)
+        != scope["canonicalControlDigest"]
         or publication is None
         or jobs._digest(json.loads(publication[0])["manifest"]) != scope["manifestDigest"]
     ):

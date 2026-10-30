@@ -191,10 +191,16 @@ def validate_reviewer_record_scope(
     intake.validate_selection(catalog, node["fields"], author_sessions)
     authority = node["fields"].get("confirmation")
     if authority is None:
+        proposal_scope = reviewer_selection_scope(node, catalog, author_sessions)
+        latest = next(
+            (r for _, r in _records(store, REQUEST) if "reviewer-selection" in r.get("scopes", {})),
+            None,
+        )
+        # A replacement is an unconfirmed draft, not a claim against the old B.
+        if latest is None or latest["scopes"]["reviewer-selection"] != proposal_scope:
+            return
         bundle = combined_credit(store, "reviewer-selection")
-        if bundle and bundle["scopes"]["reviewer-selection"] == reviewer_selection_scope(
-            node, catalog, author_sessions
-        ):
+        if bundle and bundle["scopes"]["reviewer-selection"] == proposal_scope:
             node["fields"]["confirmation"] = dict(
                 approvalId=bundle["request_id"],
                 eventId=bundle["responseEvent"],
@@ -327,6 +333,17 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
         request = requests.get(response.get("request_id"))
         content = response.get("content")
         if (
+            request
+            and "card_digest" in request
+            and (
+                response.get("card_digest") != request["card_digest"]
+                or hashlib.sha256(request["card"].encode("utf-8")).hexdigest()
+                != request["card_digest"]
+                or response.get("vision_revision") != request["vision_revision"]
+            )
+        ):
+            continue
+        if (
             not request
             or request != latest
             or response.get("phase") != request.get("phase")
@@ -437,6 +454,8 @@ def prepare_confirmation(
             )
         if _chat:
             _chat_question(request, revision)
+        request["vision_revision"] = spine.revision(visions[0])
+        request["card_digest"] = hashlib.sha256(request["card"].encode("utf-8")).hexdigest()
         store._event(REQUEST, request)
         return request
 
@@ -551,6 +570,9 @@ def _complete_confirmation(
             approval_id=approval_id,
             provenance=channel,
             human_identity_verified=False,
+        )
+        outcome.update(
+            vision_revision=request.get("vision_revision"), card_digest=request.get("card_digest")
         )
         if chat is not None:
             outcome["chat"] = chat

@@ -1513,9 +1513,8 @@ class PlanStore:
             vision = _json(spine.node(spine.ids("vision")[0]))
             self.connection.execute("UPDATE meta SET locked_vision_json=?", (vision,))
             self.connection.execute("UPDATE meta SET vision_lock_stale=0")
-            if self._meta()["vision_locked_revision"] or PHASES.index(self.phase()) > PHASES.index(
-                "vision-lock"
-            ):
+            # Combined A locks at Align; a native first lock still binds on phase exit.
+            if self.phase() != "vision-lock" or self._meta()["vision_locked_revision"]:
                 self.connection.execute("UPDATE meta SET vision_locked_revision=?", (revision,))
         return item_id
 
