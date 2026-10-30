@@ -142,7 +142,8 @@ def guide(root, name):
     return (
         f"<!-- {MARKER} -->\n# Seldon: {name}\n\n"
         f"Project: {root}\n\n"
-        'Open a chat in this folder and say: "Let\'s plan <your idea> with Seldon".\n\n'
+        "Open a chat in this folder and describe what to build, "
+        'e.g. "Build a small word-count CLI."\n\n'
         "Host integrations are experimental until their actual planning journey is verified.\n"
         "Codex: open this folder and choose Trust. Claude Code: approve the project server\n"
         "when prompted. VS Code: review/approve seldon in workspace MCP configuration.\n\n"
@@ -361,7 +362,7 @@ def run_init(args):
         offered = [p["provider"] for p in report["providers"] if p["executable"]["path"]]
         print(f"Provider executables found (offered, not verified): {', '.join(offered) or 'none'}")
         print("Configuration prepared; actual host planning journey remains unverified.")
-        print('Next: open a chat here and say "Let\'s plan <your idea> with Seldon".')
+        print('Next: open a chat here and describe what to build, e.g. "Build a small CLI."')
     else:
         print("Removed owned registrations; plan data and permission policies preserved.")
     return 0
