@@ -17,6 +17,7 @@ from codex_harness.core.semantic_schema import LIMIT, argv, content, path, valid
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
 MODULE = "codex_harness.core.semantic_runner"
+SOURCE_IGNORED = {".git", ".codex-harness", "__pycache__", ".pytest_cache", ".ruff_cache"}
 
 
 def read(file, limit=LIMIT):
@@ -195,6 +196,7 @@ def run(
     document, product, targets, phase, *, action_seconds=3, scenario_seconds=15, run_seconds=45
 ):
     results, scenarios = [], [{"id": None}]
+    cleanup = dict(quiescenceVerified=True, activeProcessesAfterTeardown=0, childLaunched=False)
     try:
         scenarios = validate(document, product, targets)
         if phase not in ("contracts", "validation") or os.name != "nt":
@@ -213,6 +215,8 @@ def run(
             with tempfile.TemporaryDirectory(prefix="seldon-semantic-") as temp:
                 root, count = Path(temp), 0
                 for base, dirs, files in os.walk(product, followlinks=False):
+                    dirs[:] = [name for name in dirs if name not in SOURCE_IGNORED]
+                    files = [name for name in files if name not in SOURCE_IGNORED]
                     count += len(files) + len(dirs)
                     if count > 128:
                         raise ValueError("Product source exceeds128 entries")
@@ -229,6 +233,7 @@ def run(
                     json.dumps([s, targets, phase, action_seconds, end]), encoding="utf-8"
                 )
                 cmd = [sys.executable, "-B", "-m", MODULE, "--worker", str(config)]
+                cleanup = {}  # Launch may create children even if it raises without a receipt.
                 completed = run_audit_process(
                     cmd, cwd=root, timeout=max(0.01, end - time.monotonic())
                 )
@@ -238,6 +243,7 @@ def run(
                     or control.get("activeProcessesAfterTeardown") != 0
                 ):
                     raise OSError("Owned cleanup uncertain; stop further scenarios")
+                cleanup = control
                 if completed.returncode or time.monotonic() > end:
                     raise TimeoutError("Runner failed or scenario deadline expired")
                 result = dict(json.loads(completed.stdout), id=s["id"], cleanup=control)
@@ -250,7 +256,7 @@ def run(
                 id=scenarios[min(len(results), len(scenarios) - 1)]["id"],
                 state="ERROR",
                 reason=str(error),
-                cleanup=getattr(error, "audit_control", {}),
+                cleanup=getattr(error, "audit_control", cleanup),
             )
         )
     results.extend(

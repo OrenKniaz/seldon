@@ -119,6 +119,55 @@ def test_semantic_accept_public_owner_and_sync_share_real_oracle(
         server.close()
 
 
+@pytest.mark.parametrize("oversized", [False, True])
+def test_semantic_accept_real_git_inventory_and_prelaunch_refusal(
+    semantic_acceptance_product, monkeypatch, oversized
+):
+    """Protect canonical acceptance: prior fixtures miss Git quota and no-child UNKNOWN holds."""
+    from codex_harness.core import semantic_runner
+
+    store, repo = semantic_acceptance_product
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    metadata = repo / ".git" / "inventory-fixture"
+    metadata.mkdir()
+    harness = repo / ".codex-harness"
+    harness.mkdir()
+    for index in range(129):
+        (metadata / str(index)).touch()
+        (harness / str(index)).touch()
+        if oversized:
+            (repo / f"product-{index}.txt").touch()
+    assert (repo / ".git").is_dir()
+    assert len(list((repo / ".git").rglob("*"))) > 128
+    launch = semantic_runner.run_audit_process
+    calls = []
+
+    def observed_launch(*args, **kwargs):
+        calls.append(args)
+        return launch(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_runner, "run_audit_process", observed_launch)
+    server = PlannerServer(store.workspace)
+    try:
+        admitted = server.call_tool("harness_accept_run", dict(repo=str(repo), subject="product"))
+        terminal = finish_public_acceptance(server, admitted)["structuredContent"]
+        assert terminal["state"] == "completed", terminal
+        result = terminal["result"]
+        assert result["passed"] is (not oversized), result
+        raw = result["results"][0]["semantic"]
+        assert raw["state"] == ("ERROR" if oversized else "PASS"), raw
+        assert raw["cleanup"]["quiescenceVerified"] is True
+        assert raw["cleanup"]["activeProcessesAfterTeardown"] == 0
+        assert "cleanupUncertainty" not in raw
+        assert len(calls) == (0 if oversized else 1)
+        if oversized:
+            assert "Product source exceeds128 entries" in raw["reason"]
+            assert raw["cleanup"]["childLaunched"] is False
+        assert current_run(store)["id"] == result["id"]
+    finally:
+        server.close()
+
+
 @pytest.mark.parametrize("link", ["unlinked", "unknown", "stale", "empty"])
 def test_semantic_accept_refuses_invalid_coverage_before_admission(
     semantic_acceptance_product, link

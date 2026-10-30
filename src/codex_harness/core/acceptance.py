@@ -26,6 +26,7 @@ from codex_harness.core import roundtable
 from codex_harness.core import spine as plan_spine
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
+from codex_harness.core.semantic_runner import SOURCE_IGNORED
 from codex_harness.core.semantic_runner import run as run_semantic
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
@@ -144,11 +145,10 @@ def integrated_revision(repo, *, deadline=None, should_stop=None) -> str:
             if path.is_file():
                 paths.append(path.relative_to(repo).as_posix())
         paths.sort()
-    ignored = {".git", ".codex-harness", "__pycache__", ".pytest_cache", ".ruff_cache"}
     files = []
     for name in paths:
         path = repo / name
-        if not ignored.intersection(Path(name).parts):
+        if not SOURCE_IGNORED.intersection(Path(name).parts):
             _metadata_remaining(deadline, should_stop)
             digest = None
             if path.is_file():
@@ -206,11 +206,10 @@ def _integrated_revision_v1(repo) -> str:
         paths = sorted(
             path.relative_to(repo).as_posix() for path in repo.rglob("*") if path.is_file()
         )
-    ignored = {".git", ".codex-harness", "__pycache__", ".pytest_cache", ".ruff_cache"}
     files = []
     for name in paths:
         path = repo / name
-        if not ignored.intersection(Path(name).parts):
+        if not SOURCE_IGNORED.intersection(Path(name).parts):
             files.append(
                 (name, hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None)
             )

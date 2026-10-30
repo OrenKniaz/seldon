@@ -82,7 +82,7 @@ def test_invalid_relative_flag_is_rejected_before_launch(tmp_path, relative):
     ]
     result = run(document, tmp_path, TARGETS, "validation")[0]
     assert result["state"] == "ERROR" and "relative must be true" in result["reason"]
-    assert not result.get("cleanup")
+    assert result["cleanup"]["childLaunched"] is False
 
 
 @pytest.mark.parametrize(
@@ -110,7 +110,7 @@ def test_invalid_module_bindings_are_errors_before_launch(tmp_path, binding):
     result = run(scenario(), tmp_path, {"tally": dict(binding, argv=[])}, "validation")[0]
     (tmp_path / "module-observation.json").write_text(json.dumps(result))
     assert result["state"] == "ERROR", result
-    assert not result.get("cleanup") and not marker.exists()
+    assert result["cleanup"]["childLaunched"] is False and not marker.exists()
     if binding == {"module": "missing"}:
         assert "module" in result["reason"] and "__main__.py" in result["reason"]
 
@@ -158,7 +158,9 @@ def test_unsafe_setup_dirs_are_refused_before_product_action(tmp_path, dirs):
     document["scenarios"][0]["setup"]["dirs"] = dirs
     result = run(document, tmp_path, TARGETS, "validation")
     assert result[0]["state"] == "ERROR", result
-    assert not result[0].get("cleanup")  # Preflight rejects before held payload release.
+    assert (
+        result[0]["cleanup"]["childLaunched"] is False
+    )  # Preflight rejects before held payload release.
     assert not marker.exists()
 
 
@@ -384,7 +386,7 @@ def test_preflight_refuses_invalid_data_before_any_action(tmp_path, keys, value)
     if keys == ("actions", 1):
         assert "unsupported in v1" in result[0]["reason"]
     assert not launched.exists()
-    assert not result[0].get("cleanup")
+    assert result[0]["cleanup"]["childLaunched"] is False
 
 
 @pytest.mark.parametrize(
@@ -444,7 +446,7 @@ def test_byte_fixture_and_cwd_errors_prevent_product_launch(tmp_path, fixture, c
     item["actions"][0]["cwd"] = cwd
     result = run(document, tmp_path, TARGETS, "contracts")
     assert result[0]["state"] == "ERROR", result
-    assert not result[0].get("cleanup")
+    assert result[0]["cleanup"]["childLaunched"] is False
     assert not marker.exists()
 
 
@@ -484,4 +486,16 @@ def test_unobservable_directory_snapshot_is_error_not_contracts_red(tmp_path, ch
     document["scenarios"][0]["observe"] = [dict(path="data", bytesUnchangedFrom="before")]
     result = run(document, tmp_path, TARGETS, "contracts")[0]
     assert result["state"] == "ERROR" and "snapshot" in result["reason"], result
+    assert result["cleanup"]["quiescenceVerified"]
+
+
+@pytest.mark.parametrize("metadata_file", [".git", ".codex-harness"])
+def test_source_inventory_excludes_metadata_files(tmp_path, metadata_file):
+    """Protect worktree metadata exclusion; real-repo acceptance covers directories only."""
+    (tmp_path / "tally.py").write_text(PRODUCT)
+    for index in range(127):
+        (tmp_path / f"product-{index}.txt").touch()
+    (tmp_path / metadata_file).write_text("metadata must not consume the 128th product slot")
+    result = run(scenario(), tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == "PASS", result
     assert result["cleanup"]["quiescenceVerified"]
