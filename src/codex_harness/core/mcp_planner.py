@@ -1091,8 +1091,9 @@ class PlannerServer:
         if name == "harness_advance":
             result = response["result"]
             result["structuredContent"].update(currentPhase="unknown", nextPhase="unknown")
-            result["content"][0]["text"] += (
-                "\nCurrent phase unknown; next legal phase: unknown (workspace binding refused)."
+            result["content"][0]["text"] = (
+                "Current phase unknown; next legal phase: unknown (workspace binding refused).\n"
+                + result["content"][0]["text"]
             )
         return connection_reply(response, self.workspace, show_recovery=True)
 
@@ -1466,7 +1467,7 @@ class PlannerServer:
             phase = dict(currentPhase=current, nextPhase=next_phase)
             reply.setdefault("structuredContent", {}).update(phase)
             text = f"\nStill in {current}; next legal phase: {next_phase or 'none'}."
-            reply["content"][0]["text"] += text
+            reply["content"][0]["text"] = text.strip() + "\n" + reply["content"][0]["text"]
         reply = connection_reply(
             reply, self.workspace, status, show_recovery=name == "harness_plan_status"
         )
