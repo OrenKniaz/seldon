@@ -27,6 +27,9 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit"
 
 def test_dispatch_resume_recovers_worker_blocker_without_duplicate_mail(tmp_path):
     plan = _plan(tmp_path)
+    # Omitting intent from fresh-packet comparison silently relaunches an
+    # unchanged blocked worker; ordinary dispatch cannot exercise this branch.
+    intent_nodes = [dict(kind="vision", title="Resume product", text="Keep my intent.", fields={})]
 
     def blocked(worktree):
         (worktree / ".harness").mkdir()
@@ -47,8 +50,10 @@ def test_dispatch_resume_recovers_worker_blocker_without_duplicate_mail(tmp_path
         mock_provider="reference",
         fake_workers={"A": blocked},
         setup={"githubLogin": "resume-user"},
+        intent_nodes=intent_nodes,
     )
     assert "GitHub must be resume-user." in first["beads"]["A"]["prompt"]
+    assert "## User intent\nResume product\n\nKeep my intent." in first["beads"]["A"]["prompt"]
     mailbox = Mailbox(first["memoryWorkspace"])
     before = mailbox.inbox("planner")
     resumed = run_plan(
@@ -56,6 +61,7 @@ def test_dispatch_resume_recovers_worker_blocker_without_duplicate_mail(tmp_path
         work_root=tmp_path / "unused",
         resume_run_dir=_run_dir(first),
         setup={"githubLogin": "resume-user"},
+        intent_nodes=intent_nodes,
         mock_provider="reference",
         fake_workers={"A": lambda path: pytest.fail("Completed blocked attempt relaunched")},
     )

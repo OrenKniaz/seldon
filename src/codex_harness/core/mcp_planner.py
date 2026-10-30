@@ -915,6 +915,7 @@ def packet_view(store, bead_id: str, provider: str = "codex") -> dict:
         )
     if bead_id not in manifest["beads"]:
         raise ValueError(f"Unknown bead: {bead_id}")
+    locked = store._meta()["locked_vision_json"]
     with TemporaryDirectory(prefix="planner-packet-") as directory:
         path = Path(directory) / "manifest.json"
         path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -926,6 +927,7 @@ def packet_view(store, bead_id: str, provider: str = "codex") -> dict:
             provider=provider,
             proof_level=manifest.get("proofLevel"),
             setup=store.spine().node(store.spine().ids("vision")[0])["fields"].get("setup", {}),
+            intent_nodes=[json.loads(locked), *store.list_nodes("requirement")] if locked else None,
         )
     result = {"packet": packet, "characters": len(packet), "bytes": len(packet.encode("utf-8"))}
     if manifest.get("semantic"):

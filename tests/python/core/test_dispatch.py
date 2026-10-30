@@ -657,6 +657,11 @@ def test_dispatch_attempts_overlap_and_integrate_without_ownership_conflict(tmp_
     plan = _tiny_plan(tmp_path)
     barrier = threading.Barrier(2, timeout=10)
     arrivals = []
+    # Real packet consumption catches a dropped argument at dispatch; the
+    # canonical store producer is covered in the owning worker-job test.
+    intent_nodes = [
+        dict(kind="vision", title="Parallel product", text="Both parts work.", fields={})
+    ]
 
     def worker(bead_id: str):
         def edit(worktree: Path) -> None:
@@ -671,12 +676,17 @@ def test_dispatch_attempts_overlap_and_integrate_without_ownership_conflict(tmp_
         work_root=tmp_path / "runs",
         max_parallel=2,
         setup={"githubLogin": "dispatch-user"},
+        intent_nodes=intent_nodes,
         fake_workers={bead_id: worker(bead_id) for bead_id in ("A", "B")},
     )
     assert all(
         "GitHub must be dispatch-user." in bead["prompt"] for bead in record["beads"].values()
     )
     assert sorted(arrivals) == ["A", "B"]
+    assert all(
+        "## User intent\nParallel product\n\nBoth parts work." in b["prompt"]
+        for b in record["beads"].values()
+    )
     assert record["status"] == STATUS_MOCK_ONLY
     assert all(bead["integrated"]["validation"]["passed"] for bead in record["beads"].values())
     assert record["beads"]["A"]["attempt"]["baseCommit"] == record["baseline"]["commit"]

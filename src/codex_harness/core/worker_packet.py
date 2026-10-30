@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import shlex
 from pathlib import Path
 
 from codex_harness.core.graph import Bead, Plan, test_dir
+from codex_harness.core.planner_vision import SECTIONS, readable
 from codex_harness.core.proof_imports import protected_helpers, python_import_paths
 from codex_harness.core.runners import resolve_runner
 from codex_harness.core.test_audit import PROSPECTIVE_WARNING
@@ -431,6 +433,7 @@ def build_packet(
     provider: str = "codex",
     proof_level: str | None = None,
     setup: dict | None = None,
+    intent_nodes: list[dict] | None = None,
 ) -> str:
     """Supply ownership, full served spec, current files, interfaces and exact proof.
 
@@ -450,6 +453,29 @@ def build_packet(
         # retains refs/identity only, and the manifest need not be named sample.json.
         raw_bead = bead
         bead = plan.beads[raw_bead["id"]]
+    intent = ""
+    for vision in (node for node in intent_nodes or [] if node["kind"] == "vision"):
+        fields = vision["fields"]
+        parts = [vision["title"], vision["text"]]
+        for heading, aliases in (SECTIONS[0], *SECTIONS[5:7], ("Done means", ("done_means",))):
+            key = next((key for key in aliases if key in fields), None)
+            if key:
+                parts.append(f"{heading}:\n{readable(fields[key])}")
+        parts.extend(
+            f"{node['id']}: {node['text']}"
+            for node in intent_nodes
+            if node["kind"] == "requirement" and node["id"] in bead.requirements
+        )
+        full = "\n\n".join(parts)
+        excerpt = full[:2000]
+        intent = (
+            "## User intent\n"
+            + excerpt
+            + ("\n[intent truncated to 2000 characters]" if len(full) > 2000 else "")
+            + f"\nSHA-256 (intent excerpt, UTF-8): {hashlib.sha256(excerpt.encode()).hexdigest()}"
+            + "\nCheck your result against this intent; if contracts and intent conflict, "
+            "stop and report the conflict instead of choosing."
+        )
     if plan.semantic is not None:
         phase = raw_bead["semanticPhase"]
         instruction = (
@@ -466,6 +492,7 @@ def build_packet(
             [
                 f"semantic-v1 {phase}; bead {bead.id}; plan {plan.plan_revision}.",
                 instruction,
+                *([intent] if intent else []),
                 "Change ONLY: " + ", ".join(bead.owned_files),
                 "Never edit: " + ", ".join(plan.requirement_files),
                 "Stay in this worktree. Do not install, commit, push, read credentials or expand "
@@ -751,7 +778,7 @@ def build_packet(
         "compliance, product acceptance, full-vision delivery or supervision savings.\n"
         "Recovery ladder: re-read this packet; run the exact test command below; "
         "use targeted diagnostics; use a bounded search only as a last resort.",
-        "## 2. Goal\n" + "\n\n".join(goal),
+        "## 2. Goal\n" + "\n\n".join(goal) + ("\n\n" + intent if intent else ""),
         "",
         "## 4. Interfaces you may rely on\n"
         + (_bounded_context(interfaces, INTERFACE_BYTES, INTERFACE_BYTES) or "(no dependencies)"),

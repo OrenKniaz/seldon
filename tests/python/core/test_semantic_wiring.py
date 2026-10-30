@@ -715,7 +715,17 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         None,
         provider="codex",
         proof_level=manifest.get("proofLevel"),
+        intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
     ).encode("utf-8")
+    # The real confirmed store -> packet consumer must retain intent; builder-only
+    # coverage cannot catch a caller dropping it (the run19 failure).
+    assert "## User intent\n" in packet
+    assert "Offline greeting CLI" in packet and "R: R: offline greeting CLI" in packet
+    locked = store.locked_acceptance_spine().node("V1")
+    assert locked["fields"]["quality_bar"] in packet
+    assert locked["fields"]["done_feels_like"] in packet
+    assert "stop and report the conflict instead of choosing." in packet
+    assert len(packet) <= worker_packet.MAX_CHARACTERS
     assert "SCENARIOS.json" in packet and "Hello" in packet and "Implement the product" in packet
     # The scenario spec is large; it must appear once, not inline and again as a file.
     assert packet.count('"first-moment"') == 1

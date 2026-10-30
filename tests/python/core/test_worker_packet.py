@@ -787,3 +787,49 @@ def test_packet_ignores_parent_project_database(tmp_path, monkeypatch):
     assert "GitHub must be" not in packet and "foreign-user" not in packet
     explicit = build_packet(plan, plan.beads["B"], repo, None, setup={"githubLogin": "caller-user"})
     assert "GitHub must be caller-user." in explicit
+
+
+def test_packet_intent_is_explicit_linked_bounded_and_digested(tmp_path):
+    """Catch missing intent, unrelated scope and overflow; golden packets have no intent input."""
+    plan, repo = _checkout(tmp_path)
+    nodes = [
+        dict(
+            kind="vision",
+            title="Exact vision",
+            text="Keep café data local.",
+            fields={
+                "qualityBar": "No silent data loss.",
+                "done": "I can trust my saved work.",
+                "done_means": ["Recover after restart."],
+            },
+        ),
+        dict(kind="requirement", id=plan.beads["B"].requirements[0], text="Exact linked wording."),
+        dict(kind="requirement", id="UNLINKED", text="UNRELATED INTENT MUST NOT APPEAR"),
+    ]
+    expected = (
+        "Exact vision\n\nKeep café data local.\n\nQuality:\nNo silent data loss."
+        "\n\nDone:\nI can trust my saved work.\n\nDone means:\n- Recover after restart.\n\n"
+        + plan.beads["B"].requirements[0]
+        + ": Exact linked wording."
+    )
+    packet = build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)
+    assert "## User intent\n" + expected in packet
+    assert (
+        "SHA-256 (intent excerpt, UTF-8): " + hashlib.sha256(expected.encode()).hexdigest()
+        in packet
+    )
+    assert "UNRELATED INTENT MUST NOT APPEAR" not in packet
+    assert (
+        "Check your result against this intent; if contracts and intent conflict, "
+        "stop and report the conflict instead of choosing." in packet
+    )
+    legacy = build_packet(plan, plan.beads["B"], repo, None)
+    assert "## User intent" not in legacy
+    assert build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes[1:]) == legacy
+    nodes[0]["text"] = "é" * 5000
+    (repo / "tipsplit/cli.py").write_text("#" + "x" * 50_000)
+    packet = build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)
+    excerpt = ("Exact vision\n\n" + "é" * 5000)[:2000]
+    assert "## User intent\n" + excerpt + "\n[intent truncated to 2000 characters]" in packet
+    assert hashlib.sha256(excerpt.encode()).hexdigest() in packet
+    assert len(packet) <= MAX_CHARACTERS

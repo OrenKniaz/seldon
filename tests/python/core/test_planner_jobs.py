@@ -222,8 +222,25 @@ def test_exact_publication_snapshot_options_and_ordinary_dispatch(fixture, monke
         "PYTHONPATH": str(Path(jobs.__file__).resolve().parents[2]),
     }
     called = []
+    packets = []
 
     def source_dispatch(plan, **kwargs):
+        # Consume the canonical store's actual argument with the real renderer:
+        # call-shape assertions alone miss an unusable/missing intent payload.
+        from codex_harness.core.graph import load_plan
+        from codex_harness.core.worker_packet import build_packet
+
+        loaded = load_plan(plan)
+        for key, bead in store.manifest["beads"].items():
+            packets.append(
+                build_packet(
+                    loaded,
+                    {"id": key, **bead},
+                    plan / "template",
+                    None,
+                    intent_nodes=kwargs["intent_nodes"],
+                )
+            )
         called.append((plan, kwargs))
         return dict(runId="source-only-fixture", status=jobs.dispatch.STATUS_MOCK_ONLY)
 
@@ -231,6 +248,8 @@ def test_exact_publication_snapshot_options_and_ordinary_dispatch(fixture, monke
     terminal = jobs.execute_worker_job(store.workspace, store.revision)
     assert terminal["status"] == "completed"
     assert terminal["dispatchStatus"] == jobs.dispatch.STATUS_MOCK_ONLY
+    vision = store.locked_acceptance_spine().node("V1")
+    assert all("## User intent\n" + vision["title"] + "\n\n" + vision["text"] in p for p in packets)
     assert called == [
         (
             directory / "plan",
@@ -244,6 +263,7 @@ def test_exact_publication_snapshot_options_and_ordinary_dispatch(fixture, monke
                 max_provider_calls=16,
                 execution_job=directory,
                 setup={},
+                intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
             ),
         )
     ]

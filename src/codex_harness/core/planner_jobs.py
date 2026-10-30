@@ -453,6 +453,7 @@ def execute_worker_job(workspace, job_id):
                 raise ValueError("worker-job-publication-changed-before-launch")
             spine = store.spine()
             setup = spine.node(spine.ids("vision")[0])["fields"].get("setup", {})
+            intent_nodes = store.locked_acceptance_spine().to_dict()["nodes"]
         workers = _workers(manifest, request["options"]["workers"])
         run = dispatch.run_plan(
             plan,
@@ -465,6 +466,7 @@ def execute_worker_job(workspace, job_id):
             max_provider_calls=request["options"]["callCap"],
             execution_job=directory,
             setup=setup,
+            intent_nodes=intent_nodes,
         )
         terminal.update(status="completed", runId=run["runId"], dispatchStatus=run["status"])
     except Exception as error:

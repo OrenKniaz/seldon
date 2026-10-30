@@ -1998,6 +1998,7 @@ def run_plan(
     max_provider_calls: int | None = None,
     execution_job: str | Path | None = None,
     setup: dict | None = None,
+    intent_nodes: list[dict] | None = None,
 ) -> dict:
     """Run a validated work graph; only integrated passes release dependents.
 
@@ -2405,6 +2406,7 @@ def run_plan(
                     provider=records[bead_id]["provider"],
                     proof_level=manifest.get("proofLevel"),
                     setup=setup,
+                    intent_nodes=intent_nodes,
                 )
                 old_prompt = request.get("prompt") or old.get("prompt")
                 if bead_id not in retry_ids and (old_prompt is None or fresh_prompt == old_prompt):
@@ -2625,6 +2627,7 @@ def run_plan(
                             provider=current["provider"],
                             proof_level=manifest.get("proofLevel"),
                             setup=setup,
+                            intent_nodes=intent_nodes,
                         )
                         if (
                             plan.semantic is not None
