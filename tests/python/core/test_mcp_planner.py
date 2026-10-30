@@ -2013,7 +2013,7 @@ def test_public_acceptance_contract_derives_complete_executable_coverage(server,
 def test_public_compile_then_packet_current_manifest_without_execution(
     server, tmp_path, monkeypatch
 ):
-    """Protect current-manifest packet gates; catch stale reads beyond semantic happy paths."""
+    """Protect guards/legacy truth; catch invented suites absent in semantic happy paths."""
 
     def no_process(*args, **kwargs):
         raise AssertionError(
@@ -2051,6 +2051,7 @@ def test_public_compile_then_packet_current_manifest_without_execution(
     event_count = server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
     call(server, "harness_packet_view", id="A", provider="codex", include_packet=True)
     packet = server.result_data
+    assert "semanticSuite" not in packet
     assert packet["bytes"] == len(packet["packet"].encode("utf-8")) > 0
     assert packet["characters"] == len(packet["packet"])
     assert (

@@ -221,7 +221,8 @@ TOOLS = [
     ),
     _tool(
         "harness_packet_view",
-        "Read worker packet size metadata from the current compiled or published plan. "
+        "Read worker packet size and semantic suite IDs/target bindings from the current "
+        "compiled or published plan. "
         "Summary by default; include_packet=true returns exact full text for debugging. "
         "Reviewers receive their canonical packets independently.",
         {
@@ -854,7 +855,18 @@ def packet_view(store, bead_id: str, provider: str = "codex") -> dict:
             provider=provider,
             proof_level=manifest.get("proofLevel"),
         )
-    return {"packet": packet, "characters": len(packet), "bytes": len(packet.encode("utf-8"))}
+    result = {"packet": packet, "characters": len(packet), "bytes": len(packet.encode("utf-8"))}
+    if manifest.get("semantic"):
+        semantic = manifest["semantic"]
+        result["semanticSuite"] = {
+            "mode": manifest["planMode"],
+            "scenarioIds": [s["id"] for s in semantic["scenarios"]["scenarios"]],
+            "targets": semantic["targets"],
+            "teaching": "Controller acceptance uses semantic.scenarios and semantic.targets. "
+            "The separate legacy Current acceptance scenarios section may be empty. "
+            "These are planned scenarios, not execution proof.",
+        }
+    return result
 
 
 def _node_test_blocks(source: str) -> list[tuple[str, str]]:
@@ -1061,7 +1073,7 @@ class PlannerServer:
 
     def _wire_call_tool(self, name, arguments):
         if name == "harness_packet_view" and isinstance(arguments, dict):
-            # CLI/internal calls retain full packet output; only MCP defaults to size.
+            # CLI/internal calls retain full packet output; MCP defaults to the summary.
             arguments = {"include_packet": False, **arguments}
         if name not in {
             "harness_schema",

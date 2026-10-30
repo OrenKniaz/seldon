@@ -1351,11 +1351,13 @@ def coverage_store(scope_store):
 
 
 def test_current_brief_clause_walk_reaches_packet_and_all_shards(coverage_store):
-    """Catch omitted source clauses/shard context; prior packets only carried spine prose."""
+    """Protect semantic review context; catch false empty suites missed by legacy packets."""
     store = coverage_store
     brief = (store.workspace / "docs/brief.md").read_bytes().decode("utf-8")
     packet = review_packet(store)
     assert brief in packet and "S_CURRENT" in packet
+    assert "## Current acceptance scenarios" not in packet
+    assert "vision fields.scenarios and fields.targets" in packet
     assert "Clause (verbatim) | Scenario ID(s) or GAP" in packet
     assert "working notes" in packet and "all actual gaps in this first review" in packet
     assert "Reply with ONLY a JSON array" in packet
@@ -1366,6 +1368,8 @@ def test_current_brief_clause_walk_reaches_packet_and_all_shards(coverage_store)
     shards = roundtable.packet_shards(store, "codex", token_budget=12000)
     assert len(shards) > 1
     assert all(brief in shard["packet"] and "S_CURRENT" in shard["packet"] for shard in shards)
+    assert all("## Current acceptance scenarios" not in shard["packet"] for shard in shards)
+    assert all("vision fields.scenarios and fields.targets" in shard["packet"] for shard in shards)
     assert all("Clause (verbatim) | Scenario ID(s) or GAP" in shard["packet"] for shard in shards)
     (store.workspace / "docs/brief.md").write_text("CURRENT REVISED CLAUSE", encoding="utf-8")
     assert "CURRENT REVISED CLAUSE" in review_packet(store)

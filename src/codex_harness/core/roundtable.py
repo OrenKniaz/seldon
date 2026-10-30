@@ -261,7 +261,13 @@ def _test_bodies(store: PlanStore, protected=None) -> str:
     )
 
 
-def _scenario_section(scenarios) -> str:
+def _scenario_section(scenarios, *, semantic=False) -> str:
+    if semantic:
+        return (
+            "## Semantic acceptance scenarios\n\n"
+            "See the vision fields.scenarios and fields.targets in canonical spine details; "
+            "these define the planned controller suite, not execution proof.\n"
+        )
     return (
         "## Current acceptance scenarios\n\n"
         + json.dumps(scenarios, ensure_ascii=False, sort_keys=True)
@@ -302,7 +308,11 @@ def _packet(
         + render_quality_card(report)
     )
     sections.append(test_bodies)
-    sections.append(_scenario_section(scenarios) if scenario_section is None else scenario_section)
+    sections.append(
+        _scenario_section(scenarios, semantic=spine.semantic)
+        if scenario_section is None
+        else scenario_section
+    )
     # Rendered views omit some fields; reviewers still need exact acceptance,
     # verification and design details to challenge the real vision.
     sections.append(
@@ -413,7 +423,7 @@ def packet_shards(
     if scenario_section is not None and not isinstance(scenario_section, str):
         raise ValueError("scenario section must be a string")
     if scenario_section is None:
-        scenario_section = _scenario_section(scenarios)
+        scenario_section = _scenario_section(scenarios, semantic=spine.semantic)
     brief_section = _brief_section(store) if packet is None else ""
     full = (
         packet

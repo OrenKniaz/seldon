@@ -365,12 +365,22 @@ def test_mode_defaults_only_at_creation_and_survives_resume(tmp_path, mode):
 def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
     semantic_plan, monkeypatch, capsys
 ):
-    """Protect semantic packet/gates; catch default bulk echoes missed by direct-builder tests."""
+    """Protect suite inspection; catch missing IDs/bindings missed by size-only packet checks."""
     from tests.python.core.test_mcp_planner import rpc, workspace_wire
 
     from codex_harness.core import plan_cli
 
     store, manifest = semantic_plan
+    vision = store.spine().node("V1")
+    vision["fields"]["targets"] = {"greet": {"module": "greeting", "argv": []}}
+    second = json.loads(json.dumps(vision["fields"]["scenarios"]["scenarios"][0]))
+    second["id"] = "repeat-greeting"
+    vision["fields"]["scenarios"]["scenarios"].append(second)
+    store.upsert_node(vision)
+    for key in ("C", "B"):
+        bead = store.spine().node(key)
+        bead["fields"]["ownedFiles"] = ["greeting/__init__.py", "greeting/__main__.py"]
+        store.upsert_node(bead)
     assert "proofModule" not in manifest["beads"]["B"]
     assert not store.spine().ids("test") and not store.spine().coverage_gaps()
     assert not (store.workspace / "template/tests").exists()
@@ -380,6 +390,7 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
             source_only_confirmation(store, store.phase())
         store.advance(PHASES[PHASES.index(store.phase()) + 1], by="source-test")
     manifest = store.compile_template(store.workspace / "template")
+    (store.workspace / "sample.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="successful review") as error:
         store.advance("publish", by="source-test")
     assert "passing audit" not in str(error.value)
@@ -387,6 +398,14 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         store.publish(by="source-test", export_dir=store.workspace / "published")
     canonical = packet_view(store, "B")
     packet = canonical["packet"]
+    assert packet.encode("utf-8") == worker_packet.build_packet(
+        load_plan(store.workspace),
+        {"id": "B", **manifest["beads"]["B"]},
+        store.workspace / "template",
+        None,
+        provider="codex",
+        proof_level=manifest.get("proofLevel"),
+    ).encode("utf-8")
     assert "SCENARIOS.json" in packet and "Hello" in packet and "Implement the product" in packet
     # The scenario spec is large; it must appear once, not inline and again as a file.
     assert packet.count('"first-moment"') == 1
@@ -405,7 +424,15 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         assert summary["structuredContent"] == {
             "characters": len(packet),
             "bytes": len(packet.encode("utf-8")),
+            "semanticSuite": canonical["semanticSuite"],
         }
+        suite = summary["structuredContent"]["semanticSuite"]
+        assert suite["mode"] == "semantic-v1"
+        assert suite["scenarioIds"] == ["first-moment", "repeat-greeting"]
+        assert suite["targets"] == {"greet": {"module": "greeting", "argv": []}}
+        assert "semantic.scenarios and semantic.targets" in suite["teaching"]
+        assert "legacy Current acceptance scenarios section may be empty" in suite["teaching"]
+        assert "not execution proof" in suite["teaching"]
         assert packet not in summary["content"][0]["text"]
         assert "Summary only; include_packet=true" in summary["content"][0]["text"]
         assert read(id="B", include_packet=False) == summary
@@ -426,7 +453,7 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
             key: len(json.dumps(reply, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
             for key, reply in (("default", summary), ("full", full))
         }
-        assert sizes["default"] < sizes["full"], sizes
+        assert sizes["default"] < 2500 < sizes["full"], sizes
         (store.workspace / "packet-bytes.json").write_text(json.dumps(sizes), encoding="utf-8")
     finally:
         server.close()
