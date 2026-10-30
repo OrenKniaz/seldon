@@ -664,6 +664,8 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "to check files between actions.",
             "refs": "requirementRefs/contractRefs are requirement/design node IDs, e.g. R1; "
             "an optional @revision pin is checked when present.",
+            "stdin": "Optional cli.stdin supplies exactly one utf8 or strict base64 string "
+            "(e.g. {utf8: 'hello\\n'} or {base64: '/w=='}); absent means EOF/DEVNULL.",
             "fieldExample": {
                 "targets": {"app": {"entry": "app_cli.py", "argv": []}},
                 "scenarios": {

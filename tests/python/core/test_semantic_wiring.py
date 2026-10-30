@@ -945,6 +945,35 @@ def test_semantic_review_packet_keeps_three_jobs_and_adds_scenario_feasibility(s
     assert "Look for missing features or edge cases" not in packet
 
 
+def test_stored_stdin_compiles_to_real_runner_without_mutating_input(semantic_plan):
+    """Catch compiler dropping stdin or IDs; direct runner probes bypass canonical storage."""
+    from codex_harness.core.semantic_runner import run
+
+    store, _ = semantic_plan
+    vision = store.spine().node("V1")
+    document = vision["fields"]["scenarios"]
+    item = document["scenarios"][0]
+    item["actions"][0]["cli"]["stdin"] = {"base64": "/wANCoA="}
+    action_id = item["actions"][0]["id"]
+    item["observe"] = [{"action": action_id, "exitEquals": 0, "stdoutJsonEquals": "ff000d0a80"}]
+    store.upsert_node(vision)
+    before = json.dumps(store.spine().node("V1"))
+    compiled = store.compile_template(store.workspace / "template")["semantic"]
+    assert compiled["scenarios"] == document
+    product = store.workspace / "template"
+    (product / "hello.py").write_text(
+        "import json,sys\nprint(json.dumps(sys.stdin.buffer.read().hex()))\n"
+    )
+    compiled_before = json.dumps(compiled)
+    results = run(compiled["scenarios"], product, compiled["targets"], "validation")
+    assert [(r["id"], r["state"]) for r in results] == [(item["id"], "PASS")], results
+    assert results[0]["actions"][action_id]["exit"] == 0
+    assert results[0]["cleanup"]["quiescenceVerified"]
+    assert results[0]["cleanup"]["activeProcessesAfterTeardown"] == 0
+    assert json.dumps(compiled) == compiled_before
+    assert json.dumps(store.spine().node("V1")) == before
+
+
 def test_public_dirs_example_compiles_to_real_runner_with_deliberate_negative(semantic_plan):
     """Catch teaching/compile/runner drift; standalone setup tests bypass the typed producer."""
     from codex_harness.core.semantic_runner import run

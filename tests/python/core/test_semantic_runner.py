@@ -25,6 +25,53 @@ def scenario():
 TARGETS = {"tally": {"entry": "tally.py", "argv": []}}
 
 
+@pytest.mark.parametrize(
+    "stdin,expected",
+    [
+        (None, ""),
+        ({"utf8": ""}, ""),
+        ({"utf8": "שלום\r\nline\n"}, "שלום\r\nline\n".encode().hex()),
+        ({"base64": "/wANCoA="}, "ff000d0a80"),
+    ],
+)
+def test_stdin_bytes_and_eof_reach_real_cli(tmp_path, stdin, expected):
+    """Catch encoding/newline drift or missing EOF; prior CLI scenarios only use argv/files."""
+    (tmp_path / "tally.py").write_text(
+        "import json,sys\nprint(json.dumps(sys.stdin.buffer.read().hex()))\n"
+    )
+    document = scenario()
+    item = document["scenarios"][0]
+    item["setup"] = {}
+    if stdin is not None:
+        item["actions"][0]["cli"]["stdin"] = stdin
+    item["observe"] = [{"action": "add", "exitEquals": 0, "stdoutJsonEquals": expected}]
+    before = json.dumps(document)
+    result = run(document, tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == "PASS", result
+    assert result["id"] == item["id"]
+    assert json.dumps(document) == before
+    assert result["cleanup"]["quiescenceVerified"]
+    assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
+
+
+def test_stdin_write_drains_output_before_waiting_for_reader(tmp_path):
+    """Catch duplex pipe deadlock; small byte probes never fill either Windows pipe."""
+    (tmp_path / "tally.py").write_text(
+        "import sys\nsys.stdout.write('x'*12000);sys.stdout.flush()\n"
+        "data=sys.stdin.buffer.read();print(len(data), data.count(b'z'))\n"
+    )
+    document = scenario()
+    item = document["scenarios"][0]
+    item["actions"][0]["cli"]["stdin"] = {"utf8": "z" * 48000}
+    item["observe"] = [
+        {"action": "add", "exitEquals": 0, "stdoutEquals": "x" * 12000 + "48000 48000\n"}
+    ]
+    result = run(document, tmp_path, TARGETS, "validation")[0]
+    assert result["state"] == "PASS", result
+    assert result["cleanup"]["quiescenceVerified"]
+    assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
+
+
 @pytest.mark.parametrize("relative", [False, None, 0, 1, "true", [], {}])
 def test_invalid_relative_flag_is_rejected_before_launch(tmp_path, relative):
     """Catch truthiness accepting non-true flags; existing negatives lack relative argv."""
@@ -216,11 +263,13 @@ def test_missing_setup_snapshot_remains_error(tmp_path, monkeypatch):
 
 
 def test_tally_stub_fail_then_implemented_fixture_cli_pass(tmp_path):
-    """Catch false stub RED/PASS; previous AST proofs never consumed scenario data via CLI."""
+    """Catch unread input masking attributable RED; previous stub proof supplied no pipe."""
     product = tmp_path
     entry = product / "tally.py"
     entry.write_text(STUB)
-    red = run(scenario(), product, TARGETS, "contracts")
+    document = scenario()
+    document["scenarios"][0]["actions"][0]["cli"]["stdin"] = {"utf8": "x" * 48000}
+    red = run(document, product, TARGETS, "contracts")
     (tmp_path / "red.json").write_text(json.dumps(red))
     assert red[0]["state"] == "FAIL", red
     assert red[0]["stubActions"] == ["add"]
@@ -251,14 +300,18 @@ def test_tally_stub_fail_then_implemented_fixture_cli_pass(tmp_path):
     ],
 )
 def test_infrastructure_stops_remaining_scenarios(tmp_path, source, reason):
-    """Catch infra earning RED or launching later work; passing stubs miss finite-stop failures."""
+    """Catch blocked stdin escaping timeout/cleanup; previous timeout supplied no input."""
     (tmp_path / "tally.py").write_text(source)
     document = scenario()
+    if reason == "timeout":
+        document["scenarios"][0]["actions"][0]["cli"]["stdin"] = {"utf8": "x" * 20000}
     document["scenarios"].append(dict(document["scenarios"][0], id="unperformed"))
     results = run(document, tmp_path, TARGETS, "contracts", action_seconds=0.5)
     assert [r["state"] for r in results] == ["ERROR", "ERROR"], results
     assert reason in results[0]["reason"].lower(), results
     assert results[1]["reason"] == "unperformed after earlier ERROR"
+    assert results[0]["cleanup"]["quiescenceVerified"]
+    assert results[0]["cleanup"]["activeProcessesAfterTeardown"] == 0
 
 
 @pytest.mark.parametrize(
@@ -270,6 +323,21 @@ def test_infrastructure_stops_remaining_scenarios(tmp_path, source, reason):
         (("actions", 0, "cli", "argv"), [{"path": "../outside"}]),
         (("actions", 0, "cli", "argv"), [{"path": "../outside", "relative": True}]),
         (("actions", 0, "cli", "target"), "missing"),
+        *[
+            pytest.param(("actions", 0, "cli", "stdin"), value, id=f"stdin-{name}")
+            for name, value in [
+                ("null", None),
+                ("scalar", "text"),
+                ("array", []),
+                ("neither", {}),
+                ("both", {"utf8": "", "base64": ""}),
+                ("unknown", {"utf8": "", "extra": ""}),
+                ("nonstring", {"utf8": 1}),
+                ("invalid-base64", {"base64": "!"}),
+                ("base64-whitespace", {"base64": "/w==\n"}),
+                ("base64-padding", {"base64": "/w"}),
+            ]
+        ],
         (("observe", 1, "bytesUnchangedFrom"), "missing"),
         (("observe", 0, "exitEquals"), True),
         (("observe", 0, "eval"), True),
@@ -281,7 +349,7 @@ def test_infrastructure_stops_remaining_scenarios(tmp_path, source, reason):
     ],
 )
 def test_preflight_refuses_invalid_data_before_any_action(tmp_path, keys, value):
-    """Catch setup supplying code; prior collisions missed creation of a missing imported module."""
+    """Catch unsafe setup and malformed stdin prelaunch; prior negatives omit input encoding."""
     launched = tmp_path / "launched"
     (tmp_path / "tally.py").write_text(f"open({str(launched)!r},'w').write('unexpected')")
     document = scenario()
@@ -316,6 +384,7 @@ def test_preflight_refuses_invalid_data_before_any_action(tmp_path, keys, value)
     if keys == ("actions", 1):
         assert "unsupported in v1" in result[0]["reason"]
     assert not launched.exists()
+    assert not result[0].get("cleanup")
 
 
 @pytest.mark.parametrize(

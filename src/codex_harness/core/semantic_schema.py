@@ -148,7 +148,10 @@ def validate(document, product, targets, *, require_entries=True):
                     raise ValueError("Action cwd must be a directory created by setup")
             actions.add(a["id"])
             v = a["cli"]
-            fields(v, ("target", "operation", "argv"), ("target", "operation", "argv"))
+            fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"))
+            if "stdin" in v:
+                fields(v["stdin"], ("utf8", "base64"))
+                content(v["stdin"])
             if type(v["target"]) is not str or v["target"] not in targets:
                 raise ValueError("Action references an unknown target")
             if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:

@@ -44,12 +44,13 @@ def read(file, limit=LIMIT):
     return value
 
 
-def capture(cmd, root, cwd=None):
+def capture(cmd, root, cwd=None, payload=None):
     env = dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root))
     if cmd[2] == "-m":
         env["PYTHONSAFEPATH"] = "1"
     env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
-    child = Popen(cmd, cwd=cwd or root, env=env, stdin=DEVNULL, stdout=PIPE, stderr=PIPE)
+    stdin = DEVNULL if payload is None else PIPE
+    child = Popen(cmd, cwd=cwd or root, env=env, stdin=stdin, stdout=PIPE, stderr=PIPE)
     data = [None, None]
 
     def drain(stream, index):
@@ -61,6 +62,12 @@ def capture(cmd, root, cwd=None):
     ]
     for thread in threads:
         thread.start()
+    if payload is not None:
+        try:
+            with child.stdin:
+                child.stdin.write(payload)
+        except BrokenPipeError:
+            pass  # A Contracts stub may exit before consuming input.
     while child.poll() is None:
         if any(d is not None and len(d) > LIMIT for d in data):
             raise ValueError("Product output exceeds 16KiB")
@@ -119,6 +126,7 @@ def execute(s, root, targets, phase, seconds, deadline):
                 [sys.executable, "-B", *launch, *args],
                 root,
                 cwd,
+                content(v["stdin"]) if "stdin" in v else None,
             )
         finally:
             guard.cancel()
