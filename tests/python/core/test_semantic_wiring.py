@@ -365,7 +365,10 @@ def test_mode_defaults_only_at_creation_and_survives_resume(tmp_path, mode):
 def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
     semantic_plan, monkeypatch, capsys
 ):
-    """Protect suite inspection; catch missing IDs/bindings missed by size-only packet checks."""
+    """Protect suite inspection and summary-first teaching after run14's unnecessary full fetch.
+
+    Size-only packet checks miss absent guidance about when exact packet text is needed.
+    """
     from tests.python.core.test_mcp_planner import rpc, workspace_wire
 
     from codex_harness.core import plan_cli
@@ -434,7 +437,11 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         assert "legacy Current acceptance scenarios section may be empty" in suite["teaching"]
         assert "not execution proof" in suite["teaching"]
         assert packet not in summary["content"][0]["text"]
-        assert "Summary only; include_packet=true" in summary["content"][0]["text"]
+        assert "summary + semanticSuite first" in summary["content"][0]["text"]
+        assert (
+            "include_packet=true only when those cannot answer a concrete review/debug question "
+            "about exact packet text" in summary["content"][0]["text"]
+        )
         assert read(id="B", include_packet=False) == summary
         full = read(id="B", include_packet=True)
         assert full["structuredContent"] == canonical
@@ -447,6 +454,11 @@ def test_scenario_data_compiles_and_keeps_review_publish_and_packet_gates(
         tools = rpc(server, "tools/list")["result"]["tools"]
         teaching = next(tool for tool in tools if tool["name"] == "harness_packet_view")
         assert "Reviewers receive their canonical packets independently" in teaching["description"]
+        assert "default summary + semanticSuite first" in teaching["description"]
+        assert (
+            "only when those cannot answer a concrete review/debug question"
+            in teaching["description"]
+        )
         assert plan_cli.main(["--workspace", str(store.workspace), "--json", "packet", "B"]) == 0
         assert json.loads(capsys.readouterr().out)["data"] == canonical
         sizes = {

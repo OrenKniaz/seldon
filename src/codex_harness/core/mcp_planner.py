@@ -176,6 +176,10 @@ TOOLS = [
         "harness_roundtable",
         "Run the existing protected roundtable with explicit authorized reviewers. "
         "Inspect harness_schema tool=harness_roundtable first; offerings do not prove access. "
+        "Suggest a small explicit authorized max_total >=2 for initial review and "
+        "repaired-manifest recheck; honor the user's ceiling and spent attempts. "
+        "Exhaustion needs fresh consent, "
+        "never a silent cap increase or attempt reset. "
         "Before requesting semantic review, walk every full-brief clause in working notes: "
         "clause -> scenario ID(s) or GAP with rationale. Repair required gaps; unsupported "
         "obligations stay required/unproven or explicitly deferred. No coverage certification. "
@@ -225,7 +229,8 @@ TOOLS = [
         "harness_packet_view",
         "Read worker packet size and semantic suite IDs/target bindings from the current "
         "compiled or published plan. "
-        "Summary by default; include_packet=true returns exact full text for debugging. "
+        "Use the default summary + semanticSuite first; request include_packet=true only when "
+        "those cannot answer a concrete review/debug question about exact packet text. "
         "Reviewers receive their canonical packets independently.",
         {
             "id": STRING,
@@ -2075,7 +2080,11 @@ class PlannerServer:
             packet = self.result_data["packet"]
             if not args.get("include_packet", True):
                 del self.result_data["packet"]
-                packet = "Summary only; include_packet=true for full debugging text."
+                packet = (
+                    "Summary only; use this summary + semanticSuite first. "
+                    "Request include_packet=true only when those cannot answer a concrete "
+                    "review/debug question about exact packet text."
+                )
             return packet + (
                 f"\nPacket size: {self.result_data['characters']} characters; "
                 f"{self.result_data['bytes']} bytes"

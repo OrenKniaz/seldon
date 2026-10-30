@@ -75,7 +75,8 @@ def test_public_short_vision_example_preserves_actual_brief_and_existing_long_vi
 def test_public_compile_help_populates_existing_vision_metadata_and_compiles(tmp_path):
     """Protect schema-first compile: omitted argv/path shapes caused a live refusal.
 
-    Existing compile tests prepopulate fixture metadata and miss learning by error.
+    Existing compile tests prepopulate fixture metadata and miss learning by error;
+    they also miss run14's substring assertions falsely implying single-line framing.
     """
     from shutil import copytree
 
@@ -94,6 +95,13 @@ def test_public_compile_help_populates_existing_vision_metadata_and_compiles(tmp
         original = deepcopy(node)
         vision_help = invoke(server, "harness_schema", kind="vision")["structuredContent"]
         compile_help = invoke(server, "harness_schema", tool="harness_compile")["structuredContent"]
+        observe = compile_help["semanticScenarios"]["observe"]
+        assert 'stderrEquals="message\\n" proves exact framing' in observe
+        assert "stderrContains alone proves neither line count nor absence of traceback" in observe
+        assert (
+            "variable fault diagnostics need appropriate supplemental checks "
+            "through the real handler" in observe
+        )
         contract = compile_help["compilationMetadata"]
         assert vision_help["compilationMetadata"] == contract
         node["fields"].update(contract["fieldExample"])
@@ -579,7 +587,12 @@ def test_cli_schema_keeps_full_human_contract_and_compact_machine_view(tmp_path,
 
 
 def test_schema_discovery_before_start_has_usable_examples_without_creating_plan(tmp_path):
-    """Catch duplicate schema text; field-only checks miss a verbose copy beside structured data."""
+    """Protect cold discovery and repair/recheck budget teaching after run14 exhausted max_total=1.
+
+    Field-only tests miss both duplicated schema text and unusable review-budget advice.
+    """
+    from tests.python.core.test_mcp_planner import rpc
+
     # A cold planner cannot recover by reading source. tools/list only describes
     # fields as an opaque object, so it misses the bead/test repair contract.
     server = PlannerServer(tmp_path)
@@ -594,6 +607,17 @@ def test_schema_discovery_before_start_has_usable_examples_without_creating_plan
         assert data["inputSchema"]["additionalProperties"] is False
         assert "ownedFiles" in data["fieldRules"]
         assert data["allowedParentKinds"] == ["decision", "design", "requirement"]
+        review = invoke(server, "harness_schema", tool="harness_roundtable")["structuredContent"]
+        tools = rpc(server, "tools/list")["result"]["tools"]
+        description = next(t for t in tools if t["name"] == "harness_roundtable")["description"]
+        assert "explicit authorized max_total >=2" in description
+        assert "initial review and repaired-manifest recheck" in description
+        assert "honor the user's ceiling and spent attempts" in description
+        assert (
+            "Exhaustion needs fresh consent, never a silent cap increase or attempt reset"
+            in description
+        )
+        assert review["inputSchema"]["properties"]["max_total"]["minimum"] == 1
         assert not invoke(
             server,
             "harness_plan_start",

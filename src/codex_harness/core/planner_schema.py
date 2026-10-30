@@ -655,6 +655,11 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None):
             "emits ../note.txt; relative is optional but must be true (binding argv uses root).",
             "observe": "action observations: exitEquals, stdoutEquals, stdoutJsonEquals, "
             "stderrNonempty, stderrEquals (exact, including empty), stderrContains (substring). "
+            'For a stable single-line diagnostic, stderrEquals="message\\n" proves exact framing. '
+            "stderrContains alone proves neither line count nor absence of traceback. "
+            "Avoid brittle whole multiline logs; variable fault diagnostics need "
+            "appropriate supplemental checks "
+            "through the real handler. "
             "JSON equality preserves types, including integer versus float. path observations: "
             "fileJsonEquals, fileBytesEquals, fileAbsent, bytesUnchangedFrom (a setup snapshot id; "
             "files compare raw bytes, directories compare all entries and file bytes, "
