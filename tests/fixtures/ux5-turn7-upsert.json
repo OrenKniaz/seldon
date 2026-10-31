@@ -1,0 +1,1448 @@
+{
+  "expected_workspace": "C:\\Users\\oren\\Documents\\Codex\\seldon-runs\\slot-39",
+  "node": {
+    "id": "V1",
+    "kind": "vision",
+    "title": "Pollen — room for a little more possibility",
+    "text": "Pollen makes a small desk feel full of possibility through an expressive, object-led landing page.\n\nFull brief: PRODUCT-BRIEF.md",
+    "parents": [],
+    "fields": {
+      "assumptions": [
+        "No references or brand assets were supplied. User-specified direction: optimistic, considered and tactile; sculptural and playful; warm ivory, dark plum and soft marigold; cohesive system fonts and a generous original composition of the objects.",
+        "The site presents a fictional brand concept, with clearly labelled fictional specifications; the main action explores the three-piece collection and how the pieces work together.",
+        "Optional project/Git/account setup is omitted unless requested; no credentials or remote publishing are needed."
+      ],
+      "done_feels_like": "The user opens the finished local page, understands Pollen and its three fictional pieces, explores desk combinations, reads care guidance and operates FAQ by mouse or keyboard; sees the actual page before deciding whether the design feels right, with an honest account of verified and unverified checks.",
+      "expansion": {
+        "mode": "quality",
+        "reason": "The precise brief needs quality decisions within scope, with no additional product features.",
+        "upgrades": [
+          {
+            "disposition": "accept",
+            "id": "Q1",
+            "impact": "Strong presentation without network assets.",
+            "kind": "quality",
+            "text": "Create a distinctive sculptural hero arrangement and consistent original local object illustrations throughout the page."
+          },
+          {
+            "disposition": "accept",
+            "id": "Q2",
+            "impact": "Expressive brand identity and responsive readability.",
+            "kind": "quality",
+            "text": "Use deliberate editorial typography, color and spacing with balanced mobile compositions."
+          },
+          {
+            "disposition": "accept",
+            "id": "Q3",
+            "impact": "Reliable mouse and keyboard exploration.",
+            "kind": "quality",
+            "text": "Use semantic section links and native accessible FAQ disclosures with visible focus and reduced-motion handling."
+          },
+          {
+            "disposition": "accept",
+            "id": "Q4",
+            "impact": "Truthful delivery evidence and a page the user can inspect.",
+            "kind": "quality",
+            "text": "Judge actual desktop/mobile page appearance alongside local-resource, overflow, contrast and console checks."
+          }
+        ]
+      },
+      "first_user_moment": "Open index.html locally, see a generous original composition of the modular objects, and use the main action to explore the three-piece collection and how the pieces work together.",
+      "planMode": "semantic-v1",
+      "productSurface": "web",
+      "quality_bar": "A deliberate expressive identity with cohesive typography, purposeful spacing and desirable, clearly presented objects; substantial readable sections; no horizontal overflow at phone/desktop widths; visible focus, readable WCAG AA text contrast, reduced-motion support, usable controls, all local assets resolving and no console errors. Technical checks do not substitute for judging the actual design.",
+      "requirementFiles": [],
+      "scenarios": {
+        "scenarios": [
+          {
+            "actions": [
+              {
+                "id": "a1",
+                "web": {
+                  "operation": "presentation",
+                  "reducedMotion": "no-preference",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero h1"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#collection svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#fictional-specs"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .shared-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .small-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .material-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .care-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "footer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 812,
+                    "width": 375
+                  }
+                }
+              },
+              {
+                "id": "a2",
+                "web": {
+                  "operation": "presentation",
+                  "reducedMotion": "reduce",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero h1"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#collection svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#fictional-specs"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .shared-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .small-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .material-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .care-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "footer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 812,
+                    "width": 375
+                  }
+                }
+              },
+              {
+                "id": "a3",
+                "web": {
+                  "operation": "presentation",
+                  "reducedMotion": "no-preference",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero h1"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#collection svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#fictional-specs"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .shared-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .small-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .material-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .care-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "footer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 900,
+                    "width": 1440
+                  }
+                }
+              },
+              {
+                "id": "a4",
+                "web": {
+                  "operation": "presentation",
+                  "reducedMotion": "reduce",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero h1"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#hero svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#collection svg"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#nest .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#stem .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#lift .description"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#fictional-specs"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .shared-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#arrangements .small-desk"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .material-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#materials .care-story"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "footer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 900,
+                    "width": 1440
+                  }
+                }
+              }
+            ],
+            "contractRefs": [
+              "G1"
+            ],
+            "id": "S1",
+            "observe": [
+              {
+                "action": "a1",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a2",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a3",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a4",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              }
+            ],
+            "requirementRefs": [
+              "R1",
+              "R2",
+              "R4"
+            ],
+            "setup": {},
+            "verdict": "all"
+          },
+          {
+            "actions": [
+              {
+                "id": "a1",
+                "web": {
+                  "operation": "explore",
+                  "reducedMotion": "no-preference",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#explore-pieces"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#ways-to-arrange"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-collection"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-arrangements"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-materials"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#materials"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#materials h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-faq"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#faq"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#faq h2"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 812,
+                    "width": 375
+                  }
+                }
+              },
+              {
+                "id": "a2",
+                "web": {
+                  "operation": "explore",
+                  "reducedMotion": "reduce",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#explore-pieces"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#ways-to-arrange"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-collection"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-arrangements"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-materials"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#materials"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#materials h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-faq"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#faq"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#faq h2"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 812,
+                    "width": 375
+                  }
+                }
+              },
+              {
+                "id": "a3",
+                "web": {
+                  "operation": "explore",
+                  "reducedMotion": "no-preference",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#explore-pieces"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#ways-to-arrange"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-collection"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-arrangements"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-materials"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#materials"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#materials h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-faq"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#faq"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#faq h2"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 900,
+                    "width": 1440
+                  }
+                }
+              },
+              {
+                "id": "a4",
+                "web": {
+                  "operation": "explore",
+                  "reducedMotion": "reduce",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#explore-pieces"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#ways-to-arrange"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-collection"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#collection"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#collection h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-arrangements"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#arrangements"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#arrangements h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-materials"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#materials"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#materials h2"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#nav-faq"
+                      }
+                    },
+                    {
+                      "op": "assertHash",
+                      "value": "#faq"
+                    },
+                    {
+                      "op": "assertInViewport",
+                      "locator": {
+                        "selector": "#faq h2"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 900,
+                    "width": 1440
+                  }
+                }
+              }
+            ],
+            "contractRefs": [
+              "G1"
+            ],
+            "id": "S2",
+            "observe": [
+              {
+                "action": "a1",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a2",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a3",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a4",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              }
+            ],
+            "requirementRefs": [
+              "R2",
+              "R3"
+            ],
+            "setup": {},
+            "verdict": "all"
+          },
+          {
+            "actions": [
+              {
+                "id": "a1",
+                "web": {
+                  "operation": "faq",
+                  "reducedMotion": "no-preference",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "focus",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Enter"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Space"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 812,
+                    "width": 375
+                  }
+                }
+              },
+              {
+                "id": "a2",
+                "web": {
+                  "operation": "faq",
+                  "reducedMotion": "reduce",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "focus",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Enter"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Space"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 812,
+                    "width": 375
+                  }
+                }
+              },
+              {
+                "id": "a3",
+                "web": {
+                  "operation": "faq",
+                  "reducedMotion": "no-preference",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "focus",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Enter"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Space"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 900,
+                    "width": 1440
+                  }
+                }
+              },
+              {
+                "id": "a4",
+                "web": {
+                  "operation": "faq",
+                  "reducedMotion": "reduce",
+                  "steps": [
+                    {
+                      "op": "open"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "click",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "focus",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Enter"
+                    },
+                    {
+                      "op": "assertVisible",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    },
+                    {
+                      "op": "press",
+                      "locator": {
+                        "selector": "#faq-buy-summary"
+                      },
+                      "key": "Space"
+                    },
+                    {
+                      "op": "assertHidden",
+                      "locator": {
+                        "selector": "#faq-buy-answer"
+                      }
+                    }
+                  ],
+                  "target": "page",
+                  "viewport": {
+                    "height": 900,
+                    "width": 1440
+                  }
+                }
+              }
+            ],
+            "contractRefs": [
+              "G1"
+            ],
+            "id": "S3",
+            "observe": [
+              {
+                "action": "a1",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a2",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a3",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              },
+              {
+                "action": "a4",
+                "consoleErrors": 0,
+                "externalRequests": 0,
+                "headingStructure": true,
+                "noHorizontalOverflow": true,
+                "reducedMotionRespected": true,
+                "textContrastAA": true
+              }
+            ],
+            "requirementRefs": [
+              "R3"
+            ],
+            "setup": {},
+            "verdict": "all"
+          }
+        ],
+        "schema": "seldon/scenarios-v1"
+      },
+      "scope_in": "Single root index.html with local HTML/CSS/vanilla JavaScript and assets only; no build step or network requests.\nHero with original objects and useful section CTA; three fictional pieces with descriptions; combinations on different desks; material and care; FAQ; footer.\nResponsive desktop/mobile, keyboard-accessible navigation and disclosures, AA text contrast, visible focus, reduced motion, comfortable controls.\nVisual inspection of actual page and honest handover with absolute index.html path, checks and unverified limits.",
+      "scope_out": "Backend, dependencies, analytics, remote fonts/CDNs/assets, checkout, newsletter forms, testimonials, certifications, customer counts, environmental claims, unverified performance claims.",
+      "targets": {
+        "page": {
+          "entry": "index.html",
+          "kind": "web"
+        }
+      },
+      "taste": {
+        "audience": "Design-conscious renters and independent creatives with small or shared workspaces; explore the three-piece collection and how the pieces work together.",
+        "brand": "Warm ivory, dark plum and soft marigold; cohesive system fonts and a generous original composition of the objects, made with local HTML/CSS/SVG.",
+        "references": [],
+        "requiredSections": [
+          "hero",
+          "three-piece collection",
+          "desk combinations",
+          "material and care",
+          "FAQ",
+          "footer"
+        ],
+        "sourceRef": "PRODUCT-BRIEF.md",
+        "tone": "Optimistic, considered and tactile; sculptural and playful."
+      },
+      "users": "Design-conscious renters and independent creatives with small or shared workspaces.",
+      "validation": [
+        "-B",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p"
+      ],
+      "vision": "Pollen makes a small desk feel full of possibility through an expressive, object-led landing page.\n\nFull brief: PRODUCT-BRIEF.md"
+    }
+  }
+}

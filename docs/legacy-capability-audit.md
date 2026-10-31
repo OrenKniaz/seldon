@@ -76,3 +76,17 @@ Cleanup repair gate closure: the unchanged full-suite command completed with
 validation blocker for this candidate; it does not establish actual-provider or
 full-vision acceptance. The raw golden MCP call count still exceeds the audit's
 25-call target and remains a separate planning-workflow obligation.
+
+DIAG-TRANSPORT: UX-5's exact upsert on a slot-39 copy returned exit 0, empty
+stderr on both source and registered runtime; historical disconnect cause remains
+unknown. Owner: planner stdio. A malformed tool name did kill the baseline with
+`TypeError: unhashable type: 'list'` (exit 1). Boundary isolation now returns
+isError, reserves stdout for frames and sets UTF-8. Exit check: captured upsert,
+failing call, raw/printed diagnostics and continued golden delivery all pass.
+The stable full gate passed 469 tests, exit 0, in 1169.72s (baseline: 469 tests).
+The copied original V1 exactly matches the captured repair: its save persisted;
+the historical disconnect remains unattributed without original host/server logs.
+Repository-wide Ruff also reports 42 inherited errors in dogfood-watercli's
+author_plan.py and one formatting difference in its template/watercli/cli.py;
+both match HEAD. Owner: retained fixtures; deferred outside transport. Exit:
+fixture-owner cleanup passes repository-wide Ruff; src/tests are already clean.

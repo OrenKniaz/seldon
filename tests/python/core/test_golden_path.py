@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import queue
+import runpy
 import shutil
 import subprocess
 import sys
@@ -93,8 +94,17 @@ def provider_host(mode, workspace, surface, job_id=None):
     roundtable._run = review
     dispatch.run_plan = workers
     if mode == "server":
+        original_dispatch = mcp_planner.PlannerServer._dispatch
+
+        def noisy_dispatch(self, name, arguments, **options):
+            if name == "harness_plan_start":
+                print("tool diagnostic: café 中文")
+                os.write(1, "raw diagnostic: 中文\n".encode())
+            return original_dispatch(self, name, arguments, **options)
+
+        mcp_planner.PlannerServer._dispatch = noisy_dispatch
         sys.argv = [sys.argv[0], "--workspace", str(workspace)]
-        mcp_planner.main()
+        runpy.run_module("codex_harness.core.seldon_mcp", run_name="__main__")
     elif mode == "controller":
         audit_process.run_audit_process = controller_payload
         raise SystemExit(planner_recovery.monitor(workspace, job_id))
@@ -114,6 +124,8 @@ def test_golden_path(tmp_path, request, surface):
     Earlier coverage had one installed provider. Real discovery must not hide installed Codex
     at B, plan review or acceptance; the former resolver stub hid this mismatch.
     Stub results are suite evidence only, never actual-provider acceptance.
+    Replay UX-5's captured Unicode upsert and survive an uncaught malformed tool
+    request plus tool stdout noise; direct handle_line tests miss pipe death.
     """
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
@@ -139,6 +151,7 @@ def test_golden_path(tmp_path, request, surface):
         "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)]),
         "PATH": os.pathsep.join(paths),
         "LOCALAPPDATA": str(tools),
+        "PYTHONIOENCODING": "cp1252",
     }
     if surface == "web":
         from codex_harness.core.semantic_runner import web_toolchain
@@ -164,7 +177,10 @@ def test_golden_path(tmp_path, request, surface):
 
         def rpc(method, params):
             process.stdin.write(
-                json.dumps(dict(jsonrpc="2.0", id=calls, method=method, params=params)) + "\n"
+                json.dumps(
+                    dict(jsonrpc="2.0", id=calls, method=method, params=params), ensure_ascii=False
+                )
+                + "\n"
             )
             process.stdin.flush()
             while True:
@@ -227,6 +243,23 @@ def test_golden_path(tmp_path, request, surface):
                 name="greeting",
                 plan_mode="semantic-v1",
             )
+            if surface == "cli":
+                failed = rpc(
+                    "tools/call",
+                    dict(
+                        name=["harness_upsert_node"],
+                        arguments=dict(expected_workspace=str(tmp_path)),
+                    ),
+                )
+                assert failed["isError"] and "unconfirmed" in failed["content"][0]["text"]
+                assert rpc("ping", {}) == {}
+                captured = json.loads(
+                    (ROOT / "tests/fixtures/ux5-turn7-upsert.json").read_text("utf-8")
+                )
+                call("harness_upsert_node", node=captured["node"])
+                saved = call("harness_show_node", id="V1")
+                assert saved["title"] == captured["node"]["title"]
+                assert saved["fields"] == captured["node"]["fields"]
             vision = node(
                 "V1",
                 "vision",
@@ -628,6 +661,7 @@ def test_golden_path(tmp_path, request, surface):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+            assert process.returncode == 0, (tmp_path / "server.log").read_text("utf-8")
 
 
 if __name__ == "__main__":

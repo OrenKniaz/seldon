@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
-import queue
 import re
 import sys
-import threading
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -3168,54 +3165,9 @@ def _error(request_id, code: int, message: str) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workspace", required=True)
-    args = parser.parse_args()
-    sys.stdin.reconfigure(encoding="utf-8")
-    sys.stdout.reconfigure(encoding="utf-8")
-    server = PlannerServer(args.workspace)
-    try:
-        incoming = queue.Queue()
-        audit_completed = object()
-        server.audits.wake = lambda: incoming.put(audit_completed)
-        server.acceptance.wake = lambda: incoming.put(audit_completed)
+    from codex_harness.core.planner_stdio import serve
 
-        def read_lines():
-            try:
-                for line in sys.stdin:
-                    incoming.put(line)
-            finally:
-                incoming.put(None)
-
-        threading.Thread(target=read_lines, daemon=True).start()
-        while True:
-            if server.store is not None:
-                server.audits.drain(server.store)
-                server.acceptance.drain(server.store)
-            for response in server.expire_confirmation():
-                print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
-            pending = server._pending_confirmation
-            wait = max(0.01, pending["deadline"] - time.monotonic()) if pending else None
-            acceptance_wait = server.acceptance.wait_timeout()
-            if acceptance_wait is not None:
-                wait = min(wait, acceptance_wait) if wait is not None else acceptance_wait
-            try:
-                line = incoming.get(timeout=wait)
-            except queue.Empty:
-                continue
-            if line is None:
-                break
-            if line is audit_completed:
-                continue
-            response = server.handle_line(line)
-            if response is not None:
-                print(json.dumps(response, ensure_ascii=False, allow_nan=False), flush=True)
-                if server.store is not None:
-                    server.audits.dispatch_after_flush(server.store)
-                    server.acceptance.dispatch_after_flush(server.store)
-                    server.reviews.dispatch_after_flush(server.store)
-    finally:
-        server.close()
+    serve(PlannerServer)
 
 
 if __name__ == "__main__":
