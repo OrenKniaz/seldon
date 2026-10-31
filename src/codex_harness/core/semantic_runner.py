@@ -280,6 +280,20 @@ def execute(s, root, targets, phase, seconds, deadline, web=None):
     return dict(summary, observations=observations, stubActions=markers, actions=results)
 
 
+def _cleanup(root, control):
+    if not control.get("quiescenceVerified"):
+        return
+    # Browser profile sharing can outlast verified Job teardown on Windows.
+    for attempt in range(3):
+        try:
+            shutil.rmtree(root)
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) != 32 or attempt == 2:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
 def run(
     document,
     product,
@@ -327,11 +341,7 @@ def run(
             with ExitStack() as stack:
                 temp = tempfile.mkdtemp(prefix="seldon-semantic-")
                 root, count = Path(temp), 0
-                stack.callback(
-                    lambda root=root, control=cleanup: shutil.rmtree(root)
-                    if control.get("quiescenceVerified")
-                    else None
-                )
+                stack.callback(_cleanup, root, cleanup)
                 for base, dirs, files in os.walk(product, followlinks=False):
                     dirs[:] = [name for name in dirs if name not in SOURCE_IGNORED]
                     files = [name for name in files if name not in SOURCE_IGNORED]

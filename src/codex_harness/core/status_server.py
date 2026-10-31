@@ -13,21 +13,10 @@ from codex_harness.core.status_api import snapshot
 
 def create_server(*, workspace=None, runs_root=None, port=7480):
     core = Path(__file__).parent
-    fixtures = core.parents[2] / "tests" / "browser" / "cockpit" / "fixtures"
     assets = {
         "/": (core / "cockpit.html", "text/html; charset=utf-8"),
         "/cockpit.css": (core / "cockpit.css", "text/css; charset=utf-8"),
         "/cockpit.js": (core / "cockpit.js", "text/javascript; charset=utf-8"),
-        "/cockpit-overview.js": (core / "cockpit-overview.js", "text/javascript; charset=utf-8"),
-        "/legacy": (core / "workspace.html", "text/html; charset=utf-8"),
-        "/board": (core / "board.html", "text/html; charset=utf-8"),
-        "/fixtures/linkshelf.json": (fixtures / "public" / "linkshelf.json", "application/json"),
-        "/fixtures/linkshelf-planning.json": (
-            fixtures / "public" / "linkshelf-planning.json",
-            "application/json",
-        ),
-        "/fixtures/csv2md.json": (fixtures / "public" / "csv2md.json", "application/json"),
-        "/fixtures/synthetic.json": (fixtures / "synthetic" / "stress.json", "application/json"),
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -46,7 +35,7 @@ def create_server(*, workspace=None, runs_root=None, port=7480):
                 self._reply(200, body, "application/json; charset=utf-8")
             else:
                 route = urlsplit(self.path).path
-                asset = assets.get(route) if route != "/board" or self.path == "/board" else None
+                asset = assets.get(route)
                 if asset is not None and asset[0].is_file():
                     self._reply(200, asset[0].read_bytes(), asset[1])
                 else:
@@ -73,7 +62,7 @@ def main():
     parser.add_argument("--port", type=int, default=7480)
     args = parser.parse_args()
     with create_server(workspace=args.workspace, runs_root=args.runs, port=args.port) as server:
-        print(f"Read-only board: http://127.0.0.1:{server.server_port}", flush=True)
+        print(f"Read-only cockpit: http://127.0.0.1:{server.server_port}", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

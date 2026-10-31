@@ -6,15 +6,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CORE = "src/codex_harness/core"
-TOTAL_CEILING = 40988
+TOTAL_CEILING = 38324
 CEILINGS = {
     "src/codex_harness/core/acceptance.py": 1921,
     "src/codex_harness/core/dispatch.py": 2785,
-    "src/codex_harness/core/mcp_planner.py": 3228,
+    "src/codex_harness/core/mcp_planner.py": 3225,
     "src/codex_harness/core/plan_store.py": 3498,
     "src/codex_harness/core/planner_views.py": 1659,
     "src/codex_harness/core/roundtable.py": 2103,
-    "src/codex_harness/core/status_api.py": 1760,
     "src/codex_harness/core/test_audit.py": 1676,
 }
 
@@ -54,6 +53,7 @@ def test_core_module_size_ratchets_without_new_exemptions():
         for name in git(
             "ls-files", "--cached", "--others", "--exclude-standard", "--", "src/codex_harness"
         ).splitlines()
+        if (ROOT / name).is_file()
     )
     assert total <= TOTAL_CEILING <= total_baseline, (total, TOTAL_CEILING, total_baseline)
     failures = []

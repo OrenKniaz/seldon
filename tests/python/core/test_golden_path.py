@@ -520,7 +520,42 @@ def test_golden_path(tmp_path, request, surface):
             ] == reviewers
             decisions += 1
             call("harness_accept", by="user", statement="yes")
-            assert call("harness_plan_status")["acceptance"]["accepted"]
+            final_status = call("harness_plan_status")
+            assert final_status["acceptance"]["accepted"]
+            # The real saved producer reaches HTTP and the shipped browser view.
+            # Catch revision/blocker/next-step divergence and broken asset wiring;
+            # planning-only tests and synthetic UI fixtures miss this integration.
+            from tests.python.core.test_cockpit_server import get, running
+
+            before = {
+                p: p.read_bytes() for p in (tmp_path / ".codex-harness").rglob("*") if p.is_file()
+            }
+            run_path = Path(job["run"]["recordPath"])
+            runs_root = (
+                run_path.parents[2] if run_path.parent.name == "evidence" else run_path.parents[1]
+            )
+            with running(tmp_path, workspace=tmp_path, runs_root=runs_root) as connection:
+                status_code, _, body = get(connection, "/api/status")
+                assert status_code == 200
+                observed = json.loads(body)["plan"]
+                for key in ("plan_revision", "pending_gate", "open_findings", "next", "acceptance"):
+                    assert observed[key] == final_status[key], key
+                if surface == "web":
+                    subprocess.run(
+                        [
+                            "node",
+                            str(ROOT / "tests/browser/cockpit/checks.js"),
+                            f"http://127.0.0.1:{connection.port}",
+                            observed["plan_revision"],
+                            observed["next"],
+                        ],
+                        check=True,
+                        timeout=45,
+                    )
+            after = {
+                p: p.read_bytes() for p in (tmp_path / ".codex-harness").rglob("*") if p.is_file()
+            }
+            assert before == after
             assert decisions == 3
             print(
                 f"golden {surface}: decisions={decisions}; planner MCP calls={calls}; "

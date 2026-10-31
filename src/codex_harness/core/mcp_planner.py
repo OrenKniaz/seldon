@@ -28,12 +28,11 @@ from codex_harness.core.plan_store import (
     open_plan_store_readonly,
 )
 from codex_harness.core.planner_connection import connection_reply, workspace_refusal
-from codex_harness.core.planner_guidance import BATCH_GUIDANCE, planning_turn
+from codex_harness.core.planner_guidance import BATCH_GUIDANCE
 from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.planner_refusal_events import record_refusals, refusal_status
 from codex_harness.core.planner_refusals import TEACHING, compact_refusal, refusal_context
 from codex_harness.core.planner_schema import node_error_help, schema_help
-from codex_harness.core.planner_vision import vision_projection
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
 from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
 from codex_harness.core.spine import ALLOWED_PARENTS
@@ -1188,14 +1187,9 @@ class PlannerServer:
         if self.store is None and (self.workspace / ".codex-harness" / "plan.sqlite3").is_file():
             self._store()
         if self.store is not None:
-            status = self.store.status()
-            if status["plan_revision"] != hashlib.sha256(b"").hexdigest():
-                spine = self.store.spine()
-                status["visionProjection"] = vision_projection(spine.node(spine.ids("vision")[0]))
-                status["setup"] = spine.node(spine.ids("vision")[0])["fields"].get("setup", {})
-                if status["phase"] in {"features", "requirements", "plan"}:
-                    status["planningTurn"] = planning_turn(spine)
-            return status
+            from codex_harness.core.status_api import plan_status
+
+            return plan_status(self.store)
         return {
             "name": self.workspace.name,
             "phase": "align",
@@ -1572,6 +1566,8 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
+        if name == "harness_plan_status" and not error and self.store is not None:
+            return status["next"]
         if error_code in {"plan-a-consent-required", "plan-b-consent-required"}:
             return consent_views.consent_recovery(error_code)
         job = self.result_data or {}
@@ -2322,6 +2318,7 @@ class PlannerServer:
             return f"Revised protected test: {self.result_data['path']}; compile before reuse."
         if name == "harness_plan_status":
             status = refusal_status(self._status(), store)
+            status["next"] = consent_views.status_next(status, store=store)
             if not (args.get("full") or args.get("include_detail")) and status.get(
                 "visionProjection"
             ):

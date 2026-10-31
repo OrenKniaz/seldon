@@ -58,3 +58,85 @@ def semantic_consent_next(status, result, *, plan_authorized=False):
             )
         return acceptance.get("next", "harness_plan_status")
     return None
+
+
+def status_next(status, *, store):
+    """One status next step for chat and cockpit; no approval or launch authority."""
+    from codex_harness.core import planner_views as views
+    from codex_harness.core.planner_guidance import BATCH_GUIDANCE
+
+    phase = status["phase"]
+    acceptance = status.get("acceptance", {})
+    if (
+        status.get("planMode") == "semantic-v1"
+        and phase in {"execute", "accept"}
+        and (revision := status.get("published_revision"))
+    ):
+        from codex_harness.core.planner_jobs import _directory, worker_job_status
+
+        if _directory(store.workspace, revision).is_dir():
+            job = worker_job_status(store.workspace, revision)
+            if (
+                job.get("run", {}).get("semanticValidation", {}).get("state") == "PASS"
+                and not acceptance.get("lastRunSubject")
+                and not store.connection.execute("SELECT 1 FROM acceptance_attempts").fetchone()
+            ):
+                return (
+                    "harness_accept_run repo=<integrated-repo> subject=product; "
+                    "B covers validation. "
+                    "Poll harness_accept_status; C waits for evidence and review."
+                )
+    if (
+        phase == "publish"
+        and status.get("publication", {}).get("up_to_date")
+        and not acceptance.get("accepted")
+    ):
+        if status.get("continuation", {}).get("recommendation", {}).get("kind") != "not_applicable":
+            return views.review_resolution_next(status["reviewResolution"])
+        return (
+            "harness_plan_resume; inspect existing job state first. Execution requires "
+            "exact workers and call_cap matching B (otherwise fresh chat consent); "
+            "this guidance does not authorize a launch."
+        )
+    if phase == "accept":
+        if acceptance.get("invalidReason") == "acceptance-findings-open":
+            return (
+                "harness_accept_assess schema=true; inspect actual acquisition choices. "
+                "Preserve AF originals; record any intended declaration "
+                "before fresh assessment. "
+                "A later disposition mutation stales current support; support never clears "
+                "findings or native final acceptance."
+            )
+        return (
+            semantic_consent_next(status, {})
+            if status.get("planMode") == "semantic-v1"
+            else acceptance.get("next", "harness_plan_status")
+        )
+    if status.get("planMode") == "semantic-v1":
+        hint = semantic_consent_next(status, {}, plan_authorized=bool(store._current_approval("B")))
+        if hint:
+            return hint
+    gate = status.get("pending_gate")
+    if gate == "harness_plan_start":
+        return "harness_plan_start idea=<your idea> name=<plan name>"
+    if gate and gate.startswith("approval:"):
+        return (
+            "harness_record_confirmation gate="
+            + gate.split(":", 1)[1]
+            + "; review the displayed understanding and answer the native client form."
+        )
+    if status.get("open_clarifications"):
+        return "Answer the open questions with harness_answer before advancing."
+    if status.get("planMode") == "semantic-v1" and phase in {
+        "features",
+        "requirements",
+        "tech-stack",
+    }:
+        return BATCH_GUIDANCE
+    if phase in {"roundtable", "publish"}:
+        resolution = status.get("reviewResolution")
+        if resolution and resolution["nextAction"]["kind"] != "not_applicable":
+            return views.review_resolution_next(resolution)
+    if acceptance.get("accepted"):
+        return "Review the recorded acceptance above; harness_plan_status shows current evidence."
+    return views.NEXT.get(phase, "Retry harness_plan_status.")

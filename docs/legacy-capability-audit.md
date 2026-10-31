@@ -41,3 +41,38 @@ authorize copying the legacy runtime merely to satisfy imports. The current
 extraction cuts only the actual provider and memory dependency leaves.
 
 Extraction excludes legacy modules outside core, original Git metadata/config/history, credential and agent-config directories, runtime databases/state/logs, generated evidence, environments/caches, hidden evaluators and unrelated fixtures. Required tracked mock reference fixtures remain explicitly labeled test inputs.
+
+DELETE-1 projection duplication: status_api previously recomputed headline,
+activity and proof observations alongside canonical plan status. Owner: status_api
+and cockpit. Disposition: removed in deletion lanes 1–2; one GET-only view consumes
+canonical status and receipts. Exit check: saved MCP plan → HTTP → browser retains
+revision, blockers, next step, ownership and unknown usage through refresh failure.
+Actual-provider and full-vision obligations above remain open.
+
+DELETE-1 validation findings: the first full run exposed an empty saved-plan read
+regression; corrected at status_api, with the real PlanStore → HTTP read-only check
+passing. The untouched `test_web_hung_renderer_timeout_reaps_browser_children`
+once reported WinError 32 while deleting a Chromium profile instead of its timeout
+reason. Disposition: unresolved intermittent cleanup issue, owner semantic_runner;
+the exact selector passed on baseline 3e213699 and this candidate. Exit: retain the
+timeout reason and verified child teardown without a profile-sharing error.
+
+DELETE-1 cleanup follow-up: a second full run again had 467 passes and two
+WinError 32 browser-profile failures (reduced-motion attribution and hung-renderer
+timeout). Isolated baseline/candidate selectors and the baseline 15-case browser
+group passed; this supersedes isolated nonreproduction as clearance of the gate.
+Required gate repair: semantic_runner retries only sharing violation 32 during
+temporary-root deletion, only after verified teardown, at most three attempts
+(0.5s and 1s delays). Exhaustion and all other errors still propagate. The browser
+assertions and Job quiescence contract are unchanged. Validation is pending.
+
+Cleanup repair validation update: the real Windows file-lock probe retained an
+unverified root and recovered after handle release in 0.5s. All 15 existing browser
+failure checks passed; all 173 fast tests passed in 228.9s wall time, under 600s.
+The exact full-suite rerun remains pending; prior failures are retained above.
+
+Cleanup repair gate closure: the unchanged full-suite command completed with
+469 passes, no skips, exit 0 in 1340.01s. This closes the local deletion/cleanup
+validation blocker for this candidate; it does not establish actual-provider or
+full-vision acceptance. The raw golden MCP call count still exceeds the audit's
+25-call target and remains a separate planning-workflow obligation.

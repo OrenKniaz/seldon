@@ -54,8 +54,7 @@ for name, value in json.loads(sys.argv[3]).items():
         raise AssertionError('help must exit: ' + name)
 assert all(name == 'codex_harness' or name.startswith('codex_harness.core')
            for name in sys.modules if name.startswith('codex_harness'))
-assert (Path(codex_harness.core.__file__).parent / 'board.html').is_file()
-assert (Path(codex_harness.core.__file__).parent / 'workspace.html').is_file()
+assert (Path(codex_harness.core.__file__).parent / 'cockpit.html').is_file()
 """
     entries = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"].get("scripts", {})
     expected = {

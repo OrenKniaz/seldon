@@ -12,10 +12,10 @@ from codex_harness.core.plan_store import PlanStore
 
 
 @contextmanager
-def running(tmp_path, workspace=None):
+def running(tmp_path, workspace=None, runs_root=None):
     with status_server.create_server(
         workspace=workspace or tmp_path / "missing-workspace",
-        runs_root=tmp_path / "missing-runs",
+        runs_root=runs_root or tmp_path / "missing-runs",
         port=0,
     ) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -37,7 +37,15 @@ def get(connection, path):
 
 @pytest.mark.parametrize(
     "route",
-    ["/status_server.py", "/../pyproject.toml", "/%2e%2e/README.md", "/fixtures/private.json"],
+    [
+        "/status_server.py",
+        "/../pyproject.toml",
+        "/%2e%2e/README.md",
+        "/fixtures/private.json",
+        "/board",
+        "/legacy",
+        "/cockpit-overview.js",
+    ],
 )
 def test_only_named_assets_are_served(tmp_path, route):
     with running(tmp_path) as connection:
@@ -55,7 +63,8 @@ def test_real_plan_store_to_http_is_read_only(tmp_path):
         status, _, body = get(connection, "/api/status")
         assert status == 200
         plan = json.loads(body)["plan"]
-        assert plan["phase"] == expected["phase"]
+        for key in ("phase", "plan_revision", "pending_gate", "open_findings", "coverage_gaps"):
+            assert plan[key] == expected[key], key
         assert len(plan["clarifications"]) == expected["open_clarifications"]
         assert "Which first-use promise should we keep?" in json.dumps(plan["clarifications"])
         assert get(connection, "/")[0] == 200

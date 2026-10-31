@@ -4,7 +4,7 @@ import ast
 import subprocess
 from pathlib import Path
 
-CEILINGS = {"suite": 473, "fast": 175}
+CEILINGS = {"suite": 469, "fast": 173}
 ROOT = Path(__file__).resolve().parents[2]
 
 
