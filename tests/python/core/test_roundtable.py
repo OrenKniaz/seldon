@@ -77,8 +77,8 @@ def finding(node_id="R1", severity="major"):
 
 
 @pytest.fixture
-def scope_store(tmp_path_factory):
-    for store, _ in _semantic_plan.__wrapped__(tmp_path_factory):
+def scope_store(tmp_path_factory, monkeypatch):
+    for store, _ in _semantic_plan.__wrapped__(tmp_path_factory, monkeypatch):
         source_only_vision_lock(store)
         while store.phase() != "roundtable":
             if store.phase() == "plan":

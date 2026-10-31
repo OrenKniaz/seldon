@@ -33,6 +33,7 @@ def acceptance_reviewers(selected, *, executable_for=None):
 def delivery_review_selection(catalog, fields):
     """Complete the proposal before B; offerings never establish launch access."""
     selected = [approvals.reviewer_tuple(r) for r in fields["reviewers"]]
+    available = {r["provider"] for r in roundtable.default_reviewers()}
     offered = {
         p["provider"]: [
             approvals.reviewer_tuple(
@@ -42,15 +43,14 @@ def delivery_review_selection(catalog, fields):
             if c["reviewPathSupported"] and c["availability"] == "offered"
         ]
         for p in catalog["providers"]
-        if p["executable"] and p["installed"] is not False
+        if p["provider"] in available
     }
-    available = {p: choices for p, choices in offered.items() if choices}
-    for provider, choices in available.items():
-        if provider not in {r["provider"] for r in selected}:
+    for provider, choices in offered.items():
+        if choices and provider not in {r["provider"] for r in selected}:
             selected.append(choices[0])
     if len(selected) == 1 and len(available) == 1:
         selected.append({**selected[0], "name": selected[0]["name"] + "-2"})
-    assurance = acceptance_reviewers(selected, executable_for={p: p for p in available})
+    assurance = acceptance_reviewers(selected)
     return selected, dict(
         stages=list(dict.fromkeys([*fields["stages"], "plan", "full-vision"])), assurance=assurance
     )

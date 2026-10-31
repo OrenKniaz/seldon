@@ -631,12 +631,7 @@ def _executable(provider: str, executable_for) -> str | None:
 
 def default_reviewers(*, executable_for=None) -> list[dict]:
     """Offer reviewers for resolvable providers; missing overrides mean unavailable."""
-    selected = [
-        dict(reviewer)
-        for reviewer in _REVIEWERS
-        if (executable := _executable(reviewer["provider"], executable_for))
-        and shutil.which(executable)
-    ]
+    selected = [dict(r) for r in _REVIEWERS if _executable(r["provider"], executable_for)]
 
     if len(selected) == 1:
         selected.append({**selected[0], "name": selected[0]["name"] + "-2"})
@@ -649,7 +644,9 @@ def coverage(selected, *, executable_for=None):
         return {}
     available = {r["provider"] for r in _REVIEWERS if _executable(r["provider"], executable_for)}
     if providers != available or len(selected) != 2:
-        raise ValueError(f"Cross-subscription required; also available: {available - providers}")
+        raise ValueError(
+            f"Cross-subscription required; select reviewers covering {sorted(available)}"
+        )
     return {"reviewIndependence": "single-provider"}
 
 

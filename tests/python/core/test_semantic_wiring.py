@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from tests.python.core.planning_support import (
 )
 from tests.python.core.test_semantic_runner import WEB_PAGE, web_document
 
-from codex_harness.core import dispatch, worker_packet
+from codex_harness.core import dispatch, roundtable, worker_packet
 from codex_harness.core.graph import load_plan
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import PHASES, open_plan_store
@@ -149,7 +150,13 @@ def node(key, kind, parents, **fields):
 
 
 @pytest.fixture
-def semantic_plan(tmp_path_factory):
+def semantic_plan(tmp_path_factory, monkeypatch):
+    # This source fixture supplies only Codex; host installations are not its providers.
+    monkeypatch.setattr(
+        roundtable,
+        "_executable",
+        lambda provider, _: sys.executable if provider == "codex" else None,
+    )
     tmp_path = tmp_path_factory.mktemp("sv")
     server = PlannerServer(tmp_path)
     reply = server.call_tool(

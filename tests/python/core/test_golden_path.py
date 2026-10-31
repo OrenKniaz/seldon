@@ -4,11 +4,11 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
 import time
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -88,7 +88,6 @@ def provider_host(mode, workspace, surface, job_id=None):
         )
 
     subprocess.Popen = launch
-    roundtable._executable = lambda *_: sys.executable
     roundtable._run = review
     dispatch.run_plan = workers
     if mode == "server":
@@ -109,6 +108,8 @@ def test_golden_path(tmp_path, request, surface):
 
     Catch late acceptance reviewer/budget questions, reapproval after repairs/recovery,
     and changed limits launching without a diff; plan-review-only tests miss delivery.
+    Run real executable discovery: unknown model access must not hide installed Codex
+    at B, plan review or acceptance; the former resolver stub hid this mismatch.
     Stub results are suite evidence only, never actual-provider acceptance.
     """
     if surface == "web":
@@ -117,7 +118,27 @@ def test_golden_path(tmp_path, request, surface):
     replies = queue.Queue()
     calls = decisions = 0
     revision = None
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)])}
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    codex = tools / ("codex.exe" if os.name == "nt" else "codex")
+    shutil.copy2(sys.executable, codex)
+    # Keep OS/git/node tools while excluding the host's provider installations/bundles.
+    paths = [str(tools), str(Path(shutil.which("git")).parent)]
+    if os.name == "nt":
+        paths += [
+            os.path.join(os.environ["SystemRoot"], "System32"),
+            os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell", "v1.0"),
+        ]
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)]),
+        "PATH": os.pathsep.join(paths),
+        "LOCALAPPDATA": str(tools),
+    }
+    if surface == "web":
+        from codex_harness.core.semantic_runner import web_toolchain
+
+        env["SELDON_WEB_CHROMIUM"] = web_toolchain(None, False)["chromium"]["path"]
     with (tmp_path / "server.log").open("w", encoding="utf-8") as stderr:
         process = subprocess.Popen(
             [sys.executable, "-B", str(Path(__file__).resolve()), "server", str(tmp_path), surface],
@@ -191,6 +212,10 @@ def test_golden_path(tmp_path, request, surface):
             )
             process.stdin.flush()
             call("harness_plan_status")
+            detected = call("harness_preflight", providers=["codex", "claude"])["providers"]
+            assert [
+                p["provider"] for p in detected if p["executable"]["status"] == "available"
+            ] == ["codex"]
             call(
                 "harness_plan_start",
                 idea="A welcome page" if surface == "web" else "An offline greeting CLI",
@@ -311,14 +336,17 @@ def test_golden_path(tmp_path, request, surface):
             call("harness_advance", to_phase="features")
             call("harness_advance", to_phase="plan")
             catalog = mock_catalog()
-            other = deepcopy(catalog["providers"][0])
-            other.update(provider="claude", executable="C:/mock/claude.exe")
-            other["choices"][0]["model"] = "stub"
-            catalog["providers"].append(other)
+            catalog["providers"][0].update(
+                executable=detected[0]["executable"]["path"], authentication="unknown"
+            )
+            catalog["providers"][0]["choices"][0]["availability"] = "unknown"
             catalog = call(
                 "harness_reviewer_catalog", catalog=catalog, expected_spine_revision=revision
             )["catalog"]
             choice = mock_choice(catalog)
+            choice["fields"]["reviewers"].append(
+                {**choice["fields"]["reviewers"][0], "name": "second"}
+            )
             call("harness_reviewer_choice", node=choice, expected_spine_revision=revision)
             compiled = call("harness_compile", include_detail=True)
             options = dict(
@@ -331,6 +359,21 @@ def test_golden_path(tmp_path, request, surface):
                     for b in ("C", "B")
                 ],
             )
+            if surface == "cli":
+                # A second executable requires cross-provider coverage, even if the
+                # supplied catalog omitted it; the all-Codex journey cannot prove this.
+                claude = tools / ("claude.exe" if os.name == "nt" else "claude")
+                shutil.copy2(sys.executable, claude)
+                refused = call(
+                    "harness_prepare_chat_confirmation",
+                    gate="plan-execution",
+                    execution=options,
+                    reviewer_node_id="CHOICE",
+                    allow_error=True,
+                )
+                message = " ".join(c.get("text", "") for c in refused["content"])
+                assert "select reviewers covering ['claude', 'codex']" in message
+                claude.unlink()
             b = call(
                 "harness_prepare_chat_confirmation",
                 gate="plan-execution",
@@ -340,12 +383,12 @@ def test_golden_path(tmp_path, request, surface):
             reviewers = b["subject"]["reviewers"]
             assert reviewers == [
                 dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high"),
-                dict(name="claude-reviewer", provider="claude", model="stub", effort="high"),
+                dict(name="second", provider="codex", model="gpt-6.1-sol", effort="high"),
             ]
             assert b["subject"]["reviewSelection"] == dict(
                 stages=["plan", "full-vision"],
                 assurance=dict(
-                    independentRequired=True, minIndependentReviewers=2, crossProviderRequired=True
+                    independentRequired=True, minIndependentReviewers=2, crossProviderRequired=False
                 ),
             )
             assert b["subject"]["scheduledReviewStarts"] == {"plan": 2, "full-vision": 2}
