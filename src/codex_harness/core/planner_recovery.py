@@ -17,13 +17,13 @@ REQUEST = "worker-recovery-requested"
 RESOLVED = "worker-recovery-resolved"
 TOOL = dict(
     name="harness_recovery",
-    description="Inspect workers read-only; resolve offers chat abandon/readmit consent.",
+    description="Inspect workers; resolve offers abandon/readmit/revalidate consent.",
     inputSchema=dict(
         type="object",
         properties={
             "mode": {"type": "string", "enum": ["inspect", "resolve"]},
             "job_id": {"type": "string"},
-            "choice": {"type": "string", "enum": ["abandon", "readmit"]},
+            "choice": {"type": "string", "enum": ["abandon", "readmit", "revalidate"]},
             "reason": {"type": "string"},
         },
         required=["mode", "job_id"],
@@ -40,8 +40,25 @@ def worker_status(workspace, result):
     with open_plan_store_readonly(workspace) as store:
         resolved = disposition(store, result["jobId"])
     if resolved:
-        state = "abandoned" if resolved["choice"] == "abandon" else "readmitted"
+        state = {"abandon": "abandoned", "readmit": "readmitted", "revalidate": "revalidated"}[
+            resolved["choice"]
+        ]
+        if resolved["choice"] == "revalidate":
+            validation = resolved.get("validation", {})
+            state = (
+                "completed"
+                if validation.get("state") == "PASS"
+                else "failed"
+                if validation
+                else "revalidating"
+            )
         result.update(status=state, recovery=resolved)
+        if resolved["choice"] == "revalidate":
+            result["reason"] = (
+                "Retained candidate revalidation "
+                + resolved.get("validation", {}).get("state", "started")
+                + "; inspect recovery.validation for results and delivery path. No worker launched."
+            )
     return result
 
 
@@ -50,6 +67,8 @@ def admission_id(store, publication):
     while resolved := disposition(store, job_id):
         if resolved["choice"] == "abandon":
             raise ValueError("recovery-abandoned-terminal: evidence and quarantine retained")
+        if resolved["choice"] == "revalidate":
+            return job_id
         job_id = resolved["successor"]
     return job_id
 
@@ -104,9 +123,30 @@ def inspect(workspace, job_id):
         spentCalls=spent,
         remainingCalls=max(0, request["options"]["callCap"] - spent),
     )
-    proof["proofDigest"] = jobs._digest(proof)
+    from codex_harness.core.planner_candidate import retained
+
+    try:
+        proof["revalidation"] = dict(available=True, **retained(workspace, job_id))
+    except (ValueError, OSError, KeyError) as error:
+        proof["revalidation"] = dict(
+            available=False,
+            reason=str(error),
+            nextAction="Inspect run evidence; finish Build before readmission.",
+        )
+    proof["options"] = (
+        ["abandon"]
+        + (["readmit"] if verified else [])
+        + (["revalidate"] if verified and proof["revalidation"]["available"] else [])
+    )
     with open_plan_store_readonly(workspace) as store:
         proof["disposition"] = disposition(store, job_id)
+    if resolved := proof["disposition"]:
+        retryable = (
+            resolved["choice"] == "readmit"
+            and not jobs._directory(workspace, resolved["successor"]).exists()
+        ) or resolved.get("validation", {}).get("state") in {"FAIL", "ERROR"}
+        proof["options"] = ["revalidate"] if retryable and "revalidate" in proof["options"] else []
+    proof["proofDigest"] = jobs._digest(proof)
     return proof
 
 
@@ -123,14 +163,38 @@ def recovery_subject(store, action):
 
 def prepare(store, job_id, choice, reason):
     _canonical_store(store)
-    if choice not in {"abandon", "readmit"} or not isinstance(reason, str) or not reason.strip():
+    if (
+        choice not in {"abandon", "readmit", "revalidate"}
+        or not isinstance(reason, str)
+        or not reason.strip()
+    ):
         raise ValueError("recovery-choice-and-reason-required")
     with store._transaction():
         action = dict(jobId=job_id, choice=choice, reason=reason)
         proposal = approvals.proposal(store, "recovery", action)
         proof = proposal["subject"]["proof"]
-        if proof["disposition"]:
-            raise ValueError("recovery-already-resolved")
+        if proof["disposition"] and not (
+            choice == "revalidate" and "revalidate" in proof["options"]
+        ):
+            raise ValueError(
+                "recovery-already-resolved: inspect disposition and original run evidence"
+            )
+        if choice == "revalidate":
+            if proof["verdict"] != "VERIFIED-QUIESCENT":
+                raise ValueError(
+                    "revalidate requires VERIFIED-QUIESCENT; inspect original job teardown"
+                )
+            if not proof["revalidation"]["available"]:
+                raise ValueError(proof["revalidation"]["reason"])
+            prior = proof["disposition"]
+            if (
+                prior
+                and prior.get("successor")
+                and jobs._directory(store.workspace, prior["successor"]).exists()
+            ):
+                raise ValueError(
+                    "revalidate: successor already admitted; inspect successor instead"
+                )
         if choice == "readmit" and proof["verdict"] != "VERIFIED-QUIESCENT":
             raise ValueError("recovery-readmit-requires-VERIFIED-QUIESCENT")
         request = dict(
@@ -145,6 +209,11 @@ def prepare(store, job_id, choice, reason):
             workspace=str(store.workspace.resolve()),
             proposedAction=action,
         )
+        if choice == "revalidate":
+            request["card"] += (
+                "\nRevalidate retained candidate; PASS integrates and delivers at workspace root. "
+                "No worker start or extra provider spend."
+            )
         request["card"] += (
             f"\nReply binding: expected_revision={request['plan_revision']}"
             "\nEvidence and spent calls stay charged. UNKNOWN abandonment retains quarantine. "
@@ -202,6 +271,16 @@ def complete(store, request_id, **answer):
             )
             store._event(RESOLVED, resolved)
             result["disposition"] = resolved
+    if record["state"] == "approved" and request["choice"] == "revalidate":
+        from codex_harness.core.planner_candidate import revalidate
+
+        try:
+            resolved["validation"] = revalidate(store, request["jobId"], request_id)
+        except (ValueError, OSError, jobs.subprocess.SubprocessError) as error:
+            resolved["validation"] = dict(
+                state="ERROR", results=[dict(reason=str(error))], delivery=None
+            )
+        store._event(RESOLVED, resolved)
     return result
 
 

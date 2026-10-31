@@ -30,6 +30,7 @@ from codex_harness.core.memory_promotion import (
     promote_lesson,
 )
 from codex_harness.core.package_provenance import adapter_provenance
+from codex_harness.core.planner_candidate import _semantic_validation
 from codex_harness.core.provider_launch import get_adapter
 from codex_harness.core.record_io import read_record_json, write_record_json
 from codex_harness.core.runners import resolve_runner, validate_proof
@@ -1740,60 +1741,6 @@ def _semantic_identity(plan):
             Path(m.__file__).name: _file_sha256(m.__file__)
             for m in (semantic_runner, semantic_schema)
         },
-    }
-
-
-def _semantic_validation(root, plan, record, phase):
-    from codex_harness.core import semantic_runner
-
-    identity = _semantic_identity(plan)
-    red = record.get("contractsRed")
-    if phase == "build" and (
-        not red or red.get("state") != "RED" or any(red.get(k) != v for k, v in identity.items())
-    ):
-        raise ValueError(
-            "semantic-v1 requires current Contracts RED; scenarios/contracts/runner changed"
-        )
-    results = semantic_runner.run(
-        plan.semantic["scenarios"],
-        root,
-        plan.semantic["targets"],
-        "contracts" if phase == "contracts" else "validation",
-    )
-    expected = plan.semantic["scenarios"]["scenarios"]
-    complete = len(results) == len(expected) and all(
-        r["id"] == s["id"] for r, s in zip(results, expected, strict=True)
-    )
-    red_ok = complete and all(
-        r["state"] == "FAIL" and r.get("stubActions") == [a["id"] for a in s["actions"]]
-        for r, s in zip(results, expected, strict=True)
-    )
-    passed = (
-        phase == "build"
-        and complete
-        and all(r["state"] == "PASS" and not r.get("stubActions") for r in results)
-    )
-    state = (
-        "RED"
-        if phase == "contracts" and red_ok
-        else "PASS"
-        if passed
-        else "ERROR"
-        if phase == "contracts" or any(r["state"] == "ERROR" for r in results)
-        else "FAIL"
-    )
-    return {
-        **identity,
-        "phase": "contracts" if phase == "contracts" else "validation",
-        "state": state,
-        "passed": passed,
-        "admitted": red_ok if phase == "contracts" else passed,
-        "candidateCommit": _git(root, "rev-parse", "HEAD"),
-        "candidateTree": _git(root, "rev-parse", "HEAD^{tree}"),
-        "linkedRed": hashlib.sha256(json.dumps(red, sort_keys=True).encode()).hexdigest()
-        if red
-        else None,
-        "results": results,
     }
 
 

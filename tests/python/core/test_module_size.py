@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[3]
 CORE = "src/codex_harness/core"
 CEILINGS = {
     "src/codex_harness/core/acceptance.py": 2036,
-    "src/codex_harness/core/dispatch.py": 2838,
+    "src/codex_harness/core/dispatch.py": 2785,
     "src/codex_harness/core/mcp_planner.py": 3281,
     "src/codex_harness/core/plan_store.py": 3519,
     "src/codex_harness/core/planner_views.py": 1683,

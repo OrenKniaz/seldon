@@ -382,7 +382,11 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
             "repo": run["repo"],
             "isMocked": run["isMocked"],
             "didExecuteRealProvider": run["didExecuteRealProvider"],
-            **{key: run[key] for key in ("semanticContracts", "semanticValidation") if key in run},
+            **{
+                key: run[key]
+                for key in ("semanticContracts", "semanticValidation", "delivery")
+                if key in run
+            },
             "beads": {
                 key: {field: bead.get(field) for field in ("status", "provider", "model", "effort")}
                 for key, bead in run["beads"].items()
@@ -474,6 +478,9 @@ def execute_worker_job(workspace, job_id):
             setup=setup,
             intent_nodes=intent_nodes,
         )
+        from codex_harness.core.planner_candidate import deliver
+
+        deliver(workspace, request, run)
         terminal.update(status="completed", runId=run["runId"], dispatchStatus=run["status"])
     except Exception as error:
         terminal["error"] = {"type": type(error).__name__, "message": str(error)}
