@@ -26,7 +26,7 @@ def test_refused_start_leaves_no_reservation_and_b_renewal_recovers_after_restar
     only registered caps.
     """
     store, _ = semantic_plan
-    request, options = prepare_combined_b(store, cap=4)
+    request, options = prepare_combined_b(store)
     reviewer = request["subject"]["reviewers"][0]
     monkeypatch.setattr(roundtable, "_run", lambda *a, **k: (0, "[]"))
     before = list(store.connection.iterdump())
@@ -35,30 +35,28 @@ def test_refused_start_leaves_no_reservation_and_b_renewal_recovers_after_restar
     assert list(store.connection.iterdump()) == before
     approve_b(store, request)
     # Attempted/uncertain starts consume the same real cumulative consumer ledger.
-    for _ in range(3):
+    for _ in range(9):
         budget.claim_planning_review_start(store, reviewer)
     review(store, reviewer)
     spent = budget.planning_review_budget(store)
-    assert spent == dict(maxStarts=4, spentAdmissions=4)
+    assert spent == dict(maxStarts=10, spentAdmissions=10)
     before = list(store.connection.iterdump())
     with pytest.raises(ValueError, match="cap-exhausted"):
         review(store, reviewer)
     assert list(store.connection.iterdump()) == before
-    fresh = confirmation.prepare_chat_confirmation(
-        store, "plan-execution", execution=options, review_max_starts=5
-    )
+    fresh = confirmation.prepare_chat_confirmation(store, "plan-execution", execution=options)
     assert any(
-        d["field"] == "reviewAllowance" and d["before"] == 4 and d["after"] == 5
+        d["field"] == "reviewAllowance" and d["before"] == 10 and d["after"] == 12
         for d in fresh["diff"]
     )
     approve_b(store, fresh)
     with open_plan_store(store.workspace) as reopened:
-        assert budget.planning_review_budget(reopened) == dict(maxStarts=5, spentAdmissions=4)
+        assert budget.planning_review_budget(reopened) == dict(maxStarts=12, spentAdmissions=10)
         review(reopened, reviewer)
-        assert budget.usage(reopened, "review") == 5
+        assert budget.usage(reopened, "review") == 11
         with pytest.raises(ValueError, match="raise the round limit"):
             review(reopened, reviewer)
-        assert budget.usage(reopened, "review") == 5
+        assert budget.usage(reopened, "review") == 11
 
 
 def test_competing_real_review_consumers_get_one_final_slot(semantic_plan, monkeypatch):
@@ -67,10 +65,10 @@ def test_competing_real_review_consumers_get_one_final_slot(semantic_plan, monke
     slot interleaving.
     """
     store, _ = semantic_plan
-    request, _ = prepare_combined_b(store, cap=4)
+    request, _ = prepare_combined_b(store)
     approve_b(store, request)
     reviewer = request["subject"]["reviewers"][0]
-    for _ in range(3):
+    for _ in range(9):
         budget.claim_planning_review_start(store, reviewer)
     launches = []
     monkeypatch.setattr(roundtable, "_run", lambda *a, **k: launches.append(1) or (0, "[]"))
@@ -86,7 +84,7 @@ def test_competing_real_review_consumers_get_one_final_slot(semantic_plan, monke
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sum(pool.map(attempt, range(2))) == 1
-    assert launches == [1] and budget.usage(store, "review") == 4
+    assert launches == [1] and budget.usage(store, "review") == 10
     assert store.connection.execute("SELECT count(*) FROM review_attempts").fetchone()[0] == 1
 
 
@@ -96,10 +94,10 @@ def test_launch_admission_rollback_preserves_the_final_slot(semantic_plan, monke
     SQLite write failure.
     """
     store, _ = semantic_plan
-    request, _ = prepare_combined_b(store, cap=4)
+    request, _ = prepare_combined_b(store)
     approve_b(store, request)
     reviewer = request["subject"]["reviewers"][0]
-    for _ in range(3):
+    for _ in range(9):
         budget.claim_planning_review_start(store, reviewer)
     # A real SQLite failure after usage insertion, before an actual launch.
     roundtable._table(store)
@@ -118,7 +116,7 @@ def test_launch_admission_rollback_preserves_the_final_slot(semantic_plan, monke
 
     with pytest.raises(sqlite3.IntegrityError):
         review(store, reviewer)
-    assert budget.usage(store, "review") == 3
+    assert budget.usage(store, "review") == 9
     assert store.connection.execute("SELECT count(*) FROM review_attempts").fetchone()[0] == 0
     assert approvals.require_approval(store, "B")
 

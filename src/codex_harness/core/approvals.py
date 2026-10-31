@@ -160,19 +160,11 @@ def subject(store, kind, proposed_action=None):
         reviewers, selection = delivery_review_selection(catalog["catalog"], node["fields"])
     if not reviewers:
         raise ValueError("reviewer-selection-required-before-B: propose exact delivery reviewers")
-    policy = deepcopy(action.get("reviewPolicy", previous.get("reviewPolicy")))
-    if policy is None:
-        policy = dict(maxRounds=2, maxTotal=None, timeout=900)
-    if (
-        not isinstance(policy, dict)
-        or set(policy) != {"maxRounds", "maxTotal", "timeout"}
-        or type(policy["maxRounds"]) is not int
-        or policy["maxRounds"] < 1
-        or policy["maxTotal"] is not None
-        and (type(policy["maxTotal"]) is not int or policy["maxTotal"] < 1)
-        or not jobs._valid_timeout(policy["timeout"])
-    ):
-        raise ValueError("planning-review-policy-invalid")
+    from codex_harness.core.provider_call_budget import DEFAULT_REVIEW_ROUNDS
+
+    policy = deepcopy(previous.get("reviewPolicy")) or dict(
+        maxRounds=DEFAULT_REVIEW_ROUNDS, maxTotal=None, timeout=900
+    )
     policy["timeout"] = max(900, policy["timeout"])  # Formal acceptance's actual launch timeout.
     for key, value in action.get("reviewLimits", {}).items():
         if key == "maxTotal" and value is None and policy[key] is not None:
@@ -182,21 +174,16 @@ def subject(store, kind, proposed_action=None):
     actual = action.get("reviewer")
     if actual is not None and reviewer_tuple(actual) not in reviewers:
         reviewers.append(reviewer_tuple(actual))
-    allowance = action.get("reviewAllowance", previous.get("reviewAllowance"))
-    explanation = action.get("allowanceReason", previous.get("allowanceReason", ""))
-    scheduled = dict(plan=len(reviewers), **{"full-vision": len(reviewers)})
-    if allowance is None:
+    scheduled = {stage: len(reviewers) * policy["maxRounds"] for stage in ("plan", "full-vision")}
+    allowance = max(sum(scheduled.values()) + len(reviewers), previous.get("reviewAllowance", 0))
+    explanation = previous.get(
+        "allowanceReason", "Plan and formal acceptance rounds plus one repair round in reserve"
+    )
+    if action.get("renewReviews"):
         from codex_harness.core.provider_call_budget import usage
 
-        allowance = previous.get("reviewAllowance") or (
-            usage(store, "review") + sum(scheduled.values()) + len(reviewers)
-        )
-        if not previous:
-            explanation = "Plan and formal acceptance reviews plus one repair round in reserve"
-    if type(allowance) is not int or allowance < sum(scheduled.values()):
-        raise ValueError("planning-review-budget-invalid-scope")
-    if allowance > 10 and (not isinstance(explanation, str) or not explanation.strip()):
-        raise ValueError("planning-review-allowance-above-10-needs-explanation")
+        allowance = max(allowance, usage(store, "review") + len(reviewers))
+        explanation = "Additional review round after the cumulative allowance was spent"
     return {
         **result,
         "aFingerprint": fingerprint(subject(store, "A")),

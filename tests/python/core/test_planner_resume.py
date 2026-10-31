@@ -34,7 +34,6 @@ def _published(store):
         process_stub=lambda *_: (0, "[]"),
         reviewers=[dict(name="Alpha", provider="codex")],
         executable_for=lambda provider: provider,
-        max_rounds=4,
     )
     store.advance("publish", by="source-test")
     revision = store.publish(

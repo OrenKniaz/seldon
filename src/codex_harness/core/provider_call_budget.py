@@ -186,10 +186,7 @@ def _reserve(store, kind, total, payload):
         from codex_harness.core.plan_store import PlanStoreError
 
         previous = approvals.current(store, "B")["subject"]
-        action = {
-            "reviewAllowance": used + max(1, len(previous["reviewers"])),
-            "allowanceReason": "Additional review round after the cumulative allowance was spent",
-        }
+        action = {"renewReviews": True}
         if kind == "worker":
             action = {
                 "execution": {

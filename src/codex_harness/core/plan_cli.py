@@ -420,8 +420,6 @@ def parser() -> argparse.ArgumentParser:
         "--baseline-ref", help="Git baseline ref; defaults to HEAD when available"
     )
     commands["roundtable"].add_argument("--max-rounds", type=int, default=DEFAULT_REVIEW_ROUNDS)
-    commands["review-budget"].add_argument("--max-starts", type=int, required=True)
-    commands["review-budget"].add_argument("--reason", default="", help="Explain totals above ten")
     readiness_selection = commands["readiness"].add_mutually_exclusive_group()
     readiness_selection.add_argument("--beads", help="Comma-separated bead ids")
     readiness_selection.add_argument("--sample", type=int)
@@ -478,8 +476,6 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
         data = prepare_chat_confirmation(
             server.store,
             "plan-execution",
-            review_max_starts=args.max_starts,
-            allowance_reason=args.reason,
         )
         return _reply(server, json.dumps(data, ensure_ascii=False, indent=2)), data
     if command == "advance" and (args.statement is not None or args.by != "planner"):

@@ -81,7 +81,9 @@ def provider_host(mode, workspace, surface, job_id=None):
 
     def review(launch, *_):
         return tuple(
-            value.replace("source-only", "gpt-6.1-sol" if launch.cli == "codex" else "stub")
+            value.replace(
+                "source-only", "gpt-6.1-sol" if launch.cli == "codex" else "claude-sonnet-5-5"
+            ).replace("Some(High)", "Some(Medium)" if surface == "web" else "Some(High)")
             if isinstance(value, str)
             else value
             for value in protocol(launch.cli, text="[]")
@@ -108,7 +110,8 @@ def test_golden_path(tmp_path, request, surface):
 
     Catch late acceptance reviewer/budget questions, reapproval after repairs/recovery,
     and changed limits launching without a diff; plan-review-only tests miss delivery.
-    Run real executable discovery: unknown model access must not hide installed Codex
+    Catch planner-owned budget refusal using the UX-5 reviewer tuples without budget inputs;
+    Earlier coverage had one installed provider. Real discovery must not hide installed Codex
     at B, plan review or acceptance; the former resolver stub hid this mismatch.
     Stub results are suite evidence only, never actual-provider acceptance.
     """
@@ -122,6 +125,8 @@ def test_golden_path(tmp_path, request, surface):
     tools.mkdir()
     codex = tools / ("codex.exe" if os.name == "nt" else "codex")
     shutil.copy2(sys.executable, codex)
+    if surface == "web":
+        shutil.copy2(sys.executable, tools / ("claude.exe" if os.name == "nt" else "claude"))
     # Keep OS/git/node tools while excluding the host's provider installations/bundles.
     paths = [str(tools), str(Path(shutil.which("git")).parent)]
     if os.name == "nt":
@@ -215,7 +220,7 @@ def test_golden_path(tmp_path, request, surface):
             detected = call("harness_preflight", providers=["codex", "claude"])["providers"]
             assert [
                 p["provider"] for p in detected if p["executable"]["status"] == "available"
-            ] == ["codex"]
+            ] == (["codex", "claude"] if surface == "web" else ["codex"])
             call(
                 "harness_plan_start",
                 idea="A welcome page" if surface == "web" else "An offline greeting CLI",
@@ -340,6 +345,17 @@ def test_golden_path(tmp_path, request, surface):
                 executable=detected[0]["executable"]["path"], authentication="unknown"
             )
             catalog["providers"][0]["choices"][0]["availability"] = "unknown"
+            if surface == "web":
+                from copy import deepcopy
+
+                claude_provider = deepcopy(catalog["providers"][0])
+                claude_provider.update(
+                    provider="claude", executable=detected[1]["executable"]["path"]
+                )
+                claude_provider["choices"][0].update(model="claude-sonnet-5-5")
+                catalog["providers"].append(claude_provider)
+                for provider in catalog["providers"]:
+                    provider["choices"][0]["effort"]["value"] = "medium"
             catalog = call(
                 "harness_reviewer_catalog", catalog=catalog, expected_spine_revision=revision
             )["catalog"]
@@ -347,6 +363,17 @@ def test_golden_path(tmp_path, request, surface):
             choice["fields"]["reviewers"].append(
                 {**choice["fields"]["reviewers"][0], "name": "second"}
             )
+            if surface == "web":
+                # UX-5 turn 5 captured RS1 tuples and stages (choice IDs are catalog-bound).
+                choice["fields"]["stages"] = ["full-vision", "plan", "readiness", "wave-acceptance"]
+                for reviewer, provider in zip(
+                    choice["fields"]["reviewers"], catalog["providers"], strict=True
+                ):
+                    reviewer.update(
+                        name="pollen-" + provider["provider"] + "-reviewer",
+                        provider=provider["provider"],
+                        **{k: provider["choices"][0][k] for k in ("choiceId", "model", "effort")},
+                    )
             call("harness_reviewer_choice", node=choice, expected_spine_revision=revision)
             compiled = call("harness_compile", include_detail=True)
             options = dict(
@@ -381,19 +408,39 @@ def test_golden_path(tmp_path, request, surface):
                 reviewer_node_id="CHOICE",
             )
             reviewers = b["subject"]["reviewers"]
-            assert reviewers == [
-                dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high"),
-                dict(name="second", provider="codex", model="gpt-6.1-sol", effort="high"),
-            ]
+            assert reviewers == (
+                [
+                    dict(
+                        name="pollen-codex-reviewer",
+                        provider="codex",
+                        model="gpt-6.1-sol",
+                        effort="medium",
+                    ),
+                    dict(
+                        name="pollen-claude-reviewer",
+                        provider="claude",
+                        model="claude-sonnet-5-5",
+                        effort="medium",
+                    ),
+                ]
+                if surface == "web"
+                else [
+                    dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high"),
+                    dict(name="second", provider="codex", model="gpt-6.1-sol", effort="high"),
+                ]
+            )
             assert b["subject"]["reviewSelection"] == dict(
-                stages=["plan", "full-vision"],
+                stages=choice["fields"]["stages"] if surface == "web" else ["plan", "full-vision"],
                 assurance=dict(
-                    independentRequired=True, minIndependentReviewers=2, crossProviderRequired=False
+                    independentRequired=True,
+                    minIndependentReviewers=2,
+                    crossProviderRequired=surface == "web",
                 ),
             )
-            assert b["subject"]["scheduledReviewStarts"] == {"plan": 2, "full-vision": 2}
+            assert b["subject"]["scheduledReviewStarts"] == {"plan": 4, "full-vision": 4}
             assert b["subject"]["repairReserve"] == 2
             assert all(r["name"] in b["card"] and r["model"] in b["card"] for r in reviewers)
+            assert b["card"].count("up to 10 reviews") == 1
             yes(b)
             if surface == "cli":
                 # Repair the checker to match the accepted exact greeting, not the requirement.

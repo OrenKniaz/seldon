@@ -15,18 +15,6 @@ CHAT = "chat-confirmation"
 NATIVE = "mcp-client-elicitation"
 CHAT_REVIEW_SCOPE = {
     "reviewer_node_id": {"type": "string", "minLength": 1},
-    "review_max_starts": {"type": "integer", "minimum": 1},
-    "allowance_reason": {"type": "string", "minLength": 1},
-    "review_policy": {
-        "type": "object",
-        "properties": {
-            "maxRounds": {"type": "integer", "minimum": 1},
-            "maxTotal": {"type": ["integer", "null"], "minimum": 1},
-            "timeout": {"type": "integer", "minimum": 1},
-        },
-        "required": ["maxRounds", "maxTotal", "timeout"],
-        "additionalProperties": False,
-    },
 }
 CHAT_SCOPE = ("execution", *CHAT_REVIEW_SCOPE)
 
@@ -93,9 +81,6 @@ def prepare_confirmation(
     _expected_request_id=None,
     execution=None,
     reviewer_node_id=None,
-    review_max_starts=None,
-    allowance_reason="",
-    review_policy=None,
 ):
     if gate not in {"align", "vision-lock", "align+vision-lock", "plan-execution"}:
         raise PlanStoreError("plan-gate-invalid", str(gate))
@@ -129,12 +114,11 @@ def prepare_confirmation(
                 from codex_harness.core.planner_execution import execution_scope
 
                 action["execution"] = execution_scope(store, **execution, _candidate=True)
-            if review_max_starts is not None or execution is not None:
-                action["reviewAllowance"] = review_max_starts
-            if allowance_reason:
-                action["allowanceReason"] = allowance_reason
-            if review_policy is not None:
-                action["reviewPolicy"] = review_policy
+            from codex_harness.core.provider_call_budget import usage
+
+            previous = approvals.current(store, "B")
+            if previous and usage(store, "review") >= previous["subject"]["reviewAllowance"]:
+                action["renewReviews"] = True
         else:
             from codex_harness.core.planner_vision import expansion_status
 

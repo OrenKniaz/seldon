@@ -209,8 +209,6 @@ def source_only_b(
                         timeout=timeout,
                         callCap=call_cap,
                     ),
-                    reviewAllowance=10,
-                    reviewPolicy=dict(maxRounds=100, maxTotal=None, timeout=900),
                 ),
             )
         except ValueError:  # Stale execution scopes also refuse after adding a bead.
@@ -278,8 +276,6 @@ def source_only_b(
             timeout=timeout,
             call_cap=call_cap,
         ),
-        review_max_starts=10,
-        review_policy=dict(maxRounds=100, maxTotal=None, timeout=900),
     )
     result = complete_confirmation(
         store,

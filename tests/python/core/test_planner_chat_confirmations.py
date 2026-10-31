@@ -32,7 +32,7 @@ def combined_reply(store, request, text="Approve"):
     )
 
 
-def prepare_combined_b(store, selection="new", *, cap=6, chat=True, offer=True):
+def prepare_combined_b(store, selection="new", *, chat=True, offer=True):
     source_only_expansion(store)
     aligned = confirmation.prepare_confirmation(store, "align+vision-lock", _chat=chat)
     approve_b(store, aligned)
@@ -53,7 +53,7 @@ def prepare_combined_b(store, selection="new", *, cap=6, chat=True, offer=True):
     if not offer:
         return None, options
     request = confirmation.prepare_confirmation(
-        store, "plan-execution", _chat=chat, execution=options, review_max_starts=cap
+        store, "plan-execution", _chat=chat, execution=options
     )
     return request, options
 
@@ -105,7 +105,7 @@ def test_missing_b_refuses_without_reservation_then_exact_b_reaches_review_and_j
     assert list(store.connection.iterdump()) == before
     assert budget.usage(store, "review") == 0 and launches == []
     request = confirmation.prepare_confirmation(
-        store, "plan-execution", _chat=chat, execution=options, review_max_starts=6
+        store, "plan-execution", _chat=chat, execution=options
     )
     approve_b(store, request)
     store.advance("roundtable", by="source-test")
