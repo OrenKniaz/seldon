@@ -499,6 +499,31 @@ def test_clean_reviewer_counts_with_addressed_finding(store, status):
     assert list(store.connection.iterdump()) == before
 
 
+def test_minor_only_round_passes_with_persisted_advisories(store):
+    """Catch minor repair loops at publication; existing cases only close major findings."""
+    advance(store, "roundtable")
+    result = source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS,
+        process_stub=lambda launch, cwd, timeout: (
+            0,
+            json.dumps([{**FINDING, "severity": "minor" if launch.cli == "codex" else "note"}]),
+        ),
+    )
+    rows = findings(store, expand=True)
+    check = checks(store)["roundtable"]
+    assert check["status"] == "pass"
+    assert check["evidence"]["openFindingIds"] == []
+    assert set(check["evidence"]["advisoryFindingIds"]) == {row["id"] for row in rows}
+    assert len(rows) == 2 and all(row["status"] == "open" for row in rows)
+    store._check_publish()
+    from codex_harness.core.roundtable import render_roundtable_card
+
+    card = render_roundtable_card(result, rows)
+    assert "Minor (advisory)" in card and "Note (advisory)" in card
+    assert "Fix open findings" not in card
+
+
 @pytest.mark.parametrize("open_finding", [False, True])
 def test_requirement_edit_makes_roundtable_stale_until_reviewed(store, open_finding):
     advance(store, "roundtable")

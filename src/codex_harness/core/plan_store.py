@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from uuid import uuid4
 
-from codex_harness.core import intake, waves
+from codex_harness.core import intake, review_instructions, waves
 from codex_harness.core.graph import load_plan
 from codex_harness.core.reviewer_evidence import native_reviewer
 from codex_harness.core.spine import (
@@ -3424,12 +3424,7 @@ class PlanStore:
         return "acceptance-review-required"
 
     def accept(self, *, by: str, statement: str) -> dict:
-        from codex_harness.core.acceptance import (
-            _latest_run,
-            _refuse,
-            run_invalid_reason,
-            run_subject,
-        )
+        from codex_harness.core import acceptance
 
         _nonempty(by, "by")
         _nonempty(statement, "statement")
@@ -3446,18 +3441,18 @@ class PlanStore:
                 raise PlanStoreError(
                     "acceptance-scenarios-stale", "Review and save scenarios for the current nodes"
                 )
-            run = _latest_run(self)
-            if run is not None and run_subject(run) != "product":
-                _refuse("acceptance-product-required")
-            reason = run_invalid_reason(self, run)
+            run = acceptance._latest_run(self)
+            if run is not None and acceptance.run_subject(run) != "product":
+                acceptance._refuse("acceptance-product-required")
+            reason = acceptance.run_invalid_reason(self, run)
             if reason:
-                _refuse(reason, run["repo"] if run else None)
+                acceptance._refuse(reason, run["repo"] if run else None)
             if not run or not run["passed"]:
                 raise PlanStoreError(
                     "acceptance-scenarios-required",
                     "Pass all scenarios on the current integrated revision",
                 )
-            if any(f["status"] == "open" for f in self.acceptance_findings()):
+            if review_instructions.has_blocking_findings(self.acceptance_findings()):
                 raise PlanStoreError("acceptance-findings-open", "Resolve open acceptance findings")
             review_guard = self.acceptance_review_guard(run["id"])
             if review_guard:

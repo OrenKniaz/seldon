@@ -75,6 +75,9 @@ def test_every_acceptance_shard_contains_current_source_and_existing_disposition
     assert len(packets) > 2 if large else len(packets) == 2
     digest = hashlib.sha256((repo / "tiny.py").read_bytes()).hexdigest()
     for packet in packets:
+        # Catch guarantees lost in sharding; response-contract checks use small packets.
+        assert "## Already guaranteed by Seldon's runner" in packet
+        assert "product-root PYTHONPATH" in packet and "offline browser" in packet
         assert "## Read-only candidate evidence" in packet
         start = packet.index("{", packet.index("## Read-only candidate evidence"))
         evidence, _ = json.JSONDecoder().raw_decode(packet[start:])

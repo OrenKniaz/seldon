@@ -2848,6 +2848,22 @@ def test_acceptance_packet_includes_helpers_and_saved_scenarios(project):
 
 
 def assert_strict_response_contract(packet, known, *, scoped):
+    # Protect bounded semantic review; the old response-shape checks missed review scope.
+    assert "## Already guaranteed by Seldon's runner" in packet
+    assert "product-root PYTHONPATH even when action.cwd changes" in packet
+    assert "Interpreter selection is controller-owned" in packet
+    assert "a required interpreter version still needs controller/runtime evidence" in packet
+    assert "root index.html directly through file:// in an offline browser" in packet
+    assert "guardrails require zero external requests" in packet
+    assert "They do not prove that this candidate executes" in packet
+    assert "concrete user/product impact; name that impact" in packet
+    assert "No style, format, schema or wording remarks" in packet
+    assert "at most 5 findings per reviewer across all shards" in packet
+    assert "ranked by severity" in packet
+    assert "verify the listed repairs" in packet
+    assert "only add NEW blocker/major findings caused by those repairs" in packet
+    assert "No fresh minor/note" in packet
+    assert "advisory, not blocking repairs" in packet
     if scoped:
         assert (
             'have exactly {"node_id", "severity", "finding", "suggestion", "classification", '
@@ -2883,6 +2899,37 @@ def test_acceptance_response_contract_matches_strict_parser(project):
     assert seen == ["codex", "claude"]
     assert all(record["shards"] == 1 for record in result["reviewers"])
     assert result["isMocked"] is True and result["findings"] == []
+
+
+def test_acceptance_advisories_keep_evidence_gate_and_recheck_lists_repairs(project):
+    """Catch minor blocking and lost repair context; prior tests only dispose major gaps."""
+    store, repo = project
+    to_accept(store)
+    fix_product(repo)
+    run_acceptance(store, repo, subject="product")
+    item = dict(
+        node_id="V1", severity="minor", finding="First-use hint is unclear", suggestion="Clarify"
+    )
+    review(store, repo, json.dumps([item]))
+    rows = store.acceptance_findings()
+    assert len(rows) == 2 and all(row["status"] == "open" for row in rows)
+    # Advisory findings permit progress; injected transport still cannot grant native credit.
+    assert store.status()["acceptance"]["invalidReason"] == "acceptance-review-required"
+    with pytest.raises(PlanStoreError) as error:
+        store.accept(by="user", statement="I accept")
+    assert error.value.code == "acceptance-review-required"
+    repaired = rows[0]
+    store.resolve_acceptance_finding(
+        repaired["id"], status="resolved", resolution="Clarified first-use hint"
+    )
+
+    def recheck(launch, cwd, timeout):
+        packet = launch.stdin_text
+        assert repaired["id"] in packet and "Clarified first-use hint" not in packet
+        assert "only add NEW blocker/major findings caused by those repairs" in packet
+        return 0, "[]"  # Only review input is injected; admission remains owned by PlanStore.
+
+    acceptance_review(store, repo, reviewers=REVIEWERS, runner=recheck)
 
 
 def test_acceptance_actual_array_suggestions_fail_closed_and_preserve_diagnostics(project):

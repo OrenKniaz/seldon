@@ -22,7 +22,7 @@ from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
 
 from codex_harness.core import acceptance_recovery as recovery
-from codex_harness.core import roundtable
+from codex_harness.core import review_instructions, roundtable
 from codex_harness.core import spine as plan_spine
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
@@ -817,7 +817,7 @@ def rebind_acceptance(store, repo, env=None) -> dict:
             _refuse("acceptance-approval-required")
         if not old_run["passed"]:
             _refuse("acceptance-scenarios-required")
-        if any(item["status"] == "open" for item in store.acceptance_findings()):
+        if review_instructions.has_blocking_findings(store.acceptance_findings()):
             _refuse("acceptance-findings-open")
         reviews = [
             json.loads(row[0])
@@ -888,7 +888,7 @@ def rebind_acceptance(store, repo, env=None) -> dict:
             )
         if not run["passed"]:
             _refuse("acceptance-scenarios-required")
-        if any(item["status"] == "open" for item in store.acceptance_findings()):
+        if review_instructions.has_blocking_findings(store.acceptance_findings()):
             _refuse("acceptance-findings-open")
         latest_approval = store.connection.execute(
             "SELECT result_json FROM acceptance_approvals ORDER BY rowid DESC LIMIT 1"
@@ -1246,14 +1246,12 @@ def _prepare_acceptance_review(
             + " (sha256-json-sort_keys-default-utf8).\n\n"
         )
         included_header += prefix_section
+    included_header += review_instructions.instructions()
     packet = (
-        included_header + QUESTION + "\nReview only this packet. "
-        "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
-        'have exactly {"node_id", "severity", "finding", "suggestion"}. All values are '
-        "strings; finding must be nonempty. Severity is blocker, major, minor or note. "
-        'node_id must be one of the ids below, or "plan" for plan-wide findings. '
-        "suggestion must be one string; an empty string may mean no suggested fix. "
-        "Use [] if there are no findings.\nAllowed node ids: "
+        included_header
+        + QUESTION
+        + "\nReview only this packet. "
+        + review_instructions.ACCEPTANCE_RESPONSE
         + json.dumps(spine.ids(), ensure_ascii=False)
         + "\n"
         + json.dumps(
@@ -1980,7 +1978,7 @@ def acceptance_status(store) -> dict:
             invalid_reason = "acceptance-product-required"
         elif not run["passed"]:
             invalid_reason = "acceptance-scenarios-required"
-        elif any(item["status"] == "open" for item in findings):
+        elif review_instructions.has_blocking_findings(findings):
             invalid_reason = "acceptance-findings-open"
         elif reason := store.acceptance_review_guard(run["id"]):
             invalid_reason = reason

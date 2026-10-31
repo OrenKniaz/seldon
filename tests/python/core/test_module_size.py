@@ -7,12 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 CORE = "src/codex_harness/core"
 CEILINGS = {
-    "src/codex_harness/core/acceptance.py": 2038,
+    "src/codex_harness/core/acceptance.py": 2036,
     "src/codex_harness/core/dispatch.py": 2838,
     "src/codex_harness/core/mcp_planner.py": 3376,
-    "src/codex_harness/core/plan_store.py": 3670,
-    "src/codex_harness/core/planner_views.py": 1729,
-    "src/codex_harness/core/roundtable.py": 2465,
+    "src/codex_harness/core/plan_store.py": 3665,
+    "src/codex_harness/core/planner_views.py": 1728,
+    "src/codex_harness/core/roundtable.py": 2447,
     "src/codex_harness/core/status_api.py": 1765,
     "src/codex_harness/core/test_audit.py": 1676,
 }

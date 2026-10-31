@@ -22,6 +22,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core import provider_call_budget as review_budget
+from codex_harness.core import review_instructions
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
@@ -284,6 +285,7 @@ def _packet(
     *,
     scenario_section=None,
     brief_section="",
+    review_history=(),
 ) -> str:
     sections = [
         f"Review manifest revision {report['manifestRevision']} "
@@ -321,36 +323,10 @@ def _packet(
         + json.dumps(spine.to_dict(), ensure_ascii=False, sort_keys=True)
         + "\n```\n"
     )
-    focus = (
-        "Review only four things. (1) Expansion within scope: a clear improvement the "
-        "vision invites but the plan misses, or scope the vision does not ask for. "
-        "(2) Vision integrity: every locked vision item, requirement and user-stated "
-        "scenario reaches the plan unweakened. (3) Spine trickle-down: vision, requirements, "
-        "contracts, scenarios and beads link completely and consistently. Scenarios must "
-        "cover each requirement's stated behaviour; further edge cases and test depth are "
-        "the Build worker's unit-test job, so report them as note at most. "
-        "(4) Scenario feasibility: each positive scenario's setup satisfies the preconditions "
-        "the brief/requirements state (files, parent dirs, prior state); "
-        "each negative scenario's missing precondition is deliberate. Use blocker or "
-        "major only for a break in (1)-(4). Do not review code or test completeness.\n"
-        "Before your final JSON, fill this worksheet in working notes for EVERY independent "
-        "brief clause: command/cwd, value grammar, error preconditions and preservation:\n"
-        "Clause (verbatim) | Scenario ID(s) or GAP | Explanation\n"
-        "Use actual current scenario IDs only; explain how setup/actions/observations cover "
-        "the clause, or mark GAP. References alone are not coverage. Surface all actual gaps "
-        "in this first review, not one gap per round. Missing/truncated evidence is unproven. "
-        "Unsupported required setup remains a required gap or explicit recorded deferral, "
-        "never fulfilled or beyond-brief. This is semantic reviewer judgment, not machine "
-        "coverage certification. Keep the worksheet in working notes; final JSON stays below.\n"
-        if spine.semantic
-        else "Look for missing features or edge cases versus the vision; requirements without "
-        "real verification; weak concurrency or file ownership; risky design choices; "
-        "and scope that is too shallow (mocked or basic instead of the real vision). "
-        "Return actionable findings tied to exact spine items and suggest fixes.\n"
-    )
     sections.append(
         "## Review instructions\n\n"
-        + focus
+        + review_instructions.instructions(review_history)
+        + review_instructions.focus(spine.semantic)
         + "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
         'have exactly {"node_id", "severity", "finding", "suggestion", "classification", '
         '"scope_reason"}. Classification is defect-in-plan or beyond-brief; scope_reason '
@@ -393,6 +369,7 @@ def review_packet(store: PlanStore) -> str:
         _test_bodies(store),
         store.acceptance_scenarios(),
         brief_section=_brief_section(store),
+        review_history=findings(store, expand=True),
     )
 
 
@@ -440,6 +417,7 @@ def packet_shards(
             scenarios,
             scenario_section=scenario_section,
             brief_section=brief_section,
+            review_history=findings(store, expand=True),
         )
     )
 
@@ -486,7 +464,9 @@ def packet_shards(
         if node["kind"] in {"vision", "decision"}
         or not any(key in values for values in members.values())
     }
-    instructions = _packet(spine, report).split("## Review instructions\n\n", 1)[1]
+    instructions = _packet(
+        spine, report, review_history=findings(store, expand=True) if packet is None else ()
+    ).split("## Review instructions\n\n", 1)[1]
     base = (
         included_header + f"Review manifest revision {report['manifestRevision']} "
         f"(spine revision {spine.plan_revision()}).\n"
@@ -815,7 +795,8 @@ def advisory_finding_ids(store, revision=None):
     rows = [
         dict(r)
         for r in store.connection.execute(
-            "SELECT * FROM review_findings WHERE classification='beyond-brief'",
+            "SELECT * FROM review_findings WHERE classification='beyond-brief' "
+            "OR severity IN ('minor','note')",
         )
     ]
     for event in store.connection.execute(
@@ -829,7 +810,7 @@ def advisory_finding_ids(store, revision=None):
                 "SELECT * FROM review_runs WHERE round_id=? AND reviewer=? AND provider=?",
                 (row["round_id"], row["reviewer"], row["provider"]),
             ).fetchone()
-            if run and row["scope_reason"].strip():
+            if run and (review_instructions.is_minor(row) or row["scope_reason"].strip()):
                 run = dict(run)
                 if (
                     run["exit_code"] == run["invalid"] == 0
@@ -2443,7 +2424,8 @@ def render_roundtable_card(result: dict, findings: list[dict]) -> str:
     for severity in _SEVERITIES:
         group = [item for item in current if item["severity"] == severity]
         if group:
-            lines.extend(["", f"{severity.capitalize()}:"])
+            label = " (advisory)" if severity in ("minor", "note") else ""
+            lines.extend(["", f"{severity.capitalize()}{label}:"])
         for item in group:
             lines.append(
                 f"- {item['node_id']} ({item['id']}, {item['status']}): {item['finding']} "
@@ -2458,7 +2440,7 @@ def render_roundtable_card(result: dict, findings: list[dict]) -> str:
         lines.append("- Run the second provider when available for cross-subscription review.")
     if result["invalid"]:
         lines.append("- Correct rejected-unparsed responses and rerun the affected reviewers.")
-    if any(item["status"] == "open" for item in current):
+    if review_instructions.has_blocking_findings(current):
         lines.append("- Fix open findings, verify the affected plan items and record resolutions.")
     elif result["reviewers"] and not result["invalid"]:
         lines.append("- Recheck planner quality before advancing to publish.")

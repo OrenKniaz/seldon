@@ -1376,6 +1376,9 @@ def test_current_brief_clause_walk_reaches_packet_and_all_shards(coverage_store)
     assert all("## Current acceptance scenarios" not in shard["packet"] for shard in shards)
     assert all("vision fields.scenarios and fields.targets" in shard["packet"] for shard in shards)
     assert all("Clause (verbatim) | Scenario ID(s) or GAP" in shard["packet"] for shard in shards)
+    # The semantic feature-shard producer must retain runner guarantees too.
+    assert all("## Already guaranteed by Seldon's runner" in shard["packet"] for shard in shards)
+    assert all("product-root PYTHONPATH" in shard["packet"] for shard in shards)
     (store.workspace / "docs/brief.md").write_text("CURRENT REVISED CLAUSE", encoding="utf-8")
     assert "CURRENT REVISED CLAUSE" in review_packet(store)
     assert brief not in review_packet(store)
@@ -1455,6 +1458,23 @@ def repair_required_scope(store):
         ]
     )
     store.compile_template(store.workspace / "template")
+
+
+def test_repaired_review_packet_lists_repairs_for_bounded_recheck(scope_store, monkeypatch):
+    """Catch lost repair context in shards; prior packet tests only cover initial review."""
+    store = scope_store
+    scoped_review(store, monkeypatch, required=True)
+    repair_required_scope(store)
+    repaired = [row for row in findings(store, expand=True) if row["node_id"] == "F"]
+    packets = [review_packet(store)] + [
+        shard["packet"] for shard in roundtable.packet_shards(store, "codex", token_budget=12000)
+    ]
+    for packet in packets:
+        assert "verify the listed repairs" in packet
+        assert "only add NEW blocker/major findings caused by those repairs" in packet
+        assert "No fresh minor/note" in packet
+        for row in repaired:
+            assert row["id"] in packet and row["resolution"] in packet
 
 
 def test_reviewer_optionality_reaches_publication_and_closure_without_hiding(

@@ -4,6 +4,7 @@ import sqlite3
 
 from codex_harness.core.plan_store import PHASES
 from codex_harness.core.planner_vision import render_vision
+from codex_harness.core.review_instructions import status
 from codex_harness.core.reviewer_evidence import single_provider_notice
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import _escape, _layers, _projection, diagram, text_fallback
@@ -1295,7 +1296,7 @@ def findings_card(rows: list[dict]) -> str:
         {
             "Records": len(rows),
             "Findings": [
-                f"{row['id']} ({row['severity']}, {row['status']}): " + _short(row["finding"], 130)
+                f"{row['id']} ({row['severity']}, {status(row)}): " + _short(row["finding"], 130)
                 for row in rows
             ],
             "Review scope": "; ".join(sorted({review_scope(row) for row in rows})) or "no findings",
@@ -1323,11 +1324,9 @@ def roundtable_card(result: dict, rows: list[dict]) -> str:
                     f"{row['name']}: {review_scope(row)}" for row in result["reviewers"]
                 ],
                 "Findings": [
-                    f"{row['id']} ({row['status']}): {_short(row['finding'], 100)}"
-                    for row in current
+                    f"{row['id']} ({status(row)}): {_short(row['finding'], 100)}" for row in current
                 ],
-                "Evidence": f"Mocked: {readable(result.get('isMocked'))}; "
-                "recorded reports do not prove delivery.",
+                "Evidence": f"Mocked: {readable(result.get('isMocked'))}; no delivery proof.",
             },
         )
     )
