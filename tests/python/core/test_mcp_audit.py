@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core import test_test_audit
-from tests.python.core.planning_support import source_only_expansion
+from tests.python.core.planning_support import source_only_b, source_only_expansion
 from tests.python.core.test_mcp_planner import native_confirmation_result
 from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 
@@ -372,11 +372,14 @@ def started(prospective):
     while server.store.phase() != "roundtable":
         phase = server.store.phase()
         if phase in ("align", "vision-lock"):
-            confirmed = native_confirmation_result(
-                server, phase, "SOURCE-ONLY synthetic client response, not human acceptance"
-            )
+            confirmed = native_confirmation_result(server, phase, "Approve")
             assert not confirmed["isError"]
             assert confirmed["structuredContent"]["human_identity_verified"] is False
+        if phase == "plan":
+            from tests.python.core.planning_support import source_only_b
+
+            source_only_b(server.store)
+            compiled = invoke(server, "harness_compile")
         assert not invoke(server, "harness_advance", to_phase=PHASES[PHASES.index(phase) + 1])[
             "isError"
         ]
@@ -436,6 +439,9 @@ def test_public_prospective_audit_clears_only_matching_audit_gate(prospective):
         recompiled = invoke(resumed, "harness_compile")
         changed = recompiled["structuredContent"]["planRevision"]
         assert not recompiled["isError"] and changed != revision
+        stale = invoke(resumed, "harness_advance", to_phase="publish")
+        assert stale["isError"] and "plan-b-consent-required" in stale["content"][0]["text"]
+        source_only_b(resumed.store)
         stale = invoke(resumed, "harness_advance", to_phase="publish")
         assert stale["isError"] and "passing audit" in stale["content"][0]["text"]
         assert not resumed.store.passing_audit(changed)
@@ -520,8 +526,11 @@ def test_stale_completion_and_late_unbound_writer_cannot_grant_credit(prospectiv
             server.store.manifest_revision(), {"ok": True, "proofLevel": "prospective"}
         )
         assert legacy_id and server.store.passing_audit(server.store.manifest_revision()) is None
-        public = invoke(server, "harness_plan_status")["structuredContent"]
+        public = invoke(server, "harness_plan_status", full=True)["structuredContent"]
         assert public["reviewResolution"]["audit"]["current"] is False
+        refused = invoke(server, "harness_advance", to_phase="publish")
+        assert refused["isError"] and "plan-b-consent-required" in refused["content"][0]["text"]
+        source_only_b(server.store)
         refused = invoke(server, "harness_advance", to_phase="publish")
         assert refused["isError"] and "audit-binding-required" in refused["content"][0]["text"]
     finally:

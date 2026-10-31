@@ -2,7 +2,7 @@
 
 import json
 
-from tests.python.core.planning_support import source_only_confirmation
+from tests.python.core.planning_support import source_only_confirmation, source_only_expansion
 
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import open_plan_store_readonly
@@ -42,6 +42,7 @@ def test_connection_identity_survives_new_server_on_same_durable_plan(tmp_path):
         )
         assert not started["result"]["isError"]
         # Actual canonical producer; changing phase requires an explicit test proxy.
+        source_only_expansion(server.store)
         source_only_confirmation(server.store, "align")
         server.store.advance("expand", by="source-test")
     finally:

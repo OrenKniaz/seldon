@@ -21,7 +21,8 @@ def project(tmp_path):
     yield from _project.__wrapped__(tmp_path)
 
 
-def candidate(store, repo, *, large=False):
+def candidate(store, repo, *, large=False, reviewers=None):
+    reviewers = reviewers or REVIEWERS
     bead = store.spine().node("A")
     bead["fields"]["ownedFiles"] = ["tiny.py", ".env", "notes.txt"]
     store.upsert_node(bead)
@@ -39,7 +40,7 @@ def candidate(store, repo, *, large=False):
         {"node_id": "R1", "severity": "note", "finding": f"Existing {status} gap", "suggestion": ""}
         for status in ("open", "resolved", "rejected", "deferred")
     ]
-    roundtable.run_roundtable(store, reviewers=REVIEWERS, runner=lambda *_: (0, json.dumps(items)))
+    roundtable.run_roundtable(store, reviewers=reviewers, runner=lambda *_: (0, json.dumps(items)))
     for row in roundtable.findings(store):
         status = row["finding"].split()[1]
         if status != "open":
@@ -52,6 +53,17 @@ def candidate(store, repo, *, large=False):
                     }
                 ]
             )
+    import shutil
+    from pathlib import Path
+
+    from tests.python.core.planning_support import source_only_b
+
+    template = store.workspace / "template"
+    if not template.is_dir():
+        shutil.copytree(
+            Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit/template", template
+        )
+    source_only_b(store, reviewers=reviewers)
     return run_acceptance(store, repo, subject="product")
 
 

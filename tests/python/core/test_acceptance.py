@@ -12,6 +12,7 @@ import pytest
 from tests.python.core import test_dispatch, test_semantic_wiring
 from tests.python.core.planning_support import (
     publication_evidence,
+    source_only_b,
     source_only_confirmation,
     source_only_vision_lock,
 )
@@ -951,6 +952,12 @@ def public_assessment_repair_fixture(
         manifest["beads"]["B"]["dependsOn"] = ["A"]
     else:
         del manifest["beads"]["B"]
+    if second_bead:
+        (plan / "template/B.py").write_text("VALUE = 0\ndef value(): return VALUE\n")
+        (plan / "template/tests/test_B.py").write_text(
+            "import unittest\nfrom B import value\nclass Proof(unittest.TestCase):\n"
+            "    def test_value(self):\n        self.assertEqual(value(), 1)\n"
+        )
     if prerequisite:
         manifest["beads"]["D"] = {
             "title": "A prerequisite",
@@ -959,10 +966,10 @@ def public_assessment_repair_fixture(
             "proofModule": "test_D.py",
         }
         manifest["beads"]["A"]["dependsOn"] = ["D"]
-        (plan / "template/D.py").write_text("VALUE = 0\n")
+        (plan / "template/D.py").write_text("VALUE = 0\ndef value(): return VALUE\n")
         (plan / "template/tests/test_D.py").write_text(
-            "import unittest\nfrom D import VALUE\nclass Proof(unittest.TestCase):\n"
-            "    def test_dependency(self):\n        self.assertEqual(VALUE, 1)\n"
+            "import unittest\nfrom D import value\nclass Proof(unittest.TestCase):\n"
+            "    def test_dependency(self):\n        self.assertEqual(value(), 1)\n"
         )
     (plan / "sample.json").write_text(json.dumps(manifest))
     (plan / "template/A.py").write_text(
@@ -990,7 +997,7 @@ def public_assessment_repair_fixture(
         fixture_temp_root = Path(local_appdata) / "Temp"
         assert fixture_temp_root.is_dir(), "SOURCE-ONLY fixture needs an existing local Temp root"
     workspace = Path(tempfile.mkdtemp(prefix="public-af-", dir=fixture_temp_root))
-    store, revision = publish_source_store(workspace, plan)
+    store, revision = publish_source_store(workspace, plan, reviewers=REVIEWERS)
     server = PlannerServer(workspace)
     calls = []
     traces = []
@@ -1125,7 +1132,7 @@ def public_assessment_repair_fixture(
         later_worker.write_text(
             "# SOURCE-ONLY independent owned source change\n"
             "from pathlib import Path\nimport sys\n"
-            f"Path('{identity}.py').write_text('VALUE = 1\\n')\n"
+            f"Path('{identity}.py').write_text('VALUE = 1\\ndef value(): return VALUE\\n')\n"
             f"print({later_events!r})\n"
             f"print({stderr.replace(session, later_session)!r},file=sys.stderr)\n"
         )
@@ -1171,7 +1178,7 @@ def public_assessment_repair_fixture(
         )
     terminal = planner_jobs.execute_worker_job(workspace, revision)
     assert terminal["status"] == "completed", terminal
-    job = tool("harness_worker_status", dict(job_id=revision))
+    job = tool("harness_worker_status", dict(job_id=revision, include_detail=True))
     run = record_io.read_record_json(Path(job["run"]["recordPath"]))
     repo = Path(run["repo"])
     assert (repo / "A.py").read_bytes() != old_bytes == (broken / "A.py").read_bytes()
@@ -1435,7 +1442,7 @@ def test_support_requires_explicit_ordinary_reviewers_without_discovery(
 
 
 @pytest.mark.parametrize(
-    "case", ["unknown", "duplicate", "repo", "disposition", "later-pending", "artifact"]
+    "case", ["unknown", "duplicate", "repo", "disposition", "later-prepared", "artifact"]
 )
 def test_public_selected_support_refuses_before_ordinary_reservation(tmp_path, monkeypatch, case):
     fixture = public_assessment_repair_fixture(tmp_path, monkeypatch)
@@ -1459,8 +1466,10 @@ def test_public_selected_support_refuses_before_ordinary_reservation(tmp_path, m
                     resolution="SOURCE ONLY declaration after assessment must stale it",
                 ),
             )
-        elif case == "later-pending":
+        elif case == "later-prepared":
+            before_prepare = list(store.connection.iterdump())
             store.register_execution_assessment(**dict(request, timeout=16))
+            assert list(store.connection.iterdump()) == before_prepare
         elif case == "artifact":
             (repo / "A.py").write_text("def valid_id(value): return isinstance(value,int)\n")
         before = list(store.connection.iterdump())
@@ -1468,11 +1477,20 @@ def test_public_selected_support_refuses_before_ordinary_reservation(tmp_path, m
             "harness_accept_review",
             dict(repo=consumer_repo, reviewers=reviewers, execution_assessment_ids=ids),
         )
-        assert result["isError"] and len(calls) == 3
-        assert list(store.connection.iterdump()) == before
-        assert (
-            store.connection.execute("SELECT count(*) FROM acceptance_reviews").fetchone()[0] == 1
-        )
+        if case == "later-prepared":
+            # Preparation grants/reserves nothing and cannot stale real support.
+            assert not result["isError"] and len(calls) == 5
+            assert (
+                store.connection.execute("SELECT count(*) FROM acceptance_reviews").fetchone()[0]
+                == 2
+            )
+        else:
+            assert result["isError"] and len(calls) == 3
+            assert list(store.connection.iterdump()) == before
+            assert (
+                store.connection.execute("SELECT count(*) FROM acceptance_reviews").fetchone()[0]
+                == 1
+            )
     finally:
         store.close()
 
@@ -1803,24 +1821,24 @@ def test_scenario_output_is_capped_per_stream(tmp_path):
         assert output.endswith("\n[truncated]\n")
 
 
-def test_acceptance_invalid_after_vision_edit_and_restore(project):
+def test_acceptance_checks_changed_scope_and_restored_a_without_sticky_credit(project):
+    """V1 kept an edit-history hold; V2 compares scope while C still needs actual words."""
     store, repo = project
     to_accept(store)
     fix_product(repo)
     run_acceptance(store, repo, subject="product")
     source_only_native_review(store, repo)
-    store.accept(by="user", statement="Accept")
     original = store.spine().node("V1")
     changed = json.loads(json.dumps(original))
     changed["text"] += " changed"
     store.upsert_node(changed)
-    store.upsert_node(original)
     with pytest.raises(PlanStoreError) as error:
-        store.accept(by="user", statement="Accept again")
-    status = store.status()["acceptance"]
-    assert not status["accepted"]
-    assert status["invalidReason"] == "vision-unlocked"
-    assert error.value.code == "acceptance-vision-unlocked"
+        store.accept(by="user", statement="Accept changed scope")
+    assert error.value.code == "plan-a-consent-required"
+    store.upsert_node(original)
+    assert not store.status()["acceptance"]["accepted"]
+    store.accept(by="user", statement="Accept restored scope and this candidate")
+    assert store.status()["acceptance"]["accepted"]
 
 
 def test_acceptance_review_packet_bound_labels(project):
@@ -1869,6 +1887,12 @@ def test_accept_run_cards_keep_failed_evidence(project):
 
 def test_failed_acceptance_review_card_uses_current_failure(project, monkeypatch):
     store, repo = project
+    import shutil
+
+    from tests.python.core.planning_support import source_only_b
+
+    shutil.copytree(FIXTURES / "dogfood-tipsplit/template", store.workspace / "template")
+    source_only_b(store, reviewers=REVIEWERS)
     fix_product(repo)
     run_acceptance(store, repo, subject="product")
     monkeypatch.setattr("codex_harness.core.roundtable._run", lambda *args: (7, "broken report"))
@@ -1893,8 +1917,8 @@ def test_failed_acceptance_review_card_uses_current_failure(project, monkeypatch
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures"
 REVIEWERS = [
-    {"name": "codex-reviewer", "provider": "codex"},
-    {"name": "claude-reviewer", "provider": "claude"},
+    {"name": "codex-reviewer", "provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
+    {"name": "claude-reviewer", "provider": "claude", "model": "claude-sonnet-5-5"},
 ]
 COMMAND = '"{python}" "{repo}/tiny.py"'
 
@@ -2072,14 +2096,23 @@ def project(tmp_path):
             ],
         )
         store.upsert_node(vision)
-        source_only_vision_lock(store, statement="Lock this vision")
+        source_only_vision_lock(store, statement="Approve")
         yield store, repo
 
 
 def to_accept(store):
     for phase in PHASES[PHASES.index(store.phase()) + 1 :]:
         if store.phase() in ("align", "vision-lock"):
-            source_only_confirmation(store, store.phase(), statement="Confirm this vision")
+            source_only_confirmation(store, store.phase(), statement="Approve")
+        if phase == "roundtable":
+            import shutil
+
+            shutil.copytree(
+                FIXTURES / "dogfood-tipsplit/template",
+                store.workspace / "template",
+                dirs_exist_ok=True,
+            )
+            source_only_b(store, reviewers=REVIEWERS)
         if phase == "publish":
             publication_evidence(store)
         if store.phase() == "publish":
@@ -3424,12 +3457,18 @@ def test_provider_availability_governs_public_acceptance_review(
     lost persistence labels, and a downstream acceptance gate still demanding two providers.
     Provider responses are source controls, never actual provider-execution evidence.
     """
+    import shutil
+
+    from tests.python.core.planning_support import source_only_b
+
     from codex_harness.core import roundtable
 
     store, repo = project
+    selected = [REVIEWERS[0], {**REVIEWERS[0], "name": "codex-second"}] if same else REVIEWERS
+    shutil.copytree(FIXTURES / "dogfood-tipsplit/template", store.workspace / "template")
+    source_only_b(store, reviewers=selected)
     fix_product(repo)
     run = run_acceptance(store, repo, subject="product")
-    selected = [REVIEWERS[0], {**REVIEWERS[0], "name": "codex-second"}] if same else REVIEWERS
     monkeypatch.setattr(
         roundtable,
         "_executable",

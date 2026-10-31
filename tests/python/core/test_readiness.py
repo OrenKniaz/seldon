@@ -284,7 +284,7 @@ def test_readiness_is_advisory_at_publish_with_existing_gates(project, monkeypat
     while project.phase() != "publish":
         phase = project.phase()
         if phase in ("align", "vision-lock"):
-            source_only_confirmation(project, phase, statement="Approve this exact plan")
+            source_only_confirmation(project, phase, statement="Approve")
         project.advance(PHASES[PHASES.index(phase) + 1], by="planner")
     report = quality_report(project)
     assert next(c for c in report["checks"] if c["id"] == "roundtable")["status"] == "pass"

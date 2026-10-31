@@ -1,31 +1,19 @@
-"""Compact card proof; synthetic source state is not human acceptance."""
+"""The complete visible subject is authority, in either channel."""
 
-from pathlib import Path
+from tests.python.core import test_planner_confirmations
 
-from codex_harness.core.plan_store import open_plan_store
 from codex_harness.core.planner_confirmation_cards import compact_card
 from codex_harness.core.planner_confirmations import prepare_confirmation
 
-FIXTURE = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit/spine.json"
+store = test_planner_confirmations.store
 
 
-def test_compact_card_bounds_long_content_without_discarding_full_scope(tmp_path):
-    """Protect reachable controls: existing card tests require full unbounded detail."""
-    with open_plan_store(tmp_path) as store:
-        store.import_spine(FIXTURE)
-        node = store.spine().node("V1")
-        node["fields"].update(
-            vision="Long vision\n" * 1000,
-            users="Long users\n" * 1000,
-            scope_in="Full scope\n" * 1000,
-            done_feels_like="Done\n" * 1000,
-        )
-        store.upsert_node(node)
-        request = prepare_confirmation(store, "align")
-        message = compact_card(request)
-        assert len(message) < 1100 and len(message.splitlines()) == 6
-        assert request["plan_revision"] in message
-        assert "harness_show_node id=V1" in message
-        assert "Summary only" in message and "Conditions" in message
-        assert node["fields"]["scope_in"] in request["card"]
-        assert request["vision"] == node
+def test_native_display_is_the_complete_persisted_subject(store):
+    """Catch excerpt-only authority; V1 card tests intentionally required truncated display."""
+    vision = store.spine().node("V1")
+    vision["fields"]["scope_in"] = ["Complete scope words " * 200]
+    store.upsert_node(vision)
+    request = prepare_confirmation(store, "align+vision-lock")
+    assert compact_card(request) == request["card"]
+    assert vision["fields"]["scope_in"][0] in request["card"]
+    assert request["subject"]["effect"] in request["card"]

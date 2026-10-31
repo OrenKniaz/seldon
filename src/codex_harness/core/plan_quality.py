@@ -1,6 +1,6 @@
 """Deterministic, read-only planner checklist.
 
-SQL reads: nodes (existence only), approvals, clarifications, assumptions, events (question timing),
+SQL reads: nodes (existence only), clarifications, assumptions, events (consent/question timing),
 revisions (frozen snapshot), sqlite_master, and optional review_runs/review_findings.
 Reviewer coverage comes from the latest successful run per provider for the current manifest;
 open findings block across all rounds.
@@ -18,7 +18,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from codex_harness.core.graph import PlanError, load_plan, topological_order
-from codex_harness.core.plan_store import PHASES, PlanStore
+from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 from codex_harness.core.spine import Spine, SpineError, compile_manifest
 from codex_harness.core.spine_render import render_markdown
 
@@ -361,12 +361,12 @@ def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tup
         pending = f"{readiness['pendingProducerCount']} beads pending producers"
         return readiness["status"], evidence, " ".join(filter(None, [readiness["advice"], pending]))
     if check_id == "expanded-and-aligned":
-        approvals = [
-            row[0]
-            for row in store.connection.execute(
-                "SELECT id FROM approvals WHERE gate='align' ORDER BY id"
-            )
-        ]
+        from codex_harness.core.approvals import require_approval
+
+        try:
+            approvals = [require_approval(store, "A")["id"]]
+        except PlanStoreError:
+            approvals = []
         questions = store.connection.execute(
             "SELECT id, status FROM clarifications ORDER BY id"
         ).fetchall()

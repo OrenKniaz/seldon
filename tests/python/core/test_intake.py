@@ -400,9 +400,12 @@ def test_unconfirmed_proposals_remain_drafts():
     catalog = validate_catalog(observation())
     chosen = selection(catalog)
     chosen["confirmation"] = None
-    assert validate_selection(catalog, chosen, sessions(**{"reviewer-0": "other"}))[
-        "unmetRequirements"
-    ] == ["reviewer-confirmation-required: proposal is unconfirmed"]
+    assert (
+        validate_selection(catalog, chosen, sessions(**{"reviewer-0": "other"}))[
+            "unmetRequirements"
+        ]
+        == []
+    )
 
 
 def test_independence_uses_distinct_non_author_sessions_and_diversity_is_separate():
@@ -465,6 +468,9 @@ def test_legacy_catalog_requires_explicit_fresh_offering_and_reselection():
         validate_selection(current, selection(legacy), sessions(**{"reviewer-0": "other"}))
     selected = selection(current)
     selected["confirmation"] = None
-    assert validate_selection(current, selected, sessions(**{"reviewer-0": "other"}))[
-        "unmetRequirements"
-    ] == ["reviewer-confirmation-required: proposal is unconfirmed"]
+    assert (
+        validate_selection(current, selected, sessions(**{"reviewer-0": "other"}))[
+            "unmetRequirements"
+        ]
+        == []
+    )

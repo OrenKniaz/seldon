@@ -1,4 +1,8 @@
-"""Real spine/store/graph integration, phase refusals and transactional failure."""
+"""Real store/graph integration and machine prerequisites.
+
+V1 revision credits, separate reviewer consent and plan grants are replaced by
+test_planner_confirmations and test_planner_chat_confirmations V2 boundaries.
+"""
 
 import json
 import queue
@@ -13,6 +17,7 @@ from tests.python.core import test_test_audit
 from tests.python.core.planning_support import (
     publication_evidence,
     source_controller_roundtable,
+    source_only_b,
     source_only_confirmation,
     source_only_expansion,
 )
@@ -205,34 +210,6 @@ def draft_inputs(store):
     )
 
 
-@pytest.mark.parametrize("by,available", [("proxy:synthetic-reviewer", True), ("planner", False)])
-def test_wave_lock_requires_new_plan_confirmation_and_retains_origin(tmp_path, by, available):
-    from tests.python.core.test_wave_refine import cli, plan_confirmation, setup_wave
-
-    workspace = setup_wave(tmp_path / "confirmation")
-    with open_plan_store(workspace) as store:
-        with pytest.raises(ValueError, match="actual displayed-plan confirmation"):
-            store.wave_product_lock()
-    projected = plan_confirmation(workspace, by=by)
-    with open_plan_store(workspace) as store:
-        if not available:
-            assert projected is None
-            with pytest.raises(ValueError, match="actual displayed-plan confirmation"):
-                store.wave_product_lock()
-        else:
-            lock = store.wave_product_lock()
-            assert lock == projected
-            assert lock["confirmedBy"] == by and lock["isProxy"] is True
-            assert lock["confirmationOrigin"] == "proxy"
-            assert lock["statement"] == "Synthetic displayed two-wave plan approval"
-            locked_vision = store._meta()["locked_vision_json"]
-    if available:
-        waves_projection = cli(workspace, "waves")["data"]
-        assert waves_projection["waveProductLock"] == lock
-        with open_plan_store(workspace) as store:
-            assert store._meta()["locked_vision_json"] == locked_vision
-
-
 def draft_intake():
     return draft_node(
         "INTAKE",
@@ -343,63 +320,6 @@ def mock_choice(catalog, origin=None):
         ),
         ["V1"],
     )
-
-
-def test_ordinary_reviewer_confirmation_records_exact_scope_without_native_credit(tmp_path):
-    """Simulated catalog and tester-as-user action; no discovery or human attestation."""
-    from codex_harness.core.intake import canonical_digest
-
-    statement = "Tester selects exactly these reviewers.\nKeep the complete statement.  "
-    with open_plan_store(tmp_path) as store:
-        store.import_spine(FIXTURE)
-        catalog = store.record_reviewer_catalog(mock_catalog(), store.spine().plan_revision())[
-            "catalog"
-        ]
-        node = mock_choice(catalog)
-        selected = store.record_reviewer_selection(node, store.spine().plan_revision())
-        preimage = selected["spineRevision"]
-        before_holds = selected["unmetRequirements"]
-        assert any("reviewer-confirmation-required" in hold for hold in before_holds)
-        result = store.confirm_reviewer_selection(
-            node["id"], preimage, approve=True, statement=statement, conditions=""
-        )
-        authority = result["selection"]["confirmation"]
-        records = store.connection.execute(
-            "SELECT id, payload_json FROM events WHERE kind='reviewer-selection-confirmed'"
-        ).fetchall()
-        assert len(records) == 1
-        event_id, payload = records[0]
-        record = json.loads(payload)
-        expected_scope = canonical_digest(
-            {
-                "node": node,
-                "authorSessions": {"implementationSessionIds": [], "reviewerSessionIds": {}},
-                "catalog": {"id": catalog["id"], "digest": catalog["digest"]},
-            }
-        )
-        assert record["scopeDigest"] == authority["authorizedScopeDigest"] == expected_scope
-        assert authority["eventId"] == event_id
-        assert authority["approvalId"] == record["recordId"]
-        assert authority["sourceRef"] == f"reviewer-confirmation:event:{event_id}"
-        assert record["preimageRevision"] == preimage
-        assert record["statement"] == authority["statement"] == statement
-        assert record["human_identity_verified"] is False
-        assert record["provenance"] == "caller-declared-user-action"
-        assert record["origin"] == authority["origin"] == "user"
-        assert result["spineRevision"] != preimage
-        assert result["approvalGranted"] is False
-        assert result["unmetRequirements"] == [
-            hold for hold in before_holds if "reviewer-confirmation-required" not in hold
-        ]
-        assert any("independence-unknown" in hold for hold in result["unmetRequirements"])
-        assert any("cross-provider" in hold for hold in result["unmetRequirements"])
-        assert store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
-        stored = store.spine().node(node["id"])
-        assert stored == {**node, "fields": {**node["fields"], "confirmation": authority}}
-        expected = store.outcome_waves()["reviewerSelection"]
-    with open_plan_store(tmp_path) as reopened:
-        assert reopened.outcome_waves()["reviewerSelection"] == expected
-        assert reopened.spine().node(node["id"])["fields"]["confirmation"] == authority
 
 
 def test_draft_map_reopen_stale_preimage_and_returned_copy(tmp_path):
@@ -608,6 +528,7 @@ def test_unresolved_intake_baseline_and_required_map_obligation_loss(tmp_path):
 def store(tmp_path):
     with open_plan_store(tmp_path, "initial") as result:
         result.import_spine(FIXTURE)
+        shutil.copytree(FIXTURE.parent / "template", tmp_path / "template")
         yield result
 
 
@@ -620,14 +541,14 @@ def _link_r6(store):
 def _to(store, phase):
     if store.phase() == "align" and "expansion" not in store.spine().node("V1")["fields"]:
         source_only_expansion(store)
-    if phase == "publish":
-        publication_evidence(store)
     while PHASES.index(store.phase()) < PHASES.index(phase):
         current = store.phase()
         if current in ("align", "vision-lock"):
-            source_only_confirmation(
-                store, current, statement="I confirm the current understanding"
-            )
+            source_only_confirmation(store, current, statement="Approve")
+        if current == "plan":
+            source_only_b(store)
+        if current == "roundtable" and phase == "publish":
+            publication_evidence(store)
         store.advance(PHASES[PHASES.index(current) + 1], by="planner")
 
 
@@ -717,7 +638,7 @@ def test_import_export_revision_and_reopen_without_commit(store, tmp_path):
         ("bogus", "plan-phase-invalid"),
         ("features", "plan-phase-order"),
         ("align", "plan-phase-order"),
-        ("expand", "plan-approval-required"),
+        ("expand", "plan-a-consent-required"),
     ],
 )
 def test_phase_order_and_align_refusals(store, target, code):
@@ -727,64 +648,18 @@ def test_phase_order_and_align_refusals(store, target, code):
 
 
 def test_inline_approval_refuses_and_native_confirmation_survives_unchanged_replanning(store):
+    source_only_expansion(store)
     _assert_code(
         "plan-confirmation-origin-unavailable",
         lambda: store.advance("expand", by="operator", statement="That is what I want"),
     )
-    source_only_confirmation(store, "align", statement="That is what I want")
+    source_only_confirmation(store, "align", statement="Approve")
     store.advance("expand", by="planner")
     assert store.phase() == "expand"
     store.advance("align", by="planner", statement="Revisit understanding")
     assert store.phase() == "align"
     store.advance("expand", by="planner")
     assert store.phase() == "expand"
-
-
-def test_demo_cross_gate_and_new_revision_quoted_words_cannot_approve(store):
-    source_only_expansion(store)
-    source_only_confirmation(store, "align", statement="Yes, that matches what I want.")
-    store.advance("expand", by="planner")
-    store.advance("vision-lock", by="planner")
-    _assert_code(
-        "plan-confirmation-origin-unavailable",
-        lambda: store.approve("vision-lock", by="user", statement="Yes, that matches what I want."),
-    )
-    assert not store.status()["approval"]["granted"]
-    source_only_confirmation(store, "vision-lock", statement="Fresh scoped approval.")
-    node = store.spine().node("V1")
-    node["text"] += " Revised at 09:22."
-    store.upsert_node(node)
-    _assert_code(
-        "plan-confirmation-origin-unavailable",
-        lambda: store.advance("features", by="user", statement="Fresh scoped approval."),
-    )
-    assert store.phase() == "vision-lock" and not store.status()["approval"]["granted"]
-
-
-def test_cached_legacy_lock_remains_readable_but_cannot_advance_or_publish(store):
-    with store._transaction():
-        legacy = store._approve("vision-lock", "user", "Original legacy words with conditions.")
-        store.connection.execute(
-            "UPDATE meta SET phase='features',vision_locked_revision=?", (store._revision(),)
-        )
-    before = dict(
-        store.connection.execute("SELECT * FROM approvals WHERE id=?", (legacy,)).fetchone()
-    )
-    status = store.status()
-    assert not status["approval"]["granted"]
-    assert status["pending_gate"] == "approval:vision-lock"
-    _assert_code(
-        "plan-confirmation-origin-unavailable", lambda: store.advance("requirements", by="planner")
-    )
-    _assert_code("plan-confirmation-origin-unavailable", store._check_publish)
-    assert (
-        dict(store.connection.execute("SELECT * FROM approvals WHERE id=?", (legacy,)).fetchone())
-        == before
-    )
-    source_only_confirmation(
-        store, "vision-lock", statement="Fresh native renewal of displayed scope."
-    )
-    store.advance("requirements", by="planner")
 
 
 def test_native_lock_survives_subordinate_and_verification_metadata_changes(store):
@@ -803,36 +678,6 @@ def test_native_lock_survives_subordinate_and_verification_metadata_changes(stor
     assert store.status()["vision_locked_revision"] == original_revision
     assert store.status()["approval"]["approval_id"] == original
     store.advance("requirements", by="planner")
-
-
-@pytest.mark.parametrize("gate,target", [("align", "expand"), ("vision-lock", "features")])
-def test_revision_bound_approvals(store, gate, target):
-    _to(store, gate)
-    _assert_code("plan-approval-required", lambda: store.advance(target, by="planner"))
-    source_only_confirmation(store, gate, statement="Confirmed")
-    before = store.spine().plan_revision()
-    node = store.spine().node("D3")
-    node["text"] += " Updated."
-    store.upsert_node(node)
-    assert store.spine().plan_revision() != before
-    _assert_code("plan-approval-stale", lambda: store.advance(target, by="planner"))
-    source_only_confirmation(store, gate, statement="Confirmed revised plan")
-    store.advance(target, by="planner")
-    if gate == "vision-lock":
-        assert store.status()["vision_locked_revision"] == store.spine().plan_revision()
-
-
-@pytest.mark.parametrize(
-    "gate,by,statement,code",
-    [
-        ("unknown", "operator", "yes", "plan-gate-invalid"),
-        ("align", "", "yes", "plan-input-invalid"),
-        ("align", "operator", " ", "plan-input-invalid"),
-    ],
-)
-def test_approval_input_refusals(store, gate, by, statement, code):
-    _assert_code(code, lambda: store.approve(gate, by=by, statement=statement))
-    assert store.connection.execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 0
 
 
 def test_requirements_require_test_coverage(store):
@@ -870,6 +715,7 @@ def test_plan_requires_beads_then_real_consumer_ownership_validation(store):
     _assert_code("plan-schema-invalid", lambda: store.advance("roundtable", by="planner"))
     node["fields"]["ownedFiles"] = ["tipsplit/cli.py"]
     store.upsert_node(node)
+    source_only_b(store)
     store.advance("roundtable", by="planner")
 
 
@@ -908,7 +754,7 @@ def test_saved_manifest_impact_preserves_protected_reason_and_existing_sets(tmp_
 
     producer = tmp_path / "producer"
     template = producer / "template"
-    shutil.copytree(FIXTURE.parent / "template", template)
+    shutil.copytree(FIXTURE.parent / "template", template, dirs_exist_ok=True)
     with open_plan_store(producer) as local:
         local.import_spine(FIXTURE)
         unrelated = local.spine().node("A")
@@ -1155,7 +1001,7 @@ def test_import_failure_rolls_back_entire_replacement(store, monkeypatch):
 
 
 def test_events_audit_every_command_and_are_append_only(store):
-    store.upsert_node(store.spine().node("D3"))
+    source_only_expansion(store)
     question = store.ask("Question?")
     store.answer(question, "Answer")
     question = store.ask("Other?")
@@ -1164,11 +1010,12 @@ def test_events_audit_every_command_and_are_append_only(store):
     store.confirm_assumption(confirmed, rationale="Test decision")
     rejected = store.add_assumption("Two")
     store.reject_assumption(rejected, rationale="Test decision")
-    source_only_confirmation(store, "align", statement="Agreed")
+    source_only_confirmation(store, "align", statement="Approve")
     store.advance("expand", by="planner")
     kinds = [row[0] for row in store.connection.execute("SELECT kind FROM events ORDER BY id")]
     assert kinds == [
         "opened",
+        "approval-v2-migrated",
         "spine-imported",
         "node-upserted",
         "clarification-asked",
@@ -1180,7 +1027,7 @@ def test_events_audit_every_command_and_are_append_only(store):
         "assumption-added",
         "assumption-rejected",
         "confirmation-requested",
-        "approved",
+        "approval-v2-recorded",
         "confirmation-responded",
         "phase-advanced",
     ]
@@ -1283,12 +1130,14 @@ def test_published_revision_conflict_and_republish_selection(store, tmp_path):
     node = store.spine().node("D3")
     node["text"] += " A new choice."
     store.upsert_node(node)
+    source_only_b(store)
     publication_evidence(store)
     second = store.publish(by="planner", export_dir=tmp_path / "exports")
     assert first != second
     path = tmp_path / "original.json"
     path.write_text(json.dumps(original), encoding="utf-8")
     store.import_spine(path)
+    source_only_b(store)
     assert store.publish(by="planner", export_dir=tmp_path / "exports") == first
     assert store.status()["published_revision"] == first
     assert (
@@ -1298,6 +1147,7 @@ def test_published_revision_conflict_and_republish_selection(store, tmp_path):
     original["name"] = "renamed"
     path.write_text(json.dumps(original), encoding="utf-8")
     store.import_spine(path)
+    source_only_b(store)
     _assert_code(
         "plan-revision-conflict",
         lambda: store.publish(by="planner", export_dir=tmp_path / "exports"),
@@ -1306,7 +1156,7 @@ def test_published_revision_conflict_and_republish_selection(store, tmp_path):
 
 def test_publish_binds_workspace_template_and_requires_current_publication(store, tmp_path):
     template = tmp_path / "template"
-    shutil.copytree(FIXTURE.parent / "template", template)
+    shutil.copytree(FIXTURE.parent / "template", template, dirs_exist_ok=True)
     _link_r6(store)
     _to(store, "publish")
     exports = tmp_path / "exports"
@@ -1335,6 +1185,7 @@ def test_publish_binds_workspace_template_and_requires_current_publication(store
     assert status["publication"]["up_to_date"] is False
     _assert_code("plan-publication-required", lambda: store.advance("execute", by="planner"))
     with open_plan_store(tmp_path) as reopened:
+        source_only_b(reopened)
         publication_evidence(reopened)
         second = reopened.publish(by="planner", export_dir=exports)
         assert second != first
@@ -1350,6 +1201,7 @@ def _closure_policy_fixture(store, *, adopted=True, with_finding=True):
 
     _link_r6(store)
     _to(store, "roundtable")
+    source_only_b(store, reviewers=[dict(name="closure-reviewer", provider="codex")])
     revision = store.manifest_revision()
     slots = [dict(name="closure-reviewer", provider="codex", required=True)]
     if adopted:
@@ -1579,6 +1431,23 @@ def test_existing_audit_from_wrong_revision_cannot_support_closure(store):
     assert list(store.connection.iterdump()) == before
 
 
+def uncertain_assessment(store, request, monkeypatch):
+    """Crash at the actual provider boundary after the canonical admission commits."""
+    from codex_harness.core import approvals, roundtable
+
+    class SourceControllerCrash(BaseException):
+        pass
+
+    def crash(*args, **kwargs):
+        raise SourceControllerCrash()
+
+    with monkeypatch.context() as boundary:
+        boundary.setattr(roundtable, "_run", crash)
+        with pytest.raises(SourceControllerCrash):
+            roundtable.assess_execution_findings(store, **dict(request, timeout=16))
+    return approvals.records(store, "execution-assessment-reserved")[0]
+
+
 def test_execution_uncertain_older_reservation_cannot_be_cleared_without_capture(
     tmp_path, monkeypatch
 ):
@@ -1588,7 +1457,7 @@ def test_execution_uncertain_older_reservation_cannot_be_cleared_without_capture
 
     store, request, _, _, _, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
     try:
-        older = store.register_execution_assessment(**dict(request, timeout=16))
+        older = uncertain_assessment(store, request, monkeypatch)
         current = roundtable.assess_execution_findings(store, **request)
         assert len(calls) == 3
         assert current["members"][0]["support"] == "unverified"
@@ -1611,7 +1480,7 @@ def test_execution_fabricated_consumption_cannot_release_unknown_overlap(tmp_pat
 
     store, request, _, _, _, calls, _ = canonical_af_fixture(tmp_path, monkeypatch)
     try:
-        older = store.register_execution_assessment(**dict(request, timeout=16))
+        older = uncertain_assessment(store, request, monkeypatch)
         current = roundtable.assess_execution_findings(store, **request)
         assert current["members"][0]["support"] == "unverified"
         # Negative corruption counterfactual, not a supported event-import API.

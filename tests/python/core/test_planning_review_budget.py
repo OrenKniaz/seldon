@@ -1,344 +1,352 @@
-"""Source-only review-start ceilings; no provider, host or human evidence."""
+"""Cumulative transactional usage replaces immutable registration/file originals."""
 
-import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from tests.python.core.test_roundtable import REVIEWERS, reviewer_stream
-from tests.python.core.test_roundtable import store as source_store
+from tests.python.core import test_semantic_wiring
+from tests.python.core.test_planner_chat_confirmations import (
+    approve_b,
+    prepare_combined_b,
+    review,
+)
 
-from codex_harness.core import plan_cli, roundtable
+from codex_harness.core import approvals, roundtable
+from codex_harness.core import planner_confirmations as confirmation
 from codex_harness.core import provider_call_budget as budget
-from codex_harness.core.plan_store import PlanStore
+from codex_harness.core.plan_store import open_plan_store
+
+semantic_plan = test_semantic_wiring.semantic_plan
 
 
-@pytest.fixture
-def store(tmp_path):
-    yield from source_store.__wrapped__(tmp_path)
+def test_refused_start_leaves_no_reservation_and_b_renewal_recovers_after_restart(
+    semantic_plan, monkeypatch
+):
+    """
+    Run23 regression: refusal stranded a round reservation and blocked amendment; V1 tested
+    only registered caps.
+    """
+    store, _ = semantic_plan
+    request, options = prepare_combined_b(store, cap=1)
+    reviewer = request["subject"]["reviewers"][0]
+    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: (0, "[]"))
+    before = list(store.connection.iterdump())
+    with pytest.raises(ValueError, match="plan-b-consent-required"):
+        review(store, reviewer)
+    assert list(store.connection.iterdump()) == before
+    approve_b(store, request)
+    review(store, reviewer)
+    spent = budget.planning_review_budget(store)
+    assert spent == dict(maxStarts=1, spentAdmissions=1)
+    before = list(store.connection.iterdump())
+    with pytest.raises(ValueError, match="cap-exhausted"):
+        review(store, reviewer)
+    assert list(store.connection.iterdump()) == before
+    fresh = confirmation.prepare_chat_confirmation(
+        store, "plan-execution", execution=options, review_max_starts=2
+    )
+    assert any(
+        d["field"] == "reviewAllowance" and d["before"] == 1 and d["after"] == 2
+        for d in fresh["diff"]
+    )
+    approve_b(store, fresh)
+    with open_plan_store(store.workspace) as reopened:
+        assert budget.planning_review_budget(reopened) == dict(maxStarts=2, spentAdmissions=1)
+        review(reopened, reviewer)
+        assert budget.usage(reopened, "review") == 2
+        with pytest.raises(ValueError, match="raise the round limit"):
+            review(reopened, reviewer)
+        assert budget.usage(reopened, "review") == 2
 
 
-def register(store, cap=10):
-    return budget.register_planning_review_budget(store, "P1-source-only", cap)
+def test_competing_real_review_consumers_get_one_final_slot(semantic_plan, monkeypatch):
+    """
+    Catch count/insert races through two real connections; serial renewal misses the final-
+    slot interleaving.
+    """
+    store, _ = semantic_plan
+    request, _ = prepare_combined_b(store, cap=1)
+    approve_b(store, request)
+    reviewer = request["subject"]["reviewers"][0]
+    launches = []
+    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: launches.append(1) or (0, "[]"))
+
+    def attempt(_):
+        with open_plan_store(store.workspace) as reopened:
+            try:
+                review(reopened, reviewer)
+                return True
+            except ValueError as error:
+                assert "cap-exhausted" in str(error)
+                return False
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sum(pool.map(attempt, range(2))) == 1
+    assert launches == [1] and budget.usage(store, "review") == 1
+    assert store.connection.execute("SELECT count(*) FROM review_attempts").fetchone()[0] == 1
 
 
-def claimed(store):
-    return budget.planning_review_budget(store)["spentAdmissions"]
+def test_launch_admission_rollback_preserves_the_final_slot(semantic_plan, monkeypatch):
+    """
+    Catch usage committed before a failed attempt insert; concurrency tests never inject
+    SQLite write failure.
+    """
+    store, _ = semantic_plan
+    request, _ = prepare_combined_b(store, cap=1)
+    approve_b(store, request)
+    reviewer = request["subject"]["reviewers"][0]
+    # A real SQLite failure after usage insertion, before an actual launch.
+    roundtable._table(store)
+    store.connection.execute(
+        "CREATE TABLE review_attempts (id TEXT PRIMARY KEY, plan_revision TEXT, "
+        "reviewer TEXT, provider TEXT)"
+    )
+    store.connection.execute(
+        "CREATE TRIGGER reject_test_attempt BEFORE INSERT ON review_attempts "
+        "BEGIN SELECT RAISE(ABORT, 'source-only write failure'); END"
+    )
+    monkeypatch.setattr(
+        roundtable, "_run", lambda *a, **k: pytest.fail("Rollback must precede launch")
+    )
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        review(store, reviewer)
+    assert budget.usage(store, "review") == 0
+    assert store.connection.execute("SELECT count(*) FROM review_attempts").fetchone()[0] == 0
+    assert approvals.require_approval(store, "B")
 
 
-def test_public_prepare_is_no_launch_and_immutable(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: pytest.fail("provider launch"))
-    argv = [
-        "--workspace",
-        str(tmp_path),
-        "review-budget",
-        "--machine-json",
-        "--campaign",
-        "P1-source-only",
-        "--max-starts",
-        "10",
-    ]
-    assert plan_cli.main(argv) == 0
-    data = json.loads(capsys.readouterr().out)["data"]
-    assert data["campaign"] == "P1-source-only" and data["spentAdmissions"] == 0
-    assert plan_cli.main(argv) == 0
-    capsys.readouterr()
-    assert plan_cli.main(argv[:-1] + ["9"]) == 2
-    capsys.readouterr()
-    with PlanStore(tmp_path) as current:
-        assert claimed(current) == 0
-        with pytest.raises(ValueError, match="planning-review-budget"):
-            budget.register_planning_review_budget(current, "replacement", 10)
-
-
-def test_ten_starts_sticky_across_reopen_revision_and_reviewer(tmp_path):
-    with PlanStore(tmp_path) as current:
-        register(current)
-        for index in range(5):
-            assert budget.claim_planning_review_start(current, REVIEWERS[0]) == index + 1
-        current.upsert_node(
-            dict(
-                id="V1", kind="vision", title="Changed", text="New revision", fields={}, parents=[]
-            )
+def test_auto_allowance_is_part_of_b_and_large_total_requires_explanation(semantic_plan):
+    """
+    Catch separate catalog/budget prompts and silent large ceilings; renewal tests supply
+    explicit small totals.
+    """
+    store, _ = semantic_plan
+    _, options = prepare_combined_b(store)
+    request = confirmation.prepare_chat_confirmation(store, "plan-execution", execution=options)
+    assert request["subject"]["reviewAllowance"] == 5
+    assert str(5) in request["card"]
+    with pytest.raises(ValueError, match="explanation"):
+        confirmation.prepare_chat_confirmation(
+            store, "plan-execution", execution=options, review_max_starts=11
         )
-    with PlanStore(tmp_path) as current:
-        for index in range(5, 10):
-            assert budget.claim_planning_review_start(current, REVIEWERS[1]) == index + 1
-        with pytest.raises(ValueError, match="planning-review-start-cap-exhausted"):
-            budget.claim_planning_review_start(current, REVIEWERS[0])
-        assert claimed(current) == 10
+    request = confirmation.prepare_chat_confirmation(
+        store,
+        "plan-execution",
+        execution=options,
+        review_max_starts=11,
+        allowance_reason="Three required review stages and repair reserve",
+    )
+    approve_b(store, request)
+    assert budget.planning_review_budget(store)["maxStarts"] == 11
+
+
+def legacy_delivery(tmp_path, *, complete_card=True, damaged=False, chat_fault=None):
+    """Retained V1 record fixture, never a production manual repair or launch.
+
+    Copy the unchanged V1 table shapes from a disposable seed. The final fixture
+    has no V2 marker/ledger, so opening it exercises actual automatic conversion.
+    """
+    import hashlib
+    import json
+    import sqlite3
+
+    from tests.python.core.test_planner_confirmations import store as fixture_store
+
+    seed_root = tmp_path / "seed"
+    seed_root.mkdir()
+    fixture = fixture_store.__wrapped__(seed_root)
+    seed = next(fixture)
+    data = seed._data()
+    rows = {
+        table: [tuple(r) for r in seed.connection.execute(f"SELECT * FROM {table}")]
+        for table in ("nodes", "meta")
+    }
+    schemas = [
+        seed.connection.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,)).fetchone()[
+            0
+        ]
+        for table in ("nodes", "meta", "events", "approvals")
+    ]
+    revision = seed._revision()
+    fixture.close()
+    root = tmp_path / "legacy"
+    internal = root / ".codex-harness"
+    internal.mkdir(parents=True)
+    connection = sqlite3.connect(internal / "plan.sqlite3")
+    for sql in schemas:
+        connection.execute(sql)
+    for table, values in rows.items():
+        connection.executemany(
+            f"INSERT INTO {table} VALUES ({','.join('?' for _ in values[0])})", values
+        )
+    card = (
+        approvals.EFFECTS["A"]
+        + "\nControls: retained V1 preimage\n"
+        + json.dumps(data, ensure_ascii=False)
+    )
+    if not complete_card:
+        card = "An excerpt without the complete scope and lock effect"
+    digest = hashlib.sha256(card.encode()).hexdigest()
+    request = dict(
+        request_id="retained-a",
+        gate="align+vision-lock",
+        phase="align",
+        plan_revision=revision,
+        workspace=str(root),
+        card=card,
+        card_digest=digest,
+        channel=confirmation.CHAT,
+    )
+    response = dict(
+        request_id="retained-a",
+        state="approved",
+        action="accept",
+        card_digest=digest,
+        provenance=confirmation.CHAT,
+        content=dict(approve=True, statement="Approve", conditions=""),
+        approval_ids={"align": "old-align", "vision-lock": "old-lock"},
+    )
+    _, _, response["chat"] = confirmation._chat_evidence(
+        request["request_id"],
+        revision,
+        "Approve",
+        hashlib.sha256(b"Approve").hexdigest(),
+        "source-only retained actor",
+    )
+    if chat_fault == "actor":
+        response["chat"].pop("actor_label")
+    elif chat_fault == "quote":
+        response["chat"]["quoted_message"] = "No"
+    for gate, identity in response["approval_ids"].items():
+        connection.execute(
+            "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, ?)",
+            (identity, gate, revision, confirmation.CHAT, "Approve", "retained"),
+        )
+    original = dict(
+        schema="seldon/planning-review-budget-v1",
+        workspace=str(root),
+        campaign="retained",
+        maxStarts=2,
+    )
+    claim = dict(
+        registrationDigest=hashlib.sha256(
+            json.dumps(original, sort_keys=True).encode()
+        ).hexdigest(),
+        ordinal=1,
+        reviewer=dict(name="old", provider="codex"),
+        pid=123,
+    )
+    for event, payload in [
+        (confirmation.REQUEST, request),
+        (confirmation.RESPONSE, response),
+        ("planning-review-budget-registered", original),
+        ("planning-review-start-claimed", claim),
+    ]:
+        connection.execute(
+            "INSERT INTO events (kind, at, payload_json) VALUES (?, 'retained', ?)",
+            (event, json.dumps(payload)),
+        )
+    connection.commit()
+    connection.close()
+    directory = internal / "planning-review-budget"
+    (directory / "claims").mkdir(parents=True)
+    (directory / "registration.json").write_text(json.dumps(original), encoding="utf-8")
+    (directory / "claims/00000001.json").write_text(
+        json.dumps({} if damaged else claim), encoding="utf-8"
+    )
+    return root
 
 
 @pytest.mark.parametrize(
-    "damage",
-    [
-        "registration-missing",
-        "registration-bad",
-        "claim-missing",
-        "claim-bad",
-        "registration-event-missing",
-    ],
+    "complete,chat_fault,converted",
+    [(False, None, False), (True, None, True), (True, "actor", False), (True, "quote", False)],
 )
-def test_configured_missing_or_corrupt_original_cannot_reset(tmp_path, damage):
-    with PlanStore(tmp_path) as current:
-        root = current.path.parent / "planning-review-budget"
-        if damage == "registration-event-missing":
-            root.mkdir()
-            (root / "claims").mkdir()
-            (root / "registration.json").write_text("{}", encoding="utf-8")
-        else:
-            register(current)
-            budget.claim_planning_review_start(current, REVIEWERS[0])
-            original = root / (
-                "registration.json" if damage.startswith("registration") else "claims/00000001.json"
-            )
-            if damage.endswith("missing"):
-                original.unlink()
-            else:
-                original.write_text('{"changed": true}', encoding="utf-8")
-        with pytest.raises((ValueError, OSError), match="planning-review-budget"):
-            budget.claim_planning_review_start(current, REVIEWERS[0])
-        with pytest.raises((ValueError, OSError), match="planning-review-budget"):
-            register(current)
-
-
-def test_concurrent_original_claims_never_exceed_ten(tmp_path):
-    with PlanStore(tmp_path) as current:
-        register(current)
-
-    def attempt(_):
-        with PlanStore(tmp_path) as current:
-            try:
-                return budget.claim_planning_review_start(current, REVIEWERS[0])
-            except ValueError as error:
-                assert "planning-review-start-cap-exhausted" in str(error)
-                return None
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(attempt, range(14)))
-    assert sorted(value for value in results if value is not None) == list(range(1, 11))
-    with PlanStore(tmp_path) as current:
-        assert claimed(current) == 10
-
-
-def test_ordinary_overflow_reshards_stop_before_eleventh_child(store, monkeypatch):
-    register(store)
-    calls = []
-    shard = dict(
-        packet="source-only",
-        hash="fixed",
-        nodeIds=["R1"],
-        features=[],
-        truncatedNodes=[],
-        contextNodeIds=[],
-        estimatedTokens=1,
-    )
-
-    def shards(*args, token_budget=None, **kwargs):
-        return [dict(shard)] * (1 if token_budget is None else 7)
-
-    def child(launch, cwd, timeout):
-        calls.append(launch)
-        if len(calls) in (1, 9):
-            raise ValueError("maximum context tokens exceeded")
-        return 0, reviewer_stream("codex", [])
-
-    monkeypatch.setattr(roundtable, "packet_shards", shards)
-    monkeypatch.setattr(roundtable, "_run", child)
-    reviewers = [dict(REVIEWERS[0], name="first"), dict(REVIEWERS[0], name="second")]
-    with pytest.raises(ValueError, match="planning-review-start-cap-exhausted"):
-        roundtable.run_roundtable(
-            store, reviewers=reviewers, executable_for={"codex": "source-only-codex"}, max_rounds=1
-        )
-    assert len(calls) == claimed(store) == 10
-
-
-def test_ordinary_repeat_without_flags_uses_original(store, monkeypatch):
-    register(store, 1)
-    calls = []
-    monkeypatch.setattr(
-        roundtable, "_run", lambda *a, **k: (calls.append(a) or (0, reviewer_stream("codex", [])))
-    )
-    for index in range(2):
-        if index == 0:
-            roundtable.run_roundtable(
-                store, reviewers=[REVIEWERS[0]], executable_for={"codex": "source-only-codex"}
-            )
-        else:
-            with pytest.raises(ValueError, match="planning-review-start-cap-exhausted"):
-                roundtable.run_roundtable(
-                    store,
-                    reviewers=[dict(REVIEWERS[0], name="renamed")],
-                    executable_for={"codex": "source-only-codex"},
+def test_conversion_twice_preserves_spend_and_only_exact_displayed_consent(
+    tmp_path, complete, chat_fault, converted
+):
+    """
+    Catch duplicate import or excerpt promotion on restart; renewal begins with an
+    already-V2 store.
+    """
+    root = legacy_delivery(tmp_path, complete_card=complete, chat_fault=chat_fault)
+    for _ in range(2):
+        with open_plan_store(root) as store:
+            assert budget.usage(store, "review") == 1
+            assert len(approvals.records(store, "approval-v2-migrated")) == 1
+            assert len(approvals.records(store, approvals.EVENT)) == int(converted)
+            if converted:
+                saved = approvals.require_approval(store, "A")
+                assert (
+                    saved["words"] == "Approve" and saved["actor"] == "source-only retained actor"
                 )
-    assert len(calls) == claimed(store) == 1
+            else:
+                with pytest.raises(ValueError):
+                    approvals.require_approval(store, "A")
+            with pytest.raises(ValueError):
+                approvals.require_approval(store, "B")
+            assert store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 2
 
 
-def test_failed_child_claim_not_refunded(store, monkeypatch):
-    register(store, 1)
-    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: (_ for _ in ()).throw(OSError("lost")))
-    roundtable.run_roundtable(
-        store, reviewers=[REVIEWERS[0]], executable_for={"codex": "source-only-codex"}
-    )
-    assert claimed(store) == 1
-    with pytest.raises(ValueError, match="planning-review-start-cap-exhausted"):
-        budget.claim_planning_review_start(store, REVIEWERS[0])
+def test_conversion_missing_or_inconsistent_usage_stops_without_import(tmp_path):
+    """
+    Catch malformed historical claims silently resetting spend; exact-match conversion uses
+    intact originals.
+    """
+    import sqlite3
+
+    root = legacy_delivery(tmp_path, damaged=True)
+    with pytest.raises(ValueError, match="invalid-original"):
+        open_plan_store(root)
+    with sqlite3.connect(root / ".codex-harness/plan.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM events WHERE kind='approval-v2-migrated'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute("SELECT 1 FROM sqlite_master WHERE name='usage_ledger'").fetchone()
+            is None
+        )
 
 
-def test_unconfigured_legacy_and_injected_runner_are_unchanged(store):
-    assert budget.claim_planning_review_start(store, REVIEWERS[0]) is None
-    register(store)
-    roundtable.run_roundtable(
-        store, reviewers=[REVIEWERS[0]], runner=lambda *a: (0, reviewer_stream("codex", []))
-    )
-    assert claimed(store) == 0
+def test_auto_sizing_explains_scheduled_total_above_ten_without_granting_it(semantic_plan):
+    """Catch silent clamping; explicit-total tests never exercise scheduled sizing."""
+    store, _ = semantic_plan
+    _, options = prepare_combined_b(store)
+    node = store.spine().node("CHOICE")
+    original = node["fields"]["reviewers"][0]
+    node["fields"]["reviewers"] = [
+        {**original, "name": name} for name in ("first", "second", "third")
+    ]
+    store.record_reviewer_selection(node, store._revision())
+    options["expected_revision"] = store.compile_template(store.workspace / "template")[
+        "planRevision"
+    ]
+    question = confirmation.prepare_chat_confirmation(store, "plan-execution", execution=options)
+    assert question["subject"]["reviewAllowance"] == 15
+    assert "scheduled" in question["subject"]["allowanceReason"]
+    assert budget.usage(store, "review") == 0 and not approvals.current(store, "B")
+    with pytest.raises(ValueError):
+        store.advance("roundtable", by="source-test")
+    approve_b(store, question)
+    assert approvals.require_approval(store, "B")["subject"]["reviewAllowance"] == 15
 
 
-@pytest.mark.parametrize("exhausted", [False, True])
-def test_canonical_real_child_uses_same_ceiling(store, monkeypatch, exhausted):
-    register(store, 1)
-    if exhausted:
-        budget.claim_planning_review_start(store, REVIEWERS[0])
-    context = {"reviewerExecutable": {"path": "source-only-codex"}}
-    header = {
-        "context": context,
-        "packet": "source-only",
-        "launch": {},
-        "registrationId": "source-only-registration",
-    }
-    monkeypatch.setattr(store, "register_execution_assessment", lambda **k: header)
-    monkeypatch.setattr(store, "execution_assessment_state", lambda: {"held": True})
-    monkeypatch.setattr(store, "commit_execution_assessment", lambda *a: {"sourceOnly": True})
-    monkeypatch.setattr(roundtable, "_execution_context", lambda *a: context)
-    monkeypatch.setattr(roundtable, "_execution_events", lambda *a: [])
-    monkeypatch.setattr(roundtable, "_execution_capture", lambda *a: None)
-    from codex_harness.core import acceptance_recovery
-
-    monkeypatch.setattr(acceptance_recovery, "_launch_identity", lambda *a: {})
-    calls = []
-    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: (calls.append(a) or (0, b"", b"")))
-    result = roundtable.assess_execution_findings(store, reviewer=REVIEWERS[0], timeout=1)
-    assert claimed(store) == 1 and len(calls) == (0 if exhausted else 1)
-    if exhausted:
-        assert result == {"held": True}
-        error = store.connection.execute(
-            "SELECT payload_json FROM events WHERE kind='execution-assessment-observation-error'"
-        ).fetchone()
-        assert "planning-review-start-cap-exhausted" in error[0]
-    else:
-        assert result == {"sourceOnly": True}
-
-
-def test_public_roundtable_omitted_flags_still_capped(store, monkeypatch, capsys):
-    base = ["--workspace", str(store.workspace)]
+def test_missing_converted_ledger_never_restarts_at_zero(semantic_plan, monkeypatch):
+    """Catch recreated lost usage; damaged V1 files have no V2 conversion marker."""
+    store, _ = semantic_plan
+    request, _ = prepare_combined_b(store)
+    approve_b(store, request)
+    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: (0, "[]"))
+    review(store, request["subject"]["reviewers"][0])
+    assert budget.usage(store, "review") == 1
+    # Unsupported corruption counterfactual in this temporary test database.
+    store.connection.execute("DROP TABLE usage_ledger")
+    with pytest.raises(ValueError, match="usage-ledger-missing-after-conversion"):
+        open_plan_store(store.workspace)
     assert (
-        plan_cli.main(
-            base
-            + [
-                "review-budget",
-                "--campaign",
-                "P1-source-only",
-                "--max-starts",
-                "1",
-                "--machine-json",
-            ]
-        )
-        == 0
+        store.connection.execute("SELECT 1 FROM sqlite_master WHERE name='usage_ledger'").fetchone()
+        is None
     )
-    capsys.readouterr()
-    calls = []
-    monkeypatch.setattr(
-        roundtable, "_run", lambda *a, **k: (calls.append(a) or (0, reviewer_stream("codex", [])))
-    )
-    monkeypatch.setattr(roundtable, "_executable", lambda *a: "source-only-codex")
-    for index in range(2):
-        reviewer = dict(REVIEWERS[0], name=f"public-{index}")
-        result = plan_cli.main(
-            base
-            + [
-                "roundtable",
-                "--reviewer",
-                json.dumps(reviewer),
-                "--max-rounds",
-                "1",
-                "--machine-json",
-            ]
-        )
-        output = json.loads(capsys.readouterr().out)
-        assert result == (0 if index == 0 else 2)
-        if index:
-            assert "planning-review-start-cap-exhausted" in output["text"]
-    assert len(calls) == claimed(store) == 1
-
-
-def test_configured_missing_original_holds_before_ordinary_child(store, monkeypatch):
-    register(store)
-    (store.path.parent / "planning-review-budget" / "registration.json").unlink()
-    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: pytest.fail("provider launch"))
-    with pytest.raises(ValueError, match="planning-review-budget-invalid-original"):
-        roundtable.run_roundtable(
-            store, reviewers=[REVIEWERS[0]], executable_for={"codex": "source-only-codex"}
-        )
-
-
-def test_existing_support_refusal_precedes_budget_admission(store, monkeypatch):
-    register(store)
-    monkeypatch.setattr(roundtable, "_run", lambda *a, **k: pytest.fail("provider launch"))
-
-    def refused():
-        raise ValueError("source-only support hold")
-
-    with pytest.raises(ValueError, match="source-only support hold"):
-        roundtable._review_shard(
-            store,
-            {"roundId": "source-only"},
-            REVIEWERS[0],
-            roundtable.packet_shards(store, "codex")[0],
-            executable="source-only-codex",
-            runner=None,
-            timeout=1,
-            before_launch=refused,
-        )
-    assert claimed(store) == 0
-
-
-@pytest.mark.parametrize("exhausted", [False, True])
-def test_public_acceptance_reviewer_counts_same_project_budget(tmp_path, monkeypatch, exhausted):
-    import sys
-
-    from tests.python.core.test_acceptance_recovery import (
-        REVIEWERS as source_reviewers,
-    )
-    from tests.python.core.test_acceptance_recovery import (
-        candidate,
-        project,
-        protocol,
-    )
-
-    from codex_harness.core import acceptance
-
-    fixture = project.__wrapped__(tmp_path)
-    current, repo = next(fixture)
-    try:
-        candidate(current, repo)
-        register(current, 2)
-        if exhausted:
-            budget.claim_planning_review_start(current, REVIEWERS[0])
-            budget.claim_planning_review_start(current, REVIEWERS[1])
-        calls = []
-        monkeypatch.setattr(roundtable, "_executable", lambda *a: sys.executable)
-
-        def child(*args, **kwargs):
-            provider = source_reviewers[len(calls)]["provider"]
-            calls.append(args)
-            return protocol(provider, text="[]")
-
-        monkeypatch.setattr(roundtable, "_run", child)
-        if exhausted:
-            with pytest.raises(ValueError, match="planning-review-start-cap-exhausted"):
-                acceptance.acceptance_review(current, repo, reviewers=source_reviewers)
-        else:
-            acceptance.acceptance_review(current, repo, reviewers=source_reviewers)
-        assert len(calls) == (0 if exhausted else 2)
-        assert claimed(current) == 2
-    finally:
-        fixture.close()

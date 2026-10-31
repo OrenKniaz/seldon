@@ -3,8 +3,12 @@
 import json
 
 import pytest
-from tests.python.core.planning_support import source_only_confirmation
-from tests.python.core.test_planner_replay_gaps import REVIEWERS, audit
+from tests.python.core.planning_support import (
+    source_controller_roundtable,
+    source_only_b,
+    source_only_confirmation,
+)
+from tests.python.core.test_planner_replay_gaps import REVIEWERS, audit, confirmed_vision
 from tests.python.core.test_planner_replay_gaps import project as project_fixture
 
 from codex_harness.core import roundtable
@@ -13,14 +17,19 @@ from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
 
 @pytest.fixture(name="project")
 def admission_project(tmp_path, monkeypatch):
-    yield from project_fixture.__wrapped__(tmp_path, monkeypatch)
+    for store in project_fixture.__wrapped__(tmp_path, monkeypatch):
+        confirmed_vision(store)
+        source_only_b(store, reviewers=REVIEWERS)
+        yield store
 
 
 def controller_review(store, monkeypatch, output="[]"):
     # Exercise the controller-owned launch path; this is not actual-provider proof.
-    monkeypatch.setattr(roundtable, "_run", lambda *args: (0, output, ""))
-    return roundtable.run_roundtable(
-        store, reviewers=REVIEWERS, executable_for=lambda provider: provider
+    return source_controller_roundtable(
+        store,
+        reviewers=REVIEWERS,
+        process_stub=lambda *args: (0, output, ""),
+        executable_for=lambda provider: provider,
     )
 
 
@@ -28,7 +37,7 @@ def enter_publish(store):
     while store.phase() != "publish":
         current = store.phase()
         if current in ("align", "vision-lock"):
-            source_only_confirmation(store, current, statement="Approve displayed fixture")
+            source_only_confirmation(store, current, statement="Approve")
         store.advance(PHASES[PHASES.index(current) + 1], by="source-test-planner")
 
 
@@ -82,24 +91,26 @@ def test_already_publish_stale_vision_refused_then_renewed(project, monkeypatch,
     vision["text"] += " clarified scope"
     project.upsert_node(vision)
     audit(project)
-    controller_review(project, monkeypatch)
     if surface == "store":
-        with pytest.raises(PlanStoreError, match="vision-lock needs renewed approval"):
+        with pytest.raises(PlanStoreError, match="plan-a-consent-required"):
             project.publish(by="source-test", export_dir=project.workspace / "plan")
     elif surface == "cli":
         from tests.python.core.test_plan_cli import cli
 
-        assert "plan-approval-stale" in cli(project.workspace, "publish", code=2)
+        assert "plan-a-consent-required" in cli(project.workspace, "publish", code=2)
     else:
         from codex_harness.core.mcp_planner import PlannerServer
 
         server = PlannerServer(project.workspace)
         try:
             reply = server.call_tool("harness_publish", {})
-            assert reply["isError"] and "plan-approval-stale" in str(reply)
+            assert reply["isError"] and "plan-a-consent-required" in str(reply)
         finally:
             server.close()
-    source_only_confirmation(project, "vision-lock", statement="Approve clarified scope")
+    source_only_confirmation(project, "vision-lock", statement="Approve")
+    source_only_b(project, reviewers=REVIEWERS)
+    audit(project)
+    controller_review(project, monkeypatch)
     project.publish(by="source-test", export_dir=project.workspace / "plan")
 
 
@@ -127,7 +138,7 @@ def test_open_blocker_refused_at_enter_and_final_publish_then_disposition(
         while project.phase() != "roundtable":
             current = project.phase()
             if current in ("align", "vision-lock"):
-                source_only_confirmation(project, current, statement="Approve fixture")
+                source_only_confirmation(project, current, statement="Approve")
             project.advance(PHASES[PHASES.index(current) + 1], by="source-test")
     with pytest.raises(PlanStoreError, match="open.*finding|finding.*open"):
         if boundary == "enter":

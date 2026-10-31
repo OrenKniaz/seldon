@@ -12,77 +12,59 @@ TEACHING = (
 # Codes observed in runs 15–23 and UX journeys, grouped by their owning rule.
 RULES = [
     (
-        (
-            "plan-b-consent-required combined-consent-required "
-            "combined-consent-requires-exact-chat-response "
-            "combined-execution-and-review-budget-required "
-            "planning-review-budget-consent-required planning-reviewer-consent-required "
-            "reviewer-confirmation-required native-execution-confirmation-required "
-            "worker-execution-native-origin-required"
-        ),
+        "approval-changes-requested",
+        "Your response requests changes or qualifies the displayed approval.",
+        "Qualified or unclear words cannot approve the complete A or B subject.",
+        "ask the user to clarify the changes, then show a fresh complete question "
+        "and wait for an unqualified Approve.",
+    ),
+    (
+        "plan-a-consent-required plan-b-consent-required",
         "The requested work lacks current consent.",
-        "Consent must cover the exact candidate, reviewers and limits.",
-        (
-            "ask the user to answer Seldon's current consent question exactly as shown "
-            "(Needs your go-ahead (B) when applicable)."
-        ),
-    ),
-    (
-        "planning-review-budget-immutable-scope",
-        "The registered review budget cannot be edited by this request.",
-        "Only a fresh, bound B approval can raise the campaign cap; spent starts remain counted.",
-        "ask the user to decide on a higher campaign total through Seldon's fresh B question.",
+        "Consent must match the complete current A or B subject, candidate and limits.",
+        "ask the user to decide on the complete current A or B question and its field diff.",
     ),
     (
         (
-            "planning-review-start-cap-exhausted provider-call-cap-exhausted "
-            "roundtable-total-budget-exhausted execution-shared-review-budget-exhausted"
+            "roundtable-total-budget-exhausted roundtable-budget-exhausted "
+            "execution-shared-review-budget-exhausted"
         ),
-        "The provider start allowance is exhausted.",
-        "Spent admissions count against the original ceiling, including failed starts.",
-        "ask the user to stop this campaign because its allowance is exhausted.",
+        "The requested review limits are exhausted.",
+        "Spent and uncertain starts remain counted; preparation and refusal reserve nothing.",
+        "ask the user to decide on higher cumulative limits through a fresh B question.",
     ),
     (
         (
-            "planning-review-budget-invalid-original "
-            "provider-call-claim-original-invalid planning-review-budget-invalid-scope "
-            "worker-execution-limits-invalid worker-job-call-cap-required"
+            "usage-migration-missing-review-claims usage-migration-inconsistent-review-claims "
+            "usage-migration-worker-original-invalid usage-migration-worker-claims-inconsistent "
+            "usage-migration-worker-claim-invalid usage-migration-admission-original-invalid "
+            "usage-ledger-missing-after-conversion planning-review-budget-invalid-original "
+            "worker-execution-limits-invalid "
+            "worker-job-call-cap-required planning-review-policy-invalid"
         ),
-        "The requested limits or original budget records are invalid.",
-        "Execution requires valid limits and intact original admission records.",
+        "The requested limits or retained usage originals are invalid.",
+        "Execution requires valid B limits and intact cumulative admission records.",
         None,
     ),
     (
         (
-            "plan-approval-required plan-approval-stale plan-confirmation-gate-mismatch "
-            "plan-confirmation-response-invalid plan-gate-invalid "
-            "plan-confirmation-origin-unavailable confirmation-request-superseded"
+            "plan-confirmation-gate-mismatch plan-confirmation-response-invalid "
+            "plan-confirmation-origin-unavailable plan-confirmation-request-unknown "
+            "plan-confirmation-channel-mismatch plan-confirmation-revision-mismatch "
+            "plan-confirmation-already-consumed"
         ),
-        "The approval is missing or does not match the current gate.",
-        "Only a valid response for the current gate and revision grants approval.",
-        None,
-    ),
-    (
-        (
-            "combined-inputs-stale combined-reviewer-scope-stale "
-            "plan-reviewer-confirmation-scope-stale "
-            "plan-reviewer-confirmation-target-stale worker-execution-candidate-stale"
-        ),
-        "The approved inputs have changed.",
-        "Consent and evidence bind to exact inputs; earlier approval cannot cover edits.",
+        "The response cannot approve the current question.",
+        "Only an affirmative response matching the complete current subject grants consent.",
         None,
     ),
     (
         (
             "plan-catalog-unavailable reviewer-catalog-stale "
             "reviewer-catalog-producer-unavailable reviewer-catalog-refresh-required "
-            "reviewer-catalog-hash-mismatch reviewer-effort-invalid "
-            "plan-reviewer-confirmation-record-invalid "
-            "plan-reviewer-confirmation-target-invalid "
-            "plan-reviewer-confirmation-already-recorded"
+            "reviewer-catalog-hash-mismatch reviewer-effort-invalid"
         ),
         "The reviewer choice cannot be used as submitted.",
-        "Reviewer choices must match the offered catalog and recorded confirmation.",
+        "Draft choices must match the offered catalog; actual reviewer tuples still require B.",
         None,
     ),
     (
@@ -108,7 +90,7 @@ RULES = [
             "acceptance-run-required acceptance-review-required "
             "acceptance-attempt-unknown acceptance-review-interrupted "
             "worker-execution-canonical-prerequisite "
-            "worker-execution-frozen-semantic-candidate-required"
+            "worker-execution-frozen-candidate-required"
         ),
         "Required planning, review or execution evidence is missing or held.",
         "Only current candidate-bound evidence satisfies the owning gate.",
@@ -219,6 +201,7 @@ def refusal_hold(value):
                 "decline",
                 "cancel",
                 "conditional",
+                "changes-requested",
             )
             for key in ("state", "status")
         )

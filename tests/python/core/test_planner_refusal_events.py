@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 import pytest
+from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.test_planner_refusals import canonical_rows
 
 from codex_harness.core.mcp_planner import PlannerServer
@@ -45,6 +46,7 @@ def test_public_refusal_occurrences_persist_once_and_status_counts_survive_reope
     server = PlannerServer(tmp_path)
     try:
         assert not wire(server, "harness_plan_start", idea="Count words", name="Counter")["isError"]
+        source_only_expansion(server.store)
         assert not wire(server, "harness_prepare_chat_confirmation", gate="align")["isError"]
         assert events(server) == []
         before, revision = canonical_rows(server.store), server.store._revision()
@@ -58,7 +60,7 @@ def test_public_refusal_occurrences_persist_once_and_status_counts_survive_reope
         for at, payload in events(server):
             assert datetime.fromisoformat(at).utcoffset().total_seconds() == 0
             assert payload == {
-                "code": "plan-approval-required",
+                "code": "plan-a-consent-required",
                 "phase": "align",
                 "tool": "harness_advance",
                 "plan_revision": revision,
@@ -68,7 +70,7 @@ def test_public_refusal_occurrences_persist_once_and_status_counts_survive_reope
         for _ in range(2):
             status = wire(server, "harness_plan_status")
             assert not status["isError"]
-            assert status["structuredContent"]["refusals_by_code"] == {"plan-approval-required": 2}
+            assert status["structuredContent"]["refusals_by_code"] == {"plan-a-consent-required": 2}
         (tmp_path / "other").mkdir()
         other = PlannerServer(tmp_path / "other")
         try:
@@ -152,6 +154,7 @@ def test_native_confirmation_refusal_and_expiry_each_record_one_event(
             scope_out="Network",
             assumptions=[],
         )
+        source_only_expansion(server.store)
         offered = server.handle_line(
             json.dumps(
                 {

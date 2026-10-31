@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core import test_planner_replay_gaps
-from tests.python.core.planning_support import source_only_vision_lock
+from tests.python.core.planning_support import source_only_b, source_only_vision_lock
 from tests.python.core.test_plan_cli import cli
 from tests.python.core.test_planner_replay_gaps import review
 
@@ -23,7 +23,7 @@ def check(store, name):
 
 
 def lock(store):
-    source_only_vision_lock(store, statement="Test fixture vision")
+    source_only_vision_lock(store, statement="Approve")
 
 
 def scenarios(store):
@@ -66,6 +66,7 @@ def test_audit_failure_exit(project, machine):
 
 def test_publish_entry_uses_publication_gate(project):
     test_planner_replay_gaps.confirmed_vision(project)
+    source_only_b(project, reviewers=test_planner_replay_gaps.REVIEWERS)
     project.connection.execute("UPDATE meta SET phase='roundtable'")
     result = cli(project.workspace, "advance", "--to", "publish", code=2, machine=True)
     assert "plan-publication-evidence-required" in result["text"]

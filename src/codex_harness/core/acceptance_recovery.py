@@ -343,6 +343,19 @@ class ReviewAttempt:
     ):
         from codex_harness.core.acceptance import current_run
 
+        if not mocked:
+            from codex_harness.core import approvals
+            from codex_harness.core import provider_call_budget as budget
+
+            with store._transaction():
+                for reviewer in selected:
+                    record = approvals.require_approval(
+                        store, "B", dict(reviewer=reviewer, reviewLimits={"timeout": 900})
+                    )
+                    if budget.usage(store, "review") >= record["subject"]["reviewAllowance"]:
+                        budget._reserve(
+                            store, "review", record["subject"]["reviewAllowance"], reviewer
+                        )
         attempt = uuid4().hex
         root = _directory(store, attempt)
         _safe(root, root)

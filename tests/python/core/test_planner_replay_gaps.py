@@ -6,10 +6,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import source_controller_roundtable, source_only_vision_lock
+from tests.python.core.planning_support import (
+    source_controller_roundtable,
+    source_only_b,
+    source_only_vision_lock,
+)
 from tests.python.core.test_plan_cli import cli
 
-from codex_harness.core import plan_cli, roundtable
+from codex_harness.core import approvals, plan_cli, roundtable
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.spine_diagrams import text_fallback, user_journey
@@ -79,6 +83,8 @@ def project(tmp_path, monkeypatch):
 
 def review(store, reviewers=REVIEWERS, process_stub=None, **kwargs):
     """Controller-path source simulation for coverage/retry mechanics, not provider proof."""
+    if approvals.current(store, "A") is None:
+        confirmed_vision(store)
     return source_controller_roundtable(
         store,
         reviewers=reviewers,
@@ -110,9 +116,7 @@ def confirmed_vision(store):
         assumptions=[],
     )
     store.upsert_node(node)
-    source_only_vision_lock(
-        store, statement="SOURCE-ONLY approve the complete Answer fixture card."
-    )
+    source_only_vision_lock(store, statement="Approve")
     store.advance("features", by="source-test")
 
 
@@ -162,6 +166,7 @@ def test_gap2_windows_prefers_newest_desktop_bundle_and_preserves_override(tmp_p
 
 
 def test_gap3_retry_keeps_other_providers_success_for_same_revision(project):
+    confirmed_vision(project)
     project.connection.execute("UPDATE meta SET phase='roundtable'")
     first = review(
         project,
@@ -189,13 +194,13 @@ def test_gap3_retry_keeps_other_providers_success_for_same_revision(project):
 def test_gap4_round_budget_is_per_reviewer_revision_and_reserved_before_launch(project):
     def concurrent(launch, *args):
         with PlanStore(project.workspace) as second:
-            with pytest.raises(PlanStoreError, match="used 1/1"):
+            with pytest.raises(PlanStoreError, match="round limit through B"):
                 review(second, REVIEWERS[:1], max_rounds=1)
         return 0, "[]"
 
     result = review(project, REVIEWERS[:1], concurrent, max_rounds=1)
     assert result["maxRounds"] == 1 and result["reviewers"][0]["round"] == 1
-    with pytest.raises(PlanStoreError, match="used 1/1"):
+    with pytest.raises(PlanStoreError, match="round limit through B"):
         review(project, REVIEWERS[:1], max_rounds=1)
     review(project, REVIEWERS[1:], max_rounds=1)
     node = project.spine().node("R1")
@@ -205,6 +210,8 @@ def test_gap4_round_budget_is_per_reviewer_revision_and_reserved_before_launch(p
 
 
 def test_gap5_error_json_exits_two_and_preserves_reviewer_data(project, capsys, monkeypatch):
+    confirmed_vision(project)
+    reviewers = source_only_b(project, reviewers=REVIEWERS)
     monkeypatch.setattr(roundtable, "_run", lambda *args: (9, "out", "failure detail"))
     monkeypatch.setattr(roundtable, "_executable", lambda *args: "fake.exe")
     code = plan_cli.main(
@@ -214,7 +221,7 @@ def test_gap5_error_json_exits_two_and_preserves_reviewer_data(project, capsys, 
             "--json",
             "roundtable",
             "--reviewer",
-            json.dumps(REVIEWERS[0]),
+            json.dumps(reviewers[0]),
         ]
     )
     result = json.loads(capsys.readouterr().out)
@@ -269,12 +276,14 @@ def test_gap8_decision_records_choice_and_rationale_before_next_phase(project):
 
 
 def test_gap9_status_explains_spine_manifest_and_published_revisions(project):
-    before = cli(project.workspace, "status", machine=True)
+    before = cli(project.workspace, "status", "--full", machine=True)
     for name in ("spine_revision", "manifest_revision", "published_revision"):
-        assert name + ":" in before["text"] and name in before["status"]
+        assert name in before["status"]
+    assert "Revisions: spine" in before["text"]
+    assert " · manifest " in before["text"] and " · published " in before["text"]
     assert before["status"]["manifest_revision"] != before["status"]["spine_revision"]
     (project.workspace / "template/tests/test_answer.py").write_text("# changed protected proof\n")
-    after = cli(project.workspace, "status", machine=True)["status"]
+    after = cli(project.workspace, "status", "--full", machine=True)["status"]
     assert after["spine_revision"] == before["status"]["spine_revision"]
     assert after["manifest_revision"] != before["status"]["manifest_revision"]
     assert not after["publication"]["up_to_date"]
@@ -282,6 +291,7 @@ def test_gap9_status_explains_spine_manifest_and_published_revisions(project):
 
 def test_gap10_quality_and_publish_require_current_audit_and_review(project):
     confirmed_vision(project)
+    source_only_b(project, reviewers=REVIEWERS)
     project.connection.execute("UPDATE meta SET phase='publish'")
     assert check(project, "audit")["status"] == "fail"
     assert check(project, "roundtable")["status"] == "fail"

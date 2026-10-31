@@ -17,7 +17,7 @@ import sys
 
 import pytest
 from tests.python.core import test_planner_replay_gaps
-from tests.python.core.planning_support import source_controller_roundtable
+from tests.python.core.planning_support import source_controller_roundtable, source_only_b
 from tests.python.core.test_mcp_planner import rpc
 
 from codex_harness.core import plan_cli
@@ -43,6 +43,14 @@ def _at_roundtable(store):
         )
     test_planner_replay_gaps.confirmed_vision(store)
     for phase in ("requirements", "tech-stack", "plan", "roundtable"):
+        if phase == "roundtable":
+            source_only_b(
+                store,
+                reviewers=[
+                    dict(name="Alpha", provider="codex"),
+                    dict(name="Beta", provider="claude"),
+                ],
+            )
         store.advance(phase, by="source-test")
     store.compile_template(store.workspace / "template")
 
@@ -50,12 +58,14 @@ def _at_roundtable(store):
 def _status_pair(store, capsys):
     server = PlannerServer(store.workspace)
     try:
-        wire = rpc(server, "tools/call", {"name": "harness_plan_status", "arguments": {}})
+        wire = rpc(
+            server, "tools/call", {"name": "harness_plan_status", "arguments": {"full": True}}
+        )
         assert not wire["result"]["isError"]
         mcp = wire["result"]
     finally:
         server.close()
-    assert plan_cli.main(["--workspace", str(store.workspace), "--json", "status"]) == 0
+    assert plan_cli.main(["--workspace", str(store.workspace), "--json", "status", "--full"]) == 0
     cli = json.loads(capsys.readouterr().out)
     assert not cli["isError"]
     return mcp, cli
@@ -365,7 +375,7 @@ def test_continuation_stale_action_and_concurrent_observation_refresh(project, c
         == 2
     )
     refused = json.loads(capsys.readouterr().out)
-    assert "plan-publication-evidence-required" in refused["text"]
+    assert "plan-b-consent-required" in refused["text"]
     assert project.phase() == "roundtable"
     assert refused["status"]["continuation"]["planning"]["kind"] == "audit_required"
     print(
@@ -382,6 +392,8 @@ def test_continuation_stale_action_and_concurrent_observation_refresh(project, c
 @pytest.mark.parametrize("phase", ["roundtable", "publish"])
 def test_metadata_only_compile_prerequisite_has_precise_public_gate(project, capsys, phase):
     """Metadata removal preserves approval, but cannot claim publication readiness."""
+    from tests.python.core.test_planner_refusals import canonical_rows
+
     from codex_harness.core.planner_resume import resume_plan
 
     _at_roundtable(project)
@@ -401,13 +413,13 @@ def test_metadata_only_compile_prerequisite_has_precise_public_gate(project, cap
             {"name": "harness_upsert_node", "arguments": {"node": edited_vision}},
         )["result"]
         assert not changed["isError"], changed
-        before = list(project.connection.iterdump())
+        before = canonical_rows(project)
         mcp, cli = _status_pair(project, capsys)
         resumed = resume_plan(project.workspace)
-        assert list(project.connection.iterdump()) == before
+        assert canonical_rows(project) == before
         statuses = [mcp["structuredContent"], cli["status"], resumed["canonicalStatus"]]
         for status in statuses:
-            assert status["approval"] == original_approval
+            assert status["approval"]["approval_id"] == original_approval["approval_id"]
             assert status["approval"]["granted"] is True
             assert status["reviewResolution"]["manifestRevision"] is None
             assert status["continuation"]["planning"]["kind"] == "compile_required"
@@ -428,7 +440,7 @@ def test_metadata_only_compile_prerequisite_has_precise_public_gate(project, cap
         )
         refused = rpc(server, "tools/call", mutation)["result"]
         assert refused["isError"] and project.phase() == phase
-        assert list(project.connection.iterdump()) == before
+        assert canonical_rows(project) == before
         print(
             json.dumps(
                 {
@@ -518,7 +530,9 @@ def test_continuation_missing_plan_surfaces_do_not_create_state(tmp_path, capsys
     try:
         status = server._status()
         view = review_resolution_state(None, status)
-        mcp = rpc(server, "tools/call", {"name": "harness_plan_status", "arguments": {}})["result"]
+        mcp = rpc(
+            server, "tools/call", {"name": "harness_plan_status", "arguments": {"full": True}}
+        )["result"]
         assert not mcp["isError"] and view["nextAction"]["kind"] == "unavailable_refresh"
         assert mcp["content"][0]["text"].split("Next:")[-1].startswith(" harness_plan_start")
         assert plan_cli.main(["--workspace", str(missing), "--json", "status"]) == 0
@@ -599,6 +613,10 @@ def test_resolution_reads_preserve_state_and_canonical_refusal(project, monkeypa
     requirement["text"] += " invalidates displayed evidence"
     project.upsert_node(requirement)
     project.compile_template(project.workspace / "template")
+    with pytest.raises(PlanStoreError) as changed_candidate:
+        project.advance("publish", by="source-test")
+    assert changed_candidate.value.code == "plan-b-consent-required"
+    source_only_b(project)
     with pytest.raises(PlanStoreError) as error:
         project.advance("publish", by="source-test")
     assert error.value.code == "plan-publication-evidence-required"
@@ -613,7 +631,9 @@ def test_resolution_reads_preserve_state_and_canonical_refusal(project, monkeypa
     missing = project.workspace / "never-created"
     server = PlannerServer(missing)
     try:
-        response = rpc(server, "tools/call", {"name": "harness_plan_status", "arguments": {}})
+        response = rpc(
+            server, "tools/call", {"name": "harness_plan_status", "arguments": {"full": True}}
+        )
         assert not response["result"]["isError"]
         assert "harness_plan_start" in response["result"]["content"][0]["text"]
         assert not missing.exists()
@@ -781,6 +801,8 @@ def test_public_repair_loop_refreshes_review_before_canonical_publication(
     prefix = ["--workspace", str(project.workspace), "--json"]
 
     def public(*arguments, expected=0):
+        if arguments == ("status",):
+            arguments += ("--full",)
         assert plan_cli.main([*prefix, *arguments]) == expected
         result = json.loads(capsys.readouterr().out)
         assert result["isError"] is (expected != 0)
@@ -818,6 +840,7 @@ def test_public_repair_loop_refreshes_review_before_canonical_publication(
     assert pending["nextAction"]["kind"] == "review_required"
     assert len(packets) == 1
     public("advance", "--to", "publish", expected=2)
+    reviewer = source_only_b(project, reviewers=[reviewer])[0]
     reviewed = public("roundtable", "--reviewer", json.dumps(reviewer))
     assert not reviewed["data"]["invalid"] and len(packets) == 2
     assert packets[0] != packets[1] and "Receive the accepted answer 42" in packets[1]
@@ -856,7 +879,11 @@ def _public_review_with_members(project, monkeypatch, capsys, node_id="R1"):
 
     monkeypatch.setattr(roundtable, "_run", reviewer)
     monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
-    reviewers = [dict(name="Alpha", provider="codex"), dict(name="Beta", provider="claude")]
+    reviewers = source_only_b(
+        project,
+        reviewers=[dict(name="Alpha", provider="codex"), dict(name="Beta", provider="claude")],
+    )
+    reviewers = [{k: v for k, v in reviewer.items() if v is not None} for reviewer in reviewers]
     prefix = ["--workspace", str(project.workspace), "--json"]
     assert (
         plan_cli.main(
@@ -955,6 +982,10 @@ def test_roundtable_return_hands_member_repairs_to_invoking_planner(
 
 @pytest.mark.parametrize("operation", ["harness_advance", "harness_publish"])
 def test_blocked_mcp_reply_contains_bound_author_handoff(project, monkeypatch, capsys, operation):
+    from tests.python.core.test_planner_refusals import canonical_rows
+
+    from codex_harness.core.approvals import current
+
     _public_review_with_members(project, monkeypatch, capsys)
     if operation == "harness_publish":
         # Reach publish normally before a later real review exposes new blocking work.
@@ -992,7 +1023,8 @@ def test_blocked_mcp_reply_contains_bound_author_handoff(project, monkeypatch, c
     requirement["text"] += " revised author context"
     project.upsert_node(requirement)
     project.compile_template(project.workspace / "template")
-    before = list(project.connection.iterdump())
+    source_only_b(project, reviewers=current(project, "B")["subject"]["reviewers"])
+    before = canonical_rows(project)
     server = PlannerServer(project.workspace)
     try:
         result = rpc(
@@ -1008,10 +1040,13 @@ def test_blocked_mcp_reply_contains_bound_author_handoff(project, monkeypatch, c
         assert handoff["manifestRevision"] == project.manifest_revision()
         assert all(row["revisionRelation"] == "stale" for row in handoff["members"])
         assert "author repair" in result["content"][0]["text"].lower()
-        assert "harness_resolve_findings" in result["content"][0]["text"]
+        text = result["content"][0]["text"]
+        assert all(part in text for part in ("What happened:", "Why:", "Current values:"))
+        assert text.count("\nNext: ") == 1
+        assert text.splitlines()[-1].startswith("Next: harness_plan_status expected_workspace=")
     finally:
         server.close()
-    assert list(project.connection.iterdump()) == before
+    assert canonical_rows(project) == before
     assert not project.status()["publication"]["up_to_date"]
 
 

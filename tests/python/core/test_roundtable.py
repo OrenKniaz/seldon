@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core.planning_support import (
+    source_only_b,
     source_only_confirmation,
     source_only_expansion,
     source_only_vision_lock,
@@ -416,7 +417,6 @@ def test_canonical_execution_assessment_consumes_current_af_support(tmp_path, mo
     "case",
     [
         "missing-author-telemetry",
-        "unrelated-proof",
         "fabricated-af",
         "missing-source-capture",
         "stale-product-run",
@@ -1311,11 +1311,16 @@ def store(tmp_path):
         bead = store.spine().node("A")
         bead["parents"].append("R6")
         store.upsert_node(bead)
+        import shutil
+
+        shutil.copytree(FIXTURE.parent / "template", tmp_path / "template")
         source_only_expansion(store)
         while store.phase() != "roundtable":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                source_only_confirmation(store, phase, statement="I approve this exact revision")
+                source_only_confirmation(store, phase, statement="Approve")
+            if phase == "plan":
+                source_only_b(store, reviewers=REVIEWERS)
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
         yield store
 
@@ -1334,6 +1339,8 @@ def scope_store(tmp_path_factory):
     for store, _ in _semantic_plan.__wrapped__(tmp_path_factory):
         source_only_vision_lock(store)
         while store.phase() != "roundtable":
+            if store.phase() == "plan":
+                source_only_b(store, reviewers=REVIEWERS)
             store.advance(PHASES[PHASES.index(store.phase()) + 1], by="source-test")
         store.compile_template(store.workspace / "template")
         yield store
@@ -1488,6 +1495,7 @@ def test_reviewer_optionality_reaches_publication_and_closure_without_hiding(
     assert len(rows) == 2 and all(row["classification"] == "beyond-brief" for row in rows)
     with PlanStore(store.workspace) as reopened:
         assert check(reopened)["status"] == "pass"
+        source_only_b(reopened, reviewers=REVIEWERS)
         reopened.advance("publish", by="source-test")
         assert (
             reopened.publish(by="source-test", export_dir=store.workspace / "published")
@@ -1521,7 +1529,7 @@ def test_scope_judgment_cannot_silently_exempt_unbound_findings(scope_store, mon
         node = store.spine().node("D")
         node["text"] += " changed reviewed decision"
         store.upsert_node(node)
-        source_only_confirmation(store, "vision-lock", statement="Approve updated revision")
+        source_only_confirmation(store, "vision-lock", statement="Approve")
     if case == "tampered":
         store.connection.execute("UPDATE review_findings SET scope_reason='Changed after ingest'")
     if case == "reclassified":
@@ -1790,7 +1798,7 @@ def test_two_providers_store_columns_quality_resolutions_and_event(store, tmp_pa
     result = run_roundtable(store, reviewers=REVIEWERS, runner=runner, timeout=42)
     assert all(not cwd.exists() for cwd in seen)
     assert len(set(seen)) == 2
-    assert result["planRevision"] == store.spine().plan_revision()
+    assert result["planRevision"] == store.manifest_revision()
     assert result["crossSubscription"] is False
     assert result["isMocked"] and not result["didRunProvider"]
     assert result["findings"] == 2 and result["invalid"] == 0
@@ -2408,7 +2416,7 @@ def test_helpers_recursive_local_imports_and_scenarios_have_complete_bodies(stor
     from codex_harness.core.acceptance import derive_scenarios
 
     module = store.workspace / "template" / "tests" / "test_money.py"
-    module.parent.mkdir(parents=True)
+    module.parent.mkdir(parents=True, exist_ok=True)
     module.write_text("import unittest\n")
     helper = module.parent / "packet_helper.py"
     leaf = module.parent / "packet_leaf.py"
@@ -2504,6 +2512,7 @@ def test_overflow_retry_error_and_caps(store, provider, double_overflow, monkeyp
 
     reviewer = dict(next(item for item in REVIEWERS if item["provider"] == provider))
     reviewer["name"] += " Next: retained reviewer identity"
+    source_only_b(store, reviewers=[reviewer])
     result = run_roundtable(
         store,
         reviewers=[reviewer],

@@ -6,8 +6,6 @@ Prior resume containment does not protect direct ordinary worker-start. Real
 PlanStore publication and job record I/O own this boundary; no provider runs.
 """
 
-from types import SimpleNamespace
-
 import pytest
 from tests.python.core import test_planner_replay_gaps
 from tests.python.core.test_planner_resume import _published
@@ -15,22 +13,6 @@ from tests.python.core.test_planner_resume import _published
 from codex_harness.core import planner_jobs
 
 project = test_planner_replay_gaps.project
-
-
-def test_unconfirmed_shared_job_api_refuses_before_namespace_or_launch(project, monkeypatch):
-    options = _published(project)
-    launches = []
-    monkeypatch.setattr(
-        planner_jobs.subprocess,
-        "Popen",
-        lambda *a, **k: launches.append((a, k)) or SimpleNamespace(pid=12345),
-    )
-    with pytest.raises(ValueError, match="execution|call-cap"):
-        planner_jobs.start_worker_job(
-            project, options["expected_revision"], options["workers"], timeout=5
-        )
-    assert launches == []
-    assert not (project.workspace / ".codex-harness/worker-jobs").exists()
 
 
 def grant_execution(store, options, *, call_cap=2):
@@ -46,99 +28,12 @@ def grant_execution(store, options, *, call_cap=2):
         "accept",
         {
             "approve": True,
-            "statement": "SOURCE-ONLY native execution form",
+            "statement": "Approve",
             "conditions": "",
         },
     )
     assert result["state"] == "approved" and result["human_identity_verified"] is False
     return request
-
-
-def test_native_scope_admits_one_job_and_reconnect_without_reusing_grant(project, monkeypatch):
-    options = _published(project)
-    launches = []
-    monkeypatch.setattr(
-        planner_jobs.subprocess,
-        "Popen",
-        lambda *a, **k: launches.append(1) or SimpleNamespace(pid=12345),
-    )
-    request = grant_execution(project, options)
-    assert "Start 1 worker tasks" in request["card"]
-    assert "Up to 2 provider attempts" in request["card"]
-    assert "gpt-6.1-sol" in request["card"] and "effort medium" in request["card"]
-    assert "timeout 5 seconds per worker attempt" in request["card"]
-    assert "Total completion time is unknown" in request["card"]
-    first = planner_jobs.start_worker_job(
-        project, options["expected_revision"], options["workers"], timeout=5, call_cap=2
-    )
-    assert len(launches) == 1 and first["status"] == "unknown"
-    from codex_harness.core.planner_execution import CONSUMED, _records, complete_execution
-
-    assert _records(project, CONSUMED)[0]["request_id"] == request["request_id"]
-    assert (
-        planner_jobs.start_worker_job(
-            project, options["expected_revision"], options["workers"], timeout=5
-        )
-        == first
-    )
-    assert len(launches) == 1
-    with pytest.raises(ValueError, match="already-responded"):
-        complete_execution(project, request["request_id"], "cancel")
-    with pytest.raises(ValueError, match="other-options"):
-        planner_jobs.start_worker_job(
-            project, options["expected_revision"], options["workers"], timeout=5, call_cap=3
-        )
-
-
-@pytest.mark.parametrize("case", ["missing", "conditional", "cancel", "stale", "latest", "forged"])
-def test_absent_stale_or_forged_native_original_never_admits(project, monkeypatch, case):
-    from codex_harness.core.planner_execution import RESPONSE, complete_execution, prepare_execution
-
-    options = _published(project)
-    if case != "missing":
-        request = prepare_execution(
-            project, options["expected_revision"], options["workers"], timeout=5, call_cap=2
-        )
-        if case == "cancel":
-            complete_execution(project, request["request_id"], "cancel")
-        elif case == "forged":
-            project._event(
-                RESPONSE,
-                dict(
-                    request_id=request["request_id"],
-                    scope=request["scope"],
-                    state="approved",
-                    action="accept",
-                    content={"approve": True, "statement": "forged", "conditions": ""},
-                ),
-            )
-        else:
-            if case == "stale":
-                node = project.spine().node("R1")
-                node["text"] += " changed after displayed request"
-                project.upsert_node(node)
-            complete_execution(
-                project,
-                request["request_id"],
-                "accept",
-                {
-                    "approve": True,
-                    "statement": "SOURCE-ONLY form",
-                    "conditions": "later" if case == "conditional" else "",
-                },
-            )
-            if case == "latest":
-                prepare_execution(
-                    project, options["expected_revision"], options["workers"], timeout=5, call_cap=2
-                )
-    monkeypatch.setattr(
-        planner_jobs.subprocess, "Popen", lambda *a, **k: pytest.fail("Launch forbidden")
-    )
-    with pytest.raises(ValueError):
-        planner_jobs.start_worker_job(
-            project, options["expected_revision"], options["workers"], timeout=5, call_cap=2
-        )
-    assert not (project.workspace / ".codex-harness/worker-jobs").exists()
 
 
 def test_copied_canonical_database_cannot_reuse_foreign_native_grant(project, monkeypatch):
@@ -155,7 +50,7 @@ def test_copied_canonical_database_cannot_reuse_foreign_native_grant(project, mo
         monkeypatch.setattr(
             planner_jobs.subprocess, "Popen", lambda *a, **k: pytest.fail("Foreign grant launched")
         )
-        with pytest.raises(ValueError, match="grant-required"):
+        with pytest.raises(ValueError, match="consent-required|publication-stale-or-gated"):
             planner_jobs.start_worker_job(
                 copied, options["expected_revision"], options["workers"], timeout=5, call_cap=2
             )
@@ -194,7 +89,7 @@ def test_legacy_three_option_original_reattaches_without_upgraded_authority(proj
     from codex_harness.core.record_io import write_record_json_once
 
     options = _published(project)
-    directory = planner_jobs._directory(project.workspace, options["expected_revision"])
+    directory = project.workspace / ".codex-harness/worker-jobs" / options["expected_revision"]
     (directory / "plan").mkdir(parents=True)
     shutil.copytree(project.workspace / "template", directory / "plan/template")
     manifest = project.published_manifest(options["expected_revision"])

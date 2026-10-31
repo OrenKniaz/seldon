@@ -161,19 +161,29 @@ def _latest_scenario_run(db):
 
 
 def _phase_history(db):
-    """Historical transitions, not inferred approval of the current revision."""
-    history = {}
+    """Historical transitions and declared actors, never current consent authority."""
+    history = {
+        phase: dict(phase=phase, passedAt=None, approvedBy=None, isProxy=None, evidence=None)
+        for phase in PHASES
+    }
     approvals = {}
     for row in db.execute(
-        "SELECT kind, at, payload_json FROM events "
-        "WHERE kind IN ('approved', 'phase-advanced') ORDER BY id"
+        "SELECT kind, at, payload_json FROM events WHERE kind IN "
+        "('approved', 'approval-v2-recorded', 'phase-advanced') ORDER BY id"
     ):
         payload = json.loads(row["payload_json"])
         if row["kind"] == "approved":
             approvals[payload["gate"]] = payload
-        if row["kind"] == "phase-advanced":
+        elif row["kind"] == "approval-v2-recorded":
+            approvals[payload["subject"]["kind"]] = (
+                dict(by=payload["actor"], statement=payload["words"])
+                if payload["state"] == "approved"
+                else {}
+            )
+        else:
             phase = payload["from"]
-            approval = approvals.get(phase, {})
+            kind = "A" if phase in {"align", "vision-lock"} else "B"
+            approval = approvals.get(kind, approvals.get(phase, {}))
             who = approval.get("by")
             history[phase] = {
                 "phase": phase,
@@ -186,19 +196,7 @@ def _phase_history(db):
                 "evidence": approval.get("statement") or payload.get("statement"),
                 "revision": payload.get("plan_revision"),
             }
-    return [
-        history.get(
-            phase,
-            {
-                "phase": phase,
-                "passedAt": None,
-                "approvedBy": None,
-                "isProxy": None,
-                "evidence": None,
-            },
-        )
-        for phase in PHASES
-    ]
+    return list(history.values())
 
 
 def _acceptance_evidence(db, status):
@@ -286,10 +284,7 @@ def _reviews(store):
 
 def _recorded_understanding(store, status):
     """Enrich an existing prerequisite, never infer an active prompt or approval."""
-    from codex_harness.core.planner_confirmations import (
-        confirmation_card,
-        legacy_confirmation_card,
-    )
+    from codex_harness.core import approvals
 
     gate = status.get("pending_gate")
     if gate not in ("approval:align", "approval:vision-lock"):
@@ -349,12 +344,12 @@ def _recorded_understanding(store, status):
     vision = request.get("vision")
     if not isinstance(vision, dict) or vision != spine.node(visions[0]):
         return None
-    phase = status["phase"]
-    expected_cards = {
-        render(gate, phase, revision, vision)
-        for render in (confirmation_card, legacy_confirmation_card)
-    }
-    if request.get("card") not in expected_cards or not isinstance(vision.get("title"), str):
+    subject = approvals.subject(store, "A")
+    if (
+        request.get("subject") != subject
+        or request.get("card") != approvals.render(subject, request.get("diff", []))
+        or not isinstance(vision.get("title"), str)
+    ):
         return None
     # This is a public excerpt, not the unrestricted canonical node/request.
     public_keys = {key for _, aliases in SECTIONS for key in aliases} | {"done_means"}

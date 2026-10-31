@@ -266,7 +266,7 @@ def parser() -> argparse.ArgumentParser:
         "supervision-report": ("run",),
         "render": (),
         "roundtable": (),
-        "review-budget": ("campaign",),
+        "review-budget": (),
         "readiness": (),
         "findings": (),
         "resolve": (),
@@ -316,6 +316,7 @@ def parser() -> argparse.ArgumentParser:
         "--provider", choices=["codex", "claude", "copilot"], default="codex"
     )
     commands["status"].add_argument("--brief", action="store_true")
+    commands["status"].add_argument("--full", action="store_true")
     commands["preflight"].add_argument("--provider", action="append", dest="providers")
     commands["impact"].add_argument("--since", help="Manifest revision or saved manifest file")
     commands["supervision-report"].add_argument("--baseline-run")
@@ -415,7 +416,7 @@ def parser() -> argparse.ArgumentParser:
     )
     commands["roundtable"].add_argument("--max-rounds", type=int, default=DEFAULT_REVIEW_ROUNDS)
     commands["review-budget"].add_argument("--max-starts", type=int, required=True)
-    commands["review-budget"].add_argument("--amend-request", help="Approved fresh B request ID")
+    commands["review-budget"].add_argument("--reason", default="", help="Explain totals above ten")
     readiness_selection = commands["readiness"].add_mutually_exclusive_group()
     readiness_selection.add_argument("--beads", help="Comma-separated bead ids")
     readiness_selection.add_argument("--sample", type=int)
@@ -465,12 +466,15 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
     command = args.command
     if command == "review-budget":
         from codex_harness.core.plan_store import open_plan_store
-        from codex_harness.core.provider_call_budget import register_planning_review_budget
+        from codex_harness.core.planner_confirmations import prepare_chat_confirmation
 
         if server.store is None:
             server.store = open_plan_store(server.workspace)
-        data = register_planning_review_budget(
-            server.store, args.campaign, args.max_starts, amendment_request_id=args.amend_request
+        data = prepare_chat_confirmation(
+            server.store,
+            "plan-execution",
+            review_max_starts=args.max_starts,
+            allowance_reason=args.reason,
         )
         return _reply(server, json.dumps(data, ensure_ascii=False, indent=2)), data
     if command == "advance" and (args.statement is not None or args.by != "planner"):
@@ -632,7 +636,7 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 **({"plan_mode": args.plan_mode} if args.plan_mode else {}),
             ),
         ),
-        "status": ("harness_plan_status", lambda: {}),
+        "status": ("harness_plan_status", lambda: dict(full=args.full)),
         "resume": (
             "harness_plan_resume",
             lambda: {

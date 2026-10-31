@@ -195,6 +195,9 @@ class PlanStore:
                     (name if name is not None else workspace.name,),
                 )
                 self._event("opened", {"name": self._meta()["name"]})
+            from codex_harness.core.approval_migration import migrate
+
+            migrate(self)
 
     def close(self) -> None:
         self.connection.close()
@@ -398,18 +401,13 @@ class PlanStore:
         if row is None:
             return
 
-        def intent(fields):
-            return {
-                key: value
-                for key, value in fields.items()
-                if key not in ("validation", "requirementFiles")
-                and not (
-                    fields.get("planMode") == "semantic-v1" and key in ("scenarios", "targets")
-                )
-            }
+        from codex_harness.core.approvals import intent as approval_intent
 
+        def intent(fields):
+            return approval_intent(dict(title="", text="", fields=fields))["fields"]
+
+        locked = json.loads(self._meta()["locked_vision_json"])
         if node["fields"].get("planMode") == "semantic-v1" and not reopen_vision_lock:
-            locked = json.loads(self._meta()["locked_vision_json"])
             before = {f"fields.{key}": value for key, value in intent(locked["fields"]).items()}
             after = {f"fields.{key}": value for key, value in intent(node["fields"]).items()}
             before.update(text=locked["text"], title=locked["title"])
@@ -436,8 +434,11 @@ class PlanStore:
             or row["title"] != node["title"]
             or intent(json.loads(row["fields_json"])) != intent(node["fields"])
         ):
-            self.connection.execute("UPDATE meta SET vision_lock_stale=1")
-            self._event("vision-lock-stale", {"id": node["id"]})
+            stale = approval_intent(locked) != approval_intent(node)
+            self.connection.execute("UPDATE meta SET vision_lock_stale=?", (int(stale),))
+            self._event(
+                "vision-lock-stale" if stale else "vision-lock-restored", {"id": node["id"]}
+            )
 
     def upsert_node(self, node: dict, *, reopen_vision_lock: bool = False) -> None:
         with self._transaction():
@@ -725,9 +726,6 @@ class PlanStore:
             )
             assurance = intake.validate_selection(observation["catalog"], node["fields"], sessions)
             node["fields"] = assurance["selection"]
-            from codex_harness.core.planner_confirmations import validate_reviewer_record_scope
-
-            validate_reviewer_record_scope(self, node, observation["catalog"], sessions)
             result = self._save_draft_nodes(
                 before,
                 [node],
@@ -740,63 +738,10 @@ class PlanStore:
                 "nextAction": "Resolve unmet assurance before existing review gates",
             }
 
-    def confirm_reviewer_selection(
-        self,
-        node_id: str,
-        expected_spine_revision: str,
-        *,
-        approve: bool,
-        statement: str,
-        conditions: str,
-    ) -> dict:
-        """Record an explicit ordinary caller action, never native or human identity proof."""
-        from codex_harness.core.planner_confirmations import (
-            REVIEWER_CONFIRMATION,
-            reviewer_confirmation_target,
-            reviewer_record_authority,
+    def confirm_reviewer_selection(self, node_id, expected_spine_revision, **response):
+        raise PlanStoreError(
+            "plan-b-consent-required", "Reviewer choices are drafts; approve the complete B subject"
         )
-
-        with self._transaction():
-            before = self._draft_preimage(expected_spine_revision)
-            node, catalog, sessions, scope = reviewer_confirmation_target(self, before, node_id)
-            if (
-                approve is not True
-                or not isinstance(statement, str)
-                or not statement.strip()
-                or not isinstance(conditions, str)
-                or conditions != ""
-            ):
-                raise PlanStoreError(
-                    "plan-reviewer-confirmation-action-invalid",
-                    "Explicit affirmative action, full statement and empty conditions required",
-                )
-            record = dict(
-                recordId=str(uuid4()),
-                nodeId=node_id,
-                preimageRevision=expected_spine_revision,
-                scopeDigest=scope,
-                catalogId=catalog["id"],
-                catalogDigest=catalog["digest"],
-                authorSessions=deepcopy(sessions),
-                approve=True,
-                statement=statement,
-                conditions="",
-                origin="user",
-                provenance="caller-declared-user-action",
-                human_identity_verified=False,
-            )
-            self._event(REVIEWER_CONFIRMATION, record)
-            event_id = self.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-            node["fields"]["confirmation"] = reviewer_record_authority(event_id, record)
-            assurance = intake.validate_selection(catalog, node["fields"], sessions)
-            node["fields"] = assurance["selection"]
-            result = self._save_draft_nodes(
-                before,
-                [node],
-                "reviewer-selection-recorded",
-                {"nodeId": node_id, "authorSessions": sessions},
-            )
-            return {**result, **assurance, "confirmationRecord": {**record, "eventId": event_id}}
 
     def record_wave_map(
         self,
@@ -1304,13 +1249,6 @@ class PlanStore:
                     if current and field == "reviewerSelection":
                         catalog = self._latest_draft_event("reviewer-catalog-recorded")
                         try:
-                            from codex_harness.core.planner_confirmations import (
-                                validate_reviewer_record_scope,
-                            )
-
-                            validate_reviewer_record_scope(
-                                self, node, catalog["catalog"], event["authorSessions"]
-                            )
                             item.update(
                                 intake.validate_selection(
                                     catalog["catalog"], node["fields"], event["authorSessions"]
@@ -1483,78 +1421,33 @@ class PlanStore:
     def phase(self) -> str:
         return self._meta()["phase"]
 
-    def _approve(self, gate: str, by: str, statement: str) -> str:
-        gates = (
-            "align vision-lock plan-lock reviewer-selection review-budget "
-            "publish execution validation"
-        )
-        if gate not in gates.split():
-            raise PlanStoreError("plan-gate-invalid", gate)
-        _nonempty(by, "by")
-        _nonempty(statement, "statement")
-        revision = Spine(self._data()).plan_revision()
-        item_id = uuid4().hex
-        self.connection.execute(
-            "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, ?)",
-            (item_id, gate, revision, by, statement, _now()),
-        )
-        self._event(
-            "approved",
-            {
-                "id": item_id,
-                "gate": gate,
-                "plan_revision": revision,
-                "by": by,
-                "statement": statement,
-            },
-        )
-
-        if gate == "vision-lock":
-            spine = Spine(self._data())
-            vision = _json(spine.node(spine.ids("vision")[0]))
-            self.connection.execute("UPDATE meta SET locked_vision_json=?", (vision,))
-            self.connection.execute("UPDATE meta SET vision_lock_stale=0")
-            # Combined A locks at Align; a native first lock still binds on phase exit.
-            if self.phase() != "vision-lock" or self._meta()["vision_locked_revision"]:
-                self.connection.execute("UPDATE meta SET vision_locked_revision=?", (revision,))
-        return item_id
-
     def approve(self, gate: str, *, by: str, statement: str) -> str:
-        if gate not in ("align", "vision-lock"):
-            raise PlanStoreError("plan-gate-invalid", gate)
-        _nonempty(by, "by")
-        _nonempty(statement, "statement")
         raise PlanStoreError(
-            "plan-confirmation-origin-unavailable",
-            "Supplied words cannot approve a gate. Use a client supporting native MCP elicitation.",
+            "plan-confirmation-origin-unavailable", "Display and answer the current A/B subject"
         )
 
-    def _approval_credit(self, gate: str, revision: str) -> dict | None:
-        from codex_harness.core.planner_confirmations import approval_credit
+    def _current_approval(self, kind):
+        from codex_harness.core.approvals import require_approval
 
-        if gate == "vision-lock" and self._meta()["vision_locked_revision"]:
-            if self._meta()["vision_lock_stale"]:
-                return None
-            revision = self._meta()["vision_locked_revision"]
-        return approval_credit(self, gate, revision)
+        if not self.connection.execute("SELECT 1 FROM nodes WHERE kind='vision'").fetchone():
+            return None
+        try:
+            record = require_approval(self, kind)
+        except PlanStoreError as error:
+            if error.code not in {"plan-a-consent-required", "plan-b-consent-required"}:
+                raise
+            return None
+        return dict(
+            id=record["id"],
+            by=record["channel"],
+            statement=record["words"],
+            plan_revision=self._revision(),
+        )
 
     def _check_approval(self, gate: str, revision: str) -> None:
-        if self._approval_credit(gate, revision):
-            return
-        if gate == "vision-lock" and self._meta()["vision_lock_stale"]:
-            raise PlanStoreError("plan-approval-stale", "vision-lock needs renewed approval")
-        rows = self.connection.execute(
-            "SELECT plan_revision FROM approvals WHERE gate=?", (gate,)
-        ).fetchall()
-        if any(row["plan_revision"] == revision for row in rows) or (
-            gate == "vision-lock" and self._meta()["vision_locked_revision"]
-        ):
-            raise PlanStoreError(
-                "plan-confirmation-origin-unavailable",
-                "Historical supplied words remain recorded; obtain fresh native confirmation.",
-            )
-        code = "plan-approval-stale" if rows else "plan-approval-required"
-        raise PlanStoreError(code, f"{gate} needs approval of {revision}")
+        from codex_harness.core.approvals import require_approval
+
+        require_approval(self, "A")
 
     def compile_template(self, template: Path) -> dict:
         """Materialize the canonical spine before binding protected file contents."""
@@ -2470,12 +2363,6 @@ class PlanStore:
                 )
             revision = self._revision()
             spine = Spine(self._data())
-            if current == "plan" and to_phase == "roundtable":
-                from codex_harness.core.planner_confirmations import combined_credit
-
-                credit = combined_credit(self, "plan-lock")
-                if credit and statement is None:
-                    statement, by = credit["response"]["content"]["statement"], "user"
             if to_phase == "vision-lock" or current == "vision-lock" and target > index:
                 from codex_harness.core.planner_vision import expansion_status
 
@@ -2492,19 +2379,19 @@ class PlanStore:
                     if statement is not None:
                         self.approve(current, by=by, statement=statement)
                     self._check_approval(current, revision)
-                if current == "vision-lock":
-                    # Re-entering an unchanged lock reuses its original native grant;
-                    # metadata/subordinate revisions are not newly approved revisions.
-                    grant = self._approval_credit(current, revision)
-                    self.connection.execute(
-                        "UPDATE meta SET vision_locked_revision=?", (grant["plan_revision"],)
-                    )
                 if current == "requirements":
                     self._check_coverage(spine, "test")
                 if current == "plan":
                     self._check_coverage(spine, "bead")
                     self._manifest(spine)
+                    from codex_harness.core.approvals import require_approval
+
+                    consent = require_approval(self, "B")
+                    statement, by = consent["words"], "user"
                 if to_phase == "publish":
+                    from codex_harness.core.approvals import require_approval
+
+                    require_approval(self, "B")
                     self._check_publish()
                     self._check_evidence(self._manifest(spine)["planRevision"])
                 if current == "publish" and not self.publication_current(
@@ -2579,9 +2466,8 @@ class PlanStore:
                 "plan-prospective-reason-required", "Record why no oracle is available"
             )
         with self._transaction():
-            from codex_harness.core.planner_confirmations import combined_credit
+            from codex_harness.core.approvals import require_approval
 
-            combined_credit(self, "publish")
             if self.phase() != "publish":
                 raise PlanStoreError(
                     "plan-publish-phase-required", "Enter publish before publishing"
@@ -2591,6 +2477,7 @@ class PlanStore:
             self._check_coverage(spine, "test")
             self._check_coverage(spine, "bead")
             manifest = self._manifest(spine)
+            require_approval(self, "B")
             wave_lock = self.wave_product_lock() if manifest.get("waveScope") else None
             revision = manifest["planRevision"]
             self._check_evidence(revision)
@@ -2640,9 +2527,6 @@ class PlanStore:
                 self.connection.execute("UPDATE meta SET published_revision=?", (revision,))
                 if row is not None:
                     self._event("publication-selected", {"plan_revision": revision, "by": by})
-            from codex_harness.core.planner_execution import bind_candidate_execution
-
-            bind_candidate_execution(self, manifest)
             self._export(snapshot, Path(export_dir))
         return revision
 
@@ -2825,8 +2709,9 @@ class PlanStore:
 
     def locked_acceptance_spine(self) -> Spine:
         meta = self._meta()
-        if not meta["locked_vision_json"] or meta["vision_lock_stale"]:
+        if not meta["locked_vision_json"]:
             raise PlanStoreError("acceptance-vision-unlocked", "Confirm the current locked vision")
+        self._check_approval("vision-lock", self._revision())
         vision = json.loads(meta["locked_vision_json"])
         data = self._data()
         data["nodes"] = [vision if node["kind"] == "vision" else node for node in data["nodes"]]
@@ -2917,7 +2802,7 @@ class PlanStore:
         max_total,
         timeout,
     ):
-        """Seal a complete execution-stage request and shared capacity before launch."""
+        """Prepare captured execution inputs; admission and usage occur only at real launch."""
         from codex_harness.core import acceptance_recovery as recovery
         from codex_harness.core import roundtable
 
@@ -2987,36 +2872,6 @@ class PlanStore:
             packet=packet,
             launch=recovery._launch_identity(launch, executable),
         )
-        root = roundtable._execution_directory(self, item_id)
-        # External files are not locked by SQLite; compare the complete projection
-        # again inside the writer, immediately before the reservation append.
-        with self._transaction():
-            if roundtable._execution_context(self, request) != context:
-                raise ValueError("execution-selection-raced-before-reservation")
-            matching = [
-                old
-                for _, old in roundtable._execution_events(self, "execution-assessment-reserved")
-                if old["request"] == request and old["context"] == context
-            ]
-            if matching:
-                # Duplicate caller delivery cannot launch a second child or
-                # abandon an uncertain first launch. A retry needs a new request.
-                return dict(matching[-1], reused=True)
-            totals = roundtable.review_totals(self, expected_manifest_revision)
-            used = next(
-                (
-                    row
-                    for row in totals
-                    if row["reviewer"] == reviewer["name"]
-                    and row["provider"] == reviewer["provider"]
-                ),
-                dict(round=0, total=0),
-            )
-            if used["round"] >= max_rounds or used["total"] >= max_total:
-                raise ValueError("execution-shared-review-budget-exhausted")
-            root.mkdir(parents=True, exist_ok=False)
-            recovery._write(root, "packet", packet.encode("utf-8"))
-            self._event("execution-assessment-reserved", header)
         return header
 
     def commit_execution_assessment(self, registration_id):
@@ -3519,7 +3374,7 @@ class PlanStore:
                 if index >= PHASES.index("vision-lock")
                 else None
             )
-            credit = self._approval_credit(approval_gate, revision) if approval_gate else None
+            credit = self._current_approval("A") if approval_gate else None
             approval = (
                 None
                 if not approval_gate

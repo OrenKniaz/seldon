@@ -22,6 +22,7 @@ from pathlib import Path
 
 from codex_harness.core import dispatch
 from codex_harness.core.graph import load_plan
+from codex_harness.core.intake import _model
 from codex_harness.core.managed_paths import directory, short
 from codex_harness.core.plan_store import open_plan_store
 from codex_harness.core.provider_launch import get_adapter
@@ -118,6 +119,7 @@ def _workers(manifest, workers):
         if worker["provider"] != worker["provider"].strip().lower():
             raise ValueError("worker-job-provider-must-use-canonical-name")
         get_adapter(worker["provider"])
+        _model(worker["model"])
         result[bead] = dict(worker)
     return [result[bead] for bead in sorted(result)]
 
@@ -144,7 +146,7 @@ def start_worker_job(
 ):
     """Admit once and return promptly; no mock, executable override or retry surface.
 
-    New admissions consume the existing bridge's exact native execution original.
+    New admissions check the current B subject against the actual execution scope.
     A local call ceiling is not verified subscription quota or human identity.
     """
     if type(max_parallel) is not int or max_parallel < 1:
@@ -173,14 +175,14 @@ def start_worker_job(
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
         return worker_job_status(store.workspace, expected_revision)
 
-    # A job that ended before any provider launched may be re-admitted under a
-    # fresh execution grant; the old namespace is kept beside it as evidence.
+    # An unlaunched job may be re-admitted within the current B limits;
+    # retain the old namespace as evidence.
     stranded = directory.is_dir() and _ended_before_launch(directory)
     if directory.is_dir() and not stranded:
         return reattach()
     from codex_harness.core.planner_execution import (
-        consume_execution,
-        consumed_execution_provenance,
+        admit_execution,
+        admitted_execution_provenance,
         execution_scope,
         require_execution,
     )
@@ -195,14 +197,7 @@ def start_worker_job(
         timeout=timeout,
         call_cap=call_cap,
     )
-    try:
-        require_execution(store, scope)  # Missing/forged grants refuse before any namespace.
-    except ValueError as error:
-        if str(error) != "worker-execution-grant-consumed" or not directory.is_dir():
-            raise
-        # Another starter consumed this grant after our initial absence check.
-        # Reuse only its actual namespace, with the ordinary original checks.
-        return reattach()
+    require_execution(store, scope)
     options = {
         "workers": selection,
         "maxParallel": max_parallel,
@@ -222,11 +217,13 @@ def start_worker_job(
         # wait for it or seize its directory and launch another child.
         return reattach()
     try:
-        execution_id = consume_execution(store, scope, expected_revision)
-        execution_provenance = consumed_execution_provenance(
+        execution_id = admit_execution(store, scope, expected_revision)
+        execution_provenance = admitted_execution_provenance(
             store, execution_id, scope, expected_revision
         )
         before = _files(template)
+        if before != scope["templateFiles"]:
+            raise ValueError("worker-job-template-changed-before-snapshot")
         plan = directory / "plan"
         plan.mkdir()
         shutil.copytree(template, plan / "template")
@@ -405,8 +402,8 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         )
         if _ended_before_launch(_directory(workspace, job_id)):
             result["reason"] = (
-                "Ended before any provider launched. Request a fresh worker execution "
-                "approval; harness_worker_start then re-admits this publication."
+                "Ended before any provider launched. Retry within the current B limits; "
+                "harness_worker_start re-admits this publication."
             )
     return result
 

@@ -3,6 +3,7 @@
 import builtins
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -11,7 +12,12 @@ from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import publication_evidence, source_only_confirmation
+from tests.python.core.planning_support import (
+    publication_evidence,
+    source_only_b,
+    source_only_confirmation,
+    source_only_expansion,
+)
 
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.plan_store import PHASES, PlanStore
@@ -332,10 +338,14 @@ def test_snapshot_canonical_readers_and_dispatcher_shape(tmp_path):
         bead = store.spine().node("A")
         bead["parents"].append("R6")
         store.upsert_node(bead)
+        source_only_expansion(store)
+        shutil.copytree(FIXTURE.parent / "template", workspace / "template")
         while store.phase() != "publish":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
                 source_only_confirmation(store, phase, statement="Confirmed")
+            if phase == "plan":
+                source_only_b(store)
             if phase == "roundtable":
                 publication_evidence(store)
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
@@ -407,7 +417,7 @@ def test_snapshot_canonical_readers_and_dispatcher_shape(tmp_path):
     ]
     assert plan["phases"][2]["label"] == "Vision Lock"
     history = {item["phase"]: item for item in plan["phaseHistory"]}
-    assert history["align"]["approvedBy"] == "mcp-client-elicitation"
+    assert history["align"]["approvedBy"] == "native-client-declared-user"
     assert history["align"]["isProxy"] is False
     assert history["align"]["passedAt"]
     assert history["align"]["evidence"] == "Confirmed"
@@ -512,10 +522,14 @@ def test_republished_revision_selects_canonical_current_run(tmp_path):
         bead = store.spine().node("A")
         bead["parents"].append("R6")
         store.upsert_node(bead)
+        source_only_expansion(store)
+        shutil.copytree(FIXTURE.parent / "template", workspace / "template")
         while store.phase() != "publish":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
                 source_only_confirmation(store, phase, statement="Confirmed")
+            if phase == "plan":
+                source_only_b(store)
             if phase == "roundtable":
                 publication_evidence(store)
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
@@ -523,9 +537,11 @@ def test_republished_revision_selects_canonical_current_run(tmp_path):
         revision_a = store.publish(by="operator", export_dir=workspace / "exports")
         original = store.spine().node("A")
         store.upsert_node({**original, "title": original["title"] + " revised"})
+        source_only_b(store)
         publication_evidence(store)
         revision_b = store.publish(by="operator", export_dir=workspace / "exports")
         store.upsert_node(original)
+        source_only_b(store)
         publication_evidence(store)
         assert store.publish(by="operator", export_dir=workspace / "exports") == revision_a
         assert store.status()["published_revision"] == revision_a
@@ -978,6 +994,7 @@ def test_canonical_acceptance_run_reaches_read_only_snapshot(tmp_path, subject):
             scope_in=[],
         )
         store.upsert_node(vision)
+        source_only_expansion(store)
         source_only_confirmation(store, "align", statement="Confirmed")
         store.advance("expand", by="planner")
         store.advance("vision-lock", by="planner")
@@ -1094,7 +1111,27 @@ def test_phase_history_proxy_and_empty_events(tmp_path):
         # Reconstruct a historical supplied-words row/event solely for projection.
         # It must remain attributable as originally recorded and earns no fresh credit.
         with store._transaction():
-            store._approve("align", "user-proxy", "Scope agreed by proxy")
+            store.connection.execute(
+                "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "historical",
+                    "align",
+                    store._revision(),
+                    "user-proxy",
+                    "Scope agreed by proxy",
+                    "2026-01-01T00:00:00Z",
+                ),
+            )
+            store._event(
+                "approved",
+                dict(
+                    id="historical",
+                    gate="align",
+                    plan_revision=store._revision(),
+                    by="user-proxy",
+                    statement="Scope agreed by proxy",
+                ),
+            )
             store.connection.execute("UPDATE meta SET phase='expand'")
             store._event(
                 "phase-advanced",

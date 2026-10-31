@@ -250,11 +250,12 @@ def test_recorded_decision_is_qualified_but_unrelated_dialog_is_not(snapshots):
 
 def test_empty_decisions_qualifies_same_revision_rendered_readiness_change(snapshots):
     """Catch stale empty-view readiness; previous tests changed decision items, not this text."""
-    from tests.python.core.planning_support import source_only_confirmation
+    from tests.python.core.planning_support import source_only_confirmation, source_only_expansion
 
     workspace, _ = snapshots
     with PlanStore(workspace) as store:
-        source_only_confirmation(store, "align", statement="Source-only empty-view fixture")
+        source_only_expansion(store)
+        source_only_confirmation(store, "align", statement="Approve")
         store.advance("expand", by="planner")
     baseline = status_api.snapshot(workspace=workspace)
     assert baseline["cockpit"]["answers"]["needsYou"] == []

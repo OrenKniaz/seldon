@@ -1,14 +1,13 @@
-"""Conservative local provider-attempt claims in the original publication job.
+"""One transactional delivery ledger for attempted or uncertain real starts.
 
-Create-once ordinal originals arbitrate participating concurrent callers. Claims
-precede possible launch and are never refunded, including uncertain failures.
+SQLite arbitrates participating concurrent callers. Claims precede possible
+launch and are never refunded, including uncertain failures.
 This is not provider quota verification, authentication or current liveness.
 """
 
 import hashlib
 import json
 import os
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -17,19 +16,10 @@ from codex_harness.core.record_io import open_record_read, read_record_json, wri
 DEFAULT_REVIEW_ROUNDS = 2
 
 
-@contextmanager
-def review_transaction(store):
-    from codex_harness.core.planner_confirmations import combined_credit
-
-    with store._transaction():
-        combined_credit(store, "review-budget")
-        yield
-
-
 def verify_job(directory, record=None):
     from codex_harness.core import planner_jobs as jobs
     from codex_harness.core.plan_store import open_plan_store_readonly
-    from codex_harness.core.planner_execution import consumed_execution, execution_scope
+    from codex_harness.core.planner_execution import admitted_execution
 
     if directory is None:
         raise ValueError("provider-call-owned-native-job-required")
@@ -48,15 +38,7 @@ def verify_job(directory, record=None):
     ):
         raise ValueError("provider-call-owned-controller-required")
     with open_plan_store_readonly(workspace) as store:
-        current = execution_scope(
-            store,
-            request["jobId"],
-            scope["workers"],
-            max_parallel=scope["maxParallel"],
-            timeout=scope["timeout"],
-            call_cap=scope["callCap"],
-        )
-        if current != scope or not consumed_execution(
+        if not admitted_execution(
             store, request.get("executionRequestId"), scope, request["jobId"]
         ):
             raise ValueError("provider-call-execution-binding-stale")
@@ -169,212 +151,189 @@ def claim_call(directory, record, attempt_dir, *, timeout=None):
         )
     ):
         raise ValueError("provider-call-run-binding-mismatch")
-    claims = jobs._inside(directory, directory / "provider-call-budget")
-    claims.mkdir(exist_ok=True)
-    # Atomic create-once collisions advance within the same approved finite
-    # range; no read-count/write race, refund, fresh-root reset or unlimited retry.
-    for ordinal in range(1, request["options"]["callCap"] + 1):
-        path = jobs._inside(directory, claims / f"{ordinal:08d}.json")
-        try:
-            write_record_json_once(
-                path,
-                {
-                    "requestDigest": request["requestDigest"],
-                    "ordinal": ordinal,
-                    "bead": record["bead"],
-                    "provider": record["provider"],
-                    "model": record["model"],
-                    "effort": record["effort"],
-                    "attemptDir": str(attempt_dir),
-                },
+    from codex_harness.core.plan_store import open_plan_store
+
+    with open_plan_store(directory.parent.parent.parent) as store:
+        with store._transaction():
+            from codex_harness.core.approvals import current, executable_candidate, require_approval
+
+            approved = current(store, "B")
+            scope = dict(request["executionScope"])
+            if approved:
+                scope["callCap"] = approved["subject"]["execution"]["callCap"]
+            manifest = read_record_json(directory / "plan/sample.json")
+            authority = require_approval(
+                store,
+                "B",
+                dict(
+                    execution=scope,
+                    candidate=executable_candidate(manifest, request["templateFiles"]),
+                ),
             )
-            return ordinal
-        except FileExistsError:
-            previous = read_record_json(path)
-            if (
-                previous.get("requestDigest") != request["requestDigest"]
-                or previous.get("ordinal") != ordinal
-            ):
-                raise ValueError("provider-call-claim-original-invalid") from None
-            continue
-    raise ValueError("provider-call-cap-exhausted")
+            return _reserve(store, "worker", authority["subject"]["execution"]["callCap"], record)
 
 
-def _review_digest(original):
-    return hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest()
+def usage(store, kind):
+    return store.connection.execute(
+        "SELECT count(*) FROM usage_ledger WHERE kind=?", (kind,)
+    ).fetchone()[0]
 
 
-def _planning_review_originals(store):
-    """Check retained originals against their admission-time budget in event order."""
-    root = store.path.parent / "planning-review-budget"
-    registrations = store.connection.execute(
-        "SELECT payload_json FROM events WHERE kind='planning-review-budget-registered' ORDER BY id"
-    ).fetchall()
-    claims = store.connection.execute(
-        "SELECT id, payload_json FROM events WHERE kind='planning-review-start-claimed' ORDER BY id"
-    ).fetchall()
-    amendments = store.connection.execute(
-        "SELECT id,payload_json FROM events WHERE kind='planning-review-budget-amended' ORDER BY id"
-    ).fetchall()
-    if not (registrations or claims or amendments or root.exists()):
-        return None, []
-    try:
-        if len(registrations) != 1 or root.is_symlink():
-            raise ValueError("registration required")
-        original = json.loads(registrations[0][0])
-        if (
-            not isinstance(original, dict)
-            or set(original) != {"schema", "workspace", "campaign", "maxStarts"}
-            or original["schema"] != "seldon/planning-review-budget-v1"
-            or original["workspace"] != str(store.workspace)
-            or not isinstance(original["campaign"], str)
-            or not original["campaign"].strip()
-            or type(original["maxStarts"]) is not int
-            or not 1 <= original["maxStarts"] <= 10
-            or read_record_json(root / "registration.json") != original
-        ):
-            raise ValueError("registration changed")
-        digests = [(0, _review_digest(original))]
-        for event_id, payload in amendments:
-            amendment = json.loads(payload)
-            if amendment["previousDigest"] != _review_digest(original):
-                raise ValueError("amendment changed")
-            original = {**original, "maxStarts": amendment["maxStarts"]}
-            digests.append((event_id, _review_digest(original)))
-        records = [json.loads(row[1]) for row in claims]
-        if len(records) > original["maxStarts"]:
-            raise ValueError("claims exceed original cap")
-        expected = {f"{ordinal:08d}.json" for ordinal in range(1, len(records) + 1)}
-        directory = root / "claims"
-        if directory.is_symlink() or {path.name for path in directory.iterdir()} != expected:
-            raise ValueError("claim originals missing or orphaned")
-        for ordinal, record in enumerate(records, 1):
-            if (
-                not isinstance(record, dict)
-                or set(record) != {"registrationDigest", "ordinal", "reviewer", "pid"}
-                or record["registrationDigest"]
-                != next(
-                    digest for event, digest in reversed(digests) if event < claims[ordinal - 1][0]
-                )
-                or type(record["ordinal"]) is not int
-                or record["ordinal"] != ordinal
-                or not isinstance(record["reviewer"], dict)
-                or type(record["pid"]) is not int
-                or read_record_json(directory / f"{ordinal:08d}.json") != record
-            ):
-                raise ValueError("claim original changed")
-        return original, records
-    except (ValueError, OSError, KeyError, TypeError) as error:
-        raise ValueError("planning-review-budget-invalid-original") from error
+def _reserve(store, kind, total, payload):
+    from uuid import uuid4
+
+    if not store.connection.in_transaction:
+        raise ValueError("usage-writer-transaction-required")
+    used = usage(store, kind)
+    if used >= total:
+        from codex_harness.core import approvals
+        from codex_harness.core.plan_store import PlanStoreError
+
+        previous = approvals.current(store, "B")["subject"]
+        action = {
+            "reviewAllowance": used + max(1, len(previous["reviewers"])),
+            "allowanceReason": "Additional review round after the cumulative allowance was spent",
+        }
+        if kind == "worker":
+            action = {
+                "execution": {
+                    **previous["execution"],
+                    "callCap": used + len(previous["execution"]["workers"]),
+                }
+            }
+        proposed = approvals.proposal(store, "B", action)
+        error = PlanStoreError(
+            "plan-b-consent-required", f"{kind}-call-cap-exhausted: " + proposed["card"]
+        )
+        error.approval = proposed
+        raise error
+    store.connection.execute(
+        "INSERT INTO usage_ledger (kind, source, payload_json) VALUES (?, ?, ?)",
+        (kind, uuid4().hex, json.dumps(payload, sort_keys=True)),
+    )
+    return used + 1
 
 
 def planning_review_budget(store):
-    """Read the configured review ceiling; no quota or host-call claim."""
-    original, claims = _planning_review_originals(store)
-    return None if original is None else {**original, "spentAdmissions": len(claims)}
+    from codex_harness.core.approvals import current
 
-
-def register_planning_review_budget(store, campaign, max_starts, *, amendment_request_id=None):
-    """Register or consent to a higher shared cap; never reset or refund claims."""
-    if (
-        not isinstance(campaign, str)
-        or not campaign.strip()
-        or len(campaign) > 128
-        or type(max_starts) is not int
-        or not 1 <= max_starts <= 10
-    ):
-        raise ValueError("planning-review-budget-invalid-scope")
-    proposed = dict(
-        schema="seldon/planning-review-budget-v1",
-        workspace=str(store.workspace),
-        campaign=campaign,
-        maxStarts=max_starts,
+    record = current(store, "B")
+    return dict(
+        maxStarts=record["subject"]["reviewAllowance"] if record else None,
+        spentAdmissions=usage(store, "review"),
     )
-    root = store.path.parent / "planning-review-budget"
-    with store._transaction():
-        original, claims = _planning_review_originals(store)
-        if original is not None:
-            if amendment_request_id is not None:
-                from codex_harness.core import acceptance_recovery
-                from codex_harness.core.planner_confirmations import combined_credit
-                from codex_harness.core.roundtable import _execution_events as assessments
-
-                authority = combined_credit(store, "review-budget")
-                scope = authority["scopes"]["review-budget"] if authority else {}
-                if (
-                    not authority
-                    or authority["request_id"] != amendment_request_id
-                    or authority.get("reviewBudgetPreviousDigest") != _review_digest(original)
-                    or {k: v for k, v in scope.items() if k != "reviewers"} != proposed
-                    or campaign != original["campaign"]
-                    or not scope.get("reviewers")
-                    or max_starts <= original["maxStarts"]
-                    or any(not a["admitted"] for a in acceptance_recovery.attempt_summaries(store))
-                    or len(assessments(store, "execution-assessment-reserved"))
-                    != len(assessments(store, "execution-assessment-consumed"))
-                    or (
-                        store.connection.execute(
-                            "SELECT 1 FROM sqlite_master WHERE name='review_attempts'"
-                        ).fetchone()
-                        and store.connection.execute(
-                            "SELECT 1 FROM review_attempts "
-                            "WHERE id NOT IN (SELECT id FROM review_runs)"
-                        ).fetchone()
-                    )
-                ):
-                    raise ValueError("planning-review-budget-amendment-stale-or-inflight")
-                amendment = dict(maxStarts=max_starts, requestId=amendment_request_id)
-                amendment["previousDigest"] = _review_digest(original)
-                store._event("planning-review-budget-amended", amendment)
-            elif proposed != original:
-                raise ValueError("planning-review-budget-immutable-scope")
-        else:
-            if amendment_request_id is not None:
-                raise ValueError("planning-review-budget-registration-required")
-            root.mkdir()
-            (root / "claims").mkdir()
-            write_record_json_once(root / "registration.json", proposed)
-            store._event("planning-review-budget-registered", proposed)
-    return {**proposed, "spentAdmissions": len(claims)}
 
 
-def claim_planning_review_start(store, reviewer):
-    """Reserve one durable review admission before a possible real child start.
+def claim_planning_review_start(store, reviewer, *, limits=None):
+    """Reserve at the real launch boundary. Refusal rolls back every admission row."""
+    from contextlib import nullcontext
 
-    Existing SQLite writer reservation serializes participating processes. File
-    originals precede their events: interruption leaves an orphan and holds,
-    never a refundable launch or fresh allowance. A spent admission is not proof
-    the process started. Worker job guards stay separate.
-    """
-    with store._transaction():
-        from codex_harness.core.planner_confirmations import _b_required, combined_credit
+    from codex_harness.core.approvals import require_approval
 
-        authority = combined_credit(store, "review-budget")
-        original, claims = _planning_review_originals(store)
-        if original is None:
-            return None
-        if authority:
-            scope = authority["scopes"]["review-budget"]
-            if {k: v for k, v in scope.items() if k != "reviewers"} != original:
-                raise _b_required("planning-review-budget-consent-required")
-            if {
-                k: reviewer.get(k) for k in ("name", "provider", "model", "effort")
-            } not in scope.get("reviewers", []):
-                raise _b_required("planning-reviewer-consent-required")
-        if len(claims) >= original["maxStarts"]:
-            if authority:
-                raise _b_required("planning-review-start-cap-exhausted; stop, no ceiling reset")
-            raise ValueError("planning-review-start-cap-exhausted")
-        ordinal = len(claims) + 1
-        record = dict(
-            registrationDigest=_review_digest(original),
-            ordinal=ordinal,
-            reviewer=reviewer,
-            pid=os.getpid(),
+    with nullcontext() if store.connection.in_transaction else store._transaction():
+        record = require_approval(store, "B", dict(reviewer=reviewer, reviewLimits=limits or {}))
+        return _reserve(store, "review", record["subject"]["reviewAllowance"], reviewer)
+
+
+def review_capacity(store, reviewer, revision, max_rounds, max_total):
+    from codex_harness.core import roundtable
+    from codex_harness.core.plan_store import PlanStoreError
+
+    totals = next(
+        (
+            t
+            for t in roundtable.review_totals(store, revision)
+            if t["reviewer"] == reviewer["name"] and t["provider"] == reviewer["provider"]
+        ),
+        dict(round=0, total=0),
+    )
+    if max_total is not None and totals["total"] >= max_total:
+        raise PlanStoreError(
+            "roundtable-total-budget-exhausted",
+            roundtable._total_exhaustion_advice(
+                store, reviewer, revision, totals["total"], max_total
+            ),
         )
-        write_record_json_once(
-            store.path.parent / "planning-review-budget" / "claims" / f"{ordinal:08d}.json",
-            record,
+    if max_rounds is not None and totals["round"] >= max_rounds:
+        raise PlanStoreError(
+            "roundtable-budget-exhausted",
+            "Revise the plan or raise the round limit through B",
         )
-        store._event("planning-review-start-claimed", record)
-    return ordinal
+    return totals
+
+
+def admit_review(
+    store, reviewer, run_id, revision, max_rounds, max_total, timeout, *, mocked=False
+):
+    from codex_harness.core import roundtable
+    from codex_harness.core.plan_store import PlanStoreError
+
+    with store._transaction():
+        if store.manifest_revision() != revision:
+            raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
+        if not mocked:
+            # Usage and the attempt reservation commit together, immediately
+            # before the child call. Any refusal rolls both back.
+            claim_planning_review_start(
+                store,
+                reviewer,
+                limits=dict(maxRounds=max_rounds, maxTotal=max_total, timeout=timeout),
+            )
+        roundtable._table(store)
+        store.connection.execute(
+            "CREATE TABLE IF NOT EXISTS review_attempts (id TEXT PRIMARY KEY, "
+            "plan_revision TEXT, reviewer TEXT, provider TEXT)"
+        )
+        exists = store.connection.execute(
+            "SELECT 1 FROM review_attempts WHERE id=?", (run_id,)
+        ).fetchone()
+        totals = review_capacity(
+            store, reviewer, revision, None if exists else max_rounds, None if exists else max_total
+        )
+        if not exists:
+            store.connection.execute(
+                "INSERT INTO review_attempts VALUES (?, ?, ?, ?)",
+                (run_id, revision, reviewer["name"], reviewer["provider"]),
+            )
+            return totals["round"] + 1, totals["total"] + 1
+        return totals["round"], totals["total"]
+
+
+def admit_execution_assessment(store, header):
+    from codex_harness.core import acceptance_recovery as recovery
+    from codex_harness.core import roundtable
+
+    request, context = header["request"], header["context"]
+    with store._transaction():
+        if roundtable._execution_context(store, request) != context:
+            raise ValueError("execution-selection-raced-before-reservation")
+        if any(
+            old["request"] == request and old["context"] == context
+            for _, old in roundtable._execution_events(store, "execution-assessment-reserved")
+        ):
+            return False
+        used = next(
+            (
+                row
+                for row in roundtable.review_totals(store, request["expected_manifest_revision"])
+                if row["reviewer"] == request["reviewer"]["name"]
+                and row["provider"] == request["reviewer"]["provider"]
+            ),
+            dict(round=0, total=0),
+        )
+        if used["round"] >= request["max_rounds"] or used["total"] >= request["max_total"]:
+            raise ValueError("execution-shared-review-budget-exhausted")
+        claim_planning_review_start(
+            store,
+            request["reviewer"],
+            limits=dict(
+                maxRounds=request["max_rounds"],
+                maxTotal=request["max_total"],
+                timeout=request["timeout"],
+            ),
+        )
+        root = roundtable._execution_directory(store, header["registrationId"])
+        root.mkdir(parents=True, exist_ok=False)
+        recovery._write(root, "packet", header["packet"].encode("utf-8"))
+        store._event("execution-assessment-reserved", header)
+    return True

@@ -5,7 +5,9 @@ import shutil
 
 import pytest
 from tests.python.core.planning_support import (
+    source_only_b,
     source_only_confirmation,
+    source_only_expansion,
     source_only_publication,
     source_only_vision_lock,
 )
@@ -64,6 +66,7 @@ def publish_local_fixture(store, root):
         )
     )
     store.upsert_node(node("T1", "test", ["A"], module="test_value.py", level="e2e"))
+    source_only_expansion(store)
     template = store.workspace / "template"
     (template / "tests").mkdir(parents=True)
     (template / "value.py").write_text("def value(n): return None\n", encoding="utf-8")
@@ -75,6 +78,8 @@ def publish_local_fixture(store, root):
     implementation = root / "local-implementation-fixture"
     implementation.mkdir()
     (implementation / "value.py").write_text("def value(n): return n + 1\n", encoding="utf-8")
+    source_only_vision_lock(store)
+    source_only_b(store)
     manifest = store.compile_template(template)
     audit = audit_revised_tests(
         repo=store.workspace,
@@ -101,7 +106,9 @@ def publish_local_fixture(store, root):
         while store.phase() != "publish":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                source_only_confirmation(store, phase, statement="Local fixture confirmation")
+                source_only_confirmation(store, phase, statement="Approve")
+            if phase == "plan":
+                source_only_b(store)
             store.advance(PHASES[PHASES.index(phase) + 1], by="planner")
         return store.publish(by="planner", export_dir=store.workspace / "plan")
 
@@ -201,7 +208,8 @@ def recorded_review_snapshots(tmp_path):
     workspace.mkdir()
     with PlanStore(workspace) as store:
         store.import_spine(FIXTURE)
-        source_only_confirmation(store, "align", statement="Source-only confirmation")
+        source_only_expansion(store)
+        source_only_confirmation(store, "align", statement="Approve")
         store.advance("expand", by="planner")
         reviewers = [
             dict(name="Review Alpha", provider="codex", model="requested-alpha"),
@@ -419,6 +427,7 @@ def confirmation_snapshots(tmp_path):
                 },
             )
         )
+        source_only_expansion(store)
         before = snapshot(workspace=workspace)
         outbound = begin_native(server)
         request_id = server._pending_confirmation["request"]["request_id"]
@@ -445,7 +454,7 @@ def confirmation_snapshots(tmp_path):
         vision["title"] = "Changed understanding"
         store.upsert_node(vision)
         stale = snapshot(workspace=workspace)
-        source_only_confirmation(store, "align", statement="Explicit simulated later confirmation")
+        source_only_confirmation(store, "align", statement="Approve")
         store.advance("expand", by="planner")
         no_prerequisite = snapshot(workspace=workspace)
         return dict(
@@ -476,12 +485,18 @@ def test_existing_approval_item_enriches_only_exact_recorded_understanding(tmp_p
         "Vision": "Track habits locally",
         "Users": "- One local user",
         "First moment": "Check off today's habit",
+        "Quality": "Retain every cent",
+        "Done": "Shares add up",
     }
     assert "never-export-this" not in json.dumps(understanding)
     assert samples["recorded"]["plan"]["approval"]["granted"] is False
-    for state in ("before", "cancelled", "stale"):
+    for state in ("before", "stale"):
         needs = samples[state]["cockpit"]["answers"]["needsYou"]
         assert len(needs) == 1 and not needs[0].get("recordedUnderstanding")
+    # Native cancellation offers a fresh complete question, never approval.
+    cancelled = samples["cancelled"]
+    assert cancelled["plan"]["approval"]["granted"] is False
+    assert cancelled["cockpit"]["answers"]["needsYou"][0]["recordedUnderstanding"] == understanding
     assert samples["no_prerequisite"]["cockpit"]["answers"]["needsYou"] == []
 
 
@@ -576,7 +591,7 @@ def scenario_store(tmp_path):
                 nodeIds=["X2"],
             )
         )
-        source_only_vision_lock(store, statement="Fixture records this vision")
+        source_only_vision_lock(store, statement="Approve")
         store.save_acceptance_scenarios(derive_scenarios(store.locked_acceptance_spine()))
         yield store, repo
 
@@ -683,7 +698,8 @@ def test_recorded_acceptance_and_no_decisions_do_not_become_verified_or_ready(
     with PlanStore(tmp_path) as store:
         store.upsert_node(node("V1", "vision", []))
         store.upsert_node(node("F1", "feature", ["V1"]))
-        source_only_confirmation(store, "align", statement="Recorded fixture words")
+        source_only_expansion(store)
+        source_only_confirmation(store, "align", statement="Approve")
         store.advance("expand", by="planner")
     canonical_plan = status_api._plan
     recorded = dict(

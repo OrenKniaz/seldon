@@ -9,7 +9,12 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.python.core.planning_support import source_only_confirmation, source_only_publication
+from tests.python.core.planning_support import (
+    source_only_b,
+    source_only_confirmation,
+    source_only_expansion,
+    source_only_publication,
+)
 
 from codex_harness.core import dispatch, test_audit
 from codex_harness.core.acceptance import derive_scenarios, run_scenarios
@@ -1029,13 +1034,19 @@ def test_prospective_publication_cli_mcp_status_and_oracle_upgrade(prospective, 
     save_spine(prospective["spine"], source)
     with PlanStore(tmp_path) as store:
         store.import_spine(source)
+        source_only_expansion(store)
         manifest = store.compile_template(prospective["template"])
         prospective["manifest"] = manifest
         while store.phase() != "roundtable":
             phase = store.phase()
             if phase in ("align", "vision-lock"):
-                source_only_confirmation(store, phase, statement="Test scope confirmed")
+                source_only_confirmation(store, phase, statement="Approve")
+            if phase == "plan":
+                source_only_b(store)
             store.advance(PHASES[PHASES.index(phase) + 1], by="test")
+        manifest = store._manifest(store.spine())
+        prospective["manifest"] = manifest
+        prospective["spine"] = store.spine()
         result = subprocess.run(
             [
                 sys.executable,

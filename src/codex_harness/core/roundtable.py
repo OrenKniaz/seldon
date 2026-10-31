@@ -1167,10 +1167,11 @@ def _review_shard(
         directory = TemporaryDirectory(prefix="harness-roundtable-")
         if before_launch is not None or runner is None:
             checking_launch = True
-            if before_launch is not None:
-                before_launch()
-            if runner is None:
-                review_budget.claim_planning_review_start(store, reviewer)
+            reserved = before_launch is not None and before_launch() is True
+            if runner is None and not reserved:
+                review_budget.claim_planning_review_start(
+                    store, reviewer, limits={"timeout": timeout}
+                )
             checking_launch = False
         attempted = True
         response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
@@ -2038,15 +2039,18 @@ def assess_execution_findings(store, **request):
         if _execution_context(store, request) != header["context"]:
             raise ValueError("execution-prelaunch-selection-changed")
         with TemporaryDirectory(prefix="harness-execution-review-") as cwd:
-            review_budget.claim_planning_review_start(store, reviewer)
+            if not review_budget.admit_execution_assessment(store, header):
+                return store.execution_assessment_state()
             attempted = True
             response = _run(launch, Path(cwd), request["timeout"], raw=True)
             # Preserve the actual return before temporary-directory cleanup.
             _execution_capture(store, header, launch, executable, response)
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
-        if attempted and not _execution_events(
-            store, "execution-assessment-captured", header["registrationId"]
-        ):
+        if not attempted:
+            return dict(
+                members=[], fullVisionHeld=True, holdReasons=[str(error)], closureEligible=False
+            )
+        if not _execution_events(store, "execution-assessment-captured", header["registrationId"]):
             output, stderr = getattr(error, "output", None), getattr(error, "stderr", None)
             try:
                 _execution_capture(
@@ -2132,82 +2136,40 @@ def run_roundtable(
         )
         for provider in dict.fromkeys(item["provider"] for item in selected)
     }
-    # Reserve attempts before launching so concurrent calls cannot exceed the budget.
-    with review_budget.review_transaction(store):
-        if store._revision() != spine.plan_revision() or store.manifest_revision() != revision:
-            raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
-        _table(store)
-        store.connection.execute(
-            "CREATE TABLE IF NOT EXISTS review_attempts (id TEXT PRIMARY KEY, "
-            "plan_revision TEXT, reviewer TEXT, provider TEXT)"
-        )
-        for reviewer in selected:
-            attempts = store.connection.execute(
-                "SELECT count(*) FROM review_attempts "
-                "WHERE plan_revision=? AND reviewer=? AND provider=?",
-                (revision, reviewer["name"], reviewer["provider"]),
-            ).fetchone()[0]
-            # Existing replay runs predate reservations, and still consume rounds.
-            legacy = store.connection.execute(
-                "SELECT count(*) FROM review_runs "
-                "WHERE plan_revision=? AND reviewer=? AND provider=? "
-                "AND id NOT IN (SELECT id FROM review_attempts)",
-                (revision, reviewer["name"], reviewer["provider"]),
-            ).fetchone()[0]
-            totals = review_totals(store, revision)
-            total = next(
-                (
-                    item["total"]
-                    for item in totals
-                    if item["reviewer"] == reviewer["name"]
-                    and item["provider"] == reviewer["provider"]
-                ),
-                0,
-            )
-            if max_total is not None and total >= max_total:
-                raise PlanStoreError(
-                    "roundtable-total-budget-exhausted",
-                    _total_exhaustion_advice(store, reviewer, revision, total, max_total),
-                )
-            # Execution-stage reservations share this exact tuple/revision pool;
-            # they never become ordinary review_attempts or review success.
-            used = next(
-                (
-                    item["round"]
-                    for item in totals
-                    if item["reviewer"] == reviewer["name"]
-                    and item["provider"] == reviewer["provider"]
-                ),
-                attempts + legacy,
-            )
-            if used >= max_rounds:
-                raise PlanStoreError(
-                    "roundtable-budget-exhausted",
-                    f"{reviewer['name']} used {used}/{max_rounds} rounds for {revision}; "
-                    "revise the plan or explicitly raise --max-rounds",
-                )
-            reservations[(reviewer["name"], reviewer["provider"])] = (
-                uuid4().hex,
-                used + 1,
-                total + 1,
-            )
-        result.update(coverage(selected, executable_for=executable_for))
-        for reviewer in selected:
-            store.connection.execute(
-                "INSERT INTO review_attempts VALUES (?, ?, ?, ?)",
-                (
-                    reservations[(reviewer["name"], reviewer["provider"])][0],
-                    revision,
-                    reviewer["name"],
-                    reviewer["provider"],
+    from codex_harness.core.approvals import require_approval
+
+    for reviewer in selected:
+        review_budget.review_capacity(store, reviewer, revision, max_rounds, max_total)
+        if runner is None:
+            require_approval(
+                store,
+                "B",
+                dict(
+                    reviewer=reviewer,
+                    reviewLimits=dict(maxRounds=max_rounds, maxTotal=max_total, timeout=timeout),
                 ),
             )
+    result.update(coverage(selected, executable_for=executable_for))
+    for reviewer in selected:
+        reservations[(reviewer["name"], reviewer["provider"])] = uuid4().hex
     for reviewer in selected:
         started_at = _now()
         record = {**reviewer, "exitCode": 0, "findings": 0, "invalid": 0, "rejected": []}
-        run_id, record["round"], record["total"] = reservations[
-            (reviewer["name"], reviewer["provider"])
-        ]
+        run_id = reservations[(reviewer["name"], reviewer["provider"])]
+
+        def admit(reviewer=reviewer, record=record, run_id=run_id):
+            record["round"], record["total"] = review_budget.admit_review(
+                store,
+                reviewer,
+                run_id,
+                revision,
+                max_rounds,
+                max_total,
+                timeout,
+                mocked=runner is not None,
+            )
+            return True
+
         result["reviewers"].append(record)
         provider = reviewer["provider"]
         merged = []
@@ -2222,6 +2184,7 @@ def run_roundtable(
             token_budget=(token_budgets or {}).get(provider),
             report=report,
             shards=dossiers[provider],
+            before_launch=admit,
         ):
             if shard_record["invalid"] and not record["rejected"]:
                 record["exitCode"] = shard_record["exitCode"]

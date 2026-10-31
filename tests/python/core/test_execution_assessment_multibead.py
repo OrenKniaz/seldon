@@ -27,7 +27,7 @@ def test_earlier_unchanged_bead_can_prepare_assessment_after_later_integration(
     )
     try:
         job_id = store._meta()["published_revision"]
-        job = tool("harness_worker_status", {"job_id": job_id})
+        job = tool("harness_worker_status", {"job_id": job_id, "include_detail": True})
         run_path = Path(job["run"]["recordPath"])
         run = json.loads(run_path.read_text(encoding="utf-8"))
         original_a = run["beads"]["A"]["integrated"]["integrationCommit"]
@@ -111,7 +111,7 @@ def test_current_inputs_lineage_and_receipts_must_remain_proven(tmp_path, monkey
     )
     try:
         job_id = store._meta()["published_revision"]
-        job = tool("harness_worker_status", {"job_id": job_id})
+        job = tool("harness_worker_status", {"job_id": job_id, "include_detail": True})
         run_path = Path(job["run"]["recordPath"])
         run = json.loads(run_path.read_text(encoding="utf-8"))
         canonical_head = _git(repo, "rev-parse", "HEAD")

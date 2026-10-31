@@ -505,8 +505,6 @@ def validate_selection(
     reviewers = _list(selected["reviewers"], "selection.reviewers", nonempty=True)
     names, providers, models = set(), set(), set()
     unmet, independence = [], []
-    if selected["confirmation"] is None:
-        unmet.append("reviewer-confirmation-required: proposal is unconfirmed")
     for reviewer in reviewers:
         _object(reviewer, "name provider choiceId model effort", "reviewer")
         name = _text(reviewer["name"], "reviewer.name")

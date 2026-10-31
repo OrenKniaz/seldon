@@ -121,7 +121,7 @@ def test_concurrent_start_after_grant_consumption_reattaches_original(
     winner_consumed, release_winner = threading.Event(), threading.Event()
     role = threading.local()
     require = planner_execution.require_execution
-    consume = planner_execution.consume_execution
+    consume = planner_execution.admit_execution
 
     def interleaved_require(canonical, scope):
         if role.name == "delayed":
@@ -144,7 +144,7 @@ def test_concurrent_start_after_grant_consumption_reattaches_original(
         return _thread_start(store.workspace, store.revision, workers)
 
     monkeypatch.setattr(planner_execution, "require_execution", interleaved_require)
-    monkeypatch.setattr(planner_execution, "consume_execution", observed_consume)
+    monkeypatch.setattr(planner_execution, "admit_execution", observed_consume)
     directory = jobs._directory(store.workspace, store.revision)
     with ThreadPoolExecutor(max_workers=2) as executor:
         delayed = executor.submit(start, "delayed")
@@ -175,7 +175,7 @@ def test_concurrent_start_after_grant_consumption_reattaches_original(
         admitted = winner.result(timeout=10)
     assert len(launches) == 1
     assert admitted == jobs.worker_job_status(store.workspace, store.revision)
-    consumed = planner_execution._records(store, planner_execution.CONSUMED)
+    consumed = planner_execution.approvals.records(store, planner_execution.ADMITTED)
     assert len(consumed) == 1
     assert consumed[0]["jobId"] == store.revision
 
@@ -487,9 +487,10 @@ def test_worker_status_rejects_unbounded_wait_at_public_boundary(fixture, wait_s
 
 
 @pytest.mark.parametrize(
-    "invalid", ["duplicate", "missing", "unsupported", "empty", "noncanonical"]
+    "invalid", ["duplicate", "missing", "unsupported", "empty", "noncanonical", "unresolved-model"]
 )
 def test_worker_selection_requires_explicit_supported_tuple(fixture, invalid):
+    """Reject unresolved model aliases; other cases only check tuple shape/provider names."""
     store, workers, launches = fixture
     if invalid == "duplicate":
         workers[-1] = workers[0]
@@ -499,16 +500,23 @@ def test_worker_selection_requires_explicit_supported_tuple(fixture, invalid):
         workers[0]["provider"] = "invented-provider"
     elif invalid == "noncanonical":
         workers[0]["provider"] = " Codex "
+    elif invalid == "unresolved-model":
+        workers[0]["model"] = "latest"
     else:
         workers[0]["effort"] = ""
     with pytest.raises(
-        ValueError, match="provider-must-use-canonical-name" if invalid == "noncanonical" else None
+        ValueError,
+        match="provider-must-use-canonical-name"
+        if invalid == "noncanonical"
+        else "reviewer-model-unresolved"
+        if invalid == "unresolved-model"
+        else None,
     ):
         jobs.start_worker_job(store, store.revision, workers, call_cap=16)
     assert launches == []
 
 
-def test_job_that_ended_before_any_provider_launch_readmits_on_fresh_grant(fixture, monkeypatch):
+def test_unlaunched_job_readmits_with_current_b_and_retains_old_attempt(fixture, monkeypatch):
     """Protect stranded publications; catches a Seldon prelaunch bug burning the only job."""
     store, workers, launches = fixture
     directory = Path(admit(fixture)["evidenceDir"])
@@ -528,11 +536,8 @@ def test_job_that_ended_before_any_provider_launch_readmits_on_fresh_grant(fixtu
     monkeypatch.setattr(jobs.dispatch, "run_plan", prelaunch_failure)
     jobs.execute_worker_job(store.workspace, store.revision)
     status = jobs.worker_job_status(store.workspace, store.revision)
-    assert "fresh worker execution approval" in status["reason"]
-    # The consumed grant alone only reattaches; no relaunch without a new approval.
-    assert jobs.start_worker_job(store, store.revision, workers, call_cap=16) == status
-    assert len(launches) == 1
-    source_grant(store, store.revision, workers)
+    assert "current B limits" in status["reason"]
+    # No provider start spent usage; ordinary recovery reuses unchanged consent.
     readmitted = jobs.start_worker_job(store, store.revision, workers, call_cap=16)
     assert readmitted["status"] == "unknown" and len(launches) == 2
     assert (directory.parent / f"{directory.name}.prelaunch-failed-1/terminal.json").is_file()

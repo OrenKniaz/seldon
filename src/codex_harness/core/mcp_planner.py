@@ -521,7 +521,10 @@ TOOLS = [
         "Semantic-v1 defaults to chat; interaction=native requires the user's explicit request "
         "and negotiated elicitation. Quoted tool arguments cannot approve a native gate.",
         {
-            "gate": {"type": "string", "enum": ["align", "vision-lock"]},
+            "gate": {
+                "type": "string",
+                "enum": ["align", "vision-lock", "align+vision-lock", "plan-execution"],
+            },
             "interaction": {"type": "string", "enum": ["chat", "native"]},
         },
         ["gate"],
@@ -1126,7 +1129,7 @@ class PlannerServer:
         pending = self._pending_confirmation or {}
         prepared = pending.get("request", {})
         status = (
-            {"phase": prepared["gate"], "plan_revision": prepared.get("plan_revision", "unknown")}
+            {"phase": prepared["phase"], "plan_revision": prepared.get("plan_revision", "unknown")}
             if response.get("method") == "elicitation/create" and "gate" in prepared
             else None
         )
@@ -1890,14 +1893,10 @@ class PlannerServer:
                 "harness_plan_status shows the current gate."
             )
         if status.get("planMode") == "semantic-v1":
-            from codex_harness.core.planner_confirmations import approval_credit
-
             hint = views.semantic_consent_next(
                 status,
                 self.result_data or {},
-                plan_authorized=bool(
-                    approval_credit(self.store, "plan-lock", status["plan_revision"])
-                ),
+                plan_authorized=bool(self.store._current_approval("B")),
             )
             if hint:
                 return hint
@@ -1979,24 +1978,7 @@ class PlannerServer:
 
     def _dispatch(self, name: str, args: dict, *, schema_tools=None) -> str:
         if name == "harness_prepare_chat_confirmation":
-            from codex_harness.core.planner_execution import _control_digest
-
-            store = self._store()
-            proposal = {k: v for k, v in args.items() if k != "include_detail"}
-            with store._transaction():
-                proposal["_event_id"] = store.connection.execute(
-                    "SELECT MAX(id) FROM events"
-                ).fetchone()[0]
-                cached = self._chat_prepared
-                reuse = cached and cached[:2] == (proposal, _control_digest(store, 0))
-            self.result_data = cached[2] if reuse else self._prepare_chat_question(args)
-            with store._transaction():
-                latest = store.connection.execute(
-                    "SELECT id,payload_json FROM events ORDER BY id DESC LIMIT 1"
-                ).fetchone()
-                if json.loads(latest[1]).get("request_id") == self.result_data["request_id"]:
-                    proposal["_event_id"] = latest[0]
-                    self._chat_prepared = proposal, _control_digest(store, 0), self.result_data
+            self.result_data = self._prepare_chat_question(args)
             return self.result_data["card"]
         if name == "harness_record_chat_confirmation":
             self._chat_prepared = None
@@ -2783,7 +2765,6 @@ class PlannerServer:
 
     def _begin_execution(self, request_id, name, arguments):
         from codex_harness.core.plan_store import open_plan_store_readonly
-        from codex_harness.core.planner_confirmations import combined_credit
         from codex_harness.core.planner_execution import (
             execution_scope,
             prepare_execution,
@@ -2797,9 +2778,6 @@ class PlannerServer:
         snapshot = resume_plan(self.workspace, expected_revision=arguments.get("expected_revision"))
         if snapshot["state"] == "reattached":
             return {"jsonrpc": "2.0", "id": request_id, "result": self.call_tool(name, arguments)}
-        if snapshot.get("canonicalStatus"):
-            with open_plan_store_readonly(self.workspace) as readonly:
-                combined_credit(readonly, "execution")
         if snapshot["reasonCode"] != "native-execution-confirmation-required":
             return {
                 "jsonrpc": "2.0",
@@ -2820,8 +2798,8 @@ class PlannerServer:
         scope = execution_scope(store, **proposal)
         try:
             require_execution(store, scope)
-        except ValueError as error:
-            if str(error) != "worker-execution-grant-required":
+        except PlanStoreError as error:
+            if error.code != "plan-b-consent-required":
                 raise
         else:
             return {"jsonrpc": "2.0", "id": request_id, "result": self.call_tool(name, arguments)}
@@ -2985,34 +2963,12 @@ class PlannerServer:
 
     def _begin_confirmation(self, request_id, arguments):
         from codex_harness.core.planner_confirmation_cards import compact_card
-        from codex_harness.core.planner_confirmations import approval_credit, prepare_confirmation
+        from codex_harness.core.planner_confirmations import prepare_confirmation
 
         tool = next(tool for tool in TOOLS if tool["name"] == "harness_record_confirmation")
         _validate(arguments, tool["inputSchema"])
         store = self._store()
         gate, revision = arguments["gate"], store._revision()
-        credit = approval_credit(store, gate, revision)
-        if (
-            credit
-            and credit["by"] == "chat-confirmation"
-            and (
-                store.phase() == gate
-                or gate == "vision-lock"
-                and PHASES.index(store.phase()) > PHASES.index("vision-lock")
-            )
-        ):
-            outcome = dict(
-                gate=gate,
-                plan_revision=revision,
-                state="approved",
-                approval_id=credit["id"],
-                provenance="chat-confirmation",
-                human_identity_verified=False,
-                source_verified=False,
-                content=dict(approve=True, statement=credit["statement"], conditions=""),
-                reused=True,
-            )
-            return {"jsonrpc": "2.0", "id": request_id, "result": self._confirmation_reply(outcome)}
         if store.spine().semantic and arguments.get("interaction") != "native":
             return {
                 "jsonrpc": "2.0",

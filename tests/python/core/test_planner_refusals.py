@@ -3,15 +3,15 @@
 import json
 
 import pytest
+from tests.python.core.test_semantic_wiring import semantic_plan as _semantic_plan
 
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.planner_connection import connection_reply
 from codex_harness.core.planner_refusals import MESSAGES, TEACHING, refusal_text
 from codex_harness.core.project_init import guide
-from codex_harness.core.provider_call_budget import (
-    planning_review_budget,
-    register_planning_review_budget,
-)
+from codex_harness.core.provider_call_budget import planning_review_budget
+
+semantic_plan = _semantic_plan
 
 
 def canonical_rows(store):
@@ -108,17 +108,33 @@ def test_real_store_refusal_and_start_and_init_teach_supported_recovery(tmp_path
         server.close()
 
 
-def test_budget_values_come_from_canonical_registration(tmp_path):
-    """Catch invented/reset ceilings in recovery; other wording tests use explicit values."""
-    from codex_harness.core.plan_store import open_plan_store
+def test_refusal_values_come_from_cumulative_b_after_real_launch(semantic_plan, monkeypatch):
+    """Catch invented/reset recovery values; static formatter cases never spend from B."""
+    from tests.python.core.test_planner_chat_confirmations import (
+        approve_b,
+        prepare_combined_b,
+        review,
+    )
 
-    with open_plan_store(tmp_path) as store:
-        register_planning_review_budget(store, "Counter", 4)
-        with pytest.raises(ValueError, match="immutable-scope") as error:
-            register_planning_review_budget(store, "Counter", 6)
-        text = refusal_text(str(error.value), tmp_path, planning_review_budget(store))
-        assert '"maxStarts": 4' in text and '"spentAdmissions": 0' in text
-        assert "fresh B question" in text.splitlines()[-1]
+    from codex_harness.core import roundtable
+
+    store, _ = semantic_plan
+    request, _ = prepare_combined_b(store, cap=1)
+    approve_b(store, request)
+    reviewer = request["subject"]["reviewers"][0]
+    monkeypatch.setattr(roundtable, "_run", lambda *_: (0, "[]"))
+    monkeypatch.setattr(roundtable, "_executable", lambda *_: "source-only")
+    review(store, reviewer)
+    server = PlannerServer(store.workspace)
+    try:
+        result = server.call_tool("harness_roundtable", {"reviewers": [reviewer]})
+        assert result["isError"] and result["refusalCode"] == "plan-b-consent-required"
+        text = result["content"][0]["text"]
+        assert '"budget.maxStarts": 1' in text and '"budget.spentAdmissions": 1' in text
+        assert "field diff" in text.splitlines()[-1]
+        assert planning_review_budget(store) == dict(maxStarts=1, spentAdmissions=1)
+    finally:
+        server.close()
 
 
 def test_failed_dispatch_inside_completed_job_explains_hold_without_changing_status(tmp_path):

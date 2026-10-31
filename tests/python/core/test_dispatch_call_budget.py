@@ -60,20 +60,19 @@ def test_parallel_claims_are_finite_and_persist_without_refunds(project, monkeyp
             try:
                 return claim_call(directory, record, run / f"attempt-{index}")
             except ValueError as error:
-                assert str(error) == "provider-call-cap-exhausted"
+                assert "worker-call-cap-exhausted" in str(error)
                 return None
 
         with ThreadPoolExecutor(max_workers=6) as pool:
             results = list(pool.map(claim, range(8)))
         assert sorted(item for item in results if item is not None) == [1, 2]
-        before = {
-            p.name: p.read_bytes() for p in (directory / "provider-call-budget").glob("*.json")
-        }
+        before = list(project.connection.execute("SELECT * FROM usage_ledger WHERE kind='worker'"))
         with pytest.raises(ValueError, match="cap-exhausted"):
             claim_call(directory, record, run / "recovered-uncertain-attempt")
-        assert {
-            p.name: p.read_bytes() for p in (directory / "provider-call-budget").glob("*.json")
-        } == before
+        assert (
+            list(project.connection.execute("SELECT * FROM usage_ledger WHERE kind='worker'"))
+            == before
+        )
 
     _controller(project, monkeypatch, inspect)
 
@@ -207,14 +206,94 @@ def test_unknown_or_malformed_run_cannot_claim_recovery(project, monkeypatch, ca
         path = run / "evidence/run.json"
         write_record_json_once(path, {"status": status, "finishedAt": finished})
         assert claim_call(directory, record, run / "original-attempt") == 1
-        before = {p.name: p.read_bytes() for p in (directory / "provider-call-budget").iterdir()}
+        before = list(project.connection.execute("SELECT * FROM usage_ledger WHERE kind='worker'"))
         raw = path.read_bytes()
         with pytest.raises(ValueError, match="terminal-original-required"):
             bind_run(directory, directory / "plan", run, max_provider_calls=2, resume=True)
         assert not (directory / "dispatch-resume").exists()
         assert path.read_bytes() == raw
-        assert {
-            p.name: p.read_bytes() for p in (directory / "provider-call-budget").iterdir()
-        } == before
+        assert (
+            list(project.connection.execute("SELECT * FROM usage_ledger WHERE kind='worker'"))
+            == before
+        )
+
+    _controller(project, monkeypatch, inspect)
+
+
+def test_raised_worker_total_uses_current_b_without_resetting_active_job_spend(
+    project, monkeypatch
+):
+    """Catch old job caps freezing renewed B; review renewal misses worker ownership checks."""
+    from codex_harness.core import approvals
+    from codex_harness.core import planner_confirmations as confirmation
+    from codex_harness.core.plan_store import open_plan_store
+    from codex_harness.core.provider_call_budget import usage
+
+    def inspect(directory, run, record):
+        assert claim_call(directory, record, run / "first") == 1
+        with pytest.raises(ValueError, match="cap-exhausted"):
+            claim_call(directory, record, run / "refused")
+        current = approvals.current(project, "B")["subject"]["execution"]
+        request = confirmation.prepare_confirmation(
+            project,
+            "plan-execution",
+            execution=dict(
+                expected_revision=record["planRevision"],
+                workers=current["workers"],
+                max_parallel=current["maxParallel"],
+                timeout=current["timeout"],
+                call_cap=2,
+            ),
+        )
+        assert any(d["field"] == "execution.callCap" for d in request["diff"])
+        confirmation.complete_confirmation(
+            project,
+            request["request_id"],
+            "accept",
+            dict(approve=True, statement="Approve", conditions=""),
+        )
+        assert claim_call(directory, record, run / "renewed") == 2
+        with open_plan_store(project.workspace) as reopened:
+            assert usage(reopened, "worker") == 2
+        with pytest.raises(ValueError, match="cap-exhausted"):
+            claim_call(directory, record, run / "still-exhausted")
+
+    _controller(project, monkeypatch, inspect, cap=1)
+
+
+def test_new_b_candidate_cannot_admit_an_old_job_snapshot(project, monkeypatch):
+    """Catch today's template authorizing an old job; limit renewal keeps identical inputs."""
+    from codex_harness.core import planner_confirmations as confirmation
+    from codex_harness.core.provider_call_budget import usage
+
+    def inspect(directory, run, record):
+        source = project.workspace / "template/answer.py"
+        source.write_text(source.read_text() + "\n# regenerated candidate input\n")
+        manifest = project.compile_template(project.workspace / "template")
+        original = json.loads((directory / "request.json").read_text())
+        scope = original["executionScope"]
+        request = confirmation.prepare_confirmation(
+            project,
+            "plan-execution",
+            execution=dict(
+                expected_revision=manifest["planRevision"],
+                workers=scope["workers"],
+                max_parallel=scope["maxParallel"],
+                timeout=scope["timeout"],
+                call_cap=scope["callCap"],
+            ),
+        )
+        assert any("candidate.templateFiles" in d["field"] for d in request["diff"])
+        confirmation.complete_confirmation(
+            project,
+            request["request_id"],
+            "accept",
+            dict(approve=True, statement="Approve", conditions=""),
+        )
+        with pytest.raises(ValueError) as refusal:
+            claim_call(directory, record, run / "old-candidate")
+        assert refusal.value.code == "plan-b-consent-required"
+        assert any("candidate.templateFiles" in d["field"] for d in refusal.value.approval["diff"])
+        assert usage(project, "worker") == 0
 
     _controller(project, monkeypatch, inspect)

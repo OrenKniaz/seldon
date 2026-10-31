@@ -16,7 +16,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tests.python.core.planning_support import source_controller_roundtable, source_only_vision_lock
+from tests.python.core.planning_support import (
+    source_controller_roundtable,
+    source_only_b,
+    source_only_vision_lock,
+)
 
 from codex_harness.core import dispatch, planner_jobs
 from codex_harness.core.plan_store import PlanStore
@@ -53,7 +57,11 @@ def source_process_observations(monkeypatch):
     monkeypatch.setattr(dispatch, "_git", observed_git)
 
 
-def publish_source_store(workspace, plan=None, *, spine_file=None):
+def publish_source_store(workspace, plan=None, *, spine_file=None, reviewers=None):
+    reviewers = reviewers or [
+        dict(name="source-codex", provider="codex", model="source-only", effort="high"),
+        dict(name="source-claude", provider="claude", model="source-only", effort=None),
+    ]
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     template = Path(spine_file).parent / "template" if spine_file else Path(plan) / "template"
@@ -157,7 +165,7 @@ def publish_source_store(workspace, plan=None, *, spine_file=None):
     source_only_vision_lock(store)
     for phase in ("features", "requirements", "tech-stack", "plan", "roundtable"):
         if phase == "roundtable":
-            store.compile_template(workspace / "template")
+            source_only_b(store, reviewers=reviewers)
         store.advance(phase, by="source-test")
     store.compile_template(workspace / "template")
     known = Path(__file__).resolve().parents[3] / "fixtures/dogfood-tipsplit"
@@ -188,10 +196,7 @@ def publish_source_store(workspace, plan=None, *, spine_file=None):
     source_controller_roundtable(
         store,
         process_stub=lambda *_: (0, "[]"),
-        reviewers=[
-            {"name": "source-codex", "provider": "codex"},
-            {"name": "source-claude", "provider": "claude"},
-        ],
+        reviewers=reviewers,
         executable_for=lambda provider: provider,
     )
     store.advance("publish", by="source-test")
@@ -214,7 +219,7 @@ def source_grant(store, revision, workers, *, max_parallel=2, timeout=900, call_
         "accept",
         {
             "approve": True,
-            "statement": "SOURCE-ONLY correlated native form fixture",
+            "statement": "Approve",
             "conditions": "",
         },
     )

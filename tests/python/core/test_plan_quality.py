@@ -1,12 +1,14 @@
 """Quality checks through real store gates, publication and graph validation."""
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 from tests.python.core.planning_support import (
     publication_evidence,
     source_controller_roundtable,
+    source_only_b,
     source_only_confirmation,
     source_only_expansion,
 )
@@ -22,6 +24,7 @@ FIXTURE = Path(__file__).resolve().parents[3] / "fixtures" / "dogfood-tipsplit" 
 def store(tmp_path):
     with open_plan_store(tmp_path) as result:
         result.import_spine(FIXTURE)
+        shutil.copytree(FIXTURE.parent / "template", tmp_path / "template")
         source_only_expansion(result)
         vision = result.spine().node("V1")
         vision["fields"].update(
@@ -47,11 +50,13 @@ def store(tmp_path):
         yield result
 
 
-def advance(store, target):
+def advance(store, target, *, reviewers=None):
     while PHASES.index(store.phase()) < PHASES.index(target):
         current = store.phase()
         if current in ("align", "vision-lock"):
-            source_only_confirmation(store, current, statement="I approve this exact understanding")
+            source_only_confirmation(store, current, statement="Approve")
+        if current == "plan":
+            source_only_b(store, reviewers=reviewers or REVIEWERS)
         if current == "roundtable":
             publication_evidence(store)
         store.advance(PHASES[PHASES.index(current) + 1], by="planner")
@@ -81,7 +86,8 @@ def test_published_real_store_all_statuses_and_read_only(store, tmp_path):
     revision = publish(store, tmp_path)
     before = list(store.connection.iterdump())
     report = quality_report(store)
-    assert report["planRevision"] == revision
+    assert report["planRevision"] == store.spine().plan_revision()
+    assert report["manifestRevision"] == revision
     assert {check["id"]: check["status"] for check in report["checks"]} == {
         "expanded-and-aligned": "pass",
         "mapping": "pass",
@@ -106,9 +112,9 @@ def test_published_real_store_all_statuses_and_read_only(store, tmp_path):
 @pytest.mark.parametrize("failure", ["latest-required", "third-required"])
 def test_prospective_required_failure_cannot_hide_behind_successes(store, failure):
     """New policy fixture; source reviewer processes are doubles, never live proof."""
-    advance(store, "roundtable")
-    revision = store.manifest_revision()
     selected = [*REVIEWERS, dict(name="third", provider="copilot")]
+    advance(store, "roundtable", reviewers=selected)
+    revision = store.manifest_revision()
     slots = selected[:2] if failure == "latest-required" else selected
     # Seed the proposed event shape so RED exercises the existing quality consumer,
     # not a missing new method. The implementation's real writer is tested below.
@@ -140,7 +146,7 @@ def test_prospective_required_failure_cannot_hide_behind_successes(store, failur
 
 @pytest.mark.parametrize("successful", [1, 2])
 def test_predeclared_optional_failure_retains_existing_quality_thresholds(store, successful):
-    advance(store, "roundtable")
+    advance(store, "roundtable", reviewers=[*REVIEWERS, dict(name="optional", provider="copilot")])
     slots = [
         dict(name=row["name"], provider=row["provider"], required=True)
         for row in REVIEWERS[:successful]
@@ -166,7 +172,7 @@ def test_predeclared_optional_failure_retains_existing_quality_thresholds(store,
 
 
 def test_unlisted_attempt_is_not_silently_optional(store):
-    advance(store, "roundtable")
+    advance(store, "roundtable", reviewers=[*REVIEWERS, dict(name="unlisted", provider="copilot")])
     store.record_plan_review_policy(
         [dict(name=row["name"], provider=row["provider"], required=True) for row in REVIEWERS],
         store.manifest_revision(),
@@ -378,12 +384,20 @@ def test_open_assumption_at_publish(store, tmp_path):
 
 
 def test_alignment_threshold_and_late_questions(store):
+    """Current A drives read-only quality; V1 row reads missed valid A and scope edits."""
     advance(store, "vision-lock")
     question = store.ask("Late unresolved detail?")
     assert checks(store)["expanded-and-aligned"]["status"] == "fail"
     store.waive(question, "Explicitly outside scope")
     assert checks(store)["expanded-and-aligned"]["status"] == "pass"
     vision = store.spine().node("V1")
+    vision["fields"]["quality_bar"] += " including exact rounding"
+    store.upsert_node(vision)
+    before = list(store.connection.iterdump())
+    assert checks(store)["expanded-and-aligned"]["status"] == "fail"
+    assert list(store.connection.iterdump()) == before
+    source_only_confirmation(store, "vision-lock")
+    assert checks(store)["expanded-and-aligned"]["status"] == "pass"
     vision["fields"]["scope_out"] = " "
     store.upsert_node(vision)
     assert checks(store)["expanded-and-aligned"]["evidence"]["missingFields"] == ["scope_out"]
@@ -544,7 +558,7 @@ def test_requirement_edit_makes_roundtable_stale_until_reviewed(store, open_find
     assert check["status"] == "fail"
     assert "plan changed since the last review; re-run the roundtable" in check["advice"]
     assert check["evidence"]["reviewedRevision"] == reviewed["planRevision"]
-    assert check["evidence"]["currentRevision"] == store.spine().plan_revision()
+    assert check["evidence"]["currentRevision"] == store.manifest_revision()
     assert check["evidence"]["stale"] is True
     assert check["evidence"]["reviewerCount"] == 0
     assert check["evidence"]["open"] == int(open_finding)
@@ -667,13 +681,11 @@ def test_available_provider_coverage_flows_from_roundtable_to_quality(
     """
     import sys
 
-    from tests.python.core.planning_support import source_only_expansion
-
     from codex_harness.core import roundtable
 
     source_only_expansion(store)
-    advance(store, "roundtable")
     selected = [REVIEWERS[0], {**REVIEWERS[0], "name": "second"}] if same else REVIEWERS
+    advance(store, "roundtable", reviewers=selected)
     monkeypatch.setattr(
         roundtable,
         "_executable",

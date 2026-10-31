@@ -37,7 +37,7 @@ def semantic_consent_next(status, result, *, plan_authorized=False):
         result.get("gate") in {"align+vision-lock", "plan-execution"}
         and result.get("state") != "approved"
     ):
-        return "Stop; address the actual response before preparing fresh consent."
+        return "Stop; clarify changes, then show a fresh A/B question and wait for Approve."
     if status.get("open_clarifications"):
         return "Ask the genuine missing-information question; record it with harness_answer."
     phase = status["phase"]
@@ -56,12 +56,8 @@ def semantic_consent_next(status, result, *, plan_authorized=False):
         return (
             "harness_advance to_phase=roundtable; use B within its recorded limits."
             if plan_authorized
-            else (
-                "harness_compile; register shared review/acceptance-review ceilings with CLI "
-                "review-budget; harness_prepare_chat_confirmation gate=plan-execution with exact "
-                "execution and reviewer_node_id. Show plan/waves/files, reviewer/worker tuples, "
-                "ceilings, call_cap, concurrency and timeouts."
-            )
+            else "harness_compile; harness_prepare_chat_confirmation gate=plan-execution. "
+            "Show the complete B subject and field diff; wait for the actual reply."
         )
     if phase == "accept":
         acceptance = status.get("acceptance", {})

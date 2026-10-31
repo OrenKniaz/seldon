@@ -274,9 +274,12 @@ def protocol(provider, *, text=None):
 
 def interrupted(project, monkeypatch, *, mocked=False, response=None, before_review=None):
     store, repo = project
-    candidate(store, repo)
+    candidate(store, repo, reviewers=REVIEWERS)
     if before_review:
         before_review(store, repo)
+        from tests.python.core.planning_support import source_only_b
+
+        source_only_b(store, reviewers=REVIEWERS)
     calls = []
     monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
 
@@ -391,7 +394,7 @@ def test_changed_unknown_and_incomplete_originals_refuse_without_launch(project,
     def before(store, repo):
         if kind == "incomplete-protected-body":
             tests = store.workspace / "template" / "tests"
-            tests.mkdir(parents=True)
+            tests.mkdir(parents=True, exist_ok=True)
             (tests / "unreferenced.py").write_text("# SOURCE ONLY missing required body\n")
 
     store, repo, attempt = interrupted(
@@ -415,7 +418,7 @@ def test_changed_unknown_and_incomplete_originals_refuse_without_launch(project,
     elif kind == "context":
         store.ask("SOURCE ONLY R3 remains unanswered", ["R1"])
     elif kind == "protected":
-        (store.workspace / "template").mkdir()
+        (store.workspace / "template").mkdir(exist_ok=True)
         (store.workspace / "template" / "PLAN.md").write_text("changed protected bytes")
     elif kind == "plan":
         node = store.spine().node("R1")
@@ -471,7 +474,7 @@ def test_final_writer_rechecks_context_and_rolls_back_findings(project, monkeypa
 
 def test_capture_io_failure_is_fatal_before_a_second_provider(project, monkeypatch):
     store, repo = project
-    candidate(store, repo)
+    candidate(store, repo, reviewers=REVIEWERS)
     calls = []
     monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
 
@@ -500,7 +503,7 @@ def test_failed_execution_does_not_become_recoverable(project, monkeypatch, kind
     import subprocess
 
     store, repo = project
-    candidate(store, repo)
+    candidate(store, repo, reviewers=REVIEWERS)
     calls = []
     monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
 
@@ -570,7 +573,7 @@ def test_resume_rejects_execution_overrides(project):
 
 def test_ordinary_overflow_still_runs_but_cannot_be_recovered(project, monkeypatch):
     store, repo = project
-    candidate(store, repo)
+    candidate(store, repo, reviewers=REVIEWERS)
     calls = []
     monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
 
@@ -591,7 +594,7 @@ def test_ordinary_overflow_still_runs_but_cannot_be_recovered(project, monkeypat
 
 def test_changed_actual_argv_cannot_be_sealed_under_original_registration(project, monkeypatch):
     store, repo = project
-    candidate(store, repo)
+    candidate(store, repo, reviewers=REVIEWERS)
     original = roundtable._launch_review
     constructed, launched = [], []
     monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
@@ -618,7 +621,7 @@ def test_changed_actual_argv_cannot_be_sealed_under_original_registration(projec
 def test_omitted_body_cannot_be_claimed_from_untrusted_context(project, monkeypatch):
     def before(store, _):
         tests = store.workspace / "template" / "tests"
-        tests.mkdir(parents=True)
+        tests.mkdir(parents=True, exist_ok=True)
         body = "# SOURCE ONLY omitted proof body\n"
         (tests / "unreferenced.py").write_text(body)
         store.ask(body, ["R1"])
@@ -632,7 +635,7 @@ def test_omitted_body_cannot_be_claimed_from_untrusted_context(project, monkeypa
 def test_protected_line_endings_are_exact_inputs(project, monkeypatch):
     def before(store, _):
         template = store.workspace / "template"
-        template.mkdir()
+        template.mkdir(exist_ok=True)
         for name, body in render_markdown(store.spine()).items():
             (template / name).write_bytes(body.encode("utf-8"))
 
@@ -684,7 +687,7 @@ def test_journal_ancestor_reparse_is_refused(project, monkeypatch):
 def test_protected_json_fields_remain_ordinary_data(project, monkeypatch):
     def before(store, _):
         template = store.workspace / "template"
-        template.mkdir()
+        template.mkdir(exist_ok=True)
         for name, body in render_markdown(store.spine()).items():
             (template / name).write_bytes(body.encode("utf-8"))
         module = store.spine().node(store.spine().ids("test")[0])["fields"]["module"]
@@ -703,7 +706,7 @@ def test_protected_json_fields_remain_ordinary_data(project, monkeypatch):
 def test_non_utf8_protected_helper_refuses_recovery_only(project, monkeypatch):
     def before(store, _):
         template = store.workspace / "template"
-        template.mkdir()
+        template.mkdir(exist_ok=True)
         for name, body in render_markdown(store.spine()).items():
             (template / name).write_bytes(body.encode("utf-8"))
         module = store.spine().node(store.spine().ids("test")[0])["fields"]["module"]
