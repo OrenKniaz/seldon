@@ -280,25 +280,38 @@ def test_golden_path(tmp_path, request, surface):
                     ["R"],
                     grammar="Visit page" if surface == "web" else "hello prints Hello and exits 0",
                 ),
-                node(
-                    "C",
-                    "bead",
-                    ["CLI"],
-                    ownedFiles=[filename],
-                    dependsOn=[],
-                    lessons=["D"],
-                    semanticPhase="contracts",
-                ),
-                node(
-                    "B",
-                    "bead",
-                    ["CLI"],
-                    ownedFiles=[filename],
-                    dependsOn=["C"],
-                    lessons=[],
-                    semanticPhase="build",
-                ),
             ]
+            if surface == "web":
+                nodes.extend(
+                    [
+                        node(
+                            "C",
+                            "bead",
+                            ["CLI"],
+                            ownedFiles=[filename],
+                            dependsOn=[],
+                            lessons=["D"],
+                            semanticPhase="contracts",
+                        ),
+                        node(
+                            "B",
+                            "bead",
+                            ["CLI"],
+                            ownedFiles=[filename],
+                            dependsOn=["C"],
+                            lessons=[],
+                            semanticPhase="build",
+                        ),
+                    ]
+                )
+            if surface == "cli":
+                # The farm loop came from legacy help in a semantic plan. Previous journeys
+                # authored perfect beads themselves and never consumed the planner's contract.
+                schema = call("harness_schema", kind="bead")
+                beads = schema["semanticBeads"]["nodes"]
+                for bead in beads:
+                    bead["parents"] = ["CLI"]
+                nodes.extend(beads)
             scenarios = (
                 web_document()
                 if surface == "web"

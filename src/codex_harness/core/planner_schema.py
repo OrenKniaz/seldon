@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 from codex_harness.core.planner_guidance import BATCH_GUIDANCE
-from codex_harness.core.spine import ALLOWED_PARENTS
+from codex_harness.core.spine import ALLOWED_PARENTS, SEMANTIC_PHASES, bead_contract, bead_rules
 
 FIELD_RULES = {
     "vision": (
@@ -42,21 +42,10 @@ FIELD_RULES = {
         "confirmed flags. Approve confirms every field as shown; Changes: adjusts them. "
         "There is no separate Expand confirmation. Trace accepted IDs downstream in "
         "requirement/decision/acceptance fields.expansionRefs, never by editing locked vision. "
-        "Before compile, add fields.validation (Python argv prefix as a string array) "
+        "Legacy only: before compile add fields.validation (Python argv as a string array) "
         "and fields.requirementFiles (extra protected relative paths as a string array, "
         "possibly empty); see compilationMetadata for exact shapes and a valid example. "
         "These metadata fields are not required at initial vision authoring."
-    ),
-    "bead": (
-        "fields.ownedFiles: nonempty array of nonblank strings; "
-        "fields.proofModule: nonblank string; fields.dependsOn and fields.lessons: "
-        "arrays of unique existing bead/decision IDs respectively (empty allowed). "
-        "Optional fields.provider: nonblank string. Optional fields.capabilityRefs: array of "
-        "unique lowercase dotted identifiers (each at most 128 characters; segments start "
-        "with a-z and continue with a-z, 0-9, underscore or hyphen), e.g. skill.playwright. "
-        "Omitted or empty means no declaration. References are REQUESTED/UNVERIFIED metadata; "
-        "they do not grant tools, permissions or runtime availability. Commands, endpoints, "
-        "credentials and configuration are not reference identifiers. Dependencies must be acyclic."
     ),
     "test": "fields.module: nonblank string; fields.level: unit or e2e.",
 }
@@ -243,7 +232,7 @@ def _node(kind, node_id, parents, fields=None, text=None):
     }
 
 
-def node_example(kind):
+def node_example(kind, semantic=False):
     """Small planning examples, never observations or evidence of acceptance."""
     vision = _node("vision", "V1", [])
     if kind == "vision":
@@ -259,6 +248,8 @@ def node_example(kind):
             "and no data is saved.",
             "assumptions": [],
         }
+    if semantic:
+        vision["fields"]["planMode"] = "semantic-v1"
     feature = _node("feature", "F1", ["V1"])
     requirement = _node(
         "requirement",
@@ -283,25 +274,12 @@ def node_example(kind):
                 "bead",
                 "B1",
                 ["R1"],
-                {
-                    "ownedFiles": ["src/parser.py"],
-                    "proofModule": "test_parser",
-                    "dependsOn": [],
-                    "lessons": [],
-                },
+                {k: example for k, (example, _) in bead_contract(semantic).items()},
             ),
         ),
         "test": (
             [vision, feature, requirement],
-            _node(
-                "test",
-                "T1",
-                ["R1"],
-                {
-                    "module": "test_parser",
-                    "level": "unit",
-                },
-            ),
+            _node("test", "T1", ["R1"], {"module": "test_parser", "level": "unit"}),
         ),
     }
     return examples[kind]
@@ -473,11 +451,15 @@ def typed_draft_help(tool):
     return result
 
 
-def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teaching=False):
+def schema_help(
+    tools, *, tool="harness_upsert_node", kind=None, include_teaching=False, semantic=False
+):
     """Return actual transport schema plus advisory help for canonical node fields."""
     contract = next((item for item in tools if item["name"] == tool), None)
     if contract is None:
         raise ValueError(f"Unknown tool: {tool}; choose one of {sorted(t['name'] for t in tools)}")
+    if semantic and kind == "test":
+        raise ValueError(bead_rules(True))
     if kind is not None and tool != "harness_upsert_node":
         raise ValueError("kind applies only to harness_upsert_node")
     result = {
@@ -571,29 +553,14 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teachin
         )
     if tool in {"harness_compile", "harness_upsert_node", "harness_upsert_nodes"}:
         result["proofAuthoring"] = {
-            "prepare": "When authoring test nodes or bead proofs, prepare executable protected "
-            "tests and importable failing stubs in workspace/template before compile/review. "
-            "A test node records intent; it does not create those files.",
-            "cli": "For a Python module CLI, provide its planned entry module. For example, "
-            "template/app.py can contain raise NotImplementedError('planned CLI'); a direct "
-            "subprocess proof invokes [sys.executable, '-m', 'app'] and asserts its real result. "
-            "For python -m tally, provide tally/__init__.py and tally/__main__.py under template. "
-            "An imported main() API is not required; this example does not promise support for "
-            "arbitrary helper/control-flow shapes.",
-            "scope": "Stubs are planning skeletons, not product implementation or delivery. "
-            "Keep protected assertions intact; workers implement the owned product files.",
-            "evidence": "Zero review findings do not establish a passing audit. Prospective "
-            "audit still requires collection, attributable red-stub failures and interface "
-            "assertions; it does not prove product behavior or oracle satisfiability.",
+            "prepare": "Legacy only: create protected tests and importable failing stubs in "
+            "workspace/template before compile/review. Nodes record intent, not files.",
+            "cli": "Invoke planned app.py or app/__main__.py via sys.executable; no main() needed.",
+            "scope": "Workers own product files; preserve assertions. Review is not audit proof.",
         }
         result["compilationLimits"] = {
             "maxE2eNodes": 1,
-            "integration": "The current compiler accepts at most one level=e2e test node. "
-            "Represent integration with one suite module containing multiple cases; "
-            "do not create an e2e node per case or feature. Unit test nodes may be separate.",
-            "traceability": "A test's parents are requirement or bead IDs; one integration "
-            "suite can reference requirements across features. These are existing compiler "
-            "limits, not additional authoring or approval gates.",
+            "integration": "Legacy: one level=e2e suite module; unit nodes may be separate.",
         }
         result["semanticScenarios"] = {
             "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
@@ -681,32 +648,36 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teachin
             },
         }
         result["compilationMetadata"] = {
-            "owner": "The existing vision node's fields; not arguments to harness_compile.",
-            "requiredWhen": "Required before compile, not at initial vision authoring.",
-            "validation": "Array of nonblank strings: Python argv preceding the proof module. "
-            "For stdlib unittest discovery use -B -m unittest discover -s tests -p; "
-            "the bead's proofModule supplies the discovery pattern after -p.",
-            "requirementFiles": "Array of nonblank relative path strings for extra protected "
-            "files/directories; [] is valid. Compile already protects the test directory "
-            "and generated planning documents; do not repeat them unless needed.",
-            "pathBase": "Paths are relative to the product/template checkout root. "
-            "MCP compiles workspace/template: use tests, not template/tests; "
-            "do not use absolute paths or paths escaping the checkout.",
+            "owner": "Legacy vision.fields before compile, not initial authoring or arguments.",
+            "validation": "Nonblank Python argv strings preceding bead.proofModule (-p pattern).",
+            "requirementFiles": "Extra protected relative paths; tests/planning docs protected.",
+            "pathBase": "workspace/template-relative; no absolute/escaping paths.",
             "fieldExample": {
                 "validation": ["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
                 "requirementFiles": [],
             },
-            "apply": "Read the existing vision with harness_show_node. Merge only these "
-            "metadata fields into its fields and upsert the complete preserved node with "
-            "harness_upsert_node; keep all other vision fields, text, title and IDs. "
-            "Prepare the actual template proofs before harness_compile.",
-            "references": [
-                "docs/operator/handoff-contract.md#planner-declarations",
-                "docs/operator/planner-guide.md",
-                "docs/architecture/verification-runners.md#manifest-contract",
-            ],
+            "apply": "harness_show_node; merge metadata into saved vision; harness_upsert_node.",
         }
+    if semantic:
+        prerequisites, design = node_example("design", True)
+        prerequisites.append(design)
+        _, contracts = node_example("bead", True)
+        contracts["parents"] = [design["id"]]
+        build = deepcopy(contracts)
+        contracts.update(id="C", title="Contracts")
+        build.update(id="B", title="Build")
+        build["fields"].update(semanticPhase=SEMANTIC_PHASES[1], dependsOn=["C"])
+        result.update(semanticBeads={"nodes": [contracts, build]}, beadRules=bead_rules(True))
+        for key in ("proofAuthoring", "compilationLimits", "compilationMetadata"):
+            result.pop(key, None)
     if tool == "harness_upsert_nodes":
+        if semantic:
+            result.update(
+                prerequisiteNodes=prerequisites,
+                example=result["semanticBeads"],
+                exampleUse="Adapt IDs/ownedFiles; batch prerequisites and both beads.",
+            )
+            return result
         prerequisites, test = node_example("test")
         requirement = next(node for node in prerequisites if node["kind"] == "requirement")
         result.update(
@@ -736,28 +707,33 @@ def schema_help(tools, *, tool="harness_upsert_node", kind=None, include_teachin
         kind = kind or "requirement"
         if kind not in ALLOWED_PARENTS:
             raise ValueError(f"Unknown node kind: {kind}; choose one of {list(ALLOWED_PARENTS)}")
-        prerequisites, example = node_example(kind)
+        prerequisites, example = node_example(kind, semantic)
+        if semantic and kind == "bead":
+            prerequisites.append(design)
         result.update(
             kind=kind,
             allowedParentKinds=sorted(ALLOWED_PARENTS[kind]),
-            fieldRules=FIELD_RULES.get(
-                kind, "No additional kind-specific fields required by Spine."
-            ),
+            fieldRules=bead_rules(semantic)
+            if kind == "bead"
+            else FIELD_RULES.get(kind, "No additional kind-specific fields required by Spine."),
             fieldsPolicy="fields is an open object of finite JSON values; additional keys allowed. "
             "Later quality, compilation and phase gates still apply.",
             parentRule="Parent IDs must exist, be unique and acyclic, with allowed kinds.",
             prerequisiteNodes=prerequisites,
-            example={"node": example},
-            exampleUse="In a new started plan, upsert prerequisiteNodes in order, then example. "
-            "For an existing plan, use its actual IDs and preserve accepted intent.",
+            example={"node": contracts if semantic and kind == "bead" else example},
+            exampleUse="Upsert prerequisites then example; adapt IDs, preserve accepted intent.",
         )
     return result
 
 
-def node_error_help(arguments):
+def node_error_help(arguments, semantic=False):
     """Explain rejected input without replacing or relaxing the owning validator."""
     import json
 
+    if semantic:
+        return (
+            bead_rules(True) + " Read harness_schema kind=bead for the complete two-bead example."
+        )
     node = arguments.get("node") if isinstance(arguments, dict) else None
     kind = node.get("kind") if isinstance(node, dict) else None
     if not isinstance(kind, str) or kind not in ALLOWED_PARENTS:
@@ -765,7 +741,7 @@ def node_error_help(arguments):
     _, example = node_example(kind)
     return (
         "Rule: "
-        + FIELD_RULES.get(kind, "Use the required node keys and types in harness_schema.")
+        + (bead_rules() if kind == "bead" else FIELD_RULES.get(kind, "Read harness_schema."))
         + " Parent IDs must already exist with allowed kinds; fields remains open JSON."
         + "\nExample: "
         + json.dumps({"node": example}, ensure_ascii=False)

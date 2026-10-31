@@ -37,6 +37,38 @@ def _strings(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value)
 
 
+SEMANTIC_PHASES = ("contracts", "build")
+
+
+def bead_contract(semantic=False):
+    return {
+        "ownedFiles": (["hello.py"], lambda v: _strings(v) and bool(v)),
+        "dependsOn": ([], _strings),
+        "lessons": ([], _strings),
+        **(
+            {"semanticPhase": (SEMANTIC_PHASES[0], lambda v: v in SEMANTIC_PHASES)}
+            if semantic
+            else {"proofModule": ("test_parser", lambda v: isinstance(v, str) and bool(v.strip()))}
+        ),
+    }
+
+
+def bead_rules(semantic=False):
+    return (
+        "Required fields (arrays contain nonblank strings): "
+        + _canonical({k: example for k, (example, _) in bead_contract(semantic).items()})
+        + ". ownedFiles is nonempty; dependsOn/lessons are unique existing bead/decision IDs. "
+        "Dependencies are acyclic. Optional provider is nonblank; capabilityRefs are unique "
+        "lowercase dotted identifiers, requested/unverified, never permissions. "
+        + (
+            f"Exactly two beads: semanticPhase in {SEMANTIC_PHASES}; Build dependsOn Contracts. "
+            "No proofModule or test nodes; controller validates scenarios."
+            if semantic
+            else ""
+        )
+    )
+
+
 def _canonical(value: object) -> str:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
@@ -125,9 +157,7 @@ class Spine:
                 self._validate_bead(node)
             elif node["kind"] == "test":
                 if self.semantic:
-                    raise SpineError(
-                        "spine-schema-invalid", "semantic-v1 uses scenario data, not test nodes"
-                    )
+                    raise SpineError("spine-schema-invalid", bead_rules(True))
                 fields = node["fields"]
                 if (
                     not isinstance(fields.get("module"), str)
@@ -155,15 +185,8 @@ class Spine:
         except PlanError as error:
             raise SpineError("spine-bead-fields-invalid", str(error)) from error
         valid = (
-            all(_strings(fields.get(key)) for key in ("ownedFiles", "dependsOn", "lessons"))
-            and bool(fields["ownedFiles"])
-            and (
-                fields.get("semanticPhase") in ("contracts", "build")
-                and "proofModule" not in fields
-                if self.semantic
-                else isinstance(fields.get("proofModule"), str)
-                and bool(fields["proofModule"].strip())
-            )
+            all(check(fields.get(key)) for key, (_, check) in bead_contract(self.semantic).items())
+            and (not self.semantic or "proofModule" not in fields)
             and (
                 "provider" not in fields
                 or isinstance(fields["provider"], str)
@@ -182,7 +205,10 @@ class Spine:
                     )
                 )
         if not valid:
-            raise SpineError("spine-bead-fields-invalid", f"Invalid bead fields for {node['id']}")
+            raise SpineError(
+                "spine-bead-fields-invalid",
+                f"Invalid bead fields for {node['id']}. {bead_rules(self.semantic)}",
+            )
 
     def ids(self, kind: str | None = None) -> list[str]:
         return [key for key, node in self._nodes.items() if kind is None or node["kind"] == kind]
@@ -521,15 +547,14 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
             raise ValueError("Other surfaces unsupported in semantic-v1; use Python CLI/static web")
         document, targets, covered = semantic_spec(spine, template_dir)
         phases = {b["semanticPhase"]: key for key, b in beads.items()}
-        if len(beads) != 2 or set(phases) != {"contracts", "build"}:
+        if len(beads) != 2 or set(phases) != set(SEMANTIC_PHASES):
             raise ValueError(
-                "Multiple/parallel Build unsupported in semantic-v1; "
-                "declare Contracts and one Build"
+                "Multiple/parallel Build unsupported in semantic-v1; " + bead_rules(True)
             )
         if beads[phases["contracts"]]["dependsOn"] or beads[phases["build"]]["dependsOn"] != [
             phases["contracts"]
         ]:
-            raise ValueError("semantic-v1 requires Contracts -> Build -> controller Validation")
+            raise ValueError(bead_rules(True))
         contract_ids = {
             ref.partition("@")[0] for s in document["scenarios"] for ref in s["contractRefs"]
         }

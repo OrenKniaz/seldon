@@ -570,8 +570,7 @@ TOOLS = [
     ),
     _tool(
         "harness_upsert_node",
-        "Save a canonical spine node. Bead fields require ownedFiles, proofModule, "
-        "dependsOn and lessons; test fields require module and level (unit or e2e).",
+        "Save a canonical spine node. Read harness_schema kind=bead for this plan's contract.",
         {
             "node": _object(
                 {
@@ -1183,6 +1182,10 @@ class PlannerServer:
             self.store = open_plan_store(self.workspace)
         return self.store
 
+    def _semantic(self):
+        exists = (self.workspace / ".codex-harness/plan.sqlite3").is_file()
+        return self._store().spine().semantic if exists else False
+
     def _status(self) -> dict:
         if self.store is None and (self.workspace / ".codex-harness" / "plan.sqlite3").is_file():
             self._store()
@@ -1300,8 +1303,10 @@ class PlannerServer:
                 body += (
                     "\nInspect harness_schema tool=" + name + "; keep unsupported authority held."
                 )
-            if name == "harness_upsert_node" and isinstance(error, ValueError | KeyError):
-                body += "\n" + node_error_help(arguments)
+            if name in {"harness_upsert_node", "harness_upsert_nodes"} and isinstance(
+                error, ValueError | KeyError
+            ):
+                body += "\n" + node_error_help(arguments, self._semantic())
             if name == "harness_accept_scenarios" and operation_error_code in {
                 "acceptance-scenario-invalid",
                 "acceptance-coverage-required",
@@ -1928,7 +1933,11 @@ class PlannerServer:
             self.result_data = resume_plan(self.workspace, **args)
             return "Durable plan resume\n" + resume_card(self.result_data)
         if name == "harness_schema":
-            self.result_data = schema_help(TOOLS if schema_tools is None else schema_tools, **args)
+            self.result_data = schema_help(
+                TOOLS if schema_tools is None else schema_tools,
+                **args,
+                semantic=self._semantic(),
+            )
             if args.get("tool") == "harness_resolve_findings":
                 store = (
                     self._store()
@@ -2113,33 +2122,21 @@ class PlannerServer:
             node = self.store.spine().node(self.store.spine().ids("vision")[0])
             setup_card = views.setup_card(node["fields"].get("setup", {})) + "\n" + TEACHING
             if self.store.spine().semantic:
-                guide = schema_help(TOOLS, kind="vision")
+                guide = schema_help(TOOLS, kind="vision", semantic=True)
                 self.result_data["schemaDigest"] = {
-                    "visionFields": {
-                        **guide["example"]["node"]["fields"],
-                        "planMode": "semantic-v1",
-                    },
+                    "visionFields": guide["example"]["node"]["fields"],
                     "visionRules": guide["fieldRules"],
                     "semanticScenarios": guide["semanticScenarios"],
+                    "semanticBeads": guide["semanticBeads"],
+                    "beadRules": guide["beadRules"],
                 }
-                self.result_data["authoringGuidance"] = BATCH_GUIDANCE
                 return (
-                    setup_card
-                    + "\nsemantic-v1 resumed (Windows Python CLIs AND single static web pages; "
-                    "HTML/CSS/vanilla JS, no build/network; everything else stays legacy). "
-                    "Planner writes DATA: "
-                    "V1.fields.scenarios uses seldon/scenarios-v1; V1.fields.targets binds "
-                    "CLI: {entry, argv}; web: {kind:web, entry:index.html}, productSurface:web. "
-                    "References are requirement/design node IDs (optional @revision pin). "
-                    "Design nodes hold contracts. Declare exactly two beads with semanticPhase "
-                    "contracts/build and Build dependsOn Contracts. No proofModule or test nodes. "
-                    "No prospective audit or protected test authoring. Review, publish and packet "
-                    "sufficiency still apply. Execute with max_parallel=1. RED is history; "
-                    "only controller Validation PASS fulfills scenarios. Say 'pause plan' to pause."
-                    "\n"
-                    "Use schemaDigest for vision/scenarios throughout this plan; no per-phase "
-                    "harness_schema calls needed (still available for unfamiliar details).\n"
-                    + BATCH_GUIDANCE
+                    setup_card + "\nsemantic-v1: Windows Python CLIs/static web; no build/network. "
+                    "Planner writes scenario data; use schemaDigest for vision, scenarios and "
+                    "both beads, adapting IDs/ownedFiles. No prospective audit or protected test "
+                    "authoring. Review, publish and packet sufficiency still apply. "
+                    "Execute max_parallel=1; only controller Validation PASS fulfills scenarios. "
+                    "Say 'pause plan' to pause.\n" + BATCH_GUIDANCE
                 )
             return setup_card + "\nPlan mode resumed. To pause, say 'pause plan'."
         if (
