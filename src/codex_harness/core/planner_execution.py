@@ -71,7 +71,7 @@ def _control_digest(store, exclude_event=None, *, execution_transition=False):
         if table == "events":
             query += (
                 " WHERE kind NOT IN ('worker-execution-requested', "
-                "'worker-execution-responded', 'worker-execution-consumed')"
+                "'worker-execution-responded', 'worker-execution-consumed', 'planner-refusal')"
             )
             if exclude_event is not None:
                 query += f" AND id != {int(exclude_event)}"

@@ -16,6 +16,7 @@ from importlib.metadata import distribution
 from pathlib import Path
 
 from codex_harness.core.init_hosts import HOSTS, MARKER, claude, codex, server_entry
+from codex_harness.core.planner_refusals import TEACHING
 from codex_harness.core.preflight import preflight_report
 
 IGNORE_START = f"# {MARKER} begin\n"
@@ -60,30 +61,58 @@ def offline_reviewers(user_models=None):
     for provider in ("codex", "claude", "copilot"):
         executable = _executable(provider, None)
         choices = [
-            {"model": slug, "effort": ({"kind": "named", "value": effort}
-                                      if effort else {"kind": "unsupported"}),
-             "availability": "offered", "reviewPathSupported": False,
-             "reason": "unverified; cached, not entitlement"}
+            {
+                "model": slug,
+                "effort": (
+                    {"kind": "named", "value": effort} if effort else {"kind": "unsupported"}
+                ),
+                "availability": "offered",
+                "reviewPathSupported": False,
+                "reason": "unverified; cached, not entitlement",
+            }
             for slug, effort in (models if provider == "codex" else [])
         ]
         if provider in supplied:
-            choices.append({"model": _model(supplied[provider]), "effort": {"kind": "unsupported"},
-                            "availability": "unknown", "reviewPathSupported": False,
-                            "reason": "user-supplied model; unverified"})
-        evidence = {"executable": executable, "cache": metadata if provider == "codex" else {},
-                    "choices": choices}
-        providers.append({
-            "provider": provider, "executable": executable, "executableDigest": None,
-            "version": None, "installed": bool(executable), "authentication": "unknown",
-            "discovery": "observed" if choices else "unknown", "choices": choices,
-            "source": {"kind": "provider-local-metadata", "reference":
-                       ("~/.codex/models_cache.json " if provider == "codex" else "resolver ")
-                       + json.dumps(evidence["cache"]),
-                       "digest": canonical_digest(evidence)},
-            "reason": ("cached, not entitlement" if provider == "codex" and models
-                       else "model list unknown")
-                       + "; installed != authenticated; remaining usage unknown",
-        })
+            choices.append(
+                {
+                    "model": _model(supplied[provider]),
+                    "effort": {"kind": "unsupported"},
+                    "availability": "unknown",
+                    "reviewPathSupported": False,
+                    "reason": "user-supplied model; unverified",
+                }
+            )
+        evidence = {
+            "executable": executable,
+            "cache": metadata if provider == "codex" else {},
+            "choices": choices,
+        }
+        providers.append(
+            {
+                "provider": provider,
+                "executable": executable,
+                "executableDigest": None,
+                "version": None,
+                "installed": bool(executable),
+                "authentication": "unknown",
+                "discovery": "observed" if choices else "unknown",
+                "choices": choices,
+                "source": {
+                    "kind": "provider-local-metadata",
+                    "reference": (
+                        "~/.codex/models_cache.json " if provider == "codex" else "resolver "
+                    )
+                    + json.dumps(evidence["cache"]),
+                    "digest": canonical_digest(evidence),
+                },
+                "reason": (
+                    "cached, not entitlement"
+                    if provider == "codex" and models
+                    else "model list unknown"
+                )
+                + "; installed != authenticated; remaining usage unknown",
+            }
+        )
     return providers
 
 
@@ -206,7 +235,7 @@ def ignore_text(text, remove):
 def guide(root, name):
     return (
         f"<!-- {MARKER} -->\n# Seldon: {name}\n\n"
-        f"Project: {root}\n\n"
+        f"Project: {root}\n\n{TEACHING}\n\n"
         "Open a chat in this folder and describe what to build, "
         'e.g. "Build a small word-count CLI."\n\n'
         "At Align, show available review providers/models and ask the user to pick "

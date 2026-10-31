@@ -17,6 +17,7 @@ import pytest
 from tests.python.core import test_test_audit
 from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.test_mcp_planner import native_confirmation_result
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import PHASES, open_plan_store_readonly
@@ -553,7 +554,7 @@ def test_public_legacy_history_by_revision_preserves_rows_without_correlation(pr
         )
         for passed in (False, True)
     ]
-    before = list(server.store.connection.iterdump())
+    before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
     server.close()
     reader = PlannerServer(root)
     try:
@@ -575,7 +576,8 @@ def test_public_legacy_history_by_revision_preserves_rows_without_correlation(pr
     finally:
         reader.close()
     with open_plan_store_readonly(root) as saved:
-        assert list(saved.connection.iterdump()) == before
+        assert canonical_rows(saved) == before
+        assert refusal_total(saved) == refusal_count + 2
         assert saved.passing_audit(revision) is None
 
 
@@ -670,7 +672,12 @@ def test_pre_result_engine_exception_records_dispatch_without_proof(prospective,
         assert not server.audits.thread.is_alive()
         server.audits.drain(server.store)
         result = invoke(server, "harness_audit_status", id=admission["attemptId"])
-        failed = result["structuredContent"]
+        assert result["structuredContent"]["refusalRecording"] == {"state": "recorded"}
+        failed = {
+            key: value
+            for key, value in result["structuredContent"].items()
+            if key != "refusalRecording"
+        }
         assert result["isError"] and failed["state"] == "failed"
         assert failed["didRunValidation"] and failed["result"] is None
         assert failed["error"] and not failed["completedAllRequiredSteps"]

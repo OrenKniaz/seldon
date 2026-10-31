@@ -4,6 +4,7 @@ import sqlite3
 
 from codex_harness.core.plan_store import PHASES
 from codex_harness.core.planner_vision import render_vision
+from codex_harness.core.reviewer_evidence import single_provider_notice
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import _escape, _layers, _projection, diagram, text_fallback
 
@@ -1356,8 +1357,7 @@ def acceptance_run_card(run: dict) -> str:
 def review_card(result: dict, *, details=False) -> str:
     lines = [f"**Review: {result.get('roundId', result.get('id', 'acceptance'))}**"]
     if result.get("reviewIndependence") == "single-provider":
-        lines.append("Reviewed by two {provider} reviewers; only one provider was available."
-                     .format_map(result["reviewers"][0]))
+        lines.append(single_provider_notice(result))
     if result.get("findingCountsScope"):
         lines.append("Findings scope: " + result["findingCountsScope"])
     for row in result["reviewers"]:

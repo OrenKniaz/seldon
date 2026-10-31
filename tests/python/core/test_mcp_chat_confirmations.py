@@ -13,6 +13,7 @@ from tests.python.core.test_mcp_planner import (
     start,
     workspace_wire,
 )
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 from tests.python.core.test_planner_resume import _published
 
 from codex_harness.core import planner_jobs
@@ -137,11 +138,12 @@ def test_bound_response_attempt_reoffers_full_question_even_when_rejected(semant
         repeated = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")
         assert repeated["structuredContent"]["request_id"] == original["request_id"]
         assert len(repeated["content"][0]["text"].splitlines()) == 1
-        count = store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        before, count = canonical_rows(store), refusal_total(store)
         response = record(server, original, reply)
         if reply == "Approve but not execution":
             assert response["isError"] and "chat-confirmation-choice-unclear" in str(response)
-            assert store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == count
+            assert canonical_rows(store) == before
+            assert refusal_total(store) == count + 1
         else:
             assert not response["isError"], response
             assert response["structuredContent"]["state"] == (

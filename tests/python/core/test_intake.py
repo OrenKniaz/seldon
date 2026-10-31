@@ -21,10 +21,16 @@ def test_offline_producer_reaches_catalog_event(offline_cache, tmp_path):  # noq
     from tests.python.core.test_plan_store import draft_inputs
 
     from codex_harness.core.plan_store import open_plan_store
+
     with open_plan_store(tmp_path) as store:
         draft_inputs(store)
-        result = store.record_reviewer_catalog({"discovery": "offline", "userModels":
-            {"claude": "user-model", "copilot": "user-model"}}, store.spine().plan_revision())
+        result = store.record_reviewer_catalog(
+            {
+                "discovery": "offline",
+                "userModels": {"claude": "user-model", "copilot": "user-model"},
+            },
+            store.spine().plan_revision(),
+        )
         catalog = result["catalog"]
         rows = catalog["providers"]
         choice = rows[0]["choices"][0]
@@ -35,8 +41,10 @@ def test_offline_producer_reaches_catalog_event(offline_cache, tmp_path):  # noq
         assert "fixture-1" in rows[0]["source"]["reference"]
         assert "SECRET" not in json.dumps(catalog) and "PRIVATE" not in json.dumps(catalog)
         event = store.connection.execute(
-            "SELECT payload_json FROM events WHERE kind='reviewer-catalog-recorded'").fetchone()
+            "SELECT payload_json FROM events WHERE kind='reviewer-catalog-recorded'"
+        ).fetchone()
         assert json.loads(event[0])["catalog"] == catalog
+
 
 HASH = "a" * 64
 

@@ -143,8 +143,10 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
         )
         if (record := json.loads(payload)).get("reviewIndependence") == "single-provider"
     }
-    single = len(reviewers) >= 2 and len(providers) == 1 and all(
-        row["round_id"] in labeled for row in runs
+    single = (
+        len(reviewers) >= 2
+        and len(providers) == 1
+        and all(row["round_id"] in labeled for row in runs)
     )
     evidence.update({"reviewIndependence": "single-provider"} if single else {})
     passed = len(reviewers) >= 2 and (len(providers) >= 2 or single) and not unresolved

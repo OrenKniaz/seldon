@@ -21,8 +21,10 @@ def offline_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("PATH", str(tmp_path))
+
     def no_launch(*args, **kwargs):
         raise AssertionError("Offline observation must not launch a process")
+
     monkeypatch.setattr(subprocess, "Popen", no_launch)
     for name in ("codex", "claude", "copilot"):
         executable = tmp_path / (name + (".cmd" if os.name == "nt" else ""))
@@ -30,9 +32,22 @@ def offline_cache(tmp_path, monkeypatch):
         executable.chmod(0o755)
     cache = tmp_path / ".codex/models_cache.json"
     cache.parent.mkdir()
-    cache.write_text(json.dumps({"client_version": "fixture-1", "identity": "PRIVATE",
-        "tokens": "SECRET", "models": [{"slug": "observed-model", "identity": "PRIVATE",
-        "supported_reasoning_levels": [{"effort": "high", "description": "SECRET"}]}]}))
+    cache.write_text(
+        json.dumps(
+            {
+                "client_version": "fixture-1",
+                "identity": "PRIVATE",
+                "tokens": "SECRET",
+                "models": [
+                    {
+                        "slug": "observed-model",
+                        "identity": "PRIVATE",
+                        "supported_reasoning_levels": [{"effort": "high", "description": "SECRET"}],
+                    }
+                ],
+            }
+        )
+    )
     return cache
 
 
@@ -40,6 +55,7 @@ def offline_cache(tmp_path, monkeypatch):
 def test_offline_catalog_unknown_without_usable_cache(offline_cache, state):
     """Prevent stale or broken metadata claiming offerings; prior tests inject valid catalogs."""
     from codex_harness.core.intake import validate_catalog
+
     if state == "absent":
         offline_cache.unlink()
     elif state == "stale":

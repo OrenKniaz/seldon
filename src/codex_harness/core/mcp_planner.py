@@ -25,9 +25,11 @@ from codex_harness.core.plan_store import (
     open_plan_store,
     open_plan_store_readonly,
 )
-from codex_harness.core.planner_connection import connection_reply
+from codex_harness.core.planner_connection import connection_reply, workspace_refusal
 from codex_harness.core.planner_guidance import BATCH_GUIDANCE, planning_turn
 from codex_harness.core.planner_nodes import batch_nodes
+from codex_harness.core.planner_refusal_events import record_refusals, refusal_status
+from codex_harness.core.planner_refusals import TEACHING, compact_refusal, refusal_context
 from codex_harness.core.planner_schema import node_error_help, schema_help
 from codex_harness.core.planner_vision import vision_projection
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
@@ -1133,37 +1135,7 @@ class PlannerServer:
         return connection_reply(response, self.workspace, status)
 
     def _workspace_refusal(self, request_id, binding, code, name=None):
-        # No status/store reads here: even formatting a normal error can open a store.
-        response = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "isError": True,
-                "workspaceBinding": binding,
-                "structuredContent": {"workspaceBinding": binding},
-                "content": [
-                    {
-                        "type": "text",
-                        "text": code
-                        + ": workspace binding refused.\n"
-                        + self._binding_text(binding)
-                        + "\nNo store access or provider admission was attempted for this call.\n"
-                        "Next: Inspect harness_plan_status read-only, verify the intended project "
-                        "from the caller, then use a correctly bound connection with "
-                        "expected_workspace. A supported client reload route is unknown; "
-                        "changing config alone proves no live binding.",
-                    }
-                ],
-            },
-        }
-        if name == "harness_advance":
-            result = response["result"]
-            result["structuredContent"].update(currentPhase="unknown", nextPhase="unknown")
-            result["content"][0]["text"] = (
-                "Current phase unknown; next legal phase: unknown (workspace binding refused).\n"
-                + result["content"][0]["text"]
-            )
-        return connection_reply(response, self.workspace, show_recovery=True)
+        return workspace_refusal(self, request_id, binding, code, name)
 
     def _wire_call_tool(self, name, arguments):
         if name == "harness_packet_view" and isinstance(arguments, dict):
@@ -1289,7 +1261,7 @@ class PlannerServer:
     def call_tool(self, name: str, arguments: dict, *, schema_tools=None) -> dict:
         self.result_data = None
         if name == "harness_accept_status":
-            return self._acceptance_job_status(arguments)
+            return connection_reply(self._acceptance_job_status(arguments), self.workspace)
         operation_error_code = None
         error_message = ""
         uncertain_dispatch = False
@@ -1439,13 +1411,6 @@ class PlannerServer:
                 body += " The tool completed; do not repeat its mutation to refresh status."
         if is_error:
             body += f"\npending_gate: {status['pending_gate'] or 'none'}"
-            help_line = (
-                views.refusal_help(operation_error_code, error_message, status)
-                if operation_error_code
-                else None
-            )
-            if help_line:
-                body += "\n" + help_line
         acceptance = status.get("acceptance", {})
         if name == "harness_plan_status" and acceptance.get("invalidMessage"):
             body += "\n- Acceptance invalid: " + acceptance["invalidMessage"]
@@ -1462,7 +1427,7 @@ class PlannerServer:
             and name == "harness_resolve_findings"
             and (uncertain_dispatch or not status_available)
         ):
-            next_step += " Read-only contract: harness_schema tool=harness_resolve_findings."
+            body += "\nRead-only contract: harness_schema tool=harness_resolve_findings."
         if (
             uncertain_dispatch
             and name == "harness_plan_resume"
@@ -1558,8 +1523,13 @@ class PlannerServer:
             reply.setdefault("structuredContent", {}).update(phase)
             text = f"\nStill in {current}; next legal phase: {next_phase or 'none'}."
             reply["content"][0]["text"] = text.strip() + "\n" + reply["content"][0]["text"]
+        refusal_values = refusal_context(self, is_error, error_message, operation_error_code)
         reply = connection_reply(
-            reply, self.workspace, status, show_recovery=name == "harness_plan_status"
+            reply,
+            self.workspace,
+            status,
+            show_recovery=name == "harness_plan_status",
+            refusal_values=refusal_values,
         )
         if name == "harness_prepare_chat_confirmation" and not is_error:
             reply["content"][0]["text"] = body + "\n\n" + reply["content"][0]["text"]
@@ -1626,6 +1596,7 @@ class PlannerServer:
                         "digest": digest,
                     }
                     reply["content"][0]["text"] = f"unchanged since {digest}; Next: {next_step}"
+        compact_refusal(name, reply, self.workspace, status, self.result_data)
         return reply
 
     @staticmethod
@@ -2260,7 +2231,7 @@ class PlannerServer:
                 raise ValueError("planMode is immutable; no conversion of existing plans")
             self.result_data = {"id": "V1"}
             node = self.store.spine().node(self.store.spine().ids("vision")[0])
-            setup_card = views.setup_card(node["fields"].get("setup", {}))
+            setup_card = views.setup_card(node["fields"].get("setup", {})) + "\n" + TEACHING
             if self.store.spine().semantic:
                 guide = schema_help(TOOLS, kind="vision")
                 self.result_data["schemaDigest"] = {
@@ -2466,7 +2437,7 @@ class PlannerServer:
             self.result_data = store.revise_test(**args)
             return f"Revised protected test: {self.result_data['path']}; compile before reuse."
         if name == "harness_plan_status":
-            status = self._status()
+            status = refusal_status(self._status(), store)
             if not (args.get("full") or args.get("include_detail")) and status.get(
                 "visionProjection"
             ):
@@ -3174,6 +3145,7 @@ class PlannerServer:
             ),
         }
 
+    @record_refusals
     def expire_confirmation(self):
         """Bound the one pending native interaction without blocking ordinary MCP calls."""
         pending = self._pending_confirmation
@@ -3193,6 +3165,7 @@ class PlannerServer:
             self._wire_binding_reply(response, binding) if binding is not None else response,
         ]
 
+    @record_refusals
     def handle_line(self, line: str) -> dict | None:
         try:
             request = json.loads(line, parse_constant=_invalid_constant)

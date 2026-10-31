@@ -10,6 +10,7 @@ import shlex
 import pytest
 from tests.python.core import test_planner_replay_gaps, test_planner_resolution
 from tests.python.core.planning_support import source_controller_roundtable
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.planner_audits import audit_synchronously
@@ -52,11 +53,12 @@ def test_resume_compile_next_uses_existing_native_compiler(project):
         vision = project.spine().node("V1")
         vision["fields"].pop("validation")
         assert not result(server, "harness_upsert_node", node=vision)["isError"]
-        before = list(project.connection.iterdump())
+        before, refusal_count = canonical_rows(project), refusal_total(project)
         resumed = result(server, "harness_plan_resume")
         assert "harness_compile" in next_line(resumed)
         assert "existing CLI" not in next_line(resumed)
-        assert list(project.connection.iterdump()) == before
+        assert canonical_rows(project) == before
+        assert refusal_total(project) == refusal_count + 1
     finally:
         server.close()
 
@@ -70,7 +72,7 @@ def test_failed_advance_and_resume_name_native_roundtable(project):
     assert audit_synchronously(project)["proofCreditGranted"]
     server = PlannerServer(project.workspace)
     try:
-        before = list(project.connection.iterdump())
+        before, refusal_count = canonical_rows(project), refusal_total(project)
         blocked = result(server, "harness_advance", to_phase="publish")
         assert blocked["isError"] and project.phase() == "roundtable"
         resumed = result(server, "harness_plan_resume")
@@ -78,7 +80,8 @@ def test_failed_advance_and_resume_name_native_roundtable(project):
             assert "harness_roundtable" in next_line(reply)
             assert "name/provider/model/effort" in next_line(reply)
             assert "existing CLI" not in next_line(reply)
-        assert list(project.connection.iterdump()) == before
+        assert canonical_rows(project) == before
+        assert refusal_total(project) == refusal_count + 2
     finally:
         server.close()
 

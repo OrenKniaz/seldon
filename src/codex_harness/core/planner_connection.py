@@ -8,6 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from codex_harness.core.plan_store import PHASES
+from codex_harness.core.planner_refusals import refusal_code, refusal_hold, refusal_text
 
 
 def connection_projection(workspace: str | Path, status: dict | None = None) -> dict:
@@ -47,6 +48,7 @@ def connection_reply(
     status: dict | None = None,
     *,
     show_recovery: bool = False,
+    refusal_values: dict | None = None,
 ) -> dict:
     """Project a tool result or native elicitation without changing its payload.
 
@@ -62,6 +64,8 @@ def connection_reply(
     payload = reply.get("result", reply)
     if not isinstance(payload, dict) or "content" not in payload:
         return reply
+    if payload.get("jobOnly") and not payload.get("isError"):
+        return reply
     result = deepcopy(reply)
     payload = result.get("result", result)
     projection = (
@@ -73,6 +77,15 @@ def connection_reply(
     for item in payload["content"]:
         if item.get("type") == "text":
             item["text"] = _text(item["text"], projection, show_recovery)
+            values = {
+                "status": status or {},
+                "data": payload.get("structuredContent", {}),
+                "binding": payload.get("workspaceBinding", {}),
+                **(refusal_values or {}),
+            }
+            if payload.get("isError") or refusal_hold(values):
+                payload.setdefault("refusalCode", refusal_code(item["text"], values))
+                item["text"] = refusal_text(item["text"], workspace, values)
             # One header per response; additional text blocks remain untouched.
             break
     return result
@@ -96,3 +109,37 @@ def _text(text: str, projection: dict, show_recovery: bool) -> str:
         if show_recovery:
             lines.append(recovery)
     return "\n".join(lines)
+
+
+def workspace_refusal(self, request_id, binding, code, name=None):
+    # No status/store reads here: even formatting a normal error can open a store.
+    response = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {
+            "isError": True,
+            "workspaceBinding": binding,
+            "structuredContent": {"workspaceBinding": binding},
+            "content": [
+                {
+                    "type": "text",
+                    "text": code
+                    + ": workspace binding refused.\n"
+                    + self._binding_text(binding)
+                    + "\nNo store access or provider admission was attempted for this call.\n"
+                    "Next: Inspect harness_plan_status read-only, verify the intended project "
+                    "from the caller, then use a correctly bound connection with "
+                    "expected_workspace. A supported client reload route is unknown; "
+                    "changing config alone proves no live binding.",
+                }
+            ],
+        },
+    }
+    if name == "harness_advance":
+        result = response["result"]
+        result["structuredContent"].update(currentPhase="unknown", nextPhase="unknown")
+        result["content"][0]["text"] = (
+            "Current phase unknown; next legal phase: unknown (workspace binding refused).\n"
+            + result["content"][0]["text"]
+        )
+    return connection_reply(response, self.workspace, show_recovery=True)

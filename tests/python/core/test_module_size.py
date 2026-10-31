@@ -9,8 +9,8 @@ CORE = "src/codex_harness/core"
 CEILINGS = {
     "src/codex_harness/core/acceptance.py": 2038,
     "src/codex_harness/core/dispatch.py": 2838,
-    "src/codex_harness/core/mcp_planner.py": 3403,
-    "src/codex_harness/core/plan_store.py": 3691,
+    "src/codex_harness/core/mcp_planner.py": 3376,
+    "src/codex_harness/core/plan_store.py": 3670,
     "src/codex_harness/core/planner_views.py": 1729,
     "src/codex_harness/core/roundtable.py": 2465,
     "src/codex_harness/core/status_api.py": 1765,

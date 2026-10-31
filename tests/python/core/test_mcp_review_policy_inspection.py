@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 import pytest
 from tests.python.core.test_plan_store import FIXTURE, _link_r6, _to
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 
 from codex_harness.core import mcp_planner, plan_cli, planner_views, roundtable
 from codex_harness.core.mcp_planner import PlannerServer
@@ -186,7 +187,7 @@ def test_bound_inspection_without_plan_refuses_without_creating_workspace(tmp_pa
 
 
 def test_inspection_rejects_mutation_arguments_without_adoption_or_launch(project, monkeypatch):
-    """Catch accidentally treating inspection payload as optional policy declaration."""
+    """Catch adopting policy from inspection input; only the refusal audit may be appended."""
     calls = []
 
     def forbidden(*args, **kwargs):
@@ -196,7 +197,7 @@ def test_inspection_rejects_mutation_arguments_without_adoption_or_launch(projec
     monkeypatch.setattr(PlanStore, "record_plan_review_policy", forbidden)
     monkeypatch.setattr(roundtable, "run_roundtable", forbidden)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
-    before = list(project.connection.iterdump())
+    before, refusal_count = canonical_rows(project), refusal_total(project)
     server = PlannerServer(project.workspace)
     try:
         result = wire(
@@ -209,6 +210,7 @@ def test_inspection_rejects_mutation_arguments_without_adoption_or_launch(projec
             },
         )
         assert result["isError"]
-        assert not calls and list(project.connection.iterdump()) == before
+        assert not calls and canonical_rows(project) == before
+        assert refusal_total(project) == refusal_count + 1
     finally:
         server.close()

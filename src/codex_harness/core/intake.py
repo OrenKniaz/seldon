@@ -312,9 +312,12 @@ def validate_catalog(observation: Value) -> ReviewerCatalogV1:
         from codex_harness.core.project_init import offline_reviewers
 
         _object(observation, "discovery", "offline observation", "userModels")
-        observation = {"schema": "dot-reviewer-catalog-v1", "id": f"RC-{uuid4()}",
-                       "observedAt": datetime.now(UTC).isoformat(),
-                       "providers": offline_reviewers(observation.get("userModels"))}
+        observation = {
+            "schema": "dot-reviewer-catalog-v1",
+            "id": f"RC-{uuid4()}",
+            "observedAt": datetime.now(UTC).isoformat(),
+            "providers": offline_reviewers(observation.get("userModels")),
+        }
     canonical_digest(observation)
     result = deepcopy(_object(observation, "schema id observedAt providers", "catalog", "digest"))
     _enum(result["schema"], ("dot-reviewer-catalog-v1",), "catalog.schema")

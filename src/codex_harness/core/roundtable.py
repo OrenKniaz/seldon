@@ -25,6 +25,7 @@ from codex_harness.core import provider_call_budget as review_budget
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
+from codex_harness.core.reviewer_evidence import single_provider_notice
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
@@ -2413,8 +2414,7 @@ def findings(store: PlanStore, status=None, *, expand=False) -> list[dict]:
 def render_roundtable_card(result: dict, findings: list[dict]) -> str:
     lines = [f"Roundtable: plan {result['planRevision'][:12]}"]
     if result.get("reviewIndependence") == "single-provider":
-        lines.append("Reviewed by two {provider} reviewers; only one provider was available."
-                     .format_map(result["reviewers"][0]))
+        lines.append(single_provider_notice(result))
     lines.append(f"Cross-subscription: {str(result['crossSubscription']).lower()}")
     lines.append(f"Round budget: {result.get('maxRounds', 2)} per reviewer per revision")
     for reviewer in result["reviewers"]:

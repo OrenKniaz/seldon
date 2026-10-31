@@ -4,6 +4,7 @@ import json
 import subprocess
 
 import pytest
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 
 from codex_harness.core import mcp_planner, roundtable
 from codex_harness.core.mcp_planner import PlannerServer
@@ -166,7 +167,7 @@ def test_adoption_workspace_refusal_precedes_store_or_process(tmp_path, monkeypa
 
 @pytest.mark.parametrize("case", ["stale", "empty", "all-optional", "role-edit", "attempt-exists"])
 def test_adoption_preserves_canonical_refusals_and_policy_free_history(project, case):
-    """Catch bypassed writer rules; direct writer tests miss new-route rollback/history loss."""
+    """Catch policy/history changes on refusal; its audit append is the sole allowed delta."""
     workspace, revision = project
     slots = [dict(slot) for slot in SLOTS]
     expected = {
@@ -207,7 +208,7 @@ def test_adoption_preserves_canonical_refusals_and_policy_free_history(project, 
             )
             assert not store._plan_review_policies()
             assert store.review(reviewed["roundId"])["reviewers"][0]["isMocked"]
-        before = list(store.connection.iterdump())
+        before, refusal_count = canonical_rows(store), refusal_total(store)
     server = PlannerServer(workspace)
     try:
         refused = wire(
@@ -221,7 +222,8 @@ def test_adoption_preserves_canonical_refusals_and_policy_free_history(project, 
     finally:
         server.close()
     with open_plan_store_readonly(workspace) as saved:
-        assert list(saved.connection.iterdump()) == before
+        assert canonical_rows(saved) == before
+        assert refusal_total(saved) == refusal_count + 1
 
 
 @pytest.mark.parametrize("case", ["stale-policy", "missing-validation"])

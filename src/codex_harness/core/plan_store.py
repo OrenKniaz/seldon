@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from codex_harness.core import intake, waves
 from codex_harness.core.graph import load_plan
+from codex_harness.core.reviewer_evidence import native_reviewer
 from codex_harness.core.spine import (
     SCHEMA,
     Spine,
@@ -3340,30 +3341,6 @@ class PlanStore:
         if self._open("clarifications"):
             return "plan-clarifications-open"
 
-        def native_reviewer(reviewer):
-            if not isinstance(reviewer, dict):
-                return False
-            details = reviewer.get("shardDetails")
-            count = reviewer.get("shards")
-            return (
-                isinstance(reviewer.get("provider"), str)
-                and bool(reviewer["provider"].strip())
-                and type(count) is int
-                and count > 0
-                and isinstance(details, list)
-                and len(details) == count
-                and all(
-                    isinstance(shard, dict)
-                    and shard.get("isMocked") is False
-                    and shard.get("didRunProvider") is True
-                    and type(shard.get("exitCode")) is int
-                    and shard["exitCode"] == 0
-                    and type(shard.get("invalid")) is int
-                    and shard["invalid"] == 0
-                    for shard in details
-                )
-            )
-
         def original_review(review):
             # Rebind carries a reference, never a newly executed review. Follow only
             # links recorded by the existing rebind producer, preserving originals.
@@ -3437,9 +3414,11 @@ class PlanStore:
                 isinstance(reviewers, list)
                 and reviewers
                 and all(native_reviewer(reviewer) for reviewer in reviewers)
-                and (len({reviewer["provider"] for reviewer in reviewers}) >= 2
-                     or review.get("reviewIndependence") == "single-provider"
-                     and len({reviewer.get("name", "") for reviewer in reviewers} - {""}) >= 2)
+                and (
+                    len({reviewer["provider"] for reviewer in reviewers}) >= 2
+                    or review.get("reviewIndependence") == "single-provider"
+                    and len({reviewer.get("name", "") for reviewer in reviewers} - {""}) >= 2
+                )
             ):
                 return None
         return "acceptance-review-required"

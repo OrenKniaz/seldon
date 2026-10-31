@@ -11,6 +11,7 @@ from copy import deepcopy
 
 import pytest
 from tests.python.core import test_mcp_audit, test_planner_replay_gaps
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import PlanStoreError, open_plan_store_readonly
@@ -212,7 +213,7 @@ def test_failed_audit_receipt_stays_failed_when_followup_status_is_unavailable(
         server.audits.thread.join(timeout=30)
         assert not server.audits.thread.is_alive()
         server.audits.drain(server.store)
-        before = tuple(server.store.connection.iterdump())
+        before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
 
         def unavailable(self):
             raise OSError("Follow-up status unavailable")
@@ -229,7 +230,8 @@ def test_failed_audit_receipt_stays_failed_when_followup_status_is_unavailable(
             "SELECT passed FROM audit_runs WHERE id=?", (receipt["id"],)
         ).fetchone()
         assert row[0] == 0
-        assert tuple(server.store.connection.iterdump()) == before
+        assert canonical_rows(server.store) == before
+        assert refusal_total(server.store) == refusal_count + 1
         assert executions == [1]  # Follow-up observation failure never reruns validation.
     finally:
         server.close()

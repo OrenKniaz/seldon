@@ -11,11 +11,12 @@ import pytest
 from tests.python.core import test_test_audit
 from tests.python.core.planning_support import publication_evidence, source_only_expansion
 from tests.python.core.test_plan_store import draft_inputs, draft_intake, mock_catalog, mock_choice
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 from tests.python.core.test_preflight import inject_mock_discovery
 
 from codex_harness.core import graph, worker_packet
 from codex_harness.core.mcp_planner import PHASE_DIAGRAMS, TOOLS, PlannerServer
-from codex_harness.core.plan_store import PHASES, open_plan_store
+from codex_harness.core.plan_store import PHASES, open_plan_store, open_plan_store_readonly
 from codex_harness.core.planner_views import banner, chat_diagram
 from codex_harness.core.spine import MARKDOWN_FILES, load_spine
 
@@ -64,7 +65,14 @@ def test_status_summary_full_fetch_and_pending_question_preserve_canonical_autho
         assert summary["nodeId"] == node["id"] and summary["planRevision"] == revision
         assert summary["nodeRevision"] == server.store.spine().revision(node["id"])
         assert "Summary only" in compact_reply["content"][0]["text"]
-        summarized = {"visionProjection", "continuation", "reviewResolution", "digest"}
+        assert compact["refusals_by_code"] == {}
+        summarized = {
+            "visionProjection",
+            "continuation",
+            "reviewResolution",
+            "digest",
+            "refusals_by_code",
+        }
         assert {k: v for k, v in compact.items() if k not in summarized} == {
             k: v for k, v in before.items() if k not in summarized
         }
@@ -72,7 +80,7 @@ def test_status_summary_full_fetch_and_pending_question_preserve_canonical_autho
         full_reply = workspace_wire(
             server, "harness_plan_status", expected_workspace=str(tmp_path), full=True
         )
-        assert full_reply["structuredContent"] == before
+        assert full_reply["structuredContent"] == {**before, "refusals_by_code": {}}
         assert words in full_reply["content"][0]["text"]
         fetched = workspace_wire(
             server, summary["fullFetch"]["tool"], **summary["fullFetch"]["arguments"]
@@ -384,10 +392,11 @@ def test_public_ordinary_choice_refuses_invalid_or_replayed_action_without_credi
             )
             assert not changed["isError"]
             assert server.store.spine().plan_revision() == selected["spineRevision"]
-        before = list(server.store.connection.iterdump())
+        before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
         refused = workspace_wire(server, tool_name, expected_workspace=str(tmp_path), **arguments)
         assert refused["isError"], refused
-        assert list(server.store.connection.iterdump()) == before
+        assert canonical_rows(server.store) == before
+        assert refusal_total(server.store) == refusal_count + 1
         assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
         records = server.store.connection.execute(
             "SELECT count(*) FROM events WHERE kind='reviewer-selection-confirmed'"
@@ -413,7 +422,7 @@ def test_public_ordinary_choice_rejects_authority_injection(tmp_path, field):
     server = PlannerServer(tmp_path)
     try:
         node, selected, _ = public_test_reviewer_choice(server)
-        before = list(server.store.connection.iterdump())
+        before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
         result = workspace_wire(
             server,
             "harness_confirm_reviewer_choice",
@@ -426,7 +435,8 @@ def test_public_ordinary_choice_rejects_authority_injection(tmp_path, field):
             **{field: "injected"},
         )
         assert result["isError"], result
-        assert list(server.store.connection.iterdump()) == before
+        assert canonical_rows(server.store) == before
+        assert refusal_total(server.store) == refusal_count + 1
         assert server.store.spine().node(node["id"])["fields"]["confirmation"] is None
     finally:
         server.close()
@@ -1683,7 +1693,7 @@ def test_roundtable_schema_refuses_unknown_provider_before_dispatch(server):
         "properties"
     ]["provider"]["enum"]
     assert set(providers) == {"claude", "codex", "copilot"}
-    before = list(server.store.connection.iterdump())
+    before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
     reply = workspace_wire(
         server,
         "harness_roundtable",
@@ -1694,7 +1704,8 @@ def test_roundtable_schema_refuses_unknown_provider_before_dispatch(server):
     assert reply["isError"] and "must be one of" in text
     assert all(provider in text for provider in providers)
     assert "KeyError" not in text and "unexpected" not in text
-    assert list(server.store.connection.iterdump()) == before
+    assert canonical_rows(server.store) == before
+    assert refusal_total(server.store) == refusal_count + 1
 
 
 @pytest.mark.parametrize("runner", ["unittest", "command"])
@@ -1710,7 +1721,7 @@ def test_show_unknown_node_teaches_listing_without_lookup_error(server, runner):
             "proofGlob": "*.py",
         }
         call(server, "harness_upsert_node", node=vision)
-    before = list(server.store.connection.iterdump())
+    before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
     reply = workspace_wire(
         server,
         "harness_show_node",
@@ -1724,7 +1735,8 @@ def test_show_unknown_node_teaches_listing_without_lookup_error(server, runner):
         server, "harness_show_node", expected_workspace=str(server.workspace), id="V1"
     )
     assert not known["isError"] and known["structuredContent"]["id"] == "V1"
-    assert list(server.store.connection.iterdump()) == before
+    assert canonical_rows(server.store) == before
+    assert refusal_total(server.store) == refusal_count + 1
 
 
 @pytest.fixture
@@ -2194,9 +2206,10 @@ def test_public_compile_then_packet_current_manifest_without_execution(
     try:
         missing = call(server, "harness_compile", error=True)
         assert "plan-requirement-file-missing" in missing
+        assert refusal_total(server.store) > 0
         assert (
             server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
-            == event_count
+            == event_count + 1
         )
     finally:
         (template / "authored-tests-held").rename(template / "tests")
@@ -2267,6 +2280,7 @@ def test_preflight_protocol_never_opens_or_creates_plan(tmp_path, monkeypatch, e
                     fields={},
                 )
             )
+            canonical_before, refusal_count = canonical_rows(store), refusal_total(store)
     before = {
         path.relative_to(tmp_path): path.read_bytes()
         for path in tmp_path.rglob("*")
@@ -2307,7 +2321,15 @@ def test_preflight_protocol_never_opens_or_creates_plan(tmp_path, monkeypatch, e
         for path in tmp_path.rglob("*")
         if path.is_file()
     }
-    assert after == before
+    if existing_plan:
+        assert {p: b for p, b in after.items() if not p.name.startswith("plan.sqlite3")} == {
+            p: b for p, b in before.items() if not p.name.startswith("plan.sqlite3")
+        }
+        with open_plan_store_readonly(workspace) as store:
+            assert canonical_rows(store) == canonical_before
+            assert refusal_total(store) == refusal_count + 3
+    else:
+        assert after == before
 
 
 def test_draft_tools_same_store_reopen_and_unmet_chat(tmp_path):
@@ -2388,9 +2410,11 @@ def test_review_mcp_malformed_fields_refuses_atomically(tmp_path, target):
         result = rpc(server, "tools/call", dict(name=name, arguments=arguments))["result"]
         assert result["isError"]
         assert "plan-draft-fields-invalid" in result["content"][0]["text"]
+        assert result["structuredContent"]["refusalRecording"] == {"state": "recorded"}
         assert server.store.spine().plan_revision() == revision
         assert (
-            server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0] == events
+            server.store.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+            == events + 1
         )
     finally:
         server.close()
@@ -2955,12 +2979,13 @@ def test_mcp_wave_confirmation_refuses_without_mutation(tmp_path, arguments):
     server = mcp_wave_plan(tmp_path / "refused")
     try:
         before = server.store.status()
-        events = list(server.store.connection.execute("SELECT * FROM events"))
+        events, refusal_count = canonical_rows(server.store), refusal_total(server.store)
         args = dict(to_phase="roundtable") | arguments
         result = confirmation_rpc(server, **args)
         assert result["isError"], result
         assert server.store.status() == before
-        assert list(server.store.connection.execute("SELECT * FROM events")) == events
+        assert canonical_rows(server.store) == events
+        assert refusal_total(server.store) == refusal_count + 1
         assert server.store.outcome_waves()["waveProductLock"] is None
     finally:
         server.close()
@@ -2975,11 +3000,12 @@ def test_mcp_advance_confirmation_cannot_substitute_vision_gate(server, gate, ta
         call(server, "harness_advance", to_phase="expand")
         call(server, "harness_advance", to_phase="vision-lock")
     before = server.store.status()
-    events = list(server.store.connection.execute("SELECT * FROM events"))
+    events, refusal_count = canonical_rows(server.store), refusal_total(server.store)
     result = confirmation_rpc(server, to_phase=target, user_statement="Synthetic misplaced words")
     assert result["isError"], result
     assert server.store.status() == before
-    assert list(server.store.connection.execute("SELECT * FROM events")) == events
+    assert canonical_rows(server.store) == events
+    assert refusal_total(server.store) == refusal_count + 1
     assert not server.store.connection.execute(
         "SELECT * FROM approvals WHERE gate=?", (gate,)
     ).fetchall()
@@ -3014,7 +3040,7 @@ def test_mcp_closure_schema_example_records_unverified_and_holds_publication(tmp
             example = advertised["closureExample"]["example"]
             invalid = json.loads(json.dumps(example))
             invalid["findings"][0]["closure"]["reviewIds"] = ["invented-review"]
-            before = list(store.connection.iterdump())
+            before, refusal_count = canonical_rows(store), refusal_total(store)
             rejected = rpc(
                 instance,
                 "tools/call",
@@ -3026,7 +3052,8 @@ def test_mcp_closure_schema_example_records_unverified_and_holds_publication(tmp
             assert rejected["isError"]
             assert "record-stale-or-absent" in rejected["content"][0]["text"]
             assert "harness_schema tool=harness_resolve_findings" in rejected["content"][0]["text"]
-            assert list(store.connection.iterdump()) == before
+            assert canonical_rows(store) == before
+            assert refusal_total(store) == refusal_count + 1
             response = rpc(
                 instance,
                 "tools/call",
