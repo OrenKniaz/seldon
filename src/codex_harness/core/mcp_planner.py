@@ -554,7 +554,7 @@ TOOLS = [
         "Record only an explicit answer to a displayed chat question: Approve, No, Cancel or "
         "Changes: <text>. Quote/hash/actor are caller-supplied and unverified. Does not launch.",
         {
-            "gate": {"type": "string", "enum": [*CHAT_GATES, "recovery"]},
+            "gate": {"type": "string", "enum": CHAT_GATES},
             "request_id": STRING,
             "expected_revision": STRING,
             "quoted_message": STRING,
@@ -1925,13 +1925,9 @@ class PlannerServer:
             arguments = {key: value for key, value in args.items() if key != "gate"}
             if args["gate"] == "execution":
                 outcome = complete_chat_execution(self._store(), **arguments)
-            elif args["gate"] == "recovery":
-                outcome = planner_recovery.complete(self._store(), **arguments)
             else:
                 outcome = complete_chat_confirmation(self._store(), **args)
-            if outcome["state"] in {"decline", "declined", "cancel", "changes-requested"} and (
-                args["gate"] != "recovery"
-            ):
+            if outcome["state"] in {"decline", "declined", "cancel", "changes-requested"}:
                 outcome["reason"] = "Decision " + outcome["state"] + "; approval was not granted."
                 outcome["chatConfirmation"] = self._prepare_chat_question(
                     {"gate": "plan-execution" if args["gate"] == "execution" else args["gate"]}

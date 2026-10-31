@@ -1,10 +1,9 @@
-"""Recovery through real local processes, canonical stores and public consent.
+"""Recovery through real local processes and canonical cumulative consent.
 
 The dispatch test payload launches only Python locally, never a coding provider.
 Publication uses the retained source fixture's real audit and synthetic reviews.
 """
 
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -85,30 +84,15 @@ def tool(server, name, **arguments):
     )["result"]
 
 
-def answer(server, request, quote="Approve"):
-    return tool(
-        server,
-        "harness_record_chat_confirmation",
-        gate="recovery",
-        request_id=request["request_id"],
-        expected_revision=request["plan_revision"],
-        quoted_message=quote,
-        quote_sha256=hashlib.sha256(quote.encode()).hexdigest(),
-        actor_label="source-test-user",
-    )
-
-
 def snapshot(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
 def test_local_child_exit_readmit_once_with_cumulative_v2_usage(admitted, monkeypatch):
-    """Catch refused plain yes, duplicate successor launch and budget reset via MCP.
+    """Protect card-free quiescent recovery, single admission and charged starts.
 
-    Old job tests fake Popen/dispatch and cannot prove descendant teardown or a
-    successor's real canonical provider-claim consumer. The old recovery helper
-    supplied a hidden publication revision instead of using the card's reply binding.
-    No cleanup field is mocked.
+    Frozen-plan tests miss successor consumption through the real ledger after
+    restart; a finite local child proves teardown without mocking cleanup.
     """
     store, revision, workers, job, launches, launch = admitted
     assert Path(job["evidenceDir"]).name == short(revision)
@@ -141,35 +125,12 @@ def test_local_child_exit_readmit_once_with_cumulative_v2_usage(admitted, monkey
             reason="Finite local child exited",
         )
         assert not offered["isError"], offered
-        request = offered["structuredContent"]
-        assert request["plan_revision"] in offered["content"][0]["text"]
-        assert (
-            tool(server, "harness_recovery", mode="inspect", job_id=revision)["structuredContent"]
-            == proof
-        )
-        completed = answer(server, request, "yes")
-        assert not completed["isError"], completed
-        successor = completed["structuredContent"]["disposition"]["successor"]
-        with pytest.raises(ValueError, match="plan-b-consent-required"):
-            jobs.start_worker_job(store, revision, workers, call_cap=16)
-        assert not jobs._directory(store.workspace, successor).exists()
+        resolved = offered["structuredContent"]
+        assert "card" not in resolved
+        successor = resolved["successor"]
         options = dict(expected_revision=revision, workers=workers, call_cap=16)
-        execution = tool(
-            server, "harness_prepare_chat_confirmation", gate="execution", execution=options
-        )
-        assert not execution["isError"], execution
-        execution_id = execution["structuredContent"]["request_id"]
-        consent = tool(
-            server,
-            "harness_record_chat_confirmation",
-            gate="execution",
-            request_id=execution_id,
-            expected_revision=store._revision(),
-            quoted_message="Approve",
-            quote_sha256=hashlib.sha256(b"Approve").hexdigest(),
-            actor_label="source-test-user",
-        )
-        assert not consent["isError"], consent
+        server.close()  # Reconnect retains consent, disposition and charged usage.
+        server = PlannerServer(store.workspace)
         with monkeypatch.context() as patch:
             patch.setattr(jobs.subprocess, "Popen", launch)
             started = tool(server, "harness_worker_start", **options)
@@ -184,7 +145,6 @@ def test_local_child_exit_readmit_once_with_cumulative_v2_usage(admitted, monkey
         assert len(launches) == 2
         assert recovery.inspect(store.workspace, successor)["spentCalls"] == 1
         assert snapshot(Path(job["evidenceDir"])) == old
-        assert answer(server, request)["isError"]
 
         # Run the same finite payload in the successor through the real claim consumer.
         def successor_payload(command, **options):
@@ -248,10 +208,7 @@ def test_unknown_refuses_readmit_abandon_terminal_and_inspect_no_writes(admitted
             reason="Preserve unknown execution in quarantine",
         )
         assert not offered["isError"], offered
-        request = offered["structuredContent"]
-        completed = answer(server, request)
-        assert not completed["isError"], completed
-        assert completed["structuredContent"]["disposition"]["quarantine"] is True
+        assert offered["structuredContent"]["quarantine"] is True
         assert recovery.inspect(store.workspace, revision)["disposition"]["choice"] == "abandon"
         assert jobs.worker_job_status(store.workspace, revision)["status"] == "abandoned"
         with pytest.raises(ValueError, match="abandoned-terminal"):
@@ -265,30 +222,3 @@ def test_unknown_refuses_readmit_abandon_terminal_and_inspect_no_writes(admitted
     finally:
         server.close()
     capsys.readouterr()
-
-
-def test_decline_and_stale_proof_grant_no_resolution(admitted):
-    """Catch reused/changed targets and the old recovery adapter accepting any words.
-
-    A/B gate tests do not protect the recovery adapter's route through V2 consent.
-    """
-    store, revision, _, _, _, _ = admitted
-    server = PlannerServer(store.workspace)
-    try:
-        first = recovery.prepare(store, revision, "abandon", "Stopped testing")
-        declined = answer(server, first, "No")
-        assert not declined["isError"], declined
-        assert recovery.disposition(store, revision) is None
-        assert answer(server, first)["isError"]
-        undecided = recovery.prepare(store, revision, "abandon", "Stopped testing")
-        reply = answer(server, undecided, "Please inspect first")
-        assert not reply["isError"], reply
-        assert reply["structuredContent"]["state"] == "changes-requested"
-        assert recovery.disposition(store, revision) is None
-        second = recovery.prepare(store, revision, "abandon", "Stopped testing")
-        (jobs._directory(store.workspace, revision) / "temp").mkdir()
-        assert answer(server, second)["isError"]
-        assert recovery.disposition(store, revision) is None
-        assert recovery.approvals.records(store, recovery.RESOLVED) == []
-    finally:
-        server.close()

@@ -129,13 +129,7 @@ def require_execution(store, scope):
     return approvals.require_approval(
         store,
         "B",
-        dict(
-            execution=scope,
-            candidate=dict(
-                manifestDigest=scope["executableManifestDigest"],
-                templateFiles=scope["templateFiles"],
-            ),
-        ),
+        dict(execution=scope),
     )["id"]
 
 
@@ -146,13 +140,7 @@ def admit_execution(store, scope, job_id):
         record = approvals.require_approval(
             store,
             "B",
-            dict(
-                execution=scope,
-                candidate=dict(
-                    manifestDigest=scope["executableManifestDigest"],
-                    templateFiles=scope["templateFiles"],
-                ),
-            ),
+            dict(execution=scope),
         )
         store._event(
             ADMITTED, dict(id=record["id"], jobId=job_id, scope=scope, channel=record["channel"])

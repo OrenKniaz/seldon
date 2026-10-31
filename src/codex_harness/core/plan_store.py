@@ -402,38 +402,17 @@ class PlanStore:
 
         from codex_harness.core.approvals import intent as approval_intent
 
-        def intent(fields):
-            return approval_intent(dict(title="", text="", fields=fields))["fields"]
-
         locked = json.loads(self._meta()["locked_vision_json"])
-        if node["fields"].get("planMode") == "semantic-v1" and not reopen_vision_lock:
-            before = {f"fields.{key}": value for key, value in intent(locked["fields"]).items()}
-            after = {f"fields.{key}": value for key, value in intent(node["fields"]).items()}
-            before.update(text=locked["text"], title=locked["title"])
-            after.update(text=node["text"], title=node["title"])
-            changed = sorted(
-                key
-                for key in before.keys() | after.keys()
-                if key not in before or key not in after or before[key] != after[key]
+        stale = approval_intent(locked) != approval_intent(node)
+        if node["fields"].get("planMode") == "semantic-v1" and not reopen_vision_lock and stale:
+            raise PlanStoreError(
+                "vision-locked-wording",
+                "Approved intent changed. Use reopen_vision_lock=true and show the A diff; "
+                "metadata and check repairs preserving intent need no new consent.",
             )
-            if changed:
-                raise PlanStoreError(
-                    "vision-locked-wording",
-                    f"Differing keys: {', '.join(changed)}. Vision wording is locked. "
-                    f"Resend {node['id']} with the locked text/title/fields verbatim "
-                    "(only scenarios/targets may change). Put new detail into requirements. "
-                    "Use reopen_vision_lock=true only when the user's latest reply explicitly "
-                    "asks to change the approved vision, quality or done text; never for your own "
-                    "rewording, clarification or implementation consequences. Reopening costs "
-                    "the user another Vision Lock approval.",
-                )
-
-        if (
-            row["text"] != node["text"]
-            or row["title"] != node["title"]
-            or intent(json.loads(row["fields_json"])) != intent(node["fields"])
+        if approval_intent(dict(row, fields=json.loads(row["fields_json"]))) != approval_intent(
+            node
         ):
-            stale = approval_intent(locked) != approval_intent(node)
             self.connection.execute("UPDATE meta SET vision_lock_stale=?", (int(stale),))
             self._event(
                 "vision-lock-stale" if stale else "vision-lock-restored", {"id": node["id"]}

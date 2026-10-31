@@ -12,7 +12,7 @@ import threading
 import time
 
 from tests.python.core import test_test_audit
-from tests.python.core.planning_support import source_only_b, source_only_expansion
+from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.test_mcp_planner import native_confirmation_result
 
 from codex_harness.core.mcp_planner import PlannerServer
@@ -194,7 +194,8 @@ def test_public_prospective_audit_clears_only_matching_audit_gate(prospective):
     """Catch the missing native route and false or lost prospective audit credit.
 
     CLI and engine tests miss public discovery/help, workspace dispatch and the
-    actual stored audit's consumption by public advance after reopening.
+    actual stored audit's consumption by public advance after reopening. Proof edits
+    must invalidate audit credit without asking for the same B again.
     """
     assert "harness_audit" in {tool["name"] for tool in PlannerServer(".")._wire_tools()}
     server, revision = started(prospective)
@@ -243,9 +244,6 @@ def test_public_prospective_audit_clears_only_matching_audit_gate(prospective):
         recompiled = invoke(resumed, "harness_compile")
         changed = recompiled["structuredContent"]["planRevision"]
         assert not recompiled["isError"] and changed != revision
-        stale = invoke(resumed, "harness_advance", to_phase="publish")
-        assert stale["isError"] and "plan-b-consent-required" in stale["content"][0]["text"]
-        source_only_b(resumed.store)
         stale = invoke(resumed, "harness_advance", to_phase="publish")
         assert stale["isError"] and "passing audit" in stale["content"][0]["text"]
         assert not resumed.store.passing_audit(changed)

@@ -155,20 +155,16 @@ def claim_call(directory, record, attempt_dir, *, timeout=None):
 
     with open_plan_store(directory.parent.parent.parent) as store:
         with store._transaction():
-            from codex_harness.core.approvals import current, executable_candidate, require_approval
+            from codex_harness.core.approvals import current, require_approval
 
             approved = current(store, "B")
             scope = dict(request["executionScope"])
             if approved:
                 scope["callCap"] = approved["subject"]["execution"]["callCap"]
-            manifest = read_record_json(directory / "plan/sample.json")
             authority = require_approval(
                 store,
                 "B",
-                dict(
-                    execution=scope,
-                    candidate=executable_candidate(manifest, request["templateFiles"]),
-                ),
+                dict(execution=scope),
             )
             return _reserve(store, "worker", authority["subject"]["execution"]["callCap"], record)
 

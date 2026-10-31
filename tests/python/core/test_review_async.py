@@ -9,7 +9,6 @@ import time
 from tests.python.core import test_acceptance_candidate_packet
 from tests.python.core.test_acceptance_candidate_packet import candidate
 from tests.python.core.test_acceptance_recovery import REVIEWERS, protocol
-from tests.python.core.test_mcp_chat_confirmations import record
 from tests.python.core.test_mcp_planner import workspace_wire
 
 from codex_harness.core import roundtable
@@ -23,7 +22,7 @@ def test_review_admission_reconnect_and_explicit_unknown_recovery(project, monke
     """Catch transport-blocking paid review and duplicate retry after owner loss.
 
     Prior review tests waited synchronously and could not observe an admitted job
-    while providers were blocked, or consume UNKNOWN recovery through public V2.
+    while providers were blocked, or prove UNKNOWN stays held through recovery.
     """
     store, repo = project
     candidate(store, repo, reviewers=REVIEWERS)
@@ -148,59 +147,26 @@ def test_review_admission_reconnect_and_explicit_unknown_recovery(project, monke
             choice="readmit",
             reason="Accept the spent claim and retry once",
         )
-        assert not request["isError"], request
-        assert request["structuredContent"]["proof"]["spentCalls"] == spent
-        assert (
-            record(server, request["structuredContent"], "No")["structuredContent"]["state"]
-            == "declined"
-        )
+        assert request["isError"] and "UNKNOWN stays held" in str(request)
         assert (
             call("harness_accept_review", repo=str(repo), reviewers=REVIEWERS)["structuredContent"][
                 "attemptId"
             ]
             == lost
         )
-        request = call(
+        assert usage(store, "review") == spent and len(launches) == 2
+        stopped = call(
             "harness_recovery",
             mode="resolve",
             job_id="review:" + lost,
-            choice="readmit",
-            reason="Accept the spent claim and retry once",
-        )
-        assert (
-            record(server, request["structuredContent"])["structuredContent"]["state"] == "approved"
-        )
-        retry = call("harness_accept_review", repo=str(repo), reviewers=REVIEWERS)
-        successor = retry["structuredContent"]["attemptId"]
-        assert successor != lost
-        assert (
-            call("harness_accept_review", repo=str(repo), reviewers=REVIEWERS)["structuredContent"][
-                "attemptId"
-            ]
-            == successor
-        )
-        server.reviews.dispatch_after_flush(server.store)
-        finish(successor)
-        assert usage(store, "review") == spent + 2
-        assert len(launches) == 4
-
-        stopped = call("harness_accept_review", repo=str(repo), reviewers=REVIEWERS)[
-            "structuredContent"
-        ]["attemptId"]
-        server.close()
-        server = PlannerServer(store.workspace)
-        request = call(
-            "harness_recovery",
-            mode="resolve",
-            job_id="review:" + stopped,
             choice="abandon",
-            reason="Stop with the spent claim retained",
+            reason="Stop with the uncertain spent claim retained",
         )
-        assert (
-            record(server, request["structuredContent"])["structuredContent"]["state"] == "approved"
-        )
+        assert not stopped["isError"], stopped
+        assert stopped["structuredContent"]["quarantine"]
         assert call("harness_accept_review", repo=str(repo), reviewers=REVIEWERS)["isError"]
-        assert len(launches) == 4
+        assert len(launches) == 2
+
     finally:
         release.set()
         server.close()

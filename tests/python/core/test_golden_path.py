@@ -40,6 +40,7 @@ def provider_host(mode, workspace, surface, job_id=None):
         roundtable,
     )
 
+    workspace = Path(workspace)
     actual_popen = subprocess.Popen
     actual_audit = audit_process.run_audit_process
     actual_run = dispatch.run_plan
@@ -58,8 +59,15 @@ def provider_host(mode, workspace, surface, job_id=None):
         return actual_audit(command("worker", str(workspace), job_id), **options)
 
     def contracts(root):
+        first = surface == "cli" and not (workspace / "contracts-attempted").exists()
+        if first:
+            (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
         (root / ("index.html" if surface == "web" else "hello.py")).write_text(
-            "<!doctype html><h1>SELDON-STUB visit</h1>" if surface == "web" else STUB,
+            "<!doctype html><h1>SELDON-STUB visit</h1>"
+            if surface == "web"
+            else "raise RuntimeError('broken stub')"
+            if first
+            else STUB,
             encoding="utf-8",
         )
 
@@ -99,8 +107,8 @@ def provider_host(mode, workspace, surface, job_id=None):
 def test_golden_path(tmp_path, request, surface):
     """Protect idea→root product→accepted with three plain user decisions.
 
-    Catch stranded delivery, approval churn and broken planner/worker/acceptance
-    integration; existing journeys prepopulate the store and dispatch outside MCP.
+    Catch reapproval after check repairs or quiescent recovery, and changed limits
+    launching without a diff; frozen-plan journeys miss those transitions.
     Stub results are suite evidence only, never actual-provider acceptance.
     """
     if surface == "web":
@@ -140,15 +148,18 @@ def test_golden_path(tmp_path, request, surface):
                     assert "error" not in reply, reply
                     return reply["result"]
 
-        def call(tool_name, **arguments):
+        def call(tool_name, *, allow_error=False, **arguments):
             nonlocal calls, revision
             calls += 1
             result = rpc(
                 "tools/call",
                 dict(name=tool_name, arguments=dict(expected_workspace=str(tmp_path), **arguments)),
             )
-            if result.get("isError"):
+            if result.get("isError") and not allow_error:
                 print(json.dumps(result))
+            if allow_error:
+                assert result.get("isError"), result
+                return result
             assert not result.get("isError"), (tool_name, json.dumps(result, ensure_ascii=True))
             revision = result.get("plannerConnection", {}).get("planRevision", revision)
             return result.get("structuredContent", {})
@@ -274,7 +285,7 @@ def test_golden_path(tmp_path, request, surface):
                                     id="hello", cli=dict(target="greet", operation="hello", argv=[])
                                 )
                             ],
-                            observe=[dict(action="hello", exitEquals=0, stdoutEquals="Hello")],
+                            observe=[dict(action="hello", exitEquals=0, stdoutEquals="Hello\n")],
                             verdict="all",
                         )
                     ],
@@ -324,7 +335,7 @@ def test_golden_path(tmp_path, request, surface):
                 expected_revision=compiled["planRevision"],
                 max_parallel=1,
                 timeout=30,
-                call_cap=2,
+                call_cap=3,
                 workers=[
                     dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
                     for b in ("C", "B")
@@ -337,6 +348,16 @@ def test_golden_path(tmp_path, request, surface):
                 reviewer_node_id="CHOICE",
             )
             yes(b)
+            if surface == "cli":
+                # Repair the checker to match the accepted exact greeting, not the requirement.
+                vision["fields"]["scenarios"]["scenarios"][0]["observe"][0]["stdoutEquals"] = (
+                    "Hello"
+                )
+                vision["fields"]["productSurface"] = "cli"
+                call("harness_upsert_node", node=vision)
+                repaired = call("harness_compile", include_detail=True)
+                assert repaired["planRevision"] != options["expected_revision"]
+                options["expected_revision"] = repaired["planRevision"]
             call("harness_advance", to_phase="roundtable")
             call(
                 "harness_roundtable",
@@ -348,10 +369,43 @@ def test_golden_path(tmp_path, request, surface):
             call("harness_advance", to_phase="publish")
             call("harness_publish")
             call("harness_advance", to_phase="execute")
+            if surface == "cli":
+                changed = call(
+                    "harness_worker_start", **{**options, "call_cap": 4}, allow_error=True
+                )
+                diff = changed["structuredContent"]["chatConfirmation"]["diff"]
+                assert [(d["field"], d["before"], d["after"]) for d in diff] == [
+                    ("execution.callCap", 3, 4)
+                ]
+                assert (
+                    sum(c["text"].count("Your decision: approve B?") for c in changed["content"])
+                    == 1
+                )
             job = call("harness_worker_start", **options)
             deadline = time.monotonic() + 90
             while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
                 job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
+            if surface == "cli":
+                failed = json.loads(Path(job["run"]["recordPath"]).read_text())
+                assert failed["beads"]["C"]["integrated"]["semantic"]["state"] == "ERROR"
+                original = job["jobId"]
+                proof = call("harness_recovery", mode="inspect", job_id=original)
+                while proof["verdict"] != "VERIFIED-QUIESCENT" and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                    proof = call("harness_recovery", mode="inspect", job_id=original)
+                assert proof["verdict"] == "VERIFIED-QUIESCENT", proof
+                resolved = call(
+                    "harness_recovery",
+                    mode="resolve",
+                    job_id=original,
+                    choice="readmit",
+                    reason="Repair the failed Contracts stub",
+                )
+                assert "card" not in resolved
+                job = call("harness_worker_start", **options)
+                assert job["jobId"] == resolved["successor"] != original
+                while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
             assert job["status"] == "completed", job
             assert job["run"]["semanticContracts"]["state"] == "RED", job
             assert job["run"]["semanticValidation"]["state"] == "PASS", job
@@ -383,7 +437,7 @@ def test_golden_path(tmp_path, request, surface):
             decisions += 1
             call("harness_accept", by="user", statement="yes")
             assert call("harness_plan_status")["acceptance"]["accepted"]
-            assert decisions <= 3
+            assert decisions == 3
             print(
                 f"golden {surface}: decisions={decisions}; planner MCP calls={calls}; "
                 f"seconds={time.monotonic() - started:.2f}"

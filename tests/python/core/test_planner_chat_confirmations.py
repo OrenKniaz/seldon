@@ -127,7 +127,7 @@ def test_missing_b_refuses_without_reservation_then_exact_b_reaches_review_and_j
     assert launches == ["review", "job"]
 
 
-@pytest.mark.parametrize("change", ["tuple", "candidate", "limits", "empty-reviewers"])
+@pytest.mark.parametrize("change", ["tuple", "limits", "empty-reviewers"])
 def test_changed_review_action_requires_b_diff_before_launch(semantic_plan, monkeypatch, change):
     """
     Catch action arguments ignored by B; happy-path producer records never vary the actual
@@ -144,8 +144,6 @@ def test_changed_review_action_requires_b_diff_before_launch(semantic_plan, monk
     limits = {}
     if change == "tuple":
         reviewer = [reviewer, {**reviewer, "name": "unlisted", "model": "unseen-model"}]
-    elif change == "candidate":
-        (store.workspace / "template/changed.txt").write_text("Changed executable candidate")
     elif change == "limits":
         limits["timeout"] = 901
     monkeypatch.setattr(roundtable, "_run", lambda *a, **k: pytest.fail("Unapproved launch"))

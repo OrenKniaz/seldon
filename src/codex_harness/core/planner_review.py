@@ -66,9 +66,9 @@ def status(store, attempt_id):
             outcome="UNKNOWN",
             reason="Owner not observed; paid starts/liveness UNKNOWN. No automatic replay.",
             next=(
+                "Inspect the original owner and outcome; UNKNOWN stays held. "
                 f"harness_recovery mode=resolve job_id=review:{attempt_id} "
-                "choice=readmit reason=<accept spent claim and retry once>; "
-                "or choice=abandon to stop. Confirm the existing V2 recovery card."
+                "choice=abandon reason=<stop with spent claim retained> stops without retry."
             ),
         )
     return result

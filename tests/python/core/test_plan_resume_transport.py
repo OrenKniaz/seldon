@@ -258,8 +258,14 @@ def test_native_execution_wire_approves_exact_proposal_once_then_reattaches(
 
 
 @pytest.mark.parametrize("case", ["decline", "stale"])
-def test_native_execution_nonapproval_never_admits_or_replays(project, monkeypatch, case):
-    """Only an unconditional current correlated decision can become a new job."""
+def test_native_execution_refusal_or_stale_evidence_never_admits_or_replays(
+    project, monkeypatch, case
+):
+    """Protect consent independently from stale evidence at native resume admission.
+
+    Catch renewed consent masking a stale publication, or a valid B bypassing its
+    machine prerequisites; frozen-candidate native replies miss that distinction.
+    """
     options = test_planner_resume._published(project)
     arguments = {
         key: options[key] for key in ("expected_revision", "workers", "timeout", "call_cap")
@@ -311,7 +317,14 @@ def test_native_execution_nonapproval_never_admits_or_replays(project, monkeypat
             action=case if case in {"cancel", "decline"} else "accept",
             conditions="Only if something changes" if case == "conditions" else "",
         )
-        assert reply["result"]["isError"], reply
+        if case == "stale":
+            result = reply["result"]
+            assert result["_meta"]["executionConfirmation"]["state"] == "approved"
+            assert result["structuredContent"]["state"] == "held"
+            assert result["structuredContent"]["reasonCode"] == "canonical-prerequisite"
+            assert "Your decision: approve B?" not in str(result)
+        else:
+            assert reply["result"]["isError"], reply
         assert approve_execution_wire(server, form) is None
     server.close()
     assert not launches and not (project.workspace / ".codex-harness/worker-jobs").exists()

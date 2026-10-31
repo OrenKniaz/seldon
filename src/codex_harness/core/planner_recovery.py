@@ -8,16 +8,14 @@ from uuid import uuid4
 from codex_harness.core import approvals
 from codex_harness.core import planner_jobs as jobs
 from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
-from codex_harness.core.planner_confirmations import _chat_evidence
 from codex_harness.core.planner_execution import _canonical_store
 from codex_harness.core.provider_call_budget import usage
 from codex_harness.core.record_io import read_record_json, write_record_json_once
 
-REQUEST = "worker-recovery-requested"
 RESOLVED = "worker-recovery-resolved"
 TOOL = dict(
     name="harness_recovery",
-    description="Inspect workers or review:<attemptId>; resolve offers recovery consent.",
+    description="Inspect workers or review:<attemptId>; resolve checks machine prerequisites.",
     inputSchema=dict(
         type="object",
         properties={
@@ -154,27 +152,8 @@ def inspect(workspace, job_id):
     return proof
 
 
-def recovery_subject(store, action):
-    return dict(
-        version=2,
-        kind="recovery",
-        workspace=str(store.workspace.resolve()),
-        effect=(
-            (
-                "Approve accepts the UNKNOWN spent review claim and authorizes one explicit retry. "
-                "No usage is refunded."
-                if action["choice"] == "readmit"
-                else "Approve stops this review and retains the UNKNOWN spent claim. No retry."
-            )
-            if action["jobId"].startswith("review:")
-            else approvals.EFFECTS["recovery"]
-        ),
-        **action,
-        proof=inspect(store.workspace, action["jobId"]),
-    )
-
-
-def prepare(store, job_id, choice, reason):
+def resolve(store, job_id, choice, reason):
+    """Same-work recovery uses current A/B; UNKNOWN never permits a retry."""
     _canonical_store(store)
     if (
         choice not in {"abandon", "readmit", "revalidate"}
@@ -183,20 +162,18 @@ def prepare(store, job_id, choice, reason):
     ):
         raise ValueError("recovery-choice-and-reason-required")
     with store._transaction():
-        action = dict(jobId=job_id, choice=choice, reason=reason)
-        proposal = approvals.proposal(store, "recovery", action)
-        proof = proposal["subject"]["proof"]
+        proof = inspect(store.workspace, job_id)
         if proof["disposition"] and not (
             choice == "revalidate" and "revalidate" in proof["options"]
         ):
             raise ValueError(
                 "recovery-already-resolved: inspect disposition and original run evidence"
             )
-        if choice == "revalidate":
+        if choice != "abandon":
             if proof["verdict"] != "VERIFIED-QUIESCENT":
-                raise ValueError(
-                    "revalidate requires VERIFIED-QUIESCENT; inspect original job teardown"
-                )
+                raise ValueError("recovery-readmit-requires-VERIFIED-QUIESCENT; UNKNOWN stays held")
+            approvals.require_approval(store, "B")
+        if choice == "revalidate":
             if not proof["revalidation"]["available"]:
                 raise ValueError(proof["revalidation"]["reason"])
             prior = proof["disposition"]
@@ -208,103 +185,28 @@ def prepare(store, job_id, choice, reason):
                 raise ValueError(
                     "revalidate: successor already admitted; inspect successor instead"
                 )
-        is_review = job_id.startswith("review:")
-        if is_review and proof["verdict"] != "UNKNOWN":
-            raise ValueError("review-recovery-requires-UNKNOWN-owner")
-        if choice == "readmit" and not is_review and proof["verdict"] != "VERIFIED-QUIESCENT":
-            raise ValueError("recovery-readmit-requires-VERIFIED-QUIESCENT")
-        request = dict(
-            **proposal,
-            request_id=uuid4().hex,
-            gate="recovery",
-            plan_revision=store._revision(),
+        resolved = dict(
             jobId=job_id,
             choice=choice,
             reason=reason,
             proof=proof,
-            workspace=str(store.workspace.resolve()),
-            proposedAction=action,
+            quarantine=proof["verdict"] == "UNKNOWN",
+            successor=jobs._digest(dict(jobId=job_id, proof=proof["proofDigest"], choice=choice))
+            if choice == "readmit"
+            else None,
         )
-        if choice == "revalidate":
-            request["card"] += (
-                "\nRevalidate retained candidate; PASS integrates and delivers at workspace root. "
-                "No worker start or extra provider spend."
-            )
-        request["card"] += f"\nReply binding: expected_revision={request['plan_revision']}"
-        request["card"] += (
-            "\nSpent review claims remain charged. Retry admits one successor with the original "
-            "arguments; stop authorizes no new launch."
-            if is_review
-            else "\nEvidence and spent calls stay charged. UNKNOWN abandonment retains quarantine. "
-            "Readmission releases a hold; fresh execution consent and worker-start are required."
-        )
-        store._event(REQUEST, request)
-    return request
-
-
-def complete(store, request_id, **answer):
-    _canonical_store(store)
-    action, content, chat = _chat_evidence(request_id, **answer)
-    with store._transaction():
-        request = next(iter(approvals.records(store, REQUEST)), {})
-        if request.get("request_id") != request_id:
-            raise ValueError("recovery-request-unknown-or-superseded")
-        if any(
-            r["request_id"] == request_id
-            for r in approvals.records(store, "worker-recovery-responded")
-        ):
-            raise ValueError("recovery-already-responded")
-        subject = approvals.subject(store, "recovery", request["proposedAction"])
-        proof = subject["proof"]
-        if answer["expected_revision"] != request["plan_revision"] or subject != request["subject"]:
-            raise ValueError("recovery-proof-stale: inspect and ask again")
-        record = approvals.record_approval(
-            store,
-            request,
-            words=content["statement"],
-            actor=chat["actor_label"],
-            channel="chat-confirmation",
-            affirmative=content["approve"],
-            state=action,
-            conditions=content["conditions"],
-        )
-        result = dict(
-            request_id=request_id,
-            state=record["state"],
-            provenance="chat-confirmation",
-            chat=chat,
-            action=action,
-            content=content,
-        )
-        store._event("worker-recovery-responded", result)
-        if record["state"] == "approved":
-            approvals.require_approval(store, "recovery", request["proposedAction"])
-            resolved = dict(
-                jobId=request["jobId"],
-                request_id=request_id,
-                choice=request["choice"],
-                reason=request["reason"],
-                proof=proof,
-                quarantine=proof["verdict"] == "UNKNOWN",
-                successor=(
-                    uuid4().hex if request["jobId"].startswith("review:") else jobs._digest(request)
-                )
-                if request["choice"] == "readmit"
-                else None,
-            )
-            store._event(RESOLVED, resolved)
-            result["disposition"] = resolved
-    if record["state"] == "approved" and request["choice"] == "revalidate":
+        store._event(RESOLVED, resolved)
+    if choice == "revalidate":
         from codex_harness.core.planner_candidate import revalidate
 
         try:
-            resolved["validation"] = revalidate(store, request["jobId"], request_id)
+            resolved["validation"] = revalidate(store, job_id, uuid4().hex)
         except (ValueError, OSError, jobs.subprocess.SubprocessError) as error:
             resolved["validation"] = dict(
                 state="ERROR", results=[dict(reason=str(error))], delivery=None
             )
         store._event(RESOLVED, resolved)
-    return result
+    return resolved
 
 
 def monitor(workspace, job_id):
@@ -354,7 +256,7 @@ def reply(workspace, arguments):
             data = inspect(workspace, **args)
         elif mode == "resolve" and set(args) == {"job_id", "choice", "reason"}:
             with open_plan_store(workspace) as store:
-                data = prepare(store, **args)
+                data = resolve(store, **args)
         else:
             raise ValueError("recovery-requires-inspect-or-resolve-with-job-choice-reason")
         return dict(

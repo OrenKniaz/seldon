@@ -13,10 +13,9 @@ from codex_harness.core.plan_store import PlanStoreError
 from codex_harness.core.spine import Spine
 
 EFFECTS = {
-    "recovery": "Approve records this recovery disposition; readmission requires a fresh B.",
     "A": "Approve confirms understanding and locks this scope and these expansion decisions.",
-    "B": "Approve authorizes this plan, these review budgets, publication after review passes, "
-    "execution and validation within these limits.",
+    "B": "Approve authorizes the approved work, all reviews, execution, validation and "
+    "quiescent same-work recovery within these cumulative limits and exact choices.",
 }
 EVENT = "approval-v2-recorded"
 
@@ -53,7 +52,27 @@ def intent(vision):
             k: v
             for k, v in vision["fields"].items()
             if k
-            not in {"scenarios", "targets", "validation", "requirementFiles", "schema", "planMode"}
+            in {
+                "vision",
+                "users",
+                "first_user_moment",
+                "firstUserMoment",
+                "scope_in",
+                "scopeIn",
+                "scope_out",
+                "scopeOut",
+                "assumptions",
+                "quality_bar",
+                "qualityBar",
+                "quality",
+                "done_feels_like",
+                "doneFeelsLike",
+                "done",
+                "expansion",
+                "journey",
+                "taste",
+                "designRefs",
+            }
         },
     }
 
@@ -82,10 +101,6 @@ def subject(store, kind, proposed_action=None):
 
     if kind not in EFFECTS:
         raise ValueError("approval-kind-invalid")
-    if kind == "recovery":
-        from codex_harness.core.planner_recovery import recovery_subject
-
-        return recovery_subject(store, proposed_action)
     spine = Spine(store._data())
     visions = spine.ids("vision")
     if len(visions) != 1:
@@ -164,19 +179,11 @@ def subject(store, kind, proposed_action=None):
     actual = action.get("reviewer")
     if actual is not None and reviewer_tuple(actual) not in reviewers:
         reviewers.append(reviewer_tuple(actual))
-    candidate = action.get(
-        "candidate", executable_candidate(manifest, jobs._files(store.workspace / "template"))
-    )
     allowance = action.get("reviewAllowance", previous.get("reviewAllowance"))
     explanation = action.get("allowanceReason", previous.get("allowanceReason", ""))
     if allowance is None:
         # Planning + per-bead + final review, with one repair round in reserve.
-        approved = current(store, "B")
-        if (
-            approved
-            and previous.get("candidate") == candidate
-            and previous["reviewers"] == reviewers
-        ):
+        if current(store, "B"):
             allowance = previous["reviewAllowance"]
         else:
             from codex_harness.core.provider_call_budget import usage
@@ -192,29 +199,13 @@ def subject(store, kind, proposed_action=None):
         raise ValueError("planning-review-budget-invalid-scope")
     if allowance > 10 and (not isinstance(explanation, str) or not explanation.strip()):
         raise ValueError("planning-review-allowance-above-10-needs-explanation")
-    recovery = [
-        {k: r[k] for k in ("jobId", "choice", "successor")}
-        for r in records(store, "worker-recovery-resolved")
-        if not r["jobId"].startswith("review:")
-    ]
     return {
         **result,
-        **({"recovery": recovery} if recovery else {}),
         "aFingerprint": fingerprint(subject(store, "A")),
-        "plan": store._data(),
-        "candidate": candidate,
         "execution": dict(workers=workers, **limits),
         "reviewers": reviewers,
         "reviewSelection": selection,
         "reviewPolicy": policy,
-        "reviewRoles": next(
-            (
-                r["slots"]
-                for r in records(store, "plan-review-policy-declared")
-                if r["manifestRevision"] == manifest["planRevision"]
-            ),
-            [],
-        ),
         "reviewAllowance": allowance,
         "allowanceReason": explanation,
     }

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.python.core.test_project_memory import _link_directory
 
 from codex_harness.core import status_api
 
@@ -65,14 +66,17 @@ console.log(JSON.stringify(card(JSON.parse(fs.readFileSync(0,'utf8')))));
 
 
 def test_escaping_config_is_not_read(tmp_path):
+    """Reject escaped config through a real reparse point, without file-link privilege.
+
+    Catch exposing settings outside the project; ordinary config snapshots never
+    cross that boundary. A Windows junction exercises it without skipping the check.
+    """
     project = tmp_path / "project"
-    (project / ".codex").mkdir(parents=True)
-    outside = tmp_path / "outside.toml"
-    outside.write_text('approval_policy = "never"', encoding="utf-8")
-    try:
-        (project / ".codex" / "config.toml").symlink_to(outside)
-    except OSError as error:
-        pytest.skip(f"File symlink setup unavailable: {error.winerror}")
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "config.toml").write_text('approval_policy = "never"', encoding="utf-8")
+    _link_directory(project / ".codex", outside)
     saved = status_api.snapshot(workspace=project)["savedPermissions"]
     assert saved["availability"] == "unknown"
     assert set(saved["saved"].values()) == {"unknown"}
