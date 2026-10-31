@@ -22,6 +22,7 @@ from pathlib import Path
 
 from codex_harness.core import dispatch
 from codex_harness.core.graph import load_plan
+from codex_harness.core.managed_paths import directory, short
 from codex_harness.core.plan_store import open_plan_store
 from codex_harness.core.provider_launch import get_adapter
 from codex_harness.core.record_io import read_record_json, write_record_json_once
@@ -54,7 +55,10 @@ def _inside(workspace, path):
 def _directory(workspace, job_id):
     if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{64}", job_id):
         raise ValueError("worker-job-id-invalid")
-    return _inside(workspace, Path(workspace) / ".codex-harness" / "worker-jobs" / job_id)
+    path = _inside(workspace, directory(Path(workspace) / ".codex-harness" / "worker-jobs", job_id))
+    if (path / "request.json").is_file() and _request(path)["jobId"] != job_id:
+        raise ValueError("worker-job-request-identity-mismatch")
+    return path
 
 
 def _files(template):
@@ -123,8 +127,8 @@ def _request(directory):
     original = {key: value for key, value in request.items() if key != "requestDigest"}
     if (
         request.get("schema") != SCHEMA
-        or request.get("jobId") != directory.name
-        or request.get("publicationRevision") != directory.name
+        or directory.name not in {request.get("jobId"), short(request.get("jobId", ""))}
+        or request.get("publicationRevision") != request.get("jobId")
         or request.get("requestDigest") != _digest(original)
     ):
         raise ValueError("worker-job-request-identity-mismatch")

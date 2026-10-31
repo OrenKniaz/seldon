@@ -821,7 +821,7 @@ def test_dispatch_proves_clean_candidate_before_fast_forward(tmp_path, monkeypat
     observed = []
 
     def observe(cwd, manifest, module, **kwargs):
-        if cwd.name.startswith("candidate-"):
+        if _git(cwd, "branch", "--show-current").startswith("candidate/"):
             commit = _git(cwd, "rev-parse", "HEAD")
             assert _git(cwd, "status", "--porcelain") == ""
             assert _git(cwd, "branch", "--show-current").startswith("candidate/")

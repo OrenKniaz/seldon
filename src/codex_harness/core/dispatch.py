@@ -21,6 +21,7 @@ from tempfile import TemporaryFile
 
 from codex_harness.core import attempt_control, attempt_provenance, efficiency, graph, worker_packet
 from codex_harness.core.mail import Mailbox
+from codex_harness.core.managed_paths import directory, run_directory, short
 from codex_harness.core.memory_promotion import (
     MemoryPromotionUnavailable,
     PromotionEvidence,
@@ -1606,8 +1607,10 @@ def _attempt_bead(
 def _integration_candidate(record: dict, bead: dict, repo: Path) -> tuple[str, Path, dict]:
     """Resume only the candidate staged for this exact completed attempt."""
     worker = Path(record["attempt"]["cwd"]).resolve()
-    root = repo.parent / f"candidate-{worker.name}"
+    root = directory(repo.parent, f"candidate-{worker.name}")
     ref = f"candidate/{record['bead']}/{worker.name}"
+    if not root.name.startswith("candidate-"):
+        ref = f"candidate/{root.name}"
     state_path = Path(record["evidenceDir"]) / "integration-state.json"
     identity = {
         "runId": record["runId"],
@@ -2065,11 +2068,8 @@ def run_plan(
     for mapping in (provider_for, model_for, effort_for, executable_for, fake_workers):
         if set(mapping) - set(plan.beads):
             raise ValueError("per-bead mappings contain unknown bead ids")
-
-    run_id = f"{re.sub(r'[^A-Za-z0-9_-]', '-', plan.name)}-{datetime.now(UTC):%Y%m%dT%H%M%S%f}"
-    run_dir = (
-        Path(resume_run_dir).resolve() if resume_run_dir else Path(work_root).resolve() / run_id
-    )
+    run_id = short(datetime.now(UTC).isoformat())
+    run_dir = run_directory(work_root, run_id, manifest["beads"], resume_run_dir)
     repo, evidence, memory = run_dir / "repo", run_dir / "evidence", run_dir / "memory-workspace"
     if real_attempts:
         from codex_harness.core.provider_call_budget import bind_run, verify_job
@@ -2606,7 +2606,7 @@ def run_plan(
                     if (current["attempt"] or {}).get("recoverResult"):
                         bead_evidence = Path(current["evidenceDir"])
                     else:
-                        bead_evidence = evidence / bead_id
+                        bead_evidence = directory(evidence, bead_id)
                         suffix = ""
                         if bead_evidence.exists():
                             number = 1
@@ -2616,14 +2616,14 @@ def run_plan(
                             suffix = f"-retry-{number}"
                         bead_evidence.mkdir()
                         base_commit = _git(repo, "rev-parse", "HEAD")
-                        worktree = run_dir / f"bead-{bead_id}{suffix}"
+                        worktree = directory(run_dir, f"bead-{bead_id}{suffix}")
                         _git(
                             repo,
                             "worktree",
                             "add",
                             "-q",
                             "-b",
-                            f"bead-{bead_id}{suffix}",
+                            worktree.name,
                             str(worktree),
                             base_commit,
                         )

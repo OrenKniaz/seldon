@@ -61,7 +61,10 @@ def test_partial_integration_resume_same_attempt(tmp_path, monkeypatch, stage):
     def interrupt(*args, **kwargs):
         result = original(*args, **kwargs)
         trigger = (
-            (stage == "candidate" and Path(args[0]).name.startswith("candidate-"))
+            (
+                stage == "candidate"
+                and dispatch._git(args[0], "branch", "--show-current").startswith("candidate/")
+            )
             or (stage == "receipt" and Path(args[0]).name == "integrated.json")
             or (stage == "fast-forward" and "--ff-only" in args)
             or stage in {"promotion", "confirmation"}
@@ -257,7 +260,7 @@ def test_caught_candidate_interruption_recovers_existing_branch(tmp_path, monkey
     validate = dispatch._validate
 
     def interrupted(cwd, *args, **kwargs):
-        if cwd.name.startswith("candidate-"):
+        if dispatch._git(cwd, "branch", "--show-current").startswith("candidate/"):
             raise RuntimeError("interrupted candidate validation")
         return validate(cwd, *args, **kwargs)
 

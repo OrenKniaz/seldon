@@ -558,3 +558,43 @@ def test_job_whose_provider_ran_is_never_readmitted(fixture, monkeypatch):
     source_grant(store, store.revision, workers)
     assert jobs.start_worker_job(store, store.revision, workers, call_cap=16) == status
     assert len(launches) == 1
+
+
+def test_short_job_preserves_full_identity_and_reads_legacy_runs(fixture):
+    """Catch directory/receipt identity drift via canonical admission; dispatch skips jobs."""
+    store, _, _ = fixture
+    result = admit(fixture)
+    directory = Path(result["evidenceDir"])
+    assert len(directory.name) == 12
+    assert jobs._request(directory)["jobId"] == store.revision
+    assert result["jobId"] == result["publicationRevision"] == store.revision
+    legacy = directory.with_name(store.revision)
+    directory.rename(legacy)
+    run = legacy / "runs" / ("old-product-title-" * 5) / "evidence"
+    run.mkdir(parents=True)
+    record = dict(
+        runId=run.parent.name,
+        status="failed",
+        beads={},
+        planRevision=store.revision,
+        repo=str(run.parent / "repo"),
+        isMocked=True,
+        didExecuteRealProvider=False,
+    )
+    (run / "run.json").write_text(json.dumps(record))
+    status = jobs.worker_job_status(store.workspace, store.revision)
+    assert status["evidenceDir"] == str(legacy)
+    assert status["run"]["runId"] == record["runId"]
+
+
+def test_short_job_foreign_directory_refuses_identity(fixture, monkeypatch):
+    """Catch wrong-job reattachment on prefix collision; happy admissions use unique IDs."""
+    store, _, _ = fixture
+    admit(fixture)
+    foreign = (
+        store.revision[:12] + ("0" if store.revision[12] != "0" else "1") + store.revision[13:]
+    )
+    occupied = jobs._directory(store.workspace, store.revision)
+    monkeypatch.setattr(jobs, "directory", lambda *_: occupied)
+    with pytest.raises(ValueError, match="request-identity-mismatch"):
+        jobs.worker_job_status(store.workspace, foreign)

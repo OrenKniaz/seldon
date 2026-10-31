@@ -37,7 +37,7 @@ def _controller(store, monkeypatch, callback, *, cap=2):
             provider="codex",
             model="gpt-6.1-sol",
             effort="medium",
-            planRevision=directory.name,
+            planRevision=planner_jobs._request(directory)["jobId"],
             **{
                 key: json.loads((Path(plan) / "sample.json").read_text())["beads"]["B1"][key]
                 for key in ("ownedFiles", "requirementRefs", "specRefs")
@@ -47,7 +47,9 @@ def _controller(store, monkeypatch, callback, *, cap=2):
         return dict(runId=run.name, status=dispatch.STATUS_MOCK_ONLY)
 
     monkeypatch.setattr(planner_jobs.dispatch, "run_plan", source_dispatch)
-    terminal = planner_jobs.execute_worker_job(store.workspace, directory.name)
+    terminal = planner_jobs.execute_worker_job(
+        store.workspace, planner_jobs._request(directory)["jobId"]
+    )
     assert terminal["status"] == "completed", terminal
     return directory
 

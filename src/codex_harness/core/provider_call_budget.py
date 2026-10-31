@@ -35,9 +35,9 @@ def verify_job(directory, record=None):
         raise ValueError("provider-call-owned-native-job-required")
     directory = Path(directory).resolve()
     workspace = directory.parent.parent.parent
-    if jobs._directory(workspace, directory.name) != directory:
-        raise ValueError("provider-call-job-path-invalid")
     request = jobs._request(directory)
+    if jobs._directory(workspace, request["jobId"]) != directory:
+        raise ValueError("provider-call-job-path-invalid")
     scope = request.get("executionScope")
     if not isinstance(scope, dict) or request["options"].get("callCap") != scope.get("callCap"):
         raise ValueError("provider-call-native-scope-required")
@@ -50,14 +50,14 @@ def verify_job(directory, record=None):
     with open_plan_store_readonly(workspace) as store:
         current = execution_scope(
             store,
-            directory.name,
+            request["jobId"],
             scope["workers"],
             max_parallel=scope["maxParallel"],
             timeout=scope["timeout"],
             call_cap=scope["callCap"],
         )
         if current != scope or not consumed_execution(
-            store, request.get("executionRequestId"), scope, directory.name
+            store, request.get("executionRequestId"), scope, request["jobId"]
         ):
             raise ValueError("provider-call-execution-binding-stale")
     snapshot = read_record_json(jobs._inside(directory, directory / "plan/sample.json"))
@@ -74,7 +74,7 @@ def verify_job(directory, record=None):
         if (
             selected is None
             or any(record.get(k) != selected[k] for k in ("provider", "model", "effort"))
-            or record.get("planRevision") != directory.name
+            or record.get("planRevision") != request["jobId"]
             or normalized_owned(record.get("ownedFiles", []))
             != normalized_owned(bead.get("ownedFiles", []))
             or record.get("requirementRefs") != bead.get("requirementRefs")

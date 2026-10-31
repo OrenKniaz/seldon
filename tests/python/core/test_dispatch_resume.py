@@ -203,7 +203,7 @@ def test_dispatch_resume_retries_blocker_and_releases_dependent(tmp_path, monkey
     assert resumed["beads"]["B"]["candidate"]["validated"]
     assert "blocker" not in a
     assert a["attempt"]["cwd"] != old["attempt"]["cwd"]
-    assert Path(a["attempt"]["cwd"]).name == "bead-A-retry-1"
+    assert Path(a["attempt"]["cwd"]).name == hashlib.sha256(b"bead-A-retry-1").hexdigest()[:12]
     history = a["superseded"][-1]
     assert history["blocker"] == blocker
     assert json.loads(Path(history["blockerPath"]).read_text()) == blocker
@@ -607,7 +607,10 @@ def test_dispatch_ambiguous_launch_requires_explicit_relaunch(tmp_path: Path) ->
     assert retried["runId"] == first["runId"]
     assert retried["beads"]["A"]["superseded"][0]["status"] == "superseded"
     assert json.loads(request_path.read_text())["disposition"] == "superseded"
-    assert Path(retried["beads"]["A"]["attempt"]["cwd"]).name == "bead-A-retry-1"
+    assert (
+        Path(retried["beads"]["A"]["attempt"]["cwd"]).name
+        == hashlib.sha256(b"bead-A-retry-1").hexdigest()[:12]
+    )
 
 
 def test_dispatch_resume_requirement_change_reuses_unaffected_bead_and_reproves_head(
