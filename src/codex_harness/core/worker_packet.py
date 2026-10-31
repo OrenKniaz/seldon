@@ -801,6 +801,8 @@ def build_packet(
         "Reject tests that restate the implementation: copied constants or text, mirrored "
         "logic, source-reading assertions, self-comparisons, mocks that supply the asserted "
         "behavior, call-shape-only checks, and production seams added only for tests.\n"
+        "Prefer extending an existing journey/E2E test over adding unit tests; add a unit "
+        "test only for a distinct invariant no journey reaches.\n"
         "Workers: for every new or changed test, name the protected behavior and a credible "
         "regression. Put one primary regression at the strongest owning boundary; add another "
         "layer only for a distinct uncovered risk. For repairs, show a real failure before the "

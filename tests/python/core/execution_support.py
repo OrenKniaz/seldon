@@ -7,7 +7,6 @@ this does not prove a human response, provider run or product acceptance.
 """
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -230,12 +229,7 @@ def source_grant(store, revision, workers, *, max_parallel=2, timeout=900, call_
 def source_execution_context(workspace, plan, *, max_parallel=2, timeout=900, call_cap=16):
     # Gate-local TEMP may be too deep for Windows Git retry merges.
     # Retain originals for diagnosis; callers still own bounded-child cleanup.
-    temp_root = Path(tempfile.gettempdir())
-    if sys.platform == "win32" and os.environ.get("LOCALAPPDATA"):
-        user_temp = Path(os.environ["LOCALAPPDATA"]) / "Temp"
-        if user_temp.is_dir():
-            temp_root = user_temp
-    workspace = Path(tempfile.mkdtemp(prefix="n-", dir=temp_root))
+    workspace = Path(tempfile.mkdtemp(prefix="n-"))
     store, revision = publish_source_store(workspace, plan)
     workers = [
         dict(bead=id, provider="codex", model="gpt-6.1-sol", effort="medium")

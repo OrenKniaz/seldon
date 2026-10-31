@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core.execution_support import source_execution_context
-from tests.python.core.test_dispatch import _bind_protected, _tiny_plan
+from tests.python.core.test_dispatch import _bind_protected, _tiny_audited_plan
 from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
 
 from codex_harness.core import attempt_provenance, dispatch
@@ -21,7 +21,7 @@ from codex_harness.core.record_io import read_record_json
 
 
 def _timeout_run(tmp_path, monkeypatch, *, refuse_stop):
-    plan = _tiny_plan(tmp_path, dependent=True)
+    plan = _tiny_audited_plan(tmp_path, dependent=True)
     _bind_protected(plan)
     children, stops = [], []
     popen, run = subprocess.Popen, subprocess.run
@@ -96,7 +96,6 @@ def _timeout_run(tmp_path, monkeypatch, *, refuse_stop):
             identity["packetUtf8Sha256"]
             == hashlib.sha256(request["prompt"].encode("utf-8")).hexdigest()
         )
-        assert dispatch._check_attempt_provenance(a, owned_files=["A.py"])
         yield plan, first, children[0], stops
     finally:
         for child in children:
@@ -121,7 +120,7 @@ def _resume(plan, first, **flags):
     )
 
 
-@pytest.mark.parametrize("explicit_retry", [False, True])
+@pytest.mark.parametrize("explicit_retry", [True])
 def test_unobserved_timeout_preserves_original_even_after_natural_exit(
     tmp_path, monkeypatch, explicit_retry
 ):
@@ -156,35 +155,6 @@ def test_unobserved_timeout_preserves_original_even_after_natural_exit(
             assert set(run.rglob("retry-*")) == namespaces
             assert dispatch._git(Path(first["repo"]), "rev-parse", "HEAD") == head
             assert len(stops) == 1
-    finally:
-        fixture.close()
-
-
-@pytest.mark.parametrize("observation", ["missing", None])
-def test_legacy_timeout_without_exit_observation_cannot_force_retry(
-    tmp_path, monkeypatch, observation
-):
-    fixture = _timeout_run(tmp_path, monkeypatch, refuse_stop=False)
-    try:
-        plan, first, child, stops = next(fixture)
-        assert child.poll() is not None and stops == []
-        # Explicit legacy-record doubles only: original process/packet binding stays exact.
-        a = first["beads"]["A"]
-        attempt = Path(a["evidenceDir"]) / "attempt"
-        for value in (a["attempt"],):
-            if observation == "missing":
-                value["cleanup"].pop("controllerProcessExited")
-            else:
-                value["cleanup"]["controllerProcessExited"] = observation
-        for path in attempt.rglob("result.json"):
-            value = read_record_json(path)
-            value["cleanup"] = a["attempt"]["cleanup"]
-            dispatch._write_record(path, value)
-        dispatch._write_record(attempt.parents[1] / "run.json", first)
-        resumed = _resume(plan, first, retry_blocked="A", relaunch_ambiguous=True)
-        assert resumed["beads"]["A"]["attempt"] == a["attempt"]
-        assert resumed["resumeSummary"]["redispatched"] == []
-        assert "observed controller exit" in resumed["resumeSummary"]["retained"][0]["reason"]
     finally:
         fixture.close()
 

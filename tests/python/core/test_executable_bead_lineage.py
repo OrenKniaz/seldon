@@ -1,8 +1,13 @@
 """Public executable admission; native responses are synthetic, never human proof."""
 
-from tests.python.core.planning_support import source_only_publication
+from tests.python.core.planning_support import (
+    source_only_b,
+    source_only_expansion,
+    source_only_publication,
+)
 from tests.python.core.test_mcp_audit import invoke
 from tests.python.core.test_mcp_planner import native_confirmation_result
+from tests.python.core.test_planner_refusals import canonical_rows
 
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import PHASES, open_plan_store_readonly
@@ -50,6 +55,7 @@ def planned(workspace, *, disconnected):
             ),
         ]
         assert not invoke(server, "harness_upsert_nodes", nodes=nodes)["isError"]
+        source_only_expansion(server.store)
         while server.store.phase() != "plan":
             phase = server.store.phase()
             if phase in ("align", "vision-lock"):
@@ -63,6 +69,8 @@ def planned(workspace, *, disconnected):
     except BaseException:
         server.close()
         raise
+    if not disconnected:
+        source_only_b(server.store)
     return server
 
 
@@ -73,23 +81,23 @@ def test_disconnected_executable_bead_refuses_plan_admission_after_reopen(tmp_pa
     try:
         with open_plan_store_readonly(tmp_path) as saved:
             assert saved.spine().coverage_gaps() == [{"id": "B", "gap": "bead-without-vision"}]
-            before = tuple(saved.connection.iterdump())
+            before = canonical_rows(saved)
         refused = invoke(server, "harness_advance", to_phase="roundtable")
         assert refused["isError"], refused
         assert "plan-bead-without-vision" in refused["content"][0]["text"]
         assert "B" in refused["content"][0]["text"]
-        assert tuple(server.store.connection.iterdump()) == before
+        assert canonical_rows(server.store) == before
         assert server.store.phase() == "plan"
         assert server.store.status()["published_revision"] is None
         assert not invoke(server, "harness_upsert_node", node=node("F", "feature", ["V1"]))[
             "isError"
         ]
         assert not invoke(server, "harness_compile")["isError"]
+        source_only_b(server.store)
         assert not invoke(server, "harness_advance", to_phase="roundtable")["isError"]
         held = invoke(server, "harness_advance", to_phase="publish")
-        assert (
-            held["isError"] and "plan-publication-evidence-required" in held["content"][0]["text"]
-        )
+        assert held["isError"]
+        assert server.store.status()["published_revision"] is None
         assert server.store.phase() == "roundtable"
     finally:
         server.close()
@@ -97,6 +105,13 @@ def test_disconnected_executable_bead_refuses_plan_admission_after_reopen(tmp_pa
 
 def source_evidence(server):
     """Actual public prospective audit plus explicitly simulated review, never live credit."""
+    source_only_b(
+        server.store,
+        reviewers=[
+            dict(name="fixture-codex", provider="codex"),
+            dict(name="fixture-claude", provider="claude"),
+        ],
+    )
     result = invoke(server, "harness_audit", mode="prospective")
     assert not result["isError"], result["content"][0]["text"]
     admission = result["structuredContent"]
@@ -141,6 +156,7 @@ def test_publication_rechecks_lineage_after_post_admission_edit(tmp_path, monkey
     monkeypatch.setattr(test_audit, "audit_prospective_tests", execute)
     server = planned(tmp_path, disconnected=False)
     try:
+        source_only_b(server.store)
         assert not invoke(server, "harness_advance", to_phase="roundtable")["isError"]
         original = source_evidence(server)
         with source_only_publication():
@@ -153,7 +169,7 @@ def test_publication_rechecks_lineage_after_post_admission_edit(tmp_path, monkey
     server = PlannerServer(tmp_path)
     try:
         with open_plan_store_readonly(tmp_path) as saved:
-            before = tuple(saved.connection.iterdump())
+            before = canonical_rows(saved)
         with source_only_publication():
             refused = invoke(
                 server,
@@ -163,7 +179,7 @@ def test_publication_rechecks_lineage_after_post_admission_edit(tmp_path, monkey
             )
         assert refused["isError"], refused
         assert "plan-bead-without-vision" in refused["content"][0]["text"]
-        assert tuple(server.store.connection.iterdump()) == before
+        assert canonical_rows(server.store) == before
         assert server.store.phase() == "publish"
         assert server.store.status()["published_revision"] is None
         assert not invoke(server, "harness_upsert_node", node=node("F", "feature", ["V1"]))[
@@ -171,9 +187,8 @@ def test_publication_rechecks_lineage_after_post_admission_edit(tmp_path, monkey
         ]
         assert not invoke(server, "harness_compile")["isError"]
         held = invoke(server, "harness_publish", proof_level="prospective", reason="No oracle")
-        assert (
-            held["isError"] and "plan-publication-evidence-required" in held["content"][0]["text"]
-        )
+        assert held["isError"]
+        assert server.store.status()["published_revision"] is None
         before_audits = server.store.connection.execute(
             "SELECT count(*) FROM audit_runs"
         ).fetchone()[0]

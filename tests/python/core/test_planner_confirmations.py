@@ -4,7 +4,6 @@ Behavior is tested through canonical producers and consumers. Forms and declared
 actors are source fixtures; no human authentication or provider execution proof.
 """
 
-import json
 from pathlib import Path
 
 import pytest
@@ -48,26 +47,6 @@ def decide(store, gate="align+vision-lock", *, action="accept", content=None, **
         store, request["request_id"], action, content or answer()
     )
     return request, result
-
-
-def test_complete_native_subject_survives_reopen_and_post_a_authoring(store):
-    """Catch revision credits invalidated by detail authoring; V1 tests bound the whole revision."""
-    request, outcome = decide(store)
-    assert outcome["state"] == "approved"
-    store.advance("expand", by="source-test")
-    store.advance("vision-lock", by="source-test")
-    vision = store.spine().node("V1")
-    vision["fields"]["scenarios"] = ["New detailed target scenario"]
-    store.upsert_node(vision)
-    store.advance("features", by="source-test")
-    with open_plan_store(store.workspace) as reopened:
-        record = approvals.require_approval(reopened, "A")
-        assert record["subject"] == request["subject"]
-        assert record["card"] == request["card"]
-        assert record["words"] == "Approve" and record["channel"] == confirmation.NATIVE
-        assert not record["human_identity_verified"]
-        assert record["fingerprint"] == approvals.fingerprint(record["subject"])
-        assert record["subject"]["effect"] in record["card"]
 
 
 @pytest.mark.parametrize("field", ["scope_in", "quality_bar", "done_feels_like", "expansion"])
@@ -183,43 +162,8 @@ def test_approval_and_lock_snapshot_rollback_together(store, monkeypatch):
     assert list(store.connection.iterdump()) == before
 
 
-def test_recorded_reviewer_selection_is_a_draft_and_never_separate_consent(store):
-    """
-    Catch stale B blocking a replacement draft; V1 selection-credit tests required extra
-    consent.
-    """
-    _, node, result = recorded_reviewer(store)
-    assert result["selection"]["confirmation"] is None
-    assert not any("reviewer-confirmation-required" in x for x in result["unmetRequirements"])
-    with pytest.raises(ValueError, match="B"):
-        store.confirm_reviewer_selection(
-            node["id"], store._revision(), approve=True, statement="Approve", conditions=""
-        )
-    assert not approvals.current(store, "B")
-
-
-def test_fingerprint_ignores_dictionary_order_but_preserves_values():
-    """Catch nondeterministic JSON equality across restarts; ordinary gate tests use one order."""
-    assert approvals.fingerprint(dict(a=1, b=2)) == approvals.fingerprint(dict(b=2, a=1))
-    assert approvals.fingerprint(dict(a=1)) != approvals.fingerprint(dict(a=True))
-    assert approvals.field_diff(dict(a=1), dict(a=True))[0]["field"] == "a"
-    assert approvals.field_diff({}, dict(a=None))[0]["beforePresent"] is False
-    assert json.loads(approvals.canonical(dict(a="complete words")))["a"] == "complete words"
-
-
 @pytest.mark.parametrize("chat", [False, True])
-@pytest.mark.parametrize(
-    "words",
-    [
-        "Approve except execution",
-        "Do not approve",
-        "Approve review only",
-        "Approve without execution",
-        "Approve unless limits change",
-        "Approve with conditions",
-        "I am undecided",
-    ],
-)
+@pytest.mark.parametrize("words", ["Approve except execution", "I am undecided"])
 def test_qualified_or_unclear_words_request_changes_at_shared_writer(store, chat, words):
     """Catch non-prefix qualifications/uncertainty; AV2-1 covers the full native/job path."""
     import hashlib

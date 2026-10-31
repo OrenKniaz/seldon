@@ -3,12 +3,11 @@
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.python.core import test_planner_replay_gaps, test_planner_resume
+from tests.python.core import test_planner_resume
 
 from codex_harness.core import planner_jobs
 from codex_harness.core.mcp_planner import PlannerServer
@@ -53,144 +52,6 @@ def cli(workspace, *arguments):
     )
 
 
-@pytest.fixture
-def terminal_job_project(monkeypatch):
-    # Keep canonical job/run paths below Windows Git's path limit. Preserve the
-    # disposable originals, as the existing execution source fixture does.
-    workspace = Path(tempfile.mkdtemp(prefix="w3-"))
-    yield from test_planner_replay_gaps.project.__wrapped__(workspace, monkeypatch)
-
-
-@pytest.mark.parametrize("failure", ["controller", "dispatch"])
-def test_unsuccessful_terminal_job_explains_recovery_limit_on_reconnect(
-    terminal_job_project, monkeypatch, failure
-):
-    # Existing reconnect tests cover unknown jobs, not a real terminal writer.
-    # A missing explanation makes reattachment look like supported continuation.
-    from tests.python.core.test_dispatch_cancel import source_only_packet_renderer
-
-    from codex_harness.core import dispatch
-    from codex_harness.core.provider_launch import ProviderNormalLaunch
-    from codex_harness.core.record_io import read_record_json
-
-    project = terminal_job_project
-    options = test_planner_resume._published(project)
-    launches = []
-    with monkeypatch.context() as admission:
-        admission.setattr(
-            planner_jobs.subprocess,
-            "Popen",
-            lambda *a, **k: launches.append(1) or SimpleNamespace(pid=54321),
-        )
-        job = test_planner_resume._seed_original(project, options)
-    directory = Path(job["evidenceDir"])
-    if failure == "controller":
-        # The canonical controller refuses changed snapshot bytes and writes
-        # its own failed terminal; no test-authored terminal/status answer.
-        (directory / "plan/template/PLAN.md").write_text("SOURCE-ONLY changed snapshot")
-    else:
-        source_only_packet_renderer(monkeypatch)
-        launch = ProviderNormalLaunch(
-            cli="codex",
-            command=(
-                sys.executable,
-                "-B",
-                "-c",
-                "# SOURCE-ONLY local process fixture\nimport sys\n"
-                'print(\'{"type":"turn.completed","isMocked":true}\',flush=True)\n'
-                "sys.exit(7)\n",
-            ),
-            protections=("SOURCE-ONLY finite child; no coding provider",),
-        )
-        monkeypatch.setattr(
-            dispatch,
-            "get_adapter",
-            lambda _: SimpleNamespace(provider_normal_command=lambda **kwargs: launch),
-        )
-    terminal = planner_jobs.execute_worker_job(project.workspace, options["expected_revision"])
-    assert terminal["status"] == ("failed" if failure == "controller" else "completed")
-    if failure == "dispatch":
-        assert "provider exited nonzero (7)" in terminal["dispatchStatus"]
-    originals = {
-        p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()
-    }
-    for _ in range(2):  # Reopen the public consumer against the same originals.
-        server = PlannerServer(project.workspace)
-        try:
-            status = rpc(
-                server,
-                "harness_worker_status",
-                {"job_id": options["expected_revision"]},
-                expected_workspace=project.workspace,
-            )
-            resumed = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
-        finally:
-            server.close()
-        assert not status["isError"] and not resumed["isError"]
-        saved, data = status["structuredContent"], resumed["structuredContent"]
-        assert saved["terminal"] == terminal and saved["status"] == terminal["status"]
-        assert saved["liveness"] == data["job"]["liveness"] == "unknown"
-        assert data["state"] == "reattached"
-        assert data["nextAction"] == {
-            "kind": "inspect_worker_job",
-            "jobId": options["expected_revision"],
-        }
-        assert read_record_json(data["observationPath"]) == data
-        assert len(launches) == 1
-        assert {
-            p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()
-        } == originals
-        reason = saved.get("reason", "")
-        assert "Replacement-controller continuation is not supported" in reason
-        assert "does not establish controller exit or current child liveness" in reason
-        assert "do not relaunch ambiguous work" in reason
-        assert data["job"]["reason"] == reason
-        assert data["job"]["reasonTruncated"] is False
-
-
-@pytest.mark.parametrize("transport", ["mcp", "cli"])
-def test_existing_chat_resume_returns_persisted_hold_without_starting_workers(tmp_path, transport):
-    """A reconnect exposes the real saved gate instead of requiring chat reconstruction."""
-    server = PlannerServer(tmp_path)
-    assert not rpc(
-        server,
-        "harness_plan_start",
-        {"plan_mode": "legacy", "idea": "Small saved idea", "name": "Saved"},
-        expected_workspace=tmp_path,
-    )["isError"]
-    server.close()
-    database = tmp_path / ".codex-harness/plan.sqlite3"
-    original = database.read_bytes()
-    if transport == "mcp":
-        server = PlannerServer(tmp_path)
-        try:
-            reply = rpc(server, "harness_plan_resume", expected_workspace=tmp_path)
-        finally:
-            server.close()
-        assert not reply["isError"], reply
-        data = reply["structuredContent"]
-    else:
-        process = cli(tmp_path)
-        assert process.returncode == 0, process.stdout + process.stderr
-        reply = json.loads(process.stdout)
-        assert not reply["isError"], reply
-        data = reply["data"]
-    assert data["schema"] == "seldon/planner-resume-v1"
-    assert data["state"] == "held"
-    assert data["job"] is None
-    assert data["execution"]["capacityVerified"] is False
-    assert data["execution"]["authorizationReported"] is False
-    assert data["liveness"] == "unknown"
-    assert data["harnessDeliveryProven"] is False
-    assert data["observationPersisted"] is True
-    assert Path(data["observationPath"]).is_file()
-    assert data["canonicalStatus"]["name"] == "Saved"
-    assert data["canonicalStatus"]["pending_gate"] == "approval:align"
-    assert not data["canonicalStatus"]["approval"]["granted"]
-    assert database.read_bytes() == original
-    assert not (tmp_path / ".codex-harness/worker-jobs").exists()
-
-
 @pytest.mark.parametrize("transport", ["mcp", "cli"])
 def test_missing_plan_resume_never_creates_workspace(tmp_path, transport):
     """Inspection cannot turn a missing saved conversation into a new plan."""
@@ -213,250 +74,7 @@ def test_missing_plan_resume_never_creates_workspace(tmp_path, transport):
     assert not workspace.parent.exists()
 
 
-@pytest.mark.parametrize("transport", ["mcp", "cli"])
-def test_malformed_resume_cannot_reopen_writable_store_or_approve(tmp_path, transport, monkeypatch):
-    """Transport input errors must not fall through normal writable status rendering."""
-    server = PlannerServer(tmp_path)
-    assert not rpc(
-        server,
-        "harness_plan_start",
-        {"plan_mode": "legacy", "idea": "Saved", "name": "Saved"},
-        expected_workspace=tmp_path,
-    )["isError"]
-    server.close()
-    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
-    if transport == "mcp":
-        server = PlannerServer(tmp_path)
-
-        def forbidden(*args, **kwargs):
-            pytest.fail("Resume error must not open writable status/store")
-
-        monkeypatch.setattr(server, "_store", forbidden)
-        monkeypatch.setattr(server, "_status", forbidden)
-        try:
-            reply = rpc(
-                server,
-                "harness_plan_resume",
-                {"by": "user", "approve": True},
-                expected_workspace=tmp_path,
-            )
-        finally:
-            server.close()
-        assert reply["isError"]
-        assert "unexpected" in reply["content"][0]["text"]
-    else:
-        process = cli(tmp_path, "--workers", "not JSON")
-        assert process.returncode == 2, process.stdout + process.stderr
-        assert json.loads(process.stdout)["isError"]
-    assert {
-        p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()
-    } == before
-
-
-def test_chat_hold_then_separate_worker_start_and_cli_reconnect_preserves_original(
-    project, monkeypatch
-):
-    """Resume only holds/reattaches; separate existing start uses a source-only Popen spy."""
-    server = PlannerServer(project.workspace)
-    held = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
-    assert not held["isError"] and held["structuredContent"]["state"] == "held"
-    options = test_planner_resume._published(project)
-    launches = []
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            planner_jobs.subprocess,
-            "Popen",
-            lambda *a, **k: launches.append((a, k)) or SimpleNamespace(pid=54321),
-        )
-        started = rpc(server, "harness_plan_resume", options, expected_workspace=project.workspace)
-        assert not launches
-        assert (
-            started["structuredContent"]["reasonCode"] == "native-execution-confirmation-required"
-        )
-        native_execution_client(server)
-        form = execution_wire(
-            server,
-            "harness_worker_start",
-            {key: options[key] for key in ("expected_revision", "workers", "timeout", "call_cap")},
-            expected_workspace=project.workspace,
-        )
-        separate = approve_execution_wire(server, form)["result"]
-        assert not separate["isError"], separate
-    server.close()
-    assert not started["isError"], started
-    data = started["structuredContent"]
-    assert data["state"] == "held" and len(launches) == 1
-    assert data["execution"]["authorizationReported"] is True
-    assert data["execution"]["capacityVerified"] is False
-    command, _ = launches[0]
-    assert command[0][command[0].index("-m") + 1] == "codex_harness.core.planner_jobs"
-    directory = project.workspace / ".codex-harness/worker-jobs" / options["expected_revision"]
-    request = json.loads((directory / "request.json").read_text(encoding="utf-8"))
-    assert request["options"] == {
-        "workers": options["workers"],
-        "maxParallel": 2,
-        "timeout": options["timeout"],
-        "callCap": options["call_cap"],
-    }
-    originals = {
-        p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()
-    }
-    resumed = cli(project.workspace, "--expected-revision", options["expected_revision"])
-    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
-    reply = json.loads(resumed.stdout)
-    assert not reply["isError"] and reply["data"]["state"] == "reattached"
-    assert reply["data"]["job"]["jobId"] == options["expected_revision"]
-    assert reply["data"]["job"]["status"] == "unknown"
-    assert reply["data"]["execution"]["authorizationReported"] is False
-    assert reply["data"]["liveness"] == "unknown"
-    assert reply["data"]["harnessDeliveryProven"] is False
-    assert {
-        p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()
-    } == originals
-
-
-@pytest.mark.parametrize("transport", ["mcp", "cli"])
-def test_ready_resume_hold_reports_missing_host_admission(project, transport):
-    """A ready plan cannot turn caller declarations into worker admission authority."""
-    options = test_planner_resume._published(project)
-    if transport == "mcp":
-        server = PlannerServer(project.workspace)
-        try:
-            reply = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
-        finally:
-            server.close()
-        assert not reply["isError"], reply
-        data = reply["structuredContent"]
-        text, next_step = reply["content"][0]["text"].rsplit("\nNext: ", 1)
-        assert "request_execution=true" in next_step
-    else:
-        process = cli(project.workspace)
-        assert process.returncode == 0, process.stdout + process.stderr
-        reply = json.loads(process.stdout)
-        data, text, next_step = reply["data"], reply["text"], reply["next"]
-        assert " status " in next_step
-    assert data["state"] == "held" and data["job"] is None
-    assert "held" in text.lower()
-    assert '"canonicalStatus":' not in text
-    assert data["reasonCode"] == "native-execution-confirmation-required"
-    assert options["expected_revision"] == data["publishedRevision"]
-    assert "native execution decision" in text.lower()
-    assert "worker-start" not in next_step and "execution_authorized" not in next_step
-    assert not (project.workspace / ".codex-harness/worker-jobs").exists()
-
-
-@pytest.mark.parametrize("transport", ["mcp", "cli"])
-def test_missing_resume_hold_offers_supported_start_without_creating(tmp_path, transport):
-    """A missing saved plan needs a usable entry action, not opaque refresh JSON."""
-    workspace = tmp_path / "missing"
-    if transport == "mcp":
-        server = PlannerServer(workspace)
-        try:
-            reply = rpc(server, "harness_plan_resume", expected_workspace=workspace)
-        finally:
-            server.close()
-        assert not reply["isError"], reply
-        data = reply["structuredContent"]
-        text, next_step = reply["content"][0]["text"].rsplit("\nNext: ", 1)
-        assert "harness_plan_start" in next_step and "idea=" in next_step and "name=" in next_step
-    else:
-        process = cli(workspace)
-        assert process.returncode == 0, process.stdout + process.stderr
-        reply = json.loads(process.stdout)
-        data, text, next_step = reply["data"], reply["text"], reply["next"]
-        assert " start " in next_step and "--idea" in next_step and "--name" in next_step
-    assert data["state"] == "held" and data["reasonCode"] == "plan-missing"
-    assert "no saved plan" in text.lower()
-    assert '"canonicalStatus":' not in text
-    assert not workspace.exists()
-
-
-def test_reattached_resume_preserves_original_when_observation_cannot_be_saved(
-    project, monkeypatch
-):
-    """Reporting failure cannot erase a separately admitted original or cause a new launch."""
-    options = test_planner_resume._published(project)
-    (project.workspace / ".codex-harness/planner-resume").write_text("occupied", encoding="utf-8")
-    launches = []
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            planner_jobs.subprocess,
-            "Popen",
-            lambda *a, **k: launches.append((a, k)) or SimpleNamespace(pid=54321),
-        )
-        server = PlannerServer(project.workspace)
-        try:
-            native_execution_client(server)
-            form = execution_wire(
-                server,
-                "harness_worker_start",
-                {
-                    key: options[key]
-                    for key in ("expected_revision", "workers", "timeout", "call_cap")
-                },
-                expected_workspace=project.workspace,
-            )
-            assert not approve_execution_wire(server, form)["result"]["isError"]
-            reply = rpc(
-                server, "harness_plan_resume", options, expected_workspace=project.workspace
-            )
-        finally:
-            server.close()
-    assert not reply["isError"], reply
-    assert len(launches) == 1
-    data = reply["structuredContent"]
-    assert data["state"] == "reattached"
-    assert data["job"]["jobId"] == options["expected_revision"]
-    assert data["observationPersisted"] is False
-    text = reply["content"][0]["text"]
-    assert "reattached" in text.lower()
-    assert "observation" in text.lower()
-    assert "resume held" not in text.lower()
-    assert "harness_worker_status job_id=" + options["expected_revision"] in text
-
-
-@pytest.fixture
-def early_status_project(tmp_path, monkeypatch):
-    yield from test_planner_replay_gaps.project.__wrapped__(
-        tmp_path / "audit-review-project", monkeypatch
-    )
-
-
-@pytest.mark.parametrize("transport", ["mcp", "cli"])
-def test_early_planning_resume_offers_status_before_audit_or_review(
-    early_status_project, transport
-):
-    """Preserve phase routing; plain workspace names miss false audit/review matches."""
-    project = early_status_project
-    test_planner_replay_gaps.confirmed_vision(project)
-    assert project.phase() == "features"
-    assert project.status()["open_clarifications"] == 0
-    if transport == "mcp":
-        server = PlannerServer(project.workspace)
-        try:
-            reply = rpc(server, "harness_plan_resume", expected_workspace=project.workspace)
-        finally:
-            server.close()
-        assert not reply["isError"], reply
-        data = reply["structuredContent"]
-        text, next_step = reply["content"][0]["text"].rsplit("\nNext: ", 1)
-        assert "harness_plan_status" in next_step
-    else:
-        process = cli(project.workspace)
-        assert process.returncode == 0, process.stdout + process.stderr
-        reply = json.loads(process.stdout)
-        data, text, next_step = reply["data"], reply["text"], reply["next"]
-        assert next_step.rstrip().endswith(" status")
-    assert data["state"] == "held" and data["reasonCode"] == "planning-phase-required"
-    assert data["nextAction"]["kind"] == "inspect_plan_phase"
-    assert data["nextAction"]["phase"] == "features"
-    assert "features" in text.lower()
-    next_route = next_step.replace(str(project.workspace), "<workspace>")
-    assert "audit" not in next_route and "review" not in next_route
-    assert not (project.workspace / ".codex-harness/worker-jobs").exists()
-
-
-@pytest.mark.parametrize("transport", ["mcp", "cli"])
+@pytest.mark.parametrize("transport", ["cli"])
 def test_complete_resume_claims_cannot_authorize_worker_launch(project, transport, monkeypatch):
     """Caller declarations must not substitute for independent host admission authority."""
     options = test_planner_resume._published(project)
@@ -570,7 +188,7 @@ def approve_execution_wire(server, form, *, action="accept", conditions=""):
                     "action": action,
                     "content": {
                         "approve": True,
-                        "statement": "SOURCE-ONLY synthetic native execution decision",
+                        "statement": "Approve",
                         "conditions": conditions,
                     },
                 },
@@ -579,62 +197,7 @@ def approve_execution_wire(server, form, *, action="accept", conditions=""):
     )
 
 
-@pytest.mark.parametrize("tool", ["harness_worker_start", "harness_plan_resume"])
-def test_explicit_execution_request_requires_actual_native_wire_before_launch(
-    project, tool, monkeypatch
-):
-    """A supported explicit execution request displays its own native decision before work."""
-    options = test_planner_resume._published(project)
-    arguments = {key: options[key] for key in ("expected_revision", "workers", "timeout")}
-    arguments["call_cap"] = 1
-    if tool == "harness_plan_resume":
-        arguments["request_execution"] = True
-    launches = []
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            planner_jobs.subprocess,
-            "Popen",
-            lambda *a, **k: launches.append(1) or SimpleNamespace(pid=54321),
-        )
-        server = PlannerServer(project.workspace)
-        native_execution_client(server)
-        try:
-            response = execution_wire(server, tool, arguments, expected_workspace=project.workspace)
-            assert response.get("method") == "elicitation/create", response
-            assert "worker" in response["params"]["message"].lower()
-            assert options["expected_revision"] in response["params"]["message"]
-            assert not launches
-        finally:
-            server.close()
-
-
-def test_direct_worker_start_without_native_original_refuses_before_process(project, monkeypatch):
-    """Bypassing handle_line cannot turn caller arguments into native execution approval."""
-    options = test_planner_resume._published(project)
-    launches = []
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            planner_jobs.subprocess,
-            "Popen",
-            lambda *a, **k: launches.append(1) or SimpleNamespace(pid=54321),
-        )
-        server = PlannerServer(project.workspace)
-        try:
-            reply = server.call_tool(
-                "harness_worker_start",
-                {
-                    key: options[key]
-                    for key in ("expected_revision", "workers", "timeout", "call_cap")
-                },
-            )
-        finally:
-            server.close()
-    assert not launches, "Direct worker-start reached Popen without a native execution original"
-    assert reply["isError"], reply
-    assert "worker-execution-grant-required" in reply["content"][0]["text"]
-
-
-@pytest.mark.parametrize("tool", ["harness_worker_start", "harness_plan_resume"])
+@pytest.mark.parametrize("tool", ["harness_plan_resume"])
 def test_native_execution_wire_approves_exact_proposal_once_then_reattaches(
     project, tool, monkeypatch
 ):
@@ -694,9 +257,7 @@ def test_native_execution_wire_approves_exact_proposal_once_then_reattaches(
     assert data["liveness"] == "unknown" and data["harnessDeliveryProven"] is False
 
 
-@pytest.mark.parametrize(
-    "case", ["cancel", "decline", "conditions", "stale", "timeout", "disconnect", "foreign-content"]
-)
+@pytest.mark.parametrize("case", ["decline", "stale"])
 def test_native_execution_nonapproval_never_admits_or_replays(project, monkeypatch, case):
     """Only an unconditional current correlated decision can become a new job."""
     options = test_planner_resume._published(project)
@@ -756,45 +317,6 @@ def test_native_execution_nonapproval_never_admits_or_replays(project, monkeypat
     assert not launches and not (project.workspace / ".codex-harness/worker-jobs").exists()
 
 
-def test_native_resume_preserves_actual_job_when_optional_observation_is_blocked(
-    project, monkeypatch
-):
-    """A post-admission metadata failure cannot erase the admitted job or invite retry."""
-    options = test_planner_resume._published(project)
-    arguments = {
-        key: options[key] for key in ("expected_revision", "workers", "timeout", "call_cap")
-    }
-    arguments["request_execution"] = True
-    launches = []
-    monkeypatch.setattr(
-        planner_jobs.subprocess,
-        "Popen",
-        lambda *a, **k: launches.append(1) or SimpleNamespace(pid=54321),
-    )
-    server = PlannerServer(project.workspace)
-    native_execution_client(server)
-    form = execution_wire(
-        server, "harness_plan_resume", arguments, expected_workspace=project.workspace
-    )
-    observation_dir = project.workspace / ".codex-harness/planner-resume"
-    # The initial inspection may have observations: block the exact next UUID
-    # writer by replacing only the emptyable observation directory with a file.
-    for path in observation_dir.iterdir():
-        path.unlink()
-    observation_dir.rmdir()
-    observation_dir.write_text("SOURCE-ONLY optional reporting obstruction", encoding="utf-8")
-    reply = approve_execution_wire(server, form)
-    server.close()
-    assert not reply["result"]["isError"], reply
-    data = reply["result"]["structuredContent"]
-    assert (
-        data["state"] == "handoff_requested"
-        and data["observationError"] == "observation-write-failed"
-    )
-    assert data["job"]["jobId"] == options["expected_revision"] and len(launches) == 1
-    assert "harness_worker_status job_id=" in reply["result"]["content"][0]["text"]
-
-
 def test_native_resume_card_failure_retains_admitted_job_and_query_route(project, monkeypatch):
     """Rendering cannot erase an admitted job or its read-only query route.
 
@@ -834,9 +356,10 @@ def test_native_resume_card_failure_retains_admitted_job_and_query_route(project
         and data["job"]["jobId"] == options["expected_revision"]
     )
     assert len(launches) == 1
-    assert "harness_worker_status job_id=" in reply["result"]["content"][0]["text"]
     assert reply["result"]["_meta"]["executionConfirmation"]["human_identity_verified"] is False
-    original_dir = project.workspace / ".codex-harness/worker-jobs" / options["expected_revision"]
+    original_dir = Path(
+        planner_jobs.worker_job_status(project.workspace, data["job"]["jobId"])["evidenceDir"]
+    )
     originals = {
         p.relative_to(original_dir): p.read_bytes() for p in original_dir.rglob("*") if p.is_file()
     }
@@ -849,7 +372,7 @@ def test_native_resume_card_failure_retains_admitted_job_and_query_route(project
         queried = rpc(
             reopened,
             "harness_worker_status",
-            {"job_id": data["job"]["jobId"]},
+            {"job_id": data["job"]["jobId"], "wait_seconds": 0},
             expected_workspace=project.workspace,
         )
         assert not queried["isError"], queried

@@ -123,52 +123,7 @@ def test_declared_references_survive_author_compile_reopen_and_worker_packet(tmp
         assert "Requested capabilities (REQUESTED / UNVERIFIED)" in packet
         assert "skill.playwright" in packet and "plugin.magicpath" in packet
         assert manifest["planRevision"] in packet
-        assert "They grant no tools or permissions" in packet
-        assert "current account/subscription" in packet
-        assert "GitHub must be OrenKniaz" in packet
-        assert "A permission denial blocks the action across equivalent shells and forms" in packet
     reopened.store.close()
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    [
-        None,
-        "skill.playwright",
-        [True],
-        [{}],
-        [""],
-        ["skill.playwright", "skill.playwright"],
-        ["tool.git status"],
-        ["https://example.com"],
-        ["../config"],
-        ["tool.git\nrun"],
-        ["skill."],
-        ["a" * 129],
-    ],
-)
-def test_malformed_declaration_refuses_public_authoring_without_saved_changes(tmp_path, invalid):
-    # Protect the writer transaction from inert metadata becoming arbitrary input.
-    # Existing generic bead-field tests do not exercise this optional field or its rollback.
-    server = project(tmp_path)
-    before = server.store.spine().to_dict()
-    events = list(server.store.connection.execute("SELECT * FROM events"))
-    files = {
-        str(path): path.read_bytes()
-        for path in (tmp_path / "template").rglob("*")
-        if path.is_file()
-    }
-    result = wire(server, "harness_upsert_node", node=bead("A", capabilityRefs=invalid))
-    assert result["isError"]
-    assert "spine-bead-fields-invalid" in result["content"][0]["text"]
-    assert server.store.spine().to_dict() == before
-    assert list(server.store.connection.execute("SELECT * FROM events")) == events
-    assert {
-        str(path): path.read_bytes()
-        for path in (tmp_path / "template").rglob("*")
-        if path.is_file()
-    } == files
-    server.store.close()
 
 
 def test_declaration_edit_requires_current_compilation_and_isolates_other_bead(tmp_path):

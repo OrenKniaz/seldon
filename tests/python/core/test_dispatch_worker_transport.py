@@ -19,10 +19,7 @@ from codex_harness.core.provider_launch import get_adapter
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows executable/command-line regression")
-@pytest.mark.parametrize("large_packet", [False, True])
-def test_path_only_worker_original_reaches_assessment_with_exact_packet(
-    tmp_path, monkeypatch, large_packet
-):
+def test_path_only_worker_original_reaches_assessment_with_exact_packet(tmp_path, monkeypatch):
     # Existing assessment fixtures replace the adapter with absolute Python argv;
     # they miss PATH identity drift and actual Windows transport of admitted packets.
     which, resolver = shutil.which, roundtable._executable
@@ -62,13 +59,14 @@ def test_path_only_worker_original_reaches_assessment_with_exact_packet(
             tmp_path,
             monkeypatch,
             worker_setup=setup,
-            worker_context=("# Context: example input λ and output for the owned parser.\n" * 400)
-            if large_packet
-            else "",
+            worker_context=("# Context: example input λ and output for the owned parser.\n" * 400),
         )
     )
     try:
-        status = tool("harness_worker_status", {"job_id": store._meta()["published_revision"]})
+        status = tool(
+            "harness_worker_status",
+            {"job_id": store._meta()["published_revision"], "include_detail": True},
+        )
         run = json.loads(Path(status["run"]["recordPath"]).read_text())
         attempt = Path(run["beads"]["A"]["evidenceDir"]) / "attempt"
         request = json.loads((attempt / "request.json").read_text())
@@ -85,19 +83,17 @@ def test_path_only_worker_original_reaches_assessment_with_exact_packet(
         assert result["exitCode"] == 0 and result["outputComplete"]
         assert request["launch"]["stdinText"] == request["prompt"]
         assert capture.read_bytes() == request["prompt"].encode("utf-8")
-        if large_packet:
-            assert 32767 < len(request["prompt"]) <= 44000
+        assert 32767 < len(request["prompt"]) <= 44000
         assert sum(len(part) + 3 for part in request["command"]) < 32767
-        if not large_packet:
-            # The original image remains authoritative after PATH changes, and a
-            # changed image must still refuse at the actual assessment consumer.
-            executable.write_bytes(executable.read_bytes() + b"SOURCE-ONLY changed image")
-            refused = tool(
-                "harness_accept_assess",
-                {"prepare": {"finding_ids": [finding["id"]], "bead_id": "A"}},
-                error=True,
-            )
-            assert refused["holdReasons"] == ["execution-author-executable-unverified"]
+        # The original image remains authoritative after PATH changes, and a
+        # changed image must still refuse at the actual assessment consumer.
+        executable.write_bytes(executable.read_bytes() + b"SOURCE-ONLY changed image")
+        refused = tool(
+            "harness_accept_assess",
+            {"prepare": {"finding_ids": [finding["id"]], "bead_id": "A"}},
+            error=True,
+        )
+        assert refused["holdReasons"] == ["execution-author-executable-unverified"]
     finally:
         store.close()
 

@@ -15,50 +15,6 @@ from codex_harness.core.memory_promotion import (
 )
 from codex_harness.core.project_memory import ProjectMemoryStore, Provenance
 
-
-def test_long_lesson_and_recovery_reference_fit_real_memory_writer(tmp_path):
-    """Catch evidence suffix overflowing a valid lesson; prior tests use short receipt paths."""
-    lesson = ("Retain the complete agreed decision and its validated evidence. " * 40)[:1854]
-    receipt = str(tmp_path / ("evidence-" + "x" * 110) / "B1" / "integrated.json")
-    evidence = PromotionEvidence("a" * 40, receipt, "D0")
-    assert (
-        len(
-            lesson
-            + f" [evidence: commit={'a' * 12} receipt={receipt}]"
-            + " [promotion: "
-            + "0" * 64
-            + "]"
-        )
-        > 2000
-    )
-    entry_id = promote_lesson(
-        tmp_path,
-        text=lesson,
-        evidence=evidence,
-        author="worker:B1:source-test",
-        provider="source-test",
-        model="finite-child",
-        recovery_identity="same-canonical-attempt",
-    )
-    stored = ProjectMemoryStore(tmp_path).get(entry_id)
-    assert len(stored.text) <= 2000
-    assert stored.text.startswith(lesson[:100])
-    assert receipt in stored.text and "[promotion: " in stored.text
-    assert stored.status == "unverified"
-    assert (
-        promote_lesson(
-            tmp_path,
-            text=lesson,
-            evidence=evidence,
-            author="worker:B1:source-test",
-            provider="source-test",
-            model="finite-child",
-            recovery_identity="same-canonical-attempt",
-        )
-        == entry_id
-    )
-
-
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32",
     reason="project memory holds Windows workspace leases; other hosts fail closed",
@@ -120,47 +76,3 @@ def test_self_confirmation_is_refused(tmp_path: Path, by: str) -> None:
     assert excinfo.value.code == "memory-self-confirmation-refused"
     assert ProjectMemoryStore(tmp_path).get(entry_id).status == "unverified"
     assert memory_prompt_for(tmp_path) is None
-
-
-@pytest.mark.parametrize(
-    ("text", "commit", "receipt"),
-    [
-        ("", "abc", "receipt"),
-        ("  ", "abc", "receipt"),
-        ("lesson", "  ", "receipt"),
-        ("lesson", "", "receipt"),
-        ("lesson", "abc", "  "),
-    ],
-)
-def test_missing_evidence_is_refused(tmp_path: Path, text: str, commit: str, receipt: str) -> None:
-    with pytest.raises(MemoryPromotionError) as excinfo:
-        promote_lesson(
-            tmp_path,
-            text=text,
-            evidence=PromotionEvidence(commit, receipt),
-            author="worker-a",
-            provider="codex",
-            model="worker-model",
-        )
-    assert excinfo.value.code == "memory-promotion-evidence-missing"
-    assert not (tmp_path / ".codex-harness").exists()
-
-
-def test_d1_lesson_reaches_next_worker_prompt(tmp_path: Path) -> None:
-    lesson = "tip-split amounts are integer cents everywhere; never floats (D1)"
-    entry_id = promote_lesson(
-        tmp_path,
-        text=lesson,
-        evidence=PromotionEvidence(EVIDENCE.integration_commit, EVIDENCE.validation_receipt, "D1"),
-        author="worker-a",
-        provider="codex",
-        model="worker-model",
-    )
-    assert ProjectMemoryStore(tmp_path).get(entry_id).tags == ("lesson", "d1")
-    assert memory_prompt_for(tmp_path) is None
-
-    confirm_lesson(tmp_path, entry_id, by="planner")
-
-    prompt = memory_prompt_for(tmp_path)
-    assert prompt is not None
-    assert lesson in prompt

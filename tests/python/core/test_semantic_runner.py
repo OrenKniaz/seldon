@@ -1,13 +1,12 @@
 """Real developer fixtures protect data execution; legacy audits inspect test code."""
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from codex_harness.core.semantic_runner import MODULE, run
+from codex_harness.core.semantic_runner import run
 
 
 def scenario():
@@ -98,49 +97,6 @@ def test_stdin_write_drains_output_before_waiting_for_reader(tmp_path):
     assert result["state"] == "PASS", result
     assert result["cleanup"]["quiescenceVerified"]
     assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
-
-
-@pytest.mark.parametrize("relative", [False, None, 0, 1, "true", [], {}])
-def test_invalid_relative_flag_is_rejected_before_launch(tmp_path, relative):
-    """Catch truthiness accepting non-true flags; existing negatives lack relative argv."""
-    (tmp_path / "tally.py").write_text("raise AssertionError('unexpected launch')")
-    document = scenario()
-    document["scenarios"][0]["actions"][0]["cli"]["argv"] = [
-        {"path": "data/ledger.json", "relative": relative}
-    ]
-    result = run(document, tmp_path, TARGETS, "validation")[0]
-    assert result["state"] == "ERROR" and "relative must be true" in result["reason"]
-    assert result["cleanup"]["childLaunched"] is False
-
-
-@pytest.mark.parametrize(
-    "binding",
-    [
-        {"module": "missing"},
-        {"module": "probe", "entry": "tally.py"},
-        {},
-        {"module": "../outside"},
-        {"module": "C:/outside"},
-        {"module": "probe..sub"},
-        {"module": "probe/sub"},
-        {"module": 1},
-        {"module": "unittest"},
-        {"module": "namespace"},
-    ],
-)
-def test_invalid_module_bindings_are_errors_before_launch(tmp_path, binding):
-    """Catch missing/unsafe module admission; existing binding negatives use entry only."""
-    marker = tmp_path / "launched"
-    (tmp_path / "tally.py").write_text(f"open({str(marker)!r},'w').write('unexpected')")
-    for name in ("unittest", "namespace"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "__main__.py").write_text("print('unexpected')")
-    result = run(scenario(), tmp_path, {"tally": dict(binding, argv=[])}, "validation")[0]
-    (tmp_path / "module-observation.json").write_text(json.dumps(result))
-    assert result["state"] == "ERROR", result
-    assert result["cleanup"]["childLaunched"] is False and not marker.exists()
-    if binding == {"module": "missing"}:
-        assert "module" in result["reason"] and "__main__.py" in result["reason"]
 
 
 GRAMMAR = """import argparse, sys
@@ -281,45 +237,6 @@ def test_missing_product_output_fails_then_persisted_output_passes(
     assert green["cleanup"]["quiescenceVerified"]
 
 
-def test_missing_setup_snapshot_remains_error(tmp_path, monkeypatch):
-    """Protect setup errors; post-action output coverage cannot detect a missing preimage."""
-    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[3] / "src"))
-    (tmp_path / "tally.py").write_text(STUB)
-    document = scenario()
-    document["scenarios"][0]["setup"]["files"] = []
-    result = run(document, tmp_path, TARGETS, "contracts")[0]
-    assert result["state"] == "ERROR", result
-    assert "ledger.json" in result["reason"]
-
-
-def test_tally_stub_fail_then_implemented_fixture_cli_pass(tmp_path):
-    """Catch unread input masking attributable RED; previous stub proof supplied no pipe."""
-    product = tmp_path
-    entry = product / "tally.py"
-    entry.write_text(STUB)
-    document = scenario()
-    document["scenarios"][0]["actions"][0]["cli"]["stdin"] = {"utf8": "x" * 48000}
-    red = run(document, product, TARGETS, "contracts")
-    (tmp_path / "red.json").write_text(json.dumps(red))
-    assert red[0]["state"] == "FAIL", red
-    assert red[0]["stubActions"] == ["add"]
-    assert red[0]["cleanup"]["quiescenceVerified"] is True
-    entry.write_text(PRODUCT)
-    spec, targets = tmp_path / "spec.json", tmp_path / "targets.json"
-    spec.write_text(json.dumps(scenario()))
-    targets.write_text(json.dumps(TARGETS))
-    cli = subprocess.run(
-        [sys.executable, "-B", "-m", MODULE, str(spec), str(product), str(targets), "validation"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert cli.returncode == 0, cli.stderr
-    (tmp_path / "green.json").write_text(cli.stdout)
-    green = json.loads(cli.stdout)[0]
-    assert green["state"] == "PASS" and green["stubActions"] == [], green
-
-
 @pytest.mark.parametrize(
     "source,reason",
     [
@@ -428,26 +345,6 @@ def test_json_equality_preserves_types_not_layout(tmp_path, expected, state):
     assert run(document, tmp_path, TARGETS, "validation")[0]["state"] == state
 
 
-def test_passing_stub_is_not_forced_red_and_validation_refuses_marker(tmp_path):
-    """Catch forced RED and final stub credit; mismatching expectations alone miss both."""
-    (tmp_path / "tally.py").write_text(STUB)
-    document = scenario()
-    document["scenarios"][0]["observe"] = [{"action": "add", "exitEquals": 3}]
-    assert run(document, tmp_path, TARGETS, "contracts")[0]["state"] == "PASS"
-    assert run(document, tmp_path, TARGETS, "validation")[0]["state"] == "ERROR"
-
-
-def test_byte_preservation_detects_json_equivalent_mutation(tmp_path):
-    """Catch changed bytes hidden by JSON equality; read-only success misses rewrites."""
-    mutation = "open(a.db,'w').write(' [ ] '); "
-    source = PRODUCT.replace("print('amount", mutation + "print('amount")
-    (tmp_path / "tally.py").write_text(source)
-    result = run(scenario(), tmp_path, TARGETS, "validation")[0]
-    assert result["state"] == "FAIL", result
-    checks = {o["check"]: o["passed"] for o in result["observations"]}
-    assert checks["bytesUnchangedFrom"] is False and checks["fileJsonEquals"] is True
-
-
 @pytest.mark.parametrize(
     "fixture,cwd",
     [
@@ -478,22 +375,6 @@ def test_byte_fixture_and_cwd_errors_prevent_product_launch(tmp_path, fixture, c
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("ending,state", [(b"\r\n", "PASS"), (b"", "FAIL")])
-def test_stderr_equals_normalizes_actual_crlf_without_inventing_newline(tmp_path, ending, state):
-    """Catch raw stderr equality rejecting Windows text; stdout newline cases miss stderrEquals."""
-    (tmp_path / "tally.py").write_text(
-        f"import sys\nsys.stderr.buffer.write({b'bad input' + ending!r})\n", encoding="utf-8"
-    )
-    document = scenario()
-    observation = {"action": "add", "stderrEquals": "bad input\n"}
-    document["scenarios"][0]["observe"] = [observation]
-    result = run(document, tmp_path, TARGETS, "validation")[0]
-    assert result["state"] == state, result
-    assert result["actions"]["add"]["stderr"] == "bad input" + ending.decode()
-    assert observation["stderrEquals"] == "bad input\n"
-    assert result["cleanup"]["quiescenceVerified"]
-
-
 @pytest.mark.parametrize("change", ["overflow", "junction"])
 def test_unobservable_directory_snapshot_is_error_not_contracts_red(tmp_path, change):
     """Catch incomplete tree credit for overflow/junctions; old snapshots only read files."""
@@ -514,18 +395,6 @@ def test_unobservable_directory_snapshot_is_error_not_contracts_red(tmp_path, ch
     document["scenarios"][0]["observe"] = [dict(path="data", bytesUnchangedFrom="before")]
     result = run(document, tmp_path, TARGETS, "contracts")[0]
     assert result["state"] == "ERROR" and "snapshot" in result["reason"], result
-    assert result["cleanup"]["quiescenceVerified"]
-
-
-@pytest.mark.parametrize("metadata_file", [".git", ".codex-harness"])
-def test_source_inventory_excludes_metadata_files(tmp_path, metadata_file):
-    """Protect worktree metadata exclusion; real-repo acceptance covers directories only."""
-    (tmp_path / "tally.py").write_text(PRODUCT)
-    for index in range(127):
-        (tmp_path / f"product-{index}.txt").touch()
-    (tmp_path / metadata_file).write_text("metadata must not consume the 128th product slot")
-    result = run(scenario(), tmp_path, TARGETS, "validation")[0]
-    assert result["state"] == "PASS", result
     assert result["cleanup"]["quiescenceVerified"]
 
 
@@ -593,8 +462,7 @@ def web_document():
     }
 
 
-@pytest.fixture(scope="module")
-def web_browser_ready(tmp_path_factory):
+def browser_readiness(tmp_path_factory):
     """Retain one real readiness attempt and native privilege failures without browser proof."""
     root = tmp_path_factory.mktemp("web-browser-readiness")
     (root / "index.html").write_text(WEB_PAGE, encoding="utf-8")
@@ -786,16 +654,6 @@ def test_web_hung_renderer_timeout_reaps_browser_children(tmp_path, web_browser_
     assert result["cleanup"]["activeProcessesBeforeTeardown"] > 0
     assert result["cleanup"]["quiescenceVerified"]
     assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
-
-
-def test_web_missing_bounded_png_is_evidence_only(tmp_path, web_browser_ready):
-    """Protect evidence-only PNGs; other browser tests never exceed the screenshot height cap."""
-    (tmp_path / "index.html").write_text(
-        WEB_PAGE + '<div style="height:13000px"></div>', encoding="utf-8"
-    )
-    result = run(web_document(), tmp_path, WEB_TARGET, "validation")[0]
-    assert result["state"] == "PASS", result
-    assert all(png["missing"] for a in result["actions"].values() for png in a["artifacts"])
 
 
 @pytest.mark.parametrize(

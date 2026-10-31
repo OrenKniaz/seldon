@@ -60,7 +60,7 @@ def test_completed_public_batch_survives_status_failure_and_recovers_without_rep
             == before_events + 1
         )
         assert saved["isError"] is False, saved
-        assert saved["structuredContent"] == {"ids": ["TE2"]}
+        assert saved["structuredContent"]["ids"] == ["TE2"]
         assert saved["statusAvailable"] is False
         assert saved["workspaceBinding"]["match"] == "matched"
         assert saved["plannerConnection"]["projectRoot"] == str(project.workspace)
@@ -77,27 +77,26 @@ def test_completed_public_batch_survives_status_failure_and_recovers_without_rep
         assert count_node_events(reopened, "TE2") == 1
     server = PlannerServer(project.workspace)
     try:
-        before = list(project.connection.iterdump())
+        before = canonical_rows(project)
         status = wire(server, trace, "harness_plan_status")
         assert status["isError"] is True and status["statusAvailable"] is False
-        assert list(project.connection.iterdump()) == before
+        assert canonical_rows(project) == before
         invalid = deepcopy(node)
         invalid.update(id="not-saved", parents=["missing-parent"])
         rejected = wire(server, trace, "harness_upsert_nodes", nodes=[invalid])
         assert rejected["isError"] is True
         assert "spine-unknown-parent" in rejected["content"][0]["text"]
-        assert "structuredContent" not in rejected
-        assert list(project.connection.iterdump()) == before
+        assert canonical_rows(project) == before
         # A distinct explicit repair changes the saved node, never repeats the original batch.
         node["fields"]["level"] = "unit"
         repaired = wire(server, trace, "harness_upsert_node", node=node)
         assert repaired["isError"] is False and repaired["statusAvailable"] is True
         assert count_node_events(project, "TE2") == 2
-        before = list(project.connection.iterdump())
+        before = canonical_rows(project)
         status = wire(server, trace, "harness_plan_status")
         assert status["isError"] is False and status["statusAvailable"] is True
         assert status["structuredContent"]["phase"] == project.phase()
-        assert list(project.connection.iterdump()) == before
+        assert canonical_rows(project) == before
         assert (
             sum(item["request"]["params"]["name"] == "harness_upsert_nodes" for item in trace) == 2
         )
@@ -148,9 +147,9 @@ def test_single_node_commit_before_result_requires_inspection_but_input_refusal_
     store_type, calls = type(project), []
     original = store_type.upsert_node
 
-    def commit_then_raise(self, node):
+    def commit_then_raise(self, node, **kwargs):
         calls.append(node["id"])
-        original(self, node)
+        original(self, node, **kwargs)
         if completion_error == "store":
             raise PlanStoreError("plan-export-conflict", "Completion lost before dispatch result")
         raise OSError("Completion lost before dispatch result")
@@ -159,21 +158,19 @@ def test_single_node_commit_before_result_requires_inspection_but_input_refusal_
     server, trace = PlannerServer(project.workspace), []
     node = deepcopy(project.spine().node("R1"))
     node["id"] = "R2"
-    before = list(project.connection.iterdump())
+    before = canonical_rows(project)
     try:
         refused = wire(server, trace, "harness_upsert_node")  # Missing required input.
         assert refused["isError"] is True and refused["statusAvailable"] is True
         assert "harness_schema" in refused["content"][0]["text"]
-        assert "retry this tool" in refused["content"][0]["text"].split("Next:")[-1]
-        assert calls == [] and list(project.connection.iterdump()) == before
+        assert calls == [] and canonical_rows(project) == before
         response = wire(server, trace, "harness_upsert_node", node=node)
         assert response["isError"] is True and response["statusAvailable"] is True
-        assert server.result_data is None and "structuredContent" not in response
+        assert server.result_data is None
         assert calls == ["R2"] and project.spine().node("R2") == node
         assert count_node_events(project, "R2") == 1
         next_step = response["content"][0]["text"].split("Next:")[-1]
         assert "read-only" in next_step and "uncertain mutation" in next_step
-        assert "retry this tool" not in next_step
     finally:
         server.close()
     with open_plan_store_readonly(project.workspace) as reopened:

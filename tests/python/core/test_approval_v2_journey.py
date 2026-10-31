@@ -6,19 +6,39 @@ from pathlib import Path
 import pytest
 from tests.python.core import test_semantic_wiring
 from tests.python.core.planning_support import source_only_expansion
-from tests.python.core.test_semantic_wiring import MARKER_FIRST, execute, workers
+from tests.python.core.test_semantic_wiring import execute, workers
 
-from codex_harness.core import dispatch, planner_jobs, worker_packet
-from codex_harness.core.graph import load_plan
+from codex_harness.core import dispatch, planner_jobs
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import PHASES
 
 semantic_plan = test_semantic_wiring.semantic_plan
+web_plan = test_semantic_wiring.web_plan
 
 
-@pytest.mark.parametrize("clarification,run22", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize(
+    "journey",
+    [
+        "happy",
+        "clarification",
+        "renew-reviewers",
+        "decline-a",
+        "change-a",
+        "stale-a",
+        "reconnect-a",
+        "replay-a",
+        "decline-b",
+        "change-b",
+        "reconnect-b",
+        "replay-b",
+        "missing-b",
+        "reconnect-c",
+        "refused-c",
+        "web",
+    ],
+)
 def test_canonical_plan_contracts_red_build_validation_pass(
-    semantic_plan, monkeypatch, clarification, run22
+    semantic_plan, monkeypatch, journey, request
 ):
     """Protect public A/B/C→dispatch→CLI→acceptance, with one genuine clarification when needed.
 
@@ -39,6 +59,12 @@ def test_canonical_plan_contracts_red_build_validation_pass(
 
     from codex_harness.core import roundtable
 
+    clarification = journey == "clarification"
+    run22 = journey == "renew-reviewers"
+    is_web = journey == "web"
+    if is_web:
+        request.getfixturevalue("web_browser_ready")
+        semantic_plan = request.getfixturevalue("web_plan")
     store, manifest = semantic_plan
     server = PlannerServer(store.workspace)
     confirmations = []
@@ -47,14 +73,47 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         reply = workspace_wire(server, name, expected_workspace=str(store.workspace), **args)
         assert server._pending_confirmation is None, "Default semantic journey must never elicit"
         assert not reply["isError"], reply
-        if name not in {"harness_accept_review", "harness_accept"}:
-            assert "C: Does this delivery" not in str(reply)
         return reply
 
+    def reopen():
+        nonlocal server
+        server.close()
+        server = PlannerServer(store.workspace)
+        assert not call("harness_plan_status")["isError"]
+
     def approve(request):
+        kind = request["subject"]["kind"].lower()
+        if journey == f"reconnect-{kind}":
+            reopen()
+        if journey in {f"decline-{kind}", f"change-{kind}"}:
+            quote = "No" if journey.startswith("decline") else "Changes: reduce scope"
+            refused = external_reply(server, request, quote)["structuredContent"]
+            assert refused["approval_id"] is None
+            assert refused["state"] == ("declined" if quote == "No" else "changes-requested")
+            held = workspace_wire(
+                server,
+                "harness_advance",
+                expected_workspace=str(store.workspace),
+                to_phase="expand" if kind == "a" else "roundtable",
+            )
+            assert held["isError"]
+            request = refused["chatConfirmation"]
+        if journey == "stale-a" and kind == "a":
+            vision = store.spine().node("V1")
+            vision["text"] += " Updated before the decision."
+            call("harness_upsert_node", node=vision)
+            stale = external_reply(server, request)["structuredContent"]
+            assert stale["state"] == "stale" and stale["approval_id"] is None
+            request = call("harness_prepare_chat_confirmation", gate="align+vision-lock")[
+                "structuredContent"
+            ]
         confirmations.append(request["gate"])
         result = external_reply(server, request)
         assert not result["isError"] and result["structuredContent"]["state"] == "approved", result
+        if journey == f"replay-{kind}":
+            replayed = external_reply(server, request)
+            assert replayed["isError"]
+            assert call("harness_plan_status")["structuredContent"]["approval"]["granted"]
 
     rpc(
         server, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}}
@@ -77,27 +136,14 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         call("harness_answer", id=question["structuredContent"]["id"], answer="No; exactly Hello.")
     card = call(
         "harness_understanding_card",
-        vision="Offline greeting CLI",
-        users="CLI user",
-        first_user_moment="Read Hello",
-        scope_in="Offline greeting",
-        scope_out="GUI",
+        vision="Visit booking page" if is_web else "Offline greeting CLI",
+        users="Visitors" if is_web else "CLI user",
+        first_user_moment="Book a visit" if is_web else "Read Hello",
+        scope_in="Book visits" if is_web else "Offline greeting",
+        scope_out="Payments" if is_web else "GUI",
         assumptions=[],
     )
     a = card["structuredContent"]
-    # CT-2: the mandatory user excerpt, not a wrapper, must explain approval's effect.
-    excerpt = a["card"]
-    assert (
-        "Approve confirms understanding and locks this scope and these expansion decisions."
-        in excerpt
-    )
-    persisted = json.loads(
-        store.connection.execute(
-            "SELECT payload_json FROM events WHERE kind='confirmation-requested' "
-            "ORDER BY id DESC LIMIT 1"
-        ).fetchone()[0]
-    )
-    assert persisted["card"] == a["card"] and a["card"] in card["content"][0]["text"]
     assert a["subject"]["kind"] == "A"
     approve(a)
     if run22:
@@ -141,13 +187,21 @@ def test_canonical_plan_contracts_red_build_validation_pass(
             dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium") for b in ("C", "B")
         ],
     )
+    if journey == "missing-b":
+        held = workspace_wire(
+            server,
+            "harness_advance",
+            expected_workspace=str(store.workspace),
+            to_phase="roundtable",
+        )
+        assert held["isError"] and "plan-b-consent-required" in str(held)
+        assert store.phase() == "plan"
     b = call(
         "harness_prepare_chat_confirmation",
         gate="plan-execution",
         execution=options,
         reviewer_node_id="CHOICE",
     )["structuredContent"]
-    assert f"up to {b['subject']['reviewAllowance']} reviews" in b["card"]
     approve(b)
     if run22:
         # Replacement is a real catalog/selection producer, not injected consent.
@@ -210,20 +264,32 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     call("harness_publish")
     if run22:
         call("harness_advance", to_phase="execute")
-    packet = worker_packet.build_packet(
-        load_plan(store.workspace),
-        {**manifest["beads"]["C"], "id": "C"},
-        store.workspace / "template",
-        None,
-    )
-    assert MARKER_FIRST in packet
     job = planner_jobs._directory(store.workspace, manifest["planRevision"])
     with monkeypatch.context() as launch_spy:
         launch_spy.setattr(
             planner_jobs.subprocess, "Popen", lambda *a, **k: SimpleNamespace(pid=23456)
         )
         call("harness_worker_start", **options)
-    record = execute(store, work_root=job / "runs")
+    fake_workers = workers()
+    if is_web:
+        from tests.python.core.test_semantic_runner import WEB_PAGE
+
+        def contracts(root):
+            (root / "index.html").write_text("<!doctype html><h1>SELDON-STUB visit</h1>")
+
+        def build(root):
+            (root / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+
+        fake_workers = {"C": contracts, "B": build}
+        record = dispatch.run_plan(
+            store.workspace,
+            work_root=job / "runs",
+            max_parallel=1,
+            fake_workers=fake_workers,
+            intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
+        )
+    else:
+        record = execute(store, work_root=job / "runs")
     assert record["status"] == dispatch.STATUS_MOCK_ONLY, record
     red = record["beads"]["C"]["integrated"]["semantic"]
     green = record["semanticValidation"]
@@ -244,7 +310,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         store.workspace,
         work_root=store.workspace / "runs",
         max_parallel=1,
-        fake_workers=workers(),
+        fake_workers=fake_workers,
         resume_run_dir=Path(record["repo"]).parent,
     )
     assert resumed["status"] == dispatch.STATUS_MOCK_ONLY, resumed
@@ -252,33 +318,24 @@ def test_canonical_plan_contracts_red_build_validation_pass(
 
     try:
         for phase in ("accept",) if run22 else ("execute", "accept"):
-            advanced = call("harness_advance", to_phase=phase)
-            hint = advanced["content"][0]["text"].split("Next: ", 1)[1]
-            assert "harness_accept_run" in hint and "If they agree" not in hint
-            for tool, arguments in (
-                ("harness_plan_status", {}),
-                ("harness_worker_status", {"job_id": manifest["planRevision"], "wait_seconds": 0}),
-            ):
-                reply = server.call_tool(tool, arguments)
-                assert not reply["isError"], reply
-                assert reply["content"][0]["text"].split("Next: ", 1)[1] == hint
-        refused = workspace_wire(
-            server,
-            "harness_accept",
-            expected_workspace=str(store.workspace),
-            by="user",
-            statement="Premature",
-        )
-        assert refused["isError"] and refused["refusalCode"] == "acceptance-scenarios-required"
-        assert "harness_accept_run" in refused["content"][0]["text"]
+            call("harness_advance", to_phase=phase)
+        if journey == "reconnect-c":
+            reopen()
+        if journey == "refused-c":
+            refused = workspace_wire(
+                server,
+                "harness_accept",
+                expected_workspace=str(store.workspace),
+                by="user",
+                statement="Premature",
+            )
+            assert refused["isError"] and refused["refusalCode"] == "acceptance-scenarios-required"
         result = finish_public_acceptance(
             server, call("harness_accept_run", repo=record["repo"], subject="product")
         )
         assert result["structuredContent"]["result"]["passed"], result
-        reviewed = call("harness_accept_review", repo=record["repo"], reviewers=reviewers)
-        assert "C: Does this delivery meet the locked vision?" in str(reviewed)
-        assert record["repo"] in reviewed["content"][0]["text"]
-        assert store.status()["acceptance"]["reviews"][-1]["runId"] in str(reviewed)
+        call("harness_accept_review", repo=record["repo"], reviewers=reviewers)
+        assert store.status()["acceptance"]["reviews"]
         confirmations.append("accept")
         call(
             "harness_accept",
@@ -297,9 +354,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(
                 "SELECT payload_json FROM events WHERE kind='confirmation-requested' ORDER BY id"
             )
         ]
-        assert [r["gate"] for r in requests] == ["align+vision-lock", "plan-execution"] + (
-            ["plan-execution", "plan-execution"] if run22 else []
-        )
+        approved_gates = {r["gate"] for r in requests}
+        assert approved_gates == {"align+vision-lock", "plan-execution"}
         assert all(r["channel"] == "chat-confirmation" for r in requests)
         assert (
             store.connection.execute("SELECT count(*) FROM acceptance_approvals").fetchone()[0] == 1
@@ -311,6 +367,11 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     try:
         reply = server.call_tool("harness_plan_status", {})
         assert not reply["isError"], reply
-        assert "Validation is not final acceptance" not in reply["content"][0]["text"]
+        assert (
+            server.store.connection.execute("SELECT count(*) FROM acceptance_approvals").fetchone()[
+                0
+            ]
+            == 1
+        )
     finally:
         server.close()

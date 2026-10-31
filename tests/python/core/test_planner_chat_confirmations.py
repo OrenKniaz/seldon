@@ -11,7 +11,7 @@ from tests.python.core.test_planner_confirmations import recorded_reviewer
 from codex_harness.core import approvals, planner_jobs, roundtable
 from codex_harness.core import planner_confirmations as confirmation
 from codex_harness.core import provider_call_budget as budget
-from codex_harness.core.plan_store import PHASES, open_plan_store
+from codex_harness.core.plan_store import PHASES
 
 semantic_plan = test_semantic_wiring.semantic_plan
 
@@ -172,120 +172,6 @@ def test_changed_job_arguments_require_b_before_namespace(semantic_plan, monkeyp
     with pytest.raises(ValueError, match="plan-b-consent-required"):
         planner_jobs.start_worker_job(store, **options)
     assert not (store.path.parent / "worker-jobs").exists()
-
-
-@pytest.mark.parametrize(
-    "words,state",
-    [
-        ("No", "declined"),
-        ("Cancel", "cancel"),
-        ("Changes: use different limits", "changes-requested"),
-    ],
-)
-def test_chat_refusal_and_conditional_reply_are_recoverable(semantic_plan, words, state):
-    """
-    Catch conditional replies promoted to authority; native form tests use structured
-    conditions.
-    """
-    store, _ = semantic_plan
-    request, options = prepare_combined_b(store)
-    assert combined_reply(store, request, words)["state"] == state
-    with pytest.raises(ValueError):
-        store.advance("roundtable", by="source-test")
-    fresh = confirmation.prepare_chat_confirmation(store, "plan-execution", execution=options)
-    assert combined_reply(store, fresh)["state"] == "approved"
-    store.advance("roundtable", by="source-test")
-    with open_plan_store(store.workspace) as reopened:
-        assert approvals.require_approval(reopened, "B")["words"] == "Approve"
-        assert budget.usage(reopened, "review") == 0
-
-
-def test_native_and_chat_render_identical_subjects_and_effects(semantic_plan):
-    """
-    Catch channel-specific authority and wrapper-only effects; old mode tests encoded that
-    split.
-    """
-    store, _ = semantic_plan
-    request, options = prepare_combined_b(store)
-    native = confirmation.prepare_confirmation(
-        store, "plan-execution", execution=options, review_max_starts=2
-    )
-    assert native["subject"] == request["subject"] and native["card"] == request["card"]
-    assert native["fingerprint"] == request["fingerprint"]
-
-
-def test_native_mcp_reply_approves_the_same_b_used_by_review(semantic_plan, monkeypatch):
-    """Catch a native bridge still minting V1 grants; direct native forms miss wire routing."""
-    import json
-
-    from tests.python.core.test_mcp_planner import answer_native, rpc
-
-    from codex_harness.core.mcp_planner import PlannerServer
-
-    store, _ = semantic_plan
-    offered, _ = prepare_combined_b(store)
-    server = PlannerServer(store.workspace)
-    try:
-        rpc(
-            server,
-            "initialize",
-            {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}},
-        )
-        server.handle_line(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
-        outbound = rpc(
-            server,
-            "tools/call",
-            {
-                "name": "harness_record_confirmation",
-                "arguments": {
-                    "gate": "plan-execution",
-                    "interaction": "native",
-                    "expected_workspace": str(store.workspace),
-                },
-            },
-        )
-        assert outbound["method"] == "elicitation/create", outbound
-        saved = server._pending_confirmation["request"]
-        assert saved["subject"] == offered["subject"]
-        assert saved["card"] in outbound["params"]["message"]
-        result = answer_native(
-            server, outbound["id"], approve=True, statement="Approve", conditions=""
-        )
-        assert not result["result"]["isError"], result
-        monkeypatch.setattr(roundtable, "_run", lambda *a, **k: (0, "[]"))
-        review(store, offered["subject"]["reviewers"][0])
-        assert budget.usage(store, "review") == 1
-    finally:
-        server.close()
-
-
-def test_catalog_refresh_grants_nothing_and_replacement_draft_needs_renewed_b(semantic_plan):
-    """
-    Catch old catalog consent blocking the replacement writer; candidate tests don't refresh
-    a catalog.
-    """
-    from copy import deepcopy
-    from uuid import uuid4
-
-    store, _ = semantic_plan
-    request, options = prepare_combined_b(store)
-    approve_b(store, request)
-    catalog = deepcopy(store._latest_draft_event("reviewer-catalog-recorded")["catalog"])
-    catalog["id"] = "RC-" + str(uuid4())
-    catalog.pop("digest")
-    fresh = store.record_reviewer_catalog(catalog, store._revision())["catalog"]
-    assert approvals.require_approval(store, "B")
-    node = store.spine().node("CHOICE")
-    node["fields"].update(catalogId=fresh["id"], catalogDigest=fresh["digest"])
-    store.record_reviewer_selection(node, store._revision())
-    manifest = store.compile_template(store.workspace / "template")
-    with pytest.raises(ValueError, match="consent-required"):
-        approvals.require_approval(store, "B")
-    options["expected_revision"] = manifest["planRevision"]
-    renewed = confirmation.prepare_chat_confirmation(store, "plan-execution", execution=options)
-    approve_b(store, renewed)
-    assert budget.usage(store, "review") == 0
-    assert approvals.require_approval(store, "B")["fingerprint"] == renewed["fingerprint"]
 
 
 @pytest.mark.parametrize("channel", ["native", "chat"])

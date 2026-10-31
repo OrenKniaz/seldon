@@ -3,6 +3,8 @@
 import json
 from copy import deepcopy
 
+from tests.python.core.test_planner_refusals import canonical_rows
+
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.planner_guidance import planning_turn
 from codex_harness.core.status_api import snapshot
@@ -67,17 +69,17 @@ def test_public_invalid_mixed_batch_leaves_nodes_and_events_unchanged(tmp_path):
     try:
         nodes = start(server)
         store = server._store()
-        before = list(store.connection.iterdump())
+        before = canonical_rows(store)
         invalid = deepcopy(nodes)
         invalid[-1]["parents"] = ["missing-requirement"]
         refused = invoke(server, "harness_upsert_nodes", nodes=invalid)
         assert refused["isError"]
-        assert list(store.connection.iterdump()) == before
+        assert canonical_rows(store) == before
         duplicate = invoke(server, "harness_upsert_nodes", nodes=[nodes[0], nodes[0]])
         assert duplicate["isError"]
-        assert list(store.connection.iterdump()) == before
+        assert canonical_rows(store) == before
         malformed = invoke(server, "harness_upsert_nodes", nodes=[nodes[0], {"id": "T-broken"}])
         assert malformed["isError"]
-        assert list(store.connection.iterdump()) == before
+        assert canonical_rows(store) == before
     finally:
         server.close()

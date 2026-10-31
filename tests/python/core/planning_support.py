@@ -9,7 +9,7 @@ from pathlib import Path
 from types import MethodType
 from unittest.mock import patch
 
-from codex_harness.core.plan_store import PlanStore, PlanStoreError
+from codex_harness.core.plan_store import PlanStore
 from codex_harness.core.planner_confirmations import complete_confirmation, prepare_confirmation
 from codex_harness.core.roundtable import run_roundtable
 from codex_harness.core.spine import compile_manifest
@@ -213,7 +213,7 @@ def source_only_b(
                     reviewPolicy=dict(maxRounds=100, maxTotal=None, timeout=900),
                 ),
             )
-        except PlanStoreError:
+        except ValueError:  # Stale execution scopes also refuse after adding a bead.
             pass
         else:
             return reviewers

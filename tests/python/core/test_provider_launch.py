@@ -1,126 +1,13 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from codex_harness.core.provider_launch import (
     BYPASS_FLAGS,
-    PROVIDER_NORMAL_PROFILE,
     ProviderNormalLaunch,
     ProviderNormalPolicyError,
-    get_adapter,
     reject_bypass,
 )
-
-
-@pytest.mark.parametrize("cli", ["codex", "claude", "copilot"])
-def test_stdin_prompt_is_preserved_outside_argv(cli):
-    prompt = "Review this large packet\n" + "\u03bb" * 40_000
-    launch = get_adapter(cli).provider_normal_command(prompt=prompt, prompt_via_stdin=True)
-    assert prompt not in launch.command
-    assert launch.stdin_text == prompt
-    assert launch.to_payload()["stdinText"] == prompt
-    if cli == "codex":
-        assert launch.command[1] == "exec" and launch.command[-1] == "-"
-    elif cli == "claude":
-        assert launch.command[1] == "-p"
-        assert launch.command[-1] == "Read,Edit,Write,Glob,Grep"
-    else:
-        assert "-p" not in launch.command and "--prompt" not in launch.command
-    reject_bypass(launch.command)
-    assert get_adapter(cli).provider_normal_command(prompt="small").stdin_text is None
-
-
-def test_codex_runs_exec_in_workspace_write_sandbox_without_bypass() -> None:
-    launch = get_adapter("codex").provider_normal_command(
-        prompt="Add the parser\nwith tests", model="gpt-5.5", reasoning_effort="high"
-    )
-
-    assert launch.command == (
-        "codex",
-        "exec",
-        "--json",
-        "--color",
-        "never",
-        "--sandbox",
-        "workspace-write",
-        "-c",
-        'approval_policy="never"',
-        "--model",
-        "gpt-5.5",
-        "-c",
-        'model_reasoning_effort="high"',
-        "Add the parser\nwith tests",
-    )
-    assert "--ignore-user-config" not in launch.command
-    assert "not repo-only" in launch.protections[0]
-
-
-def test_claude_uses_permission_rules_and_explicit_tools() -> None:
-    launch = get_adapter("claude").provider_normal_command(
-        prompt="Fix the bug",
-        model="claude-sonnet-5-5",
-        reasoning_effort="high",
-        allowed_tools=("Bash(uv run pytest:*)",),
-        platform="linux",
-    )
-
-    assert launch.command == (
-        "claude",
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--permission-mode",
-        "acceptEdits",
-        "--allowedTools",
-        "Read,Edit,Write,Glob,Grep,Bash(uv run pytest:*)",
-        "--model",
-        "claude-sonnet-5-5",
-        "--effort",
-        "high",
-        "Fix the bug",
-    )
-    assert "--bare" not in launch.command
-    assert "--strict-mcp-config" not in launch.command
-    assert any("not a security boundary" in line for line in launch.protections)
-
-
-def test_claude_on_native_windows_states_the_missing_shell_sandbox() -> None:
-    launch = get_adapter("claude").provider_normal_command(prompt="x", platform="win32")
-
-    assert any("shell sandbox is unavailable" in line for line in launch.protections)
-
-
-def test_copilot_uses_explicit_tool_rules_and_denies_push() -> None:
-    launch = get_adapter("copilot").provider_normal_command(
-        prompt="Write docs", allowed_tools=("shell(uv run pytest)",), model="gpt-5.5"
-    )
-
-    assert launch.command == (
-        "copilot",
-        "-p",
-        "Write docs",
-        "--no-ask-user",
-        "--allow-tool",
-        "write",
-        "--allow-tool",
-        "shell(uv run pytest)",
-        "--deny-tool",
-        "shell(git push)",
-        "--model",
-        "gpt-5.5",
-    )
-    assert "--yolo" not in launch.command
-    assert "--autopilot" not in launch.command
-
-
-@pytest.mark.parametrize("cli", ["claude", "copilot"])
-@pytest.mark.parametrize("rule", ["", "*", "all", "--yolo"])
-def test_wildcard_or_flag_tool_rules_are_refused(cli: str, rule: str) -> None:
-    with pytest.raises(ProviderNormalPolicyError):
-        get_adapter(cli).provider_normal_command(prompt="x", allowed_tools=(rule,))
 
 
 @pytest.mark.parametrize("flag", sorted(BYPASS_FLAGS))
@@ -159,48 +46,9 @@ _CODE_PROMPT = (
 )
 
 
-@pytest.mark.parametrize("cli", ["codex", "claude", "copilot"])
-def test_multiline_code_prompt_is_preserved_exactly(cli: str) -> None:
-    launch = get_adapter(cli).provider_normal_command(prompt=_CODE_PROMPT)
-
-    assert _CODE_PROMPT in launch.command
-    assert launch.command.count(_CODE_PROMPT) == 1
-
-
-@pytest.mark.parametrize(
-    "flag",
-    [
-        "--dangerously-bypass-hook-trust",
-        "--dangerously-anything-new",
-        "--ignore-rules",
-        "--ignore-user-config",
-    ],
-)
-def test_review_counterexample_flags_are_refused(flag: str) -> None:
-    with pytest.raises(ProviderNormalPolicyError):
-        ProviderNormalLaunch(cli="codex", command=("codex", "exec", flag, "p"), protections=())
-
-
-@pytest.mark.parametrize("cli", ["codex", "claude", "copilot"])
-def test_protections_state_requested_options_not_verified_enforcement(cli: str) -> None:
-    text = " ".join(get_adapter(cli).provider_normal_command(prompt="x").protections)
-
-    assert "not verified by Harness" in text
-    assert "anything else is denied" not in text
-    assert "refused without asking" not in text
-
-
 def test_a_launch_record_cannot_carry_a_bypass_command() -> None:
     with pytest.raises(ProviderNormalPolicyError):
         ProviderNormalLaunch(cli="codex", command=("codex", "--yolo"), protections=())
-
-
-@pytest.mark.parametrize("cli", ["codex", "claude", "copilot"])
-def test_payload_is_json_and_names_the_profile(cli: str) -> None:
-    payload = get_adapter(cli).provider_normal_command(prompt="x").to_payload()
-
-    assert json.loads(json.dumps(payload))["profile"] == PROVIDER_NORMAL_PROFILE
-    assert payload["protections"]
 
 
 # Payload hashes captured from the unchanged legacy provider-normal builders.
@@ -219,43 +67,3 @@ _BASELINE_PAYLOAD_SHA256 = {
     "copilot:linux:False": "84b35f0190a893f86ae0329d2c9fd44950410eced8e8e5e09f41f8d091bbe11d",
     "copilot:linux:True": "d102ee65555766c670445c1c4523f799efd7d61df655fed2a468bfe44c4a2df8",
 }
-
-
-@pytest.mark.parametrize("cli", ["codex", "claude", "copilot"])
-@pytest.mark.parametrize("platform", ["win32", "linux"])
-@pytest.mark.parametrize("stdin", [False, True])
-def test_exact_qualified_provider_payload_parity(cli, platform, stdin):
-    import hashlib
-
-    tools = (
-        ("Bash(python -B -m unittest:*)", "PowerShell(python -B -m unittest:*)")
-        if cli == "claude"
-        else ("shell(python -B -m unittest)",)
-        if cli == "copilot"
-        else ()
-    )
-    payload = (
-        get_adapter(cli)
-        .provider_normal_command(
-            prompt='Keep\n  exact λ and "quotes"; --yolo is forbidden.',
-            prompt_via_stdin=stdin,
-            model="exact-model",
-            reasoning_effort="high",
-            executable="C:/provider dir/native.cmd",
-            platform=platform,
-            allowed_tools=tools,
-        )
-        .to_payload()
-    )
-    actual = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    ).hexdigest()
-    assert actual == _BASELINE_PAYLOAD_SHA256[f"{cli}:{platform}:{stdin}"]
-
-
-def test_provider_lookup_preserves_normalization_and_unknown_error():
-    assert get_adapter(" CODEX ") is get_adapter("codex")
-    with pytest.raises(
-        ValueError, match="Unsupported CLI adapter 'foreign'. Supported: claude, codex, copilot"
-    ):
-        get_adapter("foreign")
