@@ -17,6 +17,8 @@ from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import uuid4
 
 from codex_harness.core import planner_confirmations as confirmations
+from codex_harness.core import planner_consent_views as consent_views
+from codex_harness.core import planner_recovery
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
 from codex_harness.core.plan_store import (
@@ -49,8 +51,10 @@ STRING = {"type": "string", "minLength": 1}
 STRINGS = {"type": "array", "items": STRING}
 CHAT_GATES = ["align", "vision-lock", "execution", "align+vision-lock", "plan-execution"]
 B_NEXT = (
-    "Needs your go-ahead (B): return to plan, compile, then "
-    "harness_prepare_chat_confirmation gate=plan-execution; wait for the actual reply."
+    "Needs your go-ahead (B): "
+    "harness_prepare_chat_confirmation gate=plan-execution execution=<exact workers and limits>; "
+    "show the complete subject and field diff, then record the actual reply with "
+    "harness_record_chat_confirmation."
 )
 
 
@@ -98,6 +102,7 @@ CLOSURE_DECLARATION_SCHEMA = _object(
 
 
 TOOLS = [
+    planner_recovery.TOOL,
     _tool(
         "harness_schema",
         "Read existing tool input contracts and actionable canonical node examples; "
@@ -142,18 +147,6 @@ TOOLS = [
             "author_sessions": {"type": "object"},
         },
         ["node", "expected_spine_revision"],
-    ),
-    _tool(
-        "harness_confirm_reviewer_choice",
-        "Record an explicit ordinary caller-declared action for the current stored choice; "
-        "human identity remains unverified, with no native gate or execution approval.",
-        {
-            "node_id": STRING,
-            "expected_spine_revision": STRING,
-            "approve": {"type": "boolean"},
-            "statement": STRING,
-            "conditions": {"type": "string"},
-        },
     ),
     _tool(
         "harness_wave_map",
@@ -561,7 +554,7 @@ TOOLS = [
         "Record only an explicit answer to a displayed chat question: Approve, No, Cancel or "
         "Changes: <text>. Quote/hash/actor are caller-supplied and unverified. Does not launch.",
         {
-            "gate": {"type": "string", "enum": CHAT_GATES},
+            "gate": {"type": "string", "enum": [*CHAT_GATES, "recovery"]},
             "request_id": STRING,
             "expected_revision": STRING,
             "quoted_message": STRING,
@@ -677,10 +670,8 @@ TOOLS = [
     ),
     _tool(
         "harness_worker_start",
-        "Start the existing dispatcher once for the exact current publication; return a durable "
-        "job ID promptly. Workers implement the product; the planner steers. Requires permission "
-        "through an exact-scope native or caller-mediated chat decision. No automatic retry or "
-        "subscription-capacity verification; call_cap is a local worker-call ceiling.",
+        "Start once under exact native/chat execution consent; return a durable job ID. "
+        "call_cap bounds local attempts; subscription capacity is unverified. No automatic retry.",
         {
             "expected_revision": STRING,
             "workers": {
@@ -696,8 +687,7 @@ TOOLS = [
     ),
     _tool(
         "harness_worker_status",
-        "Reattach to recorded worker-job and dispatcher evidence. Never launch or infer live "
-        "workers from an old running snapshot. Product checks alone are not worker delivery.",
+        "Reattach evidence; old snapshots prove neither liveness nor delivery. Never launch.",
         {
             "job_id": STRING,
             "include_detail": {"type": "boolean"},
@@ -1045,7 +1035,6 @@ class PlannerServer:
         self._pending_confirmation = None
         self._confirmation_timeout = confirmation_timeout
         self._schema_teaching, self._terminal_digests = set(), {}
-        self._chat_prepared, self._chat_shown = None, set()
 
     def _wire_tools(self):
         """Wire assertions are caller intent, never authenticated host context."""
@@ -1124,8 +1113,6 @@ class PlannerServer:
                     break
         elif response.get("method") == "elicitation/create":
             response["params"]["message"] += "\n" + self._binding_text(binding)
-        # Ordinary tool results already carry the status observed by call_tool.
-        # Native cards use the gate/revision already prepared for this request.
         pending = self._pending_confirmation or {}
         prepared = pending.get("request", {})
         status = (
@@ -1263,6 +1250,8 @@ class PlannerServer:
 
     def call_tool(self, name: str, arguments: dict, *, schema_tools=None) -> dict:
         self.result_data = None
+        if name == "harness_recovery":
+            return planner_recovery.reply(self.workspace, arguments)
         if name == "harness_accept_status":
             return connection_reply(self._acceptance_job_status(arguments), self.workspace)
         operation_error_code = None
@@ -1319,6 +1308,8 @@ class PlannerServer:
             )
         except Exception as error:
             operation_error_code = getattr(error, "code", None)
+            if getattr(error, "approval", None):
+                self.result_data = error.approval
             error_message = str(error)
             # These advance/publish prerequisites precede writes in canonical transactions.
             uncertain_dispatch = dispatch_started and not (
@@ -1342,7 +1333,6 @@ class PlannerServer:
                 "harness_intake",
                 "harness_reviewer_catalog",
                 "harness_reviewer_choice",
-                "harness_confirm_reviewer_choice",
             }:
                 guide = schema_help(TOOLS, tool=name)
                 body += "\nOwning typed contract: " + json.dumps(guide["owningContract"])
@@ -1420,7 +1410,10 @@ class PlannerServer:
         next_step = (
             self._next(name, arguments, status, is_error, operation_error_code)
             if status_available
-            and (not uncertain_dispatch or operation_error_code == "plan-b-consent-required")
+            and (
+                not uncertain_dispatch
+                or operation_error_code in {"plan-a-consent-required", "plan-b-consent-required"}
+            )
             else "harness_plan_status read-only; inspect the reported blocker, "
             "primary result and saved IDs. "
             "Do not repeat a completed or uncertain mutation; inspect its recorded effect first."
@@ -1536,31 +1529,6 @@ class PlannerServer:
         )
         if name == "harness_prepare_chat_confirmation" and not is_error:
             reply["content"][0]["text"] = body + "\n\n" + reply["content"][0]["text"]
-            data = self.result_data
-            digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
-            binding = (data["request_id"], digest)
-            if not arguments.get("include_detail"):
-
-                def summary(value, key=""):
-                    if key in {"card", "vision", "reviewer", "templateFiles"}:
-                        encoded = json.dumps(value, sort_keys=True).encode()
-                        return dict(count=len(value), digest=hashlib.sha256(encoded).hexdigest())
-                    if isinstance(value, dict):
-                        return {k: summary(v, k) for k, v in value.items()}
-                    return value
-
-                reply["structuredContent"] = summary(data)
-                reply["structuredContent"].update(
-                    digest=digest,
-                    covered_gates=list(data.get("scopes", {data.get("gate", "execution"): None})),
-                    next_action=next_step,
-                )
-                if binding in self._chat_shown:
-                    reply["structuredContent"] = dict(request_id=data["request_id"], digest=digest)
-                    reply["content"][0]["text"] = (
-                        f"Existing request {data['request_id']} digest {digest}; Next: {next_step}"
-                    )
-            self._chat_shown.add(binding)
         if not is_error and name == "harness_schema" and "semanticScenarios" in self.result_data:
             teaching = self.result_data["semanticScenarios"]
             digest = hashlib.sha256(json.dumps(teaching, sort_keys=True).encode()).hexdigest()
@@ -1647,8 +1615,8 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
-        if error_code == "plan-b-consent-required":
-            return B_NEXT
+        if error_code in {"plan-a-consent-required", "plan-b-consent-required"}:
+            return consent_views.consent_recovery(error_code)
         job = self.result_data or {}
         if (
             status.get("planMode") == "semantic-v1"
@@ -1836,7 +1804,6 @@ class PlannerServer:
             "harness_intake",
             "harness_reviewer_catalog",
             "harness_reviewer_choice",
-            "harness_confirm_reviewer_choice",
         }:
             return "harness_schema tool=" + name
         if name == "harness_waves" and self.result_data and self.result_data.get("intake") is None:
@@ -1845,7 +1812,6 @@ class PlannerServer:
             "harness_intake",
             "harness_reviewer_catalog",
             "harness_reviewer_choice",
-            "harness_confirm_reviewer_choice",
             "harness_wave_map",
             "harness_waves",
         ):
@@ -1856,7 +1822,7 @@ class PlannerServer:
             )
         acceptance = status.get("acceptance", {})
         if (
-            name == "harness_accept_rebind"
+            name in {"harness_accept_rebind", "harness_accept"}
             or name == "harness_plan_status"
             and status["phase"] == "accept"
         ):
@@ -1872,7 +1838,7 @@ class PlannerServer:
                     "findings or native final acceptance."
                 )
             return (
-                views.semantic_consent_next(status, {})
+                consent_views.semantic_consent_next(status, {})
                 if status.get("planMode") == "semantic-v1"
                 else acceptance.get("next", "harness_plan_status")
             )
@@ -1893,7 +1859,7 @@ class PlannerServer:
                 "harness_plan_status shows the current gate."
             )
         if status.get("planMode") == "semantic-v1":
-            hint = views.semantic_consent_next(
+            hint = consent_views.semantic_consent_next(
                 status,
                 self.result_data or {},
                 plan_authorized=bool(self.store._current_approval("B")),
@@ -1942,13 +1908,6 @@ class PlannerServer:
                 if (self.result_data or {}).get("openGaps") == []:
                     return "harness_advance to_phase=plan; every intermediate gate still runs."
                 return BATCH_GUIDANCE
-            if status["phase"] == "plan":
-                if name == "harness_compile":
-                    return "harness_advance to_phase=roundtable; existing review gates apply."
-                return (
-                    "harness_compile; use harness_upsert_nodes only for missing Contracts/Build "
-                    "beads or reported gaps."
-                )
         if status["phase"] in {"roundtable", "publish"}:
             resolution = status.get("reviewResolution")
             if resolution and resolution["nextAction"]["kind"] != "not_applicable":
@@ -1981,33 +1940,28 @@ class PlannerServer:
             self.result_data = self._prepare_chat_question(args)
             return self.result_data["card"]
         if name == "harness_record_chat_confirmation":
-            self._chat_prepared = None
             from codex_harness.core.planner_confirmations import complete_chat_confirmation
             from codex_harness.core.planner_execution import complete_chat_execution
 
             arguments = {key: value for key, value in args.items() if key != "gate"}
             if args["gate"] == "execution":
                 outcome = complete_chat_execution(self._store(), **arguments)
+            elif args["gate"] == "recovery":
+                outcome = planner_recovery.complete(self._store(), **arguments)
             else:
                 outcome = complete_chat_confirmation(self._store(), **args)
-            if outcome["state"] in {"decline", "declined", "cancel", "conditional"} and args[
-                "gate"
-            ] not in {"align+vision-lock", "plan-execution"}:
-                proposal = {"gate": args["gate"]}
-                if args["gate"] == "execution":
-                    scope = outcome["scope"]
-                    proposal["execution"] = {
-                        "expected_revision": scope["publicationRevision"],
-                        "workers": scope["workers"],
-                        "max_parallel": scope["maxParallel"],
-                        "timeout": scope["timeout"],
-                        "call_cap": scope["callCap"],
-                    }
-                outcome["chatConfirmation"] = self._prepare_chat_question(proposal)
+            if outcome["state"] in {"decline", "declined", "cancel", "changes-requested"} and (
+                args["gate"] != "recovery"
+            ):
+                outcome["reason"] = "Decision " + outcome["state"] + "; approval was not granted."
+                outcome["chatConfirmation"] = self._prepare_chat_question(
+                    {"gate": "plan-execution" if args["gate"] == "execution" else args["gate"]}
+                )
             self.result_data = outcome
             body = (
-                f"Chat confirmation {outcome['state']}. Caller-mediated; actor identity, "
-                "message source and recency are unverified. No worker was launched. "
+                f"Chat confirmation {outcome['state']}. {outcome.get('reason', '')} "
+                "Caller-mediated; actor identity, message source and recency are unverified. "
+                "No worker was launched. "
                 "Use a separate advance or exact worker-start after an approved decision."
             )
             if "chatConfirmation" in outcome:
@@ -2062,7 +2016,6 @@ class PlannerServer:
             "harness_intake": "record_intake",
             "harness_reviewer_catalog": "record_reviewer_catalog",
             "harness_reviewer_choice": "record_reviewer_selection",
-            "harness_confirm_reviewer_choice": "confirm_reviewer_selection",
             "harness_wave_map": "record_wave_map",
             "harness_waves": "outcome_waves",
         }
@@ -2451,7 +2404,6 @@ class PlannerServer:
                 )
             ]
             body = views.status_card(status, questions)
-            # Provenance and exact ids live in a compact footer for the agent.
             details = views.status_details(status)
             approval = status.get("approval")
             if approval:
@@ -2681,10 +2633,8 @@ class PlannerServer:
                 raise
             return (
                 f"Worker job {self.result_data['jobId']}: {self.result_data['status']}\n"
-                + "Workers implement; the planner steers. Read original dispatch evidence before "
-                f"claiming delivery. Current liveness: {self.result_data['liveness']}"
-                + "\nVerify behavior through Seldon scenarios; do not change file permissions/ACLs "
-                "or system settings for ad-hoc checks."
+                + f"Read original evidence; current liveness: {self.result_data['liveness']}. "
+                "Workers implement; the planner steers. Verify through Seldon scenarios."
             )
         raise ValueError(f"Unknown tool: {name}")
 
@@ -2962,7 +2912,6 @@ class PlannerServer:
         return connection_reply(reply, self.workspace, status)
 
     def _begin_confirmation(self, request_id, arguments):
-        from codex_harness.core.planner_confirmation_cards import compact_card
         from codex_harness.core.planner_confirmations import prepare_confirmation
 
         tool = next(tool for tool in TOOLS if tool["name"] == "harness_record_confirmation")
@@ -3012,7 +2961,7 @@ class PlannerServer:
             "id": wire_id,
             "method": "elicitation/create",
             "params": {
-                "message": compact_card(prepared),
+                "message": prepared["card"],
                 "requestedSchema": _object(
                     {
                         "approve": {

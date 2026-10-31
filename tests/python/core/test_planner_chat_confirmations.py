@@ -351,12 +351,10 @@ def test_native_conditional_words_do_not_admit_execution(semantic_plan, monkeypa
         assert refused["structuredContent"]["state"] == "changes-requested"
         assert refused["structuredContent"]["approval_id"] is None
         assert approvals.current(store, "B")["words"] == words
-        if channel == "native":
-            fresh = refused["structuredContent"]["chatConfirmation"]
-            assert fresh["subject"] == offered["subject"]
-            assert any(fresh["card"] == item.get("text") for item in refused["content"])
-        else:
-            assert "fresh complete question" in refused["content"][0]["text"]
+        # Both channels re-ask with the same subject instead of approving.
+        fresh = refused["structuredContent"]["chatConfirmation"]
+        assert fresh["subject"] == offered["subject"]
+        assert any(fresh["card"] in item.get("text", "") for item in refused["content"])
         monkeypatch.setattr(
             roundtable, "_run", lambda *a, **k: launches.append("review") or (0, "[]")
         )

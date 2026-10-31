@@ -56,7 +56,7 @@ def verify_job(directory, record=None):
         if (
             selected is None
             or any(record.get(k) != selected[k] for k in ("provider", "model", "effort"))
-            or record.get("planRevision") != request["jobId"]
+            or record.get("planRevision") != request["publicationRevision"]
             or normalized_owned(record.get("ownedFiles", []))
             != normalized_owned(bead.get("ownedFiles", []))
             or record.get("requirementRefs") != bead.get("requirementRefs")

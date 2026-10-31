@@ -104,9 +104,8 @@ def _nonempty(value: str, label: str) -> None:
 class PlanStore:
     """One SQLite authority per existing workspace, with revision-bound gates.
 
-    Each command takes a write reservation before reading its preimage. Successful
-    commands commit before returning; callers never need to commit. A new store
-    has no nodes until a vision is upserted or a complete spine is imported.
+    Commands reserve writes before reading and commit before returning.
+    Reads preserve their caller's transaction; new stores begin without nodes.
     """
 
     def __init__(self, workspace: str | Path, name: str | None = None) -> None:
@@ -228,6 +227,9 @@ class PlanStore:
         return self.connection.execute("SELECT * FROM meta").fetchone()
 
     def _data(self) -> dict:
+        rows = self.connection.execute(
+            "SELECT meta.name, nodes.* FROM meta LEFT JOIN nodes ON 1 ORDER BY nodes.id"
+        ).fetchall()
         nodes = [
             {
                 "id": row["id"],
@@ -237,16 +239,13 @@ class PlanStore:
                 "fields": json.loads(row["fields_json"]),
                 "parents": json.loads(row["parents_json"]),
             }
-            for row in self.connection.execute("SELECT * FROM nodes ORDER BY id")
+            for row in rows
+            if row["id"] is not None
         ]
-        return {"schema": SCHEMA, "name": self._meta()["name"], "nodes": nodes}
+        return {"schema": SCHEMA, "name": rows[0]["name"], "nodes": nodes}
 
     def spine(self) -> Spine:
-        self.connection.execute("BEGIN")
-        try:
-            return Spine(self._data())
-        finally:
-            self.connection.rollback()
+        return Spine(self._data())
 
     def list_nodes(self, kind: str | None = None) -> list[dict]:
         """Read the current nodes without writing planning truth."""

@@ -272,6 +272,9 @@ def test_validation_ownership_is_exact_and_legacy_default_unchanged(tmp_path, se
             }[selection]
         )
     )
+    dispatch._git(tmp_path, "init", "-q")
+    dispatch._git(tmp_path, "add", ".")
+    dispatch._commit(tmp_path, "validation inputs")
     if selection == "invalid":
         with pytest.raises(TypeError):
             dispatch._validate(tmp_path, manifest, "test_shared.py", **kwargs)

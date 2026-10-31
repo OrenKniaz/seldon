@@ -278,9 +278,9 @@ def test_later_batch_cannot_hide_open_findings_or_other_reviewer_failures(projec
 def test_readiness_is_advisory_at_publish_with_existing_gates(project, monkeypatch):
     from codex_harness.core.plan_store import PHASES
 
+    test_planner_replay_gaps.review(project)
     review(project, BLOCKED)
     test_planner_replay_gaps.audit(project)
-    test_planner_replay_gaps.review(project)
     while project.phase() != "publish":
         phase = project.phase()
         if phase in ("align", "vision-lock"):

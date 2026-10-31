@@ -46,7 +46,6 @@ def test_real_owned_cli_records_package_entry_and_safe_output_environment(
 ):
     """Catch P1's rejected package/explicit env; old tests only launch module.py inherited env."""
     monkeypatch.delenv("PYTHONIOENCODING", raising=False)
-    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     environment = (
         ""
         if package
@@ -76,7 +75,6 @@ def test_real_owned_cli_records_package_entry_and_safe_output_environment(
     if not package:
         assert launch["requestedOutputEnvironment"] == {
             "PYTHONIOENCODING": "utf-8",
-            "PYTHONDONTWRITEBYTECODE": "1",
         }
         assert child["stdoutEncoding"] == child["stderrEncoding"] == "utf-8"
         assert child["dontWriteBytecode"] is True

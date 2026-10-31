@@ -4,6 +4,7 @@ import json
 
 import pytest
 from tests.python.core import test_roundtable
+from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 
 from codex_harness.core import roundtable
 from codex_harness.core.mcp_planner import PlannerServer
@@ -28,9 +29,9 @@ def test_public_review_timeout_refuses_before_canonical_reservation(
         raise AssertionError("Invalid timeout must refuse before admission or a process")
 
     monkeypatch.setattr(roundtable, "_run", forbidden)
-    monkeypatch.setattr(roundtable, "claim_planning_review_start", forbidden)
+    monkeypatch.setattr(roundtable.review_budget, "claim_planning_review_start", forbidden)
     server = PlannerServer(store.workspace)
-    before = list(store.connection.iterdump())
+    before, refusals = canonical_rows(store), refusal_total(store)
     request = dict(
         jsonrpc="2.0",
         id=1,
@@ -53,7 +54,8 @@ def test_public_review_timeout_refuses_before_canonical_reservation(
         assert response["isError"]
         assert "timeout must be a finite positive number" in response["content"][0]["text"]
         assert calls == []
-        assert list(store.connection.iterdump()) == before
+        assert canonical_rows(store) == before
+        assert refusal_total(store) == refusals + 1
     finally:
         server.close()
 

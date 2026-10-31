@@ -370,14 +370,6 @@ def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tup
         questions = store.connection.execute(
             "SELECT id, status FROM clarifications ORDER BY id"
         ).fetchall()
-        # Events retain timing even when the planner returns to an earlier phase.
-        before_lock = []
-        for row in store.connection.execute("SELECT kind, payload_json FROM events ORDER BY id"):
-            payload = json.loads(row["payload_json"])
-            if row["kind"] == "phase-advanced" and payload["to"] == "vision-lock":
-                break
-            if row["kind"] == "clarification-asked":
-                before_lock.append(payload["id"])
         fields = spine.node(spine.ids("vision")[0])["fields"]
         missing = [
             key
@@ -388,16 +380,16 @@ def _evaluate(check_id: str, store: PlanStore, spine: Spine, state: dict) -> tup
         locked = PHASES.index(state["phase"]) >= PHASES.index("vision-lock")
         failed = not approvals or bool(missing) or (locked and bool(unanswered))
         return (
-            "fail" if failed else "warn" if len(before_lock) < 3 or unanswered else "pass",
+            "fail" if failed else "pass",
             {
                 "approvalIds": approvals,
                 "clarificationsAsked": len(questions),
-                "beforeVisionLockIds": before_lock,
                 "unansweredIds": unanswered,
                 "missingFields": missing,
             },
-            "Complete the understanding card, approve alignment and answer three questions."
-            if failed or len(before_lock) < 3 or unanswered
+            "Complete understanding; harness_prepare_chat_confirmation gate=vision-lock shows A. "
+            "Record the actual reply; answer open questions with harness_answer."
+            if failed
             else "",
         )
     if check_id == "mapping":

@@ -33,6 +33,13 @@ def record_refusals(method):
                 if request.get("method") == "tools/call"
                 else pending.get("tool_name", "harness_record_confirmation")
             )
+            arguments = request.get("params", {}).get("arguments", {})
+            if (
+                tool == "harness_recovery"
+                and isinstance(arguments, dict)
+                and arguments.get("mode") == "inspect"
+            ):
+                continue
             if not result.get("isError") and (
                 tool in ("harness_prepare_chat_confirmation", "harness_plan_status")
                 or not refusal_hold(

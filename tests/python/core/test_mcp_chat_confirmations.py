@@ -13,7 +13,6 @@ from tests.python.core.test_mcp_planner import (
     start,
     workspace_wire,
 )
-from tests.python.core.test_planner_refusals import canonical_rows, refusal_total
 from tests.python.core.test_planner_resume import _published
 
 from codex_harness.core import planner_jobs
@@ -23,103 +22,11 @@ project = test_planner_replay_gaps.project
 semantic_plan = test_semantic_wiring.semantic_plan
 
 
-@pytest.mark.parametrize("gate", ["align", "align+vision-lock", "plan-execution"])
-def test_prepare_compact_wire_preserves_card_originals_and_reuses_only_unchanged(
-    semantic_plan, gate
-):
-    """Protect real producer -> MCP bytes and reuse without replaying control preimages.
+@pytest.mark.parametrize("quote", ["No", "Approve but narrow scope", "Changes: narrow scope"])
+def test_complete_subject_and_conditional_recovery(semantic_plan, quote):
+    """Protect visible/persisted authority and recoverable non-plain replies.
 
-    Catches altered approval text, lost limits, stale reuse and duplicate requests;
-    existing consent-credit journeys inspect authority but never bound response size.
-    """
-    from tests.python.core.planning_support import source_only_expansion
-    from tests.python.core.test_planner_chat_confirmations import prepare_combined_b
-
-    store, _ = semantic_plan
-    arguments = dict(gate=gate)
-    if gate == "plan-execution":
-        _, options = prepare_combined_b(store)
-        arguments["execution"] = options
-    else:
-        source_only_expansion(store)
-    server = PlannerServer(store.workspace)
-
-    def size(value):
-        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
-
-    try:
-        compact = tool(server, "harness_prepare_chat_confirmation", **arguments)
-        assert not compact["isError"], compact
-        original = json.loads(
-            store.connection.execute(
-                "SELECT payload_json FROM events ORDER BY id DESC LIMIT 1"
-            ).fetchone()[0]
-        )
-        data = compact["structuredContent"]
-        assert original["card"].encode() in compact["content"][0]["text"].encode()
-        assert size(compact) < 50_000
-        assert size(data) < 8_000
-        assert data["card"]["count"] == len(original["card"])
-        assert set(data["covered_gates"]) == set(original.get("scopes", {gate: None}))
-        if gate == "plan-execution":
-            scope = data["scopes"]["execution"]
-            for key in ("workers", "callCap", "timeout", "maxParallel"):
-                assert scope[key] == original["scopes"]["execution"][key]
-            assert scope["templateFiles"]["count"] == len(
-                original["scopes"]["execution"]["templateFiles"]
-            )
-        event_count = store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-        full = tool(server, "harness_prepare_chat_confirmation", include_detail=True, **arguments)
-        assert not full["isError"]
-        assert full["structuredContent"] == {
-            **original,
-            "source_verified": False,
-            "human_identity_verified": False,
-        }
-        assert full["content"][0]["text"].encode() == compact["content"][0]["text"].encode()
-        repeated = tool(server, "harness_prepare_chat_confirmation", **arguments)
-        assert repeated["structuredContent"] == dict(
-            request_id=data["request_id"], digest=data["digest"]
-        )
-        assert len(repeated["content"][0]["text"].splitlines()) == 1
-        assert size(repeated) < 2_000
-        assert store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == event_count
-        print(
-            f"COMPACT2 {gate}: full={size(full)} default={size(compact)} repeated={size(repeated)}"
-        )
-        if gate == "plan-execution":
-            (store.workspace / "template" / "compact2-protected.txt").write_text(
-                "changed protected template\n"
-            )
-        else:
-            # A real separate producer supersedes this connection's unanswered offer.
-            from codex_harness.core.planner_confirmations import prepare_chat_confirmation
-
-            prepare_chat_confirmation(store, gate)
-        refreshed = tool(server, "harness_prepare_chat_confirmation", **arguments)
-        assert not refreshed["isError"], refreshed
-        assert refreshed["structuredContent"]["request_id"] != data["request_id"]
-        assert "<<<SHOW-VERBATIM" in refreshed["content"][0]["text"]
-        assert not record(server, refreshed["structuredContent"], "No")["isError"]
-        after_response = tool(server, "harness_prepare_chat_confirmation", **arguments)
-        assert (
-            after_response["structuredContent"]["request_id"]
-            != refreshed["structuredContent"]["request_id"]
-        )
-    finally:
-        server.close()
-
-
-def tool(server, name, **arguments):
-    return workspace_wire(server, name, expected_workspace=str(server.workspace), **arguments)
-
-
-@pytest.mark.parametrize("reply", ["Approve but not execution", "Changes: narrow scope", "Approve"])
-def test_bound_response_attempt_reoffers_full_question_even_when_rejected(semantic_plan, reply):
-    """Catch rejected prose preserving the compact cache despite a bound response attempt.
-
-    Existing response tests cover durable response events; grammar rejection occurs
-    before those events and previously left the same question suppressed forever.
+    Catches V1 grammar rejection and hidden cards; core equality tests miss MCP output.
     """
     from tests.python.core.planning_support import source_only_expansion
 
@@ -127,78 +34,25 @@ def test_bound_response_attempt_reoffers_full_question_even_when_rejected(semant
     source_only_expansion(store)
     server = PlannerServer(store.workspace)
     try:
-        first = tool(
-            server,
-            "harness_prepare_chat_confirmation",
-            gate="align+vision-lock",
-            include_detail=True,
-        )
-        assert not first["isError"], first
-        original = first["structuredContent"]
-        repeated = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")
-        assert repeated["structuredContent"]["request_id"] == original["request_id"]
-        assert len(repeated["content"][0]["text"].splitlines()) == 1
-        before, count = canonical_rows(store), refusal_total(store)
-        response = record(server, original, reply)
-        if reply == "Approve but not execution":
-            assert response["isError"] and "chat-confirmation-choice-unclear" in str(response)
-            assert canonical_rows(store) == before
-            assert refusal_total(store) == count + 1
-        else:
-            assert not response["isError"], response
-            assert response["structuredContent"]["state"] == (
-                "approved" if reply == "Approve" else "conditional"
-            )
-        assert store.status()["approval"]["granted"] is (reply == "Approve")
-        fresh = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")
-        assert not fresh["isError"], fresh
-        assert fresh["structuredContent"]["request_id"] != original["request_id"]
-        saved = store._latest_draft_event("confirmation-requested")
-        assert saved["card"].encode() in fresh["content"][0]["text"].encode()
-        assert "<<<SHOW-VERBATIM" in fresh["content"][0]["text"]
-        assert saved["request_id"] == fresh["structuredContent"]["request_id"]
+        offered = tool(server, "harness_prepare_chat_confirmation", gate="align+vision-lock")
+        request = offered["structuredContent"]
+        assert request["card"] in offered["content"][0]["text"]
+        assert request["subject"]["effect"] in request["card"]
+        response = record(server, request, quote)
+        outcome = response["structuredContent"]
+        assert outcome["state"] == ("declined" if quote == "No" else "changes-requested")
+        assert outcome["approval_id"] is None and outcome["reason"]
+        fresh = outcome["chatConfirmation"]
+        assert fresh["card"] in response["content"][0]["text"]
+        assert "Changes from your previous decision" in fresh["card"]
+        assert "harness_record_chat_confirmation" in response["content"][0]["text"]
+        assert record(server, fresh)["structuredContent"]["state"] == "approved"
     finally:
         server.close()
 
 
-def test_execution_repeat_after_response_requires_a_new_question(project):
-    """Catch reuse after an execution response excluded by the control digest.
-
-    Planning gate tests use a different event kind; existing execution journeys
-    consume consent but never prepare the identical proposal again afterwards.
-    """
-    options = _published(project)
-    proposal = {k: options[k] for k in ("expected_revision", "workers", "timeout", "call_cap")}
-    server = PlannerServer(project.workspace)
-    try:
-        first = tool(
-            server, "harness_prepare_chat_confirmation", gate="execution", execution=proposal
-        )
-        assert not first["isError"], first
-        data = first["structuredContent"]
-        full = tool(
-            server,
-            "harness_prepare_chat_confirmation",
-            gate="execution",
-            execution=proposal,
-            include_detail=True,
-        )
-        assert full["structuredContent"]["scope"]["workers"] == proposal["workers"]
-        assert full["structuredContent"]["card"].encode() in first["content"][0]["text"].encode()
-        repeat = tool(
-            server, "harness_prepare_chat_confirmation", gate="execution", execution=proposal
-        )
-        assert repeat["structuredContent"]["request_id"] == data["request_id"]
-        assert len(repeat["content"][0]["text"].splitlines()) == 1
-        assert not record(server, {**data, "gate": "execution"}, "No")["isError"]
-        fresh = tool(
-            server, "harness_prepare_chat_confirmation", gate="execution", execution=proposal
-        )
-        assert not fresh["isError"], fresh
-        assert fresh["structuredContent"]["request_id"] != data["request_id"]
-        assert "<<<SHOW-VERBATIM" in fresh["content"][0]["text"]
-    finally:
-        server.close()
+def tool(server, name, **arguments):
+    return workspace_wire(server, name, expected_workspace=str(server.workspace), **arguments)
 
 
 def record(server, question, quote="Approve", *, apply_budget=True):
@@ -215,21 +69,6 @@ def record(server, question, quote="Approve", *, apply_budget=True):
         quote_sha256=hashlib.sha256(quote.encode()).hexdigest(),
         actor_label="source-only external tester; identity and source unverified",
     )
-    if (
-        apply_budget
-        and question.get("gate") == "plan-execution"
-        and result.get("structuredContent", {}).get("state") == "approved"
-    ):
-        from codex_harness.core import provider_call_budget as budget
-
-        scope = question["scopes"]["review-budget"]
-        if budget.planning_review_budget(server.store)["maxStarts"] != scope["maxStarts"]:
-            budget.register_planning_review_budget(
-                server.store,
-                scope["campaign"],
-                scope["maxStarts"],
-                amendment_request_id=question["request_id"],
-            )
     return result
 
 
@@ -605,17 +444,16 @@ def test_combined_a_requires_b_before_public_spend_publish_or_execution(
 @pytest.mark.parametrize(
     "offered", ["unanswered", "declined", "stale", "superseded", "approved_history"]
 )
-def test_native_after_card_uses_effective_native_credits(semantic_plan, monkeypatch, offered):
-    """CT-3: an obsolete A offer must not force B after actual native approval.
+def test_native_a_always_requires_b_regardless_of_prior_offers(semantic_plan, monkeypatch, offered):
+    """Protect native A -> missing B refusal at the public review consumer.
 
-    The earlier prompt-only test never consumed native credits through review spending;
-    Superseded unapproved offers grant nothing; CC rule R2 keeps an actually approved A sticky.
+    Catches V1 native spending without B; the chat happy path always supplies B.
     """
     import sys
 
     from tests.python.core.planning_support import source_only_expansion
 
-    from codex_harness.core import plan_cli, provider_call_budget, roundtable
+    from codex_harness.core import provider_call_budget, roundtable
     from codex_harness.core.plan_store import PHASES
 
     store, _ = semantic_plan
@@ -680,7 +518,7 @@ def test_native_after_card_uses_effective_native_credits(semantic_plan, monkeypa
                     server,
                     form["id"],
                     approve=True,
-                    statement="SOURCE-ONLY explicit native approval",
+                    statement="Approve",
                     conditions="",
                 )["result"]
                 assert (
@@ -689,20 +527,6 @@ def test_native_after_card_uses_effective_native_credits(semantic_plan, monkeypa
                 )
             assert not tool(server, "harness_advance", to_phase=phase)["isError"]
         assert not tool(server, "harness_compile")["isError"]
-        assert (
-            plan_cli.main(
-                [
-                    "--workspace",
-                    str(store.workspace),
-                    "review-budget",
-                    "--campaign",
-                    "CT-3",
-                    "--max-starts",
-                    "2",
-                ]
-            )
-            == 0
-        )
         advanced = tool(server, "harness_advance", to_phase="roundtable")
         reviewed = tool(
             server,
@@ -712,14 +536,12 @@ def test_native_after_card_uses_effective_native_credits(semantic_plan, monkeypa
             max_total=1,
             timeout=5,
         )
-        held = offered == "approved_history"
-        assert advanced["isError"] is held and reviewed["isError"] is held, reviewed
-        assert launches == ([] if held else [1])
-        assert provider_call_budget.planning_review_budget(store)["spentAdmissions"] == int(
-            not held
-        )
-        if held:
-            assert "Needs your go-ahead (B)" in str(reviewed)
+        assert advanced["isError"] and reviewed["isError"], reviewed
+        assert launches == []
+        budget = provider_call_budget.planning_review_budget(store)
+        assert budget is None or budget["spentAdmissions"] == 0
+        assert "plan-b-consent-required" in str(reviewed)
+        assert "harness_prepare_chat_confirmation" in str(reviewed)
     finally:
         server.close()
 
@@ -976,29 +798,6 @@ def test_public_chat_execution_records_then_separate_start_consumes_exact_grant(
         reopened = tool(server, "harness_worker_status", job_id=job["jobId"])
         assert not reopened["isError"], reopened
         assert reopened["structuredContent"]["approvalProvenance"] == "chat-confirmation"
-    finally:
-        server.close()
-
-
-@pytest.mark.parametrize(
-    "quote,state", [("No", "declined"), ("Cancel", "cancel"), ("Changes: clarify", "conditional")]
-)
-def test_public_chat_negative_reply_gives_no_credit_and_new_question(tmp_path, quote, state):
-    """Catch public No-to-yes or stale-question reuse; native negatives lack the typed chat seam."""
-    server = PlannerServer(tmp_path)
-    try:
-        start(server)
-        offered = tool(server, "harness_prepare_chat_confirmation", gate="align")
-        assert not offered["isError"], offered
-        question = offered["structuredContent"]
-        response = record(server, question, quote)
-        assert not response["isError"], response
-        outcome = response["structuredContent"]
-        assert outcome["state"] == state and outcome["approval_id"] is None
-        assert outcome["chatConfirmation"]["request_id"] != question["request_id"]
-        assert not server.store.status()["approval"]["granted"]
-        assert tool(server, "harness_advance", to_phase="expand")["isError"]
-        assert record(server, question)["isError"]  # Answer replay never grants approval.
     finally:
         server.close()
 

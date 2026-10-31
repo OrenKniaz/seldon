@@ -1,15 +1,16 @@
 """Stored vision/read-view parity and public guidance; no providers or human approval."""
 
 import argparse
+import json
 from copy import deepcopy
 
 import pytest
 from tests.python.core.planning_support import source_only_confirmation, source_only_expansion
 
+from codex_harness.core.approvals import proposal
 from codex_harness.core.mcp_planner import TOOLS, PlannerServer
 from codex_harness.core.plan_cli import batch_nodes, parser
 from codex_harness.core.plan_store import PlanStoreError, open_plan_store
-from codex_harness.core.planner_confirmations import _understanding
 from codex_harness.core.planner_guidance import NEXT_TARGETS, planning_turn
 from codex_harness.core.planner_schema import node_example
 from codex_harness.core.planner_views import status_card
@@ -44,11 +45,11 @@ def test_incomplete_expansion_reports_semantic_gap_without_approval(change, path
         vision = store.spine().node("V1")
         complete = expansion_status(vision)
         assert complete["gaps"] == [] and complete["untracedAcceptedUpgradeRefs"] is None
+        source_only_confirmation(store, "align")
+        store.advance("expand", by="planner")
         change(vision["fields"])
         assert path in {gap["path"] for gap in expansion_status(vision)["gaps"]}
         store.upsert_node(vision)
-        source_only_confirmation(store, "align")
-        store.advance("expand", by="planner")
         before = list(store.connection.iterdump())
         with pytest.raises(PlanStoreError, match="Expansion required before Vision Lock"):
             store.advance("vision-lock", by="planner")
@@ -78,8 +79,15 @@ def test_stored_vision_reaches_summary_and_cockpit_without_alias_or_detail_loss(
     with open_plan_store(tmp_path) as store:
         stored = store.spine().node("V1")
         projection = vision_projection(stored)
-        # Normal cards preserve complete established text and alias precedence.
-        assert render_vision(projection) == _understanding(stored)
+        # The current consent producer preserves all words and aliases too.
+        request = proposal(store, "A")
+        assert request["subject"]["scope"] == {
+            "title": stored["title"],
+            "understanding": stored["text"],
+            "fields": stored["fields"],
+        }
+        displayed = request["card"].split("Complete approval subject:\n", 1)[1]
+        assert json.loads(displayed.split("\nChanges from", 1)[0]) == request["subject"]
     result = snapshot(workspace=tmp_path)
     assert result["plan"]["visionProjection"] == projection
     assert result["cockpit"]["vision"]["sections"] == projection["sections"]

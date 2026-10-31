@@ -15,14 +15,13 @@ RULES = [
         "approval-changes-requested",
         "Your response requests changes or qualifies the displayed approval.",
         "Qualified or unclear words cannot approve the complete A or B subject.",
-        "ask the user to clarify the changes, then show a fresh complete question "
-        "and wait for an unqualified Approve.",
+        None,
     ),
     (
         "plan-a-consent-required plan-b-consent-required",
         "The requested work lacks current consent.",
         "Consent must match the complete current A or B subject, candidate and limits.",
-        "ask the user to decide on the complete current A or B question and its field diff.",
+        None,
     ),
     (
         (

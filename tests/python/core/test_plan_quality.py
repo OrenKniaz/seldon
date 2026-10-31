@@ -403,7 +403,8 @@ def test_alignment_threshold_and_late_questions(store):
     assert checks(store)["expanded-and-aligned"]["evidence"]["missingFields"] == ["scope_out"]
 
 
-def test_fewer_than_three_questions_before_lock(tmp_path):
+def test_current_a_needs_no_question_quota(tmp_path):
+    """Protect V2 alignment; catches a V1 question quota missed by fully questioned plans."""
     with open_plan_store(tmp_path) as store:
         store.import_spine(FIXTURE)
         source_only_expansion(store)
@@ -416,7 +417,7 @@ def test_fewer_than_three_questions_before_lock(tmp_path):
             store.answer(store.ask("Detail?"), "Answer")
         advance(store, "vision-lock")
         store.answer(store.ask("Too late?"), "Yes")
-        assert checks(store)["expanded-and-aligned"]["status"] == "warn"
+        assert checks(store)["expanded-and-aligned"]["status"] == "pass"
 
 
 def test_mapping_gaps_and_edge_case_warning(store):

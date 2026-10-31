@@ -130,7 +130,7 @@ def _request(directory):
     if (
         request.get("schema") != SCHEMA
         or directory.name not in {request.get("jobId"), short(request.get("jobId", ""))}
-        or request.get("publicationRevision") != request.get("jobId")
+        or not re.fullmatch(r"[0-9a-f]{64}", request.get("publicationRevision", ""))
         or request.get("requestDigest") != _digest(original)
     ):
         raise ValueError("worker-job-request-identity-mismatch")
@@ -153,7 +153,10 @@ def start_worker_job(
         raise ValueError("worker-job-max-parallel-must-be-positive")
     if not _valid_timeout(timeout):
         raise ValueError("worker-job-timeout-must-be-positive")
-    directory = _directory(store.workspace, expected_revision)
+    from codex_harness.core.planner_recovery import admission_id
+
+    job_id = admission_id(store, expected_revision)
+    directory = _directory(store.workspace, job_id)
 
     def reattach():
         if (directory / "request.json").is_file():
@@ -173,7 +176,7 @@ def start_worker_job(
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
             if previous["options"] != options:
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
-        return worker_job_status(store.workspace, expected_revision)
+        return worker_job_status(store.workspace, job_id)
 
     # An unlaunched job may be re-admitted within the current B limits;
     # retain the old namespace as evidence.
@@ -217,10 +220,8 @@ def start_worker_job(
         # wait for it or seize its directory and launch another child.
         return reattach()
     try:
-        execution_id = admit_execution(store, scope, expected_revision)
-        execution_provenance = admitted_execution_provenance(
-            store, execution_id, scope, expected_revision
-        )
+        execution_id = admit_execution(store, scope, job_id)
+        execution_provenance = admitted_execution_provenance(store, execution_id, scope, job_id)
         before = _files(template)
         if before != scope["templateFiles"]:
             raise ValueError("worker-job-template-changed-before-snapshot")
@@ -236,7 +237,8 @@ def start_worker_job(
             raise ValueError("worker-job-publication-changed-during-snapshot")
         request = {
             "schema": SCHEMA,
-            "jobId": expected_revision,
+            "jobId": job_id,
+            "containment": "windows-job-monitor-v1",
             "publicationRevision": expected_revision,
             "manifestDigest": _digest(manifest),
             "templateFiles": before,
@@ -257,7 +259,7 @@ def start_worker_job(
             "--workspace",
             str(store.workspace.resolve()),
             "--job-id",
-            expected_revision,
+            job_id,
         ]
         flags = (
             {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
@@ -291,7 +293,7 @@ def start_worker_job(
             {"type": type(error).__name__, "message": str(error), "at": _now()},
         )
         raise
-    return worker_job_status(store.workspace, expected_revision)
+    return worker_job_status(store.workspace, job_id)
 
 
 def worker_job_status(workspace, job_id, *, wait_seconds=0):
@@ -330,6 +332,7 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
     if not (directory / "request.json").is_file():
         return {**result, "reason": "Admission incomplete; do not relaunch"}
     request = _request(directory)
+    result["publicationRevision"] = request["publicationRevision"]
     result["options"] = request["options"]
     has_execution = bool(request.get("executionRequestId") and request.get("executionScope"))
     # Before this field existed, the execution-original contract was native-only.
@@ -368,7 +371,7 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         path = _inside(directory, paths[0])
         run = read_record_json(path)
         if (
-            run.get("planRevision") != job_id
+            run.get("planRevision") != request["publicationRevision"]
             or Path(run.get("repo", "")).resolve() != (path.parent.parent / "repo").resolve()
         ):
             raise ValueError("worker-job-dispatch-identity-mismatch")
@@ -405,7 +408,9 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
                 "Ended before any provider launched. Retry within the current B limits; "
                 "harness_worker_start re-admits this publication."
             )
-    return result
+    from codex_harness.core.planner_recovery import worker_status
+
+    return worker_status(workspace, result)
 
 
 def _ended_before_launch(directory):
@@ -450,7 +455,7 @@ def execute_worker_job(workspace, job_id):
         if not database.is_file():
             raise ValueError("worker-job-plan-store-missing")
         with open_plan_store(workspace) as store:
-            if _publication(store, job_id)[0] != manifest:
+            if _publication(store, request["publicationRevision"])[0] != manifest:
                 raise ValueError("worker-job-publication-changed-before-launch")
             spine = store.spine()
             setup = spine.node(spine.ids("vision")[0])["fields"].get("setup", {})
@@ -482,8 +487,9 @@ def main(argv=None):
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--job-id", required=True)
     args = parser.parse_args(argv)
-    terminal = execute_worker_job(args.workspace, args.job_id)
-    return 0 if terminal["status"] == "completed" else 1
+    from codex_harness.core.planner_recovery import monitor
+
+    return monitor(args.workspace, args.job_id)
 
 
 if __name__ == "__main__":

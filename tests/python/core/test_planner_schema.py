@@ -270,62 +270,19 @@ def typed_template(server, tool):
     return guide, template
 
 
-def test_ordinary_reviewer_action_schema_is_cold_unbound_and_distinct_from_intake(tmp_path):
-    server = PlannerServer(tmp_path / "absent")
+def test_reviewer_draft_routes_to_complete_b_without_separate_approval(tmp_path):
+    """Protect cold discovery; catches retired approval advice missed by prepared-B journeys."""
+    server = PlannerServer(tmp_path / "not-started")
     try:
-        guide = invoke(server, "harness_schema", tool="harness_confirm_reviewer_choice")
-        assert not guide["isError"], guide
-        data = guide["structuredContent"]
-        expected = {
-            "node_id",
-            "expected_spine_revision",
-            "approve",
-            "statement",
-            "conditions",
-            "expected_workspace",
+        guide = invoke(server, "harness_schema", tool="harness_reviewer_choice")
+        contract = guide["structuredContent"]["owningContract"]
+        assert "gate=plan-execution" in contract["confirmationRoute"]
+        assert "complete B subject" in contract["confirmationRoute"]
+        listed = server.handle_line(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+        assert "harness_confirm_reviewer_choice" not in {
+            t["name"] for t in listed["result"]["tools"]
         }
-        assert set(data["inputSchema"]["required"]) == expected
-        assert set(data["inputSchema"]["properties"]) == expected
-        assert data["inputSchema"]["additionalProperties"] is False
-        assert data["inputSchema"]["properties"]["approve"]["type"] == "boolean"
-        assert data["inputSchema"]["properties"]["conditions"]["type"] == "string"
-        assert data["actionTemplate"] == {
-            "node_id": None,
-            "expected_spine_revision": None,
-            "approve": None,
-            "statement": None,
-            "conditions": "",
-        }
-        contract = data["owningContract"]
-        assert "human_identity_verified=false" in contract["remainingHolds"]
-        assert "reviewer-confirmation-required" in contract["remainingHolds"]
-        assert "reviewer-catalog-producer-unavailable" in data["producerLimits"]
-        choice = invoke(server, "harness_schema", tool="harness_reviewer_choice")[
-            "structuredContent"
-        ]
-        assert "harness_confirm_reviewer_choice" in choice["owningContract"]["confirmationRoute"]
-        assert "typed-confirmation-producer-unavailable" not in choice["producerLimits"]
-        intake = invoke(server, "harness_schema", tool="harness_intake")["structuredContent"]
-        assert (
-            "typed-confirmation-producer-unavailable"
-            in intake["owningContract"]["confirmationRoute"]
-        )
-        assert (
-            "harness_record_confirmation only serves align"
-            in intake["owningContract"]["confirmationRoute"]
-        )
         assert not server.workspace.exists() and server.store is None
-        guide_text = (
-            Path(__file__).resolve().parents[3] / "docs/operator/planner-guide.md"
-        ).read_text(encoding="utf-8")
-        for text in (
-            "harness_confirm_reviewer_choice",
-            "caller-declared tester-as-user",
-            "human_identity_verified=false",
-            "reviewer-catalog-producer-unavailable",
-            "typed-confirmation-producer-unavailable",
-        ):
-            assert text in guide_text
     finally:
         server.close()
 
@@ -458,7 +415,7 @@ def test_emitted_catalog_and_choice_drafts_require_actual_supplied_bindings(tmp_
             item.startswith("reviewer-confirmation-required:") for item in data["unmetRequirements"]
         )
         assert server.store.spine().node(choice["node"]["id"])["fields"]["confirmation"] is None
-        assert "harness_confirm_reviewer_choice" in guide["producerLimits"]
+        assert "gate=plan-execution" in guide["producerLimits"]
         assert "typed-confirmation-producer-unavailable" not in guide["producerLimits"]
     finally:
         server.close()
@@ -1003,7 +960,7 @@ def test_schema_rejects_unknown_tool_and_irrelevant_kind_without_creating_plan(t
                 "draftRule": {
                     "confirmation",
                     "null",
-                    "reviewer-confirmation-required",
+                    "consent",
                     "independence",
                 },
             },
@@ -1046,7 +1003,7 @@ def test_first_typed_refusal_teaches_owner_contract_then_supported_diagnostic(
             assert "typed-confirmation-producer-unavailable" in contract["confirmationRoute"]
         else:
             assert "null" in contract["confirmation"]
-            assert "harness_confirm_reviewer_choice" in contract["confirmationRoute"]
+            assert "gate=plan-execution" in contract["confirmationRoute"]
             assert "typed-confirmation-producer-unavailable" not in contract["confirmationRoute"]
         assert "reviewer-catalog-producer-unavailable" in contract["discoveryRoute"]
         next_tool = contract["nextTool"]
@@ -1071,7 +1028,7 @@ def test_guide_acceptance_node_route_roundtrips_without_proof_credit(tmp_path, c
     guide_path = Path(__file__).resolve().parents[3] / "docs/operator/planner-guide.md"
     guide_text = guide_path.read_text(encoding="utf-8")
     paragraph = next(
-        line for line in guide_text.splitlines() if line.startswith("Explicit `acceptance`")
+        part for part in guide_text.split("\n\n") if part.startswith("Explicit `acceptance`")
     )
     trace = []
 

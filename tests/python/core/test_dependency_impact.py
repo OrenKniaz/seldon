@@ -49,7 +49,7 @@ def test_public_dependency_impact_agrees_with_imported_baseline_before_and_after
         store.upsert_node(transitive)
         snapshot = tmp_path / "baseline-spine.json"
         store.export_spine(snapshot)
-    baseline = public(producer, "harness_compile")
+    baseline = public(producer, "harness_compile", include_detail=True)
     saved = tmp_path / "baseline-manifest.json"
     saved.write_text(json.dumps(baseline), encoding="utf-8")
     original_baseline = saved.read_bytes()

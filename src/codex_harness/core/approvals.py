@@ -13,6 +13,7 @@ from codex_harness.core.plan_store import PlanStoreError
 from codex_harness.core.spine import Spine
 
 EFFECTS = {
+    "recovery": "Approve records this recovery disposition; readmission requires a fresh B.",
     "A": "Approve confirms understanding and locks this scope and these expansion decisions.",
     "B": "Approve authorizes this plan, these review budgets, publication after review passes, "
     "execution and validation within these limits.",
@@ -81,6 +82,10 @@ def subject(store, kind, proposed_action=None):
 
     if kind not in EFFECTS:
         raise ValueError("approval-kind-invalid")
+    if kind == "recovery":
+        from codex_harness.core.planner_recovery import recovery_subject
+
+        return recovery_subject(store, proposed_action)
     spine = Spine(store._data())
     visions = spine.ids("vision")
     if len(visions) != 1:
@@ -187,8 +192,13 @@ def subject(store, kind, proposed_action=None):
         raise ValueError("planning-review-budget-invalid-scope")
     if allowance > 10 and (not isinstance(explanation, str) or not explanation.strip()):
         raise ValueError("planning-review-allowance-above-10-needs-explanation")
+    recovery = [
+        {k: r[k] for k in ("jobId", "choice", "successor")}
+        for r in records(store, "worker-recovery-resolved")
+    ]
     return {
         **result,
+        **({"recovery": recovery} if recovery else {}),
         "aFingerprint": fingerprint(subject(store, "A")),
         "plan": store._data(),
         "candidate": candidate,
@@ -239,6 +249,11 @@ def render(payload, changes):
         f"Your decision: approve {payload['kind']}? Reply Approve, No, Cancel, "
         "or Changes: <text>.\n"
         + payload["effect"]
+        + (
+            f"\nB includes up to {payload['reviewAllowance']} reviews in total."
+            if payload["kind"] == "B"
+            else ""
+        )
         + "\nComplete approval subject:\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
         + "\nChanges from your previous decision:\n"

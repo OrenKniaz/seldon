@@ -875,9 +875,8 @@ def test_prospective_module_cli_preserves_explicit_empty_environment(
             if key.startswith("PYTHON"):
                 monkeypatch.delenv(key)
     elif environment == "output-only":
-        # The observation reports a delta, so ensure both requested values change.
+        # The launcher already enforces no bytecode; only encoding changes.
         monkeypatch.delenv("PYTHONIOENCODING", raising=False)
-        monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     requested = {
         "empty": "{}",
         "empty-no-python": "{}",
@@ -904,7 +903,6 @@ def test_prospective_module_cli_preserves_explicit_empty_environment(
         assert launch["instrumented"]
         assert launch["requestedOutputEnvironment"] == {
             "PYTHONIOENCODING": "utf-8",
-            "PYTHONDONTWRITEBYTECODE": "1",
         }
         return
     assert not result["ok"], result["findings"]

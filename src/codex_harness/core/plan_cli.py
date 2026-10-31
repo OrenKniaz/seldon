@@ -232,6 +232,11 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--workspace", required=True)
     root.add_argument("--json", dest="machine", action="store_true")
     subs = root.add_subparsers(dest="command", required=True)
+    recovery = subs.add_parser("recovery")
+    recovery.add_argument("mode", choices=["inspect", "resolve"])
+    recovery.add_argument("--job-id", required=True)
+    recovery.add_argument("--choice", choices=["abandon", "readmit"])
+    recovery.add_argument("--reason")
     specs = {
         "start": ("idea", "name"),
         "status": (),
@@ -1023,6 +1028,17 @@ def main(argv=None) -> int:
         )
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    if getattr(args, "command", None) == "recovery":
+        from codex_harness.core.planner_recovery import reply
+
+        proposal = {
+            k: v
+            for k, v in vars(args).items()
+            if k in {"mode", "job_id", "choice", "reason"} and v is not None
+        }
+        result = reply(args.workspace, proposal)
+        print(json.dumps(result) if args.machine else result["content"][0]["text"])
+        return int(result["isError"])
     if getattr(args, "command", None) == "supervision-report":
         from codex_harness.core.supervision import report
 

@@ -18,7 +18,7 @@ from codex_harness.core.plan_cli import main, next_command
 from codex_harness.core.plan_store import open_plan_store
 
 ROOT = Path(__file__).resolve().parents[3]
-GUIDE = ROOT / "docs/operator/planner-guide.md"
+GUIDE = ROOT / "docs/operator/planner-legacy-example.md"
 
 
 def test_public_execution_assessment_schema_read_is_complete_without_plan(tmp_path):
@@ -425,8 +425,6 @@ def test_guide_example_stops_at_synthetic_review_gate(tmp_path):
                 source_only_confirmation(store, gate)
             continue
         args = shlex.split(line.replace("<Q>", question or "<Q>"))
-        if args[0] == "start":
-            args += ["--plan-mode", "legacy"]
         if args[0] == "roundtable":
             args += ["--test-only-review-output", str(tmp_path / "response.json")]
         if args == ["advance", "--to", "publish"]:

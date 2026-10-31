@@ -152,113 +152,6 @@ def workspace_files(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
-def test_public_ordinary_reviewer_choice_confirmation_is_durable_and_scoped(tmp_path, monkeypatch):
-    """Simulated catalog/tester action; real public wire/store, no identity/provider proof."""
-    from codex_harness.core.intake import canonical_digest
-    from codex_harness.core.plan_store import open_plan_store_readonly
-
-    def no_launch(*args, **kwargs):
-        raise AssertionError("Ordinary confirmation must not start a provider or process")
-
-    monkeypatch.setattr(subprocess, "Popen", no_launch)
-    server = PlannerServer(tmp_path)
-    trace = []
-
-    def invoke(tool_name, **arguments):
-        reply = workspace_wire(server, tool_name, expected_workspace=str(tmp_path), **arguments)
-        trace.append({"tool": tool_name, "arguments": arguments, "response": reply})
-        assert not reply["isError"], reply
-        return reply["structuredContent"]
-
-    try:
-        invoke(
-            "harness_plan_start",
-            plan_mode="legacy",
-            idea="Explicit reviewer choice",
-            name="Tester action",
-        )
-        catalog = invoke(
-            "harness_reviewer_catalog",
-            catalog=mock_catalog(),
-            expected_spine_revision=server.store.spine().plan_revision(),
-        )["catalog"]
-        sessions = {"implementationSessionIds": ["simulated-author"], "reviewerSessionIds": {}}
-        node = mock_choice(catalog)
-        selected = invoke(
-            "harness_reviewer_choice",
-            node=node,
-            author_sessions=sessions,
-            expected_spine_revision=server.store.spine().plan_revision(),
-        )
-        stored_before = server.store.spine().node(node["id"])
-        assert stored_before["fields"]["confirmation"] is None
-        assert callable(server.store.confirm_reviewer_selection)  # Frozen leaf already exists.
-        guide = invoke("harness_schema", tool="harness_confirm_reviewer_choice")
-        schema = guide["inputSchema"]
-        assert set(schema["required"]) == {
-            "node_id",
-            "expected_spine_revision",
-            "approve",
-            "statement",
-            "conditions",
-            "expected_workspace",
-        }
-        assert set(schema["properties"]) == set(schema["required"])
-        assert schema["additionalProperties"] is False
-        statement = "Tester chooses exactly this recorded proposal.\nRetain all words and spaces.  "
-        result = invoke(
-            "harness_confirm_reviewer_choice",
-            node_id=node["id"],
-            expected_spine_revision=selected["spineRevision"],
-            approve=True,
-            statement=statement,
-            conditions="",
-        )
-        record, authority = result["confirmationRecord"], result["selection"]["confirmation"]
-        expected_scope = canonical_digest(
-            {
-                "node": stored_before,
-                "authorSessions": sessions,
-                "catalog": {"id": catalog["id"], "digest": catalog["digest"]},
-            }
-        )
-        assert record["scopeDigest"] == authority["authorizedScopeDigest"] == expected_scope
-        assert record["preimageRevision"] == selected["spineRevision"]
-        assert result["spineRevision"] != selected["spineRevision"]
-        assert record["statement"] == authority["statement"] == statement
-        assert record["human_identity_verified"] is False
-        assert record["provenance"] == "caller-declared-user-action"
-        assert result["approvalGranted"] is False and result["lockState"] == "unconfirmed"
-        assert result["unmetRequirements"] == [
-            hold
-            for hold in selected["unmetRequirements"]
-            if not hold.startswith("reviewer-confirmation-required:")
-        ]
-        assert any("independence-unknown" in hold for hold in result["unmetRequirements"])
-        assert any("cross-provider" in hold for hold in result["unmetRequirements"])
-        projected = invoke("harness_waves")["reviewerSelection"]
-        assert projected["selection"] == result["selection"]
-        assert projected["unmetRequirements"] == result["unmetRequirements"]
-        server.close()
-        with open_plan_store_readonly(tmp_path) as persisted:
-            rows = persisted.connection.execute(
-                "SELECT id,payload_json FROM events WHERE kind='reviewer-selection-confirmed'"
-            ).fetchall()
-            assert len(rows) == 1
-            assert rows[0][0] == authority["eventId"] == record["eventId"]
-            payload = json.loads(rows[0][1])
-            assert payload == {key: value for key, value in record.items() if key != "eventId"}
-            assert authority["sourceRef"] == f"reviewer-confirmation:event:{rows[0][0]}"
-            assert authority["approvalId"] == payload["recordId"]
-            assert persisted.spine().node(node["id"])["fields"]["confirmation"] == authority
-            assert persisted.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
-        server = PlannerServer(tmp_path)
-        assert invoke("harness_waves")["reviewerSelection"] == projected
-        print(json.dumps({"sourceOnly": True, "simulatedCatalog": catalog, "wire": trace}))
-    finally:
-        server.close()
-
-
 def test_wire_workspace_missing_intent_cannot_resume_other_project(tmp_path, monkeypatch):
     from codex_harness.core import mcp_planner
 
@@ -300,207 +193,6 @@ def test_wire_workspace_missing_intent_cannot_resume_other_project(tmp_path, mon
     finally:
         cached.close()
         other.close()
-
-
-def public_test_reviewer_choice(server):
-    """Source-only supplied catalog facts and sessions; no actual discovery."""
-
-    def invoke(tool_name, **arguments):
-        reply = workspace_wire(
-            server, tool_name, expected_workspace=str(server.workspace), **arguments
-        )
-        assert not reply["isError"], reply
-        return reply["structuredContent"]
-
-    invoke(
-        "harness_plan_start", plan_mode="legacy", idea="Public action controls", name="Test choice"
-    )
-    catalog = invoke(
-        "harness_reviewer_catalog",
-        catalog=mock_catalog(),
-        expected_spine_revision=server.store.spine().plan_revision(),
-    )["catalog"]
-    node = mock_choice(catalog)
-    selected = invoke(
-        "harness_reviewer_choice",
-        node=node,
-        expected_spine_revision=server.store.spine().plan_revision(),
-    )
-    return node, selected, catalog
-
-
-@pytest.mark.parametrize(
-    "case",
-    ["negative", "conditional", "malformed", "stale", "catalog", "replay", "proposal", "sessions"],
-)
-def test_public_ordinary_choice_refuses_invalid_or_replayed_action_without_credit(tmp_path, case):
-    server = PlannerServer(tmp_path)
-    try:
-        node, selected, _ = public_test_reviewer_choice(server)
-        arguments = dict(
-            node_id=node["id"],
-            expected_spine_revision=selected["spineRevision"],
-            approve=True,
-            statement="Explicit simulated tester action",
-            conditions="",
-        )
-        tool_name = "harness_confirm_reviewer_choice"
-        if case in ("replay", "proposal", "sessions"):
-            confirmed = workspace_wire(
-                server, tool_name, expected_workspace=str(tmp_path), **arguments
-            )
-            assert not confirmed["isError"], confirmed
-            arguments["expected_spine_revision"] = confirmed["structuredContent"]["spineRevision"]
-            if case == "proposal":
-                proposal = server.store.spine().node(node["id"])
-                proposal["fields"]["recommendation"]["reason"] += " changed"
-                changed = workspace_wire(
-                    server, "harness_upsert_node", expected_workspace=str(tmp_path), node=proposal
-                )
-                assert not changed["isError"]
-                arguments["expected_spine_revision"] = server.store.spine().plan_revision()
-                consumer = workspace_wire(server, "harness_waves", expected_workspace=str(tmp_path))
-                assert consumer["structuredContent"]["reviewerSelection"]["state"] == "stale"
-                assert "selection" not in consumer["structuredContent"]["reviewerSelection"]
-            elif case == "sessions":
-                tool_name = "harness_reviewer_choice"
-                arguments = dict(
-                    node=server.store.spine().node(node["id"]),
-                    expected_spine_revision=arguments["expected_spine_revision"],
-                    author_sessions={
-                        "implementationSessionIds": [],
-                        "reviewerSessionIds": {"primary": "new-simulated-session"},
-                    },
-                )
-        elif case == "negative":
-            arguments["approve"] = False
-        elif case == "conditional":
-            arguments["conditions"] = "Only if unknown availability becomes verified"
-        elif case == "malformed":
-            arguments["approve"] = "true"
-        elif case == "stale":
-            arguments["expected_spine_revision"] = "0" * 64
-        else:
-            replacement = mock_catalog()
-            replacement["id"] = "RC-00000000-0000-0000-0000-000000000002"
-            changed = workspace_wire(
-                server,
-                "harness_reviewer_catalog",
-                expected_workspace=str(tmp_path),
-                catalog=replacement,
-                expected_spine_revision=selected["spineRevision"],
-            )
-            assert not changed["isError"]
-            assert server.store.spine().plan_revision() == selected["spineRevision"]
-        before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
-        refused = workspace_wire(server, tool_name, expected_workspace=str(tmp_path), **arguments)
-        assert refused["isError"], refused
-        assert canonical_rows(server.store) == before
-        assert refusal_total(server.store) == refusal_count + 1
-        assert server.store.connection.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
-        records = server.store.connection.execute(
-            "SELECT count(*) FROM events WHERE kind='reviewer-selection-confirmed'"
-        ).fetchone()[0]
-        assert records == (1 if case in ("replay", "proposal", "sessions") else 0)
-    finally:
-        server.close()
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "by",
-        "origin",
-        "approvalId",
-        "eventId",
-        "sourceRef",
-        "authorizedScopeDigest",
-        "human_identity_verified",
-    ],
-)
-def test_public_ordinary_choice_rejects_authority_injection(tmp_path, field):
-    server = PlannerServer(tmp_path)
-    try:
-        node, selected, _ = public_test_reviewer_choice(server)
-        before, refusal_count = canonical_rows(server.store), refusal_total(server.store)
-        result = workspace_wire(
-            server,
-            "harness_confirm_reviewer_choice",
-            expected_workspace=str(tmp_path),
-            node_id=node["id"],
-            expected_spine_revision=selected["spineRevision"],
-            approve=True,
-            statement="Simulated action",
-            conditions="",
-            **{field: "injected"},
-        )
-        assert result["isError"], result
-        assert canonical_rows(server.store) == before
-        assert refusal_total(server.store) == refusal_count + 1
-        assert server.store.spine().node(node["id"])["fields"]["confirmation"] is None
-    finally:
-        server.close()
-
-
-def test_public_ordinary_choice_workspace_refusal_precedes_store_and_provider(
-    tmp_path, monkeypatch
-):
-    from codex_harness.core import mcp_planner
-
-    bound, intended = tmp_path / "bound", tmp_path / "intended"
-    calls = []
-
-    def forbidden(*args, **kwargs):
-        calls.append(args)
-        raise AssertionError("Wrong/missing intent must refuse before store or provider")
-
-    monkeypatch.setattr(mcp_planner, "open_plan_store", forbidden)
-    monkeypatch.setattr(subprocess, "Popen", forbidden)
-    for workspace, supplied in ((bound, None), (bound, str(intended)), (intended, str(bound))):
-        server = PlannerServer(workspace)
-        try:
-            context = {} if supplied is None else {"expected_workspace": supplied}
-            reply = workspace_wire(server, "harness_confirm_reviewer_choice", **context)
-            assert reply["isError"]
-            expected = "workspace-assertion-required" if supplied is None else "workspace-mismatch"
-            assert expected in reply["content"][0]["text"]
-            assert server.store is None and server._pending_confirmation is None
-            assert not calls and not bound.exists() and not intended.exists()
-        finally:
-            server.close()
-
-
-def test_public_ordinary_choice_two_bound_projects_keep_distinct_records(tmp_path):
-    servers = [PlannerServer(tmp_path / name) for name in ("first", "second")]
-    records = []
-    try:
-        for server in servers:
-            server.workspace.mkdir()
-            node, selected, _ = public_test_reviewer_choice(server)
-            result = workspace_wire(
-                server,
-                "harness_confirm_reviewer_choice",
-                expected_workspace=str(server.workspace),
-                node_id=node["id"],
-                expected_spine_revision=selected["spineRevision"],
-                approve=True,
-                statement=f"Simulated tester selects {server.workspace.name} proposal",
-                conditions="",
-            )
-            assert not result["isError"], result
-            assert result["workspaceBinding"]["serverWorkspace"] == str(server.workspace)
-            assert result["workspaceBinding"]["match"] == "matched"
-            record = result["structuredContent"]["confirmationRecord"]
-            records.append(record["recordId"])
-            assert (
-                server.store.spine().node(node["id"])["fields"]["confirmation"]["approvalId"]
-                == record["recordId"]
-            )
-            assert result["structuredContent"]["approvalGranted"] is False
-        assert len(set(records)) == 2
-    finally:
-        for server in servers:
-            server.close()
 
 
 @pytest.mark.parametrize(
@@ -722,12 +414,12 @@ def test_public_execution_assessment_schema_and_choices_do_not_create_plan(tmp_p
 
 
 EXPECTED_TOOLS = {
+    "harness_recovery",
     "harness_schema",
     "harness_preflight",
     "harness_intake",
     "harness_reviewer_catalog",
     "harness_reviewer_choice",
-    "harness_confirm_reviewer_choice",
     "harness_wave_map",
     "harness_waves",
     "harness_review",
@@ -2613,6 +2305,7 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
         if name.startswith("harness_accept")
         or name
         in {
+            "harness_recovery",  # Dedicated real child/consent/successor recovery journey.
             "harness_resolve_finding",
             "harness_resolve_findings",
             "harness_packet_view",
@@ -2630,7 +2323,6 @@ def test_each_tool_and_all_eleven_phases_to_publication(server, tmp_path):
             "harness_intake",
             "harness_reviewer_catalog",
             "harness_reviewer_choice",
-            "harness_confirm_reviewer_choice",
             "harness_wave_map",
             "harness_waves",
             "harness_worker_start",
