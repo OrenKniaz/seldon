@@ -13,7 +13,6 @@ import json
 import os
 import re
 import signal
-import sqlite3
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
@@ -1388,6 +1387,9 @@ def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, res
     if support is not None:
         result["executionSupport"] = copy.deepcopy(support)
     with store._transaction():
+        from codex_harness.core.planner_review import ensure_active
+
+        ensure_active(store, attempt.id)
         if resumed:
             saved = store.connection.execute(
                 "SELECT result_json FROM acceptance_reviews WHERE id=?", (attempt.id,)
@@ -1719,50 +1721,13 @@ def read_execution_finding_origins(store, finding_ids):
             for member in review["findingIds"]
         ):
             raise ValueError("execution-af-original-finding-changed")
-        completions = recovery._events(store, recovery.COMPLETED, attempt.id)
-        if len(completions) != len(header["slots"]) or len(
-            {row["slot"] for _, row in completions}
-        ) != len(completions):
-            raise ValueError("execution-af-original-completion-incomplete")
-        originals = []
-        sessions = set()
-        parsed_findings = []
-        for slot in header["slots"]:
-            matches = [row for _, row in completions if row["slot"] == slot["id"]]
-            if len(matches) != 1:
-                raise ValueError("execution-af-slot-missing")
-            completion = matches[0]
-            if (
-                completion["headerHash"] != recovery.digest(header)
-                or completion["launch"] != slot["launch"]
-                or not slot["launch"]["executable"]
-                or completion["isMocked"] is not False
-                or completion["didRunProvider"] is not True
-                or type(completion["exitCode"]) is not int
-                or completion["exitCode"] != 0
-            ):
-                raise ValueError("execution-af-original-return-invalid")
-            packet = recovery._read(attempt.root, slot["id"] + ".packet", slot["packet"])
-            output = recovery._read(attempt.root, slot["id"] + ".stdout", completion["stdout"])
-            stderr = recovery._read(attempt.root, slot["id"] + ".stderr", completion["stderr"])
-            identity = recovery.runtime_identity(
-                slot["reviewer"]["provider"], slot["reviewer"], output, stderr
-            )
-            session = (identity["provider"], identity["session"])
-            if identity != completion["runtime"] or session in sessions:
-                raise ValueError("execution-af-original-session-mismatch")
-            sessions.add(session)
-            record, items = roundtable._parse_review_return(
-                store,
-                slot["reviewer"],
-                {**slot["shard"], "packet": packet},
-                (completion["exitCode"], output, stderr),
-                mocked=False,
-            )
-            if record["invalid"] or not record["packetBound"]:
-                raise ValueError("execution-af-original-output-invalid")
-            parsed_findings.extend((slot["reviewer"], item) for item in items)
-            originals.append(dict(slot=slot, completion=completion))
+        parts = attempt.read_returns()
+        parsed_findings = [(owner, item) for owner, _, items, _ in parts for item in items]
+        completions = dict(recovery._events(store, recovery.COMPLETED, attempt.id))
+        originals = [
+            dict(slot=slot, completion=completions[event_id])
+            for slot, (_, _, _, event_id) in zip(header["slots"], parts, strict=True)
+        ]
         if not any(
             reviewer["name"] == finding["reviewer"]
             and reviewer["provider"] == finding["provider"]
@@ -1812,84 +1777,10 @@ def _resume_acceptance_review(store, repo, attempt_id):
         raise recovery.refusal(error) from error
 
 
-def acceptance_review(
-    store,
-    repo,
-    *,
-    reviewers=None,
-    runner=None,
-    token_budgets=None,
-    resume=None,
-    execution_assessment_ids=None,
-) -> dict:
-    if resume is not None:
-        if any(
-            value is not None
-            for value in (reviewers, runner, token_budgets, execution_assessment_ids)
-        ):
-            raise ValueError("Resume uses only the original registered review settings")
-        return _resume_acceptance_review(store, repo, resume)
-    if execution_assessment_ids is not None and reviewers is None:
-        raise ValueError(
-            "Execution support requires explicitly authorized ordinary "
-            "reviewers; supply reviewers before discovery or launch"
-        )
-    run, selected, dossiers, evidence, packet, included_header, context, original_identity = (
-        _prepare_acceptance_review(
-            store,
-            repo,
-            reviewers,
-            token_budgets,
-            **(
-                {"execution_assessment_ids": execution_assessment_ids}
-                if execution_assessment_ids is not None
-                else {}
-            ),
-        )
-    )
-    executables = {
-        item["provider"]: item["provider"]
-        if runner is not None
-        else roundtable._executable(item["provider"], None)
-        for item in selected
-    }
-    for provider, executable in executables.items():
-        if not executable:
-            raise ValueError(f"Reviewer executable unavailable: {provider}")
-    attempt = recovery.ReviewAttempt.start(
-        store,
-        repo,
-        run,
-        selected,
-        dossiers,
-        executables,
-        evidence,
-        mocked=runner is not None,
-        expected_identity=original_identity,
-    )
-    try:
-        return _execute_acceptance_review(
-            store,
-            repo,
-            run,
-            selected,
-            dossiers,
-            packet,
-            included_header,
-            context,
-            executables,
-            attempt,
-            runner,
-            token_budgets,
-        )
-    except recovery.CaptureFailure as error:
-        raise recovery.refusal(error) from error
-    except sqlite3.Error as error:
-        raise PlanStoreError(
-            "acceptance-review-interrupted",
-            f"Attempt {attempt.id}: {error}. Preserve originals; use accept-review --resume "
-            f"{attempt.id} --repo {Path(repo).resolve()} to recover only completed evidence.",
-        ) from error
+def acceptance_review(store, repo, **kwargs) -> dict:
+    from codex_harness.core.planner_review import review
+
+    return review(store, repo, **kwargs)
 
 
 def _execute_acceptance_review(
@@ -1937,11 +1828,7 @@ def _execute_acceptance_review(
             context=context,
             capture=attempt.capture,
             abandon=attempt.abandon,
-            **(
-                {"before_launch": attempt.check_execution_support}
-                if "executionSupport" in attempt.header
-                else {}
-            ),
+            before_launch=attempt.check_execution_support,
         ):
             if shard_record["invalid"]:
                 # Persist diagnostic evidence (already saved before cleanup), but

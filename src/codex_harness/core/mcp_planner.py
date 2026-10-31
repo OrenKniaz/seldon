@@ -382,7 +382,7 @@ TOOLS = [
     ),
     _tool(
         "harness_accept_review",
-        "Cross-subscription acceptance review of the delivered product.",
+        "Admit durable acceptance review; poll attemptId with harness_accept_status.",
         {
             "repo": STRING,
             "resume": STRING,
@@ -1025,9 +1025,11 @@ class PlannerServer:
     def __init__(self, workspace: str | Path, *, confirmation_timeout=600):
         from codex_harness.core.planner_acceptance import AcceptanceOwner
         from codex_harness.core.planner_audits import AuditOwner
+        from codex_harness.core.planner_review import ReviewOwner
 
         self.audits = AuditOwner()
         self.acceptance = AcceptanceOwner()
+        self.reviews = ReviewOwner()
         self.workspace = Path(workspace).resolve()
         self.store = None
         self._elicitation = False
@@ -1166,6 +1168,7 @@ class PlannerServer:
             self.store = previous
 
     def close(self) -> None:
+        self.reviews.close()
         self.acceptance.close(self.store)
         self.audits.close(self.store)
         if self._pending_confirmation is not None:
@@ -1211,42 +1214,9 @@ class PlannerServer:
         return views.chat_diagram(spine, kind)
 
     def _acceptance_job_status(self, arguments):
-        """Read captured job history without running whole-plan freshness/projection."""
-        try:
-            tool = next(t for t in TOOLS if t["name"] == "harness_accept_status")
-            _validate(arguments, tool["inputSchema"])
-            data = self.acceptance.status(self._store(), arguments["id"])
-            self.result_data = data
-            result = data["result"]
-            failed = data["state"] in {"failed", "stale", "unknown-interrupted"} or bool(
-                result and not result["passed"]
-            )
-            body = (
-                views.acceptance_run_card(result)
-                if result
-                else views.data_card("Acceptance job", data)
-            )
-            next_step = "harness_accept_status id=" + data["attemptId"]
-            if result and not failed:
-                next_step = (
-                    "harness_accept_run repo=<integrated-repo> subject=product"
-                    if data["subject"] == "oracle"
-                    else "harness_accept_review repo=<integrated-repo>"
-                )
-            body += (
-                "\nCaptured snapshot only; current proof/review/approval checks actual freshness."
-            )
-        except Exception as error:
-            data, failed = None, True
-            body = f"{getattr(error, 'code', type(error).__name__)}: {error}"
-            next_step = "Inspect the admitted attempt ID and workspace; do not resubmit work."
-        return {
-            "isError": failed,
-            "jobOnly": True,
-            "planStatusIncluded": False,
-            **({"structuredContent": data} if data is not None else {}),
-            "content": [{"type": "text", "text": body + "\nNext: " + next_step}],
-        }
+        from codex_harness.core.planner_acceptance import job_status
+
+        return job_status(self, arguments)
 
     def call_tool(self, name: str, arguments: dict, *, schema_tools=None) -> dict:
         self.result_data = None
@@ -1292,11 +1262,12 @@ class PlannerServer:
                     or self.result_data["invalid"]
                     or any(row["exitCode"] != 0 for row in self.result_data["reviewers"])
                 )
-                or name == "harness_accept_run"
+                or name in {"harness_accept_run", "harness_accept_review"}
                 and self.result_data
                 and (
-                    self.result_data["state"] in {"failed", "stale", "unknown-interrupted"}
+                    self.result_data.get("state") in {"failed", "stale", "unknown-interrupted"}
                     or self.result_data.get("result") is not None
+                    and name == "harness_accept_run"
                     and not self.result_data["result"]["passed"]
                 )
                 or name == "harness_accept_assess"
@@ -1352,7 +1323,11 @@ class PlannerServer:
                     "Retain every returned first-moment/scope ID; supply given, executable steps "
                     "and expect, then save the complete scenarios array."
                 )
-            if name == "harness_accept_review" and self.result_data:
+            if (
+                name == "harness_accept_review"
+                and self.result_data
+                and "reviewers" in self.result_data
+            ):
                 body = views.review_card(self.result_data) + "\n" + body
             if name == "harness_accept_assess":
                 contract = views.execution_assessment_contract()
@@ -1745,6 +1720,10 @@ class PlannerServer:
                 "choices; select explicitly and supply authorized "
                 "reviewer/finite limits."
             )
+        if name == "harness_accept_review" and (self.result_data or {}).get("kind") == "review":
+            return self.result_data.get("next") or (
+                "harness_accept_status id=" + self.result_data["attemptId"]
+            )
         if (
             name == "harness_accept_review"
             and not error
@@ -2065,7 +2044,6 @@ class PlannerServer:
             return f"Finding {args['id']}: {status}"
         if name.startswith("harness_accept"):
             from codex_harness.core.acceptance import (
-                acceptance_review,
                 derive_scenarios,
             )
 
@@ -2081,14 +2059,7 @@ class PlannerServer:
             elif name == "harness_accept_run":
                 result = self.acceptance.start(store, args["repo"], subject=args.get("subject"))
             elif name == "harness_accept_review":
-                prior_failure = store.latest_review_failure()
-                try:
-                    result = acceptance_review(store, **args)
-                except ValueError:
-                    failure = store.latest_review_failure()
-                    if failure != prior_failure:
-                        self.result_data = failure
-                    raise
+                result = self.reviews.start(store, **args)
             elif name == "harness_accept_rebind":
                 result = store.accept_rebind(args["repo"])
             else:
@@ -2108,7 +2079,7 @@ class PlannerServer:
                     return views.acceptance_run_card(result["result"])
                 return views.data_card("Acceptance attempt", result)
             if name == "harness_accept_review":
-                return views.review_card(result)
+                return views.data_card("Review attempt", result)
             body = views.data_card(name.removeprefix("harness_").replace("_", " ").title(), result)
             if name == "harness_accept_scenarios" and any(
                 not item.get("executable") or item.get("status") == "stale"
@@ -3270,6 +3241,7 @@ def main() -> None:
                 if server.store is not None:
                     server.audits.dispatch_after_flush(server.store)
                     server.acceptance.dispatch_after_flush(server.store)
+                    server.reviews.dispatch_after_flush(server.store)
     finally:
         server.close()
 

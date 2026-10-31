@@ -17,7 +17,7 @@ REQUEST = "worker-recovery-requested"
 RESOLVED = "worker-recovery-resolved"
 TOOL = dict(
     name="harness_recovery",
-    description="Inspect workers; resolve offers abandon/readmit/revalidate consent.",
+    description="Inspect workers or review:<attemptId>; resolve offers recovery consent.",
     inputSchema=dict(
         type="object",
         properties={
@@ -74,6 +74,10 @@ def admission_id(store, publication):
 
 
 def inspect(workspace, job_id):
+    if job_id.startswith("review:"):
+        from codex_harness.core.planner_review import recovery_proof
+
+        return recovery_proof(workspace, job_id)
     directory = jobs._directory(workspace, job_id)
     request = jobs._request(directory)
     receipt_path = jobs._inside(directory, directory / "quiescence.json")
@@ -155,7 +159,16 @@ def recovery_subject(store, action):
         version=2,
         kind="recovery",
         workspace=str(store.workspace.resolve()),
-        effect=approvals.EFFECTS["recovery"],
+        effect=(
+            (
+                "Approve accepts the UNKNOWN spent review claim and authorizes one explicit retry. "
+                "No usage is refunded."
+                if action["choice"] == "readmit"
+                else "Approve stops this review and retains the UNKNOWN spent claim. No retry."
+            )
+            if action["jobId"].startswith("review:")
+            else approvals.EFFECTS["recovery"]
+        ),
         **action,
         proof=inspect(store.workspace, action["jobId"]),
     )
@@ -195,7 +208,10 @@ def prepare(store, job_id, choice, reason):
                 raise ValueError(
                     "revalidate: successor already admitted; inspect successor instead"
                 )
-        if choice == "readmit" and proof["verdict"] != "VERIFIED-QUIESCENT":
+        is_review = job_id.startswith("review:")
+        if is_review and proof["verdict"] != "UNKNOWN":
+            raise ValueError("review-recovery-requires-UNKNOWN-owner")
+        if choice == "readmit" and not is_review and proof["verdict"] != "VERIFIED-QUIESCENT":
             raise ValueError("recovery-readmit-requires-VERIFIED-QUIESCENT")
         request = dict(
             **proposal,
@@ -214,9 +230,12 @@ def prepare(store, job_id, choice, reason):
                 "\nRevalidate retained candidate; PASS integrates and delivers at workspace root. "
                 "No worker start or extra provider spend."
             )
+        request["card"] += f"\nReply binding: expected_revision={request['plan_revision']}"
         request["card"] += (
-            f"\nReply binding: expected_revision={request['plan_revision']}"
-            "\nEvidence and spent calls stay charged. UNKNOWN abandonment retains quarantine. "
+            "\nSpent review claims remain charged. Retry admits one successor with the original "
+            "arguments; stop authorizes no new launch."
+            if is_review
+            else "\nEvidence and spent calls stay charged. UNKNOWN abandonment retains quarantine. "
             "Readmission releases a hold; fresh execution consent and worker-start are required."
         )
         store._event(REQUEST, request)
@@ -267,7 +286,11 @@ def complete(store, request_id, **answer):
                 reason=request["reason"],
                 proof=proof,
                 quarantine=proof["verdict"] == "UNKNOWN",
-                successor=jobs._digest(request) if request["choice"] == "readmit" else None,
+                successor=(
+                    uuid4().hex if request["jobId"].startswith("review:") else jobs._digest(request)
+                )
+                if request["choice"] == "readmit"
+                else None,
             )
             store._event(RESOLVED, resolved)
             result["disposition"] = resolved

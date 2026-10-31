@@ -110,12 +110,26 @@ def interrupted(project, monkeypatch, *, mocked=False, response=None, before_rev
     return store, repo, attempt
 
 
-def test_lost_transaction_recovers_nonempty_findings_without_third_review(project, monkeypatch):
+def test_lost_transaction_and_interleaved_resume_recover_once(project, monkeypatch):
+    """Catch duplicate recovery credit on a racing resume; status-only tests miss commits."""
     store, repo, attempt = interrupted(project, monkeypatch)
+    original = acceptance._commit_acceptance_review
+    winner = []
+    entered = []
+
+    def interleaved(*args, **kwargs):
+        if not entered:
+            entered.append(True)
+            winner.append(acceptance.acceptance_review(store, repo, resume=attempt))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(acceptance, "_commit_acceptance_review", interleaved)
     summary = acceptance.acceptance_status(store)["reviewAttempts"][0]
     assert summary["id"] == attempt and summary["completedSlots"] == 2
     assert summary["admitted"] is False
     result = acceptance.acceptance_review(store, repo, resume=attempt)
+    assert result["findingIds"] == winner[0]["findingIds"]
+    assert len(recovery._events(store, "acceptance-reviewed", attempt)) == 1
     assert result["id"] == attempt and len(result["findings"]) == 2
     assert result["isMocked"] is False and result["packetBound"] is True
     assert len(result["receiptEventIds"]) == 2
@@ -234,23 +248,3 @@ def test_final_writer_rechecks_context_and_rolls_back_findings(project, monkeypa
     with pytest.raises(PlanStoreError):
         acceptance.acceptance_review(store, repo, resume=attempt)
     assert store.connection.execute("SELECT COUNT(*) FROM acceptance_findings").fetchone()[0] == 0
-
-
-def test_interleaved_winning_resume_returns_same_aggregate(project, monkeypatch):
-    store, repo, attempt = interrupted(project, monkeypatch)
-    original = acceptance._commit_acceptance_review
-    winner = []
-    entered = []
-
-    def interleaved(*args, **kwargs):
-        if not entered:
-            entered.append(True)
-            winner.append(acceptance.acceptance_review(store, repo, resume=attempt))
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(acceptance, "_commit_acceptance_review", interleaved)
-    result = acceptance.acceptance_review(store, repo, resume=attempt)
-    assert result["findingIds"] == winner[0]["findingIds"]
-    assert store.connection.execute("SELECT COUNT(*) FROM acceptance_reviews").fetchone()[0] == 1
-    assert store.connection.execute("SELECT COUNT(*) FROM acceptance_findings").fetchone()[0] == 2
-    assert len(recovery._events(store, "acceptance-reviewed", attempt)) == 1

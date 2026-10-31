@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from tests.python.core import test_semantic_wiring
 from tests.python.core.planning_support import source_only_expansion
+from tests.python.core.review_support import finish_review
 from tests.python.core.test_semantic_wiring import execute, workers
 
 from codex_harness.core import dispatch, planner_jobs
@@ -69,6 +70,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(
 
     def call(name, **args):
         reply = workspace_wire(server, name, expected_workspace=str(store.workspace), **args)
+        if name == "harness_accept_review":
+            reply = finish_review(server, reply)
         assert server._pending_confirmation is None, "Default semantic journey must never elicit"
         assert not reply["isError"], reply
         return reply

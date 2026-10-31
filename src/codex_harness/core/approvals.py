@@ -195,6 +195,7 @@ def subject(store, kind, proposed_action=None):
     recovery = [
         {k: r[k] for k in ("jobId", "choice", "successor")}
         for r in records(store, "worker-recovery-resolved")
+        if not r["jobId"].startswith("review:")
     ]
     return {
         **result,

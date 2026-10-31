@@ -593,6 +593,10 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             if command == "accept-review" and args.execution_assessment:
                 arguments["execution_assessment_ids"] = args.execution_assessment
         reply = server.call_tool("harness_" + command.replace("-", "_"), arguments)
+        if command == "accept-review":
+            from codex_harness.core.planner_review import finish_cli
+
+            reply = finish_cli(server, reply)
         if command == "accept-run" and not reply["isError"]:
             attempt_id = reply["structuredContent"]["attemptId"]
             server.acceptance.dispatch_after_flush(server.store)

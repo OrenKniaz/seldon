@@ -340,6 +340,7 @@ class ReviewAttempt:
         *,
         mocked,
         expected_identity,
+        attempt_id=None,
     ):
         from codex_harness.core.acceptance import current_run
 
@@ -356,7 +357,7 @@ class ReviewAttempt:
                         budget._reserve(
                             store, "review", record["subject"]["reviewAllowance"], reviewer
                         )
-        attempt = uuid4().hex
+        attempt = attempt_id or uuid4().hex
         root = _directory(store, attempt)
         _safe(root, root)
         root.mkdir(parents=True)
@@ -481,7 +482,10 @@ class ReviewAttempt:
         return cls(store, rows[0][1], rows[0][0])
 
     def check_execution_support(self):
-        """Prospective opt-in prelaunch check; no child or permission is produced."""
+        """Check current support and any explicit async recovery disposition."""
+        from codex_harness.core.planner_review import ensure_active
+
+        ensure_active(self.store, self.id)
         support = self.header.get("executionSupport")
         if support is None:
             return
@@ -529,6 +533,11 @@ class ReviewAttempt:
             raise ValueError(
                 "Review is mocked, incomplete or unrecoverable: " + str(header["ineligible"])
             )
+        return self.read_returns()
+
+    def read_returns(self):
+        """Validate sealed originals independently of current product freshness."""
+        header = self.header
         completions = _events(self.store, COMPLETED, self.id)
         slots = header["slots"]
         if len(completions) != len(slots) or len({row["slot"] for _, row in completions}) != len(
@@ -611,7 +620,7 @@ def attempt_summaries(store):
     completed = _events(store, COMPLETED)
     abandoned = {item["attemptId"] for _, item in _events(store, ABANDONED)}
     admitted = {row[0] for row in store.connection.execute("SELECT id FROM acceptance_reviews")}
-    return [
+    summaries = [
         {
             "id": item["attemptId"],
             "runId": item["run"]["id"],
@@ -623,3 +632,14 @@ def attempt_summaries(store):
         }
         for _, item in _events(store, STARTED)
     ]
+
+    from codex_harness.core import planner_review
+
+    by_id = {row["id"]: row for row in summaries}
+    for entry in planner_review.entries(store):
+        observed = planner_review.status(store, entry["attemptId"])
+        row = by_id.setdefault(entry["attemptId"], dict(id=entry["attemptId"]))
+        row.update({key: observed[key] for key in ("state", "error", "attemptId")})
+        if observed.get("next"):
+            row["next"] = observed["next"]
+    return list(by_id.values())

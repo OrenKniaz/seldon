@@ -369,7 +369,17 @@ def test_golden_path(tmp_path, request, surface):
                 time.sleep(0.1)
                 acceptance = call("harness_accept_status", id=acceptance["attemptId"])
             assert acceptance["result"]["passed"], acceptance
-            call("harness_accept_review", repo=str(tmp_path), reviewers=b["subject"]["reviewers"])
+            review = call(
+                "harness_accept_review", repo=str(tmp_path), reviewers=b["subject"]["reviewers"]
+            )
+            attempt_id = review["attemptId"]
+            deadline = time.monotonic() + 90
+            while review["state"] in {"queued", "running"} and time.monotonic() < deadline:
+                time.sleep(0.1)
+                review = call("harness_accept_status", id=attempt_id)
+                assert review["attemptId"] == attempt_id, review
+            assert review["state"] == "completed", review
+            assert review["result"]["id"] == attempt_id, review
             decisions += 1
             call("harness_accept", by="user", statement="yes")
             assert call("harness_plan_status")["acceptance"]["accepted"]

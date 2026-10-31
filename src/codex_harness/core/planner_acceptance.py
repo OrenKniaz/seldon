@@ -348,3 +348,46 @@ class AcceptanceOwner:
                     "WHERE owner=? AND state IN ('queued','running')",
                     ("Owner closed; child liveness UNKNOWN; no replay", self.instance),
                 )
+
+
+def job_status(self, arguments):
+    """Read captured job history without running whole-plan freshness/projection."""
+    try:
+        from codex_harness.core import planner_views as views
+        from codex_harness.core.mcp_planner import TOOLS as self_tools
+        from codex_harness.core.mcp_planner import _validate
+
+        tool = next(t for t in self_tools if t["name"] == "harness_accept_status")
+        _validate(arguments, tool["inputSchema"])
+        from codex_harness.core.planner_review import status_reply
+
+        if reply := status_reply(self, arguments["id"]):
+            return reply
+        data = self.acceptance.status(self._store(), arguments["id"])
+        self.result_data = data
+        result = data["result"]
+        failed = data["state"] in {"failed", "stale", "unknown-interrupted"} or bool(
+            result and not result["passed"]
+        )
+        body = (
+            views.acceptance_run_card(result) if result else views.data_card("Acceptance job", data)
+        )
+        next_step = "harness_accept_status id=" + data["attemptId"]
+        if result and not failed:
+            next_step = (
+                "harness_accept_run repo=<integrated-repo> subject=product"
+                if data["subject"] == "oracle"
+                else "harness_accept_review repo=<integrated-repo>"
+            )
+        body += "\nCaptured snapshot only; current proof/review/approval checks actual freshness."
+    except Exception as error:
+        data, failed = None, True
+        body = f"{getattr(error, 'code', type(error).__name__)}: {error}"
+        next_step = "Inspect the admitted attempt ID and workspace; do not resubmit work."
+    return {
+        "isError": failed,
+        "jobOnly": True,
+        "planStatusIncluded": False,
+        **({"structuredContent": data} if data is not None else {}),
+        "content": [{"type": "text", "text": body + "\nNext: " + next_step}],
+    }

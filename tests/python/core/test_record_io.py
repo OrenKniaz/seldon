@@ -14,8 +14,9 @@ from codex_harness.core import dispatch, record_io
 from codex_harness.core.record_io import open_record_read, read_record_json
 
 
-@pytest.mark.parametrize("relative", ["request.json", "evidence/run.json", "run.json"])
+@pytest.mark.parametrize("relative", ["request.json", "evidence/run.json"])
 def test_supported_reader_serializes_cross_process_publication(tmp_path, relative):
+    """Catch torn cross-process replacement at root/nested paths; backoff tests lack readers."""
     path = tmp_path / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     dispatch._write_record(path, {"revision": 1})

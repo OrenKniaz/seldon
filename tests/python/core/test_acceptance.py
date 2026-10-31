@@ -16,6 +16,7 @@ from tests.python.core.planning_support import (
     source_only_confirmation,
     source_only_vision_lock,
 )
+from tests.python.core.review_support import completed_call
 
 from codex_harness.core.acceptance import (
     acceptance_review,
@@ -578,7 +579,7 @@ def public_assessment_repair_fixture(
     traces = []
 
     def tool(name, arguments, *, error=False):
-        result = server.call_tool(name, arguments)
+        result = completed_call(server, name, arguments)
         if name == "harness_accept_run" and not result["isError"]:
             result = finish_public_acceptance(server, result)
             result["structuredContent"] = result["structuredContent"]["result"]
