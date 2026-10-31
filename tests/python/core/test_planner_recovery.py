@@ -91,7 +91,7 @@ def answer(server, request, quote="Approve"):
         "harness_record_chat_confirmation",
         gate="recovery",
         request_id=request["request_id"],
-        expected_revision=request["proof"]["publicationRevision"],
+        expected_revision=request["plan_revision"],
         quoted_message=quote,
         quote_sha256=hashlib.sha256(quote.encode()).hexdigest(),
         actor_label="source-test-user",
@@ -103,10 +103,12 @@ def snapshot(root):
 
 
 def test_local_child_exit_readmit_once_with_cumulative_v2_usage(admitted, monkeypatch):
-    """Catch unsafe/duplicate successor launch and budget reset at the owning boundary.
+    """Catch refused plain yes, duplicate successor launch and budget reset via MCP.
 
     Old job tests fake Popen/dispatch and cannot prove descendant teardown or a
-    successor's real canonical provider-claim consumer. No cleanup field is mocked.
+    successor's real canonical provider-claim consumer. The old recovery helper
+    supplied a hidden publication revision instead of using the card's reply binding.
+    No cleanup field is mocked.
     """
     store, revision, workers, job, launches, launch = admitted
     assert Path(job["evidenceDir"]).name == short(revision)
@@ -121,12 +123,14 @@ def test_local_child_exit_readmit_once_with_cumulative_v2_usage(admitted, monkey
     monkeypatch.setattr(audit_process, "run_audit_process", local_payload)
     assert recovery.inspect(store.workspace, revision)["verdict"] == "UNKNOWN"
     recovery.monitor(store.workspace, revision)
-    proof = recovery.inspect(store.workspace, revision)
+    server = PlannerServer(store.workspace)
+    inspected = tool(server, "harness_recovery", mode="inspect", job_id=revision)
+    assert not inspected["isError"], inspected
+    proof = inspected["structuredContent"]
     assert proof["verdict"] == "VERIFIED-QUIESCENT", proof
     assert (store.workspace / "child-exited").read_text() == "done"
     assert proof["spentCalls"] == 1 and proof["remainingCalls"] == 15
     old = snapshot(Path(job["evidenceDir"]))
-    server = PlannerServer(store.workspace)
     try:
         offered = tool(
             server,
@@ -138,7 +142,12 @@ def test_local_child_exit_readmit_once_with_cumulative_v2_usage(admitted, monkey
         )
         assert not offered["isError"], offered
         request = offered["structuredContent"]
-        completed = answer(server, request)
+        assert request["plan_revision"] in offered["content"][0]["text"]
+        assert (
+            tool(server, "harness_recovery", mode="inspect", job_id=revision)["structuredContent"]
+            == proof
+        )
+        completed = answer(server, request, "yes")
         assert not completed["isError"], completed
         successor = completed["structuredContent"]["disposition"]["successor"]
         with pytest.raises(ValueError, match="plan-b-consent-required"):

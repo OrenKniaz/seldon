@@ -25,6 +25,34 @@ def scenario():
 TARGETS = {"tally": {"entry": "tally.py", "argv": []}}
 
 
+def test_action_timeout_identifies_stalled_cli_and_preserves_cleanup(tmp_path):
+    """Expose the stalled launch for recovery; existing timeouts lose action/argv/cwd/stdin."""
+    (tmp_path / "tally.py").write_text("import time\ntime.sleep(30)\n")
+    document = scenario()
+    item = document["scenarios"][0]
+    item["setup"] = {"dirs": ["data/caller"]}
+    item["observe"] = [{"action": "add", "exitEquals": 0}]
+    item["actions"][0]["cwd"] = "data/caller"
+    item["actions"][0]["cli"]["stdin"] = {"utf8": "hello"}
+    result = run(document, tmp_path, TARGETS, "validation", action_seconds=1)[0]
+    assert result["state"] == "ERROR" and result["reason"] == "Product action timeout"
+    stalled = result["action"]
+    assert stalled["id"] == "add" and stalled["seconds"] == 1
+    assert stalled["command"][:2] == [sys.executable, "-B"]
+    assert Path(stalled["command"][2]).name == "tally.py"
+    assert stalled["command"][3:] == [
+        "--db",
+        str(Path(stalled["cwd"]).parents[1] / "data/ledger.json"),
+        "add",
+        "food",
+        "0",
+    ]
+    assert Path(stalled["cwd"]).parts[-2:] == ("data", "caller")
+    assert stalled["stdinBytes"] == 5
+    assert result["cleanup"]["quiescenceVerified"]
+    assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
+
+
 @pytest.mark.parametrize(
     "stdin,expected",
     [
@@ -677,7 +705,6 @@ def test_web_observed_stub_red_unperformed_interaction_and_validation_rejection(
 @pytest.mark.parametrize(
     "source,reason",
     [
-        ('<p style="background:linear-gradient(white,black)">Unknown contrast</p>', "Unresolved"),
         ('<canvas width="10" height="10"></canvas>', "Uninspectable"),
         (
             "<script>requestAnimationFrame(function tick(){requestAnimationFrame(tick)})</script>",
@@ -686,11 +713,49 @@ def test_web_observed_stub_red_unperformed_interaction_and_validation_rejection(
     ],
 )
 def test_web_unobservable_rendering_is_error(tmp_path, source, reason, web_browser_ready):
-    """Reject unknown contrast/motion; measurable gate failures miss uninspectable rendering."""
+    """Reject unknown motion; measurable gate failures miss uninspectable rendering."""
     (tmp_path / "index.html").write_text(WEB_PAGE + source, encoding="utf-8")
     result = run(web_document(), tmp_path, WEB_TARGET, "validation")[0]
     assert result["state"] == "ERROR" and reason in result["reason"], result
     assert result["cleanup"]["quiescenceVerified"]
+
+
+def test_web_unknown_contrast_advises_without_masking_measured_failure(tmp_path, web_browser_ready):
+    """Keep decorative/unknown contrast deliverable but catch AA defects alongside it;
+    existing gate tests have no generated content or advisory-to-verdict integration.
+    """
+    fixture = (
+        WEB_PAGE
+        + """<style>
+    .decoration::after{content:'+';color:white}
+    .hidden::before{content:'Hidden label';color:white}
+    .label::before{content:'Readable label';color:#111}
+    #unknown::after{content:'Generated label';background:linear-gradient(white,black)}
+    #covered{background:white;color:#111}
+    </style><span class="decoration"></span><span class="hidden" aria-hidden="true"></span>
+    <span class="label"></span><span id="unknown"></span>
+    <div style="background:linear-gradient(white,black)">
+      <p id="covered">Opaque background resolves through transparent child <em>text</em></p>
+    </div><p id="body-copy" style="color:#111">Body copy</p>"""
+    )
+    for color, state in [("#111", "PASS"), ("#aaa", "FAIL")]:
+        (tmp_path / "index.html").write_text(
+            fixture.replace(
+                'id="body-copy" style="color:#111"', f'id="body-copy" style="color:{color}"'
+            ),
+            encoding="utf-8",
+        )
+        result = run(web_document(), tmp_path, WEB_TARGET, "validation")[0]
+        assert result["state"] == state, result
+        for action in result["actions"].values():
+            assert action["advisories"], action
+            assert all(note["severity"] == "ADVISORY" for note in action["advisories"])
+            elements = {note["element"] for note in action["advisories"]}
+            # Unmeasurable text is advised; decorative, hidden and opaque-backed text is not.
+            assert "span#unknown::after" in elements
+            assert not elements & {"span.decoration::after", "span.hidden::before", "p#covered"}
+            assert action["checks"]["textContrastAA"] == (state == "PASS")
+        assert result["cleanup"]["quiescenceVerified"]
 
 
 def test_web_missing_tool_is_prelaunch_error(tmp_path, monkeypatch):

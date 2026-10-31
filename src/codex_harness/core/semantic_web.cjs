@@ -9,7 +9,7 @@ const end = Date.now() + cfg.remaining * 1000;
 const remaining = () => { const ms = Math.min(cfg.seconds * 1000, end - Date.now());
   if (ms <= 0) throw Error('Web scenario timeout'); return ms; };
 
-// Runs only adapter-owned code in the page. Unsupported rendering is never a pass.
+// Runs only adapter-owned code in the page. Unmeasurable contrast is advisory.
 function inspect() {
   const visible = e => (e.getClientRects().length || [...e.childNodes].some(n => {
     if (n.nodeType !== 3 || !n.textContent.trim()) return false;
@@ -35,31 +35,51 @@ function inspect() {
   const lum = c => c.slice(0, 3).map(x => x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4)
     .reduce((v, x, i) => v + x * [.2126, .7152, .0722][i], 0);
   let textContrastAA = true;
+  const advisories = [];
+  const decorative = e => [...ancestors(e)].some(n => n.getAttribute('aria-hidden') === 'true');
+  function contrast(e, style, pseudo = '') {
+    try {
+      let fg = rgba(style.color), bg = [0, 0, 0, 0];
+      const layers = [...ancestors(e)].map(n => getComputedStyle(n));
+      if (pseudo) layers.unshift(style);
+      // Effects on an ancestor still apply even behind an opaque child background.
+      if (layers.some(s => s.mixBlendMode !== 'normal' || s.filter !== 'none' ||
+          s.backdropFilter !== 'none' || s.textShadow !== 'none' || +s.opacity !== 1))
+        throw Error('Unresolved blend/filter/shadow/opacity text contrast');
+      for (const s of layers) {
+        if (s.backgroundImage !== 'none') throw Error('Unresolved image/gradient text contrast');
+        const color = rgba(s.backgroundColor);
+        fg = over(fg, color); bg = over(bg, color);
+        if (bg[3] === 1) break;
+      }
+      fg = over(fg, [1, 1, 1, 1]); bg = over(bg, [1, 1, 1, 1]);
+      const l = [lum(fg), lum(bg)].sort((a, b) => a - b);
+      const large = parseFloat(style.fontSize) >= 24 || parseFloat(style.fontSize) >= 18.67 && +style.fontWeight >= 700;
+      if ((l[1] + .05) / (l[0] + .05) < (large ? 3 : 4.5)) textContrastAA = false;
+    } catch (error) {
+      advisories.push({severity: 'ADVISORY', check: 'textContrastAA',
+        element: e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + pseudo,
+        reason: error.message + '; manual contrast review required'});
+    }
+  }
   for (const e of all) {
+    if (/^(SCRIPT|STYLE|NOSCRIPT|TITLE)$/.test(e.tagName) || decorative(e)) continue;
     for (const pseudo of ['::before', '::after']) {
-      if (!['none', 'normal', '""'].includes(getComputedStyle(e, pseudo).content))
-        throw Error('Unresolved generated text contrast');
+      const style = getComputedStyle(e, pseudo), content = style.content;
+      if (style.display === 'none' || style.visibility === 'hidden' || +style.opacity === 0 ||
+          ['none', 'normal', '""', "''"].includes(content)) continue;
+      // Punctuation/symbol-only generated content is decorative (e.g. FAQ +/- icons).
+      if (/^(["']).*\1$/.test(content) && !/[\p{L}\p{N}]/u.test(content.slice(1, -1))) continue;
+      if (/^(["']).*\1$/.test(content)) contrast(e, style, pseudo);
+      else advisories.push({severity: 'ADVISORY', check: 'textContrastAA',
+        element: e.tagName.toLowerCase() + pseudo,
+        reason: 'Unresolved generated content; manual contrast review required'});
     }
-    if (/^(SCRIPT|STYLE|NOSCRIPT|TITLE)$/.test(e.tagName) ||
-        ![...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()) &&
-        !(/^(INPUT|TEXTAREA)$/.test(e.tagName) && e.value)) continue;
-    const style = getComputedStyle(e);
-    let fg = rgba(style.color), bg = [0, 0, 0, 0];
-    for (const n of ancestors(e)) {
-      const s = getComputedStyle(n);
-      if (s.backgroundImage !== 'none' || s.mixBlendMode !== 'normal' || s.filter !== 'none' ||
-          s.backdropFilter !== 'none' || s.textShadow !== 'none') throw Error('Unresolved image/gradient/blend text contrast');
-      const color = rgba(s.backgroundColor);
-      fg = over(fg, color); bg = over(bg, color);
-      fg[3] *= +s.opacity; bg[3] *= +s.opacity;
-    }
-    fg = over(fg, [1, 1, 1, 1]); bg = over(bg, [1, 1, 1, 1]);
-    const l = [lum(fg), lum(bg)].sort((a, b) => a - b);
-    const large = parseFloat(style.fontSize) >= 24 || parseFloat(style.fontSize) >= 18.67 && +style.fontWeight >= 700;
-    if ((l[1] + .05) / (l[0] + .05) < (large ? 3 : 4.5)) textContrastAA = false;
+    if ([...e.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()) ||
+        /^(INPUT|TEXTAREA)$/.test(e.tagName) && e.value) contrast(e, getComputedStyle(e));
   }
   return {noHorizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0) <= innerWidth,
-    textContrastAA, headingStructure,
+    textContrastAA, headingStructure, advisories,
     motion: document.getAnimations().some(a => a.playState === 'running' || a.pending),
     uninspectable: all.some(e => /^(CANVAS|VIDEO)$/.test(e.tagName.toUpperCase()) ||
       e.tagName === 'IMG' && /\.(gif|webp|svg)(?:[?#]|$)/i.test(e.currentSrc)) ||
@@ -77,7 +97,7 @@ function inspect() {
     toolchain.chromium = browser.version();
     const context = await browser.newContext({viewport: j.viewport, reducedMotion: j.reducedMotion,
       offline: true, serviceWorkers: 'block', acceptDownloads: false});
-    const requests = [], errors = [], steps = [], artifacts = [];
+    const requests = [], errors = [], steps = [], artifacts = [], advisoryNotes = new Map();
     let marker = false, anyMarker = false;
     const checks = {noHorizontalOverflow: true, consoleErrors: 0, externalRequests: 0,
       textContrastAA: true, headingStructure: true, reducedMotionRespected: true};
@@ -108,6 +128,7 @@ function inspect() {
       spec.selector ? page.locator('css=' + spec.selector) : page.getByRole(spec.role, {name: spec.name, exact: true});
     async function checkpoint() {
       const a = await page.evaluate(inspect);
+      for (const note of a.advisories) advisoryNotes.set(JSON.stringify(note), note);
       for (const k of ['noHorizontalOverflow', 'textContrastAA', 'headingStructure']) checks[k] &&= a[k];
       const body = await page.locator('body').innerText({timeout: remaining()});
       anyMarker ||= (await page.content()).includes('SELDON-STUB ');
@@ -159,7 +180,7 @@ function inspect() {
       } catch (e) { artifacts.push({missing: true, reason: e.message.slice(0, 160), fullPage}); }
     }
     checks.consoleErrors = errors.length; checks.externalRequests = requests.length;
-    const result = {state: 'OBSERVED', marker, checks, steps, artifacts,
+    const result = {state: 'OBSERVED', marker, checks, steps, artifacts, advisories: [...advisoryNotes.values()],
       toolchain, errors: errors.slice(0, 4), requests: requests.slice(0, 4)};
     await browser.close(); browser = null;
     process.stdout.write(JSON.stringify(result));

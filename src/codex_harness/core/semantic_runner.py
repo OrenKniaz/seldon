@@ -146,13 +146,17 @@ def execute(s, root, targets, phase, seconds, deadline, web=None):
         snapshots[f["id"]] = read(path(root, f["path"]))
 
     def expired():
-        print(json.dumps({"state": "ERROR", "reason": "Product action timeout"}), flush=True)
+        print(
+            json.dumps(dict(state="ERROR", reason="Product action timeout", action=action)),
+            flush=True,
+        )
         os._exit(0)  # Outer held Job reaps the entire owned tree, including pipe holders.
 
     for a in s["actions"]:
         budget = min(30 if "web" in a else seconds, deadline - time.monotonic())
         if budget <= 0:
             raise TimeoutError("Scenario/run deadline; action unperformed")
+        action = dict(id=a["id"], seconds=budget)
         guard = threading.Timer(budget, expired)
         guard.start()
         try:
@@ -193,12 +197,14 @@ def execute(s, root, targets, phase, seconds, deadline, web=None):
                 if "module" in binding
                 else [str(path(root, binding["entry"]))]
             )
-            result = capture(
-                [sys.executable, "-B", *launch, *args],
-                root,
-                cwd,
-                content(v["stdin"]) if "stdin" in v else None,
+            command = [sys.executable, "-B", *launch, *args]
+            payload = content(v["stdin"]) if "stdin" in v else None
+            action.update(
+                command=command,
+                cwd=str(cwd),
+                stdinBytes=len(payload) if payload is not None else None,
             )
+            result = capture(command, root, cwd, payload)
         finally:
             guard.cancel()
         marker = f"SELDON-STUB {v['operation']}"
@@ -291,11 +297,13 @@ def run(
     try:
         scenarios = validate(document, product, targets)
         is_web = any(b.get("kind") == "web" for b in targets.values())
-        action_seconds = action_seconds if action_seconds is not None else (10 if is_web else 3)
-        scenario_seconds = (
-            scenario_seconds if scenario_seconds is not None else (30 if is_web else 15)
-        )
-        run_seconds = run_seconds if run_seconds is not None else (90 if is_web else 45)
+        # Hang guards, not speed targets: cold Windows Python under load exceeded 3s (run 24).
+        # Defaults fit inside any caller-supplied outer budget.
+        run_seconds = run_seconds if run_seconds is not None else (90 if is_web else 120)
+        if scenario_seconds is None:
+            scenario_seconds = min(30 if is_web else 60, run_seconds)
+        if action_seconds is None:
+            action_seconds = min(10 if is_web else 20, scenario_seconds)
         if phase not in ("contracts", "validation") or os.name != "nt":
             raise ValueError("Use contracts/validation on Windows (held Job required)")
         if is_web and all(

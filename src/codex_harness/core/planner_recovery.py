@@ -126,25 +126,27 @@ def prepare(store, job_id, choice, reason):
     if choice not in {"abandon", "readmit"} or not isinstance(reason, str) or not reason.strip():
         raise ValueError("recovery-choice-and-reason-required")
     with store._transaction():
-        proof = inspect(store.workspace, job_id)
+        action = dict(jobId=job_id, choice=choice, reason=reason)
+        proposal = approvals.proposal(store, "recovery", action)
+        proof = proposal["subject"]["proof"]
         if proof["disposition"]:
             raise ValueError("recovery-already-resolved")
         if choice == "readmit" and proof["verdict"] != "VERIFIED-QUIESCENT":
             raise ValueError("recovery-readmit-requires-VERIFIED-QUIESCENT")
         request = dict(
-            **approvals.proposal(
-                store, "recovery", dict(jobId=job_id, choice=choice, reason=reason)
-            ),
+            **proposal,
             request_id=uuid4().hex,
             gate="recovery",
+            plan_revision=store._revision(),
             jobId=job_id,
             choice=choice,
             reason=reason,
             proof=proof,
             workspace=str(store.workspace.resolve()),
-            proposedAction=dict(jobId=job_id, choice=choice, reason=reason),
+            proposedAction=action,
         )
         request["card"] += (
+            f"\nReply binding: expected_revision={request['plan_revision']}"
             "\nEvidence and spent calls stay charged. UNKNOWN abandonment retains quarantine. "
             "Readmission releases a hold; fresh execution consent and worker-start are required."
         )
@@ -164,12 +166,9 @@ def complete(store, request_id, **answer):
             for r in approvals.records(store, "worker-recovery-responded")
         ):
             raise ValueError("recovery-already-responded")
-        proof = inspect(store.workspace, request["jobId"])
-        if (
-            request["workspace"] != str(store.workspace.resolve())
-            or answer["expected_revision"] != proof["publicationRevision"]
-            or proof != request["proof"]
-        ):
+        subject = approvals.subject(store, "recovery", request["proposedAction"])
+        proof = subject["proof"]
+        if answer["expected_revision"] != request["plan_revision"] or subject != request["subject"]:
             raise ValueError("recovery-proof-stale: inspect and ask again")
         record = approvals.record_approval(
             store,
