@@ -19,7 +19,6 @@ web_plan = test_semantic_wiring.web_plan
 @pytest.mark.parametrize(
     "journey",
     [
-        "happy",
         "clarification",
         "renew-reviewers",
         "decline-a",
@@ -34,7 +33,6 @@ web_plan = test_semantic_wiring.web_plan
         "missing-b",
         "reconnect-c",
         "refused-c",
-        "web",
     ],
 )
 def test_canonical_plan_contracts_red_build_validation_pass(

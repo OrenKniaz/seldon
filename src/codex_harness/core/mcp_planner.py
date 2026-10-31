@@ -2272,12 +2272,12 @@ class PlannerServer:
             template = self.workspace / "template"
             if template.resolve() != template:
                 raise ValueError("Compilation template must stay in the fixed workspace")
-            # Validate the canonical graph before rendering or recording a compile event.
-            # The existing compiler then binds and checks actual protected file contents.
             with TemporaryDirectory(prefix="planner-compile-") as directory:
                 path = Path(directory) / "manifest.json"
                 path.write_text(json.dumps(compile_manifest(store.spine())), encoding="utf-8")
                 load_plan(path)
+                if store.spine().semantic:
+                    template.mkdir(exist_ok=True)
                 self.result_data = store.compile_template(template)
             return f"Compiled current manifest: {self.result_data['planRevision']}"
         if name == "harness_audit":
@@ -2451,7 +2451,6 @@ class PlannerServer:
                 details.append("- Historical statement: " + views.readable(row["statement"]))
             waves = store.outcome_waves()
             if waves.get("waveMap") or waves.get("mapNode"):
-                # A recorded outcome map is planning content, so it stays in full.
                 body += "\n\n" + views.outcome_waves_card(waves)
             else:
                 outcome = views.outcome_summary(waves)
@@ -3233,8 +3232,6 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     server = PlannerServer(args.workspace)
     try:
-        # Only stdin reading moves off-thread; all store/protocol mutation stays
-        # on this thread. A queue timeout bounds one pending user interaction.
         incoming = queue.Queue()
         audit_completed = object()
         server.audits.wake = lambda: incoming.put(audit_completed)

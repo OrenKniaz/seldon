@@ -439,11 +439,10 @@ def semantic_spec(spine, product=None):
     document, targets = root["scenarios"], root["targets"]
     try:
         validate(document, product or Path.cwd(), targets, require_entries=False)
-        if any(
-            (t.get("kind") == "web") != (root.get("productSurface") == "web")
-            for t in targets.values()
-        ):
-            raise ValueError("Web targets require productSurface web; CLI targets require cli")
+        # The surface follows the targets; only a mixed or contradicting declaration is wrong.
+        kinds = {"web" if t.get("kind") == "web" else "cli" for t in targets.values()}
+        if len(kinds) > 1 or root.get("productSurface", next(iter(kinds), "cli")) not in kinds:
+            raise ValueError("Targets must all be web or all CLI and match productSurface")
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
             f"Invalid scenarios/targets: {error}. Author scenarios with schema, scenarios, "

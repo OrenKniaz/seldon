@@ -19,7 +19,6 @@ FAST_FILES = {
     "test_planning_review_budget.py",
     "test_semantic_runner.py",
     "test_worker_packet.py",
-    "test_worker_capability_requirements.py",
     "test_graph.py",
     "test_mail.py",
     "test_record_io.py",
@@ -29,7 +28,11 @@ FAST_FILES = {
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "fast: caller invariants, bounded to ten minutes")
-    root = Path("C:/Users/oren/t/d") if os.name == "nt" else Path(tempfile.gettempdir())
+    root = (
+        Path(os.environ.get("TEMP", "C:/Users/oren/t/d"))
+        if os.name == "nt"
+        else Path(tempfile.gettempdir())
+    )
     root.mkdir(parents=True, exist_ok=True)
     os.environ["TEMP"] = os.environ["TMP"] = str(root)
     tempfile.tempdir = str(root)
@@ -44,6 +47,7 @@ def tmp_path(tmp_path_factory):
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
+    items.sort(key=lambda item: item.path.name != "test_golden_path.py")
     for item in items:
         if item.path.name in FAST_FILES and not item.name.startswith("test_web_"):
             item.add_marker(pytest.mark.fast)
