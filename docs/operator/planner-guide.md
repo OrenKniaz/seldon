@@ -43,14 +43,15 @@ Never invent consent or turn silence, a cancellation or an earlier refusal into 
   expansion accept/reject/defer choices, quality and Done. `harness_understanding_card`
   creates combined `align+vision-lock` consent when complete. Approval covers both gates;
   advance through Expand and Vision Lock without another question.
-- **B: plan and execution.** Compile first; record exact reviewer proposals and the shared
-  campaign ceiling in B (up to N reviews, not a promise to use them all). Prepare
+- **B: plan and execution.** Compile first; propose exact reviewer tuples from the catalog.
+  B includes plan review and formal acceptance: two distinct reviewers, cross-provider when
+  both are available; two from the same provider when only one exists. B names scheduled
+  starts and a finite repair reserve within the cumulative ceiling. Prepare
   `harness_prepare_chat_confirmation gate=plan-execution` with `reviewer_node_id` and exact
   `execution={expected_revision,workers,call_cap,max_parallel,timeout}`. Display plan, waves,
   files, reviewer/worker provider-model-effort tuples, review and worker caps and timeouts.
-  Approval covers review, eligible repairs, publication after passing review, execution and
-  validation within those limits. Failed/uncertain starts consume caps; changes need fresh
-  affected consent. Inspect schema before amending a shared budget; spent starts never reset.
+  Approval covers reviews, repairs, publication, execution, validation and quiescent same-work
+  recovery. Failed/uncertain starts consume caps. Changed scope, limits or tuples get one diff.
 - **C: owner acceptance.** Run product scenarios, complete current acceptance review and
   resolve findings within B. Ask whether delivery meets the locked vision; record actual
   owner words through `harness_accept`. C names the delivered repository and reviewed product
@@ -82,6 +83,8 @@ reattach existing jobs without relaunch. Unknown ownership or cleanup holds new 
 `harness_accept_status id=ID`, never resubmit to poll. Queued work and historical captured
 PASS do not grant current acceptance. Product acceptance needs accepted dispatch evidence,
 current passing scenarios, review and owner acceptance. Status never executes work.
+`harness_accept_review repo=DIR` reuses B's acceptance reviewers without another question;
+actual independence, access and candidate evidence are still checked at launch.
 Use `accept-scenarios --derive` to prepare drafts; fill executable steps and expectations.
 
 Explicit `acceptance` spine nodes allow parents acceptance vision/feature. Read

@@ -47,7 +47,6 @@ def connection_reply(
     workspace: str | Path,
     status: dict | None = None,
     *,
-    show_recovery: bool = False,
     refusal_values: dict | None = None,
 ) -> dict:
     """Project a tool result or native elicitation without changing its payload.
@@ -59,7 +58,7 @@ def connection_reply(
     if reply.get("method") == "elicitation/create":
         result = deepcopy(reply)
         projection = connection_projection(workspace, status)
-        result["params"]["message"] = _text(result["params"]["message"], projection, show_recovery)
+        result["params"]["message"] = _text(result["params"]["message"], projection)
         return result
     payload = reply.get("result", reply)
     if not isinstance(payload, dict) or "content" not in payload:
@@ -76,7 +75,7 @@ def connection_reply(
     payload["plannerConnection"] = projection
     for item in payload["content"]:
         if item.get("type") == "text":
-            item["text"] = _text(item["text"], projection, show_recovery)
+            item["text"] = _text(item["text"], projection)
             values = {
                 "status": status or {},
                 "data": payload.get("structuredContent", {}),
@@ -91,24 +90,10 @@ def connection_reply(
     return result
 
 
-def _text(text: str, projection: dict, show_recovery: bool) -> str:
+def _text(text: str, projection: dict) -> str:
     if text.startswith(projection["header"] + "\n"):
         return text
-    lines = [projection["header"]]
-    body, separator, next_step = text.rpartition("\nNext: ")
-    # Full recovery guidance stays in structured plannerConnection.recovery.
-    recovery = (
-        "- Connection recovery: if this chat loses Seldon, open a new chat in "
-        + projection["projectRoot"]
-        + " and call harness_plan_status with expected_workspace set to that folder."
-    )
-    if show_recovery and separator:
-        lines.extend([body, recovery, "Next: " + next_step])
-    else:
-        lines.append(text)
-        if show_recovery:
-            lines.append(recovery)
-    return "\n".join(lines)
+    return projection["header"] + "\n" + text
 
 
 def workspace_refusal(self, request_id, binding, code, name=None):
@@ -142,4 +127,4 @@ def workspace_refusal(self, request_id, binding, code, name=None):
             "Current phase unknown; next legal phase: unknown (workspace binding refused).\n"
             + result["content"][0]["text"]
         )
-    return connection_reply(response, self.workspace, show_recovery=True)
+    return connection_reply(response, self.workspace)

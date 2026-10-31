@@ -32,7 +32,7 @@ def combined_reply(store, request, text="Approve"):
     )
 
 
-def prepare_combined_b(store, selection="new", *, cap=2, chat=True, offer=True):
+def prepare_combined_b(store, selection="new", *, cap=6, chat=True, offer=True):
     source_only_expansion(store)
     aligned = confirmation.prepare_confirmation(store, "align+vision-lock", _chat=chat)
     approve_b(store, aligned)
@@ -105,7 +105,7 @@ def test_missing_b_refuses_without_reservation_then_exact_b_reaches_review_and_j
     assert list(store.connection.iterdump()) == before
     assert budget.usage(store, "review") == 0 and launches == []
     request = confirmation.prepare_confirmation(
-        store, "plan-execution", _chat=chat, execution=options, review_max_starts=2
+        store, "plan-execution", _chat=chat, execution=options, review_max_starts=6
     )
     approve_b(store, request)
     store.advance("roundtable", by="source-test")
@@ -134,13 +134,15 @@ def test_changed_review_action_requires_b_diff_before_launch(semantic_plan, monk
     call.
     """
     store, _ = semantic_plan
-    request, _ = prepare_combined_b(store, "none" if change == "empty-reviewers" else "new")
+    if change == "empty-reviewers":
+        _, options = prepare_combined_b(store, "none", offer=False)
+        with pytest.raises(ValueError, match="reviewer-selection-required-before-B"):
+            confirmation.prepare_chat_confirmation(store, "plan-execution", execution=options)
+        assert approvals.current(store, "B") is None and budget.usage(store, "review") == 0
+        return
+    request, _ = prepare_combined_b(store)
     approve_b(store, request)
-    reviewer = (
-        request["subject"]["reviewers"][0]
-        if request["subject"]["reviewers"]
-        else dict(name="unseen", provider="codex", model="gpt-6.1-sol", effort="high")
-    )
+    reviewer = request["subject"]["reviewers"][0]
     limits = {}
     if change == "tuple":
         reviewer = [reviewer, {**reviewer, "name": "unlisted", "model": "unseen-model"}]

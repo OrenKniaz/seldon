@@ -107,8 +107,8 @@ def provider_host(mode, workspace, surface, job_id=None):
 def test_golden_path(tmp_path, request, surface):
     """Protect idea→root product→accepted with three plain user decisions.
 
-    Catch reapproval after check repairs or quiescent recovery, and changed limits
-    launching without a diff; frozen-plan journeys miss those transitions.
+    Catch late acceptance reviewer/budget questions, reapproval after repairs/recovery,
+    and changed limits launching without a diff; plan-review-only tests miss delivery.
     Stub results are suite evidence only, never actual-provider acceptance.
     """
     if surface == "web":
@@ -319,16 +319,6 @@ def test_golden_path(tmp_path, request, surface):
                 "harness_reviewer_catalog", catalog=catalog, expected_spine_revision=revision
             )["catalog"]
             choice = mock_choice(catalog)
-            choice["fields"]["reviewers"].append(
-                dict(
-                    name="secondary",
-                    provider="claude",
-                    **{
-                        k: catalog["providers"][1]["choices"][0][k]
-                        for k in ("choiceId", "model", "effort")
-                    },
-                )
-            )
             call("harness_reviewer_choice", node=choice, expected_spine_revision=revision)
             compiled = call("harness_compile", include_detail=True)
             options = dict(
@@ -347,6 +337,20 @@ def test_golden_path(tmp_path, request, surface):
                 execution=options,
                 reviewer_node_id="CHOICE",
             )
+            reviewers = b["subject"]["reviewers"]
+            assert reviewers == [
+                dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high"),
+                dict(name="claude-reviewer", provider="claude", model="stub", effort="high"),
+            ]
+            assert b["subject"]["reviewSelection"] == dict(
+                stages=["plan", "full-vision"],
+                assurance=dict(
+                    independentRequired=True, minIndependentReviewers=2, crossProviderRequired=True
+                ),
+            )
+            assert b["subject"]["scheduledReviewStarts"] == {"plan": 2, "full-vision": 2}
+            assert b["subject"]["repairReserve"] == 2
+            assert all(r["name"] in b["card"] and r["model"] in b["card"] for r in reviewers)
             yes(b)
             if surface == "cli":
                 # Repair the checker to match the accepted exact greeting, not the requirement.
@@ -359,13 +363,16 @@ def test_golden_path(tmp_path, request, surface):
                 assert repaired["planRevision"] != options["expected_revision"]
                 options["expected_revision"] = repaired["planRevision"]
             call("harness_advance", to_phase="roundtable")
-            call(
+            plan_review = call(
                 "harness_roundtable",
-                reviewers=b["subject"]["reviewers"],
                 max_rounds=1,
                 max_total=2,
                 timeout=5,
             )
+            assert [
+                {k: r[k] for k in ("name", "provider", "model", "effort")}
+                for r in plan_review["reviewers"]
+            ] == reviewers
             call("harness_advance", to_phase="publish")
             call("harness_publish")
             call("harness_advance", to_phase="execute")
@@ -455,9 +462,7 @@ def test_golden_path(tmp_path, request, surface):
                 time.sleep(0.1)
                 acceptance = call("harness_accept_status", id=acceptance["attemptId"])
             assert acceptance["result"]["passed"], acceptance
-            review = call(
-                "harness_accept_review", repo=str(tmp_path), reviewers=b["subject"]["reviewers"]
-            )
+            review = call("harness_accept_review", repo=str(tmp_path))
             attempt_id = review["attemptId"]
             deadline = time.monotonic() + 90
             while review["state"] in {"queued", "running"} and time.monotonic() < deadline:
@@ -466,6 +471,10 @@ def test_golden_path(tmp_path, request, surface):
                 assert review["attemptId"] == attempt_id, review
             assert review["state"] == "completed", review
             assert review["result"]["id"] == attempt_id, review
+            assert [
+                {k: r[k] for k in ("name", "provider", "model", "effort")}
+                for r in review["result"]["reviewers"]
+            ] == reviewers
             decisions += 1
             call("harness_accept", by="user", statement="yes")
             assert call("harness_plan_status")["acceptance"]["accepted"]

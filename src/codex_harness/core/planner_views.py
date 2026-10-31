@@ -868,25 +868,6 @@ def refusal_help(code, message: str, status: dict) -> str | None:
     return None
 
 
-def publish_review_question(status: dict) -> str:
-    """Turn a missing-review publish refusal into a question the user can answer."""
-    published = status.get("published_revision")
-    stop = (
-        f"keep the last published plan ({str(published)[:12]})"
-        if published
-        else "leave the plan unpublished for now"
-    )
-    return "\n".join(
-        [
-            "**Decision needed: run one more plan review?**",
-            "The plan changed after its last successful review, so publishing needs a fresh "
-            "review of this exact version.",
-            "Reply **Run review** to review it now (uses one review call from your budget), "
-            f"or **Stop** to {stop}.",
-        ]
-    )
-
-
 def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
     """Transport-specific wording for the same single canonical advisory action."""
     action = state["nextAction"]
@@ -949,12 +930,7 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
         )
     if kind == "review_required":
         review = state["review"]
-        review_command = (
-            cmd("roundtable --reviewer @<reviewer.json>")
-            if cli_prefix is not None
-            else "harness_roundtable "
-            "reviewers=<explicit authorized name/provider/model/effort tuples>"
-        )
+        review_command = cmd("roundtable") if cli_prefix is not None else "harness_roundtable"
         if review.get("qualityStatus") == "fail" and review["current"]:
             round_id = review["detailRoute"]["roundId"]
             inspect = (

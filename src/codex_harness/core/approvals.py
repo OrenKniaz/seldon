@@ -154,10 +154,12 @@ def subject(store, kind, proposed_action=None):
         if catalog is None:
             raise ValueError("reviewer-catalog-original-missing")
         from codex_harness.core.intake import validate_selection
+        from codex_harness.core.planner_review import delivery_review_selection
 
         validate_selection(catalog["catalog"], node["fields"], selected["authorSessions"])
-        reviewers = [reviewer_tuple(r) for r in node["fields"]["reviewers"]]
-        selection = {k: node["fields"][k] for k in ("stages", "assurance")}
+        reviewers, selection = delivery_review_selection(catalog["catalog"], node["fields"])
+    if not reviewers:
+        raise ValueError("reviewer-selection-required-before-B: propose exact delivery reviewers")
     policy = deepcopy(action.get("reviewPolicy", previous.get("reviewPolicy")))
     if policy is None:
         policy = dict(maxRounds=2, maxTotal=None, timeout=900)
@@ -171,6 +173,7 @@ def subject(store, kind, proposed_action=None):
         or not jobs._valid_timeout(policy["timeout"])
     ):
         raise ValueError("planning-review-policy-invalid")
+    policy["timeout"] = max(900, policy["timeout"])  # Formal acceptance's actual launch timeout.
     for key, value in action.get("reviewLimits", {}).items():
         if key == "maxTotal" and value is None and policy[key] is not None:
             policy[key] = None
@@ -181,21 +184,16 @@ def subject(store, kind, proposed_action=None):
         reviewers.append(reviewer_tuple(actual))
     allowance = action.get("reviewAllowance", previous.get("reviewAllowance"))
     explanation = action.get("allowanceReason", previous.get("allowanceReason", ""))
+    scheduled = dict(plan=len(reviewers), **{"full-vision": len(reviewers)})
     if allowance is None:
-        # Planning + per-bead + final review, with one repair round in reserve.
-        if current(store, "B"):
-            allowance = previous["reviewAllowance"]
-        else:
-            from codex_harness.core.provider_call_budget import usage
+        from codex_harness.core.provider_call_budget import usage
 
-            spent = usage(store, "review")
-            scheduled = max(1, len(reviewers) * (len(workers) + 3))
-            allowance = spent + scheduled
-            if allowance > 10:
-                explanation = (
-                    f"{spent} spent starts plus {scheduled} scheduled reviews and repair reserve"
-                )
-    if type(allowance) is not int or allowance < 1:
+        allowance = previous.get("reviewAllowance") or (
+            usage(store, "review") + sum(scheduled.values()) + len(reviewers)
+        )
+        if not previous:
+            explanation = "Plan and formal acceptance reviews plus one repair round in reserve"
+    if type(allowance) is not int or allowance < sum(scheduled.values()):
         raise ValueError("planning-review-budget-invalid-scope")
     if allowance > 10 and (not isinstance(explanation, str) or not explanation.strip()):
         raise ValueError("planning-review-allowance-above-10-needs-explanation")
@@ -206,6 +204,8 @@ def subject(store, kind, proposed_action=None):
         "reviewers": reviewers,
         "reviewSelection": selection,
         "reviewPolicy": policy,
+        "scheduledReviewStarts": scheduled,
+        "repairReserve": allowance - sum(scheduled.values()),
         "reviewAllowance": allowance,
         "allowanceReason": explanation,
     }

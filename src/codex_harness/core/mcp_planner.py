@@ -181,12 +181,8 @@ TOOLS = [
     ),
     _tool(
         "harness_roundtable",
-        "Run the existing protected roundtable with explicit authorized reviewers. "
-        "Inspect harness_schema tool=harness_roundtable first; offerings do not prove access. "
-        "Suggest a small explicit authorized max_total >=2 for initial review and "
-        "repaired-manifest recheck; honor the user's ceiling and spent attempts. "
-        "Exhaustion needs fresh consent, "
-        "never a silent cap increase or attempt reset. "
+        "Review with B's exact reviewers and cumulative limits; explicit overrides require B. "
+        "Offerings do not prove access; launch checks remain in force. "
         "Before requesting semantic review, walk every full-brief clause in working notes: "
         "clause -> scenario ID(s) or GAP with rationale. Repair required gaps; unsupported "
         "obligations stay required/unproven or explicitly deferred. No coverage certification. "
@@ -206,7 +202,7 @@ TOOLS = [
             "max_total": {"type": "integer", "minimum": 1},
             "timeout": {"type": "number", "exclusiveMinimum": 0},
         },
-        ["reviewers"],
+        [],
     ),
     _tool(
         "harness_readiness",
@@ -1435,20 +1431,7 @@ class PlannerServer:
             }
         ):
             handoff = views.review_author_handoff(self._store(), status)
-            if (
-                name == "harness_publish"
-                and operation_error_code == "plan-publication-evidence-required"
-                and "successful review" in error_message
-                and "passing audit" not in error_message
-                and handoff.get("memberCount") == 0
-            ):
-                if status.get("planMode") != "semantic-v1":
-                    body += "\n" + views.publish_review_question(status)
-                    next_step = (
-                        "Ask the user the question above and wait; on Run review: " + next_step
-                    )
-            else:
-                body += "\n" + views.author_handoff_card(handoff)
+            body += "\n" + views.author_handoff_card(handoff)
         reply = {
             "isError": is_error,
             "statusAvailable": status_available,
@@ -1499,7 +1482,6 @@ class PlannerServer:
             reply,
             self.workspace,
             status,
-            show_recovery=name == "harness_plan_status",
             refusal_values=refusal_values,
         )
         if name == "harness_prepare_chat_confirmation" and not is_error:

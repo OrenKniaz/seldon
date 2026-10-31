@@ -1192,11 +1192,9 @@ def _prepare_acceptance_review(
     run = current_run(store)
     if run is None or Path(run["repo"]) != Path(repo).resolve():
         raise PlanStoreError("acceptance-run-required", "Run scenarios on the current revision")
-    selected = roundtable.default_reviewers() if reviewers is None else list(reviewers)
-    if len(selected) < 2 or len({item["name"] for item in selected}) != len(selected):
-        raise ValueError("Two distinct reviewers required (cross-subscription when available)")
-    if not roundtable.coverage(selected) and len({r["provider"] for r in selected}) < len(selected):
-        raise ValueError("Acceptance reviewers/providers must be distinct")
+    from codex_harness.core.planner_review import authorized_acceptance_reviewers
+
+    selected = authorized_acceptance_reviewers(store, reviewers)
     support_args = (
         {"execution_assessment_ids": execution_assessment_ids}
         if execution_assessment_ids is not None

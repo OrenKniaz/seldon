@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from codex_harness.core import provider_call_budget as review_budget
 from codex_harness.core import review_instructions
+from codex_harness.core.approvals import require_approval
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
@@ -629,11 +630,7 @@ def _executable(provider: str, executable_for) -> str | None:
 
 
 def default_reviewers(*, executable_for=None) -> list[dict]:
-    """Use both subscriptions when their executables resolve.
-
-    executable_for may be a provider-to-executable mapping or a callable. A
-    missing/None override marks that provider unavailable.
-    """
+    """Offer reviewers for resolvable providers; missing overrides mean unavailable."""
     selected = [
         dict(reviewer)
         for reviewer in _REVIEWERS
@@ -1811,7 +1808,9 @@ def run_roundtable(
         raise ValueError("max-total must be a positive integer")
     report = quality_report(store)
     selected = (
-        default_reviewers(executable_for=executable_for) if reviewers is None else list(reviewers)
+        require_approval(store, "B")["subject"]["reviewers"]
+        if reviewers is None
+        else list(reviewers)
     )
     result = {
         "roundId": uuid4().hex,
@@ -1835,8 +1834,6 @@ def run_roundtable(
         )
         for provider in dict.fromkeys(item["provider"] for item in selected)
     }
-    from codex_harness.core.approvals import require_approval
-
     for reviewer in selected:
         review_budget.review_capacity(store, reviewer, revision, max_rounds, max_total)
         if runner is None:

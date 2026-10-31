@@ -18,6 +18,54 @@ UPDATED = "acceptance-review-state"
 _owners = {}
 
 
+def acceptance_reviewers(selected, *, executable_for=None):
+    """The same formal-review requirements at B preparation and actual launch."""
+    if len(selected) < 2 or len({r["name"] for r in selected}) != len(selected):
+        raise ValueError("Two distinct reviewers required (cross-subscription when available)")
+    single = roundtable.coverage(selected, executable_for=executable_for)
+    if not single and len({r["provider"] for r in selected}) < len(selected):
+        raise ValueError("Acceptance reviewers/providers must be distinct")
+    return dict(
+        independentRequired=True, minIndependentReviewers=2, crossProviderRequired=not single
+    )
+
+
+def delivery_review_selection(catalog, fields):
+    """Complete the proposal before B; offerings never establish launch access."""
+    selected = [approvals.reviewer_tuple(r) for r in fields["reviewers"]]
+    offered = {
+        p["provider"]: [
+            approvals.reviewer_tuple(
+                dict(name=p["provider"] + "-reviewer", provider=p["provider"], **c)
+            )
+            for c in p["choices"]
+            if c["reviewPathSupported"] and c["availability"] == "offered"
+        ]
+        for p in catalog["providers"]
+        if p["executable"] and p["installed"] is not False
+    }
+    available = {p: choices for p, choices in offered.items() if choices}
+    for provider, choices in available.items():
+        if provider not in {r["provider"] for r in selected}:
+            selected.append(choices[0])
+    if len(selected) == 1 and len(available) == 1:
+        selected.append({**selected[0], "name": selected[0]["name"] + "-2"})
+    assurance = acceptance_reviewers(selected, executable_for={p: p for p in available})
+    return selected, dict(
+        stages=list(dict.fromkeys([*fields["stages"], "plan", "full-vision"])), assurance=assurance
+    )
+
+
+def authorized_acceptance_reviewers(store, reviewers):
+    selected = (
+        approvals.require_approval(store, "B")["subject"]["reviewers"]
+        if reviewers is None
+        else list(reviewers)
+    )
+    acceptance_reviewers(selected)
+    return selected
+
+
 def latest_run_id(store):
     row = store.connection.execute(
         "SELECT id FROM acceptance_runs ORDER BY rowid DESC LIMIT 1"

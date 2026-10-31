@@ -238,8 +238,7 @@ def guide(root, name):
         f"Project: {root}\n\n{TEACHING}\n\n"
         "Open a chat in this folder and describe what to build, "
         'e.g. "Build a small word-count CLI."\n\n'
-        "At Align, show available review providers/models and ask the user to pick "
-        "reviewers (deferrable until review).\n"
+        "B proposes exact plan and formal acceptance reviewers with cumulative limits.\n"
         "Host integrations are experimental until their actual planning journey is verified.\n"
         "Codex: open this folder and choose Trust. Claude Code: approve the project server\n"
         "when prompted. VS Code: review/approve seldon in workspace MCP configuration.\n\n"
