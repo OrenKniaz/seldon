@@ -253,7 +253,11 @@ def test_infrastructure_stops_remaining_scenarios(tmp_path, source, reason):
     if reason == "timeout":
         document["scenarios"][0]["actions"][0]["cli"]["stdin"] = {"utf8": "x" * 20000}
     document["scenarios"].append(dict(document["scenarios"][0], id="unperformed"))
-    results = run(document, tmp_path, TARGETS, "contracts", action_seconds=0.5)
+    # Only the deliberate stall has a short deadline; crash/output/marker cases
+    # need startup room so scheduler latency cannot replace the failure being tested.
+    results = run(
+        document, tmp_path, TARGETS, "contracts", action_seconds=0.5 if reason == "timeout" else 2
+    )
     assert [r["state"] for r in results] == ["ERROR", "ERROR"], results
     assert reason in results[0]["reason"].lower(), results
     assert results[1]["reason"] == "unperformed after earlier ERROR"
@@ -463,7 +467,7 @@ def web_document():
 
 
 def browser_readiness(tmp_path_factory):
-    """Retain one real readiness attempt and native privilege failures without browser proof."""
+    """Retain real readiness through the production launcher; startup failure is an error."""
     root = tmp_path_factory.mktemp("web-browser-readiness")
     (root / "index.html").write_text(WEB_PAGE, encoding="utf-8")
     result = run(web_document(), root, WEB_TARGET, "validation", evidence_dir=root.parent / "pngs")[
@@ -471,14 +475,6 @@ def browser_readiness(tmp_path_factory):
     ]
     receipt = root.parent / "web-browser-readiness.json"
     receipt.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    reason = result.get("reason", "")
-    if (
-        result["state"] == "ERROR"
-        and "GPU process exited unexpectedly: exit_code=-1073741790" in reason
-    ):
-        assert result["cleanup"]["quiescenceVerified"]
-        assert result["cleanup"]["activeProcessesAfterTeardown"] == 0
-        pytest.skip(f"Chromium sandbox child access denied (0xC0000022); actual ERROR: {receipt}")
     assert result["state"] == "PASS", result
     return result
 
@@ -636,9 +632,14 @@ def test_web_missing_tool_is_prelaunch_error(tmp_path, monkeypatch):
 
 
 def test_web_hung_renderer_timeout_reaps_browser_children(tmp_path, web_browser_ready):
-    """Protect real hung-renderer teardown; CLI timeout never starts Chromium descendants."""
+    """Protect renderer starvation teardown; CLI timeouts never start Chromium.
+
+    A self-rescheduling microtask models a runaway update loop without triggering
+    single-process Chromium's hot-loop crash, preserving the live-child timeout check.
+    """
     (tmp_path / "index.html").write_text(
-        WEB_PAGE + "<script>while(true){}</script>", encoding="utf-8"
+        WEB_PAGE + "<script>queueMicrotask(function spin(){queueMicrotask(spin)})</script>",
+        encoding="utf-8",
     )
     result = run(
         web_document(),

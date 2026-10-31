@@ -409,6 +409,37 @@ def test_golden_path(tmp_path, request, surface):
             assert job["status"] == "completed", job
             assert job["run"]["semanticContracts"]["state"] == "RED", job
             assert job["run"]["semanticValidation"]["state"] == "PASS", job
+            if surface == "web":
+                # Protect mode provenance and preview guidance through canonical dispatch;
+                # CLI journeys never render, and packet fixtures do not consume dispatch.
+                retained = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
+                proof = retained["semanticValidation"]["results"]
+                actions = [a for r in proof for a in r["actions"].values()]
+                assert all(a["browserMode"] in {"normal", "single-process"} for a in actions)
+                # Execute the packet's actual shell command: a quoted Windows executable
+                # without PowerShell's & looks plausible but never opens the preview.
+                from codex_harness.core.audit_process import run_audit_process
+
+                prompt = retained["beads"]["B"]["prompt"]
+                command = next(c for c in prompt.split("`") if "--preview ." in c)
+                try:
+                    preview = run_audit_process(
+                        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                        cwd=tmp_path,
+                        timeout=20,
+                    )
+                    output, cleanup = preview.stdout, preview.audit_control
+                except subprocess.TimeoutExpired as error:
+                    output, cleanup = error.output, error.audit_control
+                observed = json.loads(output)
+                assert observed.get("state") != "ERROR", observed
+                assert observed["browserMode"] in {"normal", "single-process"}
+                assert cleanup["quiescenceVerified"]
+                assert cleanup["activeProcessesAfterTeardown"] == 0
+                print(
+                    f"golden web: scenarios={len(proof)}; journeys={len(actions)}; "
+                    f"browserModes={sorted({a['browserMode'] for a in actions})}"
+                )
             assert (tmp_path / filename).is_file()
             if surface == "cli":
                 assert (
@@ -418,6 +449,7 @@ def test_golden_path(tmp_path, request, surface):
                     == b"Hello"
                 )
             call("harness_advance", to_phase="accept")
+            deadline = time.monotonic() + 90
             acceptance = call("harness_accept_run", repo=str(tmp_path), subject="product")
             while acceptance.get("result") is None and time.monotonic() < deadline:
                 time.sleep(0.1)

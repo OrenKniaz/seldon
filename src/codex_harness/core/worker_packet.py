@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import shlex
+import sys
 from pathlib import Path
 
 from codex_harness.core.graph import Bead, Plan, test_dir
@@ -529,6 +530,12 @@ def build_packet(
             else "Implement the product and your own unit tests. Preserve scenario data, contracts "
             "and launch bindings. The controller runs identical scenarios for Validation."
         )
+        if any(t.get("kind") == "web" for t in plan.semantic["targets"].values()):
+            instruction += (
+                f" Preview and keyboard-test your page in a real browser with "
+                f'`& "{sys.executable}" -B -m codex_harness.core.semantic_runner --preview .`; '
+                "close the browser when done."
+            )
         view_paragraphs = {}
         packet = "\n\n".join(
             sections := [

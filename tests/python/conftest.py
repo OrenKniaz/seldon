@@ -59,7 +59,7 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(scope="session")
 def web_browser_ready(tmp_path_factory):
-    """Share one real browser readiness result, including a retained privilege skip."""
+    """Share one real browser readiness result, through the production launcher."""
     from tests.python.core.test_semantic_runner import browser_readiness
 
     return browser_readiness(tmp_path_factory)

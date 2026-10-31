@@ -12,7 +12,7 @@ import threading
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
+from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired, call
 
 from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.semantic_schema import LIMIT, WEB, argv, content, path, validate
@@ -410,6 +410,16 @@ def run(
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--preview"]:
+        tools = web_toolchain(None, False)
+        cmd = [tools[k]["path"] for k in ("node", "adapter")]
+        cmd += [
+            "--preview",
+            str(Path(tools["playwright"]["path"]).parent),
+            tools["chromium"]["path"],
+            sys.argv[2] if len(sys.argv) > 2 else ".",
+        ]
+        raise SystemExit(call(cmd))
     if sys.argv[1:2] == ["--worker"]:
         try:
             s, targets, phase, seconds, deadline, web = json.loads(read(Path(sys.argv[2]), 131072))
