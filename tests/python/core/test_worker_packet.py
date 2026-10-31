@@ -896,10 +896,24 @@ def test_intent_core_exceeding_packet_budget_names_sizes(tmp_path):
 
     plan, repo = _checkout(tmp_path)
 
-    nodes = [dict(kind="vision", title="Locked", text="v" * 44_000, fields={})]
+    nodes = [dict(kind="vision", title="Locked", text="v" * MAX_CHARACTERS, fields={})]
 
     with pytest.raises(
         ValueError,
-        match=r"ERROR core 44008 total \d+ exceeds 44000",
+        match=rf"exceed {MAX_CHARACTERS} characters: total \d+; sections.*Goal",
     ):
         build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)
+
+
+def test_linked_intent_over_eight_thousand_characters_is_never_dropped(tmp_path):
+    """Protect long linked scope from the 8k cutoff; earlier tests use short references."""
+    plan, repo = _checkout(tmp_path)
+    requirement = "Mandatory accepted wording. " + "r" * 9000
+    nodes = [
+        dict(kind="vision", title="Locked", text="Full core intent.", fields={}),
+        dict(kind="requirement", id=plan.beads["B"].requirements[0], text=requirement),
+    ]
+    packet = build_packet(plan, plan.beads["B"], repo, None, intent_nodes=nodes)
+    excerpt = packet.split("## User intent\n")[1].split("\nSHA-256")[0]
+    assert requirement in excerpt
+    assert hashlib.sha256(excerpt.encode()).hexdigest() in packet

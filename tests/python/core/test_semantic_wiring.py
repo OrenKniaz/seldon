@@ -2022,3 +2022,57 @@ def test_ux2_sized_canonical_vision_builds_both_packets_with_verbatim_core(web_p
             assert len(excerpt) > 2000
             assert hashlib.sha256(excerpt.encode()).hexdigest() in packet
             assert len(packet) <= worker_packet.MAX_CHARACTERS
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude", "copilot"])
+def test_ux3_sized_canonical_packet_preserves_intent_and_reports_section_overflow(
+    web_plan, provider
+):
+    """Protect compiled 45k+ packets/intent; small packet views miss the UX-3 cap failure."""
+    from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
+
+    store, _ = web_plan
+    vision = store.spine().node("V1")
+    vision["text"] = "Locked landing page intent. " + "v" * 2700
+    # Real canonical scenario data, carried into SCENARIOS.json by the compiler.
+    vision["fields"]["scenarios"]["scenarios"][0]["setup"]["files"] = [
+        dict(path="data/catalog.json", utf8=json.dumps({"description": "s" * 45046}))
+    ]
+    store.upsert_node(vision)
+    lock_vision(store)
+    store.compile_template(store.workspace / "template")
+    packet = packet_view(store, "B", provider)["packet"]
+    assert 44000 < len(packet) <= PROVIDER_TOKEN_BUDGETS[provider] * 3 // 4
+    assert vision["text"] in packet
+    scenario_source = (store.workspace / "template/SCENARIOS.json").read_text(encoding="utf-8")
+    assert packet.count(scenario_source) == 1
+    plan_view = packet.split("\n\nPLAN.md\n", 1)[1].split("\n\nREQUIREMENTS.md\n", 1)[0]
+    requirement = store.spine().node("R")["text"]
+    original = (store.workspace / "template/PLAN.md").read_text(encoding="utf-8")
+    assert original.count(requirement) == 2 and plan_view.count(requirement) == 1
+    paragraph = original.split("\n\n").index(requirement) + 1
+    assert f"[Identical text: see PLAN.md, paragraph {paragraph}.]" in plan_view
+    # The scenario schema has its own 64KiB bound. Use confirmed-memory input
+    # for exact worker-cap boundaries without weakening or bypassing that schema.
+    manifest = store.compile_template(store.workspace / "template")
+    manifest_path = store.workspace / "packet-budget-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    plan = load_plan(manifest_path)
+    cap = PROVIDER_TOKEN_BUDGETS[provider] * 3 // 4
+    memory = "m" * (cap - len(packet) + len("(no confirmed memory)"))
+
+    def build(memory):
+        return worker_packet.build_packet(
+            plan,
+            {"id": "B", **manifest["beads"]["B"]},
+            store.workspace / "template",
+            memory,
+            provider=provider,
+            intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
+        )
+
+    assert len(build(memory)) == cap
+    with pytest.raises(ValueError, match=rf"exceed {cap} characters") as error:
+        build(memory + "m")
+    for section in ("User intent", "PLAN.md", "REQUIREMENTS.md", "SCENARIOS.json", "total"):
+        assert section in str(error.value)

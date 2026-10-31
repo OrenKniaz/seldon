@@ -255,3 +255,29 @@ One directory-symlink test skipped for unavailable Windows privilege in both run
 
 - MCP tool argument and result structures, `structuredContent`, and all proof, approval and gate semantics.
 - Owned by other lanes: async acceptance, audit helper attribution, worker packets, and dispatch.
+
+
+## PACKET-CAP: UX-3 prelaunch refusal (2026-10-31)
+
+Owner: worker_packet.py / worker_packet_budget.py. Slot-35 publication
+8ea24b3dcfe768dd742eb966b74f8aa6634dfa9dce92b6577ed7e2c61b335dca,
+B1: supported read-only packet_view reproduced 45,046 characters against the
+44,000-character limit; SCENARIOS.json contributed 30,337 and PLAN.md 8,205.
+Disposition: repaired locally with provider-budget caps, mandatory linked intent
+preserved in full, section-size errors and lossless references for repeated generated
+Markdown paragraphs. No source publication, worker/provider launch or acceptance credit.
+Scope excludes planner scenario/schema changes, execution approval and provider limits.
+Exit check: canonical 45k+ packet compiles and builds for all three providers; exact
+provider cap succeeds, cap+1 reports sections, long linked intent survives, original
+slot-35 B1/B2 packet_view succeeds without changing the store/template. Source evidence
+and remaining execution boundary: ../packet-cap-lane-report.md. The next product proof
+requires separately authorized same-publication execution, not another blind retry.
+
+Owning-gate follow-ups (baseline-confirmed, outside PACKET-CAP): three canonical
+Contracts/Build cases refuse worker admission (owner: execution confirmation fixture);
+exit: supported admission consumes the canonical granted scope in those three cases.
+Compact public responses exceed their 6,000-character assertion in long workspace paths
+(6,095 candidate / 6,132 baseline; owner: planner view size budget); exit: compact reads
+stay below that bound for the long-path fixture. The same four test IDs fail with the
+original d0e2b0b packet implementation. Chromium sandbox access denied (0xC0000022)
+remains an explicit skip, with no equivalent-route retry or browser acceptance claim.

@@ -12,11 +12,11 @@ from pathlib import Path
 from codex_harness.core.graph import Bead, Plan, test_dir
 from codex_harness.core.planner_vision import SECTIONS, design_references, readable, taste_fields
 from codex_harness.core.proof_imports import protected_helpers, python_import_paths
+from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
 from codex_harness.core.runners import resolve_runner
 from codex_harness.core.test_audit import PROSPECTIVE_WARNING
+from codex_harness.core.worker_packet_budget import MAX_CHARACTERS, check_packet, compact_view
 
-# Existing contract budget plus 24 KB of proof and 8 KB of dependency context.
-MAX_CHARACTERS = 44_000
 PROOF_FILE_BYTES = 12_000
 PROOF_TOTAL_BYTES = 24_000
 INTERFACE_BYTES = 8_000
@@ -441,6 +441,7 @@ def build_packet(
     exceed the cap, refuse launch instead of silently dropping accepted scope.
     """
     repo = Path(repo)
+    max_characters = min(MAX_CHARACTERS, PROVIDER_TOKEN_BUDGETS[provider] * 3 // 4)
     if isinstance(bead, Bead):
         manifest_path = plan.root / "sample.json"
         manifest = (
@@ -488,11 +489,10 @@ def build_packet(
         )
 
     def fit_intent(packet):
+        check_packet(packet, sections, max_characters)
         if not intent:
             return packet
-        remaining = MAX_CHARACTERS - len(packet)
-        if remaining < 0:
-            raise ValueError(f"ERROR core {len(full)} total {len(packet)} exceeds {MAX_CHARACTERS}")
+        remaining = max_characters - len(packet)
         excerpt = full
         for node in sorted(
             (node for node in intent_nodes if node["kind"] == "requirement"),
@@ -501,12 +501,16 @@ def build_packet(
             addition = f"\n\n{node['id']}: " + (
                 node["text"] if node["id"] in bead.requirements else node.get("title", node["id"])
             )
-            if len(excerpt) + len(addition) <= min(8000, len(full) + remaining):
+            if node["id"] in bead.requirements or len(excerpt) + len(addition) <= min(
+                8000, len(full) + remaining
+            ):
                 excerpt += addition
         rendered = intent.replace(full, excerpt, 1).replace(
             hashlib.sha256(full.encode()).hexdigest(), hashlib.sha256(excerpt.encode()).hexdigest()
         )
-        return packet.replace(intent, rendered, 1)
+        packet = packet.replace(intent, rendered, 1)
+        check_packet(packet, [s.replace(intent, rendered, 1) for s in sections], max_characters)
+        return packet
 
     if plan.semantic is not None:
         phase = raw_bead["semanticPhase"]
@@ -525,8 +529,9 @@ def build_packet(
             else "Implement the product and your own unit tests. Preserve scenario data, contracts "
             "and launch bindings. The controller runs identical scenarios for Validation."
         )
+        view_paragraphs = {}
         packet = "\n\n".join(
-            [
+            sections := [
                 f"semantic-v1 {phase}; bead {bead.id}; plan {plan.plan_revision}.",
                 instruction,
                 *([intent] if intent else []),
@@ -539,7 +544,9 @@ def build_packet(
                 json.dumps(raw_bead, sort_keys=True),
                 # SCENARIOS.json already carries the manifest's semantic block verbatim.
                 *(
-                    name + "\n" + (repo / name).read_text(encoding="utf-8")
+                    name
+                    + "\n"
+                    + compact_view(name, (repo / name).read_text(encoding="utf-8"), view_paragraphs)
                     for name in plan.requirement_files
                     if name not in reference_names
                 ),
@@ -551,12 +558,7 @@ def build_packet(
                 memory_text or "(no confirmed memory)",
             ]
         )
-        packet = fit_intent(packet)
-        if len(packet) > MAX_CHARACTERS:
-            raise ValueError(
-                f"worker packet contract/spec/interfaces exceed {MAX_CHARACTERS} characters"
-            )
-        return packet
+        return fit_intent(packet)
     document = repo / "PLAN.md"
     texts = _plan_texts(document.read_text(encoding="utf-8")) if document.exists() else {}
     refs = [{"id": node, "revision": revision} for node, revision in bead.requirement_refs]
@@ -872,14 +874,9 @@ def build_packet(
 
     limit = max((len(body) for _, body, _ in bodies), default=0)
     packet = render(limit)
-    while len(packet) > MAX_CHARACTERS and limit:
+    while len(packet) > max_characters and limit:
         limit = max(
-            0, limit - max(1, (len(packet) - MAX_CHARACTERS + len(bodies) - 1) // len(bodies))
+            0, limit - max(1, (len(packet) - max_characters + len(bodies) - 1) // len(bodies))
         )
         packet = render(limit)
-    packet = fit_intent(packet)
-    if len(packet) > MAX_CHARACTERS:
-        raise ValueError(
-            f"worker packet contract/spec/interfaces exceed {MAX_CHARACTERS} characters"
-        )
-    return packet
+    return fit_intent(packet)
