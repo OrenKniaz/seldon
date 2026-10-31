@@ -199,9 +199,9 @@ def test_execution_repeat_after_response_requires_a_new_question(project):
         server.close()
 
 
-def record(server, question, quote="Approve"):
+def record(server, question, quote="Approve", *, apply_budget=True):
     """A separate typed source-only external-message fixture, not an observed human reply."""
-    return tool(
+    result = tool(
         server,
         "harness_record_chat_confirmation",
         gate=question.get("gate", "execution"),
@@ -213,6 +213,22 @@ def record(server, question, quote="Approve"):
         quote_sha256=hashlib.sha256(quote.encode()).hexdigest(),
         actor_label="source-only external tester; identity and source unverified",
     )
+    if (
+        apply_budget
+        and question.get("gate") == "plan-execution"
+        and result.get("structuredContent", {}).get("state") == "approved"
+    ):
+        from codex_harness.core import provider_call_budget as budget
+
+        scope = question["scopes"]["review-budget"]
+        if budget.planning_review_budget(server.store)["maxStarts"] != scope["maxStarts"]:
+            budget.register_planning_review_budget(
+                server.store,
+                scope["campaign"],
+                scope["maxStarts"],
+                amendment_request_id=question["request_id"],
+            )
+    return result
 
 
 def test_run22_renew_reviewers_with_stale_selection_retains_shared_cap(
@@ -351,9 +367,10 @@ def test_run22_renew_reviewers_with_stale_selection_retains_shared_cap(
         public("harness_compile")
         options["expected_revision"] = store.manifest_revision()
         fresh = question()
+        # BR-1: this unconfirmed replacement is normalized; only confirmed names are retained.
         tuples = fresh["scopes"]["review-budget"]["reviewers"]
         assert tuples == [
-            dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="medium"),
+            dict(name="codex-reviewer", provider="codex", model="gpt-6.1-sol", effort="medium"),
             dict(
                 name="claude-reviewer",
                 provider="claude",
@@ -379,10 +396,13 @@ def test_run22_renew_reviewers_with_stale_selection_retains_shared_cap(
         assert len(launches) == budget.planning_review_budget(store)["spentAdmissions"] == 3
         # Same admission owner is used by acceptance reviews; no new campaign allowance.
         assert budget.claim_planning_review_start(store, tuples[1]) == 4
+        assert old_b["scopes"]["review-budget"]["maxStarts"] == 6
+        assert budget.claim_planning_review_start(store, tuples[0]) == 5
+        assert budget.claim_planning_review_start(store, tuples[1]) == 6
         with pytest.raises(ValueError, match="cap-exhausted"):
             budget.claim_planning_review_start(store, tuples[0])
-        assert budget.planning_review_budget(store)["maxStarts"] == 4
-        assert budget.planning_review_budget(store)["spentAdmissions"] == 4
+        assert budget.planning_review_budget(store)["maxStarts"] == 6
+        assert budget.planning_review_budget(store)["spentAdmissions"] == 6
     finally:
         server.close()
 
@@ -835,10 +855,13 @@ def test_b_binds_mixed_approval_routes_until_fresh_consent(semantic_plan, monkey
                 not fresh["isError"] and not record(server, fresh["structuredContent"])["isError"]
             )
             assert not tool(server, "harness_advance", to_phase="roundtable")["isError"]
+        approved_b = (
+            b["structuredContent"] if route == "native_a_explicit_b" else fresh["structuredContent"]
+        )
         reviewed = tool(
             server,
             "harness_roundtable",
-            reviewers=[dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high")],
+            reviewers=[approved_b["scopes"]["review-budget"]["reviewers"][0]],
             max_rounds=1,
             max_total=1,
             timeout=5,

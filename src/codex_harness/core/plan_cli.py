@@ -24,6 +24,7 @@ from codex_harness.core.plan_store import PHASES
 from codex_harness.core.planner_connection import connection_reply
 from codex_harness.core.planner_nodes import batch_nodes as write_batch_nodes
 from codex_harness.core.preflight import diagnostic_status
+from codex_harness.core.provider_call_budget import DEFAULT_REVIEW_ROUNDS
 from codex_harness.core.spine import compile_manifest
 
 TYPED_DECISION_SCHEMAS = {"dot-intake-v1", "dot-reviewer-selection-v1", "dot-wave-map-v1"}
@@ -412,8 +413,9 @@ def parser() -> argparse.ArgumentParser:
     baseline.add_argument(
         "--baseline-ref", help="Git baseline ref; defaults to HEAD when available"
     )
-    commands["roundtable"].add_argument("--max-rounds", type=int, default=2)
+    commands["roundtable"].add_argument("--max-rounds", type=int, default=DEFAULT_REVIEW_ROUNDS)
     commands["review-budget"].add_argument("--max-starts", type=int, required=True)
+    commands["review-budget"].add_argument("--amend-request", help="Approved fresh B request ID")
     readiness_selection = commands["readiness"].add_mutually_exclusive_group()
     readiness_selection.add_argument("--beads", help="Comma-separated bead ids")
     readiness_selection.add_argument("--sample", type=int)
@@ -467,7 +469,9 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
 
         if server.store is None:
             server.store = open_plan_store(server.workspace)
-        data = register_planning_review_budget(server.store, args.campaign, args.max_starts)
+        data = register_planning_review_budget(
+            server.store, args.campaign, args.max_starts, amendment_request_id=args.amend_request
+        )
         return _reply(server, json.dumps(data, ensure_ascii=False, indent=2)), data
     if command == "advance" and (args.statement is not None or args.by != "planner"):
         if args.to != "roundtable" or server._store().phase() != "plan":

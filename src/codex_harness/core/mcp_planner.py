@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import uuid4
 
+from codex_harness.core import planner_confirmations as confirmations
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
 from codex_harness.core.plan_store import (
@@ -530,7 +531,7 @@ TOOLS = [
         {
             "gate": {"type": "string", "enum": CHAT_GATES},
             "include_detail": {"type": "boolean"},
-            "reviewer_node_id": STRING,
+            **confirmations.CHAT_REVIEW_SCOPE,
             "execution": _object(
                 {
                     "expected_revision": STRING,
@@ -2756,7 +2757,6 @@ class PlannerServer:
         return connection_reply(reply, self.workspace, status)
 
     def _prepare_chat_question(self, arguments, *, _expected_request_id=None):
-        from codex_harness.core.planner_confirmations import prepare_chat_confirmation
         from codex_harness.core.planner_execution import prepare_chat_execution
 
         if self._pending_confirmation is not None:
@@ -2770,11 +2770,11 @@ class PlannerServer:
         else:
             if "execution" in arguments and arguments["gate"] != "plan-execution":
                 raise ValueError("chat-planning-question-refuses-execution-fields")
-            question = prepare_chat_confirmation(
+            question = confirmations.prepare_chat_confirmation(
                 self._store(),
                 arguments["gate"],
                 _expected_request_id=_expected_request_id,
-                **{k: arguments[k] for k in ("execution", "reviewer_node_id") if k in arguments},
+                **{k: arguments[k] for k in confirmations.CHAT_SCOPE if k in arguments},
             )
         return {**question, "source_verified": False, "human_identity_verified": False}
 

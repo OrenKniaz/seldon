@@ -21,10 +21,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from codex_harness.core import provider_call_budget as review_budget
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
-from codex_harness.core.provider_call_budget import claim_planning_review_start
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
@@ -1188,7 +1188,7 @@ def _review_shard(
             if before_launch is not None:
                 before_launch()
             if runner is None:
-                claim_planning_review_start(store, reviewer)
+                review_budget.claim_planning_review_start(store, reviewer)
             checking_launch = False
         attempted = True
         response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
@@ -2056,7 +2056,7 @@ def assess_execution_findings(store, **request):
         if _execution_context(store, request) != header["context"]:
             raise ValueError("execution-prelaunch-selection-changed")
         with TemporaryDirectory(prefix="harness-execution-review-") as cwd:
-            claim_planning_review_start(store, reviewer)
+            review_budget.claim_planning_review_start(store, reviewer)
             attempted = True
             response = _run(launch, Path(cwd), request["timeout"], raw=True)
             # Preserve the actual return before temporary-directory cleanup.
@@ -2102,7 +2102,7 @@ def run_roundtable(
     runner=None,
     executable_for=None,
     timeout=900,
-    max_rounds=2,
+    max_rounds=review_budget.DEFAULT_REVIEW_ROUNDS,
     max_total=None,
     token_budgets=None,
 ) -> dict:
@@ -2151,7 +2151,7 @@ def run_roundtable(
         for provider in dict.fromkeys(item["provider"] for item in selected)
     }
     # Reserve attempts before launching so concurrent calls cannot exceed the budget.
-    with store._transaction():
+    with review_budget.review_transaction(store):
         if store._revision() != spine.plan_revision() or store.manifest_revision() != revision:
             raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
         _table(store)

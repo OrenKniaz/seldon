@@ -22,6 +22,11 @@ RESPONSE = "confirmation-responded"
 REVIEWER_CONFIRMATION = "reviewer-selection-confirmed"
 CHAT = "chat-confirmation"
 NATIVE = "mcp-client-elicitation"
+CHAT_REVIEW_SCOPE = {
+    "reviewer_node_id": {"type": "string", "minLength": 1},
+    "review_max_starts": {"type": "integer", "minimum": 1, "maximum": 10},
+}
+CHAT_SCOPE = ("execution", *CHAT_REVIEW_SCOPE)
 
 
 def _chat_question(request, revision):
@@ -378,10 +383,69 @@ def approval_credit(store: PlanStore, gate: str, revision: str) -> dict | None:
     return None
 
 
+def _propose_b_reviewers(store, execution, node_id):
+    from codex_harness.core import intake, roundtable
+    from codex_harness.core.planner_execution import execution_scope
+
+    execution_scope(store, **execution, _candidate=True)
+    spine = Spine(store._data())
+    selected = store._latest_draft_event("reviewer-selection-recorded")
+    node_id = node_id or (selected or {}).get("nodeId")
+    if not node_id:
+        return execution, node_id
+    node = reviewer_confirmation_target(store, spine, node_id, allow_existing=True)[0]
+    fields, defaults = node["fields"], roundtable.default_reviewers()
+    if fields["confirmation"] is not None:
+        chosen = fields["reviewers"]
+        if len(chosen) < 2 or {r["provider"] for r in chosen} != {r["provider"] for r in defaults}:
+            raise ValueError("Confirmed kickoff reviewers require current provider coverage")
+        roundtable.coverage(chosen)
+        return execution, node_id
+    catalog = store._latest_draft_event("reviewer-catalog-recorded")
+    providers = {p["provider"]: p for p in catalog["catalog"]["providers"]} if catalog else {}
+    if any(not providers.get(r["provider"], {}).get("choices") for r in defaults):
+        catalog = intake.validate_catalog(
+            {"discovery": "offline", "userModels": {r["provider"]: r["model"] for r in defaults}}
+        )
+        catalog["providers"] = [
+            providers[p["provider"]] if providers.get(p["provider"], {}).get("choices") else p
+            for p in catalog["providers"]
+        ]
+        catalog.pop("digest")
+        catalog = store.record_reviewer_catalog(catalog, spine.plan_revision())
+        providers = {p["provider"]: p for p in catalog["catalog"]["providers"]}
+    for reviewer in defaults:
+        choice = providers[reviewer["provider"]]["choices"][0]
+        reviewer.update({k: choice[k] for k in ("model", "effort", "choiceId")})
+    fields.update(
+        catalogId=catalog["catalog"]["id"],
+        catalogDigest=catalog["catalog"]["digest"],
+        reviewers=defaults,
+        stages=sorted(set([*fields["stages"], "plan", "full-vision"])),
+    )
+    fields["assurance"]["crossProviderRequired"] = len({r["provider"] for r in defaults}) > 1
+    fields["recommendation"]["choiceIds"] = list(dict.fromkeys(r["choiceId"] for r in defaults))
+    node["text"] = roundtable.coverage(defaults).get("reviewIndependence", "cross-provider")
+    if node == spine.node(node_id):
+        return execution, node_id
+    store.record_reviewer_selection(node, spine.plan_revision())
+    manifest = store.compile_template(store.workspace / "template")
+    return {**execution, "expected_revision": manifest["planRevision"]}, node["id"]
+
+
 def prepare_confirmation(
-    store, gate, *, _chat=False, _expected_request_id=None, execution=None, reviewer_node_id=None
+    store,
+    gate,
+    *,
+    _chat=False,
+    _expected_request_id=None,
+    execution=None,
+    reviewer_node_id=None,
+    review_max_starts=None,
 ):
     """Persist exactly what the native client will display for the current gate."""
+    if gate == "plan-execution" and execution is not None:
+        execution, reviewer_node_id = _propose_b_reviewers(store, execution, reviewer_node_id)
     with store._transaction():
         if gate not in ("align", "vision-lock", "align+vision-lock", "plan-execution"):
             raise PlanStoreError("plan-gate-invalid", str(gate))
@@ -418,17 +482,29 @@ def prepare_confirmation(
                 raise PlanStoreError("plan-expansion-required", "Prepare expansion before consent")
             request["scopes"] = {g: revision for g in ("align", "vision-lock")}
         if gate == "plan-execution":
+            from codex_harness.core import provider_call_budget as review_budget
             from codex_harness.core.planner_execution import _control_digest, execution_scope
-            from codex_harness.core.provider_call_budget import planning_review_budget
 
-            budget = planning_review_budget(store)
+            budget = review_budget.planning_review_budget(store)
             if execution is None or budget is None:
                 raise ValueError("combined-execution-and-review-budget-required")
+            budget = {k: v for k, v in budget.items() if k != "spentAdmissions"}
+            if review_max_starts is None:
+                reviewers = (
+                    spine.node(reviewer_node_id)["fields"]["reviewers"] if reviewer_node_id else []
+                )
+                starts = len(reviewers) * (review_budget.DEFAULT_REVIEW_ROUNDS + 1)
+                review_max_starts = max(budget["maxStarts"], starts)
+            if type(review_max_starts) is not int or not 1 <= review_max_starts <= 10:
+                raise ValueError("planning-review-budget-invalid-scope")
+            request["reviewBudgetPreviousDigest"] = review_budget._review_digest(budget)
+            budget["maxStarts"] = review_max_starts
+            request["card"] += f"\nPrevious review budget: {request['reviewBudgetPreviousDigest']}"
             execution = execution_scope(store, **execution, _candidate=True)
             request["scopes"] = {
                 "plan-lock": revision,
                 "publish": execution["manifestDigest"],
-                "review-budget": {k: v for k, v in budget.items() if k != "spentAdmissions"},
+                "review-budget": budget,
                 "execution": execution,
                 "validation": execution,
             }

@@ -8,10 +8,22 @@ This is not provider quota verification, authentication or current liveness.
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from codex_harness.core.record_io import open_record_read, read_record_json, write_record_json_once
+
+DEFAULT_REVIEW_ROUNDS = 2
+
+
+@contextmanager
+def review_transaction(store):
+    from codex_harness.core.planner_confirmations import combined_credit
+
+    with store._transaction():
+        combined_credit(store, "review-budget")
+        yield
 
 
 def verify_job(directory, record=None):
@@ -188,16 +200,23 @@ def claim_call(directory, record, attempt_dir, *, timeout=None):
     raise ValueError("provider-call-cap-exhausted")
 
 
+def _review_digest(original):
+    return hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest()
+
+
 def _planning_review_originals(store):
-    """Cross-check sticky project originals; absence alone retains legacy behavior."""
+    """Check retained originals against their admission-time budget in event order."""
     root = store.path.parent / "planning-review-budget"
     registrations = store.connection.execute(
         "SELECT payload_json FROM events WHERE kind='planning-review-budget-registered' ORDER BY id"
     ).fetchall()
     claims = store.connection.execute(
-        "SELECT payload_json FROM events WHERE kind='planning-review-start-claimed' ORDER BY id"
+        "SELECT id, payload_json FROM events WHERE kind='planning-review-start-claimed' ORDER BY id"
     ).fetchall()
-    if not registrations and not claims and not root.exists():
+    amendments = store.connection.execute(
+        "SELECT id,payload_json FROM events WHERE kind='planning-review-budget-amended' ORDER BY id"
+    ).fetchall()
+    if not (registrations or claims or amendments or root.exists()):
         return None, []
     try:
         if len(registrations) != 1 or root.is_symlink():
@@ -215,8 +234,14 @@ def _planning_review_originals(store):
             or read_record_json(root / "registration.json") != original
         ):
             raise ValueError("registration changed")
-        digest = hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest()
-        records = [json.loads(row[0]) for row in claims]
+        digests = [(0, _review_digest(original))]
+        for event_id, payload in amendments:
+            amendment = json.loads(payload)
+            if amendment["previousDigest"] != _review_digest(original):
+                raise ValueError("amendment changed")
+            original = {**original, "maxStarts": amendment["maxStarts"]}
+            digests.append((event_id, _review_digest(original)))
+        records = [json.loads(row[1]) for row in claims]
         if len(records) > original["maxStarts"]:
             raise ValueError("claims exceed original cap")
         expected = {f"{ordinal:08d}.json" for ordinal in range(1, len(records) + 1)}
@@ -227,7 +252,10 @@ def _planning_review_originals(store):
             if (
                 not isinstance(record, dict)
                 or set(record) != {"registrationDigest", "ordinal", "reviewer", "pid"}
-                or record["registrationDigest"] != digest
+                or record["registrationDigest"]
+                != next(
+                    digest for event, digest in reversed(digests) if event < claims[ordinal - 1][0]
+                )
                 or type(record["ordinal"]) is not int
                 or record["ordinal"] != ordinal
                 or not isinstance(record["reviewer"], dict)
@@ -246,8 +274,8 @@ def planning_review_budget(store):
     return None if original is None else {**original, "spentAdmissions": len(claims)}
 
 
-def register_planning_review_budget(store, campaign, max_starts):
-    """Prepare once through the public CLI, before any child; never reset a cap."""
+def register_planning_review_budget(store, campaign, max_starts, *, amendment_request_id=None):
+    """Register or consent to a higher shared cap; never reset or refund claims."""
     if (
         not isinstance(campaign, str)
         or not campaign.strip()
@@ -262,13 +290,47 @@ def register_planning_review_budget(store, campaign, max_starts):
         campaign=campaign,
         maxStarts=max_starts,
     )
+    root = store.path.parent / "planning-review-budget"
     with store._transaction():
         original, claims = _planning_review_originals(store)
         if original is not None:
-            if proposed != original:
+            if amendment_request_id is not None:
+                from codex_harness.core import acceptance_recovery
+                from codex_harness.core.planner_confirmations import combined_credit
+                from codex_harness.core.roundtable import _execution_events as assessments
+
+                authority = combined_credit(store, "review-budget")
+                scope = authority["scopes"]["review-budget"] if authority else {}
+                if (
+                    not authority
+                    or authority["request_id"] != amendment_request_id
+                    or authority.get("reviewBudgetPreviousDigest") != _review_digest(original)
+                    or {k: v for k, v in scope.items() if k != "reviewers"} != proposed
+                    or campaign != original["campaign"]
+                    or not scope.get("reviewers")
+                    or max_starts <= original["maxStarts"]
+                    or any(not a["admitted"] for a in acceptance_recovery.attempt_summaries(store))
+                    or len(assessments(store, "execution-assessment-reserved"))
+                    != len(assessments(store, "execution-assessment-consumed"))
+                    or (
+                        store.connection.execute(
+                            "SELECT 1 FROM sqlite_master WHERE name='review_attempts'"
+                        ).fetchone()
+                        and store.connection.execute(
+                            "SELECT 1 FROM review_attempts "
+                            "WHERE id NOT IN (SELECT id FROM review_runs)"
+                        ).fetchone()
+                    )
+                ):
+                    raise ValueError("planning-review-budget-amendment-stale-or-inflight")
+                amendment = dict(maxStarts=max_starts, requestId=amendment_request_id)
+                amendment["previousDigest"] = _review_digest(original)
+                store._event("planning-review-budget-amended", amendment)
+            elif proposed != original:
                 raise ValueError("planning-review-budget-immutable-scope")
         else:
-            root = store.path.parent / "planning-review-budget"
+            if amendment_request_id is not None:
+                raise ValueError("planning-review-budget-registration-required")
             root.mkdir()
             (root / "claims").mkdir()
             write_record_json_once(root / "registration.json", proposed)
@@ -305,9 +367,7 @@ def claim_planning_review_start(store, reviewer):
             raise ValueError("planning-review-start-cap-exhausted")
         ordinal = len(claims) + 1
         record = dict(
-            registrationDigest=hashlib.sha256(
-                json.dumps(original, sort_keys=True).encode()
-            ).hexdigest(),
+            registrationDigest=_review_digest(original),
             ordinal=ordinal,
             reviewer=reviewer,
             pid=os.getpid(),
