@@ -393,7 +393,24 @@ def test_dispatch_failed_bead_blocks_transitive_dependents_but_independent_conti
             "C": lambda path: pytest.fail("C launched"),
         },
     )
-    assert record["beads"]["A"]["status"] == "rejected: no source change"
+    assert record["beads"]["A"]["status"] == "integrated validation failed"
     assert record["beads"]["B"]["status"] == "blocked: dependency A failed"
     assert record["beads"]["C"]["status"] == "blocked: dependency A failed"
     assert record["beads"]["D"]["status"] == STATUS_MOCK_ONLY
+
+    # A successful no-op is validated against integration HEAD; catches a change-count
+    # admission rule. The failed attempt above cannot distinguish no-op from bad output.
+    satisfied = _tiny_plan(tmp_path / "satisfied", dependent=True)
+    for key in ("A", "B"):
+        (satisfied / f"template/{key}.py").write_text("VALUE = 1\n")
+    record = run_plan(
+        satisfied,
+        work_root=tmp_path / "satisfied-runs",
+        fake_workers={"A": lambda _: None, "B": lambda _: None},
+    )
+    assert all(
+        b["status"] == "already-satisfied" and b["guard"]["passed"]
+        for b in record["beads"].values()
+    )
+    assert all(b["integrated"]["validation"]["passed"] for b in record["beads"].values())
+    assert _git(Path(record["repo"]), "rev-list", "--count", "HEAD") == "1"

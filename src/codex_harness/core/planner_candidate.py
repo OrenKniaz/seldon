@@ -307,12 +307,9 @@ def record_judgment(store, *, repo, check, passed, statement, by):
     )
     with store._transaction():
         store._event("candidate-judgment", row)
-    row["next"] = (
-        f"harness_recovery mode=resolve job_id={job_id} choice=revalidate "
-        "reason=<consume candidate-bound judgments within B>"
-        if run["semanticValidation"]["state"] != "PASS"
-        else "harness_accept_run repo=<project-folder> subject=product; then formal review and C"
-    )
+    from codex_harness.core.planner_consent_views import status_next
+
+    row["next"] = status_next(store.status(), store=store)
     return row
 
 

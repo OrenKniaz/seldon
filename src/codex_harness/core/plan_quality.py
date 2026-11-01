@@ -19,6 +19,7 @@ from tempfile import TemporaryDirectory
 
 from codex_harness.core.graph import PlanError, load_plan, topological_order
 from codex_harness.core.plan_store import PHASES, PlanStore, PlanStoreError
+from codex_harness.core.reviewer_evidence import single_provider_notice
 from codex_harness.core.spine import Spine, SpineError, compile_manifest
 from codex_harness.core.spine_render import render_markdown
 
@@ -58,7 +59,7 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
     ).fetchone()
     if not exists:
-        return "fail", {"tableExists": False}, "Run and record the cross-provider roundtable."
+        return "fail", {"tableExists": False}, "Run and record the roundtable."
     columns = {row[1] for row in store.connection.execute("PRAGMA table_info(review_runs)")}
     if (
         not {"id", "round_id", "plan_revision", "reviewer", "provider", "exit_code", "finished_at"}
@@ -78,7 +79,7 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
             "ORDER BY finished_at DESC, id DESC LIMIT 1"
         ).fetchone()
     if latest is None:
-        return "fail", {"roundId": None}, "Run and record the cross-provider roundtable."
+        return "fail", {"roundId": None}, "Run and record the roundtable."
     runs = store.successful_reviews(revision)
     if stale and any(row.get("carriedForward") for row in runs):
         stale = False
@@ -152,7 +153,7 @@ def _roundtable(store: PlanStore) -> tuple[str, dict, str]:
     passed = len(reviewers) >= 2 and (len(providers) >= 2 or single) and not unresolved
     advice = "" if passed else "Resolve all open findings."
     if single:
-        advice = "Single-provider review; only one provider was available. " + advice
+        advice = single_provider_notice({"reviewers": runs}) + " " + advice
     elif len(providers) == 1:
         advice = (
             "Only one provider is available in the successful review set; "

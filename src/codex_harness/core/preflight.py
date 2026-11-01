@@ -1,4 +1,4 @@
-"""Read-only prerequisite observations; never opens a store or launches a provider."""
+"""Read-only prerequisites and supplied planning inputs; never launches a provider."""
 
 from __future__ import annotations
 
@@ -24,18 +24,20 @@ def _path_status(path: Path, *, directory: bool) -> dict:
         "status": "available" if correct_kind else "unavailable",
         "reason": "Existence only; contents and access not verified"
         if correct_kind
-        else "Expected directory"
-        if directory
-        else "Expected file",
+        else f"Expected {'directory' if directory else 'file'}",
     }
 
 
-def preflight_report(workspace: str | Path, providers=None, *, executable_for=None) -> dict:
-    """Reuse canonical discovery and normal command builders without executing them.
-
-    executable_for is the existing resolver's injection seam for unit fixtures.
-    No credential/config files, database contents, or provider versions are read.
-    """
+def preflight_report(
+    workspace: str | Path,
+    providers=None,
+    *,
+    executable_for=None,
+    execution=None,
+    catalog=None,
+    reviewer_node=None,
+) -> dict:
+    """Observe executables and canonical planning prerequisites without executing them."""
     if providers is None:
         providers = list(SUPPORTED_PROVIDERS)
     if (
@@ -69,6 +71,21 @@ def preflight_report(workspace: str | Path, providers=None, *, executable_for=No
                 "requestedProtectionNotes": list(launch.protections),
             }
         )
+    from codex_harness.core.plan_store import open_plan_store_readonly
+    from codex_harness.core.planner_confirmations import planning_prerequisites
+    from codex_harness.core.planner_schema import typed_draft_help
+
+    missing = (
+        "harness_plan_start reviewer-catalog-required reviewer-selection-required-before-B "
+        "execution.expected_revision execution.workers execution.call_cap"
+    ).split()
+    revision = "unknown"
+    if (workspace / ".codex-harness/plan.sqlite3").is_file():
+        with open_plan_store_readonly(workspace) as store:
+            revision = store._revision()
+            _, missing = planning_prerequisites(
+                store, execution, catalog=catalog, reviewer_node=reviewer_node
+            )
     return {
         "schema": "seldon-preflight-v1",
         "workspace": _path_status(workspace, directory=True),
@@ -77,6 +94,9 @@ def preflight_report(workspace: str | Path, providers=None, *, executable_for=No
         ),
         "template": _path_status(workspace / "template", directory=True),
         "providers": observations,
+        "planningPrerequisites": missing,
+        "planRevision": revision,
+        "reviewerContract": typed_draft_help("harness_reviewer_choice"),
         "unknown": {"planValidity": "unknown", "network": "unknown", "workerSuccess": "not-proven"},
         "executionReadiness": "not-proven",
         "didRunProvider": False,
@@ -84,12 +104,12 @@ def preflight_report(workspace: str | Path, providers=None, *, executable_for=No
     }
 
 
-def diagnostic_status(workspace: Path) -> dict:
+def diagnostic_status(workspace: Path, report=None) -> dict:
     """Retain the planner envelope without claiming to have read current planning truth."""
     return {
         "name": workspace.name,
         "phase": "unknown",
-        "plan_revision": "unknown",
+        "plan_revision": (report or {}).get("planRevision", "unknown"),
         "open_clarifications": "unknown",
         "pending_gate": "preflight-only",
     }
@@ -111,7 +131,6 @@ def render_preflight(report: dict) -> str:
             f"  - Requested policy only: {note}" for note in item["requestedProtectionNotes"]
         )
     lines.append("- Plan validity and network UNKNOWN; actual worker success NOT PROVEN.")
-    lines.append(
-        "- No provider launched; no credentials/config inspected; planning/proof gates unchanged."
-    )
+    lines.extend("- Missing: " + issue for issue in report["planningPrerequisites"])
+    lines.append(report["reviewerContract"]["approvalRule"])
     return "\n".join(lines)

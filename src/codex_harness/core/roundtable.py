@@ -27,7 +27,7 @@ from codex_harness.core.approvals import require_approval
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
-from codex_harness.core.reviewer_evidence import single_provider_notice
+from codex_harness.core.reviewer_evidence import review_tier, single_provider_notice
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
@@ -620,16 +620,12 @@ def default_reviewers(*, executable_for=None) -> list[dict]:
     return selected
 
 
-def coverage(selected, *, executable_for=None):
-    providers = {item["provider"] for item in selected}
-    if len(selected) < 2 or len(providers) != 1:
-        return {}
-    available = {r["provider"] for r in _REVIEWERS if _executable(r["provider"], executable_for)}
-    if providers != available or len(selected) != 2:
-        raise ValueError(
-            f"Cross-subscription required; select reviewers covering {sorted(available)}"
-        )
-    return {"reviewIndependence": "single-provider"}
+def coverage(selected):
+    return (
+        {"reviewIndependence": "single-provider"}
+        if len(selected) >= 2 and review_tier(selected) == "same-provider"
+        else {}
+    )
 
 
 def _run(launch, cwd: Path, timeout: int, *, raw=False):
@@ -746,21 +742,23 @@ def _parse_review_return(store, reviewer, shard, response, *, mocked):
     }
     known |= mapping.keys()
     for item in _last_array(_response(output, reviewer["provider"])):
-        reason = _invalid_reason(item, known)
+        reason = _invalid_reason(item)
         if reason:
             record["rejected"].append(
                 {"status": "rejected-unparsed", "reason": reason, "finding": item}
             )
         else:
-            for owner in mapping.get(item["node_id"], [item["node_id"]]):
-                valid.append(
-                    {
-                        **item,
-                        "node_id": owner,
-                        **({"scenarioId": item["node_id"]} if item["node_id"] in mapping else {}),
-                        "outOfShard": owner not in {*shard["nodeIds"], "plan"},
-                    }
+            reported = item["node_id"]
+            # Reviewer headings belong to the whole plan, never invented spine IDs.
+            for owner in mapping.get(reported, [reported if reported in known else "plan"]):
+                finding = dict(
+                    item, node_id=owner, outOfShard=owner not in {*shard["nodeIds"], "plan"}
                 )
+                if reported not in known:
+                    finding["finding"] = f"[{reported}] {item['finding']}"
+                if reported in mapping:
+                    finding["scenarioId"] = reported
+                valid.append(finding)
     record["invalid"] = len(record["rejected"])
     return record, valid
 
@@ -1170,7 +1168,7 @@ def _last_array(output: str) -> list:
     return last
 
 
-def _invalid_reason(item, known: set[str]) -> str | None:
+def _invalid_reason(item) -> str | None:
     if not isinstance(item, dict) or set(item) not in (
         _FIELDS,
         _FIELDS | {"classification", "scope_reason"},
@@ -1183,8 +1181,6 @@ def _invalid_reason(item, known: set[str]) -> str | None:
         or not item["scope_reason"].strip()
     ):
         return "Finding scope requires a known classification and nonblank scope_reason"
-    if item["node_id"] not in known:
-        return "Unknown spine node_id"
     if item["severity"] not in _SEVERITIES:
         return "Unknown severity"
     if not item["finding"].strip():
@@ -1838,7 +1834,7 @@ def run_roundtable(
                     reviewLimits=dict(maxRounds=max_rounds, maxTotal=max_total, timeout=timeout),
                 ),
             )
-    result.update(coverage(selected, executable_for=executable_for))
+    result.update(coverage(selected))
     for reviewer in selected:
         reservations[(reviewer["name"], reviewer["provider"])] = uuid4().hex
     for reviewer in selected:

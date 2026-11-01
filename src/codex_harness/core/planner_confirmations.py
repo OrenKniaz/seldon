@@ -4,6 +4,7 @@ import hashlib
 from uuid import uuid4
 
 from codex_harness.core import approvals
+from codex_harness.core.approvals import records
 from codex_harness.core.plan_store import PHASES, PlanStoreError
 from codex_harness.core.spine import Spine
 
@@ -15,15 +16,6 @@ CHAT_REVIEW_SCOPE = {
     "reviewer_node_id": {"type": "string", "minLength": 1},
 }
 CHAT_SCOPE = ("execution", *CHAT_REVIEW_SCOPE)
-
-
-def _records(store, kind):
-    for row in store.connection.execute(
-        "SELECT id, payload_json FROM events WHERE kind=? ORDER BY id DESC", (kind,)
-    ):
-        import json
-
-        yield row[0], json.loads(row[1])
 
 
 def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, actor_label):
@@ -64,6 +56,56 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
     return action, content, evidence
 
 
+def planning_prerequisites(
+    store, execution=None, *, reviewer_node_id=None, catalog=None, reviewer_node=None
+):
+    """One read-only B preflight; collect independent failures before any paid start."""
+    from codex_harness.core.intake import validate_catalog, validate_selection
+    from codex_harness.core.planner_execution import execution_scope
+    from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
+
+    action, missing = {}, []
+    try:
+        approvals.require_approval(store, "A")
+    except PlanStoreError as error:
+        missing.append(error.code)
+    selected, node, catalog = selection_inputs(store, catalog=catalog, node=reviewer_node)
+    if reviewer_node_id is not None and reviewer_node_id != (selected or {}).get("nodeId"):
+        missing.append("reviewer-selection-current-node-required")
+    if execution is None:
+        action = (approvals.latest_request(store, "B") or {}).get("proposedAction", {})
+    if execution is not None or "execution" not in action:
+        required = {"expected_revision", "workers", "call_cap"} - (execution or {}).keys()
+        missing.extend("execution." + key for key in sorted(required))
+        if not required:
+            try:
+                action["execution"] = execution_scope(store, **execution, _candidate=True)
+            except (ValueError, TypeError) as error:
+                missing.append(str(error))
+    if catalog is None:
+        missing.append("reviewer-catalog-required: supply offered models; access remains unknown")
+    else:
+        try:
+            catalog = validate_catalog(catalog)
+        except ValueError as error:
+            missing.append(str(error))
+    if node is None:
+        missing.append("reviewer-selection-required-before-B: propose exact delivery reviewers")
+    elif catalog is not None:
+        sessions = selected.get(
+            "authorSessions", {"implementationSessionIds": [], "reviewerSessionIds": {}}
+        )
+        try:
+            validate_selection(catalog, node["fields"], sessions)
+        except (ValueError, KeyError, TypeError) as error:
+            missing.append(str(error))
+        try:
+            delivery_review_selection(node["fields"])
+        except (ValueError, KeyError, TypeError) as error:
+            missing.append(str(error))
+    return action, list(dict.fromkeys(missing))
+
+
 def prepare_confirmation(
     store,
     gate,
@@ -80,7 +122,7 @@ def prepare_confirmation(
         gate = "align+vision-lock"
     with store._transaction():
         if _expected_request_id is not None:
-            latest = next((r for _, r in _records(store, REQUEST) if r["gate"] == gate), None)
+            latest = next((r for r in records(store, REQUEST) if r["gate"] == gate), None)
             if latest is None or latest["request_id"] != _expected_request_id:
                 raise ValueError("confirmation-request-superseded")
         phase = store.phase()
@@ -96,42 +138,9 @@ def prepare_confirmation(
         kind = "B" if gate == "plan-execution" else "A"
         action = {}
         if kind == "B":
-            missing = []
-            try:
-                approvals.require_approval(store, "A")
-            except PlanStoreError as error:
-                missing.append(error.code)
-            selected = store._latest_draft_event("reviewer-selection-recorded")
-            if reviewer_node_id is not None and reviewer_node_id != (selected or {}).get("nodeId"):
-                missing.append("reviewer-selection-current-node-required")
-            if execution is None:
-                previous = next(
-                    (
-                        r
-                        for _, r in _records(store, REQUEST)
-                        if r.get("subject", {}).get("kind") == "B"
-                    ),
-                    {},
-                )
-                action.update(previous.get("proposedAction", {}))
-            if execution is not None:
-                from codex_harness.core.planner_execution import execution_scope
-
-                required = {"expected_revision", "workers", "call_cap"} - execution.keys()
-                missing.extend("execution." + key for key in sorted(required))
-                if not required:
-                    try:
-                        action["execution"] = execution_scope(store, **execution, _candidate=True)
-                    except (ValueError, TypeError) as error:
-                        missing.append(str(error))
-            if execution is None and "execution" not in action:
-                missing.extend(
-                    ["execution.expected_revision", "execution.workers", "execution.call_cap"]
-                )
-            if selected is None:
-                missing.append(
-                    "reviewer-selection-required-before-B: propose exact delivery reviewers"
-                )
+            action, missing = planning_prerequisites(
+                store, execution, reviewer_node_id=reviewer_node_id
+            )
             if missing:
                 raise PlanStoreError(
                     "plan-b-prerequisites-missing", "Missing B prerequisites: " + "; ".join(missing)
@@ -158,11 +167,8 @@ def prepare_confirmation(
             channel=CHAT if _chat else NATIVE,
             choices=approvals.CHOICES,
         )
-        consumed = {r["request_id"] for _, r in _records(store, RESPONSE)}
-        latest = next(
-            (r for _, r in _records(store, REQUEST) if r.get("subject", {}).get("kind") == kind),
-            None,
-        )
+        consumed = {r["request_id"] for r in records(store, RESPONSE)}
+        latest = approvals.latest_request(store, kind)
         if (
             (_chat or kind == "B")
             and latest
@@ -197,9 +203,7 @@ def _complete_confirmation(
     store, request_id, action, content=None, *, chat=None, expected_gate=None
 ):
     with store._transaction():
-        request = next(
-            (r for _, r in _records(store, REQUEST) if r["request_id"] == request_id), None
-        )
+        request = next((r for r in records(store, REQUEST) if r["request_id"] == request_id), None)
         if request is None:
             raise PlanStoreError("plan-confirmation-request-unknown", str(request_id))
         channel = CHAT if chat is not None else NATIVE
@@ -209,7 +213,7 @@ def _complete_confirmation(
             raise PlanStoreError("plan-confirmation-revision-mismatch", request_id)
         if chat is not None and expected_gate != request["gate"]:
             raise PlanStoreError("plan-confirmation-gate-mismatch", request_id)
-        if any(r["request_id"] == request_id for _, r in _records(store, RESPONSE)):
+        if any(r["request_id"] == request_id for r in records(store, RESPONSE)):
             raise PlanStoreError("plan-confirmation-already-consumed", request_id)
         if action not in {"accept", "decline", "cancel"} or (
             action == "accept"
@@ -234,14 +238,7 @@ def _complete_confirmation(
                 else "declined"
             )
             affirmative = state == "accept"
-        latest = next(
-            (
-                r
-                for _, r in _records(store, REQUEST)
-                if r.get("subject", {}).get("kind") == request.get("subject", {}).get("kind")
-            ),
-            None,
-        )
+        latest = approvals.latest_request(store, request.get("subject", {}).get("kind"))
         if "subject" not in request or latest != request and affirmative:
             state = "stale"
         record = None

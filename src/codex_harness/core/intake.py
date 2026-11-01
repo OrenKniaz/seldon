@@ -427,11 +427,7 @@ def validate_catalog(observation: Value) -> ReviewerCatalogV1:
 def validate_selection(
     catalog: ReviewerCatalogV1, selection: ReviewerSelectionV1, author_sessions: Value
 ) -> dict:
-    """Refuse incompatible values; report valid drafts' unmet assurance separately.
-
-    Empty unmetRequirements means only these supplied value requirements are met;
-    it is never execution authorization or a replacement for existing review gates.
-    """
+    """Collect catalog/effort defects; valid draft assurance never authorizes execution."""
     current = validate_catalog(catalog)
     canonical_digest([selection, author_sessions])
     selected = deepcopy(
@@ -444,10 +440,20 @@ def validate_selection(
     _enum(selected["schema"], ("dot-reviewer-selection-v1",), "selection.schema")
     _text(selected["catalogId"], "selection.catalogId")
     _hash(selected["catalogDigest"], "selection.catalogDigest")
+    issues = []
     if selected["catalogId"] != current["id"] or selected["catalogDigest"] != current["digest"]:
-        _refuse(
-            "reviewer-catalog-stale", "selection must bind the exact current catalog ID and digest"
+        issues.append(
+            "reviewer-catalog-stale: selection must bind the exact current catalog ID and digest"
         )
+    reviewers = _list(selected["reviewers"], "selection.reviewers", nonempty=True)
+    for index, reviewer in enumerate(reviewers):
+        try:
+            _object(reviewer, "name provider choiceId model effort", "reviewer")
+            _effort(reviewer["effort"], f"reviewer[{index}].effort")
+        except ValueError as error:
+            issues.append(str(error))
+    if issues:
+        raise ValueError("; ".join(issues))
     choices = {
         choice["choiceId"]: (provider, choice)
         for provider in current["providers"]
@@ -502,11 +508,9 @@ def validate_selection(
     for name, session in reviewer_sessions.items():
         _text(name, "reviewerSessionIds.name")
         _text(session, "reviewerSessionIds.session")
-    reviewers = _list(selected["reviewers"], "selection.reviewers", nonempty=True)
     names, providers, models = set(), set(), set()
     unmet, independence = [], []
     for reviewer in reviewers:
-        _object(reviewer, "name provider choiceId model effort", "reviewer")
         name = _text(reviewer["name"], "reviewer.name")
         if name in names:
             _refuse("reviewer-name-duplicate", name)
@@ -514,7 +518,6 @@ def validate_selection(
         _text(reviewer["provider"], "reviewer.provider")
         _hash(reviewer["choiceId"], "reviewer.choiceId")
         _model(reviewer["model"])
-        _effort(reviewer["effort"], "reviewer.effort")
         if reviewer["choiceId"] not in choices:
             _refuse("reviewer-choice-absent", f"{name}: exact chosen identity absent")
         provider, choice = choices[reviewer["choiceId"]]
@@ -559,8 +562,6 @@ def validate_selection(
         if len(models) > 1
         else "single-provider/same-model"
     )
-    if assurance["crossProviderRequired"] and len(providers) < 2:
-        unmet.append("reviewer-cross-provider-required: fewer than two selected providers")
     return {
         "selection": selected,
         "independence": {

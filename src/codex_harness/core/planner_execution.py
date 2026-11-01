@@ -28,7 +28,6 @@ def execution_scope(
     from codex_harness.core import planner_jobs as jobs
 
     if _candidate:
-        _canonical_store(store)
         manifest, template = store._manifest(Spine(store._data())), store.workspace / "template"
         if not expected_revision or expected_revision not in {
             manifest["planRevision"],

@@ -306,8 +306,8 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         raise ValueError("wait_seconds must be between 0 and 600")
     if wait_seconds:
         deadline = time.monotonic() + wait_seconds
-        initial = current = worker_job_status(workspace, job_id)
-        while "terminal" not in current and current == initial:
+        current = worker_job_status(workspace, job_id)
+        while "terminal" not in current:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -481,7 +481,8 @@ def execute_worker_job(workspace, job_id):
         from codex_harness.core.planner_candidate import deliver
 
         deliver(workspace, request, run)
-        terminal.update(status="completed", runId=run["runId"], dispatchStatus=run["status"])
+        terminal.update(runId=run["runId"], dispatchStatus=run["status"])
+        terminal["status"] = "failed" if run["status"].startswith("plan-failed") else "completed"
     except Exception as error:
         terminal["error"] = {"type": type(error).__name__, "message": str(error)}
     terminal["at"] = _now()

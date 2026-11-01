@@ -37,15 +37,14 @@ def semantic_consent_next(status, result, *, plan_authorized=False):
             else "harness_prepare_chat_confirmation gate=align+vision-lock; ask for scope consent."
         )
     if phase == "expand":
-        return (
-            "harness_advance to_phase=vision-lock; the current A subject is checked before locking."
-        )
+        return "harness_advance to_phase=vision-lock"
     if phase == "plan":
         return (
             "harness_advance to_phase=roundtable; use B within its recorded limits."
             if plan_authorized
-            else "harness_compile; harness_prepare_chat_confirmation gate=plan-execution. "
-            "Show the complete B subject and field diff; wait for the actual reply."
+            else "harness_prepare_chat_confirmation gate=plan-execution"
+            if result.get("planRevision")
+            else "harness_compile"
         )
     if phase == "accept":
         acceptance = status.get("acceptance", {})
@@ -69,7 +68,7 @@ def status_next(status, *, store):
     acceptance = status.get("acceptance", {})
     if (
         status.get("planMode") == "semantic-v1"
-        and phase in {"execute", "accept"}
+        and phase in {"publish", "execute"}
         and (revision := status.get("published_revision"))
     ):
         from codex_harness.core.planner_jobs import _directory, worker_job_status
@@ -79,16 +78,13 @@ def status_next(status, *, store):
 
         if _directory(store.workspace, revision).is_dir():
             job = worker_job_status(store.workspace, revision)
-            if (
-                job.get("run", {}).get("semanticValidation", {}).get("state") == "PASS"
-                and not acceptance.get("lastRunSubject")
-                and not store.connection.execute("SELECT 1 FROM acceptance_attempts").fetchone()
-            ):
-                return (
-                    "harness_accept_run repo=<project-folder> subject=product; "
-                    "B covers validation. "
-                    "Poll harness_accept_status; C waits for evidence and review."
-                )
+            if job.get("status") == "failed":
+                return f"harness_recovery mode=inspect job_id={revision}; supported repair within B"
+            if job.get("run", {}).get("delivery"):
+                return "harness_advance to_phase=" + ("execute" if phase == "publish" else "accept")
+            return f"harness_worker_status job_id={revision} wait_seconds=120"
+        if phase == "execute":
+            return "harness_worker_start with the exact workers and limits approved in B"
     if (
         phase == "publish"
         and status.get("publication", {}).get("up_to_date")
@@ -96,11 +92,7 @@ def status_next(status, *, store):
     ):
         if status.get("continuation", {}).get("recommendation", {}).get("kind") != "not_applicable":
             return views.review_resolution_next(status["reviewResolution"])
-        return (
-            "harness_plan_resume; inspect existing job state first. Execution requires "
-            "exact workers and call_cap matching B (otherwise fresh chat consent); "
-            "this guidance does not authorize a launch."
-        )
+        return "harness_advance to_phase=execute"
     if phase == "accept":
         if acceptance.get("invalidReason") == "acceptance-findings-open":
             return (

@@ -106,9 +106,13 @@ TOOLS = [
     ),
     _tool(
         "harness_preflight",
-        "Read-only executable and workspace observations; "
-        "no provider launch or execution-ready verdict.",
-        {"providers": {"type": "array", "items": STRING, "minItems": 1}},
+        "Read-only prerequisites; never launches providers or claims execution readiness.",
+        {
+            "providers": {"type": "array", "items": STRING, "minItems": 1},
+            "execution": {"type": "object"},
+            "catalog": {"type": "object"},
+            "reviewer_node": {"type": "object"},
+        },
         [],
     ),
     _tool(
@@ -1335,7 +1339,7 @@ class PlannerServer:
             status = (
                 resume_status(self.workspace, self.result_data)
                 if name == "harness_plan_resume"
-                else diagnostic_status(self.workspace)
+                else diagnostic_status(self.workspace, self.result_data)
                 if name == "harness_preflight"
                 else self.result_data
                 if name == "harness_plan_status" and not is_error
@@ -1614,9 +1618,6 @@ class PlannerServer:
                 if error
                 else status["next"]
             )
-        if name in {"harness_worker_start", "harness_worker_status"} and data.get("jobId"):
-            if data.get("run", {}).get("semanticValidation", {}).get("state") != "PASS":
-                return "harness_worker_status job_id=" + data["jobId"] + " wait_seconds=120"
         if name == "harness_plan_resume":
             return resume_next(data)
         if error and name in {
@@ -1639,9 +1640,8 @@ class PlannerServer:
         if error:
             return "Correct the reported blocker; " + status.get("next", "harness_plan_status")
         if status.get("planMode") == "semantic-v1":
-            hint = consent_views.semantic_consent_next(
-                status, data, plan_authorized=bool(self.store._current_approval("B"))
-            )
+            authorized = bool(self.store._current_approval("B"))
+            hint = consent_views.semantic_consent_next(status, data, plan_authorized=authorized)
             if hint:
                 return hint
         if name == "harness_understanding_card":

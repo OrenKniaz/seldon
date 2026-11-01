@@ -18,37 +18,32 @@ UPDATED = "acceptance-review-state"
 _owners = {}
 
 
-def acceptance_reviewers(selected, *, executable_for=None):
-    """The same formal-review requirements at B preparation and actual launch."""
+def acceptance_reviewers(selected):
+    """Two distinct reviewers; cross-subscription is preferred, never required."""
     if len(selected) < 2 or len({r["name"] for r in selected}) != len(selected):
-        raise ValueError("Two distinct reviewers required (cross-subscription when available)")
-    single = roundtable.coverage(selected, executable_for=executable_for)
-    if not single and len({r["provider"] for r in selected}) < len(selected):
-        raise ValueError("Acceptance reviewers/providers must be distinct")
-    return dict(
-        independentRequired=True, minIndependentReviewers=2, crossProviderRequired=not single
-    )
+        raise ValueError("Two distinct reviewers required")
+    return dict(independentRequired=True, minIndependentReviewers=2, crossProviderRequired=False)
 
 
-def delivery_review_selection(catalog, fields):
-    """Complete the proposal before B; offerings never establish launch access."""
+def selection_inputs(store, *, catalog=None, node=None):
+    """Read the recorded selection and its exact catalog original for every consumer."""
+    selected = store._latest_draft_event("reviewer-selection-recorded") or {}
+    node = node or (store.spine().node(selected["nodeId"]) if selected else None)
+    if catalog is None:
+        for record in approvals.records(store, "reviewer-catalog-recorded"):
+            observed = record["catalog"]
+            if not node or all(
+                observed[k] == node["fields"]["catalog" + k.title()] for k in ("id", "digest")
+            ):
+                catalog = observed
+                break
+    return selected, node, catalog
+
+
+def delivery_review_selection(fields):
+    """Honor the selected providers; installed offerings never broaden user authorization."""
     selected = [approvals.reviewer_tuple(r) for r in fields["reviewers"]]
-    available = {r["provider"] for r in roundtable.default_reviewers()}
-    offered = {
-        p["provider"]: [
-            approvals.reviewer_tuple(
-                dict(name=p["provider"] + "-reviewer", provider=p["provider"], **c)
-            )
-            for c in p["choices"]
-            if c["reviewPathSupported"] and c["availability"] == "offered"
-        ]
-        for p in catalog["providers"]
-        if p["provider"] in available
-    }
-    for provider, choices in offered.items():
-        if choices and provider not in {r["provider"] for r in selected}:
-            selected.append(choices[0])
-    if len(selected) == 1 and len(available) == 1:
+    if len(selected) == 1:
         selected.append({**selected[0], "name": selected[0]["name"] + "-2"})
     assurance = acceptance_reviewers(selected)
     return selected, dict(

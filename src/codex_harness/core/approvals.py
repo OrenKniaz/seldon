@@ -7,12 +7,15 @@ from uuid import uuid4
 
 from codex_harness.core.plan_store import PlanStoreError
 from codex_harness.core.planner_vision import SECTIONS
+from codex_harness.core.reviewer_evidence import review_tier
 from codex_harness.core.spine import Spine
 
 EFFECTS = {
     "A": "Approve confirms understanding and locks this scope and these expansion decisions.",
-    "B": "Approve authorizes the approved work, all reviews, execution, validation and "
-    "quiescent same-work recovery within these cumulative limits and exact choices.",
+    "B": "Yes authorizes scoped work, workers, all reviews, validation and quiescent same-work "
+    "recovery within B's limits. User provider/model restrictions apply to reviewers. "
+    "Cross-subscription is preferred, never required; two distinct same-provider reviewers "
+    "are accepted. No separate exception decision is needed.",
 }
 EVENT = "approval-v2-recorded"
 AFFIRMATIVE = {
@@ -64,6 +67,17 @@ def current(store, kind):
     return next((r for r in records(store, EVENT) if r["subject"]["kind"] == kind), None)
 
 
+def latest_request(store, kind):
+    return next(
+        (
+            r
+            for r in records(store, "confirmation-requested")
+            if r.get("subject", {}).get("kind") == kind
+        ),
+        None,
+    )
+
+
 def intent(vision):
     return {
         "title": vision["title"],
@@ -92,8 +106,6 @@ def executable_candidate(manifest, template_files):
 
 def subject(store, kind, proposed_action=None):
     """Build from canonical content plus actual action arguments, never gate history."""
-    from codex_harness.core import planner_jobs as jobs
-
     if kind not in EFFECTS:
         raise ValueError("approval-kind-invalid")
     spine = Spine(store._data())
@@ -104,55 +116,21 @@ def subject(store, kind, proposed_action=None):
     if kind == "A":
         return {**result, "scope": intent(spine.node(visions[0]))}
     action = proposed_action or {}
-    previous = current(store, "B")
-    previous = (
-        previous["subject"]
-        if previous
-        else next(
-            (
-                r["subject"]
-                for r in records(store, "confirmation-requested")
-                if r.get("subject", {}).get("kind") == "B"
-            ),
-            {},
-        )
-    )
+    previous = current(store, "B") or latest_request(store, "B") or {}
+    previous = previous.get("subject", {})
     execution = action.get("execution", previous.get("execution"))
     if execution is None:
         raise PlanStoreError("plan-b-consent-required", "Prepare B with exact workers and limits")
-    manifest = store._manifest(spine)
-    workers = jobs._workers(manifest, execution["workers"])
+    # execution_scope owns tuple/limit validation; this internal subject binds its result.
     limits = {k: execution[k] for k in ("callCap", "maxParallel", "timeout")}
-    if (
-        type(limits["callCap"]) is not int
-        or limits["callCap"] < len(workers)
-        or type(limits["maxParallel"]) is not int
-        or limits["maxParallel"] < 1
-        or not jobs._valid_timeout(limits["timeout"])
-        or spine.semantic
-        and limits["maxParallel"] != 1
-    ):
-        raise ValueError("worker-execution-limits-invalid")
-    selected = store._latest_draft_event("reviewer-selection-recorded")
+    from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
+
+    _, node, catalog = selection_inputs(store)
     reviewers, selection = [], None
-    if selected:
-        node = spine.node(selected["nodeId"])
-        catalog = next(
-            (
-                r
-                for r in records(store, "reviewer-catalog-recorded")
-                if r["catalog"]["id"] == node["fields"]["catalogId"]
-                and r["catalog"]["digest"] == node["fields"]["catalogDigest"]
-            ),
-            None,
-        )
+    if node:
         if catalog is None:
             raise ValueError("reviewer-catalog-original-missing")
-        from codex_harness.core.intake import validate_selection
-        from codex_harness.core.planner_review import delivery_review_selection
-
-        validate_selection(catalog["catalog"], node["fields"], selected["authorSessions"])
-        reviewers, selection = delivery_review_selection(catalog["catalog"], node["fields"])
+        reviewers, selection = delivery_review_selection(node["fields"])
     if not reviewers:
         raise ValueError("reviewer-selection-required-before-B: propose exact delivery reviewers")
     from codex_harness.core.provider_call_budget import DEFAULT_REVIEW_ROUNDS
@@ -182,8 +160,9 @@ def subject(store, kind, proposed_action=None):
     return {
         **result,
         "aFingerprint": fingerprint(subject(store, "A")),
-        "execution": dict(workers=workers, **limits),
+        "execution": dict(workers=execution["workers"], **limits),
         "reviewers": reviewers,
+        "reviewTier": review_tier(reviewers),
         "reviewSelection": selection,
         "reviewPolicy": policy,
         "scheduledReviewStarts": scheduled,
@@ -225,6 +204,7 @@ def render(payload, changes):
     ]
     if payload["kind"] == "B":
         lines.append(f"B includes up to {payload['reviewAllowance']} reviews in total.")
+        lines.append("Review tier: " + payload["reviewTier"])
     lines.extend(
         f"{title}:\n{json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)}"
         for title, value in (

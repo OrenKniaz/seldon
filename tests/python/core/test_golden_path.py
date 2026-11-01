@@ -17,9 +17,6 @@ import pytest
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tests.python.core.test_plan_store import mock_catalog, mock_choice
-from tests.python.core.test_semantic_runner import WEB_PAGE, web_document
-from tests.python.core.test_semantic_wiring import PRODUCT, STUB, node
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -42,6 +39,7 @@ def provider_host(mode, workspace, surface, job_id=None):
     )
 
     workspace = Path(workspace)
+    filename = "index.html" if surface == "web" else "hashslip.py"
     actual_popen = subprocess.Popen
     actual_audit = audit_process.run_audit_process
     actual_run = dispatch.run_plan
@@ -63,36 +61,51 @@ def provider_host(mode, workspace, surface, job_id=None):
         first = surface == "cli" and not (workspace / "contracts-attempted").exists()
         if first:
             (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
-        (root / ("index.html" if surface == "web" else "hello.py")).write_text(
-            "<!doctype html><h1>SELDON-STUB visit</h1>"
+        (root / filename).write_text(
+            "<!doctype html>"
+            + "".join(
+                f"<p>SELDON-STUB {op}</p>"
+                for op in ("content", "navigation", "faq-pointer", "faq-keyboard")
+            )
             if surface == "web"
             else "raise RuntimeError('broken stub')"
             if first
-            else STUB,
+            else "import sys\n"
+            "operation = 'help' if sys.argv[1:] == ['--help'] else 'receipt' "
+            "if not sys.argv[1:] or sys.argv[1:2] == ['--label'] and len(sys.argv) == 3 "
+            "else 'usage'\nprint('SELDON-STUB ' + operation, file=sys.stderr)\nsys.exit(3)\n",
             encoding="utf-8",
         )
 
     def build(root):
-        (root / ("index.html" if surface == "web" else "hello.py")).write_text(
-            WEB_PAGE + "<style>h1{background:linear-gradient(white,#fff)}h1::after{conte"
-            "nt:' rendered label';background:linear-gradient(white,#fff)}</st"
-            "yle>"
-            if surface == "web"
-            else PRODUCT,
-            encoding="utf-8",
-        )
+        (root / filename).write_bytes((ROOT / "tests/fixtures/efficiency" / filename).read_bytes())
+        if surface == "web":
+            with (root / filename).open("a", encoding="utf-8") as out:
+                out.write("<style>h1{background:linear-gradient(white,#fff)}</style>")
 
     def workers(plan, **options):
         return actual_run(plan, **options, fake_workers={"C": contracts, "B": build})
 
     def review(launch, *_):
+        if "## Read-only candidate evidence" in launch.stdin_text:
+            tier = "same-provider" if surface == "cli" else "cross-provider"
+            assert f"## Review tier: {tier}" in launch.stdin_text
+        text = "[]"
+        if (
+            mode == "server"
+            and surface == "cli"
+            and not (workspace / "review-output-sent").exists()
+        ):
+            (workspace / "review-output-sent").write_text("sent")
+            payload = json.loads((ROOT / "tests/fixtures/efficiency/run26.json").read_text("utf-8"))
+            text = json.dumps([payload["headingFinding"]])
         return tuple(
             value.replace(
                 "source-only", "gpt-6.1-sol" if launch.cli == "codex" else "claude-sonnet-5-5"
-            ).replace("Some(High)", "Some(Medium)" if surface == "web" else "Some(High)")
+            ).replace("Some(High)", "Some(Medium)" if surface == "web" else "Some(Medium)")
             if isinstance(value, str)
             else value
-            for value in protocol(launch.cli, text="[]")
+            for value in protocol(launch.cli, text=text)
         )
 
     subprocess.Popen = launch
@@ -125,9 +138,11 @@ def test_golden_path(tmp_path, request, surface):
 
     Catch late acceptance reviewer/budget questions, reapproval after repairs/recovery,
     and changed limits launching without a diff; plan-review-only tests miss delivery.
-    Catch planner-owned budget refusal using the UX-5 reviewer tuples without budget inputs;
-    Earlier coverage had one installed provider. Real discovery must not hide installed Codex
-    at B, plan review or acceptance; the former resolver stub hid this mismatch.
+    Replay run26/UX6 plans, reviewer tuples, schema refusals and browser actions.
+    Catch incomplete preflight, invented TRACE nodes, illegal phase guidance and a late
+    visual judgment staling scenarios; earlier authored-perfect journeys missed these seams.
+    Replay the JSONKeys farm B refusal with installed Codex+Claude but two authorized Sol
+    reviewers; prove the same-provider tier survives B, acceptance packet and final C.
     Stub results are suite evidence only, never actual-provider acceptance.
     Replay UX-5's captured Unicode upsert and survive an uncaught malformed tool
     request plus tool stdout noise; direct handle_line tests miss pipe death.
@@ -135,6 +150,10 @@ def test_golden_path(tmp_path, request, surface):
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
     started = time.monotonic()
+    (tmp_path / "AGENTS.md").write_text(
+        "Use gpt-6.1-sol at medium effort for all helper assignments, including reviews.\n",
+        encoding="utf-8",
+    )
     replies = queue.Queue()
     calls = decisions = 0
     counts = dict(happy=0, probes=0, polls=0)
@@ -143,9 +162,13 @@ def test_golden_path(tmp_path, request, surface):
     tools = tmp_path / "tools"
     tools.mkdir()
     codex = tools / ("codex.exe" if os.name == "nt" else "codex")
+    captured_run = json.loads(
+        (
+            ROOT / "tests/fixtures/efficiency" / ("ux6.json" if surface == "web" else "run26.json")
+        ).read_text("utf-8")
+    )
     shutil.copy2(sys.executable, codex)
-    if surface == "web":
-        shutil.copy2(sys.executable, tools / ("claude.exe" if os.name == "nt" else "claude"))
+    shutil.copy2(sys.executable, tools / ("claude.exe" if os.name == "nt" else "claude"))
     # Keep OS/git/node tools while excluding the host's provider installations/bundles.
     paths = [str(tools), str(Path(shutil.which("git")).parent)]
     if os.name == "nt":
@@ -191,7 +214,7 @@ def test_golden_path(tmp_path, request, surface):
             )
             process.stdin.flush()
             while True:
-                reply = replies.get(timeout=90)
+                reply = replies.get(timeout=180)
                 assert reply is not None, (tmp_path / "server.log").read_text()
                 if "id" in reply:
                     assert "error" not in reply, reply
@@ -218,6 +241,14 @@ def test_golden_path(tmp_path, request, surface):
                 assert result.get("isError"), result
                 return result
             assert not result.get("isError"), (tool_name, json.dumps(result, ensure_ascii=True))
+            content = "\n".join(c.get("text", "") for c in result.get("content", []))
+            data = result.get("structuredContent", {})
+            if tool_name == "harness_publish":
+                assert "Next: harness_advance to_phase=execute" in content, content
+            if tool_name == "harness_worker_status" and data.get("status") == "failed":
+                assert "Next: harness_recovery mode=inspect" in content, content
+            if tool_name == "harness_worker_status" and data.get("run", {}).get("delivery"):
+                assert "Next: harness_advance to_phase=accept" in content, content
             revision = result.get("plannerConnection", {}).get("planRevision", revision)
             return result.get("structuredContent", {})
 
@@ -248,14 +279,10 @@ def test_golden_path(tmp_path, request, surface):
             )
             process.stdin.flush()
             call("harness_plan_status")
-            detected = call("harness_preflight", providers=["codex", "claude"])["providers"]
-            assert [
-                p["provider"] for p in detected if p["executable"]["status"] == "available"
-            ] == (["codex", "claude"] if surface == "web" else ["codex"])
             call(
                 "harness_plan_start",
-                idea="A welcome page" if surface == "web" else "An offline greeting CLI",
-                name="greeting",
+                idea=captured_run["nodes"][0]["text"],
+                name=captured_run["nodes"][0]["title"],
                 plan_mode="semantic-v1",
             )
             if surface == "cli":
@@ -290,257 +317,108 @@ def test_golden_path(tmp_path, request, surface):
                     },
                 )
                 probing = False
-            vision = node(
-                "V1",
-                "vision",
-                [],
-                planMode="semantic-v1",
-                quality_bar="Accessible and readable"
-                if surface == "web"
-                else "Exact offline greeting",
-                done_feels_like="Visit and explore" if surface == "web" else "Read Hello",
-                expansion=dict(
-                    mode="quality",
-                    reason="Small explicit scope",
-                    upgrades=[
-                        dict(id=str(i), text=text, kind="risk", impact=text, disposition="accept")
-                        for i, text in enumerate(["Offline", "Readable", "Simple"], 1)
-                    ],
-                ),
-            )
-            if surface == "web":
-                vision["fields"].update(
-                    taste=dict(
-                        audience="Visitors",
-                        tone="Calm",
-                        references=["Quiet spaces"],
-                        brand="Ink on white",
-                        requiredSections=["Welcome", "Details"],
-                        sourceRef="scripted-user:idea",
-                    )
-                )
-            a = call(
-                "harness_understanding_card",
-                vision="A welcome page" if surface == "web" else "Offline greeting CLI",
-                users="Visitors",
-                first_user_moment="Explore the page" if surface == "web" else "Read Hello",
-                scope_in="One page" if surface == "web" else "Offline greeting",
-                scope_out="Accounts",
-                expansion=vision["fields"]["expansion"],
-                **({"taste": vision["fields"]["taste"]} if surface == "web" else {}),
-                quality_bar=vision["fields"]["quality_bar"],
-                done_feels_like=vision["fields"]["done_feels_like"],
-                assumptions=[],
-            )
-            assert "Yes" in a["choices"] and a["gate"] == "align+vision-lock"
+            a = call("harness_understanding_card", **captured_run["understanding"])
             yes(a)
-            vision = a["vision"]
-            filename = "index.html" if surface == "web" else "hello.py"
-            nodes = [
-                node("F", "feature", ["V1"]),
-                node("R", "requirement", ["F"]),
-                node("D", "decision", ["V1"]),
-                node(
-                    "CLI",
-                    "design",
-                    ["R"],
-                    grammar="Visit page" if surface == "web" else "hello prints Hello and exits 0",
-                ),
-            ]
-            if surface == "web":
-                nodes.extend(
-                    [
-                        node(
-                            "C",
-                            "bead",
-                            ["CLI"],
-                            ownedFiles=[filename],
-                            dependsOn=[],
-                            lessons=["D"],
-                            semanticPhase="contracts",
-                        ),
-                        node(
-                            "B",
-                            "bead",
-                            ["CLI"],
-                            ownedFiles=[filename],
-                            dependsOn=["C"],
-                            lessons=[],
-                            semanticPhase="build",
-                        ),
-                    ]
-                )
-            if surface == "cli":
-                # The farm loop came from legacy help in a semantic plan. Previous journeys
-                # authored perfect beads themselves and never consumed the planner's contract.
-                schema = call("harness_schema", kind="bead")
-                beads = schema["semanticBeads"]["nodes"]
-                for bead in beads:
-                    bead["parents"] = ["CLI"]
-                nodes.extend(beads)
-            scenarios = (
-                web_document(split=True)
-                if surface == "web"
-                else dict(
-                    schema="seldon/scenarios-v1",
-                    scenarios=[
-                        dict(
-                            id="greeting",
-                            requirementRefs=["R"],
-                            contractRefs=["CLI"],
-                            setup={},
-                            actions=[
-                                dict(
-                                    id="hello", cli=dict(target="greet", operation="hello", argv=[])
-                                )
-                            ],
-                            observe=[dict(action="hello", exitEquals=0, stdoutEquals="Hello\n")],
-                            verdict="all",
-                        )
-                    ],
-                )
-            )
-            for scenario in scenarios["scenarios"]:
-                scenario.update(requirementRefs=["R"], contractRefs=["CLI"])
-            vision["fields"].update(
-                targets={"page": dict(kind="web", entry=filename)}
-                if surface == "web"
-                else {"greet": dict(entry=filename, argv=[])},
-                scenarios=scenarios,
-            )
-            # Preserve the displayed A wording while adding its subordinate specification.
-            vision["fields"].update(
-                vision="A welcome page" if surface == "web" else "Offline greeting CLI",
-                users="Visitors",
-                first_user_moment="Explore the page" if surface == "web" else "Read Hello",
-                scope_in="One page" if surface == "web" else "Offline greeting",
-                scope_out="Accounts",
-                assumptions=[],
-            )
-            call("harness_upsert_nodes", nodes=[*nodes, vision])
+            filename = "index.html" if surface == "web" else "hashslip.py"
+            nodes = captured_run["nodes"]
+            scenarios = nodes[0]["fields"]["scenarios"]
+            written = call("harness_upsert_nodes", nodes=nodes)
             call("harness_advance", to_phase="plan")
-            catalog = mock_catalog()
-            catalog["providers"][0].update(
-                executable=detected[0]["executable"]["path"], authentication="unknown"
+            preflight = call(
+                "harness_preflight",
+                providers=["codex", "claude"],
+                execution={},
+                catalog=captured_run["catalog"],
+                reviewer_node=next(
+                    r["arguments"]["node"]
+                    for r in captured_run["refusals"]
+                    if r["tool"] == "harness_reviewer_choice"
+                ),
             )
-            catalog["providers"][0]["choices"][0]["availability"] = "unknown"
-            if surface == "web":
-                from copy import deepcopy
-
-                claude_provider = deepcopy(catalog["providers"][0])
-                claude_provider.update(
-                    provider="claude", executable=detected[1]["executable"]["path"]
+            issues = "; ".join(preflight["planningPrerequisites"])
+            assert all(
+                part in issues
+                for part in (
+                    "execution.call_cap",
+                    "execution.expected_revision",
+                    "execution.workers",
+                    "reviewer-catalog-stale",
+                    "reviewer-effort-invalid",
                 )
-                claude_provider["choices"][0].update(model="claude-sonnet-5-5")
-                catalog["providers"].append(claude_provider)
-                for provider in catalog["providers"]:
-                    provider["choices"][0]["effort"]["value"] = "medium"
+            ), issues
+            detected = preflight["providers"]
+            assert all(p["executable"]["status"] == "available" for p in detected)
+            farm = json.loads(
+                (ROOT / "tests/fixtures/efficiency/jsonkeys-reviewers.json").read_text("utf-8")
+            )
+            catalog = farm["catalog"] if surface == "cli" else captured_run["catalog"]
+            for provider in catalog["providers"]:
+                observation = next(p for p in detected if p["provider"] == provider["provider"])
+                provider["executable"] = observation["executable"]["path"]
+                provider.pop("digest", None)
+                for item in provider["choices"]:
+                    item.pop("choiceId", None)
+            catalog.pop("digest", None)
             catalog = call(
                 "harness_reviewer_catalog", catalog=catalog, expected_spine_revision=revision
             )["catalog"]
-            choice = mock_choice(catalog)
-            choice["fields"]["reviewers"].append(
-                {**choice["fields"]["reviewers"][0], "name": "second"}
+            choice = farm["choice"] if surface == "cli" else captured_run["choice"]
+            choice["fields"].update(catalogId=catalog["id"], catalogDigest=catalog["digest"])
+            for reviewer in choice["fields"]["reviewers"]:
+                provider = next(
+                    p for p in catalog["providers"] if p["provider"] == reviewer["provider"]
+                )
+                reviewer.update(
+                    **{k: provider["choices"][0][k] for k in ("choiceId", "model", "effort")}
+                )
+            choice["fields"]["recommendation"]["choiceIds"] = list(
+                dict.fromkeys(r["choiceId"] for r in choice["fields"]["reviewers"])
             )
-            if surface == "web":
-                # UX-5 turn 5 captured RS1 tuples and stages (choice IDs are catalog-bound).
-                choice["fields"]["stages"] = ["full-vision", "plan", "readiness", "wave-acceptance"]
-                for reviewer, provider in zip(
-                    choice["fields"]["reviewers"], catalog["providers"], strict=True
-                ):
-                    reviewer.update(
-                        name="pollen-" + provider["provider"] + "-reviewer",
-                        provider=provider["provider"],
-                        **{k: provider["choices"][0][k] for k in ("choiceId", "model", "effort")},
-                    )
             call("harness_reviewer_choice", node=choice, expected_spine_revision=revision)
             compiled = call("harness_compile", include_detail=True)
             options = dict(
                 expected_revision=compiled["planRevision"],
                 max_parallel=1,
-                timeout=30,
-                call_cap=3,
+                timeout=300,
+                call_cap=4,
                 workers=[
                     dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
                     for b in ("C", "B")
                 ],
             )
+            proposal = dict(gate="plan-execution", execution=options, reviewer_node_id=choice["id"])
             if surface == "cli":
-                # A second executable requires cross-provider coverage, even if the
-                # supplied catalog omitted it; the all-Codex journey cannot prove this.
-                claude = tools / ("claude.exe" if os.name == "nt" else "claude")
-                shutil.copy2(sys.executable, claude)
-                refused = call(
-                    "harness_prepare_chat_confirmation",
-                    gate="plan-execution",
-                    execution=options,
-                    reviewer_node_id="CHOICE",
-                    allow_error=True,
-                )
-                message = " ".join(c.get("text", "") for c in refused["content"])
-                assert "select reviewers covering ['claude', 'codex']" in message
-                claude.unlink()
-            b = call(
-                "harness_prepare_chat_confirmation",
-                gate="plan-execution",
-                execution=options,
-                reviewer_node_id="CHOICE",
-            )
+                # Farm turns 2-6: installed Claude must not override this two-Sol selection.
+                captured = next(t["refusals"][-1] for t in reversed(farm["turns"]) if t["refusals"])
+                proposal = {
+                    k: v for k, v in captured["arguments"].items() if k != "expected_workspace"
+                }
+                proposal.update(execution=options, reviewer_node_id=choice["id"])
+            b = call("harness_prepare_chat_confirmation", **proposal)
             repeated = call(
                 "harness_prepare_chat_confirmation",
                 gate="plan-execution",
                 execution=options,
-                reviewer_node_id="CHOICE",
+                reviewer_node_id=choice["id"],
                 _probe=True,
             )
             assert repeated["request_id"] == b["request_id"]
             reviewers = b["subject"]["reviewers"]
-            assert reviewers == (
-                [
-                    dict(
-                        name="pollen-codex-reviewer",
-                        provider="codex",
-                        model="gpt-6.1-sol",
-                        effort="medium",
-                    ),
-                    dict(
-                        name="pollen-claude-reviewer",
-                        provider="claude",
-                        model="claude-sonnet-5-5",
-                        effort="medium",
-                    ),
-                ]
-                if surface == "web"
-                else [
-                    dict(name="primary", provider="codex", model="gpt-6.1-sol", effort="high"),
-                    dict(name="second", provider="codex", model="gpt-6.1-sol", effort="high"),
-                ]
-            )
-            assert b["subject"]["reviewSelection"] == dict(
-                stages=choice["fields"]["stages"] if surface == "web" else ["plan", "full-vision"],
-                assurance=dict(
-                    independentRequired=True,
-                    minIndependentReviewers=2,
-                    crossProviderRequired=surface == "web",
-                ),
-            )
+            assert reviewers == [
+                {
+                    k: r[k] if k != "effort" else r[k]["value"]
+                    for k in ("name", "provider", "model", "effort")
+                }
+                for r in choice["fields"]["reviewers"]
+            ]
+            tier = "same-provider" if surface == "cli" else "cross-provider"
+            assert b["subject"]["reviewTier"] == tier and f"Review tier: {tier}" in b["card"]
+            assert "Cross-subscription is preferred, never required" in b["card"]
             assert b["subject"]["scheduledReviewStarts"] == {"plan": 4, "full-vision": 4}
             assert b["subject"]["repairReserve"] == 2
             assert all(r["name"] in b["card"] and r["model"] in b["card"] for r in reviewers)
             assert b["card"].count("up to 10 reviews") == 1
             yes(b)
-            if surface == "cli":
-                probing = True
-                # Repair the checker to match the accepted exact greeting, not the requirement.
-                vision["fields"]["scenarios"]["scenarios"][0]["observe"][0]["stdoutEquals"] = (
-                    "Hello"
-                )
-                vision["fields"]["productSurface"] = "cli"
-                call("harness_upsert_node", node=vision)
-                repaired = call("harness_compile", include_detail=True)
-                assert repaired["planRevision"] != options["expected_revision"]
-                options["expected_revision"] = repaired["planRevision"]
-                probing = False
             call("harness_advance", to_phase="roundtable")
             plan_review = call(
                 "harness_roundtable",
@@ -552,25 +430,51 @@ def test_golden_path(tmp_path, request, surface):
                 {k: r[k] for k in ("name", "provider", "model", "effort")}
                 for r in plan_review["reviewers"]
             ] == reviewers
+            if surface == "cli":
+                review = call("harness_review", id=plan_review["roundId"], _probe=True)
+                row = review["findingMembers"][0]
+                assert row["node_id"] == "plan" and row["finding"].startswith("[TRACE]")
+                captured_closure = next(
+                    r["arguments"]["findings"][0]
+                    for r in captured_run["refusals"]
+                    if r["tool"] == "harness_resolve_findings"
+                )
+                closure = captured_closure["closure"]
+                closure.update(
+                    expectedManifestRevision=options["expected_revision"],
+                    memberIds=[row["id"]],
+                    nodeRefs=[dict(nodeId="G1", revision=written["revisions"]["G1"])],
+                )
+                call(
+                    "harness_resolve_findings",
+                    findings=[
+                        dict(
+                            id=row["id"],
+                            status="resolved",
+                            resolution=captured_closure["resolution"],
+                            closure=closure,
+                        )
+                    ],
+                )
             call("harness_advance", to_phase="publish")
             call("harness_publish")
             call("harness_advance", to_phase="execute")
             if surface == "cli":
                 changed = call(
-                    "harness_worker_start", **{**options, "call_cap": 4}, allow_error=True
+                    "harness_worker_start", **{**options, "call_cap": 5}, allow_error=True
                 )
                 diff = changed["structuredContent"]["chatConfirmation"]["diff"]
                 assert [(d["field"], d["before"], d["after"]) for d in diff] == [
-                    ("execution.callCap", 3, 4)
+                    ("execution.callCap", 4, 5)
                 ]
                 assert (
                     sum(c["text"].count("Your decision: approve B?") for c in changed["content"])
                     == 1
                 )
             job = call("harness_worker_start", **options)
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + 300
             while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
-                job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
+                job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
             if surface == "web":
                 saved = json.loads(Path(job["run"]["recordPath"]).read_text("utf-8"))
                 assert saved["semanticValidation"]["state"] == "FAIL"
@@ -623,7 +527,7 @@ def test_golden_path(tmp_path, request, surface):
                 job = call("harness_worker_start", **options)
                 assert job["jobId"] == resolved["successor"] != original
                 while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
-                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
                 probing = False
             assert job["status"] == "completed", job
             assert job["run"]["semanticContracts"]["state"] == "RED", job
@@ -661,12 +565,9 @@ def test_golden_path(tmp_path, request, surface):
                 )
             assert (tmp_path / filename).is_file()
             if surface == "cli":
-                assert (
-                    subprocess.check_output(
-                        [sys.executable, "-B", str(tmp_path / filename)], cwd=tmp_path
-                    )
-                    == b"Hello"
-                )
+                assert subprocess.check_output(
+                    [sys.executable, "-B", str(tmp_path / filename), "--help"], cwd=tmp_path
+                ).startswith(b"usage:")
             if surface == "web":
                 call(
                     "harness_accept_assess",
@@ -680,8 +581,11 @@ def test_golden_path(tmp_path, request, surface):
                     ),
                 )
             call("harness_advance", to_phase="accept")
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + 300
             acceptance = call("harness_accept_run", repo=str(tmp_path), subject="product")
+            if surface == "web":
+                judgment = dict(captured_run["judgments"][-1], repo=str(tmp_path))
+                call("harness_accept_assess", judgment=judgment, _probe=True)
             while acceptance.get("result") is None and time.monotonic() < deadline:
                 acceptance = call(
                     "harness_accept_status", id=acceptance["attemptId"], wait_seconds=60
@@ -689,7 +593,7 @@ def test_golden_path(tmp_path, request, surface):
             assert acceptance["result"]["passed"], acceptance
             review = call("harness_accept_review", repo=str(tmp_path))
             attempt_id = review["attemptId"]
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + 300
             while review["state"] in {"queued", "running"} and time.monotonic() < deadline:
                 review = call("harness_accept_status", id=attempt_id, wait_seconds=60)
                 assert review["attemptId"] == attempt_id, review

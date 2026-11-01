@@ -188,9 +188,10 @@ def test_superseded_native_timeout_cannot_replace_current_question_or_credit(
         timed_out = old.expire_confirmation()[-1]["result"]
         assert timed_out["structuredContent"]["state"] == "pending"
         assert "chatConfirmation" not in timed_out["structuredContent"]
-        from codex_harness.core.planner_confirmations import REQUEST, _records
+        from codex_harness.core.approvals import records
+        from codex_harness.core.planner_confirmations import REQUEST
 
-        assert next(row for _, row in _records(old.store, REQUEST))["request_id"] == current_id
+        assert next(iter(records(old.store, REQUEST)))["request_id"] == current_id
         if not current_approved:
             result = answer_native(
                 current,

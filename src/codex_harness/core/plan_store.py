@@ -3015,16 +3015,12 @@ class PlanStore:
 
     def _closure_declaration(self, closure, row, members, status):
         """Validate links, never infer semantic truth or observed independence."""
-        required = {
-            "schema",
-            "expectedManifestRevision",
-            "memberIds",
-            "basis",
-            "nodeRefs",
-            "reviewIds",
-            "auditIds",
-            "obligationNodeIds",
-        }
+        required = set(
+            (
+                "schema expectedManifestRevision memberIds basis nodeRefs "
+                "reviewIds auditIds obligationNodeIds"
+            ).split()
+        )
         if not isinstance(closure, dict) or set(closure) != required:
             raise ValueError(
                 "review-closure-contract-invalid: expected " + ", ".join(sorted(required))
@@ -3048,18 +3044,16 @@ class PlanStore:
         refs = closure["nodeRefs"]
         if not isinstance(refs, list) or not refs:
             raise ValueError("review-closure-node-evidence-required")
-        nodes = {}
+        spine = self.spine()
+        nodes = set()
         for ref in refs:
             if not isinstance(ref, dict) or set(ref) != {"nodeId", "revision"}:
                 raise ValueError("review-closure-node-reference-invalid")
-            saved = self.connection.execute(
-                "SELECT revision FROM nodes WHERE id=?", (ref["nodeId"],)
-            ).fetchone()
-            if not saved or saved[0] != ref["revision"]:
+            if ref["nodeId"] not in spine.ids() or spine.revision(ref["nodeId"]) != ref["revision"]:
                 raise ValueError("review-closure-artifact-stale-or-absent")
-            nodes[ref["nodeId"]] = ref["revision"]
+            nodes.add(ref["nodeId"])
         if row["node_id"] != "plan" and row["node_id"] not in nodes:
-            raise ValueError("review-closure-affected-node-missing")
+            refs = [*refs, dict(nodeId=row["node_id"], revision=spine.revision(row["node_id"]))]
         for field, table, binding in (
             ("reviewIds", "review_runs", "plan_revision"),
             ("auditIds", "audit_runs", "manifest_revision"),
@@ -3078,16 +3072,21 @@ class PlanStore:
             not isinstance(value, str) for value in obligations
         ):
             raise ValueError("review-closure-obligation-reference-invalid")
+        owners = set()
         for value in obligations:
-            saved = self.connection.execute(
-                "SELECT kind FROM nodes WHERE id=?", (value,)
-            ).fetchone()
-            if not saved or saved[0] not in {"requirement", "vision"}:
+            if value not in spine.ids():
                 raise ValueError("review-closure-obligation-reference-invalid")
+            owners.update(
+                n
+                for n in [value, *spine.ancestors(value)]
+                if spine.node(n)["kind"] in {"requirement", "vision"}
+            )
         if status == "deferred" and not obligations:
             raise ValueError("review-closure-deferred-obligation-required")
         return {
             **deepcopy(closure),
+            "nodeRefs": refs,
+            "obligationNodeIds": sorted(owners),
             "status": status,
             "closure": "unverified",
             "reason": "Targeted assessment and observed separation producers unavailable",

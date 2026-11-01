@@ -167,6 +167,47 @@ def test_reviewer_optionality_reaches_publication_and_closure_without_hiding(
         )
         assert reopened.connection.execute("SELECT count(*) FROM review_runs").fetchone()[0] == 2
         assert findings(reopened, "open", expand=True) == rows
+        # UX6 supplied repair/design refs without repeating the finding's node;
+        # run26 named the design as an obligation. Bind both to stored owners,
+        # retaining an unverified declaration. Plain dispositions missed this seam.
+        captured = json.loads(
+            (Path(__file__).resolve().parents[2] / "fixtures/efficiency/ux6.json").read_text(
+                "utf-8"
+            )
+        )
+        row = findings(reopened, "open")[0]
+        captured_closure = next(
+            r["arguments"]["findings"][0]
+            for r in captured["refusals"]
+            if r["tool"] == "harness_resolve_findings"
+        )
+        closure = captured_closure["closure"]
+        closure.update(
+            expectedManifestRevision=reopened.manifest_revision(),
+            memberIds=row["memberIds"],
+            nodeRefs=[dict(nodeId="CLI", revision=reopened.spine().revision("CLI"))],
+            obligationNodeIds=["CLI"],
+        )
+        reopened.resolve_findings(
+            [
+                dict(
+                    id=row["id"],
+                    status="resolved",
+                    resolution=captured_closure["resolution"],
+                    closure=closure,
+                )
+            ]
+        )
+        declaration = json.loads(
+            reopened.connection.execute(
+                "SELECT payload_json FROM events "
+                "WHERE kind='finding-closure-declared' ORDER BY id DESC"
+            ).fetchone()[0]
+        )
+        assert declaration["closure"] == "unverified"
+        assert {r["nodeId"] for r in declaration["nodeRefs"]} == {"CLI", "R"}
+        assert set(declaration["obligationNodeIds"]) == {"R", "V1"}
+        assert reopened.connection.execute("SELECT count(*) FROM review_runs").fetchone()[0] == 2
 
 
 # Recorded provider event shapes; tool payloads are trimmed to the relevant fields.

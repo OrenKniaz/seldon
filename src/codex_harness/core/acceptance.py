@@ -23,6 +23,7 @@ from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.semantic_runner import SOURCE_IGNORED, web_toolchain
 from codex_harness.core.semantic_runner import run as run_semantic
+from codex_harness.core.semantic_schema import WEB
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
 
@@ -506,7 +507,6 @@ def run_subject(run) -> str:
 
 
 def acceptance_inputs(store, repo, *, subject=None) -> dict:
-    """Capture only canonical planner state; no product filesystem or subprocess work."""
     if subject not in ("product", "oracle"):
         raise PlanStoreError(
             "acceptance-subject-required",
@@ -527,7 +527,7 @@ def acceptance_inputs(store, repo, *, subject=None) -> dict:
     return dict(
         **({"semantic": targets} if spine.semantic else {}),
         **(
-            {"judgments": judgments_for(store, repo)}
+            {"judgments": {k: v for k, v in judgments_for(store, repo).items() if k in WEB}}
             if spine.semantic and any(t.get("kind") == "web" for t in targets.values())
             else {}
         ),
@@ -1252,6 +1252,7 @@ def _prepare_acceptance_review(
     original_identity = recovery.identities(store, repo, run, **support_args)
     evidence = _candidate_evidence(store, repo, run, **support_args)
     included_header = (
+        f"## Review tier: {roundtable.review_tier(selected)}\n\n"
         "## Packet contents\n\nIncluded: locked vision/plan, protected tests and template-local "
         "imports, scenarios/results, manifest-owned candidate source and finding dispositions. "
         "Shards name feature slices; oversized bodies are marked. Unowned/non-source/config files, "
@@ -1372,8 +1373,7 @@ def _acceptance_reviewer_findings(run, reviewer, record, parts):
 
 
 def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, resumed=False):
-    if len({item["provider"] for item in result["reviewers"]}) == 1:
-        result["reviewIndependence"] = "single-provider"
+    result.update(roundtable.coverage(result["reviewers"]))
     result["outOfPacketTools"] = sorted(
         {tool for item in result["reviewers"] for tool in item["outOfPacketTools"]}
     )

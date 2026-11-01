@@ -1589,12 +1589,11 @@ def _attempt_bead(
     record["guard"] = {
         "changesOutsideOwnedFiles": outside,
         "requirementFilesIntact": requirements_intact,
-        "passed": not outside and requirements_intact and bool(changed),
+        "passed": not outside and requirements_intact,
     }
     if record["status"] == "blocked: worker reported":
         return record
-    # Empty attempts still need proof on the current integration HEAD. They
-    # never pass the change guard or create a worker/merge commit.
+    # Empty attempts still need proof on integration HEAD; they create no commit.
     if changed and not record["guard"]["passed"]:
         reason = (
             "requirement files changed"
@@ -1787,7 +1786,6 @@ def _integrate_bead(
         ).splitlines()
         record["attempt"]["changedPaths"] = changed_paths
         changed = bool(changed_paths)
-        record["guard"]["passed"] = changed
     binding = None
     if changed:
         bead_commit, validation_root, binding = _integration_candidate(record, bead, repo)
@@ -1890,9 +1888,7 @@ def _integrate_bead(
         else validation["passed"]
     )
     if not accepted:
-        record["status"] = (
-            "integrated validation failed" if changed else "rejected: no source change"
-        )
+        record["status"] = "integrated validation failed"
         return
     if not changed:
         record["status"] = "already-satisfied"

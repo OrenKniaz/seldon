@@ -26,6 +26,13 @@ def native_reviewer(reviewer):
     )
 
 
+def review_tier(reviewers):
+    return "same-provider" if len({r["provider"] for r in reviewers}) == 1 else "cross-provider"
+
+
 def single_provider_notice(result):
     provider = result["reviewers"][0]["provider"]
-    return f"Reviewed by two {provider} reviewers; only one provider was available."
+    return (
+        f"Review tier: {review_tier(result['reviewers'])}; {len(result['reviewers'])} "
+        f"{provider} reviewers. Cross-subscription is preferred, never required."
+    )

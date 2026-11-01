@@ -202,8 +202,8 @@ TYPED_CONTRACTS = {
         "never invent session identities.",
         "draftRule": "confirmation=null is legal draft input and yields "
         "no consent. Unknown "
-        "availability/independence and unmet cross-provider "
-        "assurance remain explicit; recording a draft never "
+        "availability/independence remain explicit. Cross-provider "
+        "review is preferred; recording a draft never "
         "admits execution.",
     },
 }
@@ -275,7 +275,10 @@ def node_example(kind, semantic=False):
 
 def typed_draft_help(tool):
     """Complete unconfirmed shapes; unresolved observations are never invented."""
+    from codex_harness.core.approvals import EFFECTS
+
     result = {
+        "approvalRule": EFFECTS["B"],
         "templateState": "unconfirmed-draft; bind prerequisites before submission",
         "revisionBinding": {
             "resultKey": "plannerConnection.planRevision",
