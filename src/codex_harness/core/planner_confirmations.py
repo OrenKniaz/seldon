@@ -60,7 +60,7 @@ def planning_prerequisites(
     store, execution=None, *, reviewer_node_id=None, catalog=None, reviewer_node=None
 ):
     """One read-only B preflight; collect independent failures before any paid start."""
-    from codex_harness.core.intake import validate_catalog, validate_selection
+    from codex_harness.core.intake import validate_selection
     from codex_harness.core.planner_execution import execution_scope
     from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
 
@@ -82,16 +82,9 @@ def planning_prerequisites(
                 action["execution"] = execution_scope(store, **execution, _candidate=True)
             except (ValueError, TypeError) as error:
                 missing.append(str(error))
-    if catalog is None:
-        missing.append("reviewer-catalog-required: supply offered models; access remains unknown")
-    else:
-        try:
-            catalog = validate_catalog(catalog)
-        except ValueError as error:
-            missing.append(str(error))
     if node is None:
         missing.append("reviewer-selection-required-before-B: propose exact delivery reviewers")
-    elif catalog is not None:
+    else:
         sessions = selected.get(
             "authorSessions", {"implementationSessionIds": [], "reviewerSessionIds": {}}
         )

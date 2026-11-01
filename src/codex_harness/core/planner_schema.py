@@ -45,9 +45,10 @@ TYPED_COMMON = {
     "discoveryRoute": "harness_preflight is supported executable discovery only: "
     "authentication/effective protections remain unknown and model entitlement "
     "is not established. Catalog/choice tools record supplied observations; no "
-    "supported public model-catalog producer is exposed here. Report "
-    "reviewer-catalog-producer-unavailable when genuine observations cannot be "
-    "acquired.",
+    "supported public model-catalog producer is exposed here. When discovery is unavailable, "
+    "propose exact reviewer provider/model/effort from available executables and user restrictions. "
+    "Proceed with catalog: unverified in B; plain yes authorizes it. No catalog question or "
+    "separate decision; real model launch failures use existing recovery within B.",
     "state": "DRAFT/HELD; no approval, entitlement, native execution authorization, phase "
     "completion or provider proof is created by documentation or recording.",
     "nextTool": {"name": "harness_preflight", "arguments": {}},
@@ -175,15 +176,15 @@ TYPED_CONTRACTS = {
         "stages assurance confirmation recommendation",
         "binding": "schema=dot-reviewer-selection-v1; catalogId and "
         "lowercaseSHA256 catalogDigest must bind exact current "
-        "recorded catalog. Reviewer choiceId must come from "
-        "its normalized catalog, not an invented digest.",
+        "recorded catalog when supplied. Without discovery use null catalogId/catalogDigest "
+        "and null reviewer choiceId; do not invent observations or hashes.",
         "reviewers": "Nonempty array of "
         "exact{name,provider,choiceId,model,effort}; "
         "name/provider nonblank; choiceId lowercaseSHA256 of "
         "an existing choice; exact provider/model/effort "
-        "must match that choice. Model/effort follow catalog "
-        "rules. Reviewer names unique; selections must match "
-        "actual catalog tuples.",
+        "must match that choice when a catalog exists. Without discovery propose the exact "
+        "model and effort (named value or unsupported) with choiceId=null. Reviewer names unique; "
+        "respect user restrictions and available executables.",
         "stages": "Nonempty string array drawn from plan|readiness|wave-acceptance|full-vision.",
         "assurance": "Exact "
         "independentRequired:boolean,minIndependentReviewers:nonnegative "
@@ -193,7 +194,7 @@ TYPED_CONTRACTS = {
         "inputs do not justify reducing it.",
         "recommendation": "Exact choiceIds:ordered array of distinct "
         "existing choice "
-        "hashes,reason:nonblank,catchRateEvidenceRefs:string "
+        "hashes (empty without discovery),reason:nonblank,catchRateEvidenceRefs:string "
         "array; preference is not proven catch rate.",
         "author_sessions": "Exact implementationSessionIds:string "
         "array,reviewerSessionIds:map of reviewer "
@@ -289,12 +290,14 @@ def typed_draft_help(tool):
         "templateUse": "New plan: harness_plan_start, then prerequisiteNodes via upsert. Existing "
         "plans preserve IDs/intent. Use the last mutation planRevision as expected_spine_revision; "
         "read status only on reconnect/stale refusal. CLI: intake/reviewer-catalog/reviewer-choice "
-        "--json @absolute-payload-file. Supply every null binding before submission: nulls are "
-        "neither observations nor authority. Keep confirmation null.",
-        "producerLimits": "reviewer-catalog-producer-unavailable: harness_preflight only "
+        "--json @absolute-payload-file. Supply required bindings; without discovery keep catalog "
+        "bindings null. Nulls are neither observations nor authority. Keep confirmation null.",
+        "producerLimits": "harness_preflight only "
         "observes executable readiness; it does not produce a model catalog or establish "
-        "authentication/entitlement. Supply genuine offered-model observations; select explicitly "
-        "with unknown access, then let the first protected real review observe the outcome.",
+        "authentication/entitlement. Missing discovery never blocks delivery: propose exact "
+        "reviewer tuples under user restrictions, labelled catalog: unverified in B and the "
+        "acceptance packet. Plain yes on B authorizes them, without another decision. "
+        "The first protected real review observes access; launch failures use existing B recovery.",
     }
     if tool == "harness_intake":
         fields = {
@@ -411,16 +414,6 @@ def typed_draft_help(tool):
             "model": None,
             "effort": None,
         }
-        result["catalogBindings"] = (
-            "First record genuine supplied observations with "
-            "harness_reviewer_catalog. Copy its returned catalog.id and catalog.digest, then "
-            "each selected provider and exact choiceId/model/effort from "
-            "catalog.providers[].choices[]. "
-            "Supply distinct reviewer names, accepted assurance policy and its actual basisRefs; "
-            "do not reduce that policy to fit available reviewers. Recommendation choiceIds must "
-            "come from that catalog. Unknown author/reviewer sessions stay unknown. No catalog "
-            "or no supported tuple means hold; an empty reviewer array is not a usable selection."
-        )
     if tool != "harness_intake":
         result["effortTemplates"] = [{"kind": "named", "value": None}, {"kind": "unsupported"}]
     if tool == "harness_intake":
@@ -429,12 +422,6 @@ def typed_draft_help(tool):
             "null. harness_record_confirmation supports only align/vision-lock, not typed "
             "intake/reviewer approval. Recording these drafts grants no execution "
             "or phase approval."
-        )
-    elif tool == "harness_reviewer_choice":
-        result["producerLimits"] += (
-            " Save reviewer choices as drafts; harness_prepare_chat_confirmation "
-            "gate=plan-execution displays exact tuples and limits for B. "
-            "Only current B authorizes review spending; catalog observations grant nothing."
         )
     return result
 

@@ -54,8 +54,8 @@ class ReviewerCatalogV1(TypedDict):
 
 class ReviewerSelectionV1(TypedDict):
     schema: Literal["dot-reviewer-selection-v1"]
-    catalogId: str
-    catalogDigest: str
+    catalogId: str | None
+    catalogDigest: str | None
     reviewers: list[Value]
     stages: list[str]
     assurance: Value
@@ -425,10 +425,10 @@ def validate_catalog(observation: Value) -> ReviewerCatalogV1:
 
 
 def validate_selection(
-    catalog: ReviewerCatalogV1, selection: ReviewerSelectionV1, author_sessions: Value
+    catalog: ReviewerCatalogV1 | None, selection: ReviewerSelectionV1, author_sessions: Value
 ) -> dict:
     """Collect catalog/effort defects; valid draft assurance never authorizes execution."""
-    current = validate_catalog(catalog)
+    current = validate_catalog(catalog) if catalog is not None else None
     canonical_digest([selection, author_sessions])
     selected = deepcopy(
         _object(
@@ -438,13 +438,17 @@ def validate_selection(
         )
     )
     _enum(selected["schema"], ("dot-reviewer-selection-v1",), "selection.schema")
-    _text(selected["catalogId"], "selection.catalogId")
-    _hash(selected["catalogDigest"], "selection.catalogDigest")
     issues = []
-    if selected["catalogId"] != current["id"] or selected["catalogDigest"] != current["digest"]:
-        issues.append(
-            "reviewer-catalog-stale: selection must bind the exact current catalog ID and digest"
-        )
+    if current is not None:
+        _text(selected["catalogId"], "selection.catalogId")
+        _hash(selected["catalogDigest"], "selection.catalogDigest")
+        if selected["catalogId"] != current["id"] or selected["catalogDigest"] != current["digest"]:
+            issues.append(
+                "reviewer-catalog-stale: selection must bind the exact current catalog ID and digest"
+            )
+    else:
+        # No invented observation: B binds the planner's exact proposed tuples.
+        selected["catalogId"] = selected["catalogDigest"] = None
     reviewers = _list(selected["reviewers"], "selection.reviewers", nonempty=True)
     for index, reviewer in enumerate(reviewers):
         try:
@@ -456,7 +460,7 @@ def validate_selection(
         raise ValueError("; ".join(issues))
     choices = {
         choice["choiceId"]: (provider, choice)
-        for provider in current["providers"]
+        for provider in (current["providers"] if current else [])
         for choice in provider["choices"]
     }
     selected["stages"] = _strings(selected["stages"], "selection.stages", nonempty=True)
@@ -488,10 +492,12 @@ def validate_selection(
     recommended = _list(recommendation["choiceIds"], "recommendation.choiceIds")
     for identity in recommended:
         _hash(identity, "recommendation.choiceId")
-        if identity not in choices:
+        if current is not None and identity not in choices:
             _refuse("reviewer-choice-absent", f"recommended choice {identity} absent")
     if len(recommended) != len(set(recommended)):
         _refuse("reviewer-choice-duplicate", "recommendation repeats a choice")
+    if current is None:
+        recommendation["choiceIds"] = []
     _text(recommendation["reason"], "recommendation.reason")
     recommendation["catchRateEvidenceRefs"] = _strings(
         recommendation["catchRateEvidenceRefs"], "catchRateEvidenceRefs"
@@ -516,15 +522,21 @@ def validate_selection(
             _refuse("reviewer-name-duplicate", name)
         names.add(name)
         _text(reviewer["provider"], "reviewer.provider")
-        _hash(reviewer["choiceId"], "reviewer.choiceId")
         _model(reviewer["model"])
-        if reviewer["choiceId"] not in choices:
-            _refuse("reviewer-choice-absent", f"{name}: exact chosen identity absent")
-        provider, choice = choices[reviewer["choiceId"]]
-        if reviewer["provider"] != provider["provider"] or any(
-            reviewer[key] != choice[key] for key in ("model", "effort")
-        ):
-            _refuse("reviewer-tuple-mismatch", f"{name}: exact provider/model/effort differs")
+        if current is not None:
+            _hash(reviewer["choiceId"], "reviewer.choiceId")
+            if reviewer["choiceId"] not in choices:
+                _refuse("reviewer-choice-absent", f"{name}: exact chosen identity absent")
+            provider, choice = choices[reviewer["choiceId"]]
+            if reviewer["provider"] != provider["provider"] or any(
+                reviewer[key] != choice[key] for key in ("model", "effort")
+            ):
+                _refuse("reviewer-tuple-mismatch", f"{name}: exact provider/model/effort differs")
+        else:
+            from codex_harness.core.provider_launch import get_adapter
+
+            get_adapter(reviewer["provider"])
+            reviewer["choiceId"] = None
         providers.add(reviewer["provider"])
         models.add(reviewer["model"])
         # Catalog assertions cannot establish or deny actual protected access.

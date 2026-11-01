@@ -128,8 +128,6 @@ def subject(store, kind, proposed_action=None):
     _, node, catalog = selection_inputs(store)
     reviewers, selection = [], None
     if node:
-        if catalog is None:
-            raise ValueError("reviewer-catalog-original-missing")
         reviewers, selection = delivery_review_selection(node["fields"])
     if not reviewers:
         raise ValueError("reviewer-selection-required-before-B: propose exact delivery reviewers")
@@ -163,6 +161,7 @@ def subject(store, kind, proposed_action=None):
         "execution": dict(workers=execution["workers"], **limits),
         "reviewers": reviewers,
         "reviewTier": review_tier(reviewers),
+        "catalog": "unverified" if catalog is None else "recorded",
         "reviewSelection": selection,
         "reviewPolicy": policy,
         "scheduledReviewStarts": scheduled,
@@ -205,6 +204,7 @@ def render(payload, changes):
     if payload["kind"] == "B":
         lines.append(f"B includes up to {payload['reviewAllowance']} reviews in total.")
         lines.append("Review tier: " + payload["reviewTier"])
+        lines.append("catalog: " + payload["catalog"])
     lines.extend(
         f"{title}:\n{json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)}"
         for title, value in (

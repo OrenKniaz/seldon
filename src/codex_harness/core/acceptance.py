@@ -18,13 +18,13 @@ from uuid import uuid4
 from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import review_instructions, roundtable
 from codex_harness.core import spine as plan_spine
-from codex_harness.core.approvals import fingerprint
+from codex_harness.core.approvals import fingerprint, require_approval
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.semantic_runner import SOURCE_IGNORED, web_toolchain
 from codex_harness.core.semantic_runner import run as run_semantic
 from codex_harness.core.semantic_schema import WEB
-from codex_harness.core.spine import compile_manifest, requirement_file_sources
+from codex_harness.core.spine import Spine, compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
 
 QUESTION = "Does this product achieve the locked vision for a real first-time user? List gaps."
@@ -1252,7 +1252,8 @@ def _prepare_acceptance_review(
     original_identity = recovery.identities(store, repo, run, **support_args)
     evidence = _candidate_evidence(store, repo, run, **support_args)
     included_header = (
-        f"## Review tier: {roundtable.review_tier(selected)}\n\n"
+        f"## Review tier: {roundtable.review_tier(selected)}; "
+        f"catalog: {require_approval(store, 'B')['subject']['catalog']}\n\n"
         "## Packet contents\n\nIncluded: locked vision/plan, protected tests and template-local "
         "imports, scenarios/results, manifest-owned candidate source and finding dispositions. "
         "Shards name feature slices; oversized bodies are marked. Unowned/non-source/config files, "
@@ -1456,7 +1457,6 @@ def _admitted_acceptance_review(store, repo, run, attempt, saved):
 def prepare_execution_assessment(store, selection):
     """Read existing canonical selectors; never reserve or invent reviewer authority."""
     from codex_harness.core import dispatch
-    from codex_harness.core.spine import Spine
 
     if not isinstance(selection, dict) or set(selection) - {"finding_ids", "bead_id"}:
         raise ValueError("execution-prepare-selection-invalid")

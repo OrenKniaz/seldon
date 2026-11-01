@@ -58,12 +58,12 @@ RULES = [
     ),
     (
         (
-            "plan-catalog-unavailable reviewer-catalog-stale "
-            "reviewer-catalog-producer-unavailable reviewer-catalog-refresh-required "
+            "reviewer-catalog-stale reviewer-catalog-refresh-required "
             "reviewer-catalog-hash-mismatch reviewer-effort-invalid"
         ),
         "The reviewer choice cannot be used as submitted.",
-        "Draft choices must match the offered catalog; actual reviewer tuples still require B.",
+        "Supplied catalogs must match; without discovery propose exact tuples as catalog: "
+        "unverified. Actual reviewer tuples still require B.",
         None,
     ),
     (

@@ -26,7 +26,7 @@ def acceptance_reviewers(selected):
 
 
 def selection_inputs(store, *, catalog=None, node=None):
-    """Read the recorded selection and its exact catalog original for every consumer."""
+    """Read exact proposed tuples and optional catalog observations for every consumer."""
     selected = store._latest_draft_event("reviewer-selection-recorded") or {}
     node = node or (store.spine().node(selected["nodeId"]) if selected else None)
     if catalog is None:

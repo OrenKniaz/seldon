@@ -1,5 +1,13 @@
 # Legacy capability audit for the local Seldon extraction
 
+CATALOG-1: 47/150 farm runs stalled before B when executable discovery could not
+produce a model catalog (20261101T100128Z-d4f633-001-hashslip and
+20261101T111738Z-af1b82-002-linecount, turn02.md). Owner: intake selection and B
+admission. Disposition: missing discovery now retains exact proposed reviewer
+tuples as catalog: unverified in B and the acceptance packet; plain yes authorizes
+them. Exit: no-catalog CLI/web golden journeys reach C in three decisions.
+Actual-provider launch/recovery acceptance remains unproven by these stub runs.
+
 Read-only source audit of qualified safety `8fd5e902` and planning `0c94f540`; no runtime proof. The later user-approved standalone repository decision supersedes the earlier in-repository packaging preference only. North Star v3 remains the product obligation.
 
 The [October 16 port decision](decisions/2026-10-16-basic-security-port-scope.md)

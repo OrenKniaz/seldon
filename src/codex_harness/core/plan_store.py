@@ -699,16 +699,14 @@ class PlanStore:
             before = self._draft_preimage(expected_spine_revision)
             node = self._draft_node(node, "decision", "dot-reviewer-selection-v1")
             observation = self._latest_draft_event("reviewer-catalog-recorded")
-            if observation is None:
-                raise PlanStoreError(
-                    "plan-catalog-unavailable", "Record an explicit observation first"
-                )
             sessions = (
                 author_sessions
                 if author_sessions is not None
                 else {"implementationSessionIds": [], "reviewerSessionIds": {}}
             )
-            assurance = intake.validate_selection(observation["catalog"], node["fields"], sessions)
+            assurance = intake.validate_selection(
+                observation["catalog"] if observation else None, node["fields"], sessions
+            )
             node["fields"] = assurance["selection"]
             result = self._save_draft_nodes(
                 before,
@@ -1235,7 +1233,9 @@ class PlanStore:
                         try:
                             item.update(
                                 intake.validate_selection(
-                                    catalog["catalog"], node["fields"], event["authorSessions"]
+                                    catalog["catalog"] if catalog else None,
+                                    node["fields"],
+                                    event["authorSessions"],
                                 )
                             )
                         except ValueError as error:

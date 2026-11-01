@@ -90,6 +90,7 @@ def provider_host(mode, workspace, surface, job_id=None):
         if "## Read-only candidate evidence" in launch.stdin_text:
             tier = "same-provider" if surface == "cli" else "cross-provider"
             assert f"## Review tier: {tier}" in launch.stdin_text
+            assert "catalog: unverified" in launch.stdin_text
         text = "[]"
         if (
             mode == "server"
@@ -142,6 +143,9 @@ def test_golden_path(tmp_path, request, surface):
     visual judgment staling scenarios; earlier authored-perfect journeys missed these seams.
     Replay the JSONKeys farm B refusal with installed Codex+Claude but two authorized Sol
     reviewers; prove the same-provider tier survives B, acceptance packet and final C.
+    No model catalog is supplied: discovery-unavailable must still reach C with three
+    decisions and catalog: unverified in B and the real acceptance packet. Catalog-backed
+    fixtures missed the farm deadlock before B; exact proposed tuples must reach launches.
     Stub results are suite evidence only, never actual-provider acceptance.
     Replay UX-5's captured Unicode upsert and survive an uncaught malformed tool
     request plus tool stdout noise; direct handle_line tests miss pipe death.
@@ -327,7 +331,6 @@ def test_golden_path(tmp_path, request, surface):
                 "harness_preflight",
                 providers=["codex", "claude"],
                 execution={},
-                catalog=captured_run["catalog"],
                 reviewer_node=next(
                     r["arguments"]["node"]
                     for r in captured_run["refusals"]
@@ -341,38 +344,21 @@ def test_golden_path(tmp_path, request, surface):
                     "execution.call_cap",
                     "execution.expected_revision",
                     "execution.workers",
-                    "reviewer-catalog-stale",
                     "reviewer-effort-invalid",
                 )
             ), issues
+            assert "reviewer-catalog" not in issues, issues
+            assert preflight["catalog"] == "unverified"
             detected = preflight["providers"]
             assert all(p["executable"]["status"] == "available" for p in detected)
             farm = json.loads(
                 (ROOT / "tests/fixtures/efficiency/jsonkeys-reviewers.json").read_text("utf-8")
             )
-            catalog = farm["catalog"] if surface == "cli" else captured_run["catalog"]
-            for provider in catalog["providers"]:
-                observation = next(p for p in detected if p["provider"] == provider["provider"])
-                provider["executable"] = observation["executable"]["path"]
-                provider.pop("digest", None)
-                for item in provider["choices"]:
-                    item.pop("choiceId", None)
-            catalog.pop("digest", None)
-            catalog = call(
-                "harness_reviewer_catalog", catalog=catalog, expected_spine_revision=revision
-            )["catalog"]
             choice = farm["choice"] if surface == "cli" else captured_run["choice"]
-            choice["fields"].update(catalogId=catalog["id"], catalogDigest=catalog["digest"])
+            choice["fields"].update(catalogId=None, catalogDigest=None)
             for reviewer in choice["fields"]["reviewers"]:
-                provider = next(
-                    p for p in catalog["providers"] if p["provider"] == reviewer["provider"]
-                )
-                reviewer.update(
-                    **{k: provider["choices"][0][k] for k in ("choiceId", "model", "effort")}
-                )
-            choice["fields"]["recommendation"]["choiceIds"] = list(
-                dict.fromkeys(r["choiceId"] for r in choice["fields"]["reviewers"])
-            )
+                reviewer["choiceId"] = None
+            choice["fields"]["recommendation"]["choiceIds"] = []
             call("harness_reviewer_choice", node=choice, expected_spine_revision=revision)
             compiled = call("harness_compile", include_detail=True)
             options = dict(
@@ -417,6 +403,8 @@ def test_golden_path(tmp_path, request, surface):
             assert b["subject"]["repairReserve"] == 2
             assert all(r["name"] in b["card"] and r["model"] in b["card"] for r in reviewers)
             assert b["card"].count("up to 10 reviews") == 1
+            assert b["subject"]["catalog"] == "unverified"
+            assert "catalog: unverified" in b["card"]
             yes(b)
             call("harness_advance", to_phase="roundtable")
             plan_review = call(
