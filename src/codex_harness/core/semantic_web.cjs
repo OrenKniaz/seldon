@@ -18,7 +18,7 @@ async function openBrowser() {
     }
   }
 }
-// Runs only adapter-owned code in the page. Unmeasurable contrast is advisory.
+// Runs only adapter-owned code in the page. Unmeasurable contrast requires judgment.
 function inspect() {
   const visible = e => (e.getClientRects().length || [...e.childNodes].some(n => {
     if (n.nodeType !== 3 || !n.textContent.trim()) return false;
@@ -143,12 +143,25 @@ function inspect() {
         const loc = locator(step.locator), count = await loc.count();
         if (count > 1) passed = false;
         else if (step.op === 'assertVisible') passed = count === 1 && await loc.isVisible();
+        else if (step.op === 'assertHidden') passed = count === 0 || !await loc.isVisible();
+        else if (step.op === 'focus' && count === 1) await loc.focus({timeout: remaining()});
         else if (step.op === 'assertFocus') passed = count === 1 && await loc.evaluate(e => e === e.ownerDocument.activeElement);
         else if (count === 1 && await loc.isVisible()) await loc.click({timeout: remaining()});
         else passed = false;
       }
       steps.push({check: step.op, passed, actual: passed, reason: passed ? 'rendered state matched' : 'rendered state mismatch'}); await checkpoint();
-      if (!passed) break; // Interactions following a missing positive assertion stay unperformed.
+      if (!passed) {
+        // A missing stub prerequisite makes the downstream positive observation fail;
+        // evaluate it on the rendered stub without pretending the interaction happened.
+        if (cfg.phase === 'contracts' && marker && ['click', 'focus', 'key'].includes(step.op)) {
+          for (const positive of j.steps.slice(j.steps.indexOf(step) + 1).filter(s => s.op === 'assertVisible')) {
+            const loc = locator(positive.locator);
+            const observed = await loc.count() === 1 && await loc.isVisible();
+            steps.push({check: 'assertVisible', passed: observed, actual: observed, reason: 'rendered stub after unavailable prerequisite'});
+          }
+        }
+        break;
+      }
       } finally { clearTimeout(watchdog); }
     }
     if (cfg.phase === 'validation' && anyMarker) throw Error('Stub marker remains; final Validation cannot pass');
@@ -163,6 +176,7 @@ function inspect() {
         artifacts.push({path: file, sha256, viewport: j.viewport, reducedMotion: j.reducedMotion, fullPage});
       } catch (e) { artifacts.push({missing: true, reason: e.message.slice(0, 160), fullPage}); }
     }
+    if (checks.textContrastAA && advisoryNotes.size) checks.textContrastAA = null;
     checks.consoleErrors = errors.length; checks.externalRequests = requests.length;
     const result = {state: 'OBSERVED', browserMode, marker, checks, steps, artifacts, advisories: [...advisoryNotes.values()],
       toolchain, errors: errors.slice(0, 4), requests: requests.slice(0, 4)}; await browser.close(); browser = null;

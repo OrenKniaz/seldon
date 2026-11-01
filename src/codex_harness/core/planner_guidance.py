@@ -1,16 +1,5 @@
 """Small public CLI/MCP targets and incremental planning guidance; no state writes."""
 
-# These are operations named by this helper's Next guidance, not a parallel router.
-NEXT_TARGETS = {
-    "schema": ("schema", "harness_schema"),
-    "node": ("node", "harness_upsert_node"),
-    "batch": ("node", "harness_upsert_nodes"),
-    "status": ("status", "harness_plan_status"),
-    "advance": ("advance", "harness_advance"),
-    "compile": ("compile", "harness_compile"),
-    "scenarios": ("accept-scenarios", "harness_accept_scenarios"),
-}
-
 BATCH_GUIDANCE = (
     "Author all features+requirements+design nodes of this phase in ONE harness_upsert_nodes "
     "call; include decisions and beads when ready, preserving accepted scope and wording. "

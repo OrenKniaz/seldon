@@ -87,3 +87,25 @@ ACCEPTANCE_RESPONSE = (
     "suggestion must be one string; an empty string may mean no suggested fix. "
     "Use [] if there are no findings.\nAllowed node ids: "
 )
+
+
+def finding_response(node_ids, *, classify=False):
+    import json
+
+    classification = (
+        "For plan review also include classification (defect-in-plan or beyond-brief) and "
+        "scope_reason explaining the judgment against the brief. Brief-required obligations, "
+        "including unsupported setup, stay required/unproven or explicitly deferred. "
+        "Only extra coverage beyond those obligations is advisory beyond-brief; this is "
+        "reviewer judgment, never machine certification or a human waiver.\n"
+        if classify
+        else ""
+    )
+    response = (
+        ACCEPTANCE_RESPONSE.replace(
+            '"finding", "suggestion"}', '"finding", "suggestion", "classification", "scope_reason"}'
+        )
+        if classify
+        else ACCEPTANCE_RESPONSE
+    )
+    return classification + response + json.dumps(node_ids, ensure_ascii=False) + "\n"

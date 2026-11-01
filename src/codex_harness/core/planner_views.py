@@ -64,17 +64,28 @@ def execution_assessment_contract():
             schema=dict(type="boolean", enum=[True]),
             prepare=obj(dict(finding_ids=strings, bead_id=string), []),
             request=request,
+            judgment=obj(
+                dict(
+                    repo=string,
+                    check=dict(type="string", enum=["textContrastAA", "visualQuality"]),
+                    passed=dict(type="boolean"),
+                    statement=string,
+                    by=string,
+                )
+            ),
         ),
         [],
     )
     schema["oneOf"] = [
-        dict(required=[key], maxProperties=1) for key in ("schema", "prepare", "request")
+        dict(required=[key], maxProperties=1)
+        for key in ("schema", "prepare", "request", "judgment")
     ]
     return dict(
         schema="seldon/public-execution-assessment-v1",
         inputSchema=schema,
         modes=dict(
             schema="Read only; creates no plan",
+            judgment="Web judgment binds files/scenarios/runtime; no machine proof or C",
             prepare="Read actual choices and exact canonical bindings; no reservation",
             request=(
                 "Explicit supplied reviewer/finite limits; existing "
@@ -84,46 +95,19 @@ def execution_assessment_contract():
         acquisition=dict(
             findings="harness_plan_status acceptance.findings / existing CLI findings",
             choices="harness_accept_assess prepare={} / accept-assess --prepare",
-            selection=(
-                "Explicit finding_ids and bead_id from returned choices; "
-                "select implicated artifacts and relevant witnesses"
-            ),
-            reviewer=(
-                "Supply actual authorized name/provider/model/effort; no "
-                "catalog, entitlement or configuration is inferred"
-            ),
-            limits=(
-                "Supply positive finite original "
-                "max_rounds/max_total/timeout; worker grants do not "
-                "authorize review calls"
-            ),
+            selection="Select returned finding_ids/bead_id, implicated artifacts and witnesses",
+            reviewer="Authorized name/provider/model/effort; no catalog or entitlement inferred",
+            limits="Finite positive max_rounds/max_total/timeout; worker grants exclude reviews",
         ),
         output=dict(
-            preparation=(
-                "requestTemplate plus actual artifacts/witnesses/choices and unavailable reasons"
-            ),
-            submission=(
-                "Canonical assessed-current/unverified members, immutable "
-                "registration and bounded Next"
-            ),
-            consumer=(
-                "Explicit accept-review --execution-assessment ID seals "
-                "current support as evidence only"
-            ),
+            preparation="requestTemplate, artifacts/witnesses/choices and unavailable reasons",
+            submission="assessed-current/unverified members, immutable registration, bounded Next",
+            consumer="accept-review --execution-assessment ID binds support as evidence only",
         ),
         limits=[
-            (
-                "Codex recognized original author/reviewer telemetry only; "
-                "unavailable observations hold before capacity"
-            ),
-            (
-                "No verified closure, ordinary credit, native approval, "
-                "default adoption or automatic relaunch"
-            ),
-            (
-                "Record any intended ordinary disposition before assessment; "
-                "later resolve stales the support"
-            ),
+            "Recognized Codex telemetry only; unavailable observations hold before capacity",
+            "No closure/ordinary credit/native approval/default adoption/automatic relaunch",
+            "Disposition before assessment; later resolve stales support",
         ],
         closureEligible=False,
         didRunProvider=False,
@@ -1558,6 +1542,8 @@ def understanding_card(
     scope_in: str,
     scope_out: str,
     assumptions: list[str],
+    quality_bar: str = "Not recorded",
+    done_feels_like: str = "Not recorded",
 ) -> str:
     return "\n".join(
         [
@@ -1567,6 +1553,8 @@ def understanding_card(
             f"- First user moment: {_short(first_user_moment, 300)}",
             f"- Scope in: {_short(scope_in, 300)}",
             f"- Scope out: {_short(scope_out, 300)}",
+            f"- Quality: {_short(quality_bar, 300)}",
+            f"- Done: {_short(done_feels_like, 300)}",
             f"- Assumptions: {readable(assumptions)}",
             "- Your call: confirm, or tell me what's wrong.",
         ]

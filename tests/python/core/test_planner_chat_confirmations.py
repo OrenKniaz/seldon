@@ -92,8 +92,25 @@ def publish(store, request, monkeypatch):
 def test_missing_b_refuses_without_reservation_then_exact_b_reaches_review_and_job(
     semantic_plan, monkeypatch, chat
 ):
-    """Catch native/no-B and missing-B bypasses at real consumers; V1 happy paths preapproved B."""
+    """Protect exact B through review/job admission and unchanged native/chat retries.
+
+    Earlier happy paths preapproved B and missed retries superseding pending requests.
+    """
     store, _ = semantic_plan
+    before = list(store.connection.iterdump())
+    with pytest.raises(ValueError) as absent:
+        confirmation.prepare_confirmation(store, "plan-execution", _chat=chat, execution={})
+    assert all(
+        item in str(absent.value)
+        for item in (
+            "plan-a-consent-required",
+            "execution.expected_revision",
+            "execution.workers",
+            "execution.call_cap",
+            "reviewer-selection-required-before-B",
+        )
+    )
+    assert list(store.connection.iterdump()) == before
     _, options = prepare_combined_b(store, chat=chat, offer=False)
     reviewer = approvals.reviewer_tuple(store.spine().node("CHOICE")["fields"]["reviewers"][0])
     launches = []
@@ -107,6 +124,12 @@ def test_missing_b_refuses_without_reservation_then_exact_b_reaches_review_and_j
     request = confirmation.prepare_confirmation(
         store, "plan-execution", _chat=chat, execution=options
     )
+    pending = list(store.connection.iterdump())
+    assert (
+        confirmation.prepare_confirmation(store, "plan-execution", _chat=chat, execution=options)
+        == request
+    )
+    assert list(store.connection.iterdump()) == pending
     approve_b(store, request)
     store.advance("roundtable", by="source-test")
     review(store, reviewer)

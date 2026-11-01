@@ -27,6 +27,7 @@ def plan_status(store):
         result["setup"] = vision["fields"].get("setup", {})
         if result["phase"] in {"features", "requirements", "plan"}:
             result["planningTurn"] = planning_turn(spine)
+    result["next"] = status_next(result, store=store)
     return result
 
 
@@ -38,7 +39,6 @@ def _plan(workspace):
         result["spine"] = (
             [store.spine().node(i) for i in store.spine().ids()] if store._data()["nodes"] else []
         )
-        result["next"] = status_next(result, store=store)
         return result
 
 

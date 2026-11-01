@@ -112,6 +112,9 @@ def test_response_binding_rechecks_subject_and_never_mints_stale_consent(store, 
     """Catch wrong/stale responses at the real writer; a launch spy cannot protect recording."""
     request = confirmation.prepare_confirmation(store, "align+vision-lock")
     if fault == "superseded":
+        vision = store.spine().node("V1")
+        vision["text"] += " revised before replacement"
+        store.upsert_node(vision)
         confirmation.prepare_confirmation(store, "align+vision-lock")
     if fault == "scope":
         vision = store.spine().node("V1")

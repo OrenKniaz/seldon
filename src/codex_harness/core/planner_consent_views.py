@@ -2,7 +2,7 @@
 
 
 def consent_recovery(code):
-    gate = "vision-lock" if code == "plan-a-consent-required" else "plan-execution"
+    gate = "align+vision-lock" if code == "plan-a-consent-required" else "plan-execution"
     return (
         f"harness_prepare_chat_confirmation gate={gate}; show the complete subject and field "
         "diff, wait for the actual reply, then harness_record_chat_confirmation. "
@@ -23,7 +23,7 @@ def semantic_consent_next(status, result, *, plan_authorized=False):
         result.get("gate") in {"align+vision-lock", "plan-execution"}
         and result.get("state") != "approved"
     ):
-        return "Stop; clarify changes, then show a fresh A/B question and wait for Approve."
+        return "Clarify changes, show fresh A/B, then wait for Yes or another listed reply."
     if status.get("open_clarifications"):
         return "Ask the genuine missing-information question; record it with harness_answer."
     phase = status["phase"]
@@ -34,7 +34,7 @@ def semantic_consent_next(status, result, *, plan_authorized=False):
             "Prepare understanding, proposed expansion dispositions, quality and Done; "
             "harness_understanding_card creates durable A."
             if phase == "align"
-            else "harness_prepare_chat_confirmation gate=vision-lock; obtain fresh scope consent."
+            else "harness_prepare_chat_confirmation gate=align+vision-lock; ask for scope consent."
         )
     if phase == "expand":
         return (
@@ -73,6 +73,9 @@ def status_next(status, *, store):
         and (revision := status.get("published_revision"))
     ):
         from codex_harness.core.planner_jobs import _directory, worker_job_status
+        from codex_harness.core.planner_recovery import admission_id
+
+        revision = admission_id(store, revision)
 
         if _directory(store.workspace, revision).is_dir():
             job = worker_job_status(store.workspace, revision)
@@ -82,7 +85,7 @@ def status_next(status, *, store):
                 and not store.connection.execute("SELECT 1 FROM acceptance_attempts").fetchone()
             ):
                 return (
-                    "harness_accept_run repo=<integrated-repo> subject=product; "
+                    "harness_accept_run repo=<project-folder> subject=product; "
                     "B covers validation. "
                     "Poll harness_accept_status; C waits for evidence and review."
                 )

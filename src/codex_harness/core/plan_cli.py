@@ -342,6 +342,7 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     assessment_modes = commands["accept-assess"].add_mutually_exclusive_group(required=True)
+    assessment_modes.add_argument("--judgment")
     assessment_modes.add_argument(
         "--schema",
         action="store_true",
@@ -560,7 +561,9 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
         return reply, reply.get("structuredContent")
     if command == "accept-assess":
         arguments = (
-            {"schema": True}
+            {"judgment": read_json(args.judgment)}
+            if args.judgment is not None
+            else {"schema": True}
             if args.schema
             else {"prepare": read_json(args.prepare)}
             if args.prepare is not None

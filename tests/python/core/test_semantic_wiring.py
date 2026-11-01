@@ -27,7 +27,8 @@ def web_plan(semantic_plan):
     reference.parent.mkdir()
     reference.write_bytes(
         base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII="
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8A"
+            "AwMCAO+aX1sAAAAASUVORK5CYII="
         )
     )
     vision = store.spine().node("V1")
@@ -65,36 +66,55 @@ def web_plan(semantic_plan):
     return store, manifest
 
 
-@pytest.mark.parametrize("missing", ["viewport", "motion"])
-def test_web_missing_coverage_surfaces_in_canonical_open_gaps(web_plan, missing):
-    """Catch late coverage errors; runner validation never exercises GAP-CHECK writes."""
-    store, _ = web_plan
-    lock_vision(store)
-    store.advance("requirements", by="source-test")
-    vision = store.spine().node("V1")
-    scenario = vision["fields"]["scenarios"]["scenarios"][0]
-    scenario["actions"] = [
-        a
-        for a in scenario["actions"]
-        if (
-            a["web"]["viewport"]["width"] == 375
-            if missing == "viewport"
-            else a["web"]["reducedMotion"] == "no-preference"
-        )
-    ]
-    ids = {a["id"] for a in scenario["actions"]}
-    scenario["observe"] = [o for o in scenario["observe"] if o["action"] in ids]
+def test_captured_writes_are_atomic_and_reopen_on_every_read_surface(semantic_plan):
+    """Protect saved-draft readability; late MCP validation missed UX5 value and F3 labels.
+
+    Replay actual writes at the store owner; prove rejected bytes never reach CLI/MCP/HTTP.
+    Missing requirement/design references stay readable draft gaps rather than write errors.
+    """
+    import io
+    from contextlib import redirect_stdout
+    from copy import deepcopy
+
+    from tests.python.core.test_cockpit_server import get, running
+
+    from codex_harness.core.plan_cli import main
+
+    store, _ = semantic_plan
+    fixtures = Path(__file__).resolve().parents[2] / "fixtures"
+    captured = json.loads((fixtures / "f3-turn11-vision.json").read_text("utf-8"))
+    store.upsert_node(captured)
+    with open_plan_store(store.workspace) as reopened:
+        assert reopened.spine().node("V1") == captured
+        expected = reopened.status()
+    malformed = json.loads((fixtures / "ux5-turn7-upsert.json").read_text("utf-8"))["node"]
+    variants = [malformed, deepcopy(captured)]
+    del variants[1]["fields"]["scenarios"]["scenarios"][0]["actions"][0]["cli"]["operation"]
+    for candidate, field in zip(variants, ["value", "operation"], strict=True):
+        before = store.path.read_bytes()
+        with pytest.raises(ValueError, match=field):
+            store.upsert_node(candidate)
+        assert store.path.read_bytes() == before
+        with open_plan_store(store.workspace) as reopened:
+            assert reopened.spine().node("V1") == captured
+    output = io.StringIO()
+    with redirect_stdout(output):
+        assert main(["--workspace", str(store.workspace), "--json", "status"]) == 0
+    assert expected["plan_revision"] in output.getvalue()
     server = PlannerServer(store.workspace)
     try:
-        reply = server.call_tool("harness_upsert_node", {"node": vision})
-        assert not reply["isError"], reply
-        assert "both viewports and motion preferences" in str(
-            reply["structuredContent"]["openGaps"]
+        reply = server.call_tool("harness_plan_status", {})
+        assert (
+            not reply["isError"]
+            and reply["structuredContent"]["plan_revision"] == expected["plan_revision"]
         )
-        refused = server.call_tool("harness_advance", {"to_phase": "tech-stack"})
-        assert refused["isError"] and "both viewports and motion preferences" in str(refused)
     finally:
         server.close()
+    with running(store.workspace, workspace=store.workspace) as connection:
+        code, _, body = get(connection, "/api/status")
+        assert (
+            code == 200 and json.loads(body)["plan"]["plan_revision"] == expected["plan_revision"]
+        )
 
 
 def test_web_toolchain_drift_blocks_build_before_browser(web_plan, monkeypatch, tmp_path):
@@ -255,7 +275,7 @@ def test_semantic_advance_chain_retains_steps_before_first_refusal(semantic_plan
     store, _ = semantic_plan
     lock_vision(store)
     vision = store.spine().node("V1")
-    del vision["fields"]["scenarios"]["scenarios"][0]["actions"][0]["cli"]["operation"]
+    vision["fields"]["scenarios"]["scenarios"][0]["contractRefs"] = ["missing-contract"]
     store.upsert_node(vision)
     server = PlannerServer(store.workspace)
     try:
@@ -314,9 +334,20 @@ def test_stored_module_binding_dispatches_relative_argv_from_caller_cwd(semantic
         "files": [{"path": "data/note.txt", "utf8": "word"}],
     }
     s["actions"][0].update(cwd="data/caller")
-    s["actions"][0]["cli"]["argv"] = [{"path": "data/note.txt", "relative": True}]
+    captured = json.loads(
+        (Path(__file__).resolve().parents[2] / "fixtures/f3-turn11-vision.json").read_text("utf-8")
+    )
+    label = next(
+        arg
+        for scenario in captured["fields"]["scenarios"]["scenarios"]
+        for action in scenario["actions"]
+        for arg in action["cli"]["argv"]
+        if isinstance(arg, str) and "snowman" in arg
+    )
+    literals = [label, "https://example.test/a:b/../c"]
+    s["actions"][0]["cli"]["argv"] = [{"path": "data/note.txt", "relative": True}, *literals]
     expected = dict(
-        launch=["-B", "-m", "probe", "payload.bin", "../note.txt"],
+        launch=["-B", "-m", "probe", "payload.bin", "../note.txt", *literals],
         cwd="caller",
         body="word",
         package="probe",
@@ -474,35 +505,6 @@ def test_semantic_admission_rejects_stale_or_deferred_scope(semantic_plan, chang
         compile_manifest(Spine(data))
 
 
-def test_stored_stdin_compiles_to_real_runner_without_mutating_input(semantic_plan):
-    """Catch compiler dropping stdin or IDs; direct runner probes bypass canonical storage."""
-    from codex_harness.core.semantic_runner import run
-
-    store, _ = semantic_plan
-    vision = store.spine().node("V1")
-    document = vision["fields"]["scenarios"]
-    item = document["scenarios"][0]
-    item["actions"][0]["cli"]["stdin"] = {"base64": "/wANCoA="}
-    action_id = item["actions"][0]["id"]
-    item["observe"] = [{"action": action_id, "exitEquals": 0, "stdoutJsonEquals": "ff000d0a80"}]
-    store.upsert_node(vision)
-    before = json.dumps(store.spine().node("V1"))
-    compiled = store.compile_template(store.workspace / "template")["semantic"]
-    assert compiled["scenarios"] == document
-    product = store.workspace / "template"
-    (product / "hello.py").write_text(
-        "import json,sys\nprint(json.dumps(sys.stdin.buffer.read().hex()))\n"
-    )
-    compiled_before = json.dumps(compiled)
-    results = run(compiled["scenarios"], product, compiled["targets"], "validation")
-    assert [(r["id"], r["state"]) for r in results] == [(item["id"], "PASS")], results
-    assert results[0]["actions"][action_id]["exit"] == 0
-    assert results[0]["cleanup"]["quiescenceVerified"]
-    assert results[0]["cleanup"]["activeProcessesAfterTeardown"] == 0
-    assert json.dumps(compiled) == compiled_before
-    assert json.dumps(store.spine().node("V1")) == before
-
-
 def test_public_dirs_example_compiles_to_real_runner_with_deliberate_negative(semantic_plan):
     """Catch teaching/compile/runner drift; standalone setup tests bypass the typed producer."""
     from codex_harness.core.semantic_runner import run
@@ -555,3 +557,196 @@ def test_public_dirs_example_compiles_to_real_runner_with_deliberate_negative(se
         assert all(r["cleanup"]["quiescenceVerified"] for r in results)
     finally:
         server.close()
+
+
+def test_required_cli_checks_and_captured_s8_finding_reach_review_packet(semantic_plan):
+    """Protect required evidence and finding identity at packet/parser owner boundaries.
+
+    Run25 HC promises had no producer; parsed-JSON tests missed framing, open stdin and help.
+    Replay the actual S8 finding without a paid review and retain real process observations.
+    """
+    from tests.python.core.test_acceptance_recovery import protocol
+
+    from codex_harness.core import acceptance
+
+    store, _ = semantic_plan
+    vision = store.spine().node("V1")
+    suite = vision["fields"]["scenarios"]["scenarios"]
+    base = suite[0]
+    base.update(id="HC1-HC3", setup={"dirs": ["data/caller"]})
+    base["actions"][0].update(cwd="data/caller")
+    base["actions"][0]["cli"].update(stdin={"base64": "aGVsbG8="}, argv=["--label", "archive copy"])
+    base["observe"] = [
+        dict(action="hello", exitEquals=0, stdoutEndsWith="\n", stdoutContains='"bytes":5')
+    ]
+    for sid, args, code in [
+        ("S8", ["--help"], 0),
+        ("HC2", ["--label"], 2),
+        ("HC2-unknown", ["--unknown"], 2),
+        ("HC2-positional", ["unexpected"], 2),
+        ("HC2-abbreviated", ["--lab", "x"], 2),
+    ]:
+        suite.append(
+            dict(
+                base,
+                id=sid,
+                actions=[
+                    dict(
+                        id="probe",
+                        cli=dict(
+                            target="greet",
+                            operation="hello",
+                            argv=args,
+                            stdin=dict(holdOpen=True, exitWithin=5),
+                        ),
+                    )
+                ],
+                observe=[
+                    dict(action="probe", exitEquals=code, stdinOpenAtExit=True, elapsedAtMost=5),
+                    *(
+                        [
+                            dict(action="probe", stdoutContains=word)
+                            for word in ("stdin", "bytes", "sha256", "label", "--label")
+                        ]
+                        if code == 0
+                        else []
+                    ),
+                ],
+            )
+        )
+    store.upsert_node(vision)
+    compiled = store.compile_template(store.workspace / "template")["semantic"]
+    assert compiled["scenarios"] == vision["fields"]["scenarios"]
+    lock_vision(store)
+    from tests.python.core.planning_support import source_only_b
+
+    reviewers = source_only_b(
+        store, reviewers=[dict(name=name, provider="codex") for name in ("left", "right")]
+    )
+    before = json.dumps(store.spine().node("V1"))
+    product = store.workspace / "candidate"
+    product.mkdir()
+    (product / "hello.py").write_text(
+        "import argparse,hashlib,json,sys\np=argparse.ArgumentParser(descr"
+        "iption='stdin bytes sha256 label JSON',allow_abbrev=False);p.add"
+        "_argument('--label');a=p.parse_args()\n"
+        "raw=sys.stdin.buffer.read();sys.stdout.buffer.write((json.dumps("
+        "dict(bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),label"
+        "=a.label),separators=(',',':'))+'\\n').encode())\n",
+        encoding="utf-8",
+    )
+    result = acceptance.run_acceptance(store, product, subject="product")
+    assert result["passed"], result
+    evidence = acceptance._candidate_evidence(store, product, result)
+    required = {r["scenarioId"]: r for r in evidence["requiredEvidence"]}
+    assert set(required) == {
+        "HC1-HC3",
+        "S8",
+        "HC2",
+        "HC2-unknown",
+        "HC2-positional",
+        "HC2-abbreviated",
+    }
+    receipts = {row["id"]: row for row in result["results"]}
+    hc1 = receipts["HC1-HC3"]["semantic"]["actions"]["hello"]
+    assert Path(hc1["command"][2]).is_absolute() and Path(hc1["cwd"]).parts[-2:] == (
+        "data",
+        "caller",
+    )
+    assert hc1["stdout"].endswith("\n") and hc1["stdout"].count("\n") == 1
+    held = receipts["S8"]["semantic"]["actions"]["probe"]
+    assert held["stdinOpenAtExit"] and held["elapsedSeconds"] <= 5
+    assert all(word in held["stdout"] for word in ("stdin", "bytes", "sha256", "label", "--label"))
+    assert all(r["candidateRevision"] == result["revision"] for r in required.values())
+    assert json.dumps(store.spine().node("V1")) == before
+    prepared = acceptance._prepare_acceptance_review(store, product, reviewers, None)
+    packet = prepared[4]
+    assert '"requiredEvidence"' in packet and '"stdinOpenAtExit": true' in packet
+    packet += roundtable.review_packet(store)
+    assert '"S8": ["R"]' in packet
+    finding = json.loads(
+        (Path(__file__).resolve().parents[2] / "fixtures/run25-s8-finding.json").read_text("utf-8")
+    )
+    record, parsed = roundtable._parse_review_return(
+        store,
+        dict(provider="claude"),
+        dict(nodeIds=["R"]),
+        protocol("claude", text=json.dumps([finding])),
+        mocked=False,
+    )
+    assert (
+        not record["rejected"] and parsed[0]["node_id"] == "R" and parsed[0]["scenarioId"] == "S8"
+    )
+    assert parsed[0]["finding"] == finding["finding"] and not parsed[0]["outOfShard"]
+    # A real story ID keeps its identity even if an authored scenario has the same ID.
+    store.upsert_node(node("S8", "story", ["F"]))
+    _, parsed = roundtable._parse_review_return(
+        store,
+        dict(provider="claude"),
+        dict(nodeIds=["S8"]),
+        protocol("claude", text=json.dumps([finding])),
+        mocked=False,
+    )
+    assert parsed[0]["node_id"] == "S8" and "scenarioId" not in parsed[0]
+
+
+def test_whole_suite_acceptance_stops_actions_and_holds_missing_cleanup_receipts(
+    semantic_plan, monkeypatch
+):
+    """Protect owner stop and UNKNOWN cleanup after suite unification.
+
+    Legacy command-owner tests miss multiple actions inside the semantic subprocess;
+    native launch normally attaches a receipt, so explicitly inject its documented absence.
+    """
+    import time
+
+    from codex_harness.core import acceptance, semantic_runner
+    from codex_harness.core.planner_acceptance import AcceptanceOwner
+
+    store, _ = semantic_plan
+    marker, release = store.workspace / "started-action", store.workspace / "release-action"
+    product = store.workspace / "product"
+    product.mkdir()
+    (product / "hello.py").write_text(
+        "from pathlib import Path\nimport sys,time\n"
+        f"Path({str(marker)!r}).write_text(sys.argv[1])\n"
+        f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n"
+        "print('done')\n"
+    )
+    vision = store.spine().node("V1")
+    scenario = vision["fields"]["scenarios"]["scenarios"][0]
+    scenario["actions"] = [
+        dict(id=name, cli=dict(target="greet", operation="hello", argv=[name]))
+        for name in ("one", "two")
+    ]
+    scenario["observe"] = [
+        dict(action=name, exitEquals=0, stdoutEquals="done\n") for name in ("one", "two")
+    ]
+    store.upsert_node(vision)
+    lock_vision(store)
+    owner = AcceptanceOwner()
+    attempt = owner.start(store, product, subject="product")
+    owner.dispatch_after_flush(store)
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            owner.drain(store)
+            time.sleep(0.01)
+        assert marker.read_text() == "one"
+        owner.close(store)
+    finally:
+        release.touch()
+        owner.thread.join(timeout=10)
+    assert not owner.thread.is_alive() and marker.read_text() == "one"
+    owner.drain(store)
+    assert owner.status(store, attempt["attemptId"])["state"] == "unknown-interrupted"
+    assert not store.connection.execute("SELECT 1 FROM acceptance_runs").fetchone()
+
+    def lost_receipt(*args, **kwargs):
+        raise OSError("launch outcome unavailable without cleanup receipt")
+
+    monkeypatch.setattr(semantic_runner, "run_audit_process", lost_receipt)
+    inputs = acceptance.acceptance_inputs(store, product, subject="product")
+    result = acceptance.run_scenarios(product, inputs["scenarios"], semantic=inputs["semantic"])
+    assert not result[0]["passed"] and result[0]["semantic"]["cleanup"] == {}
+    assert "cleanup receipt" in result[0]["semantic"]["cleanupUncertainty"]

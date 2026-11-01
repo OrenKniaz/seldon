@@ -1,0 +1,267 @@
+{
+  "id": "V1",
+  "kind": "vision",
+  "title": "HashSlip",
+  "text": "Build a Python standard-library CLI in hashslip.py that reads stdin as raw bytes and emits one JSON object with byte count, lowercase SHA-256, and label (null unless --label TEXT). Empty and binary input are valid; preserve label text. Unknown flags exit 2 with stderr and no stdout. --help must not read stdin. Include a short usage example.",
+  "parents": [],
+  "fields": {
+    "assumptions": [],
+    "first_user_moment": "Pipe empty, text, or binary input to HashSlip and receive one JSON object describing the exact bytes.",
+    "planMode": "semantic-v1",
+    "scope_in": "Implement hashslip.py using Python's standard library; consume stdin as raw bytes; output one JSON object containing bytes, lowercase SHA-256, and label (null unless supplied with --label TEXT); preserve label text; support --help without reading stdin; reject unknown flags with exit status 2, stderr diagnostic, and no stdout; provide a short usage example.",
+    "scope_out": "External dependencies, non-CLI interfaces, changing input bytes, and writing input to files.",
+    "users": "A person using a shell who needs a compact JSON summary of stdin bytes.",
+    "vision": "HashSlip is a small Python standard-library command-line tool that reports the byte length and SHA-256 digest of raw stdin, with an optional label. Full brief: PRODUCT-BRIEF.md",
+    "quality_bar": "Report exactly the bytes read, encode JSON safely for arbitrary labels, and keep stdout to one JSON object on success. Argument errors must be clear and must not produce partial JSON.",
+    "done_feels_like": "A user can pipe empty, text, or binary data into hashslip.py and get the correct byte count and lowercase SHA-256 with an optional unchanged label; --help exits without consuming stdin, and unknown options fail with status 2 on stderr only.",
+    "expansion": {
+      "mode": "quality",
+      "reason": "The request is already precise; preserve scope and make its observable correctness explicit.",
+      "upgrades": [
+        {
+          "id": "Q1",
+          "text": "Validate binary and empty stdin at the actual CLI boundary.",
+          "kind": "quality",
+          "impact": "Prevents text decoding or empty-input handling from changing the measured bytes.",
+          "disposition": "accept"
+        },
+        {
+          "id": "Q2",
+          "text": "Keep --help independent of stdin consumption.",
+          "kind": "quality",
+          "impact": "Allows help to return promptly even when stdin is a pipe awaiting data.",
+          "disposition": "accept"
+        },
+        {
+          "id": "Q3",
+          "text": "Preserve the no-stdout guarantee for unknown flags.",
+          "kind": "quality",
+          "impact": "Avoids mixing partial success output with an argument error.",
+          "disposition": "accept"
+        }
+      ]
+    },
+    "targets": {
+      "app": {
+        "entry": "hashslip.py",
+        "argv": []
+      }
+    },
+    "scenarios": {
+      "schema": "seldon/scenarios-v1",
+      "scenarios": [
+        {
+          "id": "S_BINARY",
+          "requirementRefs": [
+            "R1",
+            "R2"
+          ],
+          "contractRefs": [
+            "G1"
+          ],
+          "setup": {},
+          "actions": [
+            {
+              "id": "binary",
+              "cli": {
+                "target": "app",
+                "operation": "summarize_binary",
+                "argv": [],
+                "stdin": {
+                  "base64": "AP9B"
+                }
+              }
+            }
+          ],
+          "observe": [
+            {
+              "action": "binary",
+              "exitEquals": 0,
+              "stdoutJsonEquals": {
+                "bytes": 3,
+                "sha256": "a90a10503fbfc95789ff38a1bb5039cb71869ab9c0eb1cb51c4a9099f2933c6b",
+                "label": null
+              }
+            }
+          ],
+          "verdict": "all"
+        },
+        {
+          "id": "S_EMPTY_LABEL",
+          "requirementRefs": [
+            "R1",
+            "R2"
+          ],
+          "contractRefs": [
+            "G1"
+          ],
+          "setup": {},
+          "actions": [
+            {
+              "id": "empty",
+              "cli": {
+                "target": "app",
+                "operation": "empty_label",
+                "argv": [
+                  "--label",
+                  "x  "
+                ],
+                "stdin": {
+                  "base64": ""
+                }
+              }
+            }
+          ],
+          "observe": [
+            {
+              "action": "empty",
+              "exitEquals": 0,
+              "stdoutJsonEquals": {
+                "bytes": 0,
+                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "label": "x  "
+              }
+            }
+          ],
+          "verdict": "all"
+        },
+        {
+          "id": "S_LABEL_ESC",
+          "requirementRefs": [
+            "R2"
+          ],
+          "contractRefs": [
+            "G1"
+          ],
+          "setup": {},
+          "actions": [
+            {
+              "id": "escaped",
+              "cli": {
+                "target": "app",
+                "operation": "label_json_escaping",
+                "argv": [
+                  "--label",
+                  "quote \" slash \\ snowman ☃"
+                ],
+                "stdin": {
+                  "base64": ""
+                }
+              }
+            }
+          ],
+          "observe": [
+            {
+              "action": "escaped",
+              "exitEquals": 0,
+              "stdoutJsonEquals": {
+                "bytes": 0,
+                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "label": "quote \" slash \\ snowman ☃"
+              }
+            }
+          ],
+          "verdict": "all"
+        },
+        {
+          "id": "S_TEXT",
+          "requirementRefs": [
+            "R1",
+            "R2"
+          ],
+          "contractRefs": [
+            "G1"
+          ],
+          "setup": {},
+          "actions": [
+            {
+              "id": "text",
+              "cli": {
+                "target": "app",
+                "operation": "summarize_text",
+                "argv": [],
+                "stdin": {
+                  "utf8": "hello\n"
+                }
+              }
+            }
+          ],
+          "observe": [
+            {
+              "action": "text",
+              "exitEquals": 0,
+              "stdoutJsonEquals": {
+                "bytes": 6,
+                "sha256": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+                "label": null
+              }
+            }
+          ],
+          "verdict": "all"
+        },
+        {
+          "id": "S_HELP",
+          "requirementRefs": [
+            "R3"
+          ],
+          "contractRefs": [
+            "G1"
+          ],
+          "setup": {},
+          "actions": [
+            {
+              "id": "help",
+              "cli": {
+                "target": "app",
+                "operation": "help",
+                "argv": [
+                  "--help"
+                ]
+              }
+            }
+          ],
+          "observe": [
+            {
+              "action": "help",
+              "exitEquals": 0,
+              "stdoutEquals": "usage: hashslip.py [--label TEXT]\nexample: python -c \"print('hello', end='')\" | python hashslip.py --label greeting\n",
+              "stderrEquals": ""
+            }
+          ],
+          "verdict": "all"
+        },
+        {
+          "id": "S_UNKNOWN",
+          "requirementRefs": [
+            "R3"
+          ],
+          "contractRefs": [
+            "G1"
+          ],
+          "setup": {},
+          "actions": [
+            {
+              "id": "unknown",
+              "cli": {
+                "target": "app",
+                "operation": "unknown",
+                "argv": [
+                  "--bogus"
+                ]
+              }
+            }
+          ],
+          "observe": [
+            {
+              "action": "unknown",
+              "exitEquals": 2,
+              "stderrNonempty": true,
+              "stdoutEquals": ""
+            }
+          ],
+          "verdict": "all"
+        }
+      ]
+    }
+  }
+}

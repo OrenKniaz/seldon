@@ -7,53 +7,41 @@ from codex_harness.core.spine import ALLOWED_PARENTS, SEMANTIC_PHASES, bead_cont
 
 FIELD_RULES = {
     "vision": (
-        "For a new plan, author vision.text as a short product statement plus a full-brief "
-        "pointer, rather than pasting the brief. If PRODUCT-BRIEF.md is the existing source, "
-        "use Full brief: PRODUCT-BRIEF.md; otherwise use the actual source path. Replace the "
-        "example's <actual source path> only with that real source; do not invent a missing "
-        "file or force a different path. Preserve the complete detailed brief and its source "
-        "provenance unchanged, and derive all requirements/scenarios from it: a pointer does "
-        "not discard or narrow scope. This teaching does not migrate, truncate or rewrite "
-        "existing user-authored or locked visions. "
-        "Optional setup: projectFolder, gitName, gitEmail, githubLogin, repoUrl strings; "
+        "New vision.text: a short product statement + Full brief: <actual source path>. "
+        "Use PRODUCT-BRIEF.md only when that is the existing source; invent no path. Preserve "
+        "the complete brief/provenance and derive every requirement/scenario from it. This "
+        "teaching never migrates, truncates, rewrites or narrows existing/locked visions. "
+        "Optional setup strings: projectFolder, gitName, gitEmail, githubLogin, repoUrl. "
         "Never read credentials or git config except --get user.name or --get user.email. "
-        "Optional understanding-card fields: vision, users, first_user_moment "
-        "(alias firstUserMoment), scope_in (scopeIn), scope_out (scopeOut), "
-        "quality_bar (qualityBar, quality), done_feels_like (doneFeelsLike, done), "
-        "and assumptions. Listed aliases retain their existing precedence. "
-        "Use done_feels_like for the primary Done summary; done_means is an "
-        "additional detail field, not a primary Done alias. Other fields remain "
-        "open finite JSON and their complete words are retained. These are "
-        "planned understanding fields, not approval or delivery proof. "
-        "Web Align asks missing taste: Who is this for, and what should they do? Tone, 1–3 "
-        "reference sites/adjectives, brand colours/fonts? Required sections? Record taste="
-        "{audience,tone,references,brand,requiredSections,sourceRef}; map to users/requirements, "
-        "quality_bar and done_feels_like. Show defaults/unknowns at Lock; never infer consent. "
-        "Optional designRefs=[{path,type,sha256,provenance,use}]: existing relative workspace "
-        "files, hashed visual material, never instructions/executable code. URLs grant neither "
-        "browsing permission nor runtime dependencies; report conflicts/unviewable references. "
-        "Before vision-lock, record expansion: {mode: product|quality, reason, "
-        "upgrades: [{id, text, kind, impact, disposition: accept|reject|defer}]}, with "
-        "3–7 upgrades and nonblank quality_bar and done_feels_like. Use stable unique IDs. "
-        "Choose product for a rough idea or quality within scope for a precise spec; "
-        "quality mode adds no features. Show all fields in the whole Vision Lock question. "
-        "Each disposition is your recommendation (accept what you would build); it is "
-        "confirmed only by the user's Vision Lock reply, never by upserts, by:user or "
-        "confirmed flags. Approve confirms every field as shown; Changes: adjusts them. "
-        "There is no separate Expand confirmation. Trace accepted IDs downstream in "
-        "requirement/decision/acceptance fields.expansionRefs, never by editing locked vision. "
-        "Legacy only: before compile add fields.validation (Python argv as a string array) "
-        "and fields.requirementFiles (extra protected relative paths as a string array, "
-        "possibly empty); see compilationMetadata for exact shapes and a valid example. "
-        "These metadata fields are not required at initial vision authoring."
+        "Understanding fields/aliases: vision, users, first_user_moment/firstUserMoment, "
+        "scope_in/scopeIn, scope_out/scopeOut, quality_bar/qualityBar/quality, "
+        "done_feels_like/doneFeelsLike/done, assumptions. First-present precedence; "
+        "done_means is additional detail, never a primary Done alias. Other finite JSON "
+        "fields and their full words remain retained; these fields are not approval/proof. "
+        "Web Align asks missing audience/action, tone, 1–3 references/adjectives, colours/fonts "
+        "and sections. Record taste={audience,tone,references,brand,requiredSections,sourceRef}; "
+        "map into users/requirements, quality_bar and done_feels_like. Show defaults/unknowns "
+        "at Lock; never infer consent. Optional designRefs=[{path,type,sha256,provenance,use}] "
+        "names existing relative hashed visual files, never instructions or executable code. "
+        "URLs grant no browsing/runtime permission; report unviewable/conflicting refs. "
+        "Before A, record expansion={mode:product|quality,reason,upgrades:[{id,text,kind,impact, "
+        "disposition:accept|reject|defer}]}: 3–7 stable unique IDs plus quality_bar/Done. "
+        "Product improves rough ideas; quality adds no features to precise scope. Dispositions "
+        "are recommendations only. One complete A shows all fields and records the actual "
+        "user reply, including Yes; upserts/by:user/confirmed flags grant nothing. "
+        "Changes: adjusts the proposal; no separate Expand confirmation. Trace accepted "
+        "expansionRefs downstream in requirement/decision/acceptance fields, not locked vision. "
+        "Legacy compile needs fields.validation (Python argv string array) and requirementFiles "
+        "(extra protected relative paths, possibly empty); see compilationMetadata. Initial "
+        "vision authoring needs neither."
     ),
     "test": "fields.module: nonblank string; fields.level: unit or e2e.",
 }
 
 
 TYPED_COMMON = {
-    "expected_spine_revision": "Exact current spine plan_revision, refreshed from "
-    "harness_plan_status; stale revisions refuse atomically.",
+    "expected_spine_revision": "Exact current spine plan_revision from the last mutation result; "
+    "use harness_plan_status only on reconnect or stale refusal.",
     "discoveryRoute": "harness_preflight is supported executable discovery only: "
     "authentication/effective protections remain unknown and model entitlement "
     "is not established. Catalog/choice tools record supplied observations; no "
@@ -290,19 +278,16 @@ def typed_draft_help(tool):
     result = {
         "templateState": "unconfirmed-draft; bind prerequisites before submission",
         "revisionBinding": {
-            "tool": "harness_plan_status",
-            "resultKey": "spine_revision",
+            "resultKey": "plannerConnection.planRevision",
+            "reconnectTool": "harness_plan_status",
             "argument": "expected_spine_revision",
         },
         "prerequisiteNodes": [_node("vision", "V1", [])],
-        "templateUse": "In a new plan, call harness_plan_start with idea and name, then "
-        "harness_upsert_node for prerequisiteNodes in order. For an existing plan use its "
-        "actual IDs and preserve accepted intent. Fetch harness_plan_status AFTER all node "
-        "edits and copy its spine_revision to expected_spine_revision. Submit with the "
-        "named tool; CLI equivalents are status and intake/reviewer-catalog/reviewer-choice "
-        "--json @absolute-payload-file. Refresh status and retry after a stale revision. "
-        "Null bindings below must be supplied before submission; they are not valid "
-        "observations or authority. Keep confirmation null.",
+        "templateUse": "New plan: harness_plan_start, then prerequisiteNodes via upsert. Existing "
+        "plans preserve IDs/intent. Use the last mutation planRevision as expected_spine_revision; "
+        "read status only on reconnect/stale refusal. CLI: intake/reviewer-catalog/reviewer-choice "
+        "--json @absolute-payload-file. Supply every null binding before submission: nulls are "
+        "neither observations nor authority. Keep confirmation null.",
         "producerLimits": "reviewer-catalog-producer-unavailable: harness_preflight only "
         "observes executable readiness; it does not produce a model catalog or establish "
         "authentication/entitlement. Supply genuine offered-model observations; select explicitly "
@@ -486,19 +471,18 @@ def schema_help(
             "authority": "Distinct caller-mediated chat-confirmation, never native elicitation. "
             "source_verified=false and human_identity_verified=false. Actor and latest-message "
             "claim are unverified; SHA-256 binds only the literal supplied UTF-8 quote.",
-            "prepare": "Use gate=align or vision-lock without execution fields. For gate=execution "
+            "prepare": "Semantic-v1 A via harness_understanding_card: expansion, quality, "
+            "Done/taste; align and vision-lock prepare that same A. B=plan-execution "
             "use execution={expected_revision,workers,call_cap}; optional max_parallel/timeout. "
             "The canonical producer binds the full displayed question and current inputs.",
             "record": "Wait for a separate actual external chat reply to the displayed question. "
             "Fields: gate, request_id, expected_revision, quoted_message, "
             "quote_sha256, actor_label. "
-            "Only Approve, No, Cancel or Changes: <text> are parsed; no approve/origin/by "
+            "The card lists the owner's vocabulary, including plain Yes; no approve/origin/by "
             "field is accepted. Do not recycle the preceding native refusal as a new answer.",
-            "consumer": "Recording stores only the decision; no worker admission or launch. "
-            "An approved planning decision permits a separate phase advance. An approved execution "
-            "decision permits separate start/resume with exactly the displayed scope. No, Cancel, "
-            "conditions, missing, stale or mismatched answers grant nothing. Existing valid chat "
-            "credit is reused rather than silently replaced with a native prompt.",
+            "consumer": "Recording grants decision only, never launch. Use separate legal advance "
+            "or exact start/resume after approval. No/Cancel, conditions, missing/stale/mismatched "
+            "answers grant nothing. Reuse chat credit; never silently force native approval.",
         }
     if tool == "harness_revise_test":
         result.update(
@@ -571,7 +555,14 @@ def schema_help(
             "observe each action with noHorizontalOverflow, textContrastAA, headingStructure, "
             "reducedMotionRespected:true and consoleErrors/externalRequests:0. "
             "Contracts writes minimal HTML with DOM marker SELDON-STUB <operation>; "
-            "Build removes markers; controller runs real browser RED/Validation. No build/network.",
+            "Build removes markers; controller runs real browser RED/Validation. No build/network. "
+            "Steps include assertHidden, focus and key Space. Every journey needs assertVisible "
+            "for RED, including after prerequisite clicks. Missing PNGs fail; unknown contrast "
+            "remains unproven. Before Build, plan human visualQuality observation at C. "
+            "Use harness_accept_assess judgment={repo,check:visualQuality|textContrastAA,passed,"
+            "statement,by} on the actual delivered/retained candidate; these caller-mediated "
+            "observations never claim machine measurement. Revalidate a held candidate after "
+            "a contrast judgment, then run acceptance and formal review with retained evidence.",
             "phaseFlow": "During Vision, author vision.fields.scenarios + vision.fields.targets; "
             "then batch all phase nodes and use one forward harness_advance to_phase=plan; "
             "every intermediate gate still runs; no chain crosses consent or roundtable.",
@@ -584,7 +575,7 @@ def schema_help(
             "entry uses python -B <entry>. Both workers own module __main__.py (Contracts stub). "
             "Modules need __init__.py at every level and non-stdlib names. Optional action.cwd "
             "is setup-created, e.g. 'data/caller'; default cwd and PYTHONPATH are product root.",
-            "argv": "Plain strings may not contain / \\ : or ..; pass sandbox paths as "
+            "argv": "Strings are literal argv; only explicit path objects resolve sandbox paths: "
             "{path: 'data/x.json'}. Setup files use exactly one utf8 or strict base64 string, "
             "e.g. {path: 'data/raw.bin', base64: '/w=='} for byte FF; only data/ fixtures. "
             "setup.dirs "
@@ -596,8 +587,7 @@ def schema_help(
             'For a stable single-line diagnostic, stderrEquals="message\\n" proves exact framing. '
             "stderrContains alone proves neither line count nor absence of traceback. "
             "Avoid brittle whole multiline logs; variable fault diagnostics need "
-            "appropriate supplemental checks "
-            "through the real handler. "
+            "executable scenarios with streams/argv/cwd, not supplemental promises. "
             "JSON equality preserves types, including integer versus float. path observations: "
             "fileJsonEquals, fileBytesEquals, fileAbsent, bytesUnchangedFrom (a setup snapshot id; "
             "files compare raw bytes, directories compare all entries and file bytes, "
@@ -608,7 +598,11 @@ def schema_help(
             "refs": "requirementRefs/contractRefs are requirement/design node IDs, e.g. R1; "
             "an optional @revision pin is checked when present.",
             "stdin": "Optional cli.stdin supplies exactly one utf8 or strict base64 string "
-            "(e.g. {utf8: 'hello\\n'} or {base64: '/w=='}); absent means EOF/DEVNULL.",
+            "(e.g. {utf8: 'hello\\n'} or {base64: '/w=='}); absent means EOF/DEVNULL. "
+            "For responsive help/errors with stdin held open use {holdOpen:true,exitWithin:5}; "
+            "observe stdinOpenAtExit:true, elapsedAtMost:5, stdoutContains and stdoutEndsWith. "
+            "Required HC checks are scenarios, produced by the runner and included with exact "
+            "streams, absolute argv and cwd in the candidate-bound requiredEvidence packet slot.",
             "fieldExample": {
                 "targets": {"app": {"entry": "app_cli.py", "argv": []}},
                 "scenarios": {

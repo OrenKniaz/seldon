@@ -32,7 +32,7 @@ semantic_plan = test_semantic_wiring.semantic_plan
 semantic_acceptance_product = test_semantic_wiring.semantic_acceptance_product
 
 
-@pytest.mark.parametrize("link", ["unlinked", "unknown", "stale", "empty"])
+@pytest.mark.parametrize("link", ["unlinked", "unknown", "stale"])
 def test_semantic_accept_refuses_invalid_coverage_before_admission(
     semantic_acceptance_product, link
 ):

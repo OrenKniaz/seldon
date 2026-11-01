@@ -13,9 +13,9 @@ from tempfile import TemporaryDirectory
 from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import uuid4
 
+from codex_harness.core import approvals, planner_recovery
 from codex_harness.core import planner_confirmations as confirmations
 from codex_harness.core import planner_consent_views as consent_views
-from codex_harness.core import planner_recovery
 from codex_harness.core import planner_views as views
 from codex_harness.core.mail import KINDS, Mailbox
 from codex_harness.core.plan_store import (
@@ -46,12 +46,6 @@ PHASE_DIAGRAMS = {
 STRING = {"type": "string", "minLength": 1}
 STRINGS = {"type": "array", "items": STRING}
 CHAT_GATES = ["align", "vision-lock", "execution", "align+vision-lock", "plan-execution"]
-B_NEXT = (
-    "Needs your go-ahead (B): "
-    "harness_prepare_chat_confirmation gate=plan-execution execution=<exact workers and limits>; "
-    "show the complete subject and field diff, then record the actual reply with "
-    "harness_record_chat_confirmation."
-)
 
 
 def _object(properties: dict, required=None) -> dict:
@@ -364,7 +358,8 @@ TOOLS = [
     _tool(
         "harness_accept_status",
         "Read durable acceptance progress and terminal receipt without resubmitting work.",
-        {"id": STRING},
+        {"id": STRING, "wait_seconds": {"type": "number", "minimum": 0, "maximum": 60}},
+        ["id"],
     ),
     _tool(
         "harness_accept_rebind",
@@ -493,11 +488,12 @@ TOOLS = [
         "copy of the brief (harness_schema kind=vision). Semantic-v1: prepare expansion first; "
         "this card creates combined understanding/scope consent A when ready.",
         {
-            **dict.fromkeys(
-                ("vision", "users", "first_user_moment", "scope_in", "scope_out"), STRING
-            ),
+            **dict.fromkeys(approvals.UNDERSTANDING_FIELDS, STRING),
             "assumptions": STRINGS,
+            "expansion": {"type": "object"},
+            "taste": {"type": "object"},
         },
+        ["vision", "users", "first_user_moment", "scope_in", "scope_out", "assumptions"],
     ),
     _tool(
         "harness_record_confirmation",
@@ -516,7 +512,7 @@ TOOLS = [
     ),
     _tool(
         "harness_prepare_chat_confirmation",
-        "Offer chat consent: semantic-v1 A=align+vision-lock, B=plan-execution; or single gates. "
+        "Chat consent: semantic-v1 A=align+vision-lock, B=plan-execution; legacy gates remain. "
         "No approval or launch. Identity, supplied message source and recency remain unverified.",
         {
             "gate": {"type": "string", "enum": CHAT_GATES},
@@ -543,8 +539,8 @@ TOOLS = [
     ),
     _tool(
         "harness_record_chat_confirmation",
-        "Record only an explicit answer to a displayed chat question: Approve, No, Cancel or "
-        "Changes: <text>. Quote/hash/actor are caller-supplied and unverified. Does not launch.",
+        f"Record an explicit displayed-question answer ({', '.join(approvals.CHOICES)}). "
+        "Quote/hash/actor are caller-supplied and unverified. Does not launch.",
         {
             "gate": {"type": "string", "enum": CHAT_GATES},
             "request_id": STRING,
@@ -755,7 +751,7 @@ def resume_next(data=None, *, cli_prefix=None):
     """Render only supported routes from the shared advisory action contract."""
     data = data or {}
     if data.get("reasonCode") == "plan-b-consent-required":
-        return B_NEXT
+        return consent_views.consent_recovery("plan-b-consent-required")
     action = data.get("nextAction", {})
     kind = action.get("kind")
 
@@ -1121,6 +1117,13 @@ class PlannerServer:
         return workspace_refusal(self, request_id, binding, code, name)
 
     def _wire_call_tool(self, name, arguments):
+        if (
+            name == "harness_accept_status"
+            and isinstance(arguments, dict)
+            and arguments.get("wait_seconds", 0)
+        ):
+            # The serial owner must consume completion messages while the caller waits.
+            return self.call_tool(name, arguments)
         if name == "harness_packet_view" and isinstance(arguments, dict):
             # CLI/internal calls retain full packet output; MCP defaults to the summary.
             arguments = {"include_packet": False, **arguments}
@@ -1327,24 +1330,6 @@ class PlannerServer:
                 if self.result_data is None:
                     self.result_data = dict(contract=contract, holdReasons=[str(error)])
             is_error = True
-        if not is_error and name in {"harness_upsert_node", "harness_upsert_nodes"}:
-            store = self._store()
-            spine = store.spine()
-            if spine.semantic:
-                from codex_harness.core.spine import semantic_spec
-
-                gaps = []
-                try:
-                    semantic_spec(spine)
-                    if store.phase() == "plan":
-                        store._check_coverage(spine, "bead")
-                        store._manifest(spine)
-                except (ValueError, OSError) as error:
-                    gaps = getattr(error, "open_gaps", [str(error)])
-                self.result_data = {**(self.result_data or {}), "openGaps": gaps}
-                if gaps:
-                    phase = "roundtable" if store.phase() == "plan" else "tech-stack"
-                    body += f"\nOpen before {phase}: " + "; ".join(gaps)
         status_available = True
         try:
             status = (
@@ -1369,6 +1354,15 @@ class PlannerServer:
             body += "\nCanonical status unavailable; the primary tool result above is separate."
             if not is_error:
                 body += " The tool completed; do not repeat its mutation to refresh status."
+        if (
+            not is_error
+            and name in {"harness_upsert_node", "harness_upsert_nodes"}
+            and status.get("planMode") == "semantic-v1"
+        ):
+            gaps = status.get("coverage_gaps", [])
+            self.result_data = {**(self.result_data or {}), "openGaps": gaps}
+            if gaps:
+                body += "\nOpen draft gaps: " + json.dumps(gaps)
         if is_error:
             body += f"\npending_gate: {status['pending_gate'] or 'none'}"
         acceptance = status.get("acceptance", {})
@@ -1568,31 +1562,9 @@ class PlannerServer:
         }
 
     def _next(self, name: str, args: dict, status: dict, error: bool, error_code=None) -> str:
-        if name == "harness_plan_status" and not error and self.store is not None:
-            return status["next"]
+        data = self.result_data or {}
         if error_code in {"plan-a-consent-required", "plan-b-consent-required"}:
             return consent_views.consent_recovery(error_code)
-        job = self.result_data or {}
-        if (
-            status.get("planMode") == "semantic-v1"
-            and status.get("phase") in {"execute", "accept"}
-            and (revision := status.get("published_revision"))
-        ):
-            from codex_harness.core.planner_jobs import _directory, worker_job_status
-
-            if _directory(self.workspace, revision).is_dir():
-                job = worker_job_status(self.workspace, revision)
-        if (
-            not error
-            and job.get("run", {}).get("semanticValidation", {}).get("state") == "PASS"
-            and not status.get("acceptance", {}).get("lastRunSubject")
-            # Any attempt, even queued, means the offer was taken; status hints take over.
-            and not self.store.connection.execute("SELECT 1 FROM acceptance_attempts").fetchone()
-        ):
-            return (
-                "harness_accept_run repo=<integrated-repo> subject=product; B covers validation. "
-                "Poll harness_accept_status; C waits for evidence and review."
-            )
         if name == "harness_review_policy" and not error:
             revision = self.result_data["example"]["expectedManifestRevision"]
             reasons = status.get("reviewPolicy", {}).get("reasons", [])
@@ -1616,191 +1588,43 @@ class PlannerServer:
                 else "harness_plan_status; inspect recorded roles and current holds before any "
                 "separately authorized reviewer launch."
             )
-        if name in {"harness_audit", "harness_audit_status"}:
-            if self.result_data and "audits" in self.result_data:
-                return (
-                    "Recorded history only; request correlation and server quiescence "
-                    "remain UNKNOWN."
+        if name in {
+            "harness_audit",
+            "harness_audit_status",
+            "harness_accept_run",
+            "harness_accept_review",
+        }:
+            state, attempt = data.get("state"), data.get("attemptId")
+            poll = "harness_" + ("audit" if "audit" in name else "accept") + "_status"
+            if attempt and state in {"queued", "running", "unknown-interrupted"}:
+                return f"{poll} id={attempt}; " + (
+                    "UNKNOWN: hold mutations; no replay or new key."
+                    if state == "unknown-interrupted"
+                    else "Pending is not proof or acceptance; inspect the same attempt."
                 )
-            if self.result_data and self.result_data.get("state") == "unknown-interrupted":
-                return (
-                    "harness_audit_status id="
-                    + self.result_data["attemptId"]
-                    + "; ownership UNKNOWN: hold mutations; no replay or new key."
-                )
-            if self.result_data and self.result_data.get("state") in {"queued", "running"}:
-                return (
-                    "harness_audit_status id="
-                    + self.result_data["attemptId"]
-                    + "; read persisted status/result; pending admission is not audit completion."
-                )
-            if self.result_data and not error:
-                return "harness_plan_status; inspect committed audit result and current gate."
-            return (
-                "harness_plan_status; inspect the recorded audit findings and current gate. "
-                "Repair only the implicated planning proofs/stubs before recompiling."
-                if self.result_data
-                else "harness_schema tool=harness_audit; correct the reported audit prerequisite."
-            )
-        if name == "harness_roundtable" and self.result_data:
-            return (
-                "harness_review id="
-                + self.result_data["id"]
-                + "; inspect each recorded reviewer outcome before explicitly selecting any retry."
-            )
-        if name == "harness_accept_scenarios" and not error:
-            scenarios = self.result_data["scenarios"]
-            if not scenarios or any(
-                not item.get("executable") or item.get("status") == "stale" for item in scenarios
-            ):
-                return (
-                    "harness_schema tool=harness_accept_scenarios; fill executable steps and "
-                    "expectations and save the complete current set with harness_accept_scenarios."
-                )
-        if name == "harness_accept_run" and self.result_data:
-            attempt = self.result_data
-            if attempt["state"] in {"queued", "running"}:
-                return (
-                    "harness_accept_status id="
-                    + attempt["attemptId"]
-                    + "; pending is not acceptance."
-                )
-            if error:
-                return (
-                    "harness_accept_status id="
-                    + attempt["attemptId"]
-                    + "; inspect retained failure/unfinished evidence; "
-                    "do not replay uncertain work."
-                )
-        if name == "harness_accept_run" and not error and self.result_data["subject"] == "oracle":
-            return (
-                "harness_accept_run repo=<integrated-product-repo> subject=product; "
-                "the oracle result is a dry run, not product acceptance."
-            )
         if name == "harness_accept_assess":
-            if status.get("pending_gate") == "harness_plan_start":
-                return "harness_plan_start idea=<your idea> name=<plan name>"
-            action = (self.result_data or {}).get("nextAction")
-            if action:
-                return (
-                    action["mcpTool"]
-                    + " "
-                    + json.dumps(action["arguments"])
-                    + "; "
-                    + action.get("requiredChoices", action["reason"])
-                )
-            if error:
-                return (
-                    "harness_accept_assess schema=true; inspect the complete "
-                    "owning contract and exact holdReasons; no launch is "
-                    "authorized by this refusal."
+            if data.get("next"):
+                return data["next"]
+            if action := data.get("nextAction"):
+                return f"{action['mcpTool']} {json.dumps(action['arguments'])}; " + action.get(
+                    "requiredChoices", action["reason"]
                 )
             return (
-                "harness_accept_assess prepare={} lists actual member/bead "
-                "choices; select explicitly and supply authorized "
-                "reviewer/finite limits."
-            )
-        if name == "harness_accept_review" and (self.result_data or {}).get("kind") == "review":
-            return self.result_data.get("next") or (
-                "harness_accept_status id=" + self.result_data["attemptId"]
-            )
-        if (
-            name == "harness_accept_review"
-            and not error
-            and status.get("acceptance", {}).get("findings")
-        ):
-            acceptance = status["acceptance"]
-            if acceptance.get("invalidReason") != "acceptance-findings-open":
-                return acceptance.get("next", "harness_plan_status")
-            return (
-                "harness_accept_assess schema=true; preserve AF originals "
-                "and record any intended declaration before fresh "
-                "assessment. Support never clears findings or final "
-                "acceptance."
-            )
-        if status.get("pending_gate") == "harness_plan_start":
-            return "harness_plan_start idea=<your idea> name=<plan name>"
-        if name == "harness_resolve_findings" and error:
-            return (
-                "harness_schema tool=harness_resolve_findings (complete declaration contract "
-                "and actual bound example; unavailable verification producers remain a hold)."
-            )
-        if name == "harness_plan_resume":
-            return resume_next(self.result_data)
-        if name == "harness_schema":
-            return "Use the documented input with actual plan IDs; follow harness_plan_status."
-        if (
-            name in {"harness_worker_start", "harness_worker_status"}
-            and self.result_data
-            and self.result_data.get("jobId")
-        ):
-            return "harness_worker_status job_id=" + self.result_data["jobId"] + " wait_seconds=120"
-        if (
-            name in {"harness_publish", "harness_plan_status"}
-            and not error
-            and status["phase"] == "publish"
-            and status.get("publication", {}).get("up_to_date")
-            and not status.get("acceptance", {}).get("accepted")
-        ):
-            if (
-                status.get("continuation", {}).get("recommendation", {}).get("kind")
-                != "not_applicable"
-            ):
-                return views.review_resolution_next(status["reviewResolution"])
-            return (
-                "harness_plan_resume; inspect existing job state first. Execution requires "
-                "exact workers and call_cap matching B (otherwise fresh chat consent); "
-                "this guidance does not authorize a launch."
-            )
-        if name == "harness_preflight":
-            return (
-                "Correct the diagnostic input and retry harness_preflight."
+                "harness_accept_assess schema=true; inspect the owning contract and hold reasons."
                 if error
-                else "Review missing/unknown observations; "
-                "existing planning and proof gates still apply."
+                else status["next"]
             )
+        if name in {"harness_worker_start", "harness_worker_status"} and data.get("jobId"):
+            if data.get("run", {}).get("semanticValidation", {}).get("state") != "PASS":
+                return "harness_worker_status job_id=" + data["jobId"] + " wait_seconds=120"
+        if name == "harness_plan_resume":
+            return resume_next(data)
         if error and name in {
             "harness_intake",
             "harness_reviewer_catalog",
             "harness_reviewer_choice",
         }:
             return "harness_schema tool=" + name
-        if name == "harness_waves" and self.result_data and self.result_data.get("intake") is None:
-            return "harness_schema tool=harness_intake; keep the missing intake draft unconfirmed."
-        if name in (
-            "harness_intake",
-            "harness_reviewer_catalog",
-            "harness_reviewer_choice",
-            "harness_wave_map",
-            "harness_waves",
-        ):
-            return (
-                "Refresh harness_plan_status and reconcile the refused draft input."
-                if error
-                else "harness_waves; resolve draft/unmet assurance through existing planning gates."
-            )
-        acceptance = status.get("acceptance", {})
-        if (
-            name in {"harness_accept_rebind", "harness_accept"}
-            or name == "harness_plan_status"
-            and status["phase"] == "accept"
-        ):
-            if (
-                name == "harness_plan_status"
-                and acceptance.get("invalidReason") == "acceptance-findings-open"
-            ):
-                return (
-                    "harness_accept_assess schema=true; inspect actual acquisition choices. "
-                    "Preserve AF originals; record any intended declaration "
-                    "before fresh assessment. "
-                    "A later disposition mutation stales current support; support never clears "
-                    "findings or native final acceptance."
-                )
-            return (
-                consent_views.semantic_consent_next(status, {})
-                if status.get("planMode") == "semantic-v1"
-                else acceptance.get("next", "harness_plan_status")
-            )
         if (
             error
             and status.get("reviewResolution")
@@ -1813,86 +1637,28 @@ class PlannerServer:
         ):
             return views.review_resolution_next(status["reviewResolution"])
         if error:
-            return (
-                "Correct the reported blocker, then retry this tool; "
-                "harness_plan_status shows the current gate."
-            )
+            return "Correct the reported blocker; " + status.get("next", "harness_plan_status")
         if status.get("planMode") == "semantic-v1":
             hint = consent_views.semantic_consent_next(
-                status,
-                self.result_data or {},
-                plan_authorized=bool(self.store._current_approval("B")),
+                status, data, plan_authorized=bool(self.store._current_approval("B"))
             )
             if hint:
                 return hint
-        if name.startswith("harness_accept"):
-            return self._accept_next(name).removeprefix("\nNext: ")
         if name == "harness_understanding_card":
-            return (
-                "Show the user this card exactly as written (do not summarise), then ask them "
-                "to confirm it or say what to change."
-            )
+            return "Show this complete card and ask the user to confirm or correct it."
         if name == "harness_decision_card" and not args.get("chosen"):
-            return "Show the user this decision exactly as written and wait for their choice."
+            return "Show this complete decision and wait for the user's choice."
         if name == "harness_ask":
-            return "Your call: answer the question above so the planner can record your decision."
+            return "Wait for the actual answer, then harness_answer."
         if name == "harness_add_assumption":
             return (
-                "Confirm or reject this assumption with harness_resolve_assumption, "
-                "including the reason and speaker."
+                "Confirm or reject with harness_resolve_assumption, including reason and speaker."
             )
-        if name in ("harness_mail_send", "harness_mail_reply", "harness_mail_ack"):
+        if name in {"harness_mail_send", "harness_mail_reply", "harness_mail_ack"}:
             return "Read your inbox with harness_mail_inbox."
-        if name == "harness_plan_start" and status["phase"] == "align":
-            return (
-                "Restate the vision with harness_understanding_card, show the user the card "
-                "exactly as written, and ask them to confirm it or say what to change."
-            )
         if name == "harness_record_confirmation" and status["phase"] == args["gate"]:
-            phase = status["phase"]
-            return "harness_advance to_phase=" + PHASES[PHASES.index(phase) + 1]
-        gate = status["pending_gate"]
-        if gate == "harness_plan_start":
-            return "harness_plan_start idea=<your idea> name=<plan name>"
-        if gate and gate.startswith("approval:"):
-            return (
-                "harness_record_confirmation gate="
-                + gate.split(":", 1)[1]
-                + "; review the displayed understanding and answer the native client form."
-            )
-        if status.get("open_clarifications"):
-            return "Answer the open questions with harness_answer before advancing."
-        if status.get("planMode") == "semantic-v1":
-            if status["phase"] in {"features", "requirements", "tech-stack"}:
-                if (self.result_data or {}).get("openGaps") == []:
-                    return "harness_advance to_phase=plan; every intermediate gate still runs."
-                return BATCH_GUIDANCE
-        if status["phase"] in {"roundtable", "publish"}:
-            resolution = status.get("reviewResolution")
-            if resolution and resolution["nextAction"]["kind"] != "not_applicable":
-                return views.review_resolution_next(resolution)
-        if status.get("acceptance", {}).get("accepted"):
-            return (
-                "Review the recorded acceptance above; harness_plan_status shows current evidence."
-            )
-        return views.NEXT.get(status["phase"], "Retry harness_plan_status.")
-
-    @staticmethod
-    def _accept_next(name: str) -> str:
-        return (
-            "\nNext: "
-            + {
-                "harness_accept_scenarios": (
-                    "harness_accept_run repo=<integrated-repo> subject=product"
-                ),
-                "harness_accept_run": "harness_accept_review repo=<integrated-repo>",
-                "harness_accept_review": (
-                    "harness_accept statement=<actual-words> by=<user-or-proxy:name>"
-                ),
-                "harness_accept": "harness_plan_status",
-                "harness_accept_rebind": "harness_plan_status",
-            }[name]
-        )
+            return "harness_advance to_phase=" + PHASES[PHASES.index(status["phase"]) + 1]
+        return status.get("next", "harness_plan_status")
 
     def _dispatch(self, name: str, args: dict, *, schema_tools=None) -> str:
         if name == "harness_prepare_chat_confirmation":
@@ -1950,11 +1716,14 @@ class PlannerServer:
             self.result_data = preflight_report(self.workspace, **args)
             return render_preflight(self.result_data)
         if name == "harness_accept_assess":
-            if len(args) != 1 or not set(args).issubset({"schema", "prepare", "request"}):
-                raise ValueError(
-                    "accept-assess requires exactly one schema, prepare or request mode"
-                )
-            if args.get("schema") is True:
+            modes = views.execution_assessment_contract()["modes"]
+            if len(args) != 1 or not set(args).issubset(modes):
+                raise ValueError("accept-assess requires exactly one mode: " + ", ".join(modes))
+            if "judgment" in args:
+                from codex_harness.core.planner_candidate import record_judgment
+
+                self.result_data = record_judgment(self._store(), **args["judgment"])
+            elif args.get("schema") is True:
                 self.result_data = views.execution_assessment_contract()
             else:
                 from codex_harness.core.acceptance import prepare_execution_assessment
@@ -2031,7 +1800,9 @@ class PlannerServer:
             if name == "harness_accept_scenarios":
                 if "scenarios" in args:
                     store.save_acceptance_scenarios(args["scenarios"])
-                elif args.get("derive") or not store.acceptance_scenarios():
+                elif not store.spine().semantic and (
+                    args.get("derive") or not store.acceptance_scenarios()
+                ):
                     store.save_acceptance_scenarios(
                         derive_scenarios(store.locked_acceptance_spine())
                     )
@@ -2312,7 +2083,6 @@ class PlannerServer:
             return f"Revised protected test: {self.result_data['path']}; compile before reuse."
         if name == "harness_plan_status":
             status = refusal_status(self._status(), store)
-            status["next"] = consent_views.status_next(status, store=store)
             if not (args.get("full") or args.get("include_detail")) and status.get(
                 "visionProjection"
             ):
@@ -2425,7 +2195,9 @@ class PlannerServer:
                     "Understanding draft saved. Prepare proposed expansion dispositions, "
                     "quality and Done before consent A."
                 )
-            body = views.understanding_card(**args)
+            body = views.understanding_card(
+                **{k: v for k, v in args.items() if k not in {"expansion", "taste"}}
+            )
             return body + "\n" + views.setup_card(node["fields"].get("setup", {}))
         if name == "harness_record_confirmation":
             raise ValueError(
@@ -2448,10 +2220,10 @@ class PlannerServer:
             steps = [args["to_phase"]]
             if args["to_phase"] in PHASES:
                 start, end = PHASES.index(store.phase()), PHASES.index(args["to_phase"])
-                if start + 1 < end < PHASES.index("roundtable") and not {
-                    "align",
-                    "vision-lock",
-                }.intersection(PHASES[start:end]):
+                if start + 1 < end < PHASES.index("roundtable") and (
+                    store.spine().semantic
+                    or not {"align", "vision-lock"}.intersection(PHASES[start:end])
+                ):
                     steps = PHASES[start + 1 : end + 1]
             for phase in steps:
                 store.advance(phase, by=by, statement=statement)
@@ -2705,37 +2477,9 @@ class PlannerServer:
                 "result": self._offer_chat_confirmation(reply, "execution", proposal),
             }
         prepared = prepare_execution(self._store(), **proposal)
-        wire_id = "seldon-execution-" + uuid4().hex
-        self._pending_confirmation = {
-            "purpose": "execution",
-            "wire_id": wire_id,
-            "tool_id": request_id,
-            "tool_name": name,
-            "arguments": dict(arguments),
-            "request": prepared,
-            "deadline": time.monotonic() + self._confirmation_timeout,
-        }
-        return {
-            "jsonrpc": "2.0",
-            "id": wire_id,
-            "method": "elicitation/create",
-            "params": {
-                "message": prepared["card"],
-                "requestedSchema": _object(
-                    {
-                        "approve": {
-                            "type": "boolean",
-                            "title": "Approve only this exact worker execution and call ceiling",
-                        },
-                        "statement": {"type": "string", "title": "Your complete response"},
-                        "conditions": {
-                            "type": "string",
-                            "title": "Conditions or changes (empty for unconditional approval)",
-                        },
-                    }
-                ),
-            },
-        }
+        return self._native_question(
+            request_id, prepared, purpose="execution", tool_name=name, arguments=dict(arguments)
+        )
 
     def _execution_outcome_reply(self, pending, outcome, *, reason=None):
         from codex_harness.core.planner_resume import resume_plan
@@ -2762,40 +2506,6 @@ class PlannerServer:
         return self._offer_chat_confirmation(
             reply, "execution", proposal, request_id=pending["request"]["request_id"]
         )
-
-    def _finish_execution(self, response, pending):
-        from codex_harness.core.planner_execution import complete_execution
-
-        self._pending_confirmation = None
-        result = response.get("result")
-        try:
-            if (
-                "error" in response
-                or not isinstance(result, dict)
-                or set(result) - {"action", "content"}
-            ):
-                raise ValueError("worker-execution-response-invalid")
-            outcome = complete_execution(
-                self._store(),
-                pending["request"]["request_id"],
-                result.get("action"),
-                result.get("content"),
-            )
-        except (ValueError, KeyError) as error:
-            try:
-                outcome = complete_execution(
-                    self._store(), pending["request"]["request_id"], "cancel"
-                )
-            except (ValueError, KeyError):
-                outcome = {"state": "unproved", "request_id": pending["request"]["request_id"]}
-            reply = self._execution_outcome_reply(pending, outcome, reason=str(error))
-        else:
-            if outcome["state"] == "approved":
-                reply = self.call_tool(pending["tool_name"], pending["arguments"])
-                reply = {**reply, "_meta": {"executionConfirmation": outcome}}
-            else:
-                reply = self._execution_outcome_reply(pending, outcome)
-        return {"jsonrpc": "2.0", "id": pending["tool_id"], "result": reply}
 
     def _confirmation_reply(self, data, *, error=False, reason=None):
         try:
@@ -2888,34 +2598,38 @@ class PlannerServer:
         if self._pending_confirmation is not None:
             raise ValueError("plan-confirmation-pending: answer or cancel the displayed request")
         prepared = prepare_confirmation(self._store(), arguments["gate"])
+        return self._native_question(request_id, prepared)
+
+    def _native_question(self, request_id, prepared, **context):
         wire_id = "seldon-confirmation-" + uuid4().hex
-        self._pending_confirmation = {
-            "wire_id": wire_id,
-            "tool_id": request_id,
-            "request": prepared,
-            "deadline": time.monotonic() + self._confirmation_timeout,
-        }
-        return {
-            "jsonrpc": "2.0",
-            "id": wire_id,
-            "method": "elicitation/create",
-            "params": {
-                "message": prepared["card"],
-                "requestedSchema": _object(
-                    {
-                        "approve": {
-                            "type": "boolean",
-                            "title": "Unconditionally approve this displayed gate and revision",
-                        },
-                        "statement": {"type": "string", "title": "Your complete response"},
-                        "conditions": {
-                            "type": "string",
-                            "title": "Conditions or changes (empty for unconditional approval)",
-                        },
-                    }
+        self._pending_confirmation = dict(
+            wire_id=wire_id,
+            tool_id=request_id,
+            request=prepared,
+            deadline=time.monotonic() + self._confirmation_timeout,
+            **context,
+        )
+        return dict(
+            jsonrpc="2.0",
+            id=wire_id,
+            method="elicitation/create",
+            params=dict(
+                message=prepared["card"],
+                requestedSchema=_object(
+                    dict(
+                        approve=dict(
+                            type="boolean",
+                            title="Unconditionally approve the complete displayed subject",
+                        ),
+                        statement=dict(type="string", title="Your complete response"),
+                        conditions=dict(
+                            type="string",
+                            title="Conditions or changes (empty for unconditional approval)",
+                        ),
+                    )
                 ),
-            },
-        }
+            ),
+        )
 
     def _finish_confirmation(self, response):
         from codex_harness.core.planner_confirmations import complete_confirmation
@@ -2927,8 +2641,7 @@ class PlannerServer:
             return self._cancel_confirmation(
                 "Confirmation timed out; no approval recorded", preserve_pending=True
             )
-        if pending.get("purpose") == "execution":
-            return self._finish_execution(response, pending)
+        execution = pending.get("purpose") == "execution"
         if "error" in response:
             return self._cancel_confirmation(
                 "Native client could not display confirmation; no approval recorded",
@@ -2949,13 +2662,27 @@ class PlannerServer:
                 result.get("action"),
                 result.get("content"),
             )
-            reply = self._confirmation_reply(outcome, error=outcome["state"] != "approved")
+            reply = (
+                (
+                    self.call_tool(pending["tool_name"], pending["arguments"])
+                    if outcome["state"] == "approved"
+                    else self._execution_outcome_reply(pending, outcome)
+                )
+                if execution
+                else self._confirmation_reply(outcome, error=outcome["state"] != "approved")
+            )
+            if execution and outcome["state"] == "approved":
+                reply = {**reply, "_meta": {"executionConfirmation": outcome}}
         except (ValueError, KeyError) as error:
             outcome = complete_confirmation(
                 self._store(), pending["request"]["request_id"], "cancel"
             )
-            reply = self._confirmation_reply(outcome, error=True, reason=str(error))
-        if outcome["state"] != "approved":
+            reply = (
+                self._execution_outcome_reply(pending, outcome, reason=str(error))
+                if execution
+                else self._confirmation_reply(outcome, error=True, reason=str(error))
+            )
+        if outcome["state"] != "approved" and not execution:
             reply = self._offer_chat_confirmation(
                 reply, pending["request"]["gate"], request_id=pending["request"]["request_id"]
             )

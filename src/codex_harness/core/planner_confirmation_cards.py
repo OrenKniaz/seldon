@@ -4,13 +4,6 @@ Transport loss is not a user response. This module never grants approval or
 authenticates chat quotes; the existing correlated bridge remains the writer.
 """
 
-from __future__ import annotations
-
-
-def compact_card(request):
-    """Native and chat display the same complete persisted approval subject."""
-    return request["card"]
-
 
 def pending_outcome(request):
     """Truthful timeout/disconnect result, without fabricating a user cancellation."""

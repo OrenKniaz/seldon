@@ -1,8 +1,4 @@
-"""One current subject and one consent rule for the local A/B journey.
-
-Words, actor and channel are retained provenance, never human authentication.
-Machine prerequisites and candidate-bound product acceptance remain separate.
-"""
+"""Canonical A/B subjects and actual consent words; provenance never authenticates a human."""
 
 import hashlib
 import json
@@ -10,6 +6,7 @@ from copy import deepcopy
 from uuid import uuid4
 
 from codex_harness.core.plan_store import PlanStoreError
+from codex_harness.core.planner_vision import SECTIONS
 from codex_harness.core.spine import Spine
 
 EFFECTS = {
@@ -18,6 +15,29 @@ EFFECTS = {
     "quiescent same-work recovery within these cumulative limits and exact choices.",
 }
 EVENT = "approval-v2-recorded"
+AFFIRMATIVE = {
+    "approve",
+    "approved",
+    "yes",
+    "accept",
+    "accepted",
+    "i approve",
+    "i accept",
+    "confirmed",
+}
+CHOICES = ["Yes", "Approve", "No", "Cancel", "Changes: <text>"]
+
+UNDERSTANDING_FIELDS = tuple(aliases[0] for _, aliases in SECTIONS if aliases[0] != "assumptions")
+INTENT_FIELDS = {key for _, aliases in SECTIONS for key in aliases} | {
+    "expansion",
+    "journey",
+    "taste",
+    "designRefs",
+}
+
+
+def decision(words):
+    return " ".join(words.casefold().split()).rstrip(".!")
 
 
 def fingerprint(value):
@@ -48,32 +68,7 @@ def intent(vision):
     return {
         "title": vision["title"],
         "understanding": vision["text"],
-        "fields": {
-            k: v
-            for k, v in vision["fields"].items()
-            if k
-            in {
-                "vision",
-                "users",
-                "first_user_moment",
-                "firstUserMoment",
-                "scope_in",
-                "scopeIn",
-                "scope_out",
-                "scopeOut",
-                "assumptions",
-                "quality_bar",
-                "qualityBar",
-                "quality",
-                "done_feels_like",
-                "doneFeelsLike",
-                "done",
-                "expansion",
-                "journey",
-                "taste",
-                "designRefs",
-            }
-        },
+        "fields": {k: v for k, v in vision["fields"].items() if k in INTENT_FIELDS},
     }
 
 
@@ -224,20 +219,20 @@ def field_diff(before, after, path=""):
 
 
 def render(payload, changes):
-    return (
-        f"Your decision: approve {payload['kind']}? Reply Approve, No, Cancel, "
-        "or Changes: <text>.\n"
-        + payload["effect"]
-        + (
-            f"\nB includes up to {payload['reviewAllowance']} reviews in total."
-            if payload["kind"] == "B"
-            else ""
+    lines = [
+        f"Your decision: approve {payload['kind']}? Reply {', '.join(CHOICES)}.",
+        payload["effect"],
+    ]
+    if payload["kind"] == "B":
+        lines.append(f"B includes up to {payload['reviewAllowance']} reviews in total.")
+    lines.extend(
+        f"{title}:\n{json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)}"
+        for title, value in (
+            ("Complete approval subject", payload),
+            ("Changes from your previous decision", changes),
         )
-        + "\nComplete approval subject:\n"
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
-        + "\nChanges from your previous decision:\n"
-        + json.dumps(changes, ensure_ascii=False, sort_keys=True, indent=2)
     )
+    return "\n".join(lines)
 
 
 def proposal(store, kind, proposed_action=None):
@@ -286,27 +281,13 @@ def record_approval(store, request, *, words, actor, channel, affirmative, state
     if not isinstance(words, str) or not isinstance(actor, str) or not actor.strip():
         raise ValueError("approval-words-and-actor-required")
     payload = request["subject"]
-    decision = " ".join(words.casefold().split()).rstrip(".!")
+    answer = decision(words)
     if state not in {"stale", "decline", "cancel"}:
         if conditions:
             state = "changes-requested"
-        elif decision in {"no", "cancel"}:
-            state = "declined" if decision == "no" else "cancel"
-        elif (
-            not affirmative
-            or state != "accept"
-            or decision
-            not in {
-                "approve",
-                "approved",
-                "yes",
-                "accept",
-                "accepted",
-                "i approve",
-                "i accept",
-                "confirmed",
-            }
-        ):
+        elif answer in {"no", "cancel"}:
+            state = "declined" if answer == "no" else "cancel"
+        elif not affirmative or state != "accept" or answer not in AFFIRMATIVE:
             state = "changes-requested"
     if state == "accept" and fingerprint(payload) != fingerprint(
         subject(store, payload["kind"], request.get("proposedAction"))

@@ -1,0 +1,38 @@
+{
+  "target": "page",
+  "operation": "navigation",
+  "viewport": {
+    "width": 375,
+    "height": 812
+  },
+  "reducedMotion": "no-preference",
+  "steps": [
+    {
+      "op": "open"
+    },
+    {
+      "op": "click",
+      "locator": {
+        "text": "Explore the collection"
+      }
+    },
+    {
+      "op": "assertVisible",
+      "locator": {
+        "text": "Three pieces. More possibilities."
+      }
+    },
+    {
+      "op": "click",
+      "locator": {
+        "text": "See how they work together"
+      }
+    },
+    {
+      "op": "assertVisible",
+      "locator": {
+        "text": "A little space. Your way."
+      }
+    }
+  ]
+}

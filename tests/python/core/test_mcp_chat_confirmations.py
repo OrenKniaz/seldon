@@ -93,7 +93,7 @@ def test_public_native_failure_offers_fresh_chat_then_advances(tmp_path, native)
         assert response["isError"]
         question = response["structuredContent"]["chatConfirmation"]
         assert question["channel"] == "chat-confirmation" and question["request_id"] != original
-        assert question["choices"] == ["Approve", "No", "Cancel", "Changes: <text>"]
+        assert question["choices"] == ["Yes", "Approve", "No", "Cancel", "Changes: <text>"]
         assert not server.store.status()["approval"]["granted"]
         completed = record(server, question, "Approve\n")
         assert not completed["isError"], completed

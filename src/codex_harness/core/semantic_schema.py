@@ -8,8 +8,9 @@ from pathlib import Path
 
 LIMIT = 16384
 ACTION = (
-    "exitEquals stdoutEquals stdoutJsonEquals stderrNonempty stderrEquals stderrContains".split()
-)
+    "exitEquals stdoutEquals stdoutJsonEquals stdoutEndsWith stdoutContains "
+    "stdinOpenAtExit elapsedAtMost stderrNonempty stderrEquals stderrContains"
+).split()
 FILE = "fileJsonEquals fileBytesEquals fileAbsent bytesUnchangedFrom".split()
 WEB = (
     "noHorizontalOverflow consoleErrors externalRequests "
@@ -17,13 +18,17 @@ WEB = (
 ).split()
 
 
-def web_journey(v, targets):
+def web_journey(v, targets, *, draft=False):
     fields(
         v,
         ("target", "operation", "viewport", "reducedMotion", "steps"),
         ("target", "operation", "viewport", "reducedMotion", "steps"),
     )
-    if type(v["target"]) is not str or targets.get(v["target"], {}).get("kind") != "web":
+    if (
+        type(v["target"]) is not str
+        or (v["target"] in targets or not draft)
+        and targets.get(v["target"], {}).get("kind") != "web"
+    ):
         raise ValueError("Web journey requires a web target")
     fields(v["viewport"], ("width", "height"), ("width", "height"))
     if tuple(v["viewport"][k] for k in ("width", "height")) not in ((375, 812), (1440, 900)) or any(
@@ -41,6 +46,8 @@ def web_journey(v, targets):
         operand = {
             "open": None,
             "assertVisible": "locator",
+            "assertHidden": "locator",
+            "focus": "locator",
             "click": "locator",
             "key": "key",
             "assertFocus": "locator",
@@ -59,12 +66,15 @@ def web_journey(v, targets):
                 raise ValueError("Use one text, CSS selector, or role/name locator")
             if "selector" in loc and ">>" in loc["selector"]:
                 raise ValueError("Use plain CSS selectors without locator engines")
-        if op == "key" and step["key"] not in ("Tab", "Enter", "Escape"):
-            raise ValueError("Supported keys: Tab/Enter/Escape")
+        if op == "key" and step["key"] not in ("Tab", "Enter", "Space", "Escape"):
+            raise ValueError("Supported keys: Tab/Enter/Space/Escape")
         if op == "assertFragment" and (
             type(step["fragment"]) is not str or not step["fragment"].startswith("#")
         ):
             raise ValueError("Declare a fragment beginning with #")
+
+    if not any(isinstance(step, dict) and step.get("op") == "assertVisible" for step in steps):
+        raise ValueError("Web RED requires a positive assertVisible observation in every journey")
 
 
 def fields(value, allowed, required=()):
@@ -105,7 +115,9 @@ def content(f):
 def argv(values, root, cwd=None):
     result = []
     for value in array(values, 64):
-        if type(value) is str and not any(c in value for c in ("/", "\\", ":", "\x00", "..")):
+        if type(value) is str:
+            if "\x00" in value:
+                raise ValueError("Literal argv cannot contain NUL")
             result.append(value)
         else:
             fields(value, ("path", "relative"), ("path",))
@@ -131,13 +143,9 @@ def target_entry(binding):
     return module.replace(".", "/") + "/__main__.py"
 
 
-def validate(document, product, targets, *, require_entries=True):
+def validate(document, product, targets, *, require_entries=True, draft=False):
     if len(json.dumps([document, targets], allow_nan=False).encode()) > 65536:
         raise ValueError("Input exceeds 64KiB")
-    fields(document, ("schema", "scenarios"), ("schema", "scenarios"))
-    scenarios = array(document["scenarios"], 16)
-    if document["schema"] != "seldon/scenarios-v1" or not scenarios:
-        raise ValueError("Use seldon/scenarios-v1 with 1..16 scenarios")
     if type(targets) is not dict:
         raise ValueError("Declare target bindings")
     coverage = {}
@@ -162,6 +170,12 @@ def validate(document, product, targets, *, require_entries=True):
             if not all((p / "__init__.py").is_file() for p in list(entry.parents)[:count]):
                 raise ValueError("Module package paths require owned __init__.py files")
         argv(binding["argv"], product)
+    if draft and document is None:
+        return []
+    fields(document, ("schema", "scenarios"), ("schema", "scenarios"))
+    scenarios = array(document["scenarios"], 16)
+    if document["schema"] != "seldon/scenarios-v1" or not scenarios:
+        raise ValueError("Use seldon/scenarios-v1 with 1..16 scenarios")
     ids = set()
     for s in scenarios:
         keys = "id requirementRefs contractRefs setup actions observe verdict".split()
@@ -210,7 +224,7 @@ def validate(document, product, targets, *, require_entries=True):
                 raise ValueError("Use unique CLI actions")
             if "web" in a:
                 fields(a, ("id", "web"), ("id", "web"))
-                web_journey(a["web"], targets)
+                web_journey(a["web"], targets, draft=draft)
                 v = a["web"]
                 if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
                     raise ValueError("Declare a literal operation marker")
@@ -230,11 +244,21 @@ def validate(document, product, targets, *, require_entries=True):
             v = a["cli"]
             fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"))
             if "stdin" in v:
-                fields(v["stdin"], ("utf8", "base64"))
-                content(v["stdin"])
-            if type(v["target"]) is not str or v["target"] not in targets:
+                if set(v["stdin"]) == {"holdOpen", "exitWithin"}:
+                    if (
+                        v["stdin"]["holdOpen"] is not True
+                        or type(v["stdin"]["exitWithin"]) is not int
+                        or not 1 <= v["stdin"]["exitWithin"] <= 20
+                    ):
+                        raise ValueError(
+                            "Held-open stdin needs holdOpen:true and exitWithin:1..20 seconds"
+                        )
+                else:
+                    fields(v["stdin"], ("utf8", "base64"))
+                    content(v["stdin"])
+            if type(v["target"]) is not str or not draft and v["target"] not in targets:
                 raise ValueError("Action references an unknown target")
-            if targets[v["target"]].get("kind") == "web":
+            if targets.get(v["target"], {}).get("kind") == "web":
                 raise ValueError("CLI action requires a Python target")
             if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
                 raise ValueError("Declare a literal operation marker")
@@ -266,14 +290,20 @@ def validate(document, product, targets, *, require_entries=True):
             if reference == "path":
                 path(product, o[reference])
             for key, value in o.items():
-                kind = {"exitEquals": int, "stderrNonempty": bool, "fileAbsent": bool}.get(key, str)
+                kind = {
+                    "exitEquals": int,
+                    "elapsedAtMost": int,
+                    "stdinOpenAtExit": bool,
+                    "stderrNonempty": bool,
+                    "fileAbsent": bool,
+                }.get(key, str)
                 if key not in ("stdoutJsonEquals", "fileJsonEquals") and type(value) is not kind:
                     raise ValueError("Observation has the wrong JSON value type")
                 if key == "bytesUnchangedFrom" and value not in snapshots:
                     raise ValueError("Observation references an unknown snapshot")
         if any(sum(o.get("action") == a for o in s["observe"]) != 1 for a in web_actions):
             raise ValueError("Each web journey requires exactly one complete gate observation")
-    if any(
+    if not draft and any(
         c != {(w, m) for w in (375, 1440) for m in ("reduce", "no-preference")}
         for c in coverage.values()
     ):

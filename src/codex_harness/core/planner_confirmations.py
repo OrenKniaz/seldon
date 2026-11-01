@@ -1,7 +1,5 @@
 """Native and chat adapters for the same persisted A/B subjects."""
 
-from __future__ import annotations
-
 import hashlib
 from uuid import uuid4
 
@@ -66,13 +64,6 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
     return action, content, evidence
 
 
-def confirmation_card(gate, phase, revision, vision):
-    payload = dict(
-        version=2, kind="A", effect=approvals.EFFECTS["A"], scope=approvals.intent(vision)
-    )
-    return approvals.render(payload, [])
-
-
 def prepare_confirmation(
     store,
     gate,
@@ -84,22 +75,35 @@ def prepare_confirmation(
 ):
     if gate not in {"align", "vision-lock", "align+vision-lock", "plan-execution"}:
         raise PlanStoreError("plan-gate-invalid", str(gate))
+    semantic = Spine(store._data()).semantic
+    if semantic and gate != "plan-execution":
+        gate = "align+vision-lock"
     with store._transaction():
         if _expected_request_id is not None:
             latest = next((r for _, r in _records(store, REQUEST) if r["gate"] == gate), None)
             if latest is None or latest["request_id"] != _expected_request_id:
                 raise ValueError("confirmation-request-superseded")
         phase = store.phase()
-        if gate != "plan-execution" and phase != {"align+vision-lock": "align"}.get(gate, gate):
-            if gate != "vision-lock" or PHASES.index(phase) < PHASES.index("vision-lock"):
+        if (
+            not semantic
+            and gate != "plan-execution"
+            and phase != {"align+vision-lock": "align"}.get(gate, gate)
+        ):
+            if gate not in {"vision-lock", "align+vision-lock"} or PHASES.index(
+                phase
+            ) < PHASES.index("vision-lock"):
                 raise PlanStoreError("plan-confirmation-gate-mismatch", f"Current phase is {phase}")
         kind = "B" if gate == "plan-execution" else "A"
         action = {}
         if kind == "B":
-            approvals.require_approval(store, "A")
+            missing = []
+            try:
+                approvals.require_approval(store, "A")
+            except PlanStoreError as error:
+                missing.append(error.code)
             selected = store._latest_draft_event("reviewer-selection-recorded")
             if reviewer_node_id is not None and reviewer_node_id != (selected or {}).get("nodeId"):
-                raise ValueError("reviewer-selection-current-node-required")
+                missing.append("reviewer-selection-current-node-required")
             if execution is None:
                 previous = next(
                     (
@@ -113,7 +117,25 @@ def prepare_confirmation(
             if execution is not None:
                 from codex_harness.core.planner_execution import execution_scope
 
-                action["execution"] = execution_scope(store, **execution, _candidate=True)
+                required = {"expected_revision", "workers", "call_cap"} - execution.keys()
+                missing.extend("execution." + key for key in sorted(required))
+                if not required:
+                    try:
+                        action["execution"] = execution_scope(store, **execution, _candidate=True)
+                    except (ValueError, TypeError) as error:
+                        missing.append(str(error))
+            if execution is None and "execution" not in action:
+                missing.extend(
+                    ["execution.expected_revision", "execution.workers", "execution.call_cap"]
+                )
+            if selected is None:
+                missing.append(
+                    "reviewer-selection-required-before-B: propose exact delivery reviewers"
+                )
+            if missing:
+                raise PlanStoreError(
+                    "plan-b-prerequisites-missing", "Missing B prerequisites: " + "; ".join(missing)
+                )
             from codex_harness.core.provider_call_budget import usage
 
             previous = approvals.current(store, "B")
@@ -134,8 +156,20 @@ def prepare_confirmation(
             proposedAction=action,
             vision=Spine(store._data()).node(Spine(store._data()).ids("vision")[0]),
             channel=CHAT if _chat else NATIVE,
-            choices=["Approve", "No", "Cancel", "Changes: <text>"],
+            choices=approvals.CHOICES,
         )
+        consumed = {r["request_id"] for _, r in _records(store, RESPONSE)}
+        latest = next(
+            (r for _, r in _records(store, REQUEST) if r.get("subject", {}).get("kind") == kind),
+            None,
+        )
+        if (
+            (_chat or kind == "B")
+            and latest
+            and latest["request_id"] not in consumed
+            and all(latest.get(k) == request[k] for k in ("fingerprint", "gate", "channel"))
+        ):
+            return latest
         store._event(REQUEST, request)
         return request
 

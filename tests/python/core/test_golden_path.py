@@ -74,7 +74,12 @@ def provider_host(mode, workspace, surface, job_id=None):
 
     def build(root):
         (root / ("index.html" if surface == "web" else "hello.py")).write_text(
-            WEB_PAGE if surface == "web" else PRODUCT, encoding="utf-8"
+            WEB_PAGE + "<style>h1{background:linear-gradient(white,#fff)}h1::after{conte"
+            "nt:' rendered label';background:linear-gradient(white,#fff)}</st"
+            "yle>"
+            if surface == "web"
+            else PRODUCT,
+            encoding="utf-8",
         )
 
     def workers(plan, **options):
@@ -132,6 +137,8 @@ def test_golden_path(tmp_path, request, surface):
     started = time.monotonic()
     replies = queue.Queue()
     calls = decisions = 0
+    counts = dict(happy=0, probes=0, polls=0)
+    probing = False
     revision = None
     tools = tmp_path / "tools"
     tools.mkdir()
@@ -190,9 +197,17 @@ def test_golden_path(tmp_path, request, surface):
                     assert "error" not in reply, reply
                     return reply["result"]
 
-        def call(tool_name, *, allow_error=False, **arguments):
+        def call(tool_name, *, allow_error=False, _probe=False, **arguments):
             nonlocal calls, revision
             calls += 1
+            category = (
+                "polls"
+                if tool_name in {"harness_worker_status", "harness_accept_status"}
+                else "probes"
+                if probing or _probe or allow_error
+                else "happy"
+            )
+            counts[category] += 1
             result = rpc(
                 "tools/call",
                 dict(name=tool_name, arguments=dict(expected_workspace=str(tmp_path), **arguments)),
@@ -214,8 +229,8 @@ def test_golden_path(tmp_path, request, surface):
                 gate=card["gate"],
                 request_id=card["request_id"],
                 expected_revision=card["plan_revision"],
-                quoted_message="yes",
-                quote_sha256=hashlib.sha256(b"yes").hexdigest(),
+                quoted_message="Yes",
+                quote_sha256=hashlib.sha256(b"Yes").hexdigest(),
                 actor_label="scripted user",
             )
 
@@ -244,6 +259,8 @@ def test_golden_path(tmp_path, request, surface):
                 plan_mode="semantic-v1",
             )
             if surface == "cli":
+                calls += 1
+                counts["probes"] += 1
                 failed = rpc(
                     "tools/call",
                     dict(
@@ -253,13 +270,26 @@ def test_golden_path(tmp_path, request, surface):
                 )
                 assert failed["isError"] and "unconfirmed" in failed["content"][0]["text"]
                 assert rpc("ping", {}) == {}
+                probing = True
                 captured = json.loads(
                     (ROOT / "tests/fixtures/ux5-turn7-upsert.json").read_text("utf-8")
                 )
-                call("harness_upsert_node", node=captured["node"])
-                saved = call("harness_show_node", id="V1")
-                assert saved["title"] == captured["node"]["title"]
-                assert saved["fields"] == captured["node"]["fields"]
+                before = call("harness_show_node", id="V1")
+                refused = call("harness_upsert_node", node=captured["node"], allow_error=True)
+                assert "value" in str(refused)
+                assert call("harness_show_node", id="V1") == before
+                captured_f3 = json.loads(
+                    (ROOT / "tests/fixtures/f3-turn11-vision.json").read_text("utf-8")
+                )
+                call("harness_upsert_node", node=captured_f3)
+                assert call("harness_show_node", id="V1")["fields"] == captured_f3["fields"]
+                call(
+                    "harness_upsert_node",
+                    node={
+                        k: before[k] for k in ("id", "kind", "title", "text", "parents", "fields")
+                    },
+                )
+                probing = False
             vision = node(
                 "V1",
                 "vision",
@@ -289,7 +319,6 @@ def test_golden_path(tmp_path, request, surface):
                         sourceRef="scripted-user:idea",
                     )
                 )
-            call("harness_upsert_node", node=vision)
             a = call(
                 "harness_understanding_card",
                 vision="A welcome page" if surface == "web" else "Offline greeting CLI",
@@ -297,11 +326,15 @@ def test_golden_path(tmp_path, request, surface):
                 first_user_moment="Explore the page" if surface == "web" else "Read Hello",
                 scope_in="One page" if surface == "web" else "Offline greeting",
                 scope_out="Accounts",
+                expansion=vision["fields"]["expansion"],
+                **({"taste": vision["fields"]["taste"]} if surface == "web" else {}),
+                quality_bar=vision["fields"]["quality_bar"],
+                done_feels_like=vision["fields"]["done_feels_like"],
                 assumptions=[],
             )
+            assert "Yes" in a["choices"] and a["gate"] == "align+vision-lock"
             yes(a)
-            call("harness_advance", to_phase="expand")
-            call("harness_advance", to_phase="vision-lock")
+            vision = a["vision"]
             filename = "index.html" if surface == "web" else "hello.py"
             nodes = [
                 node("F", "feature", ["V1"]),
@@ -346,7 +379,7 @@ def test_golden_path(tmp_path, request, surface):
                     bead["parents"] = ["CLI"]
                 nodes.extend(beads)
             scenarios = (
-                web_document()
+                web_document(split=True)
                 if surface == "web"
                 else dict(
                     schema="seldon/scenarios-v1",
@@ -367,7 +400,8 @@ def test_golden_path(tmp_path, request, surface):
                     ],
                 )
             )
-            scenarios["scenarios"][0].update(requirementRefs=["R"], contractRefs=["CLI"])
+            for scenario in scenarios["scenarios"]:
+                scenario.update(requirementRefs=["R"], contractRefs=["CLI"])
             vision["fields"].update(
                 targets={"page": dict(kind="web", entry=filename)}
                 if surface == "web"
@@ -384,7 +418,6 @@ def test_golden_path(tmp_path, request, surface):
                 assumptions=[],
             )
             call("harness_upsert_nodes", nodes=[*nodes, vision])
-            call("harness_advance", to_phase="features")
             call("harness_advance", to_phase="plan")
             catalog = mock_catalog()
             catalog["providers"][0].update(
@@ -453,6 +486,14 @@ def test_golden_path(tmp_path, request, surface):
                 execution=options,
                 reviewer_node_id="CHOICE",
             )
+            repeated = call(
+                "harness_prepare_chat_confirmation",
+                gate="plan-execution",
+                execution=options,
+                reviewer_node_id="CHOICE",
+                _probe=True,
+            )
+            assert repeated["request_id"] == b["request_id"]
             reviewers = b["subject"]["reviewers"]
             assert reviewers == (
                 [
@@ -489,6 +530,7 @@ def test_golden_path(tmp_path, request, surface):
             assert b["card"].count("up to 10 reviews") == 1
             yes(b)
             if surface == "cli":
+                probing = True
                 # Repair the checker to match the accepted exact greeting, not the requirement.
                 vision["fields"]["scenarios"]["scenarios"][0]["observe"][0]["stdoutEquals"] = (
                     "Hello"
@@ -498,6 +540,7 @@ def test_golden_path(tmp_path, request, surface):
                 repaired = call("harness_compile", include_detail=True)
                 assert repaired["planRevision"] != options["expected_revision"]
                 options["expected_revision"] = repaired["planRevision"]
+                probing = False
             call("harness_advance", to_phase="roundtable")
             plan_review = call(
                 "harness_roundtable",
@@ -528,9 +571,41 @@ def test_golden_path(tmp_path, request, surface):
             deadline = time.monotonic() + 90
             while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
                 job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
+            if surface == "web":
+                saved = json.loads(Path(job["run"]["recordPath"]).read_text("utf-8"))
+                assert saved["semanticValidation"]["state"] == "FAIL"
+                roots = saved["beads"]["B"]["integrated"]["root"]
+                assert any(
+                    a["checks"]["textContrastAA"] is None
+                    for r in saved["semanticValidation"]["results"]
+                    for a in r["actions"].values()
+                )
+                call(
+                    "harness_accept_assess",
+                    judgment=dict(
+                        repo=roots,
+                        check="textContrastAA",
+                        passed=True,
+                        statement="Scripted human fixture observation: all gradient endpoints are"
+                        " white and generated label is dark; review retained viewport/f"
+                        "ull-page images in both motion preferences. This is not automa"
+                        "ted contrast proof.",
+                        by="scripted observer",
+                    ),
+                )
+                repaired = call(
+                    "harness_recovery",
+                    mode="resolve",
+                    job_id=job["jobId"],
+                    choice="revalidate",
+                    reason="Consume candidate-bound manual contrast observation within B",
+                )
+                assert repaired["validation"]["state"] == "PASS", repaired
+                job = call("harness_worker_status", job_id=job["jobId"])
             if surface == "cli":
                 failed = json.loads(Path(job["run"]["recordPath"]).read_text())
                 assert failed["beads"]["C"]["integrated"]["semantic"]["state"] == "ERROR"
+                probing = True
                 original = job["jobId"]
                 proof = call("harness_recovery", mode="inspect", job_id=original)
                 while proof["verdict"] != "VERIFIED-QUIESCENT" and time.monotonic() < deadline:
@@ -549,6 +624,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert job["jobId"] == resolved["successor"] != original
                 while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
+                probing = False
             assert job["status"] == "completed", job
             assert job["run"]["semanticContracts"]["state"] == "RED", job
             assert job["run"]["semanticValidation"]["state"] == "PASS", job
@@ -591,19 +667,31 @@ def test_golden_path(tmp_path, request, surface):
                     )
                     == b"Hello"
                 )
+            if surface == "web":
+                call(
+                    "harness_accept_assess",
+                    judgment=dict(
+                        repo=str(tmp_path),
+                        check="visualQuality",
+                        passed=True,
+                        statement="Scripted observer: actual fixture page matches the locked read"
+                        "able quality bar and Done; source-only journey",
+                        by="scripted user",
+                    ),
+                )
             call("harness_advance", to_phase="accept")
             deadline = time.monotonic() + 90
             acceptance = call("harness_accept_run", repo=str(tmp_path), subject="product")
             while acceptance.get("result") is None and time.monotonic() < deadline:
-                time.sleep(0.1)
-                acceptance = call("harness_accept_status", id=acceptance["attemptId"])
+                acceptance = call(
+                    "harness_accept_status", id=acceptance["attemptId"], wait_seconds=60
+                )
             assert acceptance["result"]["passed"], acceptance
             review = call("harness_accept_review", repo=str(tmp_path))
             attempt_id = review["attemptId"]
             deadline = time.monotonic() + 90
             while review["state"] in {"queued", "running"} and time.monotonic() < deadline:
-                time.sleep(0.1)
-                review = call("harness_accept_status", id=attempt_id)
+                review = call("harness_accept_status", id=attempt_id, wait_seconds=60)
                 assert review["attemptId"] == attempt_id, review
             assert review["state"] == "completed", review
             assert review["result"]["id"] == attempt_id, review
@@ -613,8 +701,12 @@ def test_golden_path(tmp_path, request, surface):
             ] == reviewers
             decisions += 1
             call("harness_accept", by="user", statement="yes")
-            final_status = call("harness_plan_status")
+            final_status = call("harness_plan_status", _probe=True)
             assert final_status["acceptance"]["accepted"]
+            assert {s["id"] for s in final_status["acceptance"]["scenarios"]} == {
+                s["id"] for s in scenarios["scenarios"]
+            }
+            assert all(s["lastResult"] == "pass" for s in final_status["acceptance"]["scenarios"])
             # The real saved producer reaches HTTP and the shipped browser view.
             # Catch revision/blocker/next-step divergence and broken asset wiring;
             # planning-only tests and synthetic UI fixtures miss this integration.
@@ -650,8 +742,11 @@ def test_golden_path(tmp_path, request, surface):
             }
             assert before == after
             assert decisions == 3
+            assert counts["happy"] <= 25, counts
+            assert sum(counts.values()) == calls
             print(
                 f"golden {surface}: decisions={decisions}; planner MCP calls={calls}; "
+                f"happy={counts['happy']}; probes={counts['probes']}; polls={counts['polls']}; "
                 f"seconds={time.monotonic() - started:.2f}"
             )
         finally:

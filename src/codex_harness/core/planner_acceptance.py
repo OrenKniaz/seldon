@@ -25,9 +25,16 @@ class AcceptanceOwner:
         self.prepared = None
         self.thread = None
         self.messages = queue.Queue()
+        self.changed = threading.Event()
         self.stopped = threading.Event()
+        self.stop_file = None
         self.deadline = None
         self.active = None
+
+    def _stop(self):
+        self.stopped.set()
+        if self.stop_file:
+            self.stop_file.touch()
 
     def status(self, store, attempt_id):
         exists = store.connection.execute(
@@ -127,6 +134,7 @@ class AcceptanceOwner:
                 ),
             )
             store._event("acceptance-admitted", dict(attemptId=attempt_id, inputDigest=key))
+        self.stop_file = store.workspace / ".codex-harness" / f"acceptance-stop-{attempt_id}"
         self.prepared = (attempt_id, captured)
         self.stopped.clear()
         return self.status(store, attempt_id)
@@ -175,6 +183,7 @@ class AcceptanceOwner:
 
         def emit(kind, value):
             self.messages.put((attempt_id, captured, kind, value))
+            self.changed.set()
             if self.wake:
                 self.wake()
 
@@ -204,6 +213,8 @@ class AcceptanceOwner:
                     should_stop=self.stopped.is_set,
                     deadline=deadline,
                     semantic=captured.get("semantic"),
+                    judgments=captured.get("judgments"),
+                    stop_file=self.stop_file,
                 )
                 if any(
                     step.get("cleanupUncertainty")
@@ -236,7 +247,7 @@ class AcceptanceOwner:
 
     def drain(self, store):
         if self.deadline is not None and time.monotonic() >= self.deadline:
-            self.stopped.set()
+            self._stop()
             with store._transaction():
                 store.connection.execute(
                     "UPDATE acceptance_attempts SET state='unknown-interrupted',error=? "
@@ -270,7 +281,7 @@ class AcceptanceOwner:
                         or not fresh
                         or self.stopped.is_set()
                     ):
-                        self.stopped.set()
+                        self._stop()
                         if row and row["state"] == "running":
                             store.connection.execute(
                                 "UPDATE acceptance_attempts SET state='stale',error=? WHERE id=?",
@@ -319,12 +330,12 @@ class AcceptanceOwner:
                             "acceptance-owner-stopped",
                         }:
                             state = "unknown-interrupted"
-                            self.stopped.set()
+                            self._stop()
                 else:
                     error = value
                     if kind == "unknown":
                         state = "unknown-interrupted"
-                        self.stopped.set()
+                        self._stop()
                 store.connection.execute(
                     "UPDATE acceptance_attempts SET state=?,result_json=?,error=? WHERE id=?",
                     (state, json.dumps(result) if result else None, error, attempt_id),
@@ -338,7 +349,7 @@ class AcceptanceOwner:
         return max(0.01, self.deadline - time.monotonic()) if self.deadline is not None else None
 
     def close(self, store):
-        self.stopped.set()
+        self._stop()
         self.prepared = None
         if store is not None:
             self.drain(store)
@@ -359,8 +370,27 @@ def job_status(self, arguments):
 
         tool = next(t for t in self_tools if t["name"] == "harness_accept_status")
         _validate(arguments, tool["inputSchema"])
-        from codex_harness.core.planner_review import status_reply
+        from codex_harness.core.planner_review import _owners, status_reply
 
+        wait = arguments.get("wait_seconds", 0)
+        if type(wait) not in (int, float) or not 0 <= wait <= 60:
+            raise ValueError("wait_seconds must be between 0 and 60")
+        end = time.monotonic() + wait
+        while wait:
+            self.acceptance.changed.clear()
+            self.acceptance.drain(self._store())
+            owner = _owners.get(arguments["id"])
+            if isinstance(owner, threading.Thread):
+                owner.join(max(0, end - time.monotonic()))
+                break
+            from codex_harness.core.planner_review import status as review_status
+
+            observed = review_status(self._store(), arguments["id"]) or self.acceptance.status(
+                self._store(), arguments["id"]
+            )
+            if observed["state"] not in {"queued", "running"} or time.monotonic() >= end:
+                break
+            self.acceptance.changed.wait(max(0, end - time.monotonic()))
         if reply := status_reply(self, arguments["id"]):
             return reply
         data = self.acceptance.status(self._store(), arguments["id"])

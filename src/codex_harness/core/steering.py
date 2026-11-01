@@ -28,6 +28,8 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "--literal-pathspecs", "-C", str(repo), *args],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        timeout=30,
         encoding="utf-8",
         check=True,
     ).stdout

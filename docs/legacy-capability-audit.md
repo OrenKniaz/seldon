@@ -90,3 +90,14 @@ Repository-wide Ruff also reports 42 inherited errors in dogfood-watercli's
 author_plan.py and one formatting difference in its template/watercli/cli.py;
 both match HEAD. Owner: retained fixtures; deferred outside transport. Exit:
 fixture-owner cleanup passes repository-wide Ruff; src/tests are already clean.
+
+
+## Contract alignment discovery, November 1 (source evidence)
+
+CONTRACT-ALIGNMENT owns this batch in `work/sprint-20261029/lane-contract-align`, base `193aeea` (local import `5c39c38`). Source gates do not certify a real provider cohort; the sibling `contract-align-report.md` records final check results and the patch identity.
+
+| Observation and evidence | Owner and disposition | Practical exit |
+| --- | --- | --- |
+| Captured F3/UX5 writes, Run25 S8/HC evidence, four-scenario web validation and UX4 click-first RED did not compose with their consumers. | PlanStore/semantic schema, acceptance, roundtable and consent owners: repaired together; retained fixtures and owning behavior tests cover the required seams. Final audit also extended unchanged-subject B reuse from chat to native; the same owner test checks no persistence change before consuming the request. | Exact candidate passes the source gates, then an authorized pinned CLI/web cohort proves root delivery, formal review and C; no real cohort credit here. |
+| Stdio retained-candidate recovery blocked in Git reads that inherited the RPC input stream; real golden web traces identified the calls. | Candidate/dispatch/steering subprocess owners: closed stdin explicitly; the real browser/stdio journey now consumes candidate-bound contrast judgment and reaches C. | Retained-failure recovery completes without losing the RPC connection; scenario children have explicit cleanup receipts. Missing receipts remain UNKNOWN. The single broad gate exposed an outer TimeoutExpired diagnostic lacking the runner timeout vocabulary despite verified teardown; normalization is repaired at the runner, with the existing hung-renderer check as its exit. |
+| The review's eight optional seams remain: approved-roster rediscovery, shard/start allowance, durable review owner recovery, C negative vocabulary, long-scenario budget parity, atomic same-work delivery repair, asset/packet capacity, typed failure/delivery status. | Existing approvals/review/budget/candidate/runner/status owners; deferred from this bounded batch, without weakening their current holds. | Run each ranked row's decisive owner check before claiming closure; preserve failed/assisted runs in any real cohort. |

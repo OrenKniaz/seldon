@@ -34,6 +34,7 @@ web_plan = test_semantic_wiring.web_plan
         "missing-b",
         "reconnect-c",
         "refused-c",
+        "delivery",
     ],
 )
 def test_canonical_plan_contracts_red_build_validation_pass(
@@ -291,6 +292,10 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         )
     else:
         record = execute(store, work_root=job / "runs")
+    from codex_harness.core.planner_candidate import deliver
+
+    if journey != "delivery":
+        deliver(store.workspace, planner_jobs._request(job), record)
     assert record["status"] == dispatch.STATUS_MOCK_ONLY, record
     red = record["beads"]["C"]["integrated"]["semantic"]
     green = record["semanticValidation"]
@@ -316,6 +321,9 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     )
     assert resumed["status"] == dispatch.STATUS_MOCK_ONLY, resumed
     assert resumed["semanticValidation"] == green
+    record = resumed
+    if journey != "delivery":
+        deliver(store.workspace, planner_jobs._request(job), record)
 
     try:
         for phase in ("accept",) if run22 else ("execute", "accept"):
@@ -337,12 +345,54 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         assert result["structuredContent"]["result"]["passed"], result
         call("harness_accept_review", repo=record["repo"], reviewers=reviewers)
         assert store.status()["acceptance"]["reviews"]
+        if journey == "delivery":
+            from codex_harness.core.planner_candidate import delivered_candidate
+
+            target = store.workspace / "hello.py"
+            source = Path(record["repo"]) / "hello.py"
+            original = source.read_bytes()
+            # An integration review alone cannot certify an omitted root delivery.
+            refused = workspace_wire(
+                server,
+                "harness_accept",
+                expected_workspace=str(store.workspace),
+                by="user",
+                statement="yes",
+            )
+            assert refused["isError"] and refused["refusalCode"] == "acceptance-delivery-invalid"
+            source.write_bytes(original + b"# dirty source\n")
+            with pytest.raises(ValueError, match="source differs"):
+                deliver(store.workspace, planner_jobs._request(job), record)
+            assert not target.exists()
+            source.write_bytes(original)
+            deliver(store.workspace, planner_jobs._request(job), record)
+            assert delivered_candidate(store, record["repo"])["fileHashes"]["hello.py"]
+            for changed in (b"print('different root product')\n", None):
+                if changed is None:
+                    target.unlink()
+                else:
+                    target.write_bytes(changed)
+                refused = workspace_wire(
+                    server,
+                    "harness_accept",
+                    expected_workspace=str(store.workspace),
+                    by="user",
+                    statement="yes",
+                )
+                assert (
+                    refused["isError"] and refused["refusalCode"] == "acceptance-delivery-invalid"
+                )
+                assert not store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchone()
+                target.write_bytes(original)
         confirmations.append("accept")
         call(
             "harness_accept",
             by="user",
             statement="SOURCE-ONLY external owner: Yes, meets the locked vision.",
         )
+        if journey == "delivery":
+            target.write_bytes(original + b"# edited after C\n")
+            assert not store.status()["acceptance"]["accepted"]
         assert confirmations == (["clarification"] if clarification else []) + [
             "align+vision-lock",
             "plan-execution",

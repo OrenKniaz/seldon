@@ -1,0 +1,8 @@
+{
+  "node_id": "S8",
+  "severity": "major",
+  "finding": "Scenario S8 only observes exit 0 and empty stderr for `--help`. It never checks stdout. A script that prints nothing, or prints text that does not mention stdin, the JSON fields (bytes, sha256, label) or `--label`, would still pass. The brief requires help to explain all three. R3 defers this to worker review, but no scenario or recorded check proves it. The user could receive a useless help screen with the plan reporting success.",
+  "suggestion": "Add stdout observations to S8: non-empty stdout, plus substring checks for stdin, `bytes`, `sha256`, `label` and `--label`. If the runner cannot do substring checks, record help content as an explicit controller-review deferral that must be satisfied at handover.",
+  "classification": "defect-in-plan",
+  "scope_reason": "The brief says `--help` should exit 0 and explain stdin, the JSON output and the label flag. S8 covers only the exit code and stderr, leaving the content clause unproven."
+}

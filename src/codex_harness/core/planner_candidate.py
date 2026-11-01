@@ -2,12 +2,20 @@
 
 import hashlib
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
-from codex_harness.core import planner_jobs as jobs
 from codex_harness.core.record_io import read_record_json
+
+
+def file_hashes(root, names):
+    from codex_harness.core.planner_jobs import _inside
+
+    files = {name: _inside(root, Path(root) / name) for name in names}
+    return {
+        name: hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
+        for name, file in sorted(files.items())
+    }
 
 
 def _semantic_validation(root, plan, record, phase):
@@ -22,42 +30,40 @@ def _semantic_validation(root, plan, record, phase):
         raise ValueError(
             "semantic-v1 requires current Contracts RED; scenarios/contracts/runner changed"
         )
+    names = {name for bead in plan.beads.values() for name in bead.owned_files}
+    before = file_hashes(root, names)
     results = semantic_runner.run(
         plan.semantic["scenarios"],
         root,
         plan.semantic["targets"],
         "contracts" if phase == "contracts" else "validation",
+        judgments=record.get("judgments"),
     )
+    if file_hashes(root, names) != before:
+        raise ValueError("Validation candidate bytes changed during observation")
     expected = plan.semantic["scenarios"]["scenarios"]
-    complete = len(results) == len(expected) and all(
-        r["id"] == s["id"] for r, s in zip(results, expected, strict=True)
-    )
-    red_ok = complete and all(
-        r["state"] == "FAIL" and r.get("stubActions") == [a["id"] for a in s["actions"]]
+    contracts = phase == "contracts"
+    admitted = len(results) == len(expected) and all(
+        r["id"] == s["id"]
+        and r["state"] == ("FAIL" if contracts else "PASS")
+        and r.get("stubActions", []) == ([a["id"] for a in s["actions"]] if contracts else [])
         for r, s in zip(results, expected, strict=True)
     )
-    passed = (
-        phase == "build"
-        and complete
-        and all(r["state"] == "PASS" and not r.get("stubActions") for r in results)
-    )
+    passed = admitted and not contracts
     state = (
-        "RED"
-        if phase == "contracts" and red_ok
-        else "PASS"
-        if passed
-        else "ERROR"
-        if phase == "contracts" or any(r["state"] == "ERROR" for r in results)
-        else "FAIL"
+        ("RED" if contracts else "PASS")
+        if admitted
+        else ("ERROR" if contracts or any(r["state"] == "ERROR" for r in results) else "FAIL")
     )
     return {
         **identity,
         "phase": "contracts" if phase == "contracts" else "validation",
         "state": state,
         "passed": passed,
-        "admitted": red_ok if phase == "contracts" else passed,
+        "admitted": admitted,
         "candidateCommit": _git(root, "rev-parse", "HEAD"),
         "candidateTree": _git(root, "rev-parse", "HEAD^{tree}"),
+        "candidateFiles": before,
         "linkedRed": hashlib.sha256(json.dumps(red, sort_keys=True).encode()).hexdigest()
         if red
         else None,
@@ -66,7 +72,6 @@ def _semantic_validation(root, plan, record, phase):
 
 
 def _read_git(root, *arguments):
-    # Inspection must never refresh the index or append dispatcher failure logs.
     result = subprocess.run(
         [
             "git",
@@ -79,6 +84,8 @@ def _read_git(root, *arguments):
         ],
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=10,
     )
     if result.returncode:
         raise ValueError(
@@ -90,6 +97,7 @@ def _read_git(root, *arguments):
 def retained(workspace, job_id):
     """Read-only eligibility and candidate binding; no worker or verifier starts."""
     from codex_harness.core import dispatch as d
+    from codex_harness.core import planner_jobs as jobs
 
     directory = jobs._directory(workspace, job_id)
     request = jobs._request(directory)
@@ -152,6 +160,7 @@ def retained(workspace, job_id):
 def deliver(workspace, request, run):
     """Shared worker completion: expose only a validated integration's owned files."""
     from codex_harness.core import dispatch as d
+    from codex_harness.core import planner_jobs as jobs
 
     if run.get("semanticValidation", {}).get("state") != "PASS" or run["status"].startswith(
         "plan-failed"
@@ -162,41 +171,155 @@ def deliver(workspace, request, run):
     repo = jobs._inside(directory, Path(run["repo"]))
     if d._git(repo, "rev-parse", "HEAD^{tree}") != run["semanticValidation"]["candidateTree"]:
         raise ValueError("delivery: integration tree differs from Validation PASS")
+    if _read_git(repo, "status", "--porcelain"):
+        raise ValueError("delivery: source differs from validated candidate")
     names = sorted({n for b in manifest["beads"].values() for n in b["ownedFiles"]})
-    # Resolve every path before writing any product file, preserving planner metadata.
-    files = []
+    files, hashes = [], {}
     for name in names:
         if Path(name).parts[0].startswith("."):
             raise ValueError("delivery: metadata is not a product file")
         source = jobs._inside(repo, repo / name)
         target = jobs._inside(workspace, Path(workspace) / name)
-        if source.is_file():
-            if target.exists() and target.read_bytes() != source.read_bytes():
-                baseline = jobs._inside(directory, directory / "plan/template" / name)
-                if not baseline.is_file() or target.read_bytes() != baseline.read_bytes():
-                    raise ValueError(
-                        f"delivery: existing {name} changed; preserve it and reconcile first"
-                    )
-            files.append((source, target))
-        elif target.exists():
-            raise ValueError(
-                f"delivery: retained candidate omits existing {name}; reconcile it first"
-            )
-    for source, target in files:
+        raw = source.read_bytes() if source.is_file() else None
+        hashes[name] = hashlib.sha256(raw).hexdigest() if raw is not None else None
+        if target.exists() and target.read_bytes() != raw:
+            baseline = jobs._inside(directory, directory / "plan/template" / name)
+            if not baseline.is_file() or target.read_bytes() != baseline.read_bytes():
+                raise ValueError(
+                    f"delivery: existing {name} changed; preserve it and reconcile first"
+                )
+        if raw is not None:
+            files.append((raw, target))
+    if hashes != run["semanticValidation"]["candidateFiles"]:
+        raise ValueError("delivery: source differs from validated candidate bytes")
+    for raw, target in files:
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        target.write_bytes(raw)
     run["delivery"] = dict(
         root=str(Path(workspace).resolve()),
         files=[str(t) for _, t in files],
+        fileHashes=hashes,
         candidateTree=run["semanticValidation"]["candidateTree"],
     )
+    _check_delivery(run["delivery"], workspace)
+
     d._write_record(repo.parent / "evidence/run.json", run)
     return run["delivery"]
+
+
+def _check_delivery(delivery, root):
+    if file_hashes(root, delivery["fileHashes"]) != delivery["fileHashes"]:
+        raise ValueError("delivery: delivered bytes changed or missing")
+
+
+def current_job_run(store):
+    from codex_harness.core import planner_jobs as jobs
+    from codex_harness.core.planner_recovery import admission_id
+
+    directory = jobs._directory(
+        store.workspace, admission_id(store, store._meta()["published_revision"])
+    )
+    paths = list(directory.glob("runs/*/evidence/run.json"))
+    if len(paths) != 1:
+        raise ValueError("delivery: one retained candidate required before C/judgment")
+    return directory, read_record_json(jobs._inside(directory, paths[0]))
+
+
+def delivered_candidate(store, repo):
+    """C consumes the canonical delivery, including when review used the integration repo."""
+    directory, run = current_job_run(store)
+
+    delivery = run.get("delivery")
+    manifest = read_record_json(directory / "plan/sample.json")
+    names = {n for b in manifest["beads"].values() for n in b["ownedFiles"]}
+    if (
+        not delivery
+        or set(delivery.get("fileHashes", {})) != names
+        or delivery["root"] != str(store.workspace.resolve())
+        or delivery["candidateTree"] != run["semanticValidation"]["candidateTree"]
+        or delivery["fileHashes"] != run["semanticValidation"]["candidateFiles"]
+        or run["semanticValidation"]["state"] != "PASS"
+        or Path(repo).resolve() not in {store.workspace.resolve(), Path(run["repo"]).resolve()}
+    ):
+        raise ValueError("delivery: current validated root delivery required before C")
+    _check_delivery(delivery, store.workspace)
+    _check_delivery(delivery, repo)
+    return delivery
+
+
+def judgment_binding(store, repo):
+    manifest = store._manifest(store.spine())
+    names = {n for b in manifest["beads"].values() for n in b["ownedFiles"]}
+    from codex_harness.core.approvals import fingerprint, intent
+    from codex_harness.core.semantic_runner import web_toolchain
+
+    return dict(
+        files=file_hashes(repo, names),
+        scenarios=fingerprint(manifest["semantic"]),
+        intent=fingerprint(
+            intent(store.locked_acceptance_spine().node(store.spine().ids("vision")[0]))
+        ),
+        tools=web_toolchain(None, False),
+    )
+
+
+def judgments_for(store, repo):
+    from codex_harness.core.approvals import records
+
+    binding = judgment_binding(store, repo)
+    result = {}
+    for row in records(store, "candidate-judgment"):
+        if row["binding"] == binding:
+            result.setdefault(row["check"], row)
+    return result
+
+
+def record_judgment(store, *, repo, check, passed, statement, by):
+    """Retain a caller-mediated human observation, never turn it into machine measurement."""
+    from codex_harness.core import planner_jobs as jobs
+
+    if check not in {"textContrastAA", "visualQuality"} or type(passed) is not bool:
+        raise ValueError("judgment: select textContrastAA or visualQuality and a boolean verdict")
+    if any(not isinstance(v, str) or not v.strip() for v in (statement, by)):
+        raise ValueError("judgment: actual observation words and observer required")
+    spine = store.spine()
+    fields = spine.node(spine.ids("vision")[0])["fields"]
+    if not any(t.get("kind") == "web" for t in fields.get("targets", {}).values()):
+        raise ValueError("judgment: web candidate required")
+    root = Path(repo).resolve()
+    directory, run = current_job_run(store)
+    job_id = jobs._request(directory)["jobId"]
+    if root in {store.workspace.resolve(), Path(run["repo"]).resolve()}:
+        delivered_candidate(store, root)
+    else:
+        selected = retained(store.workspace, job_id)
+        bead = run["beads"][selected["bead"]]
+        if root != Path(bead["integrated"]["root"]).resolve():
+            raise ValueError("judgment: select the unchanged retained Validation candidate")
+    row = dict(
+        check=check,
+        passed=passed,
+        statement=statement,
+        by=by,
+        binding=judgment_binding(store, root),
+        humanIdentityVerified=False,
+        source="caller-mediated human observation",
+    )
+    with store._transaction():
+        store._event("candidate-judgment", row)
+    row["next"] = (
+        f"harness_recovery mode=resolve job_id={job_id} choice=revalidate "
+        "reason=<consume candidate-bound judgments within B>"
+        if run["semanticValidation"]["state"] != "PASS"
+        else "harness_accept_run repo=<project-folder> subject=product; then formal review and C"
+    )
+    return row
 
 
 def revalidate(store, job_id, request_id):
     """Rerun verifiers, then let the existing integrator accept or reject the candidate."""
     from codex_harness.core import dispatch as d
+    from codex_harness.core import planner_jobs as jobs
 
     selected = retained(store.workspace, job_id)
     directory = jobs._directory(store.workspace, job_id)
@@ -208,7 +331,6 @@ def revalidate(store, job_id, request_id):
     run = read_record_json(path)
     plan = d.graph.load_plan(directory / "plan")
     bead = run["beads"][selected["bead"]]
-    # Reuse valid RED; only a changed verifier/scenario identity needs fresh proof.
     red = bead["contractsRed"]
     if any(red.get(k) != v for k, v in d._semantic_identity(plan).items()):
         contracts = run["beads"][plan.beads[selected["bead"]].depends_on[0]]
@@ -221,6 +343,11 @@ def revalidate(store, job_id, request_id):
             + json.dumps(red["results"])
         )
     bead["contractsRed"] = red
+    bead["judgments"] = (
+        judgments_for(store, Path(bead["integrated"]["root"]))
+        if any(t.get("kind") == "web" for t in plan.semantic["targets"].values())
+        else {}
+    )
     receipt = jobs._inside(directory, Path(bead["evidenceDir"]) / "integrated.json")
     if receipt.exists():
         receipt.rename(receipt.with_name(f"validation-{request_id}.json"))

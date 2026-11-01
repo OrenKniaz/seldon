@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from uuid import uuid4
 
-from codex_harness.core import intake, review_instructions, waves
+from codex_harness.core import intake, waves
 from codex_harness.core.graph import load_plan
 from codex_harness.core.reviewer_evidence import native_reviewer
 from codex_harness.core.spine import (
@@ -370,6 +370,12 @@ class PlanStore:
             from codex_harness.core.planner_vision import design_references
 
             design_references(node["fields"], self.workspace)
+            if spine.semantic:
+                from codex_harness.core.spine import semantic_spec
+
+                supplied = set(node["fields"]) & {"scenarios", "targets"}
+                if supplied:
+                    semantic_spec(spine, draft=True)
             prior = self.list_nodes("vision")
             if prior and prior[0]["fields"].get("planMode", "legacy") != node["fields"].get(
                 "planMode", "legacy"
@@ -2696,6 +2702,10 @@ class PlanStore:
         return Spine(data)
 
     def acceptance_scenarios(self) -> list[dict]:
+        if self._data()["nodes"] and (spine := self.spine()).semantic:
+            from codex_harness.core.acceptance import derive_scenarios
+
+            return derive_scenarios(spine)
         scenarios = [
             json.loads(row[0])
             for row in self.connection.execute(
@@ -2713,6 +2723,10 @@ class PlanStore:
         return scenarios
 
     def save_acceptance_scenarios(self, scenarios: list[dict]) -> None:
+        if self.spine().semantic:
+            raise ValueError(
+                "Semantic scenarios belong to vision.fields.scenarios; use upsert_node"
+            )
         from codex_harness.core.acceptance import derive_scenarios
 
         with self._transaction():
@@ -3280,21 +3294,7 @@ class PlanStore:
             reason = acceptance.run_invalid_reason(self, run)
             if reason:
                 acceptance._refuse(reason, run["repo"] if run else None)
-            if not run or not run["passed"]:
-                raise PlanStoreError(
-                    "acceptance-scenarios-required",
-                    "Pass all scenarios on the current integrated revision",
-                )
-            if review_instructions.has_blocking_findings(self.acceptance_findings()):
-                raise PlanStoreError("acceptance-findings-open", "Resolve open acceptance findings")
-            review_guard = self.acceptance_review_guard(run["id"])
-            if review_guard:
-                message = (
-                    "Resolve open clarifications"
-                    if review_guard == "plan-clarifications-open"
-                    else "Review the current scenario run with native reviewer evidence"
-                )
-                raise PlanStoreError(review_guard, message)
+            acceptance.require_c_evidence(self, run)
             approval = {
                 "id": uuid4().hex,
                 "runId": run["id"],

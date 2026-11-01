@@ -406,15 +406,16 @@ WEB_TARGET = {"page": {"kind": "web", "entry": "index.html"}}
 WEB_PAGE = """<!doctype html><html><meta charset="utf-8"><title>Fixture</title>
 <style>body{margin:16px;color:#111;background:white;font:16px Arial}
 a,button{color:#111;background:white} :focus{outline:2px solid black}
-@media(prefers-reduced-motion:no-preference){h1{animation:fade .1s}}
+
 @keyframes fade{from{opacity:.95}to{opacity:1}}</style>
 <h1>Welcome</h1><p>Useful content</p><a href="#details">Details</a>
-<button onclick="document.querySelector('#extra').hidden=false">Reveal</button>
+<button
+onclick="document.querySelector('#extra').hidden=!document.querySelector('#extra').hidden">Reveal</button>
 <section id="details"><h2>Details section</h2><p id="extra" hidden>Revealed content</p></section>
 </html>"""
 
 
-def web_document():
+def web_document(*, split=False):
     from codex_harness.core.semantic_schema import WEB
 
     actions = [
@@ -428,12 +429,16 @@ def web_document():
                 "steps": [
                     {"op": "open"},
                     {"op": "assertVisible", "locator": {"text": "Welcome"}},
+                    {"op": "assertHidden", "locator": {"selector": "#extra"}},
                     {"op": "key", "key": "Tab"},
                     {"op": "assertFocus", "locator": {"role": "link", "name": "Details"}},
                     {"op": "key", "key": "Enter"},
                     {"op": "assertFragment", "fragment": "#details"},
                     {"op": "click", "locator": {"selector": "button"}},
                     {"op": "assertVisible", "locator": {"text": "Revealed content"}},
+                    {"op": "focus", "locator": {"selector": "button"}},
+                    {"op": "key", "key": "Space"},
+                    {"op": "assertHidden", "locator": {"selector": "#extra"}},
                     {"op": "key", "key": "Escape"},
                 ],
             },
@@ -441,7 +446,7 @@ def web_document():
         for width, height in [(375, 812), (1440, 900)]
         for motion in ["no-preference", "reduce"]
     ]
-    return {
+    result = {
         "schema": "seldon/scenarios-v1",
         "scenarios": [
             {
@@ -464,6 +469,14 @@ def web_document():
             }
         ],
     }
+
+    if split:
+        base = result["scenarios"][0]
+        result["scenarios"] = [
+            dict(base, id=a["id"], actions=[a], observe=[o])
+            for a, o in zip(base["actions"], base["observe"], strict=True)
+        ]
+    return result
 
 
 def browser_readiness(tmp_path_factory):
@@ -560,6 +573,18 @@ def test_web_observed_stub_red_unperformed_interaction_and_validation_rejection(
         [s["check"] for s in a["steps"]] == ["open", "assertVisible"]
         for a in result["actions"].values()
     )
+    captured = json.loads(
+        (Path(__file__).resolve().parents[2] / "fixtures/ux4-click-journey.json").read_text("utf-8")
+    )
+    document = web_document()
+    for action in document["scenarios"][0]["actions"]:
+        action["web"]["steps"] = captured["steps"]
+    replayed = run(document, tmp_path, WEB_TARGET, "contracts")[0]
+    assert replayed["state"] == "FAIL" and len(replayed["stubActions"]) == 4, replayed
+    assert all(
+        any(s["check"] == "assertVisible" and not s["passed"] for s in a["steps"])
+        for a in replayed["actions"].values()
+    )
     assert run(web_document(), tmp_path, WEB_TARGET, "validation")[0]["state"] == "ERROR"
     (tmp_path / "index.html").write_text(WEB_PAGE, encoding="utf-8")
     result = run(web_document(), tmp_path, WEB_TARGET, "contracts")[0]
@@ -602,7 +627,7 @@ def test_web_unknown_contrast_advises_without_masking_measured_failure(tmp_path,
       <p id="covered">Opaque background resolves through transparent child <em>text</em></p>
     </div><p id="body-copy" style="color:#111">Body copy</p>"""
     )
-    for color, state in [("#111", "PASS"), ("#aaa", "FAIL")]:
+    for color, state in [("#111", "FAIL"), ("#aaa", "FAIL")]:
         (tmp_path / "index.html").write_text(
             fixture.replace(
                 'id="body-copy" style="color:#111"', f'id="body-copy" style="color:{color}"'
@@ -618,7 +643,7 @@ def test_web_unknown_contrast_advises_without_masking_measured_failure(tmp_path,
             # Unmeasurable text is advised; decorative, hidden and opaque-backed text is not.
             assert "span#unknown::after" in elements
             assert not elements & {"span.decoration::after", "span.hidden::before", "p#covered"}
-            assert action["checks"]["textContrastAA"] == (state == "PASS")
+            assert action["checks"]["textContrastAA"] is (None if color == "#111" else False)
         assert result["cleanup"]["quiescenceVerified"]
 
 

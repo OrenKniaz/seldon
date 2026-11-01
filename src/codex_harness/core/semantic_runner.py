@@ -85,14 +85,15 @@ def read(file, limit=LIMIT):
     return value
 
 
-def capture(cmd, root, cwd=None, payload=None, *, browser=False):
+def capture(cmd, root, cwd=None, payload=None, *, browser=False, hold_open=False):
     env = dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root))
     if cmd[2] == "-m":
         env["PYTHONSAFEPATH"] = "1"
     env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
     if browser:
         env["DEBUG"] = "pw:browser"
-    stdin = DEVNULL if payload is None else PIPE
+    started = time.monotonic()
+    stdin = PIPE if payload is not None or hold_open else DEVNULL
     child = Popen(cmd, cwd=cwd or root, env=env, stdin=stdin, stdout=PIPE, stderr=PIPE)
     data = [None, None]
 
@@ -115,13 +116,23 @@ def capture(cmd, root, cwd=None, payload=None, *, browser=False):
         if any(d is not None and len(d) > LIMIT for d in data):
             raise ValueError("Product output exceeds 16KiB")
         time.sleep(0.01)
+    elapsed = time.monotonic() - started
+    stdin_open = hold_open and not child.stdin.closed
+    if hold_open:
+        child.stdin.close()
     for thread in threads:
         thread.join()  # The enclosing action watchdog also bounds pipe drain.
     if any(d is None for d in data):
         raise OSError("Output observation unavailable")
     if any(len(d) > LIMIT for d in data):
         raise ValueError("Product output exceeds 16KiB")
-    return dict(exit=child.returncode, stdout=data[0].decode(), stderr=data[1].decode())
+    return dict(
+        exit=child.returncode,
+        stdout=data[0].decode(),
+        stderr=data[1].decode(),
+        stdinOpenAtExit=stdin_open,
+        elapsedSeconds=elapsed,
+    )
 
 
 def equal(a, b):
@@ -134,7 +145,7 @@ def equal(a, b):
     return a == b
 
 
-def execute(s, root, targets, phase, seconds, deadline, web=None):
+def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None, stop_file=None):
     snapshots, results, markers = {}, {}, []
     for directory in s["setup"].get("dirs", []):
         path(root, directory).mkdir(parents=True, exist_ok=True)
@@ -153,9 +164,13 @@ def execute(s, root, targets, phase, seconds, deadline, web=None):
         os._exit(0)  # Outer held Job reaps the entire owned tree, including pipe holders.
 
     for a in s["actions"]:
+        if stop_file and Path(stop_file).exists():
+            raise ValueError("Acceptance owner stopped; no new action child")
         budget = min(30 if "web" in a else seconds, deadline - time.monotonic())
         if budget <= 0:
             raise TimeoutError("Scenario/run deadline; action unperformed")
+        if "cli" in a and a["cli"].get("stdin", {}).get("holdOpen"):
+            budget = min(budget, a["cli"]["stdin"]["exitWithin"])
         action = dict(id=a["id"], seconds=budget)
         guard = threading.Timer(budget, expired)
         guard.start()
@@ -198,13 +213,15 @@ def execute(s, root, targets, phase, seconds, deadline, web=None):
                 else [str(path(root, binding["entry"]))]
             )
             command = [sys.executable, "-B", *launch, *args]
-            payload = content(v["stdin"]) if "stdin" in v else None
+            hold_open = v.get("stdin", {}).get("holdOpen", False)
+            payload = content(v["stdin"]) if "stdin" in v and not hold_open else None
             action.update(
                 command=command,
                 cwd=str(cwd),
                 stdinBytes=len(payload) if payload is not None else None,
             )
-            result = capture(command, root, cwd, payload)
+            result = capture(command, root, cwd, payload, hold_open=hold_open)
+            result.update(action)
         finally:
             guard.cancel()
         marker = f"SELDON-STUB {v['operation']}"
@@ -227,11 +244,24 @@ def execute(s, root, targets, phase, seconds, deadline, web=None):
             observations.extend(
                 dict(
                     check=k,
-                    passed=equal(actual["checks"][k], o[k]),
+                    passed=(judgments or {}).get(k, {}).get("passed", False)
+                    if actual["checks"][k] is None
+                    else equal(actual["checks"][k], o[k]),
+                    judgment=(judgments or {}).get(k) if actual["checks"][k] is None else None,
                     actual=actual["checks"][k],
-                    reason="browser observation",
+                    reason="human judgment required"
+                    if actual["checks"][k] is None
+                    else "browser observation",
                 )
                 for k in WEB
+            )
+            observations.append(
+                dict(
+                    check="screenshots",
+                    passed=all(not a.get("missing") for a in actual["artifacts"])
+                    and len(actual["artifacts"]) == 2,
+                    reason="viewport and full-page screenshots required",
+                )
             )
             continue
         for key, expected in o.items():
@@ -242,6 +272,14 @@ def execute(s, root, targets, phase, seconds, deadline, web=None):
                 value = actual[key.removesuffix("Equals")]
                 if key in ("stdoutEquals", "stderrEquals"):
                     value = value.replace("\r\n", "\n")
+            elif key == "stdoutEndsWith":
+                value, expected = actual["stdout"].endswith(expected), True
+            elif key == "stdoutContains":
+                value, expected = expected in actual["stdout"], True
+            elif key == "stdinOpenAtExit":
+                value = actual["stdinOpenAtExit"]
+            elif key == "elapsedAtMost":
+                value, expected = actual["elapsedSeconds"] <= expected, True
             elif key == "stderrNonempty":
                 value = bool(actual["stderr"].strip())
             elif key == "stderrContains":
@@ -305,6 +343,9 @@ def run(
     run_seconds=None,
     web_config=None,
     evidence_dir=None,
+    judgments=None,
+    should_stop=None,
+    stop_file=None,
 ):
     results, scenarios = [], [{"id": None}]
     cleanup = dict(quiescenceVerified=True, activeProcessesAfterTeardown=0, childLaunched=False)
@@ -335,6 +376,8 @@ def run(
         deadline = time.monotonic() + run_seconds
         web = web_toolchain(web_config, evidence_dir) if is_web else None
         for s in scenarios:
+            if should_stop and should_stop():
+                raise ValueError("Acceptance owner stopped; no new scenario child")
             end = min(deadline, time.monotonic() + scenario_seconds)
             if end <= time.monotonic():
                 raise TimeoutError("Run deadline; scenario unperformed")
@@ -383,7 +426,19 @@ def run(
                             shutil.copyfile(source, destination)
                 config = root / ".scenario.json"
                 config.write_text(
-                    json.dumps([s, targets, phase, action_seconds, end, web]), encoding="utf-8"
+                    json.dumps(
+                        [
+                            s,
+                            targets,
+                            phase,
+                            action_seconds,
+                            end,
+                            web,
+                            judgments,
+                            str(stop_file) if stop_file else None,
+                        ]
+                    ),
+                    encoding="utf-8",
                 )
                 cmd = [sys.executable, "-B", "-m", MODULE, "--worker", str(config)]
                 cleanup.clear()  # Launch may create children even if it raises without a receipt.
@@ -408,12 +463,12 @@ def run(
             dict(
                 id=scenarios[min(len(results), len(scenarios) - 1)]["id"],
                 state="ERROR",
-                reason=str(error),
+                reason=f"timeout: {error}" if isinstance(error, TimeoutExpired) else str(error),
                 cleanup=getattr(error, "audit_control", cleanup),
             )
         )
     results.extend(
-        dict(id=s["id"], state="ERROR", reason="unperformed after earlier ERROR")
+        dict(id=s["id"], state="ERROR", reason="unperformed after earlier ERROR", unperformed=True)
         for s in scenarios[len(results) :]
     )
     return results
@@ -432,8 +487,12 @@ if __name__ == "__main__":
         raise SystemExit(call(cmd))
     if sys.argv[1:2] == ["--worker"]:
         try:
-            s, targets, phase, seconds, deadline, web = json.loads(read(Path(sys.argv[2]), 131072))
-            result = execute(s, Path.cwd(), targets, phase, seconds, deadline, web)
+            s, targets, phase, seconds, deadline, web, judgments, stop_file = json.loads(
+                read(Path(sys.argv[2]), 131072)
+            )
+            result = execute(
+                s, Path.cwd(), targets, phase, seconds, deadline, web, judgments, stop_file
+            )
         except ERRORS as error:
             result = dict(state="ERROR", reason=str(error) or type(error).__name__)
     else:

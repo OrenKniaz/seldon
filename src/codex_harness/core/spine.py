@@ -452,29 +452,38 @@ def requirement_files_revision(template_dir: str | Path, names: list[str]) -> st
     return _hash(_canonical(file_revisions))
 
 
-def semantic_spec(spine, product=None):
+def scenario_nodes(spine):
+    """Scenario aliases refer to their declared requirement owners, never new spine nodes."""
+    if not spine.semantic:
+        return {}
+    scenarios = (
+        spine.node(spine.ids("vision")[0])["fields"].get("scenarios", {}).get("scenarios", [])
+    )
+    return {
+        s["id"]: sorted({ref.split("@", 1)[0] for ref in s["requirementRefs"]}) for s in scenarios
+    }
+
+
+def semantic_spec(spine, product=None, *, draft=False):
     from codex_harness.core.semantic_schema import validate
 
     root = spine.node(spine.ids("vision")[0])["fields"]
     for field in ("scenarios", "targets"):
-        if not isinstance(root.get(field), dict):
+        if not (draft and field not in root) and not isinstance(root.get(field), dict):
             raise ValueError(
                 f"Missing/malformed {field}; author vision.fields.{field} as an object. "
                 "See harness_schema kind=vision semanticScenarios."
             )
-    document, targets = root["scenarios"], root["targets"]
+    document, targets = root.get("scenarios"), root.get("targets", {})
     try:
-        validate(document, product or Path.cwd(), targets, require_entries=False)
-        # The surface follows the targets; only a mixed or contradicting declaration is wrong.
+        validate(document, product or Path.cwd(), targets, require_entries=False, draft=draft)
         kinds = {"web" if t.get("kind") == "web" else "cli" for t in targets.values()}
-        if len(kinds) > 1 or root.get("productSurface", next(iter(kinds), "cli")) not in kinds:
+        if len(kinds) > 1 or kinds and root.get("productSurface", next(iter(kinds))) not in kinds:
             raise ValueError("Targets must all be web or all CLI and match productSurface")
     except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            f"Invalid scenarios/targets: {error}. Author scenarios with schema, scenarios, "
-            "requirementRefs and contractRefs, plus targets bindings; "
-            "see harness_schema kind=vision semanticScenarios."
-        ) from error
+        raise ValueError(f"Invalid scenarios/targets: {error}") from error
+    if draft:
+        return document, targets, set()
     covered, gaps, messages = set(), [], []
     for scenario in document["scenarios"]:
         for field, kind in (("requirementRefs", "requirement"), ("contractRefs", "design")):

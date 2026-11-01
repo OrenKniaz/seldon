@@ -63,3 +63,22 @@ def web_browser_ready(tmp_path_factory):
     from tests.python.core.test_semantic_runner import browser_readiness
 
     return browser_readiness(tmp_path_factory)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = (yield).get_result()
+    if item.get_closest_marker("fast") is not None:
+        config = item.config
+        config._diet_fast_seconds = getattr(config, "_diet_fast_seconds", 0) + report.duration
+
+
+def pytest_sessionfinish(session):
+    seconds = getattr(session.config, "_diet_fast_seconds", 0)
+    reporter = session.config.pluginmanager.getplugin("terminalreporter")
+    if reporter:
+        reporter.write_line(
+            f"Fast marked checks: {seconds:.2f}s including setup/call/teardown; ceiling 600s"
+        )
+    if seconds > 600:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
