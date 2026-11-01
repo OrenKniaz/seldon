@@ -1,9 +1,4 @@
-"""Publication-bound background worker dispatch; records are observations, not liveness.
-
-One publication admits one original job. Reconnecting never retries an ambiguous
-launch. Existing dispatcher attempt/recovery records remain the worker authority.
-This local protocol is not authentication or confinement of the host planner.
-"""
+"""Publication-bound dispatch; recovery ends or quarantines attempts before readmission."""
 
 from __future__ import annotations
 
@@ -144,11 +139,7 @@ def _valid_timeout(value):
 def start_worker_job(
     store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap=None
 ):
-    """Admit once and return promptly; no mock, executable override or retry surface.
-
-    New admissions check the current B subject against the actual execution scope.
-    A local call ceiling is not verified subscription quota or human identity.
-    """
+    """Admit once under B; recovery alone assigns successor attempts."""
     if type(max_parallel) is not int or max_parallel < 1:
         raise ValueError("worker-job-max-parallel-must-be-positive")
     if not _valid_timeout(timeout):
@@ -178,10 +169,7 @@ def start_worker_job(
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
         return worker_job_status(store.workspace, job_id)
 
-    # An unlaunched job may be re-admitted within the current B limits;
-    # retain the old namespace as evidence.
-    stranded = directory.is_dir() and _ended_before_launch(directory)
-    if directory.is_dir() and not stranded:
+    if directory.is_dir():
         return reattach()
     from codex_harness.core.planner_execution import (
         admit_execution,
@@ -208,11 +196,6 @@ def start_worker_job(
         "callCap": call_cap,
     }
     directory.parent.mkdir(parents=True, exist_ok=True)
-    if stranded:
-        index = 1
-        while directory.with_name(f"{directory.name}.prelaunch-failed-{index}").exists():
-            index += 1
-        directory.rename(directory.with_name(f"{directory.name}.prelaunch-failed-{index}"))
     try:
         directory.mkdir()
     except FileExistsError:
@@ -297,17 +280,17 @@ def start_worker_job(
 
 
 def worker_job_status(workspace, job_id, *, wait_seconds=0):
-    """Read durable observations only, including after a new MCP connection.
-
-    No terminal original means UNKNOWN, even if launch/started records exist.
-    A PID and an old running snapshot are never evidence of current liveness.
-    """
+    """Read durable observations; recovery verdicts supersede lost terminal records."""
     if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 600:
         raise ValueError("wait_seconds must be between 0 and 600")
     if wait_seconds:
         deadline = time.monotonic() + wait_seconds
         current = worker_job_status(workspace, job_id)
-        while "terminal" not in current:
+        while "terminal" not in current and current["status"] not in {
+            "failed",
+            "readmitted",
+            "abandoned",
+        }:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -363,8 +346,6 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         result[name] = record
         if name == "terminal":
             result["status"] = record["status"]
-    # Dispatcher records can advance while the long job is running. They remain
-    # observed snapshots, and cannot substitute for a completed job original.
     runs = directory / "runs"
     paths = list(runs.glob("*/evidence/run.json")) if runs.is_dir() else []
     if len(paths) == 1:
@@ -395,46 +376,13 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         result["didRunProvider"] = run["didExecuteRealProvider"]
     elif paths:
         raise ValueError("worker-job-dispatch-record-ambiguous")
-    if "terminal" not in result:
-        result["reason"] = "No terminal original; read dispatcher evidence; do not relaunch"
-    elif result["terminal"]["status"] == "failed" or (
-        result["terminal"]["status"] == "completed"
-        and result["terminal"].get("dispatchStatus", "").startswith("plan-failed: ")
-    ):
-        result["reason"] = (
-            "Reconnect reattaches to inspect original evidence. "
-            "Replacement-controller continuation is not supported. "
-            "A terminal record does not establish controller exit or current child liveness; "
-            "do not relaunch ambiguous work."
-        )
-        if _ended_before_launch(_directory(workspace, job_id)):
-            result["reason"] = (
-                "Ended before any provider launched. Retry within the current B limits; "
-                "harness_worker_start re-admits this publication."
-            )
+    if result["status"] != "completed" or result.get("terminal", {}).get(
+        "dispatchStatus", ""
+    ).startswith("plan-failed"):
+        result["reason"] = "Failed or stalled work: harness_recovery can readmit within B."
     from codex_harness.core.planner_recovery import worker_status
 
     return worker_status(workspace, result)
-
-
-def _ended_before_launch(directory):
-    """Terminal job whose every bead stopped before a provider attempt existed."""
-    try:
-        terminal = read_record_json(_inside(directory, directory / "terminal.json"))
-        runs = list((directory / "runs").glob("*/evidence/run.json"))
-        records = [read_record_json(_inside(directory, path)) for path in runs]
-    except (OSError, ValueError):
-        return False
-    return (
-        terminal.get("status") == "completed"
-        and terminal.get("dispatchStatus", "").startswith("plan-failed: ")
-        and len(records) == 1
-        and records[0].get("didExecuteRealProvider") is False
-        and all(
-            bead.get("attempt") is None and bead.get("didRunProvider") is False
-            for bead in records[0].get("beads", {}).values()
-        )
-    )
 
 
 def execute_worker_job(workspace, job_id):

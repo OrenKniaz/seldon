@@ -1,18 +1,58 @@
-"""Explicit worker disposition; missing containment originals remain UNKNOWN."""
+"""Bounded worker recovery through the existing process owner, within B."""
 
 import json
 import os
 import sys
+import time
 from uuid import uuid4
 
 from codex_harness.core import approvals
 from codex_harness.core import planner_jobs as jobs
 from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
 from codex_harness.core.planner_execution import _canonical_store
-from codex_harness.core.provider_call_budget import usage
-from codex_harness.core.record_io import read_record_json, write_record_json_once
+from codex_harness.core.record_io import (
+    _record_guard,
+    read_record_json,
+    write_record_json,
+    write_record_json_once,
+)
 
 RESOLVED = "worker-recovery-resolved"
+STALL_SECONDS = 120
+
+
+def end_attempt(workspace, job_id):
+    """Ask the held Job owner to stop; a lost owner quarantines the old namespace."""
+    directory = jobs._directory(workspace, job_id)
+    request = jobs._request(directory)
+    write_record_json(directory / "stop.json", {"requestDigest": request["requestDigest"]})
+    deadline = time.monotonic() + 12
+    while not (directory / "quiescence.json").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    proof = inspect(workspace, job_id)
+    path = directory / "recovery-verdict.json"
+    with _record_guard(path):
+        if not path.exists():
+            write_record_json_once(
+                path,
+                dict(
+                    requestDigest=request["requestDigest"],
+                    verdict="VERIFIED-QUIESCENT"
+                    if proof["verdict"] == "VERIFIED-QUIESCENT"
+                    else "ABANDONED",
+                    quarantine=True,
+                ),
+            )
+
+
+def recovery_verdict(directory, request):
+    path = directory / "recovery-verdict.json"
+    record = read_record_json(path) if path.exists() else {}
+    if record and record.get("requestDigest") != request["requestDigest"]:
+        raise ValueError("worker-recovery-verdict-identity-mismatch")
+    return record
+
+
 TOOL = dict(
     name="harness_recovery",
     description="Inspect workers or review:<attemptId>; resolve checks machine prerequisites.",
@@ -37,6 +77,13 @@ def disposition(store, job_id):
 def worker_status(workspace, result):
     with open_plan_store_readonly(workspace) as store:
         resolved = disposition(store, result["jobId"])
+    if not resolved:
+        directory = jobs._directory(workspace, result["jobId"])
+        if recovery_verdict(directory, jobs._request(directory)):
+            result.update(
+                status="failed",
+                reason="Worker ended; readmit within the same B via harness_recovery.",
+            )
     if resolved:
         state = {"abandon": "abandoned", "readmit": "readmitted", "revalidate": "revalidated"}[
             resolved["choice"]
@@ -52,11 +99,7 @@ def worker_status(workspace, result):
             )
         result.update(status=state, recovery=resolved)
         if resolved["choice"] == "revalidate":
-            result["reason"] = (
-                "Retained candidate revalidation "
-                + resolved.get("validation", {}).get("state", "started")
-                + "; inspect recovery.validation for results and delivery path. No worker launched."
-            )
+            result["reason"] = "Inspect recovery.validation for retained revalidation and delivery."
     return result
 
 
@@ -81,17 +124,6 @@ def inspect(workspace, job_id):
     receipt_path = jobs._inside(directory, directory / "quiescence.json")
     receipt = read_record_json(receipt_path) if receipt_path.is_file() else {}
     control = receipt.get("control", {})
-    observations = {}
-    for path in [
-        directory / "launch.json",
-        directory / "started.json",
-        *directory.glob("runs/*/evidence/**/attempt/request.json"),
-    ]:
-        if path.is_file():
-            record = read_record_json(jobs._inside(directory, path))
-            observations[str(path.relative_to(directory))] = record.get(
-                "pid", record.get("processId")
-            )
     verified = (
         request.get("containment") == "windows-job-monitor-v1"
         and receipt.get("requestDigest") == request["requestDigest"]
@@ -100,30 +132,19 @@ def inspect(workspace, job_id):
         and control.get("quiescenceVerified") is True
         and control.get("activeProcessesAfterTeardown") == 0
     )
-    roots = [directory / "temp", *sorted((directory / "runs").glob("*/*"))]
-    owned = []
-    for root in roots:
-        try:
-            path = jobs._inside(directory, root)
-            owned.append(dict(path=str(path), state="retained" if path.exists() else "absent"))
-        except (OSError, ValueError) as error:
-            owned.append(dict(path=str(root), state="inaccessible", reason=str(error)))
-    with open_plan_store_readonly(workspace) as store:
-        spent = usage(store, "worker")
+    verdict = recovery_verdict(directory, request)
     proof = dict(
         jobId=job_id,
         publicationRevision=request["publicationRevision"],
         requestDigest=request["requestDigest"],
-        verdict="VERIFIED-QUIESCENT" if verified else "UNKNOWN",
-        reasons=[]
-        if verified
-        else ["No bound, complete controller/descendant Job teardown receipt"],
+        verdict=verdict.get("verdict", "VERIFIED-QUIESCENT" if verified else "UNKNOWN"),
         controllerAndChildren=control or {"liveness": "UNKNOWN"},
-        recordedPids=observations,
-        ownedDirectories=owned,
-        tempOwnership="job-local" if receipt else "legacy temp roots unknown",
-        spentCalls=spent,
-        remainingCalls=max(0, request["options"]["callCap"] - spent),
+        ownedDirectories=[
+            dict(
+                path=str(directory),
+                state="quarantined" if (directory / "stop.json").exists() else "retained",
+            )
+        ],
     )
     from codex_harness.core.planner_candidate import retained
 
@@ -133,27 +154,22 @@ def inspect(workspace, job_id):
         proof["revalidation"] = dict(
             available=False,
             reason=str(error),
-            nextAction="Inspect run evidence; finish Build before readmission.",
+            nextAction="Readmit a fresh attempt within B.",
         )
-    proof["options"] = (
-        ["abandon"]
-        + (["readmit"] if verified else [])
-        + (["revalidate"] if verified and proof["revalidation"]["available"] else [])
+    proof["options"] = ["abandon", "readmit"] + (
+        ["revalidate"] if verified and proof["revalidation"]["available"] else []
     )
     with open_plan_store_readonly(workspace) as store:
         proof["disposition"] = disposition(store, job_id)
     if resolved := proof["disposition"]:
-        retryable = (
-            resolved["choice"] == "readmit"
-            and not jobs._directory(workspace, resolved["successor"]).exists()
-        ) or resolved.get("validation", {}).get("state") in {"FAIL", "ERROR"}
+        retryable = resolved.get("validation", {}).get("state") in {"FAIL", "ERROR"}
         proof["options"] = ["revalidate"] if retryable and "revalidate" in proof["options"] else []
     proof["proofDigest"] = jobs._digest(proof)
     return proof
 
 
 def resolve(store, job_id, choice, reason):
-    """Same-work recovery uses current A/B; UNKNOWN never permits a retry."""
+    """Same-work recovery ends or quarantines the old attempt under current B."""
     _canonical_store(store)
     if (
         choice not in {"abandon", "readmit", "revalidate"}
@@ -162,6 +178,10 @@ def resolve(store, job_id, choice, reason):
     ):
         raise ValueError("recovery-choice-and-reason-required")
     with store._transaction():
+        if choice != "abandon":
+            approvals.require_approval(store, "B")
+        if choice in {"readmit", "abandon"} and not disposition(store, job_id):
+            end_attempt(store.workspace, job_id)
         proof = inspect(store.workspace, job_id)
         if proof["disposition"] and not (
             choice == "revalidate" and "revalidate" in proof["options"]
@@ -169,28 +189,19 @@ def resolve(store, job_id, choice, reason):
             raise ValueError(
                 "recovery-already-resolved: inspect disposition and original run evidence"
             )
-        if choice != "abandon":
-            if proof["verdict"] != "VERIFIED-QUIESCENT":
-                raise ValueError("recovery-readmit-requires-VERIFIED-QUIESCENT; UNKNOWN stays held")
-            approvals.require_approval(store, "B")
         if choice == "revalidate":
+            if proof["verdict"] != "VERIFIED-QUIESCENT":
+                raise ValueError(
+                    "revalidate requires a quiescent retained candidate; readmit instead"
+                )
             if not proof["revalidation"]["available"]:
                 raise ValueError(proof["revalidation"]["reason"])
-            prior = proof["disposition"]
-            if (
-                prior
-                and prior.get("successor")
-                and jobs._directory(store.workspace, prior["successor"]).exists()
-            ):
-                raise ValueError(
-                    "revalidate: successor already admitted; inspect successor instead"
-                )
         resolved = dict(
             jobId=job_id,
             choice=choice,
             reason=reason,
             proof=proof,
-            quarantine=proof["verdict"] == "UNKNOWN",
+            quarantine=choice != "revalidate",
             successor=jobs._digest(dict(jobId=job_id, proof=proof["proofDigest"], choice=choice))
             if choice == "readmit"
             else None,
@@ -227,6 +238,26 @@ def monitor(workspace, job_id):
         "raise SystemExit(0 if result['status'] == 'completed' else 1)\n"
     )
     command = [sys.executable, "-P", "-B", "-c", payload, str(workspace), job_id]
+    last_progress = next_check = time.monotonic()
+    previous = None
+
+    def stop_when():
+        nonlocal last_progress, next_check, previous
+        now = time.monotonic()
+        if now < next_check:
+            return None
+        next_check = now + 0.2
+        if (directory / "stop.json").exists():
+            return "recovery-requested"
+        # Worker events and verification results count as progress; status reads do not.
+        paths = directory.glob("runs/*/evidence/**/*.json*")
+        observed = [(str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(paths)]
+        if observed != previous:
+            previous, last_progress = observed, now
+        if now - last_progress >= min(STALL_SECONDS, request["options"]["timeout"]):
+            return "worker-stalled"
+        return None
+
     try:
         result = run_audit_process(
             command,
@@ -234,6 +265,7 @@ def monitor(workspace, job_id):
             capture_output=False,
             timeout=request["options"]["timeout"] * request["options"]["callCap"] + 600,
             env={**os.environ, **dict.fromkeys(("TEMP", "TMP", "TMPDIR"), str(temp))},
+            stop_when=stop_when,
         )
         control = getattr(result, "audit_control", {})
         code = result.returncode
@@ -244,6 +276,8 @@ def monitor(workspace, job_id):
         directory / "quiescence.json",
         {"requestDigest": request["requestDigest"], "control": control},
     )
+    if control.get("stopReason") or not control.get("quiescenceVerified"):
+        end_attempt(workspace, job_id)
     return code
 
 

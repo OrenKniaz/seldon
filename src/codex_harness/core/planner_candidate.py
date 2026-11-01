@@ -5,7 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from codex_harness.core.record_io import read_record_json
+from codex_harness.core.record_io import _record_guard, read_record_json
 
 
 def file_hashes(root, names):
@@ -100,6 +100,8 @@ def retained(workspace, job_id):
     from codex_harness.core import planner_jobs as jobs
 
     directory = jobs._directory(workspace, job_id)
+    if (directory / "stop.json").exists():
+        raise ValueError("revalidate: quarantined attempt; readmit within B")
     request = jobs._request(directory)
     terminal = read_record_json(jobs._inside(directory, directory / "terminal.json"))
     if terminal.get("requestDigest") != request["requestDigest"]:
@@ -167,44 +169,47 @@ def deliver(workspace, request, run):
     ):
         return
     directory = jobs._directory(workspace, request["jobId"])
-    manifest = read_record_json(directory / "plan/sample.json")
-    repo = jobs._inside(directory, Path(run["repo"]))
-    if d._git(repo, "rev-parse", "HEAD^{tree}") != run["semanticValidation"]["candidateTree"]:
-        raise ValueError("delivery: integration tree differs from Validation PASS")
-    if _read_git(repo, "status", "--porcelain"):
-        raise ValueError("delivery: source differs from validated candidate")
-    names = sorted({n for b in manifest["beads"].values() for n in b["ownedFiles"]})
-    files, hashes = [], {}
-    for name in names:
-        if Path(name).parts[0].startswith("."):
-            raise ValueError("delivery: metadata is not a product file")
-        source = jobs._inside(repo, repo / name)
-        target = jobs._inside(workspace, Path(workspace) / name)
-        raw = source.read_bytes() if source.is_file() else None
-        hashes[name] = hashlib.sha256(raw).hexdigest() if raw is not None else None
-        if target.exists() and target.read_bytes() != raw:
-            baseline = jobs._inside(directory, directory / "plan/template" / name)
-            if not baseline.is_file() or target.read_bytes() != baseline.read_bytes():
-                raise ValueError(
-                    f"delivery: existing {name} changed; preserve it and reconcile first"
-                )
-        if raw is not None:
-            files.append((raw, target))
-    if hashes != run["semanticValidation"]["candidateFiles"]:
-        raise ValueError("delivery: source differs from validated candidate bytes")
-    for raw, target in files:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(raw)
-    run["delivery"] = dict(
-        root=str(Path(workspace).resolve()),
-        files=[str(t) for _, t in files],
-        fileHashes=hashes,
-        candidateTree=run["semanticValidation"]["candidateTree"],
-    )
-    _check_delivery(run["delivery"], workspace)
+    with _record_guard(directory / "stop.json"):
+        if (directory / "stop.json").exists():
+            raise ValueError("delivery: quarantined attempt; readmit within B")
+        manifest = read_record_json(directory / "plan/sample.json")
+        repo = jobs._inside(directory, Path(run["repo"]))
+        if d._git(repo, "rev-parse", "HEAD^{tree}") != run["semanticValidation"]["candidateTree"]:
+            raise ValueError("delivery: integration tree differs from Validation PASS")
+        if _read_git(repo, "status", "--porcelain"):
+            raise ValueError("delivery: source differs from validated candidate")
+        names = sorted({n for b in manifest["beads"].values() for n in b["ownedFiles"]})
+        files, hashes = [], {}
+        for name in names:
+            if Path(name).parts[0].startswith("."):
+                raise ValueError("delivery: metadata is not a product file")
+            source = jobs._inside(repo, repo / name)
+            target = jobs._inside(workspace, Path(workspace) / name)
+            raw = source.read_bytes() if source.is_file() else None
+            hashes[name] = hashlib.sha256(raw).hexdigest() if raw is not None else None
+            if target.exists() and target.read_bytes() != raw:
+                baseline = jobs._inside(directory, directory / "plan/template" / name)
+                if not baseline.is_file() or target.read_bytes() != baseline.read_bytes():
+                    raise ValueError(
+                        f"delivery: existing {name} changed; preserve it and reconcile first"
+                    )
+            if raw is not None:
+                files.append((raw, target))
+        if hashes != run["semanticValidation"]["candidateFiles"]:
+            raise ValueError("delivery: source differs from validated candidate bytes")
+        for raw, target in files:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        run["delivery"] = dict(
+            root=str(Path(workspace).resolve()),
+            files=[str(t) for _, t in files],
+            fileHashes=hashes,
+            candidateTree=run["semanticValidation"]["candidateTree"],
+        )
+        _check_delivery(run["delivery"], workspace)
 
-    d._write_record(repo.parent / "evidence/run.json", run)
-    return run["delivery"]
+        d._write_record(repo.parent / "evidence/run.json", run)
+        return run["delivery"]
 
 
 def _check_delivery(delivery, root):

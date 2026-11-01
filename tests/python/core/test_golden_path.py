@@ -78,6 +78,22 @@ def provider_host(mode, workspace, surface, job_id=None):
         )
 
     def build(root):
+        if surface == "cli" and not (workspace / "stall-attempted").exists():
+            # A real descendant hangs mid-Build with uncommitted poisoned writes.
+            # The Job owner must reap it; an exited fake cannot prove recovery.
+            (workspace / "stall-attempted").write_text(str(root), encoding="utf-8")
+            child = actual_popen(
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    "from pathlib import Path; import time; "
+                    "Path('hashslip.py').write_text('POISON'); "
+                    "Path('abandoned.txt').write_text('never merge'); time.sleep(600)",
+                ],
+                cwd=root,
+            )
+            child.wait()
         (root / filename).write_bytes((ROOT / "tests/fixtures/efficiency" / filename).read_bytes())
         if surface == "web":
             with (root / filename).open("a", encoding="utf-8") as out:
@@ -125,6 +141,9 @@ def provider_host(mode, workspace, surface, job_id=None):
         sys.argv = [sys.argv[0], "--workspace", str(workspace)]
         runpy.run_module("codex_harness.core.seldon_mcp", run_name="__main__")
     elif mode == "controller":
+        # Accelerate the production no-progress clock, preserving B's scope.
+        if surface == "cli":
+            planner_recovery.STALL_SECONDS = 15
         audit_process.run_audit_process = controller_payload
         raise SystemExit(planner_recovery.monitor(workspace, job_id))
     else:
@@ -149,6 +168,9 @@ def test_golden_path(tmp_path, request, surface):
     Stub results are suite evidence only, never actual-provider acceptance.
     Replay UX-5's captured Unicode upsert and survive an uncaught malformed tool
     request plus tool stdout noise; direct handle_line tests miss pipe death.
+    Replay ShelfLife: lose an exited owner's receipt, then hang a real descendant
+    mid-Build. Both attempts must be quarantined and readmitted under the same B;
+    ordinary successful fixtures missed UNKNOWN holding delivery forever.
     """
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
@@ -503,6 +525,8 @@ def test_golden_path(tmp_path, request, surface):
                     time.sleep(0.1)
                     proof = call("harness_recovery", mode="inspect", job_id=original)
                 assert proof["verdict"] == "VERIFIED-QUIESCENT", proof
+                evidence = Path(job["evidenceDir"])
+                (evidence / "quiescence.json").rename(evidence / "retained-quiescence.json")
                 resolved = call(
                     "harness_recovery",
                     mode="resolve",
@@ -511,10 +535,34 @@ def test_golden_path(tmp_path, request, surface):
                     reason="Repair the failed Contracts stub",
                 )
                 assert "card" not in resolved
+                assert resolved["proof"]["verdict"] == "ABANDONED"
+                assert resolved["quarantine"] is True
                 job = call("harness_worker_start", **options)
                 assert job["jobId"] == resolved["successor"] != original
                 while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
+                assert job["status"] == "failed", job
+                stalled = job["jobId"]
+                proof = call("harness_recovery", mode="inspect", job_id=stalled)
+                assert proof["verdict"] == "VERIFIED-QUIESCENT", proof
+                assert proof["controllerAndChildren"]["stopReason"] == "worker-stalled"
+                assert proof["controllerAndChildren"]["activeProcessesAfterTeardown"] == 0
+                poisoned = Path((tmp_path / "stall-attempted").read_text(encoding="utf-8"))
+                assert (poisoned / "hashslip.py").read_text() == "POISON"
+                assert not (tmp_path / "abandoned.txt").exists()
+                resolved = call(
+                    "harness_recovery",
+                    mode="resolve",
+                    job_id=stalled,
+                    choice="readmit",
+                    reason="End stalled Build and retry within the same B",
+                )
+                assert resolved["quarantine"] is True
+                job = call("harness_worker_start", **options)
+                assert job["jobId"] == resolved["successor"] != stalled
+                while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
+                assert not (tmp_path / "abandoned.txt").exists()
                 probing = False
             assert job["status"] == "completed", job
             assert job["run"]["semanticContracts"]["state"] == "RED", job

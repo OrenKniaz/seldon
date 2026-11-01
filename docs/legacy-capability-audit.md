@@ -1,5 +1,27 @@
 # Legacy capability audit for the local Seldon extraction
 
+RECOVERY-1: ShelfLife turn04 refused readmission with
+`recovery-readmit-requires-VERIFIED-QUIESCENT; UNKNOWN stays held` after stalled
+Build calls (fight-1, 20261101T145704-2c0e74-001-shelflife, turns03-07).
+Owner: planner_recovery monitor/resolve and the existing audit_process Job owner.
+Disposition: bounded no-progress stop and recovery signal terminate the owned Job;
+missing teardown evidence becomes ABANDONED after 12 seconds. The old attempt's
+workspace is quarantined in its original namespace and excluded from delivery and
+revalidation; fresh readmission retains B. Exit: CLI golden loses an owner's
+receipt, then hangs a real Build descendant, verifies zero Job members, readmits
+and reaches C in three decisions without poisoned files. Final CLI/structural gate:
+18 passed in 105.31s, suite count unchanged (19), core net zero, no new tools.
+Actual-provider recovery acceptance remains unproven.
+
+RECOVERY-1 validation blocker: first web golden passed in 300.27s; final web
+golden failed at acceptance in 262.58s on missing Chromium profile `lockfile`
+(`WinError 2`), after verified Job teardown with zero active processes. Owner:
+unchanged semantic_runner._cleanup. Disposition: retained outside this recovery
+repair; both permitted gate runs consumed, no further retry or cleanup edits.
+Exit: cleanup owner handles a concurrently removed browser-profile entry without
+hiding other failures, and an authorized golden gate reaches web C. This is an
+observed cleanup race, not a demonstrated baseline failure or a green final gate.
+
 CATALOG-1: 47/150 farm runs stalled before B when executable discovery could not
 produce a model catalog (20261101T100128Z-d4f633-001-hashslip and
 20261101T111738Z-af1b82-002-linecount, turn02.md). Owner: intake selection and B

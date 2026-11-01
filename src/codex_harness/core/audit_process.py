@@ -200,7 +200,15 @@ class _WindowsJob:
 
 
 def run_audit_process(
-    args, *, cwd, capture_output=True, text=True, timeout=120, env=None, stdin=subprocess.DEVNULL
+    args,
+    *,
+    cwd,
+    capture_output=True,
+    text=True,
+    timeout=120,
+    env=None,
+    stdin=subprocess.DEVNULL,
+    stop_when=None,
 ):
     """Run a noninteractive audit; preserve any explicitly supplied stdin file or pipe."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
@@ -317,6 +325,9 @@ def run_audit_process(
         deadline = time.monotonic() + timeout
         while not records and "status" in channels and time.monotonic() < deadline:
             pump()
+            if not records and stop_when and (reason := stop_when()):
+                control["stopReason"] = reason
+                break
             time.sleep(0.005)
         timed_out = not records and time.monotonic() >= deadline
         record = records[0] if records else None
@@ -341,6 +352,8 @@ def run_audit_process(
                 output=stdout if capture_output else None,
                 stderr=stderr if capture_output else None,
             )
+        if control.get("stopReason"):
+            record = dict(kind="complete", returncode=19)
         if record is None or record.get("kind") != "complete":
             raise OSError(f"Audit bootstrap refused payload: {record}")
         control["payloadReturnCode"] = record["returncode"]
