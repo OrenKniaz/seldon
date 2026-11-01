@@ -1,5 +1,3 @@
-"""Drive asynchronous public review completion in existing synchronous consumers."""
-
 import time
 
 
@@ -25,8 +23,3 @@ def finish_review(server, reply):
             return observed
         time.sleep(0.01)
     raise AssertionError("Public review did not terminate")
-
-
-def completed_call(server, name, arguments):
-    reply = server.call_tool(name, arguments)
-    return finish_review(server, reply) if name == "harness_accept_review" else reply

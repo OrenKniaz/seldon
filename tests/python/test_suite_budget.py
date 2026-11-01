@@ -1,35 +1,37 @@
-"""Prevent test/fast-gate growth, which product journeys cannot detect."""
+"""Keep the owner-approved E2E journeys and structural guards as the entire suite."""
 
 import ast
-import subprocess
 from pathlib import Path
 
-CEILINGS = {"suite": 469, "fast": 173}
-ROOT = Path(__file__).resolve().parents[2]
+CEILINGS = {"suite": 19}
+ROOT = Path(__file__).resolve().parent
+ALLOWED = {
+    "core/test_golden_path.py",
+    "core/test_approval_v2_journey.py",
+    "core/test_module_size.py",
+    "test_suite_budget.py",
+}
 
 
-def test_suite_and_fast_gate_counts_only_shrink(pytestconfig):
-    """Catch collected parameter explosions and raised budgets; module size misses both.
+def test_only_owner_approved_e2e_and_structural_guards(pytestconfig):
+    """Catch new test files or tests hidden in support modules.
 
-    Count actual pytest items before marker deselection, including passing tests.
-    Run against tests/python; focused invocations may collect fewer items.
+    Golden journeys exercise product behavior but cannot detect suite-policy drift.
     """
-    path = Path(__file__).relative_to(ROOT).as_posix()
-    tracked = subprocess.check_output(
-        ["git", "ls-tree", "--name-only", "HEAD", "--", path], cwd=ROOT, text=True
-    ).strip()
-    baseline = CEILINGS  # Bootstrap until the initial budget is committed.
-    if tracked:
-        tree = ast.parse(
-            subprocess.check_output(["git", "show", f"HEAD:{path}"], cwd=ROOT, text=True)
-        )
-        baseline = next(
-            ast.literal_eval(node.value)
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "CEILINGS" for t in node.targets)
-        )
-    assert CEILINGS.keys() == baseline.keys()
-    for name, count in pytestconfig._diet_counts.items():
-        assert CEILINGS[name] <= baseline[name], f"{name}: ceilings only go down"
-        assert count <= CEILINGS[name], f"{name}: {count} exceeds {CEILINGS[name]}"
+    forbidden = []
+    for path in ROOT.rglob("*.py"):
+        if path.relative_to(ROOT).as_posix() in ALLOWED:
+            continue
+        if path.name.startswith("test_") or any(
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name.startswith("test_")
+            or isinstance(node, ast.ClassDef)
+            and node.name.startswith("Test")
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        ):
+            forbidden.append(path.relative_to(ROOT).as_posix())
+    assert not forbidden, (
+        "Seldon allows only golden-path/journey E2E tests (owner rule): "
+        + ", ".join(sorted(forbidden))
+    )
+    assert pytestconfig._suite_count <= CEILINGS["suite"]

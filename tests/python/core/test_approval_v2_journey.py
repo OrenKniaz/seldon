@@ -4,17 +4,17 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.python.core import test_semantic_wiring
+from tests.python.core import semantic_wiring_support
 from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.review_support import finish_review
-from tests.python.core.test_semantic_wiring import execute, workers
+from tests.python.core.semantic_wiring_support import execute, workers
 
 from codex_harness.core import dispatch, planner_jobs
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.plan_store import PHASES
 
-semantic_plan = test_semantic_wiring.semantic_plan
-web_plan = test_semantic_wiring.web_plan
+semantic_plan = semantic_wiring_support.semantic_plan
+web_plan = semantic_wiring_support.web_plan
 
 
 @pytest.mark.parametrize(
@@ -51,11 +51,11 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     from copy import deepcopy
     from types import SimpleNamespace
 
-    from tests.python.core.test_acceptance import finish_public_acceptance
-    from tests.python.core.test_acceptance_recovery import protocol
-    from tests.python.core.test_mcp_chat_confirmations import record as external_reply
-    from tests.python.core.test_mcp_planner import rpc, workspace_wire
-    from tests.python.core.test_plan_store import mock_catalog, mock_choice
+    from tests.python.core.acceptance_recovery_support import protocol
+    from tests.python.core.acceptance_support import finish_public_acceptance
+    from tests.python.core.mcp_chat_confirmations_support import record as external_reply
+    from tests.python.core.mcp_planner_support import rpc, workspace_wire
+    from tests.python.core.plan_store_support import mock_catalog, mock_choice
 
     from codex_harness.core import roundtable
 
@@ -274,7 +274,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         call("harness_worker_start", **options)
     fake_workers = workers()
     if is_web:
-        from tests.python.core.test_semantic_runner import WEB_PAGE
+        from tests.python.core.semantic_runner_support import WEB_PAGE
 
         def contracts(root):
             (root / "index.html").write_text("<!doctype html><h1>SELDON-STUB visit</h1>")

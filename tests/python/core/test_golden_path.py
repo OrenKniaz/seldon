@@ -27,7 +27,7 @@ def provider_host(mode, workspace, surface, job_id=None):
     Preserve the detached controller, Windows Job monitor and ordinary dispatch;
     only replace provider execution with deterministic file-writing workers/reviewers.
     """
-    from tests.python.core.test_acceptance_recovery import protocol
+    from tests.python.core.acceptance_recovery_support import protocol
 
     from codex_harness.core import (
         audit_process,
@@ -131,7 +131,6 @@ def provider_host(mode, workspace, surface, job_id=None):
         raise SystemExit(0 if result["status"] == "completed" else 1)
 
 
-@pytest.mark.fast
 @pytest.mark.parametrize("surface", ["cli", "web"])
 def test_golden_path(tmp_path, request, surface):
     """Protect idea→root product→accepted with three plain user decisions.
@@ -614,7 +613,7 @@ def test_golden_path(tmp_path, request, surface):
             # The real saved producer reaches HTTP and the shipped browser view.
             # Catch revision/blocker/next-step divergence and broken asset wiring;
             # planning-only tests and synthetic UI fixtures miss this integration.
-            from tests.python.core.test_cockpit_server import get, running
+            from tests.python.core.cockpit_server_support import get, running
 
             before = {
                 p: p.read_bytes() for p in (tmp_path / ".codex-harness").rglob("*") if p.is_file()
