@@ -22,6 +22,125 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 
+def judgment_contract_golden(workspace):
+    """Protect pending/verdict durability through public submission, reload and consumption.
+
+    Catch lost pending state, stale subject/evidence/candidate credit and unbounded malformed
+    corrections. Stage 1a only reloads trace observations; it never consumes semantic verdicts.
+    All semantic replies are explicitly scripted, without provider or human-consent credit.
+    """
+    from copy import deepcopy
+    from tests.python.core.mcp_planner_support import workspace_wire
+    from tests.python.core.semantic_wiring_support import node
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    workspace.mkdir(parents=True)
+    server = PlannerServer(workspace)
+
+    def call(tool, *, error=False, **args):
+        reply = workspace_wire(server, tool, expected_workspace=str(workspace), **args)
+        assert reply["isError"] is error, (tool, reply)
+        return reply.get("structuredContent", {})
+
+    def reload():
+        nonlocal server
+        server.close()
+        server = PlannerServer(workspace)
+
+    def read(record, **args):
+        return call("harness_judgment", judgment_id=record["id"], **args)
+
+    def submit(record, verdict, gaps=None, **changes):
+        response = dict(judgmentId=record["id"], binding=record["binding"], verdict=verdict,
+                        rationale="Scripted semantic assessment of retained sensor facts",
+                        meaning={"assessment": "retained readback"}, gaps=gaps or [])
+        response.update(changes)
+        return call("harness_submit_judgment", judgment_id=record["id"],
+                    response=json.dumps(response), source="scripted-judge:no-provider-launch")
+
+    try:
+        call("harness_plan_start", idea="Preserve sensor readback", name="judgments", plan_mode="semantic-v1")
+        call("harness_upsert_nodes", nodes=[node("F1", "feature", ["V1"]),
+                                           node("R1", "requirement", ["F1"])])
+        spine = server.store.spine()
+        evidence = node("E1", "result", ["R1"], evidence={
+            "itemRef": {"id": "R1", "revision": spine.revision("R1")},
+            "candidate": "sensor-candidate-1",
+            "source": {"reference": "fixture:measurement", "realProvider": False, "historical": True},
+            "observation": {"reference": "fixture:readback", "outcome": "passed"}, "state": "integrated"})
+        call("harness_upsert_node", node=evidence)
+        event_id = server.store.connection.execute("SELECT max(id) FROM events").fetchone()[0]
+        request = dict(question="Does the retained measurement establish readback?", subject_ids=["R1"],
+                       evidence_ids=["E1"], source_event_ids=[event_id])
+        pending = call("harness_prepare_judgment", **request)
+        reload()
+        restored = read(pending, candidate="sensor-candidate-1")
+        assert restored["status"] == "pending-judgment"
+        assert not restored["positiveCredit"] and not restored["concreteGap"]
+        assert restored["sourceRefs"] == pending["sourceRefs"]
+        assert restored["evidenceRefs"][0]["node"]["fields"]["evidence"]["state"] == "integrated"
+        submit(pending, "unsupported")
+        reload()
+        unsupported = read(pending, candidate="sensor-candidate-1")
+        assert unsupported["status"] == "pending-judgment" and unsupported["verdict"] == "unsupported"
+        assert unsupported["disposition"] == "judge" and unsupported["owner"] is None
+        submit(pending, "inconclusive")
+        assert not read(pending, candidate="sensor-candidate-1")["concreteGap"]
+        submit(pending, "positive")
+        reload()
+        credited = read(pending, candidate="sensor-candidate-1")
+        assert credited["positiveCredit"] and not credited["concreteGap"]
+        assert credited["meaning"] == {"assessment": "retained readback"}
+        assert not credited["sourceVerified"] and credited["owner"] is None
+        assert not read(pending)["positiveCredit"]
+        assert not read(pending, candidate="sensor-candidate-2")["positiveCredit"]
+        # An unrelated addition must not discard a bound semantic decision.
+        call("harness_upsert_node", node=node("OTHER", "feature", ["V1"]))
+        assert read(pending, candidate="sensor-candidate-1")["positiveCredit"]
+        negative = call("harness_prepare_judgment", **request)
+        submit(negative, "negative", ["Sensor readback lacks a second-channel observation"])
+        reload()
+        gap = read(negative, candidate="sensor-candidate-1")
+        assert gap["concreteGap"] and not gap["positiveCredit"]
+        assert gap["gaps"] == ["Sensor readback lacks a second-channel observation"]
+        changed = server.store.spine().node("R1")
+        changed["text"] = "Read both sensor channels"
+        call("harness_upsert_node", node=changed)
+        reload()
+        assert read(pending, candidate="sensor-candidate-1")["status"] == "pending-judgment"
+        assert not read(negative, candidate="sensor-candidate-1")["concreteGap"]
+        # Evidence has its own revision binding, independent of the subject.
+        fresh = call("harness_prepare_judgment", **request)
+        submit(fresh, "positive")
+        changed_evidence = deepcopy(server.store.spine().node("E1"))
+        changed_evidence["fields"]["evidence"]["note"] = "Additional measurement annotation"
+        call("harness_upsert_node", node=changed_evidence)
+        assert not read(fresh, candidate="sensor-candidate-1")["positiveCredit"]
+        # A corrected second fix may succeed; exhausted fixes cannot accept a fourth reply.
+        malformed = call("harness_prepare_judgment", question="Judge the current readback contract", subject_ids=["R1"])
+        for expected_fixes, expected_disposition in ((1, "exact-fix"), (2, "exact-fix"), (2, "steer")):
+            submit(malformed, "positive", binding="wrong-captured-binding")
+            reload()
+            retained = read(malformed)
+            assert retained["fixesIssued"] == expected_fixes
+            assert retained["disposition"] == expected_disposition
+            assert "binding" in retained["error"] and retained["owner"] is None
+            assert not retained["positiveCredit"] and not retained["concreteGap"]
+        call("harness_submit_judgment", judgment_id=malformed["id"], response="{}",
+             source="scripted-judge", error=True)
+        correctable = call("harness_prepare_judgment", question="Judge the revised sensor contract", subject_ids=["R1"])
+        call("harness_submit_judgment", judgment_id=correctable["id"], response="{",
+             source="scripted-judge")
+        submit(correctable, "negative")  # Missing concrete gap: second exact fix.
+        submit(correctable, "positive")
+        reload()
+        assert read(correctable)["positiveCredit"] and read(correctable)["fixesIssued"] == 2
+        assert server.store.spine().node("E1")["fields"]["evidence"]["state"] == "stale"
+        assert call("harness_plan_status")["approval"]["granted"] is False
+    finally:
+        server.close()
+
+
 def trace_contract_golden(workspace):
     """Protect public full/collapsed brownfield traces and exact amendment freshness.
 
@@ -909,6 +1028,7 @@ def test_golden_path(tmp_path, request, surface):
     ordinary successful fixtures missed UNKNOWN holding delivery forever.
     """
     if surface == "cli":
+        judgment_contract_golden(tmp_path.parent / (tmp_path.name + "-judgment-contract"))
         trace_contract_golden(tmp_path.parent / (tmp_path.name + "-trace-contract"))
         http_golden(tmp_path / "http-journey")
         http_golden(tmp_path / "shelflife-scenarios", semantic=True)

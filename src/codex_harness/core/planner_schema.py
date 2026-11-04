@@ -1,9 +1,68 @@
-"""Read-only help for existing planner contracts; validation stays in MCP/Spine."""
+"""Planner record shapes, input validation and read-only inspection; PlanStore owns truth."""
 
+import ast
+import hashlib
 from copy import deepcopy
+from typing import Literal, TypedDict
 
 from codex_harness.core.planner_guidance import BATCH_GUIDANCE
 from codex_harness.core.spine import ALLOWED_PARENTS, SEMANTIC_PHASES, bead_contract, bead_rules
+
+
+class Judgment(TypedDict):
+    """One event-backed semantic record; evidence state and human authority are separate."""
+
+    id: str
+    question: str
+    subjectRefs: list[dict]
+    evidenceRefs: list[dict]
+    sourceRefs: list[dict]
+    candidate: str | None
+    binding: str
+    status: Literal["pending-judgment", "judged"]
+    verdict: Literal["positive", "negative", "inconclusive", "unsupported"] | None
+    rationale: str | None
+    meaning: dict
+    gaps: list[str]
+    fixesIssued: int
+    disposition: Literal["judge", "exact-fix", "steer", "complete"]
+    owner: None
+    source: str | None
+    sourceVerified: bool
+    error: str | None
+
+
+JUDGMENT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "judgmentId": {"type": "string", "minLength": 1},
+        "binding": {"type": "string", "minLength": 1},
+        "verdict": {"type": "string", "enum": ["positive", "negative", "inconclusive", "unsupported"]},
+        "rationale": {"type": "string", "minLength": 1},
+        "meaning": {"type": "object"},
+        "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    },
+    "required": ["judgmentId", "binding", "verdict", "rationale", "meaning", "gaps"],
+    "additionalProperties": False,
+}
+
+
+def judgment_response(response, record):
+    """Check only shape and identity. The caller's LLM supplies all semantic meaning."""
+    import json
+
+    def reject_constant(value):
+        raise ValueError(f"Use finite JSON values instead of {value}")
+
+    parsed = json.loads(response, parse_constant=reject_constant)
+    validate_input(parsed, JUDGMENT_RESPONSE_SCHEMA, "response")
+    if parsed["judgmentId"] != record["id"] or parsed["binding"] != record["binding"]:
+        raise ValueError("Copy judgmentId and binding exactly from the prepared judgment")
+    if parsed["verdict"] == "negative" and not parsed["gaps"]:
+        raise ValueError("A negative verdict needs at least one concrete gap in gaps")
+    if parsed["verdict"] == "positive" and parsed["gaps"]:
+        raise ValueError("Resolve the gaps or return a negative/inconclusive verdict")
+    return {key: parsed[key] for key in ("verdict", "rationale", "meaning", "gaps")}
 
 FIELD_RULES = {
     "vision": (
@@ -467,6 +526,14 @@ def schema_help(
     if tool in TYPED_CONTRACTS:
         result["owningContract"] = deepcopy({**TYPED_COMMON, **TYPED_CONTRACTS[tool]})
         result.update(typed_draft_help(tool))
+    if tool in {"harness_prepare_judgment", "harness_submit_judgment", "harness_judgment"}:
+        result.update(
+            responseContract=deepcopy(JUDGMENT_RESPONSE_SCHEMA),
+            owningContract="PlanStore.prepare_judgment/submit_judgment/judgment; append-only events, no new store.",
+            binding="Copy the prepared id into judgmentId and binding verbatim. Subjects/evidence contain canonical node snapshots/revisions; sourceRefs contain canonical events. Candidate consumers supply their current candidate identity.",
+            semantics="The LLM supplies verdict, rationale, open-domain meaning and concrete gaps. Consumers validate their own meaning shape. No judgment grants human consent, execution authorization or live-provider proof.",
+            recovery="Read by judgment_id after transport loss. Initial malformed response plus exactly two fixes; disposition exact-fix includes the precise error. After steer/complete the record is closed. Pending, unsupported, inconclusive and stale records grant neither credit nor concrete-gap failure. owner is released on every submission.",
+        )
     if tool == "harness_plan_status":
         result["presentation"] = (
             "Default status labels visionProjection as a summary with node/plan revisions "
@@ -630,3 +697,145 @@ def node_error_help(arguments, semantic=False):
         + f"\nUse harness_schema kind={kind} for prerequisites and the full input contract; "
         "adapt IDs to the current plan and retain accepted intent."
     )
+
+
+def validate_input(value, schema: dict, label="arguments") -> None:
+    expected = schema["type"]
+    types = {
+        "string": isinstance(value, str),
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "boolean": type(value) is bool,
+        "integer": type(value) is int,
+        "number": type(value) in (int, float),
+        "null": value is None,
+    }
+    allowed = expected if isinstance(expected, list) else [expected]
+    if not any(types[kind] for kind in allowed):
+        raise ValueError(f"{label} must be {expected}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{label} must be one of {schema['enum']}")
+    if isinstance(value, str) and schema.get("minLength") and not value.strip():
+        raise ValueError(f"{label} must be a nonempty string")
+    if isinstance(value, dict) and "properties" in schema:
+        missing = set(schema["required"]) - value.keys()
+        extra = value.keys() - schema["properties"].keys()
+        if missing or extra:
+            raise ValueError(f"{label}: missing {sorted(missing)}, unexpected {sorted(extra)}")
+        for key, item in value.items():
+            validate_input(item, schema["properties"][key], f"{label}.{key}")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            raise ValueError(f"{label} needs at least {schema['minItems']} item(s)")
+        for item in value:
+            validate_input(item, schema["items"], label)
+
+
+
+def inspect_node(
+    self,
+    node_id: str,
+    *,
+    body: bool = False,
+    test: str | None = None,
+    include_source: bool = False,
+) -> dict:
+    """Inspect linked protected Python tests using AST only, never imports."""
+    from codex_harness.core.plan_store import PlanStoreError
+    if body and not test:
+        raise ValueError("--body requires --test <name>")
+    nodes = {node["id"]: node for node in self.list_nodes()}
+    if node_id not in nodes:
+        raise ValueError(f"Unknown node: {node_id}; use harness_nodes for available IDs")
+    node = nodes[node_id]
+    result = {
+        **node,
+        "children": sorted(key for key, child in nodes.items() if node_id in child["parents"]),
+        "testFiles": [],
+    }
+    if node["kind"] not in ("requirement", "test"):
+        return result
+    linked = {node_id}
+    while True:
+        descendants = linked | {
+            key for key, child in nodes.items() if linked.intersection(child["parents"])
+        }
+        if descendants == linked:
+            break
+        linked = descendants
+    modules = {nodes[key]["fields"]["module"] for key in linked if nodes[key]["kind"] == "test"}
+    template = (self.workspace / "template").resolve()
+    protected = set()
+    from codex_harness.core.graph import test_dir
+
+    for vision in (item for item in nodes.values() if item["kind"] == "vision"):
+        fields = vision["fields"]
+        for name in (
+            *fields.get("requirementFiles", []),
+            test_dir({"validation": fields.get("validation", [])}),
+        ):
+            path = (template / name).resolve()
+            if not path.is_relative_to(template):
+                raise ValueError(f"Protected file outside template: {name}")
+            candidates = path.rglob("*.py") if path.is_dir() else [path]
+            for candidate in candidates:
+                if not candidate.resolve().is_relative_to(template):
+                    raise ValueError(f"Protected file outside template: {candidate}")
+                if candidate.suffix == ".py" and candidate.is_file():
+                    protected.add(candidate)
+    remaining = 8 * 1024
+    source_remaining = 256 * 1024
+    found = False
+    for path in sorted(protected):
+        relative = path.relative_to(template).as_posix()
+        dotted = relative[:-3].replace("/", ".")
+        if not any(
+            module in (relative, path.name, dotted, path.stem) or dotted.endswith("." + module)
+            for module in modules
+        ):
+            continue
+        raw = path.read_bytes()
+        source = raw.decode("utf-8-sig")
+        tree = ast.parse(source, filename=relative)
+        functions = []
+        for item in tree.body:
+            if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                functions.append((item.name, item))
+            elif isinstance(item, ast.ClassDef):
+                functions.extend(
+                    (f"{item.name}.{method.name}", method)
+                    for method in item.body
+                    if isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef)
+                )
+        functions = [(name, item) for name, item in functions if item.name.startswith("test")]
+        entry = {
+            "path": relative,
+            "functions": [name for name, _ in functions],
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        if include_source:
+            source_remaining -= len(raw)
+            if source_remaining < 0:
+                raise PlanStoreError("plan-test-source-too-large", "256 KiB source budget")
+            entry["source"] = source
+        if body:
+            selected = [(name, item) for name, item in functions if test in (name, item.name)]
+            if len(selected) > 1:
+                raise ValueError(f"Ambiguous test {test} in {relative}; use Class.test_name")
+            if selected:
+                found = True
+                name, item = selected[0]
+                start = min([item.lineno] + [d.lineno for d in item.decorator_list])
+                text = "".join(source.splitlines(keepends=True)[start - 1 : item.end_lineno])
+                encoded = text.encode("utf-8")
+                clipped = encoded[:remaining].decode("utf-8", errors="ignore")
+                remaining -= len(clipped.encode("utf-8"))
+                entry.update(
+                    test=name,
+                    body=clipped,
+                    truncated=len(encoded) > len(clipped.encode("utf-8")),
+                )
+        result["testFiles"].append(entry)
+    if body and not found:
+        raise ValueError(f"Test not found in linked protected files: {test}")
+    return result

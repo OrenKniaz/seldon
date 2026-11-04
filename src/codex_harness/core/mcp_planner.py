@@ -29,7 +29,7 @@ from codex_harness.core.planner_guidance import BATCH_GUIDANCE
 from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.planner_refusal_events import record_refusals, refusal_status
 from codex_harness.core.planner_refusals import TEACHING, compact_refusal, refusal_context
-from codex_harness.core.planner_schema import node_error_help, schema_help
+from codex_harness.core.planner_schema import node_error_help, schema_help, validate_input as _validate
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
 from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
 from codex_harness.core.spine import ALLOWED_PARENTS
@@ -93,6 +93,29 @@ CLOSURE_DECLARATION_SCHEMA = _object(
 
 TOOLS = [
     planner_recovery.TOOL,
+    _tool(
+        "harness_prepare_judgment",
+        "Capture canonical facts for an LLM judgment; grants no consent or proof.",
+        {
+            "question": STRING,
+            "subject_ids": {**STRINGS, "minItems": 1},
+            "evidence_ids": STRINGS,
+            "source_event_ids": {"type": "array", "items": {"type": "integer"}},
+            "candidate": STRING,
+        },
+        ["question", "subject_ids"],
+    ),
+    _tool(
+        "harness_submit_judgment",
+        "Retain raw LLM output. Malformed replies get two exact fixes, then steer.",
+        {"judgment_id": STRING, "response": {"type": "string"}, "source": STRING},
+    ),
+    _tool(
+        "harness_judgment",
+        "Read current bound semantic credit; candidate judgments require current candidate.",
+        {"judgment_id": STRING, "candidate": STRING},
+        ["judgment_id"],
+    ),
     _tool(
         "harness_schema",
         "Read existing tool input contracts and actionable canonical node examples; "
@@ -846,38 +869,6 @@ def validate_setup(setup, workspace):
         folder = (workspace / folder).resolve()
         if not folder.is_dir() or folder != workspace.resolve():
             raise ValueError("Folder mismatch: reconnect Seldon there; server workspace is fixed")
-
-
-def _validate(value, schema: dict, label="arguments") -> None:
-    expected = schema["type"]
-    types = {
-        "string": isinstance(value, str),
-        "object": isinstance(value, dict),
-        "array": isinstance(value, list),
-        "boolean": type(value) is bool,
-        "integer": type(value) is int,
-        "number": type(value) in (int, float),
-        "null": value is None,
-    }
-    allowed = expected if isinstance(expected, list) else [expected]
-    if not any(types[kind] for kind in allowed):
-        raise ValueError(f"{label} must be {expected}")
-    if "enum" in schema and value not in schema["enum"]:
-        raise ValueError(f"{label} must be one of {schema['enum']}")
-    if isinstance(value, str) and schema.get("minLength") and not value.strip():
-        raise ValueError(f"{label} must be a nonempty string")
-    if isinstance(value, dict) and "properties" in schema:
-        missing = set(schema["required"]) - value.keys()
-        extra = value.keys() - schema["properties"].keys()
-        if missing or extra:
-            raise ValueError(f"{label}: missing {sorted(missing)}, unexpected {sorted(extra)}")
-        for key, item in value.items():
-            _validate(item, schema["properties"][key], f"{label}.{key}")
-    if isinstance(value, list):
-        if len(value) < schema.get("minItems", 0):
-            raise ValueError(f"{label} needs at least {schema['minItems']} item(s)")
-        for item in value:
-            _validate(item, schema["items"], label)
 
 
 def packet_view(store, bead_id: str, provider: str = "codex") -> dict:
@@ -1712,6 +1703,15 @@ class PlannerServer:
                 "Complete schema, examples, and field rules are in structuredContent. "
                 "Use its inputSchema and examples with actual plan IDs."
             )
+        judgment_methods = {
+            "harness_prepare_judgment": "prepare_judgment",
+            "harness_submit_judgment": "submit_judgment",
+            "harness_judgment": "judgment",
+        }
+        if name in judgment_methods:
+            # This shared projection conveys semantic judgment only, never human consent.
+            self.result_data = getattr(self._store(), judgment_methods[name])(**args)
+            return views.data_card("Semantic judgment (no human consent)", self.result_data)
         if name == "harness_preflight":
             self.result_data = preflight_report(self.workspace, **args)
             return render_preflight(self.result_data)

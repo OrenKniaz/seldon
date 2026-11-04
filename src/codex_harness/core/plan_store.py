@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from codex_harness.core import intake, waves
 from codex_harness.core.graph import load_plan
+from codex_harness.core.planner_schema import Judgment, judgment_response
 from codex_harness.core.reviewer_evidence import native_reviewer
 from codex_harness.core.spine import (
     SCHEMA,
@@ -258,116 +259,115 @@ class PlanStore:
     def spine(self) -> Spine:
         return Spine(self._data())
 
+    def _judgment_record(self, judgment_id: str) -> Judgment:
+        row = self.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='judgment-recorded' "
+            "AND json_extract(payload_json, '$.id')=? ORDER BY id DESC LIMIT 1",
+            (judgment_id,),
+        ).fetchone()
+        if row is None:
+            raise PlanStoreError("judgment-missing", "Prepare a judgment before submitting a reply")
+        return json.loads(row[0])
+
+    def prepare_judgment(
+        self,
+        *,
+        question,
+        subject_ids,
+        evidence_ids=None,
+        source_event_ids=None,
+        candidate=None,
+    ) -> Judgment:
+        """Capture canonical facts, not a default verdict or a provider launch."""
+        _nonempty(question, "question")
+        if not subject_ids:
+            raise PlanStoreError("judgment-subject-required", "Supply current subject IDs")
+        if candidate is not None:
+            _nonempty(candidate, "candidate")
+        with self._transaction():
+            spine = self.spine()
+
+            def refs(ids):
+                return [dict(id=key, revision=spine.revision(key), node=spine.node(key))
+                        for key in sorted(set(ids))]
+            subjects, evidence = refs(subject_ids), refs(evidence_ids or [])
+            sources = []
+            for key in sorted(set(source_event_ids or [])):
+                row = self.connection.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone()
+                if row is None:
+                    raise PlanStoreError("judgment-source-missing", "Supply an existing source event ID")
+                sources.append(dict(id=key, kind=row["kind"], at=row["at"],
+                                    payload=json.loads(row["payload_json"])))
+            candidates = {ref["node"]["fields"].get("evidence", {}).get("candidate")
+                          for ref in evidence} - {None}
+            if candidate is None and len(candidates) == 1:
+                candidate = next(iter(candidates))
+            if candidates and candidate not in candidates:
+                raise PlanStoreError("judgment-candidate-unbound", "Select a candidate from the captured evidence")
+            record: Judgment = dict(
+                id=uuid4().hex,
+                question=question,
+                subjectRefs=subjects,
+                evidenceRefs=evidence,
+                sourceRefs=sources,
+                candidate=candidate,
+            )
+            record["binding"] = hashlib.sha256(_json(record).encode("utf-8")).hexdigest()
+            record.update(status="pending-judgment", verdict=None, rationale=None, meaning={},
+                gaps=[], fixesIssued=0, disposition="judge", owner=None, source=None,
+                sourceVerified=False, error=None)
+            self._event("judgment-recorded", record)
+        return record
+
+    def judgment(self, judgment_id: str, *, candidate=None) -> dict:
+        """The shared consumer: credit requires a current bound explicit verdict."""
+        record = self._judgment_record(judgment_id)
+        spine = self.spine()
+        current = all(ref["id"] in spine.ids() and spine.revision(ref["id"]) == ref["revision"]
+                      for ref in record["subjectRefs"] + record["evidenceRefs"])
+        candidate_current = record["candidate"] is None or candidate == record["candidate"]
+        reason = None if current and candidate_current else (
+            "Refresh changed subject/evidence bindings" if not current else "Supply the current bound candidate")
+        judged = current and candidate_current and record["status"] == "judged"
+        return dict(record, status="judged" if judged else "pending-judgment",
+                    current=current and candidate_current, positiveCredit=judged and record["verdict"] == "positive",
+                    concreteGap=judged and record["verdict"] == "negative", refreshReason=reason)
+
+    def submit_judgment(self, *, judgment_id, response, source) -> dict:
+        """An initial response gets exactly two exact fixes; every return releases ownership."""
+        _nonempty(source, "source")
+        with self._transaction():
+            record = self._judgment_record(judgment_id)
+            if record["disposition"] in {"steer", "complete"}:
+                raise PlanStoreError("judgment-attempt-closed", "Read the retained judgment; prepare a fresh request if steering requires one")
+            if not self.judgment(judgment_id, candidate=record["candidate"])["current"]:
+                record.update(disposition="steer", error="Bindings changed; prepare a fresh judgment")
+            else:
+                try:
+                    parsed = judgment_response(response, record)
+                except (ValueError, TypeError) as error:
+                    record.update(error=str(error), disposition="exact-fix" if record["fixesIssued"] < 2 else "steer")
+                    if record["disposition"] == "exact-fix":
+                        record["fixesIssued"] += 1
+                else:
+                    record.update(parsed, error=None)
+                    decided = parsed["verdict"] in {"positive", "negative"}
+                    record.update(status="judged" if decided else "pending-judgment",
+                                  disposition="complete" if decided else "judge")
+            record.update(source=source, sourceVerified=False, owner=None)
+            self._event("judgment-response", dict(id=judgment_id, binding=record["binding"],
+                        response=response, source=source, sourceVerified=False))
+            self._event("judgment-recorded", record)
+        return self.judgment(judgment_id)
+
     def list_nodes(self, kind: str | None = None) -> list[dict]:
         """Read the current nodes without writing planning truth."""
         return [node for node in self._data()["nodes"] if kind is None or node["kind"] == kind]
 
-    def show_node(
-        self,
-        node_id: str,
-        *,
-        body: bool = False,
-        test: str | None = None,
-        include_source: bool = False,
-    ) -> dict:
-        """Inspect linked protected Python tests using AST only, never imports."""
-        if body and not test:
-            raise ValueError("--body requires --test <name>")
-        nodes = {node["id"]: node for node in self.list_nodes()}
-        if node_id not in nodes:
-            raise ValueError(f"Unknown node: {node_id}; use harness_nodes for available IDs")
-        node = nodes[node_id]
-        result = {
-            **node,
-            "children": sorted(key for key, child in nodes.items() if node_id in child["parents"]),
-            "testFiles": [],
-        }
-        if node["kind"] not in ("requirement", "test"):
-            return result
-        linked = {node_id}
-        while True:
-            descendants = linked | {
-                key for key, child in nodes.items() if linked.intersection(child["parents"])
-            }
-            if descendants == linked:
-                break
-            linked = descendants
-        modules = {nodes[key]["fields"]["module"] for key in linked if nodes[key]["kind"] == "test"}
-        template = (self.workspace / "template").resolve()
-        protected = set()
-        from codex_harness.core.graph import test_dir
+    def show_node(self, node_id, *, body=False, test=None, include_source=False) -> dict:
+        from codex_harness.core.planner_schema import inspect_node
 
-        for vision in (item for item in nodes.values() if item["kind"] == "vision"):
-            fields = vision["fields"]
-            for name in (
-                *fields.get("requirementFiles", []),
-                test_dir({"validation": fields.get("validation", [])}),
-            ):
-                path = (template / name).resolve()
-                if not path.is_relative_to(template):
-                    raise ValueError(f"Protected file outside template: {name}")
-                candidates = path.rglob("*.py") if path.is_dir() else [path]
-                for candidate in candidates:
-                    if not candidate.resolve().is_relative_to(template):
-                        raise ValueError(f"Protected file outside template: {candidate}")
-                    if candidate.suffix == ".py" and candidate.is_file():
-                        protected.add(candidate)
-        remaining = 8 * 1024
-        source_remaining = 256 * 1024
-        found = False
-        for path in sorted(protected):
-            relative = path.relative_to(template).as_posix()
-            dotted = relative[:-3].replace("/", ".")
-            if not any(
-                module in (relative, path.name, dotted, path.stem) or dotted.endswith("." + module)
-                for module in modules
-            ):
-                continue
-            raw = path.read_bytes()
-            source = raw.decode("utf-8-sig")
-            tree = ast.parse(source, filename=relative)
-            functions = []
-            for item in tree.body:
-                if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
-                    functions.append((item.name, item))
-                elif isinstance(item, ast.ClassDef):
-                    functions.extend(
-                        (f"{item.name}.{method.name}", method)
-                        for method in item.body
-                        if isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef)
-                    )
-            functions = [(name, item) for name, item in functions if item.name.startswith("test")]
-            entry = {
-                "path": relative,
-                "functions": [name for name, _ in functions],
-                "sha256": hashlib.sha256(raw).hexdigest(),
-            }
-            if include_source:
-                source_remaining -= len(raw)
-                if source_remaining < 0:
-                    raise PlanStoreError("plan-test-source-too-large", "256 KiB source budget")
-                entry["source"] = source
-            if body:
-                selected = [(name, item) for name, item in functions if test in (name, item.name)]
-                if len(selected) > 1:
-                    raise ValueError(f"Ambiguous test {test} in {relative}; use Class.test_name")
-                if selected:
-                    found = True
-                    name, item = selected[0]
-                    start = min([item.lineno] + [d.lineno for d in item.decorator_list])
-                    text = "".join(source.splitlines(keepends=True)[start - 1 : item.end_lineno])
-                    encoded = text.encode("utf-8")
-                    clipped = encoded[:remaining].decode("utf-8", errors="ignore")
-                    remaining -= len(clipped.encode("utf-8"))
-                    entry.update(
-                        test=name,
-                        body=clipped,
-                        truncated=len(encoded) > len(clipped.encode("utf-8")),
-                    )
-            result["testFiles"].append(entry)
-        if body and not found:
-            raise ValueError(f"Test not found in linked protected files: {test}")
-        return result
+        return inspect_node(self, node_id, body=body, test=test, include_source=include_source)
 
     def _revision(self) -> str:
         data = self._data()

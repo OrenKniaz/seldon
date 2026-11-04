@@ -1,5 +1,19 @@
 # Legacy capability audit for the local Seldon extraction
 
+JUDGMENT-1 (Stage 1j, C2/C3/C4, I1/I2/I4/I5/I6/I9): DESIGN — no shared
+typed owner retains absent/inconclusive semantic judgments and bounded exact-fix
+disposition. Sibling consumers: intent/consent/expansion (1b), execution/test
+meaningfulness (1c), later review/steering/acceptance. Owner: PlanStore's
+prepare_judgment/submit_judgment/judgment, using existing append-only events.
+Disposition: one pending-judgment status, canonical subject/evidence revisions and
+source events, explicit candidate binding, LLM verdict/rationale/open meaning/gaps;
+two exact fixes after the initial malformed reply, then steering with owner released.
+Exit: public submission → reload → shared consumer preserves pending/verdict,
+invalidates changed bindings, and closes exhausted retries in the CLI golden journey.
+Schema validation and read-only node inspection moved within the owned files to
+preserve frozen module ceilings; no new store or engine. Existing consumer migration
+belongs to 1b/1c; no actual provider execution, consent or ladder promotion claimed.
+
 SCEN-COV-1: ShelfLife round 3 (20261104T131037-acc663-001-shelflife) stalled
 on missing vision.fields.scenarios, then R1/R2/R3/R5 uncovered after saving
 S_IMPORT_MIXED/S_IMPORT_UNREADABLE (CLI argv/path fixtures and exact stream/exit
