@@ -356,14 +356,16 @@ class AuditOwner:
     def drain(self, store):
         while not self.results.empty():
             attempt_id, result, error = self.results.get_nowait()
-            store.complete_audit_attempt(attempt_id, self.instance, result, error)
+            store.complete_audit_attempt(
+                attempt_id, self.instance, result, error, did_run_validation=False
+            )
 
     def close(self, store):
         if self.prepared:
             self.prepared[1].close()
             self.prepared = None
         if self.thread:
-            self.thread.join()  # Existing engine stage limits, not a single 120s deadline.
+            self.thread.join()
         if store is not None:
             self.drain(store)
 

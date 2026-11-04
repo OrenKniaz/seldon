@@ -14,7 +14,6 @@ CEILINGS = {
     "src/codex_harness/core/plan_store.py": 3497,
     "src/codex_harness/core/planner_views.py": 1647,
     "src/codex_harness/core/roundtable.py": 2095,
-    "src/codex_harness/core/test_audit.py": 1676,
 }
 
 

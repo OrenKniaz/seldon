@@ -1,5 +1,34 @@
 # Legacy capability audit for the local Seldon extraction
 
+AUDIT-HTTP-1: ShelfLife fight round 2 (20261101T163156-9ed2f4-001-shelflife,
+turns02/03) stalled on `prospective-no-interface-assertion` and
+`passing-audit-required`. Owner: test_audit.audit_prospective_tests. Disposition:
+prospective classification is data-only; unknown interfaces are info findings
+labelled `audit: unrecognized interface`. Collection and RED→GREEN stay at
+execution; captured-input binding, review and acceptance retain their owners.
+Dead prospective subprocess/discovery/refusal paths are removed. Exit: the HTTP
+golden journey recognizes subprocess/urllib status/body assertions, admits an
+opaque concurrency helper at the lower tier, publishes, proves real RED→GREEN
+and reaches C in three decisions. Unproven: the single gate run failed before
+HTTP planning on a fixture argument collision (corrected afterward); web failed
+browser readiness with a scenario deadline error and verified zero-process
+cleanup. The other 17 checks passed. No baseline reproduction or retry was run;
+the corrected HTTP journey and actual-provider acceptance remain unverified.
+
+AUDIT-HTTP-1 follow-up supersedes the HTTP and web validation blockers above:
+CC's retained web golden passed with three decisions (254.34s); the owner
+identified the earlier readiness failure as load. The HTTP fixture mistakenly
+treated legacy understanding's node ID as an A card and assumed acceptance ran
+from the product directory. It now explicitly prepares the combined A subject
+and uses product-bound paths from acceptance's isolated working directory.
+No product repair was needed for these fixture defects. The first authorized
+CLI run reached dispatch RED→GREEN but exposed the cwd assumption (12.50s);
+the second passed (97.97s), including HTTP C in three decisions and the existing
+CLI recovery/delivery journey. Subprocess/urllib assertions are recognized;
+the opaque concurrency helper remains informational and does not block
+publication or C. CC's other 17 checks are retained, not rerun here. Actual
+provider/product acceptance remains unproven by these deterministic workers.
+
 RECOVERY-1: ShelfLife turn04 refused readmission with
 `recovery-readmit-requires-VERIFIED-QUIESCENT; UNKNOWN stays held` after stalled
 Build calls (fight-1, 20261101T145704-2c0e74-001-shelflife, turns03-07).

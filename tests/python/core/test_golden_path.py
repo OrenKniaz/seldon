@@ -21,6 +21,253 @@ if __name__ == "__main__":
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def http_golden(workspace):
+    """Protect subprocess HTTP planning through publication, real RED/GREEN and C.
+
+    Catch ShelfLife's import-only audit deadlock and unknown concurrency helpers;
+    the semantic CLI/static-page journeys never consume a prospective audit.
+    Only providers are doubled; HTTP, dispatch and acceptance execute normally.
+    """
+    from tests.python.core.acceptance_recovery_support import protocol
+    from tests.python.core.acceptance_support import finish_public_acceptance
+    from tests.python.core.mcp_chat_confirmations_support import record
+    from tests.python.core.mcp_planner_support import rpc, workspace_wire
+    from tests.python.core.planning_support import source_only_expansion
+    from tests.python.core.review_support import finish_review
+    from tests.python.core.semantic_wiring_support import node
+
+    from codex_harness.core import dispatch, roundtable
+    from codex_harness.core.mcp_planner import PlannerServer
+    from codex_harness.core.plan_store import PHASES
+
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text("Use gpt-6.1-sol at medium effort for reviews.\n")
+    server = PlannerServer(workspace)
+    decisions = []
+
+    def call(tool_name, **args):
+        reply = workspace_wire(server, tool_name, expected_workspace=str(workspace), **args)
+        if tool_name == "harness_accept_review":
+            reply = finish_review(server, reply)
+        assert not reply["isError"], (tool_name, reply)
+        return reply.get("structuredContent", {})
+
+    def yes(card):
+        decisions.append(card["gate"])
+        reply = record(server, card, "Yes")
+        assert not reply["isError"], reply
+
+    product = """import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class API(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'shelf')
+    def log_message(self, *args):
+        pass
+server = ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), API)
+print(server.server_port, flush=True)
+server.serve_forever()
+"""
+    proof = """import subprocess, sys, unittest
+from pathlib import Path
+from urllib.request import urlopen
+class HTTP(unittest.TestCase):
+    def test_status_and_body(self):
+        with subprocess.Popen([sys.executable, '-B', 'server.py', '0'],
+                              cwd=Path(__file__).resolve().parents[1],
+                              stdout=subprocess.PIPE, text=True) as server:
+            try:
+                port = int(server.stdout.readline())
+                with urlopen(f'http://127.0.0.1:{port}/items', timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), b'shelf')
+            finally:
+                server.terminate()
+                server.wait(timeout=5)
+"""
+    helper = """import subprocess, sys
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from urllib.request import urlopen
+def simultaneous():
+    with subprocess.Popen([sys.executable, '-B', 'server.py', '0'],
+                          cwd=Path(__file__).resolve().parents[1],
+                          stdout=subprocess.PIPE, text=True) as server:
+        try:
+            port = int(server.stdout.readline())
+            def get(_):
+                with urlopen(f'http://127.0.0.1:{port}/items', timeout=5) as response:
+                    return response.status, response.read()
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                return list(pool.map(get, range(4)))
+        finally:
+            server.terminate()
+            server.wait(timeout=5)
+"""
+    opaque = """import unittest
+from helpers import simultaneous
+class ConcurrentHTTP(unittest.TestCase):
+    def test_simultaneous_requests(self):
+        self.assertEqual(simultaneous(), [(200, b'shelf')] * 4)
+"""
+    try:
+        rpc(server, "initialize", dict(protocolVersion="2025-06-18", capabilities={}))
+        call(
+            "harness_plan_start", idea="Read shelf items over HTTP", name="http", plan_mode="legacy"
+        )
+        store = server.store
+        source_only_expansion(store)
+        call(
+            "harness_understanding_card",
+            vision="Read shelf items over HTTP",
+            users="Local operator",
+            first_user_moment="GET items returns shelf",
+            scope_in="Concurrent HTTP reads",
+            scope_out="Remote hosting",
+            assumptions=[],
+        )
+        # Legacy understanding saves a node; request the shared A subject explicitly.
+        yes(call("harness_prepare_chat_confirmation", gate="align+vision-lock"))
+        vision = store.spine().node("V1")
+        vision["fields"].update(
+            validation=["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
+            requirementFiles=["tests"],
+        )
+        call(
+            "harness_upsert_nodes",
+            nodes=[
+                vision,
+                node("F", "feature", ["V1"]),
+                node("R", "requirement", ["F"]),
+                node(
+                    "B",
+                    "bead",
+                    ["R"],
+                    ownedFiles=["server.py"],
+                    dependsOn=[],
+                    lessons=[],
+                    proofModule="test_http*.py",
+                ),
+                node("T", "test", ["R"], level="e2e", module="test_http*.py"),
+            ],
+        )
+        template = workspace / "template"
+        (template / "tests").mkdir(parents=True)
+        for name, content in {
+            "server.py": product.replace("b'shelf'", "b'stub'"),
+            "tests/test_http.py": proof,
+            "tests/helpers.py": helper,
+            "tests/test_http_concurrent.py": opaque,
+        }.items():
+            (template / name).write_text(content, encoding="utf-8")
+        for phase in PHASES[PHASES.index(store.phase()) + 1 : PHASES.index("roundtable")]:
+            call("harness_advance", to_phase=phase)
+        choice = json.loads(
+            (ROOT / "tests/fixtures/efficiency/jsonkeys-reviewers.json").read_text("utf-8")
+        )["choice"]
+        choice["fields"].update(catalogId=None, catalogDigest=None)
+        for reviewer in choice["fields"]["reviewers"]:
+            reviewer["choiceId"] = None
+        choice["fields"]["recommendation"]["choiceIds"] = []
+        call("harness_reviewer_choice", node=choice, expected_spine_revision=store._revision())
+        manifest = call("harness_compile", include_detail=True)
+        options = dict(
+            expected_revision=manifest["planRevision"],
+            max_parallel=1,
+            timeout=30,
+            call_cap=1,
+            workers=[dict(bead="B", provider="codex", model="gpt-6.1-sol", effort="medium")],
+        )
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+            patch.setattr(
+                roundtable,
+                "_run",
+                lambda launch, *_: tuple(
+                    v.replace("source-only", "gpt-6.1-sol").replace("Some(High)", "Some(Medium)")
+                    if isinstance(v, str)
+                    else v
+                    for v in protocol(launch.cli, text="[]")
+                ),
+            )
+            yes(
+                call(
+                    "harness_prepare_chat_confirmation",
+                    gate="plan-execution",
+                    execution=options,
+                    reviewer_node_id=choice["id"],
+                )
+            )
+            audit = call("harness_audit", mode="prospective")
+            server.audits.dispatch_after_flush(store)
+            server.audits.thread.join(timeout=10)
+            server.audits.drain(store)
+            audited = call("harness_audit_status", id=audit["attemptId"])
+            result = audited["result"]
+            assert result["ok"] and audited["proofCreditGranted"], audited
+            assert result["evidenceTier"] == "audit: unrecognized interface", result
+            assert all(f["severity"] == "info" for f in result["findings"])
+            assert {f["module"] for f in result["findings"]} == {"test_http*.py"}
+            assert not result["collection"] and not audited["didRunValidation"]
+            # The direct HTTP proof is recognized; only the opaque helper lowers the tier.
+            assert len(result["findings"]) == 1, result
+            call("harness_advance", to_phase="roundtable")
+            assert store.status()["pending_gate"] != "passing-audit-required"
+            call("harness_roundtable", max_rounds=1, max_total=2, timeout=5)
+            call("harness_advance", to_phase="publish")
+            call("harness_publish", proof_level="prospective", reason="No reference implementation")
+            call("harness_advance", to_phase="execute")
+            published = store.published_manifest(
+                store.status()["publication"]["published_revision"]
+            )
+            (workspace / "sample.json").write_text(json.dumps(published), encoding="utf-8")
+
+            def build(root):
+                (root / "server.py").write_text(product, encoding="utf-8")
+
+            run = dispatch.run_plan(
+                workspace, work_root=workspace / "runs", max_parallel=1, fake_workers={"B": build}
+            )
+            assert run["status"] == dispatch.STATUS_MOCK_ONLY, run
+            assert not run["baseline"]["validation"]["B"]["passed"], run
+            assert all(r["passed"] for r in run["requirementValidation"]), run
+            derived = call("harness_accept_scenarios", derive=True)
+            scenarios = derived["scenarios"]
+            for scenario in scenarios:
+                pattern = (
+                    "test_http.py"
+                    if scenario["id"] == "first-moment"
+                    else "test_http_concurrent.py"
+                )
+                scenario.update(
+                    steps=['"{python}" -B -m unittest discover -s "{repo}/tests" -p ' + pattern],
+                    expect={"exit": 0, "stderr": "OK"},
+                )
+            call("harness_accept_scenarios", scenarios=scenarios)
+            call("harness_advance", to_phase="accept")
+            accepted = finish_public_acceptance(
+                server,
+                workspace_wire(
+                    server,
+                    "harness_accept_run",
+                    expected_workspace=str(workspace),
+                    repo=run["repo"],
+                    subject="product",
+                ),
+            )
+            assert accepted["structuredContent"]["result"]["passed"], accepted
+            call("harness_accept_review", repo=run["repo"])
+            decisions.append("accept")
+            call("harness_accept", by="user", statement="Yes")
+            assert store.status()["acceptance"]["accepted"]
+            assert decisions == ["align+vision-lock", "plan-execution", "accept"]
+            print("golden http: decisions=3; subprocess HTTP + concurrency RED→GREEN; C accepted")
+    finally:
+        server.close()
+
+
 def provider_host(mode, workspace, surface, job_id=None):
     """Install external-provider doubles in each ordinary process owner.
 
@@ -172,6 +419,8 @@ def test_golden_path(tmp_path, request, surface):
     mid-Build. Both attempts must be quarantined and readmitted under the same B;
     ordinary successful fixtures missed UNKNOWN holding delivery forever.
     """
+    if surface == "cli":
+        http_golden(tmp_path / "http-journey")
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
     started = time.monotonic()

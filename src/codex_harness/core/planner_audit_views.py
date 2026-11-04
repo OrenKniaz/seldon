@@ -58,7 +58,9 @@ def render_native_audit_card(result: dict) -> str:
     """Group exact diagnostics; full output stays in the unchanged structured result."""
     findings = result.get("findings", [])
     groups = _groups(findings)
-    if result["ok"]:
+    if result.get("evidenceTier") == "audit: unrecognized interface":
+        lines = ["audit: unrecognized interface — lower evidence tier; planning may proceed."]
+    elif result["ok"]:
         label = "prospective audit" if result.get("proofLevel") == "prospective" else "audit"
         lines = [f"The {label} passed for this revision."]
     else:
@@ -83,17 +85,10 @@ def render_native_audit_card(result: dict) -> str:
         lines.append("Expected failures (retained separately):")
         for finding, references, indexes in expected:
             lines.extend(_details(finding, references, indexes, "expectedFailures"))
-    codes = {finding.get("code") for finding in findings}
-    if "prospective-no-interface-assertion" in codes:
-        lines.append(
-            "Next: Inspect the named helper/control-flow and owned-interface assertion. "
-            "This diagnostic can reflect unsupported analysis; no main() API is required. "
-            "Use the full details before changing proofs, then rerun harness_audit when ready."
-        )
-    elif result["ok"]:
+    if result["ok"]:
         lines.append(
             "Next: Check the current planning gate; this audit alone does not establish "
-            "product or integration acceptance."
+            "product or integration acceptance. Execution RED→GREEN still decides."
         )
     else:
         lines.append(
