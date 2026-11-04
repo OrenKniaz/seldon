@@ -21,6 +21,165 @@ if __name__ == "__main__":
 ROOT = Path(__file__).resolve().parents[3]
 
 
+
+def trace_contract_golden(workspace):
+    """Protect public full/collapsed brownfield traces and exact amendment freshness.
+
+    Catch dropped tests/baselines during compilation, broad evidence invalidation and
+    destructive feature replacement, metadata edits laundering retained observations and
+    stale revision references retaining current evidence credit; scenario-only delivery
+    journeys miss typed trace persistence, revision binding and independent branches. Observations here are retained fixture evidence,
+    never live-provider acceptance. No workers or providers execute in this journey.
+    """
+    from copy import deepcopy
+
+    from tests.python.core.mcp_planner_support import workspace_wire
+    from tests.python.core.semantic_wiring_support import node
+
+    from codex_harness.core.graph import load_plan
+    from codex_harness.core.mcp_planner import PlannerServer
+    from codex_harness.core.spine import Spine, SpineError
+
+    for mode, full in (("semantic-v1", True), ("legacy", False)):
+        root = workspace / mode
+        root.mkdir(parents=True)
+        (root / "template").mkdir()
+        server = PlannerServer(root)
+
+        def call(tool_name, *, error=False, **args):
+            reply = workspace_wire(server, tool_name, expected_workspace=str(root), **args)
+            assert reply["isError"] is error, (tool_name, reply)
+            return reply.get("structuredContent", {})
+
+        def ref(key):
+            return {"id": key, "revision": server.store.spine().revision(key)}
+
+        try:
+            call("harness_plan_start", idea="Tune a sensor while retaining readback", name="sensor", plan_mode=mode)
+            vision = server.store.spine().node("V1")
+            if mode == "legacy":
+                vision["fields"].update(validation=["opaque-simulator"], requirementFiles=[])
+                (root / "template" / "tests").mkdir()
+            nodes = [vision]
+            for suffix in ("1", "2"):
+                f, r, t, b, c = (prefix + suffix for prefix in ("F", "R", "T", "B", "C"))
+                nodes.append(node(f, "feature", ["V1"]))
+                parent = f
+                if full:
+                    story = "S" + suffix
+                    nodes.append(node(story, "story", [f]))
+                    parent = story
+                nodes.append(node(r, "requirement", [parent]))
+                parent = r
+                if full:
+                    architecture, design, contract = "A" + suffix, "D" + suffix, "K" + suffix
+                    nodes.extend([node(architecture, "architecture", [r]), node(design, "design", [architecture]), node(contract, "contract", [design])])
+                    parent = contract
+                nodes.extend([
+                    node(t, "test", [parent], module="sensor/readback", level="semantic", execution={"argv": ["opaque-simulator", "--measure"], "rationale": "Measure retained sensor behavior"}),
+                    node(b, "bead", [t], ownedFiles=["sensor" + suffix + ".bin"], dependsOn=[], lessons=[], **({"semanticPhase": "build"} if mode == "semantic-v1" else {"proofModule": "sensor/readback"})),
+                    node(c, "code", [b], path="sensor" + suffix + ".bin"),
+                ])
+            call("harness_upsert_nodes", nodes=nodes)
+            additions = []
+            for suffix in ("1", "2"):
+                result = "E" + suffix
+                evidence = {"itemRef": ref("C" + suffix), "candidate": "baseline-candidate", "source": {"reference": "baseline:measurement:" + suffix, "realProvider": False, "historical": True}, "observation": {"reference": "measurement:" + suffix, "outcome": "passed", "rms": 0.2}, "state": "integrated"}
+                additions.append(node(result, "result", ["C" + suffix], evidence=evidence))
+            projected = Spine({**server.store.spine().to_dict(), "nodes": server.store.spine().to_dict()["nodes"] + additions})
+            features = []
+            for suffix in ("1", "2"):
+                feature = server.store.spine().node("F" + suffix)
+                feature["fields"]["baseline"] = {"source": "existing-repository", "behavior": "Read existing sensor channel " + suffix, "rationale": "Preserve verified channel readback", "codeRefs": [ref("C" + suffix)], "testRefs": [ref("T" + suffix)], "resultRefs": [{"id": "E" + suffix, "revision": projected.revision("E" + suffix)}]}
+                feature["fields"]["evidenceRefs"] = [{"id": "E" + suffix, "revision": projected.revision("E" + suffix)}]
+                features.append(feature)
+            # Baseline annotation changes the upstream feature, so supply the retained
+            # observations in the same canonical transaction rather than refreshing later.
+            call("harness_upsert_nodes", nodes=features + additions)
+            if full:
+                call("harness_upsert_nodes", nodes=[node("RES", "research", ["V1"], rationale="Investigate sensor calibration"), node("MET", "metric", ["V1"], definition="Measured residual noise", unit="dB")])
+                call("harness_upsert_nodes", nodes=[node("STOP", "stop-condition", ["MET"], metricRefs=[ref("MET")], condition="Residual noise reaches agreed threshold"), node("PENDING", "result", ["R1"], metricRefs=[ref("MET")], evidence={"itemRef": ref("R1"), "candidate": "next-measurement", "source": {"reference": "planned:measurement", "realProvider": False, "historical": False}, "observation": None, "state": "awaiting"})])
+                call("harness_upsert_node", node=node("ITER", "iteration", ["MET"], metricRefs=[ref("MET")], resultRefs=[ref("E1")], stopConditionRefs=[ref("STOP")], researchRefs=[ref("RES")]))
+                call("harness_upsert_node", node=node("BAT", "baton", ["ITER"], decisionRefs=[], assumptions=["Baseline sensor remains available"], openQuestions=["Which calibration meets the agreed metric?"], currentState="Baseline mapped; measurement awaits execution", nextSafeAction="Review the calibration proposal", rationale="Preserve current behavior while planning", iterationRefs=[ref("ITER")]))
+            forged = deepcopy(additions[0])
+            forged["id"] = "FORGED_LIVE"
+            forged["fields"]["evidence"]["state"] = "validated live"
+            call("harness_upsert_node", node=forged, error=True)
+            extra_result = deepcopy(additions[0])
+            extra_result["id"] = "E3"
+            extra_result["fields"]["evidence"]["source"]["historical"] = False
+            extra_result["fields"]["evidence"]["observation"]["reference"] = "fixture:fresh-channel-measurement"
+            call("harness_upsert_node", node=extra_result)
+            if full:
+                call("harness_upsert_node", node=node("POINTER", "decision", ["V1"], batonRefs=[ref("BAT")], rationale="Resume from the canonical sensor baton"))
+            initial = call("harness_compile", include_detail=True)
+            sample = root / "sample.json"
+            sample.write_text(json.dumps(initial), encoding="utf-8")
+            consumed = load_plan(sample)
+            assert consumed.trace == initial["trace"]
+            assert initial["evidenceStates"]["C1"]["state"] == "integrated"
+            assert initial["evidenceStates"]["C2"]["state"] == "integrated"
+            if full:
+                assert initial["evidenceStates"]["MET"]["state"] == "awaiting"
+                assert initial["evidenceStates"]["PENDING"]["state"] == "awaiting"
+            retained = server.store.spine().to_dict()
+            server.close()
+            server = PlannerServer(root)
+            reloaded = call("harness_compile", include_detail=True)
+            assert reloaded == initial
+            assert reloaded["trace"] == retained
+            assert set(reloaded["traceRevisions"]) == {n["id"] for n in retained["nodes"]}
+            assert len(reloaded["beads"]) == 2
+            assert all(n["fields"]["level"] == "semantic" for n in retained["nodes"] if n["kind"] == "test")
+            # Record an upward discovery without granting consent or silently editing R1.
+            old_requirement = ref("R1")
+            discovery = node("DISC", "discovery", ["C1"], source="baseline:measurement:1")
+            decision = node("DEC", "decision", ["DISC"], rationale="Propose improved calibration")
+            call("harness_upsert_nodes", nodes=[discovery, decision])
+            amendment = node("AM", "amendment", ["DISC"], sourceRef=ref("DISC"), targetRefs=[old_requirement], proposedChange="Calibrate the first sensor channel", rationale="Observed drift in first channel", decisionRefs=[ref("DEC")])
+            call("harness_upsert_node", node=amendment)
+            assert ref("R1") == old_requirement
+            before = server.store.spine()
+            requirement = before.node("R1")
+            requirement["text"] = "Calibrate first-channel readback while preserving the second channel"
+            metadata_edit = before.node("E3")
+            metadata_edit["fields"]["evidence"]["note"] = "Retained observation, extra annotation only"
+            call("harness_upsert_nodes", nodes=[requirement, metadata_edit])
+            assert server.store.spine().node("E3")["fields"]["evidence"]["state"] == "stale"
+            mismatched = node("OLD_ITEM", "result", ["R1"], evidence={"itemRef": old_requirement, "candidate": "fixture-current-candidate", "source": {"reference": "fixture:stale-input", "realProvider": False, "historical": False}, "observation": {"reference": "fixture:old-requirement-observation", "outcome": "passed"}, "state": "integrated"})
+            call("harness_upsert_node", node=mismatched)
+            assert server.store.spine().node("OLD_ITEM")["fields"]["evidence"]["state"] == "stale"
+            changed = call("harness_compile", include_detail=True)
+            assert changed["evidenceStates"]["OLD_ITEM"]["state"] == "stale"
+            assert next(n for n in changed["trace"]["nodes"] if n["id"] == "OLD_ITEM")["fields"]["evidence"]["state"] == "stale"
+            spine = server.store.spine()
+            assert spine.node("E1")["fields"]["evidence"]["state"] == "stale"
+            assert spine.node("E2") == before.node("E2")
+            assert spine.node("F2") == before.node("F2")
+            assert spine.node("AM") == before.node("AM")
+            for suffix in ("1", "2"):
+                expected = deepcopy(before.node("E" + suffix)["fields"]["evidence"])
+                actual = spine.node("E" + suffix)["fields"]["evidence"]
+                assert {k: v for k, v in actual.items() if k != "state"} == {k: v for k, v in expected.items() if k != "state"}
+            assert changed["evidenceStates"]["C1"]["state"] == "stale"
+            assert changed["evidenceStates"]["C2"]["state"] == "integrated"
+            assert spine.trace_up("E1")[0][-1] == "V1"
+            feature = spine.node("F1")
+            feature["fields"].pop("baseline")
+            call("harness_upsert_node", node=feature, error=True)
+            assert server.store.spine().to_dict() == spine.to_dict()
+            imported = spine.to_dict()
+            imported["nodes"] = [n for n in imported["nodes"] if n["id"] == "V1" or n["id"].endswith("2")]
+            path = root / "narrowed.json"
+            path.write_text(json.dumps(imported), encoding="utf-8")
+            with pytest.raises(SpineError) as refusal:
+                server.store.import_spine(path)
+            assert refusal.value.code == "spine-evidence-preservation-required"
+            assert server.store.spine().to_dict() == spine.to_dict()
+        finally:
+            server.close()
+
+
 def http_golden(workspace, semantic=False):
     """Protect subprocess HTTP planning through publication, real RED/GREEN and C.
 
@@ -233,6 +392,17 @@ class ConcurrentHTTP(unittest.TestCase):
                 node("F", "feature", ["V1"]),
                 *requirements,
                 node("G1", "design", [r["id"] for r in requirements]),
+                node(
+                    "T_HTTP",
+                    "test",
+                    ["G1"],
+                    module="verify_http.py",
+                    level="semantic",
+                    execution={
+                        "argv": [sys.executable, "-B", "verify_http.py", "data/pantry.sqlite3"],
+                        "rationale": "Planned importer/SQLite/HTTP readback verifier supplied and run later in this journey",
+                    },
+                ),
                 node(
                     "C",
                     "bead",
@@ -739,6 +909,7 @@ def test_golden_path(tmp_path, request, surface):
     ordinary successful fixtures missed UNKNOWN holding delivery forever.
     """
     if surface == "cli":
+        trace_contract_golden(tmp_path.parent / (tmp_path.name + "-trace-contract"))
         http_golden(tmp_path / "http-journey")
         http_golden(tmp_path / "shelflife-scenarios", semantic=True)
     if surface == "web":

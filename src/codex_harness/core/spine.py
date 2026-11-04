@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
 from codex_harness.core.graph import PlanError, test_dir, validate_capability_refs
-from codex_harness.core.semantic_schema import target_entry
+from codex_harness.core.semantic_schema import validate_trace_fields
 
 SCHEMA = "codex-harness/spine-v1"
 MARKDOWN_FILES = ("PLAN.md", "REQUIREMENTS.md", "TRACE.md", "VISION.md")
@@ -20,11 +20,23 @@ ALLOWED_PARENTS = {
     "acceptance": {"vision", "feature"},
     "story": {"feature"},
     "requirement": {"story", "feature"},
-    "decision": {"vision", "feature", "requirement"},
-    "design": {"requirement", "decision"},
-    "bead": {"requirement", "design", "decision"},
-    "test": {"requirement", "bead"},
+    "decision": {"vision", "feature", "story", "requirement", "research", "discovery"},
+    "architecture": {"vision", "feature", "requirement", "decision"},
+    "design": {"requirement", "decision", "architecture"},
+    "contract": {"requirement", "architecture", "design"},
+    "bead": {"requirement", "architecture", "design", "contract", "decision", "test"},
+    "test": {"requirement", "architecture", "design", "contract", "bead"},
+    "code": {"feature", "requirement", "contract", "test", "bead"},
+    "result": {"feature", "requirement", "test", "bead", "code", "iteration"},
+    "research": {"vision", "feature", "requirement", "decision"},
+    "discovery": {"vision", "feature", "requirement", "research", "test", "code", "result"},
+    "amendment": {"vision", "discovery", "research", "result", "decision"},
+    "metric": {"vision", "feature", "requirement", "research"},
+    "stop-condition": {"vision", "metric", "decision"},
+    "iteration": {"metric", "research", "bead", "code"},
+    "baton": {"vision", "decision", "result", "iteration"},
 }
+ALLOWED_PARENTS["result"] = set(ALLOWED_PARENTS) - {"result"}
 
 
 class SpineError(ValueError):
@@ -61,8 +73,8 @@ def bead_rules(semantic=False):
         "Dependencies are acyclic. Optional provider is nonblank; capabilityRefs are unique "
         "lowercase dotted identifiers, requested/unverified, never permissions. "
         + (
-            f"Exactly two beads: semanticPhase in {SEMANTIC_PHASES}; Build dependsOn Contracts. "
-            "No proofModule or test nodes; controller validates scenarios."
+            f"Historical execution metadata semanticPhase in {SEMANTIC_PHASES}; "
+            "test nodes and arbitrary acyclic bead topology use the same trace contract."
             if semantic
             else ""
         )
@@ -156,13 +168,11 @@ class Spine:
             if node["kind"] == "bead":
                 self._validate_bead(node)
             elif node["kind"] == "test":
-                if self.semantic:
-                    raise SpineError("spine-schema-invalid", bead_rules(True))
                 fields = node["fields"]
                 if (
                     not isinstance(fields.get("module"), str)
                     or not fields["module"].strip()
-                    or fields.get("level") not in ("unit", "e2e")
+                    or fields.get("level") not in ("unit", "semantic", "e2e")
                 ):
                     raise SpineError(
                         "spine-test-fields-invalid", f"Invalid test fields for {node_id}"
@@ -177,6 +187,36 @@ class Spine:
             }
         except (TypeError, ValueError) as error:
             raise SpineError("spine-schema-invalid", "Fields must be finite JSON values") from error
+        try:
+            for node in self._nodes.values():
+                validate_trace_fields(node, self._nodes)
+                if node["kind"] == "result" and node["fields"]["evidence"]["itemRef"]["id"] not in self.ancestors(node["id"]):
+                    raise ValueError("Result must descend from its revision-bound evidence item")
+                if "baseline" in node["fields"]:
+                    descendants = set(self.descendants(node["id"]))
+                    for link in ("codeRefs", "testRefs", "resultRefs"):
+                        if any(ref["id"] not in descendants for ref in node["fields"]["baseline"][link]):
+                            raise ValueError("Baseline references must map this feature's own existing behavior")
+        except ValueError as error:
+            raise SpineError("spine-trace-invalid", str(error)) from error
+        for key in self.ids("result"):
+            evidence = self._nodes[key]["fields"]["evidence"]
+            ref = evidence["itemRef"]
+            if evidence["state"] != "awaiting" and ref["revision"] != self.revision(ref["id"]):
+                evidence["state"] = "stale"
+                self._revisions[key] = _hash(_canonical(self._nodes[key]))
+
+    def _impact_parents(self) -> dict[str, list[str]]:
+        parents = {key: set(values) for key, values in self._parents.items()}
+        # Operational side links affect consumers. Baselines, evidence/history,
+        # amendment targets and baton pointers preserve provenance, not causality.
+        for key, node in self._nodes.items():
+            fields = node["fields"]
+            for link in ("decisionRefs", "researchRefs", "metricRefs", "stopConditionRefs"):
+                parents[key].update(ref["id"] for ref in fields.get(link, []))
+            if node["kind"] == "bead":
+                parents[key].update([*fields["dependsOn"], *fields["lessons"]])
+        return {key: sorted(values) for key, values in parents.items()}
 
     def _validate_bead(self, node: dict) -> None:
         fields = node["fields"]
@@ -264,7 +304,7 @@ class Spine:
                 gaps.append({"id": node_id, "gap": "acceptance scenario has no executable steps"})
             elif node["kind"] == "requirement":
                 kinds = {self._nodes[item]["kind"] for item in self.descendants(node_id)}
-                for kind in ("bead",) if self.semantic else ("bead", "test"):
+                for kind in ("bead", "test"):
                     if kind not in kinds:
                         gaps.append({"id": node_id, "gap": f"requirement-without-{kind}"})
             elif node["kind"] == "bead" and not any(
@@ -284,6 +324,21 @@ class Spine:
             "name": self.name,
             "nodes": [self.node(key) for key in self.ids()],
         }
+
+    def evidence_states(self) -> dict:
+        """Project recorded observations; absence grants no proof or acceptance."""
+        states = {key: {"state": "awaiting", "evidenceRefs": []} for key in self.ids()}
+        priority = {"failed": 0, "stale": 1, "awaiting": 2, "integrated": 3, "validated live": 4}
+        for key in self.ids("result"):
+            evidence = self.node(key)["fields"]["evidence"]
+            subject = evidence["itemRef"]["id"]
+            state = evidence["state"]
+            item = states[subject]
+            if not item["evidenceRefs"] or priority[state] < priority[item["state"]]:
+                item["state"] = state
+            item["evidenceRefs"].append({"id": key, "revision": self.revision(key)})
+            states[key]["state"] = state
+        return states
 
 
 def load_spine(path: str | Path) -> Spine:
@@ -319,14 +374,14 @@ def impact(old: Spine, new: Spine) -> dict[str, list[str]]:
     affected = set(changed)
     followers = {}
     for version, spine in (("old", old), ("new", new)):
-        edges = {key: set(spine._children[key]) for key in spine.ids()}
-        for consumer in spine.ids("bead"):
-            for producer in spine.node(consumer)["fields"]["dependsOn"]:
+        edges = {key: set() for key in spine.ids()}
+        for consumer, producers in spine._impact_parents().items():
+            for producer in producers:
                 edges[producer].add(consumer)
         followers[version] = edges
-    # A single multi-source traversal; old edges are followed only for removals.
-    pending = [("new", key) for key in changed if key in new._nodes]
-    pending.extend(("old", key) for key in changes["removed"])
+    # Follow both snapshots: a removed/reparented link must retire its old proof too.
+    pending = [(version, key) for version, spine in (("old", old), ("new", new))
+               for key in changed if key in spine._nodes]
     visited: set[tuple[str, str]] = set()
     while pending:
         version, key = pending.pop()
@@ -346,6 +401,52 @@ def impact(old: Spine, new: Spine) -> dict[str, list[str]]:
         "untouchedBeads": sorted(set(new.ids("bead")) - affected),
         "staleDocs": _stale_docs(old, new, changes),
     }
+
+
+def stale_evidence(old: Spine, new: Spine) -> Spine:
+    """Invalidate affected retained observations once at the canonical transaction boundary."""
+    for key in old.ids():
+        prior_node = old.node(key)
+        links = prior_node["fields"].get("evidenceRefs", [])
+        current = new.node(key)["fields"].get("evidenceRefs", []) if key in new.ids() else []
+        if any(ref not in current for ref in links):
+            raise SpineError("spine-evidence-preservation-required", f"Retain {key}'s evidenceRefs; append evidence without dropping history")
+        if prior_node["kind"] == "result" and prior_node["fields"]["evidence"]["observation"] is not None:
+            before = prior_node["fields"]["evidence"]
+            after = new.node(key)["fields"]["evidence"] if key in new.ids("result") else {}
+            if any(before[field] != after.get(field) for field in ("itemRef", "candidate", "source", "observation")):
+                raise SpineError("spine-evidence-preservation-required", f"Retain observed result {key}; append a new result for new evidence")
+    for key in old.ids("feature"):
+        prior = old.node(key)["fields"]
+        if "baseline" not in prior:
+            continue
+        if key not in new.ids("feature"):
+            raise SpineError("spine-baseline-preservation-required", f"Retain existing feature {key} and its baseline before planning changes")
+        current = new.node(key)["fields"]
+        if current.get("baseline") != prior["baseline"]:
+            raise SpineError("spine-baseline-preservation-required", f"Retain {key}'s baseline provenance; record changes as linked amendments")
+    affected = set(impact(old, new)["affected"])
+    changes = set().union(*diff(old, new).values())
+    old_parents, new_parents = old._impact_parents(), new._impact_parents()
+    nodes = new.to_dict()["nodes"]
+    for node in nodes:
+        key = node["id"]
+        if node["kind"] != "result":
+            continue
+        evidence = node["fields"]["evidence"]
+        prior = old.node(key)["fields"]["evidence"] if key in old.ids("result") else None
+        retained = prior is not None and evidence["observation"] is not None and prior["observation"] is not None and (
+            evidence["source"]["reference"], evidence["observation"]["reference"]
+        ) == (prior["source"]["reference"], prior["observation"]["reference"])
+        upstream = set(new._walk(key, new_parents))
+        if key in old_parents:
+            upstream.update(old._walk(key, old_parents))
+        if evidence["state"] != "awaiting" and (
+            key in affected and retained and bool(upstream & changes)
+            or evidence["itemRef"]["revision"] != new.revision(evidence["itemRef"]["id"])
+        ):
+            evidence["state"] = "stale"
+    return Spine({**new.to_dict(), "nodes": nodes})
 
 
 # Which rendered documents show each kind of node (see spine_render).
@@ -374,7 +475,7 @@ def _stale_docs(old: Spine, new: Spine, changes: dict[str, list[str]]) -> list[s
     }
     for key in changes["changed"] + changes["added"] + changes["removed"]:
         node = new._nodes.get(key) or old._nodes[key]
-        stale.update(_DOCS_BY_KIND[node["kind"]])
+        stale.update(_DOCS_BY_KIND.get(node["kind"], ("TRACE.md",)))
         if node["kind"] == "acceptance" and (
             bool(old._nodes.get(key, {}).get("fields", {}).get("steps"))
             != bool(new._nodes.get(key, {}).get("fields", {}).get("steps"))
@@ -505,19 +606,18 @@ def semantic_spec(spine, product=None, *, draft=False):
             draft=draft,
             planning=True,
         )
-        kinds = {"web" if t.get("kind") == "web" else "cli" for t in targets.values()}
-        if len(kinds) > 1 or kinds and root.get("productSurface", next(iter(kinds))) not in kinds:
-            raise ValueError("Targets must all be web or all CLI and match productSurface")
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"Invalid scenarios/targets: {error}") from error
     if draft:
         return document, targets, set()
     covered, gaps, messages = set(), [], []
     for scenario in document["scenarios"]:
-        for field, kind in (("requirementRefs", "requirement"), ("contractRefs", "design")):
+        for field, kinds in (("requirementRefs", ("requirement",)),
+                             ("contractRefs", ("architecture", "design", "contract"))):
+            kind = kinds[0]
             for ref in scenario[field]:
                 key, pinned, revision = ref.partition("@")
-                if key not in spine.ids(kind) or pinned and revision != spine.revision(key):
+                if key not in {k for kind in kinds for k in spine.ids(kind)} or pinned and revision != spine.revision(key):
                     gaps.append(f"{ref} missing/stale ({field} in {scenario['id']})")
                     messages.append(
                         f"Stale/unknown semantic reference: {ref}; "
@@ -533,150 +633,81 @@ def semantic_spec(spine, product=None, *, draft=False):
 
 
 def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> dict:
+    """Compile one lossless trace; retained runner metadata grants no live evidence."""
     from codex_harness.core.wave_refine import execution_scope
 
     scope = execution_scope(spine, template_dir)
     root = spine.node(spine.ids("vision")[0])["fields"]
-    if not spine.semantic and not all(
-        _strings(root.get(key)) for key in ("validation", "requirementFiles")
-    ):
-        raise SpineError("spine-schema-invalid", "Vision requires validation and requirementFiles")
     beads = {}
     for node_id in spine.ids("bead"):
         node = spine.node(node_id)
         fields = node["fields"]
         refs = requirement_refs(spine, node_id)
         bead = {
-            "title": node["title"],
-            "ownedFiles": fields["ownedFiles"],
-            **(
-                {"semanticPhase": fields["semanticPhase"]}
-                if spine.semantic
-                else {"proofModule": fields["proofModule"]}
-            ),
-            "dependsOn": fields["dependsOn"],
-            "requirementRefs": refs,
+            "title": node["title"], "ownedFiles": fields["ownedFiles"],
+            "dependsOn": fields["dependsOn"], "requirementRefs": refs,
             "specRefs": [
                 {"id": key, "kind": spine.node(key)["kind"], "revision": spine.revision(key)}
                 for key in spine.ancestors(node_id)
-                if spine.node(key)["kind"] in {"decision", "design", "requirement"}
             ],
             "requirements": [ref["id"] for ref in refs],
-            "lessons": [
-                {"decisionId": key, "text": spine.node(key)["text"]} for key in fields["lessons"]
-            ],
+            "lessons": [{"decisionId": key, "text": spine.node(key)["text"]}
+                        for key in fields["lessons"]],
         }
+        for key in ("proofModule", "semanticPhase", "capabilityRefs"):
+            if key in fields:
+                bead[key] = fields[key]
         if "provider" in fields:
             bead["suggestedProvider"] = fields["provider"]
-        if "capabilityRefs" in fields:
-            bead["capabilityRefs"] = fields["capabilityRefs"]
         beads[node_id] = bead
-    if spine.semantic:
-        if (
-            root.get("productSurface", "cli") not in ("cli", "web")
-            or scope
-            or spine.ids("acceptance")
-        ):
-            raise ValueError("Other surfaces unsupported in semantic-v1; use Python CLI/static web")
-        document, targets, covered = semantic_spec(spine, template_dir)
-        phases = {b["semanticPhase"]: key for key, b in beads.items()}
-        if len(beads) != 2 or set(phases) != set(SEMANTIC_PHASES):
-            raise ValueError(
-                "Multiple/parallel Build unsupported in semantic-v1; " + bead_rules(True)
-            )
-        if beads[phases["contracts"]]["dependsOn"] or beads[phases["build"]]["dependsOn"] != [
-            phases["contracts"]
-        ]:
-            raise ValueError(bead_rules(True))
-        contract_ids = {
-            ref.partition("@")[0] for s in document["scenarios"] for ref in s["contractRefs"]
-        }
-        for key in beads:
-            if not covered.issubset(
-                {r["id"] for r in beads[key]["requirementRefs"]}
-            ) or not contract_ids.issubset(spine.ancestors(key)):
-                raise ValueError("Both workers must reference every requirement and contract")
-            if not {target_entry(binding) for binding in targets.values()}.issubset(
-                beads[key]["ownedFiles"]
-            ):
-                raise ValueError(
-                    "Both workers must own entry files (web: index.html) or module __main__.py"
-                )
-        manifest = dict(
-            schema="codex-harness/provider-sample-v1",
-            sample=spine.name,
-            planMode="semantic-v1",
-            semantic={
-                "scenarios": document,
-                "targets": targets,
-                "contracts": [spine.node(key) for key in spine.ids("design")],
-                **({"designRefs": root["designRefs"]} if "designRefs" in root else {}),
-            },
-            validation=[],
-            requirementFiles=[
-                *MARKDOWN_FILES,
-                "SCENARIOS.json",
-                *(r["path"] for r in root.get("designRefs", [])),
-            ],
-            beads=beads,
-            integration={},
-            planRevision=spine.plan_revision(),
-        )
-        if template_dir is not None:
-            revision = requirement_files_revision(template_dir, manifest["requirementFiles"])
-            manifest.update(
-                requirementFilesRevision=revision,
-                planRevision=_hash(f"{spine.plan_revision()}:{revision}"),
-            )
-        return manifest
-    integration_tests = [
-        key for key in spine.ids("test") if spine.node(key)["fields"]["level"] == "e2e"
-    ]
-    if len(integration_tests) > 1:
-        raise SpineError("spine-integration-invalid", "Manifest supports one integration test")
-    integration = {}
-    if integration_tests:
-        test_id = integration_tests[0]
-        integration = {
-            "proofModule": spine.node(test_id)["fields"]["module"],
-            "requirements": [ref["id"] for ref in requirement_refs(spine, test_id)],
-        }
-    if scope:
-        integration = {
-            "proofModule": scope["boundaryIntegrationModule"],
-            "requirements": scope["inScopeRequirementIds"],
-        }
     manifest = {
-        "schema": "codex-harness/provider-sample-v1",
-        "sample": spine.name,
-        "validation": root["validation"],
-        "requirementFiles": list(
-            dict.fromkeys([*root["requirementFiles"], *MARKDOWN_FILES, test_dir(root)])
-        ),
-        "planRevision": spine.plan_revision(),
-        "beads": beads,
-        "integration": integration,
+        "schema": "codex-harness/provider-sample-v1", "sample": spine.name,
+        "validation": root.get("validation", []),
+        "requirementFiles": list(dict.fromkeys([*root.get("requirementFiles", []), *MARKDOWN_FILES])),
+        "planRevision": spine.plan_revision(), "beads": beads, "integration": {},
+        "trace": spine.to_dict(),
+        "traceRevisions": {key: spine.revision(key) for key in spine.ids()},
+        "evidenceStates": spine.evidence_states(),
     }
-    if "verification" in root:
-        from codex_harness.core.runners import resolve_runner
-
-        manifest["verification"] = root["verification"]
-        resolve_runner(manifest)
+    if spine.semantic:
+        document, targets, _ = semantic_spec(spine, template_dir)
+        manifest.update(planMode="semantic-v1", semantic={
+            "scenarios": document, "targets": targets,
+            "contracts": [spine.node(key) for kind in ("architecture", "design", "contract")
+                          for key in spine.ids(kind)],
+            **({"designRefs": root["designRefs"]} if "designRefs" in root else {}),
+        })
+        manifest["requirementFiles"].extend([
+            "SCENARIOS.json", *(r["path"] for r in root.get("designRefs", []))])
+    else:
+        if not all(_strings(root.get(key)) for key in ("validation", "requirementFiles")):
+            raise SpineError("spine-schema-invalid", "Vision requires validation and requirementFiles")
+        manifest["requirementFiles"] = list(dict.fromkeys([*manifest["requirementFiles"], test_dir(root)]))
+        # The legacy runner projects one suite selector; every test remains in trace.
+        suites = [spine.node(k) for k in spine.ids("test")
+                  if spine.node(k)["fields"]["level"] == "e2e"]
+        if len(suites) == 1:
+            test = suites[0]
+            manifest["integration"] = {
+                "proofModule": test["fields"]["module"],
+                "requirements": [ref["id"] for ref in requirement_refs(spine, test["id"])],
+            }
+        if "verification" in root:
+            from codex_harness.core.runners import resolve_runner
+            manifest["verification"] = root["verification"]
+            resolve_runner(manifest)
+    if scope:
+        manifest["integration"] = {"proofModule": scope["boundaryIntegrationModule"],
+                                   "requirements": scope["inScopeRequirementIds"]}
+        manifest["waveScope"] = scope
     if template_dir is not None:
         revision = requirement_files_revision(template_dir, manifest["requirementFiles"])
-        manifest["requirementFilesRevision"] = revision
-        manifest["planRevision"] = _hash(f"{spine.plan_revision()}:{revision}")
+        manifest.update(requirementFilesRevision=revision,
+                        planRevision=_hash(f"{spine.plan_revision()}:{revision}"))
     if scope:
-        manifest["waveScope"] = scope
-        manifest["planRevision"] = _hash(
-            _canonical(
-                {
-                    "algorithm": "wave-scope-v1",
-                    "compiledRevision": manifest["planRevision"],
-                    "waveScope": scope,
-                }
-            )
-        )
+        manifest["planRevision"] = _hash(_canonical({
+            "algorithm": "wave-scope-v1", "compiledRevision": manifest["planRevision"],
+            "waveScope": scope}))
     return manifest
 
 

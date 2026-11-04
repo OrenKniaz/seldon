@@ -175,7 +175,6 @@ class PlanStore:
                 "BEGIN SELECT RAISE(ABORT, 'events are append-only'); END",
             ):
                 self.connection.execute(sql)
-            # Additive migrations preserve existing planning databases.
             for table, column, declaration in (
                 ("meta", "vision_lock_stale", "INTEGER NOT NULL DEFAULT 0"),
                 ("meta", "locked_vision_json", "TEXT"),
@@ -211,7 +210,19 @@ class PlanStore:
     def _transaction(self):
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            before = self._data() if self.connection.execute("PRAGMA table_info(nodes)").fetchone() else {"nodes": []}
             yield
+            after = self._data()
+            if before["nodes"] and before != after:
+                from codex_harness.core.spine import stale_evidence
+                current = Spine(after)
+                normalized = stale_evidence(Spine(before), current)
+                submitted = {node["id"]: node for node in after["nodes"]}
+                changed = [key for key in normalized.ids() if normalized.node(key) != submitted[key]]
+                for node_id in changed:
+                    self._write_node(normalized, node_id)
+                if changed:
+                    self._event("trace-evidence-staled", {"ids": changed, "plan_revision": normalized.plan_revision()})
             self.connection.commit()
         except BaseException:
             self.connection.rollback()
@@ -1077,7 +1088,6 @@ class PlanStore:
 
         with self._transaction():
             spine = self._draft_preimage(expected_spine_revision)
-            # Contexts are canonical recorded observations, never caller-supplied authority.
             saved = self._latest_draft_event("wave-refinement-prepared")
             need(
                 saved is not None and saved["contextDigest"] == context_digest,
@@ -1167,7 +1177,6 @@ class PlanStore:
             )
             self._check_coverage(after, "bead")
             self._check_coverage(after, "test")
-            # Canonical compiler/graph validate candidate structure before any writes.
             self._manifest(after)
             for node in nodes:
                 self._write_node(after, node["id"])
@@ -1467,7 +1476,6 @@ class PlanStore:
 
     @staticmethod
     def check_requirement_files(manifest: dict, template: Path) -> None:
-        # compile_manifest validates protected paths before this existence check.
         missing = [name for name in manifest["requirementFiles"] if not (template / name).exists()]
         if missing:
             raise PlanStoreError(
@@ -1478,9 +1486,6 @@ class PlanStore:
             )
 
     def _manifest(self, spine: Spine) -> dict:
-        # A workspace-local template is the only template this store knows.
-        # Without one, publication retains the legacy spine-only revision;
-        # callers compiling elsewhere must pass their template to compile_manifest.
         template = self.workspace / "template"
         manifest = compile_manifest(spine, template if template.is_dir() else None)
         if template.is_dir():
@@ -1492,7 +1497,6 @@ class PlanStore:
         return manifest
 
     def manifest_revision(self) -> str | None:
-        """Identity of the editable spine plus protected requirement file contents."""
         data = self._data()
         if not data["nodes"]:
             return None
@@ -1500,13 +1504,10 @@ class PlanStore:
         fields = spine.node(spine.ids("vision")[0])["fields"]
         if not spine.semantic and ("validation" not in fields or "requirementFiles" not in fields):
             return None
-        if spine.semantic and len(spine.ids("bead")) != 2:
-            return None
         template = self.workspace / "template"
         try:
             return compile_manifest(spine, template if template.is_dir() else None)["planRevision"]
         except ValueError as error:
-            # While status is read, an invalid semantic document is a planning gap.
             if not (spine.semantic and getattr(self, "_reading_status", False)):
                 raise
             self._manifest_error = str(error)
@@ -3459,7 +3460,6 @@ def open_plan_store(workspace: str | Path, name: str | None = None) -> PlanStore
 
 class _ReadOnlyPlanStore(PlanStore):
     def _manifest(self, spine: Spine) -> dict:
-        # Same canonical compiler/inputs, without _manifest's temporary-file validation.
         template = self.workspace / "template"
         manifest = compile_manifest(spine, template if template.is_dir() else None)
         if template.is_dir():

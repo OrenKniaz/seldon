@@ -1,4 +1,4 @@
-"""Closed data vocabulary for Python CLI and local web observations; no proof authority."""
+"""Domain-open trace records and retained CLI/web observation adapters; no proof authority."""
 
 import base64
 import json
@@ -16,6 +16,127 @@ WEB = (
     "noHorizontalOverflow consoleErrors externalRequests "
     "textContrastAA headingStructure reducedMotionRespected"
 ).split()
+
+EVIDENCE_STATES = ("awaiting", "failed", "stale", "integrated", "validated live")
+TRACE_LINKS = {
+    "decisionRefs": {"decision"}, "researchRefs": {"research"},
+    "metricRefs": {"metric"}, "stopConditionRefs": {"stop-condition"},
+    "iterationRefs": {"iteration"}, "batonRefs": {"baton"},
+    "evidenceRefs": {"result"}, "codeRefs": {"code"},
+    "testRefs": {"test"}, "resultRefs": {"result"},
+}
+
+
+def validate_trace_fields(node, nodes):
+    """Validate shape/identity, never product eligibility or semantic quality."""
+    def text(value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{node['id']}: supply a nonblank trace value")
+
+    def refs(values, kinds=None):
+        if not isinstance(values, list):
+            raise ValueError(f"{node['id']}: supply revision-bound references as an array")
+        seen = set()
+        for ref in values:
+            fields(ref, ("id", "revision"), ("id", "revision"))
+            key, revision = ref["id"], ref["revision"]
+            text(key)
+            if (key not in nodes or key in seen or kinds and nodes[key]["kind"] not in kinds
+                or not isinstance(revision, str) or len(revision) != 64
+                or any(c not in "0123456789abcdef" for c in revision)):
+                raise ValueError(f"{node['id']}: bind an existing unique ID/kind and sha256 revision")
+            seen.add(key)
+
+    f, kind = node["fields"], node["kind"]
+    for key, kinds in TRACE_LINKS.items():
+        if key in f:
+            refs(f[key], kinds)
+    if "baseline" in f:
+        if kind != "feature":
+            raise ValueError("Existing-baseline provenance belongs to an ordinary feature")
+        baseline = f["baseline"]
+        required = ("source", "behavior", "rationale", "codeRefs", "testRefs", "resultRefs")
+        fields(baseline, required, required)
+        for key in ("source", "behavior", "rationale"):
+            text(baseline[key])
+        for key in ("codeRefs", "testRefs", "resultRefs"):
+            refs(baseline[key], TRACE_LINKS[key])
+            if not baseline[key]:
+                raise ValueError(f"Baseline {key} must map observed existing behavior before changes")
+        for ref in baseline["resultRefs"]:
+            evidence = nodes[ref["id"]]["fields"].get("evidence")
+            if not isinstance(evidence, dict) or evidence.get("observation") is None:
+                raise ValueError("Baseline resultRefs require observed evidence before change planning")
+    if kind == "result":
+        e = f.get("evidence")
+        required = ("itemRef", "candidate", "source", "observation", "state")
+        if not isinstance(e, dict) or any(key not in e for key in required):
+            raise ValueError("Result requires evidence itemRef/candidate/source/observation/state")
+        refs([e["itemRef"]])
+        subject = e["itemRef"]["id"]
+        if nodes[subject]["kind"] == "result":
+            raise ValueError("Evidence must bind a product/plan item, not another result")
+        text(e["candidate"])
+        source = e["source"]
+        if not isinstance(source, dict) or any(k not in source for k in
+                                              ("reference", "realProvider", "historical")):
+            raise ValueError("Evidence source requires reference, realProvider and historical")
+        text(source["reference"])
+        if any(type(source[k]) is not bool for k in ("realProvider", "historical")):
+            raise ValueError("Evidence source provenance flags must be explicit booleans")
+        state, observation = e["state"], e["observation"]
+        if not isinstance(state, str) or state not in EVIDENCE_STATES:
+            raise ValueError("Use awaiting, failed, stale, integrated or validated live")
+        if observation is None:
+            if state != "awaiting":
+                raise ValueError("Missing observation stays awaiting")
+        else:
+            if not isinstance(observation, dict) or observation.get("outcome") not in ("passed", "failed"):
+                raise ValueError("Observation requires a recorded passed/failed outcome")
+            text(observation.get("reference"))
+            if state in ("integrated", "validated live") and observation["outcome"] != "passed":
+                raise ValueError("Integrated/live evidence requires an observed pass")
+            if state == "failed" and observation["outcome"] != "failed":
+                raise ValueError("Failed evidence requires an observed failure")
+        if state == "validated live" and (not source["realProvider"] or source["historical"]):
+            raise ValueError("Historical/fake-provider evidence cannot establish validated live")
+    elif kind == "amendment":
+        required = ("sourceRef", "targetRefs", "proposedChange", "rationale", "decisionRefs")
+        if any(key not in f for key in required):
+            raise ValueError("Amendment requires discovery/source, target revisions, change, rationale and decisions")
+        refs([f["sourceRef"]], {"discovery", "research", "result"})
+        refs(f["targetRefs"])
+        if not f["targetRefs"]:
+            raise ValueError("Amendment must name its affected upstream item revisions")
+        text(f["proposedChange"])
+        text(f["rationale"])
+    elif kind == "discovery":
+        text(f.get("source"))
+    elif kind == "metric":
+        text(f.get("definition"))
+        text(f.get("unit"))
+    elif kind in ("stop-condition", "iteration"):
+        required = ("metricRefs",) if kind == "stop-condition" else ("metricRefs", "resultRefs", "stopConditionRefs")
+        if any(not f.get(key) for key in required):
+            raise ValueError(f"{kind} requires nonempty {required}")
+        if kind == "stop-condition":
+            text(f.get("condition"))
+    elif kind == "baton":
+        for key in ("currentState", "nextSafeAction", "rationale"):
+            text(f.get(key))
+        for key in ("assumptions", "openQuestions", "decisionRefs"):
+            if key not in f or not isinstance(f[key], list):
+                raise ValueError(f"Baton requires {key}")
+        for value in [*f["assumptions"], *f["openQuestions"]]:
+            text(value)
+    if kind == "test" and "execution" in f:
+        execution = f["execution"]
+        fields(execution, ("argv", "rationale"), ("argv", "rationale"))
+        if not isinstance(execution["argv"], list) or not execution["argv"]:
+            raise ValueError("Worker-authored test execution requires a nonempty argv")
+        for value in execution["argv"]:
+            text(value)
+        text(execution["rationale"])
 
 
 def web_journey(v, targets, *, draft=False):
@@ -84,7 +205,7 @@ def fields(value, allowed, required=()):
     if unknown or missing:
         raise ValueError(
             f"Unknown/missing fields: unknown {sorted(unknown)}, missing {sorted(missing)}; "
-            f"allowed {sorted(allowed)}. See harness_schema kind=vision semanticScenarios."
+            f"allowed {sorted(allowed)}. Read harness_schema for the owning record shape."
         )
 
 
@@ -149,7 +270,13 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
     if type(targets) is not dict:
         raise ValueError("Declare target bindings")
     coverage = {}
-    for binding in targets.values():
+    for name, binding in targets.items():
+        if planning:
+            # Planning retains opaque worker bindings for every product domain.
+            # The selected runner, not the graph, owns executable eligibility.
+            if not isinstance(name, str) or not name.strip() or not isinstance(binding, dict):
+                raise ValueError("Target bindings require nonblank IDs and finite JSON objects")
+            continue
         if isinstance(binding, dict) and binding.get("kind") == "web":
             fields(binding, ("kind", "entry"), ("kind", "entry"))
             if binding["entry"] != "index.html" or (

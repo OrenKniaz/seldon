@@ -1899,12 +1899,12 @@ class PlannerServer:
                     "beadRules": guide["beadRules"],
                 }
                 return (
-                    setup_card + "\nsemantic-v1: Windows Python CLIs/static web; no build/network. "
-                    "Planner writes scenario data; use schemaDigest for vision, scenarios and "
-                    "both beads, adapting IDs/ownedFiles. No prospective audit or protected test "
-                    "authoring. Review, publish and packet sufficiency still apply. "
-                    "Execute max_parallel=1; only controller Validation PASS fulfills scenarios. "
-                    "Say 'pause plan' to pause.\n" + BATCH_GUIDANCE
+                    setup_card + "\nDomain-open trace: dream through ordinary tests, beads, code and results. "
+                    "Use schemaDigest for typed nodes and revision-bound evidence; planner writes "
+                    "semantics, workers write code/tests. Historical CLI/web runners still have "
+                    "execution limits pending later restoration stages (DV3/DV9). "
+                    "Review, publication and observed validation remain required; trace admission "
+                    "grants no runtime or live-provider acceptance. Say 'pause plan' to pause.\n" + BATCH_GUIDANCE
                 )
             return setup_card + "\nPlan mode resumed. To pause, say 'pause plan'."
         if (

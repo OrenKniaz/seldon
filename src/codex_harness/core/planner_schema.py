@@ -18,14 +18,14 @@ FIELD_RULES = {
         "done_feels_like/doneFeelsLike/done, assumptions. First-present precedence; "
         "done_means is additional detail, never a primary Done alias. Other finite JSON "
         "fields and their full words remain retained; these fields are not approval/proof. "
-        "Web Align asks missing audience/action, tone, 1–3 references/adjectives, colours/fonts "
+        "Web Align asks missing audience/action, tone, 1Ã¢â‚¬â€œ3 references/adjectives, colours/fonts "
         "and sections. Record taste={audience,tone,references,brand,requiredSections,sourceRef}; "
         "map into users/requirements, quality_bar and done_feels_like. Show defaults/unknowns "
         "at Lock; never infer consent. Optional designRefs=[{path,type,sha256,provenance,use}] "
         "names existing relative hashed visual files, never instructions or executable code. "
         "URLs grant no browsing/runtime permission; report unviewable/conflicting refs. "
         "Before A, record expansion={mode:product|quality,reason,upgrades:[{id,text,kind,impact, "
-        "disposition:accept|reject|defer}]}: 3–7 stable unique IDs plus quality_bar/Done. "
+        "disposition:accept|reject|defer}]}: 3Ã¢â‚¬â€œ7 stable unique IDs plus quality_bar/Done. "
         "Product improves rough ideas; quality adds no features to precise scope. Dispositions "
         "are recommendations only. One complete A shows all fields and records the actual "
         "user reply, including Yes; upserts/by:user/confirmed flags grant nothing. "
@@ -35,7 +35,24 @@ FIELD_RULES = {
         "(extra protected relative paths, possibly empty); see compilationMetadata. Initial "
         "vision authoring needs neither."
     ),
-    "test": "fields.module: nonblank string; fields.level: unit or e2e.",
+    "test": "fields.module: opaque nonblank worker test selector; fields.level: semantic or e2e. "
+    "Optional execution={argv:[nonblank strings],rationale:nonblank}; graph records intent, never runs it.",
+    "feature": "Optional baseline={source,behavior,rationale,codeRefs,testRefs,resultRefs}; "
+    "all three reference arrays are nonempty revision-bound existing graph nodes.",
+    "result": "evidence={itemRef:{id,revision},candidate,source:{reference,realProvider:boolean,"
+    "historical:boolean},observation:null|{reference,outcome:passed|failed},state}. States: awaiting, "
+    "failed, stale, integrated, validated live. Missing observation stays awaiting; historical/fake "
+    "evidence cannot be validated live. Result descends from itemRef; no acceptance is inferred.",
+    "discovery": "source: nonblank provenance reference. Record meaning in text/rationale.",
+    "amendment": "sourceRef:{id,revision} discovery/research/result; targetRefs:[{id,revision}] "
+    "nonempty upstream targets; proposedChange,rationale nonblank; decisionRefs:[{id,revision}]. "
+    "Recording an amendment grants no consent and changes no target.",
+    "metric": "definition,unit: nonblank; definition describes measurement, never its achievement.",
+    "stop-condition": "metricRefs:[{id,revision}] nonempty; condition: nonblank agreed stopping rule.",
+    "iteration": "metricRefs,resultRefs,stopConditionRefs: nonempty revision-bound node arrays. "
+    "Results retain measurements in observations. Finishing an iteration is not acceptance.",
+    "baton": "decisionRefs revision-bound array; assumptions/openQuestions string arrays; "
+    "currentState,nextSafeAction,rationale nonblank. Reference via batonRefs, never a second store.",
 }
 
 
@@ -245,7 +262,7 @@ def node_example(kind, semantic=False):
         "R1",
         ["F1"],
         text="Parser boundary: malformed input must be rejected without saving data. "
-        "Planned unit verification: submit truncated JSON and assert no record is saved. "
+        "Planned semantic verification: submit truncated JSON and assert no record is saved. "
         "Credible bug: parser saves partial data before raising. Existing happy-path "
         "proof misses this rejection and rollback behavior; add the negative case.",
     )
@@ -268,10 +285,14 @@ def node_example(kind, semantic=False):
         ),
         "test": (
             [vision, feature, requirement],
-            _node("test", "T1", ["R1"], {"module": "test_parser", "level": "unit"}),
+            _node("test", "T1", ["R1"], {"module": "test_parser", "level": "semantic"}),
         ),
     }
-    return examples[kind]
+    if kind in examples:
+        return examples[kind]
+    # Templates bind real IDs/revisions at authoring time; never invent observations.
+    parents = ["V1"] if "vision" in ALLOWED_PARENTS[kind] else ["R1"]
+    return [vision, feature, requirement], _node(kind, "N1", parents)
 
 
 def typed_draft_help(tool):
@@ -433,8 +454,6 @@ def schema_help(
     contract = next((item for item in tools if item["name"] == tool), None)
     if contract is None:
         raise ValueError(f"Unknown tool: {tool}; choose one of {sorted(t['name'] for t in tools)}")
-    if semantic and kind == "test":
-        raise ValueError(bead_rules(True))
     if kind is not None and tool != "harness_upsert_node":
         raise ValueError("kind applies only to harness_upsert_node")
     result = {
@@ -526,127 +545,26 @@ def schema_help(
             "prospective credit. Unknown ownership never auto-replays. No state is initialized.",
         )
     if tool in {"harness_compile", "harness_upsert_node", "harness_upsert_nodes"}:
-        result["proofAuthoring"] = {
-            "prepare": "Legacy only: create protected tests and importable failing stubs in "
-            "workspace/template before compile/review. Nodes record intent, not files.",
-            "cli": "Invoke planned app.py or app/__main__.py via sys.executable; no main() needed.",
-            "scope": "Workers own product files; preserve assertions. Review is not audit proof.",
-        }
-        result["compilationLimits"] = {
-            "maxE2eNodes": 1,
-            "integration": "Legacy: one level=e2e suite module; unit nodes may be separate.",
+        result["traceContract"] = {
+            "chain": "vision -> feature -> story -> requirement -> architecture/design -> contract "
+            "-> test -> bead -> code -> result; small dreams may collapse intermediate levels.",
+            "links": "decisionRefs,researchRefs,metricRefs,stopConditionRefs,iterationRefs,batonRefs,"
+            "evidenceRefs use arrays of {id,revision}; references preserve historical provenance.",
+            "fields": deepcopy(FIELD_RULES),
+            "compilation": "Full trace, traceRevisions and evidenceStates survive canonical store "
+            "reload and compilation. Every absent observation remains awaiting. Integrated is "
+            "distinct from validated live; neither records user acceptance.",
         }
         result["semanticScenarios"] = {
-            "appliesTo": "planMode semantic-v1 only; legacy plans ignore this block.",
-            "web": "productSurface: web; targets: {page: {kind: web, entry: index.html}}. "
-            "Each action.web declares target, operation, viewport:{width,height}, reducedMotion "
-            "(no-preference|reduce), steps:[{op:open},{op:assertVisible,locator:{text:Welcome}}]. "
-            "Require 375x812 and 1440x900 in BOTH motion preferences for every operation; "
-            "observe each action with noHorizontalOverflow, textContrastAA, headingStructure, "
-            "reducedMotionRespected:true and consoleErrors/externalRequests:0. "
-            "Contracts writes minimal HTML with DOM marker SELDON-STUB <operation>; "
-            "Build removes markers; controller runs real browser RED/Validation. No build/network. "
-            "Steps include assertHidden, focus and key Space. Every journey needs assertVisible "
-            "for RED, including after prerequisite clicks. Missing PNGs fail; unknown contrast "
-            "remains unproven. Before Build, plan human visualQuality observation at C. "
-            "Use harness_accept_assess judgment={repo,check:visualQuality|textContrastAA,passed,"
-            "statement,by} on the actual delivered/retained candidate; these caller-mediated "
-            "observations never claim machine measurement. Revalidate a held candidate after "
-            "a contrast judgment, then run acceptance and formal review with retained evidence.",
-            "phaseFlow": "During Vision, author vision.fields.scenarios + vision.fields.targets; "
-            "then batch all phase nodes and use one forward harness_advance to_phase=plan; "
-            "every intermediate gate still runs; no chain crosses consent or roundtable.",
-            "evidenceTiers": "Unsupported action/observation shapes (including HTTP, UI and "
-            "file import) are retained as scenario: unvalidated with the exact validation "
-            "message. Missing requirement scenarios retain their requirement as planned intent "
-            "at that tier. Planning proceeds; execution RED/GREEN and final acceptance still "
-            "require supported executable scenarios. Never ask the user to bypass Seldon.",
-            "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
-            "keep every other field and its exact wording). Each nested scenario record allows "
-            "these keys: id, requirementRefs, contractRefs, setup, actions, observe, verdict, "
-            "evidenceTier, validationMessage. "
-            "Do not add title, description or extra metadata to scenario records.",
-            "launch": "Targets use exactly one entry or module plus argv. Prefer module for "
-            "python -m: {module: 'app', argv: []} -> python -B -m app <target argv> <action argv>. "
-            "entry uses python -B <entry>. Both workers own module __main__.py (Contracts stub). "
-            "Modules need __init__.py at every level and non-stdlib names. Optional action.cwd "
-            "is setup-created, e.g. 'data/caller'; default cwd and PYTHONPATH are product root.",
-            "argv": "Strings are literal argv; only explicit path objects resolve sandbox paths: "
-            "{path: 'data/x.json'}. Setup files use exactly one utf8 or strict base64 string, "
-            "e.g. {path: 'data/raw.bin', base64: '/w=='} for byte FF; only data/ fixtures. "
-            "setup.dirs "
-            "declares empty data/ directories; parents are never inferred from CLI paths. "
-            'Relative argv: {"path": "data/note.txt", "relative": true} with cwd data/caller '
-            "emits ../note.txt; relative is optional but must be true (binding argv uses root).",
-            "observe": "action observations: exitEquals, stdoutEquals, stdoutJsonEquals, "
-            "stderrNonempty, stderrEquals (exact, including empty), stderrContains (substring). "
-            'For a stable single-line diagnostic, stderrEquals="message\\n" proves exact framing. '
-            "stderrContains alone proves neither line count nor absence of traceback. "
-            "Avoid brittle whole multiline logs; variable fault diagnostics need "
-            "executable scenarios with streams/argv/cwd, not supplemental promises. "
-            "JSON equality preserves types, including integer versus float. path observations: "
-            "fileJsonEquals, fileBytesEquals, fileAbsent, bytesUnchangedFrom (a setup snapshot id; "
-            "files compare raw bytes, directories compare all entries and file bytes, "
-            "<=128 entries). "
-            "An observation names one action or one "
-            "path, not both; path observations run after the last action, so split a scenario "
-            "to check files between actions.",
-            "refs": "requirementRefs/contractRefs are requirement/design node IDs, e.g. R1; "
-            "an optional @revision pin is checked when present.",
-            "stdin": "Optional cli.stdin supplies exactly one utf8 or strict base64 string "
-            "(e.g. {utf8: 'hello\\n'} or {base64: '/w=='}); absent means EOF/DEVNULL. "
-            "For responsive help/errors with stdin held open use {holdOpen:true,exitWithin:5}; "
-            "observe stdinOpenAtExit:true, elapsedAtMost:5, stdoutContains and stdoutEndsWith. "
-            "Required HC checks are scenarios, produced by the runner and included with exact "
-            "streams, absolute argv and cwd in the candidate-bound requiredEvidence packet slot.",
-            "fieldExample": {
-                "targets": {"app": {"entry": "app_cli.py", "argv": []}},
-                "scenarios": {
-                    "schema": "seldon/scenarios-v1",
-                    "scenarios": [
-                        {
-                            "id": "S1",
-                            "requirementRefs": ["R1"],
-                            "contractRefs": ["G1"],
-                            "setup": {
-                                "dirs": ["data"],
-                                "files": [
-                                    {"path": "data/db.json", "utf8": "[]"},
-                                    {"path": "data/raw.bin", "base64": "/w=="},
-                                ],
-                                "snapshots": [{"id": "before", "path": "data/db.json"}],
-                            },
-                            "actions": [
-                                {
-                                    "id": "a1",
-                                    "cwd": "data",
-                                    "cli": {
-                                        "target": "app",
-                                        "operation": "list",
-                                        "argv": ["--db", {"path": "data/db.json"}, "list"],
-                                    },
-                                }
-                            ],
-                            "observe": [
-                                {"action": "a1", "exitEquals": 0, "stdoutJsonEquals": []},
-                                {"path": "data/db.json", "bytesUnchangedFrom": "before"},
-                            ],
-                            "verdict": "all",
-                        }
-                    ],
-                },
-            },
+            "owner": "Retained vision.fields.scenarios/targets observation adapter; optional for "
+            "graph authoring. Opaque target bindings are retained at planning. Runner owners "
+            "decide executable support and record real observations; graph eligibility is open.",
+            "schema": "seldon/scenarios-v1; scenarios have id,requirementRefs,contractRefs,setup,"
+            "actions,observe,verdict. Unsupported execution remains unvalidated, never proof.",
         }
         result["compilationMetadata"] = {
-            "owner": "Legacy vision.fields before compile, not initial authoring or arguments.",
-            "validation": "Nonblank Python argv strings preceding bead.proofModule (-p pattern).",
-            "requirementFiles": "Extra protected relative paths; tests/planning docs protected.",
-            "pathBase": "workspace/template-relative; no absolute/escaping paths.",
-            "fieldExample": {
-                "validation": ["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
-                "requirementFiles": [],
-            },
-            "apply": "harness_show_node; merge metadata into saved vision; harness_upsert_node.",
+            "owner": "Historical runner projection on vision.fields; no authoring eligibility.",
+            "validation": "Legacy argv prefix; requirementFiles: extra protected relative paths.",
         }
     if semantic:
         prerequisites, design = node_example("design", True)
@@ -658,42 +576,20 @@ def schema_help(
         build.update(id="B", title="Build")
         build["fields"].update(semanticPhase=SEMANTIC_PHASES[1], dependsOn=["C"])
         result.update(semanticBeads={"nodes": [contracts, build]}, beadRules=bead_rules(True))
-        for key in ("proofAuthoring", "compilationLimits", "compilationMetadata"):
-            result.pop(key, None)
     if tool == "harness_upsert_nodes":
-        if semantic:
-            result.update(
-                prerequisiteNodes=prerequisites,
-                example=result["semanticBeads"],
-                exampleUse="Adapt IDs/ownedFiles; batch prerequisites and both beads.",
-            )
-            return result
-        prerequisites, test = node_example("test")
+        prerequisites, test = node_example("test", semantic)
         requirement = next(node for node in prerequisites if node["kind"] == "requirement")
         result.update(
-            prerequisiteNodes=[node for node in prerequisites if node != requirement],
+            prerequisiteNodes=[n for n in prerequisites if n != requirement],
             example={"nodes": [requirement, test]},
-            exampleUse=BATCH_GUIDANCE + " Batches validate and save atomically or none saves. "
-            "Order within the batch does not matter; duplicate IDs refuse. "
-            "For legacy plans, read kind=requirement and kind=test schemas at first use.",
-            authority="The existing canonical node writer and Spine validation are shared with "
-            "CLI node --json @feature-nodes.jsonl. No approvals or product proof are granted.",
+            exampleUse=BATCH_GUIDANCE + " Batches validate the same typed graph and save "
+            "atomically; adapt IDs and retain baseline/evidence links.",
         )
         return result
     if tool == "harness_upsert_node":
-        relevant = {
-            "vision": {"semanticScenarios", "compilationMetadata"},
-            "test": {"proofAuthoring", "compilationLimits"},
-            "bead": {"proofAuthoring"},
-        }.get(kind or "requirement", set())
-        for key in (
-            "proofAuthoring",
-            "compilationLimits",
-            "semanticScenarios",
-            "compilationMetadata",
-        ):
-            if key not in relevant:
-                result.pop(key, None)
+        if kind != "vision":
+            result.pop("semanticScenarios", None)
+            result.pop("compilationMetadata", None)
         kind = kind or "requirement"
         if kind not in ALLOWED_PARENTS:
             raise ValueError(f"Unknown node kind: {kind}; choose one of {list(ALLOWED_PARENTS)}")
@@ -720,18 +616,14 @@ def node_error_help(arguments, semantic=False):
     """Explain rejected input without replacing or relaxing the owning validator."""
     import json
 
-    if semantic:
-        return (
-            bead_rules(True) + " Read harness_schema kind=bead for the complete two-bead example."
-        )
     node = arguments.get("node") if isinstance(arguments, dict) else None
     kind = node.get("kind") if isinstance(node, dict) else None
     if not isinstance(kind, str) or kind not in ALLOWED_PARENTS:
         return "Inspect harness_schema for required node keys, types and valid kinds."
-    _, example = node_example(kind)
+    _, example = node_example(kind, semantic)
     return (
         "Rule: "
-        + (bead_rules() if kind == "bead" else FIELD_RULES.get(kind, "Read harness_schema."))
+        + (bead_rules(semantic) if kind == "bead" else FIELD_RULES.get(kind, "Read harness_schema."))
         + " Parent IDs must already exist with allowed kinds; fields remains open JSON."
         + "\nExample: "
         + json.dumps({"node": example}, ensure_ascii=False)

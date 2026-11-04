@@ -48,6 +48,7 @@ class Plan:
     verification: Mapping | None = None
     requirement_files_revision: str | None = None
     semantic: Mapping | None = None
+    trace: Mapping | None = None
 
 
 def _string(value: object) -> str:
@@ -178,11 +179,11 @@ def _spec_refs(value: object) -> tuple[tuple[str, str, str], ...]:
     refs = tuple(
         (_string(ref["id"]), _string(ref["kind"]), _revision(ref["revision"])) for ref in value
     )
-    if len({ref[0] for ref in refs}) != len(refs) or any(
-        ref[1] not in {"decision", "design", "requirement"} for ref in refs
-    ):
+    from codex_harness.core.spine import ALLOWED_PARENTS
+
+    if len({ref[0] for ref in refs}) != len(refs) or any(ref[1] not in ALLOWED_PARENTS for ref in refs):
         raise PlanError(
-            "plan-schema-invalid", "Expected unique decision, design or requirement refs"
+            "plan-schema-invalid", "Expected unique typed trace refs"
         )
     return refs
 
@@ -195,6 +196,15 @@ def load_plan(path: Path) -> Plan:
         if not isinstance(manifest, dict) or not isinstance(manifest["beads"], dict):
             raise PlanError("plan-schema-invalid", "Expected a plan and bead mapping")
         semantic = manifest.get("planMode") == "semantic-v1"
+        trace = None
+        if "trace" in manifest:
+            from codex_harness.core.spine import Spine
+
+            trace = Spine(manifest["trace"])
+            if manifest.get("traceRevisions") != {k: trace.revision(k) for k in trace.ids()}:
+                raise PlanError("plan-schema-invalid", "Compiled trace revisions must match the canonical snapshot")
+            if manifest.get("evidenceStates") != trace.evidence_states():
+                raise PlanError("plan-schema-invalid", "Evidence states must match recorded canonical observations")
         if semantic:
             from codex_harness.core.semantic_schema import validate
 
@@ -205,17 +215,6 @@ def load_plan(path: Path) -> Plan:
                 require_entries=False,
                 planning=True,
             )
-            phases = {b.get("semanticPhase"): key for key, b in manifest["beads"].items()}
-            if len(manifest["beads"]) != 2 or set(phases) != {"contracts", "build"}:
-                raise ValueError("Multiple/parallel Build unsupported in semantic-v1")
-            if manifest["beads"][phases["contracts"]].get("dependsOn") != [] or manifest["beads"][
-                phases["build"]
-            ].get("dependsOn") != [phases["contracts"]]:
-                raise ValueError("semantic-v1 requires Contracts -> Build")
-            if any("proofModule" in b for b in manifest["beads"].values()) or manifest.get(
-                "integration"
-            ):
-                raise ValueError("semantic-v1 uses scenario proof, not proofModule")
         directory = None if semantic else test_dir(manifest)
         beads = {}
         for bead_id, data in manifest["beads"].items():
@@ -262,6 +261,7 @@ def load_plan(path: Path) -> Plan:
             if "requirementFilesRevision" in manifest
             else None,
             semantic=manifest["semantic"] if semantic else None,
+            trace=MappingProxyType(trace.to_dict()) if trace is not None else None,
         )
         if "verification" in manifest:
             from codex_harness.core.runners import resolve_runner
