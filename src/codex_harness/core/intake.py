@@ -18,17 +18,17 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Literal, TypedDict
 from uuid import UUID, uuid4
 
-Recipe = Literal["baseline-amendment", "coherent-plan", "outcome-waves"]
+Recipe = str
 Value = dict[str, Any]
-RECIPES = ("baseline-amendment", "coherent-plan", "outcome-waves")
+SIZES = ("tiny", "small", "medium", "large")
 
 
 class IntakeDecisionV1(TypedDict):
     schema: Literal["dot-intake-v1"]
     requestKind: Literal["new", "feature", "fix", "refactor", "continue"]
-    sizeEstimate: Literal["S", "M", "L"]
+    sizeEstimate: Literal["tiny", "small", "medium", "large"]
     recipe: Recipe
-    baseline: Value
+    baselineRevisions: Value
     delta: Value
     ambiguity: Value
     consequence: Value
@@ -143,14 +143,10 @@ def _authority(value: Any, path: str) -> Value | None:
 
 
 def propose(request: Value, baseline: Value | None, obligations: list[Value]) -> IntakeDecisionV1:
-    """Route facts conservatively; size never reduces planning or assurance depth.
+    """Gather baseline, ambiguity and dependency facts; the planner judges process.
 
-    Request contains all non-derived decision fields, with optional schema/recipe.
-    Multiple producers or cross-wave contracts, or high ambiguity, require waves;
-    material ambiguity/hard consequences require a coherent plan. Amendment needs
-    both baseline revisions and a single ownership area. Prior recipe downgrades
-    additionally require attributable adaptation and evidence. Baseline obligation
-    IDs must all survive, regardless of the delta's node subset.
+    Size and recipe are proposals, never fact-derived minimums. User overrides
+    retain exact words/source for interpretation; none of this grants consent.
     """
     canonical_digest([request, baseline, obligations])
     fields = (
@@ -158,11 +154,11 @@ def propose(request: Value, baseline: Value | None, obligations: list[Value]) ->
         "rationale assumptions expectedSupervision nextGate reviewerDecisionId confirmation "
         "supersedes adaptation"
     )
-    result = deepcopy(_object(request, fields, "request", "schema recipe"))
+    result = deepcopy(_object(request, fields, "request", "schema recipe sizeOverride"))
     if "schema" in result:
         _enum(result["schema"], ("dot-intake-v1",), "request.schema")
     _enum(result["requestKind"], ("new", "feature", "fix", "refactor", "continue"), "requestKind")
-    _enum(result["sizeEstimate"], ("S", "M", "L"), "sizeEstimate")
+    _enum(result["sizeEstimate"], SIZES, "sizeEstimate")
     for key in ("rationale", "expectedSupervision", "nextGate", "reviewerDecisionId"):
         _text(result[key], key)
     result["assumptions"] = _strings(result["assumptions"], "assumptions")
@@ -196,12 +192,10 @@ def propose(request: Value, baseline: Value | None, obligations: list[Value]) ->
     for key in breadth:
         breadth[key] = _strings(breadth[key], f"dependencyBreadth.{key}")
     constraints = _object(
-        result["constraints"], "runtime security spend frictionBudget", "constraints"
+        result["constraints"], "runtime security", "constraints"
     )
     for key in ("runtime", "security"):
         constraints[key] = _strings(constraints[key], f"constraints.{key}")
-    for key in ("spend", "frictionBudget"):
-        _text(constraints[key], f"constraints.{key}")
     obligation_ids = set()
     for obligation in _list(obligations, "obligations"):
         _object(obligation, "id requiredForFullVision", "obligation")
@@ -225,23 +219,16 @@ def propose(request: Value, baseline: Value | None, obligations: list[Value]) ->
             _refuse("intake-obligation-loss", f"missing baseline obligations: {sorted(missing)}")
         previous = baseline["recipe"]
         if previous is not None:
-            _enum(previous, RECIPES, "baseline.recipe")
-    if (
-        ambiguity["level"] == "high"
-        or breadth["crossWaveContracts"]
-        or len(breadth["producerIds"]) > 1
-    ):
-        minimum = "outcome-waves"
-    elif ambiguity["level"] == "material" or consequence["level"] != "ordinary":
-        minimum = "coherent-plan"
-    elif all(revisions.values()) and len(delta["ownershipAreas"]) == 1:
-        minimum = "baseline-amendment"
-    else:
-        minimum = "coherent-plan"
-    recipe = result.get("recipe", minimum)
-    _enum(recipe, RECIPES, "recipe")
-    if RECIPES.index(recipe) < RECIPES.index(minimum):
-        _refuse("intake-recipe-incompatible", f"facts require at least {minimum}, got {recipe}")
+            _text(previous, "baseline.recipe")
+    recipe = result.get("recipe")
+    if recipe is not None:
+        _text(recipe, "recipe")
+    override = result.get("sizeOverride")
+    if override is not None:
+        _object(override, "size words sourceRef", "sizeOverride")
+        _enum(override["size"], SIZES, "sizeOverride.size")
+        for key in ("words", "sourceRef"):
+            _text(override[key], "sizeOverride." + key)
     result["confirmation"] = _authority(result["confirmation"], "confirmation")
     if result["supersedes"] is not None:
         ref = _object(result["supersedes"], "id revision", "supersedes")
@@ -269,17 +256,29 @@ def propose(request: Value, baseline: Value | None, obligations: list[Value]) ->
         adaptation["authority"] = _authority(adaptation["authority"], "adaptation.authority")
         if adaptation["authority"] is None:
             _refuse("intake-adaptation-invalid", "adaptation requires supplied authority")
-    if (
-        previous is not None
-        and RECIPES.index(recipe) < RECIPES.index(previous)
-        and adaptation is None
-    ):
-        _refuse(
-            "intake-downgrade-unjustified",
-            "downgrade requires adaptation reason, evidence and authority",
-        )
-    result.update(schema="dot-intake-v1", recipe=recipe, baseline=revisions)
+    result.update(schema="dot-intake-v1", recipe=recipe, baselineRevisions=revisions)
     return result
+
+
+def routing(store, node):
+    """Expose a bound size/process verdict and the user's visible override proposal."""
+    from codex_harness.core.approvals import assess
+
+    judgment = assess(store, "planning-size", dict(intake=node,
+        baseline=store.spine().to_dict(), question="Judge tiny/small/medium/large and an "
+        "appropriate collapsed process in meaning.size and meaning.process. Map brownfield "
+        "existing behavior/evidence first. Do not derive ceremony from counts or labels. "
+        "If sizeOverride is supplied, interpret its exact words/source and record boolean "
+        "meaning.overrideAccepted; user choice owns the size override."), subject_ids=store.spine().ids())
+    meaning = judgment["meaning"]
+    valid = judgment["positiveCredit"] and meaning.get("size") in SIZES and isinstance(meaning.get("process"), str) and bool(meaning["process"].strip())
+    override = node["fields"].get("sizeOverride")
+    if override is not None and type(meaning.get("overrideAccepted")) is not bool:
+        valid = False
+    return dict(state="judged" if valid or judgment["concreteGap"] else "pending-judgment",
+                judgment=judgment, size=(override["size"] if override and meaning.get("overrideAccepted") else meaning.get("size")) if valid else None,
+                process=meaning.get("process") if valid else None, userOverride=override,
+                overrideAvailable=True, next="User may override the displayed size in their own words")
 
 
 def _effort(value: Any, path: str) -> Value:

@@ -1882,13 +1882,10 @@ def _integrate_bead(
         _write_record(receipt, record["integrated"])
     record["didRunIntegratedValidation"] = True
     record["candidate"]["validated"] = validation["passed"]
-    accepted = (
-        record["integrated"]["semantic"]["admitted"]
-        if current_plan.semantic is not None
-        else validation["passed"]
-    )
-    if not accepted:
-        record["status"] = "integrated validation failed"
+    semantic = record["integrated"].get("semantic")
+    if not (semantic["admitted"] if semantic else validation["passed"]):
+        record["status"] = ("awaiting judgment" if semantic and semantic["state"] == "pending-judgment"
+                            else "integrated validation failed")
         return
     if not changed:
         record["status"] = "already-satisfied"
@@ -2210,9 +2207,10 @@ def run_plan(
     def fail(bead_id: str) -> None:
         terminal.add(bead_id)
         blocked = {bead_id}
+        waiting = records[bead_id]["status"] == "awaiting judgment"
         for dependent in order:
             if dependent not in terminal and blocked.intersection(plan.beads[dependent].depends_on):
-                records[dependent]["status"] = f"blocked: dependency {bead_id} failed"
+                records[dependent]["status"] = (f"awaiting judgment: dependency {bead_id}" if waiting else f"blocked: dependency {bead_id} failed")
                 terminal.add(dependent)
                 blocked.add(dependent)
 
@@ -2483,8 +2481,8 @@ def run_plan(
                 current["status"] = "rejected: stale semantic receipt"
                 return False
             _git(repo, "merge-base", "--is-ancestor", proof["candidateCommit"], "HEAD")
+            record["semanticValidation" if manifest["beads"][bead_id]["semanticPhase"] == "build" else "semanticContracts"] = proof
             if manifest["beads"][bead_id]["semanticPhase"] == "build":
-                record["semanticValidation"] = proof
                 return proof["passed"] and proof["candidateTree"] == _git(
                     repo, "rev-parse", "HEAD^{tree}"
                 )
@@ -2756,7 +2754,8 @@ def run_plan(
                 )
     failure = next((bead_id for bead_id in order if bead_id not in done), None)
     if failure is not None:
-        status = f"plan-failed: {failure} {records[failure]['status']}"
+        status = ("pending-judgment" if records[failure]["status"] == "awaiting judgment"
+                  else f"plan-failed: {failure} {records[failure]['status']}")
     elif (
         record["integrationValidation"] is not None
         and not record["integrationValidation"]["passed"]

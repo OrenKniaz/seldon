@@ -93,6 +93,8 @@ def worker_status(workspace, result):
             state = (
                 "completed"
                 if validation.get("state") == "PASS"
+                else validation["state"]
+                if validation.get("state") in {"pending-judgment", "pending-build"}
                 else "failed"
                 if validation
                 else "revalidating"
@@ -162,7 +164,7 @@ def inspect(workspace, job_id):
     with open_plan_store_readonly(workspace) as store:
         proof["disposition"] = disposition(store, job_id)
     if resolved := proof["disposition"]:
-        retryable = resolved.get("validation", {}).get("state") in {"FAIL", "ERROR"}
+        retryable = resolved.get("validation", {}).get("state") in {"FAIL", "ERROR", "pending-judgment"}
         proof["options"] = ["revalidate"] if retryable and "revalidate" in proof["options"] else []
     proof["proofDigest"] = jobs._digest(proof)
     return proof
@@ -235,7 +237,7 @@ def monitor(workspace, job_id):
         "import sys\n"
         "from codex_harness.core.planner_jobs import execute_worker_job\n"
         "result = execute_worker_job(sys.argv[1], sys.argv[2])\n"
-        "raise SystemExit(0 if result['status'] == 'completed' else 1)\n"
+        "raise SystemExit(1 if result['status'] == 'failed' else 0)\n"
     )
     command = [sys.executable, "-P", "-B", "-c", payload, str(workspace), job_id]
     last_progress = next_check = time.monotonic()

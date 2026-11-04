@@ -12,6 +12,13 @@ def consent_recovery(code):
 
 def semantic_consent_next(status, result, *, plan_authorized=False):
     """Three decisions; missing information and changed scope still require a reply."""
+    pending = result.get("decision") or result
+    if pending.get("state") == "pending-judgment" or pending.get("status") == "pending-judgment":
+        return "Read the retained facts; obtain the LLM interpretation and harness_submit_judgment. The user's reply stays pending."
+    if status.get("pendingDecisions"):
+        return "Read pendingDecisions; interpret the retained reply with harness_submit_judgment, without asking again."
+    if status.get("pendingSemanticJudgments"):
+        return "Read pendingSemanticJudgments, fetch its retained facts with harness_judgment, then submit the LLM verdict."
     if result.get("chatConfirmation"):
         return (
             "harness_record_chat_confirmation after showing the fresh card/diff "
@@ -23,7 +30,7 @@ def semantic_consent_next(status, result, *, plan_authorized=False):
         result.get("gate") in {"align+vision-lock", "plan-execution"}
         and result.get("state") != "approved"
     ):
-        return "Clarify changes, show fresh A/B, then wait for Yes or another listed reply."
+        return "Clarify changes, show fresh A/B, then wait for the user's own words."
     if status.get("open_clarifications"):
         return "Ask the genuine missing-information question; record it with harness_answer."
     phase = status["phase"]

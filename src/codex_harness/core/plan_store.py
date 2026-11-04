@@ -10,7 +10,7 @@ import re
 import sqlite3
 import stat
 import subprocess
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -217,6 +217,9 @@ class PlanStore:
             if before["nodes"] and before != after:
                 from codex_harness.core.spine import stale_evidence
                 current = Spine(after)
+                for node in after["nodes"]:
+                    if node["kind"] == "vision" and node not in before["nodes"]:
+                        self._classify_vision_edit(node)
                 normalized = stale_evidence(Spine(before), current)
                 submitted = {node["id"]: node for node in after["nodes"]}
                 changed = [key for key in normalized.ids() if normalized.node(key) != submitted[key]]
@@ -284,7 +287,7 @@ class PlanStore:
             raise PlanStoreError("judgment-subject-required", "Supply current subject IDs")
         if candidate is not None:
             _nonempty(candidate, "candidate")
-        with self._transaction():
+        with nullcontext() if self.connection.in_transaction else self._transaction():
             spine = self.spine()
 
             def refs(ids):
@@ -358,6 +361,8 @@ class PlanStore:
             self._event("judgment-response", dict(id=judgment_id, binding=record["binding"],
                         response=response, source=source, sourceVerified=False))
             self._event("judgment-recorded", record)
+            if record["question"] == "vision-intent":
+                self._classify_vision_edit(self.spine().node(self.spine().ids("vision")[0]))
         return self.judgment(judgment_id)
 
     def list_nodes(self, kind: str | None = None) -> list[dict]:
@@ -375,7 +380,7 @@ class PlanStore:
             return hashlib.sha256(b"").hexdigest()
         return Spine(data).plan_revision()
 
-    def _write_node(self, spine: Spine, node_id: str, *, reopen_vision_lock=False) -> None:
+    def _write_node(self, spine: Spine, node_id: str) -> None:
         node = spine.node(node_id)
         if node["kind"] == "vision":
             from codex_harness.core.planner_vision import design_references
@@ -392,7 +397,6 @@ class PlanStore:
                 "planMode", "legacy"
             ):
                 raise ValueError("planMode is immutable; choose semantic-v1 at plan creation")
-        self._classify_vision_edit(node, reopen_vision_lock=reopen_vision_lock)
         self.connection.execute(
             "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
             "kind=excluded.kind, title=excluded.title, text=excluded.text, "
@@ -410,30 +414,19 @@ class PlanStore:
             ),
         )
 
-    def _classify_vision_edit(self, node: dict, *, reopen_vision_lock=False) -> None:
+    def _classify_vision_edit(self, node: dict) -> None:
         if node["kind"] != "vision" or not self._meta()["vision_locked_revision"]:
             return
-        row = self.connection.execute("SELECT * FROM nodes WHERE id=?", (node["id"],)).fetchone()
-        if row is None:
-            return
-
-        from codex_harness.core.approvals import intent as approval_intent
-
+        from codex_harness.core.approvals import intent, intent_assessment
         locked = json.loads(self._meta()["locked_vision_json"])
-        stale = approval_intent(locked) != approval_intent(node)
-        if node["fields"].get("planMode") == "semantic-v1" and not reopen_vision_lock and stale:
-            raise PlanStoreError(
-                "vision-locked-wording",
-                "Approved intent changed. Use reopen_vision_lock=true and show the A diff; "
-                "metadata and check repairs preserving intent need no new consent.",
-            )
-        if approval_intent(dict(row, fields=json.loads(row["fields_json"]))) != approval_intent(
-            node
-        ):
-            self.connection.execute("UPDATE meta SET vision_lock_stale=?", (int(stale),))
-            self._event(
-                "vision-lock-stale" if stale else "vision-lock-restored", {"id": node["id"]}
-            )
+        if intent(locked) == intent(node):
+            self.connection.execute("UPDATE meta SET vision_lock_stale=0")
+            return
+        judgment = intent_assessment(self, node)
+        preserved = judgment["positiveCredit"] and judgment["meaning"].get("impact") == "preserved"
+        self.connection.execute("UPDATE meta SET vision_lock_stale=?", (int(not preserved),))
+        self._event("vision-intent-assessed", dict(id=node["id"], judgmentId=judgment["id"],
+                    state="preserved" if preserved else "pending-judgment"))
 
     def upsert_node(self, node: dict, *, reopen_vision_lock: bool = False) -> None:
         with self._transaction():
@@ -442,8 +435,8 @@ class PlanStore:
             data["nodes"] = [item for item in data["nodes"] if item["id"] != node_id]
             data["nodes"].append(node)
             spine = Spine(data)
-            self._write_node(spine, node_id, reopen_vision_lock=reopen_vision_lock)
-            self._event("node-upserted", {"id": node_id, "plan_revision": spine.plan_revision()})
+            self._write_node(spine, node_id)
+            self._event("node-upserted", {"id": node_id, "plan_revision": spine.plan_revision(), "reopenRequested": reopen_vision_lock})
 
     def revise_test(
         self,
@@ -670,7 +663,7 @@ class PlanStore:
             return {
                 **result,
                 "intake": node["fields"],
-                "nextAction": "Record explicit reviewer choice",
+                "routing": intake.routing(self, node),
             }
 
     def record_reviewer_catalog(self, catalog: dict, expected_spine_revision: str) -> dict:
@@ -1323,8 +1316,6 @@ class PlanStore:
             prior = self.list_nodes("vision")
             if prior and Spine(self._data()).semantic != spine.semantic:
                 raise ValueError("planMode is immutable; no conversion of existing plans")
-            for node_id in spine.ids("vision"):
-                self._classify_vision_edit(spine.node(node_id))
             self.connection.execute("DELETE FROM nodes")
             self.connection.execute("UPDATE meta SET name=?", (spine.name,))
             for node_id in spine.ids():
@@ -2695,10 +2686,7 @@ class PlanStore:
         if not meta["locked_vision_json"]:
             raise PlanStoreError("acceptance-vision-unlocked", "Confirm the current locked vision")
         self._check_approval("vision-lock", self._revision())
-        vision = json.loads(meta["locked_vision_json"])
-        data = self._data()
-        data["nodes"] = [vision if node["kind"] == "vision" else node for node in data["nodes"]]
-        return Spine(data)
+        return self.spine()
 
     def acceptance_scenarios(self) -> list[dict]:
         if self._data()["nodes"] and (spine := self.spine()).semantic:
@@ -3293,12 +3281,21 @@ class PlanStore:
             if reason:
                 acceptance._refuse(reason, run["repo"] if run else None)
             acceptance.require_c_evidence(self, run)
+            from codex_harness.core.approvals import assess
+            judgment = assess(self, "user-decision", dict(subject=dict(kind="C", run=run),
+                revision=self._revision(), request_id="C:" + run["id"], words=statement, actor=by, channel="caller-message",
+                question="Interpret exact owner words for this delivered candidate. "
+                "meaning.decision is approve, decline, cancel or changes-requested; ambiguity stays pending."))
+            if not judgment["positiveCredit"] or judgment["meaning"].get("decision") != "approve":
+                pending = dict(state="pending-judgment" if not judgment["positiveCredit"] else "declined",
+                               judgment=judgment, by=by, statement=statement, isProxy=bool(is_proxy), runId=run["id"])
+                self._event("acceptance-consent-pending", pending)
+                return pending
             approval = {
                 "id": uuid4().hex,
                 "runId": run["id"],
-                "by": by,
-                "statement": statement,
-                "isProxy": bool(is_proxy),
+                "by": by, "statement": statement,
+                "isProxy": bool(is_proxy), "judgmentId": judgment["id"], "human_identity_verified": False,
             }
             self.connection.execute(
                 "INSERT INTO acceptance_approvals VALUES (?, ?)", (approval["id"], _json(approval))
@@ -3326,6 +3323,7 @@ class PlanStore:
     def _status(self) -> dict:
         from codex_harness.core.acceptance import acceptance_status
         from codex_harness.core.roundtable import review_totals
+        from codex_harness.core.planner_confirmation_cards import pending_decisions, pending_judgments
 
         self.connection.execute("BEGIN")
         try:
@@ -3426,6 +3424,8 @@ class PlanStore:
                 "coverage_gaps": Spine(data).coverage_gaps() if data["nodes"] else [],
                 "phase_index": index + 1,
                 "acceptance": acceptance,
+                "pendingDecisions": pending_decisions(self),
+                "pendingSemanticJudgments": pending_judgments(self),
                 "roundtable": review_totals(self, current_publication),
                 **({"reviewPolicy": review_policy} if review_policy["active"] else {}),
                 "readiness": self.readiness_status(current_publication),

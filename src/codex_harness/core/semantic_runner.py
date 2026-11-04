@@ -22,6 +22,10 @@ MODULE = "codex_harness.core.semantic_runner"
 SOURCE_IGNORED = {".git", ".codex-harness", "__pycache__", ".pytest_cache", ".ruff_cache"}
 
 
+class ObservationUnavailable(ValueError):
+    """A capture bound omits evidence; it is not a product verdict."""
+
+
 def web_toolchain(config, evidence):
     defaults = dict(
         node="C:/nvm4w/nodejs/node.exe",
@@ -69,7 +73,7 @@ def read(file, limit=LIMIT):
                     raise ValueError("Directory snapshots cannot observe links/junctions")
                 entries.append(p)
                 if len(entries) > 128:
-                    raise ValueError("Directory snapshot exceeds128 entries")
+                    raise ObservationUnavailable("Directory snapshot omitted after 128 entries")
                 if p.is_dir():
                     pending.append(p)
         return {
@@ -81,13 +85,14 @@ def read(file, limit=LIMIT):
     with file.open("rb") as stream:
         value = stream.read(limit + 1)
     if len(value) > limit:
-        raise ValueError("File/output exceeds 16KiB; observation unavailable")
+        raise ObservationUnavailable("File snapshot omitted after 16KiB")
     return value
 
 
 def capture(cmd, root, cwd=None, payload=None, *, browser=False, hold_open=False):
-    env = dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root))
-    if cmd[2] == "-m":
+    env = dict(os.environ)
+    env.update(dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root)))
+    if cmd[1:3] == ["-B", "-m"]:
         env["PYTHONSAFEPATH"] = "1"
     env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
     if browser:
@@ -96,9 +101,15 @@ def capture(cmd, root, cwd=None, payload=None, *, browser=False, hold_open=False
     stdin = PIPE if payload is not None or hold_open else DEVNULL
     child = Popen(cmd, cwd=cwd or root, env=env, stdin=stdin, stdout=PIPE, stderr=PIPE)
     data = [None, None]
+    omitted = [0, 0]
 
     def drain(stream, index):
-        data[index] = stream.read(LIMIT + 1)
+        kept = bytearray()
+        while chunk := stream.read(4096):
+            remaining = max(0, LIMIT - len(kept))
+            kept.extend(chunk[:remaining])
+            omitted[index] += max(0, len(chunk) - remaining)
+        data[index] = bytes(kept)
 
     threads = [
         threading.Thread(target=drain, args=(stream, i), daemon=True)
@@ -111,10 +122,8 @@ def capture(cmd, root, cwd=None, payload=None, *, browser=False, hold_open=False
             with child.stdin:
                 child.stdin.write(payload)
         except BrokenPipeError:
-            pass  # A Contracts stub may exit before consuming input.
+            pass  # A process may exit before consuming input.
     while child.poll() is None:
-        if any(d is not None and len(d) > LIMIT for d in data):
-            raise ValueError("Product output exceeds 16KiB")
         time.sleep(0.01)
     elapsed = time.monotonic() - started
     stdin_open = hold_open and not child.stdin.closed
@@ -124,12 +133,11 @@ def capture(cmd, root, cwd=None, payload=None, *, browser=False, hold_open=False
         thread.join()  # The enclosing action watchdog also bounds pipe drain.
     if any(d is None for d in data):
         raise OSError("Output observation unavailable")
-    if any(len(d) > LIMIT for d in data):
-        raise ValueError("Product output exceeds 16KiB")
     return dict(
         exit=child.returncode,
-        stdout=data[0].decode(),
-        stderr=data[1].decode(),
+        stdout=data[0].decode("utf-8", errors="replace"),
+        stderr=data[1].decode("utf-8", errors="replace"),
+        omittedBytes=dict(stdout=omitted[0], stderr=omitted[1]),
         stdinOpenAtExit=stdin_open,
         elapsedSeconds=elapsed,
     )
@@ -146,7 +154,7 @@ def equal(a, b):
 
 
 def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None, stop_file=None):
-    snapshots, results, markers = {}, {}, []
+    snapshots, results, flags = {}, {}, []
     for directory in s["setup"].get("dirs", []):
         path(root, directory).mkdir(parents=True, exist_ok=True)
     for f in s["setup"].get("files", []):
@@ -154,7 +162,10 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_bytes(content(f))
     for f in s["setup"].get("snapshots", []):
-        snapshots[f["id"]] = read(path(root, f["path"]))
+        try:
+            snapshots[f["id"]] = read(path(root, f["path"]))
+        except ObservationUnavailable:
+            snapshots[f["id"]] = None
 
     def expired():
         print(
@@ -184,6 +195,7 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
                             tools=web,
                             root=str(root),
                             phase=phase,
+                            entry=targets[a["web"]["target"]]["entry"],
                             seconds=min(seconds, 10),
                             remaining=budget,
                         )
@@ -200,19 +212,20 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
                         state="ERROR", reason=result["reason"], actions={**results, a["id"]: result}
                     )
                 results[a["id"]] = result
-                if result["marker"]:
-                    markers.append(a["id"])
+                if result.get("marker"):
+                    flags.append(dict(action=a["id"], pattern="SELDON-STUB"))
                 continue
-            v = a["cli"]
-            binding = targets[v["target"]]
             cwd = path(root, a["cwd"]) if "cwd" in a else root
-            args = argv(binding["argv"], root) + argv(v["argv"], root, cwd)
-            launch = (
-                ["-m", binding["module"]]
-                if "module" in binding
-                else [str(path(root, binding["entry"]))]
-            )
-            command = [sys.executable, "-B", *launch, *args]
+            if "process" in a:
+                v = a["process"]
+                command = argv(v["argv"], root, cwd)
+            else:
+                v = a["cli"]
+                binding = targets[v["target"]]
+                args = argv(binding["argv"], root) + argv(v["argv"], root, cwd)
+                launch = (["-m", binding["module"]] if "module" in binding
+                          else [str(path(root, binding["entry"]))])
+                command = [sys.executable, "-B", *launch, *args]
             hold_open = v.get("stdin", {}).get("holdOpen", False)
             payload = content(v["stdin"]) if "stdin" in v and not hold_open else None
             action.update(
@@ -224,17 +237,8 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
             result.update(action)
         finally:
             guard.cancel()
-        marker = f"SELDON-STUB {v['operation']}"
-        if phase == "contracts" and not (
-            result["exit"] == 3 and marker in result["stderr"].splitlines()
-        ):
-            raise ValueError(
-                "Missing standard operation stub marker; no Contracts RED credit. "
-                "Write SELDON-STUB <operation> for the declared operation to stderr and exit 3 "
-                "before argument parsing, importing product modules, or product I/O."
-            )
         if "SELDON-STUB " in result["stderr"] + result["stdout"]:
-            markers.append(a["id"])
+            flags.append(dict(action=a["id"], pattern="SELDON-STUB"))
         results[a["id"]] = result
     observations = []
     for o in s["observe"]:
@@ -244,12 +248,13 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
             observations.extend(
                 dict(
                     check=k,
-                    passed=(judgments or {}).get(k, {}).get("passed", False)
+                    passed=(True if (judgments or {}).get(k, {}).get("positiveCredit") else
+                            False if (judgments or {}).get(k, {}).get("concreteGap") else None)
                     if actual["checks"][k] is None
                     else equal(actual["checks"][k], o[k]),
                     judgment=(judgments or {}).get(k) if actual["checks"][k] is None else None,
                     actual=actual["checks"][k],
-                    reason="human judgment required"
+                    reason="pending-judgment"
                     if actual["checks"][k] is None
                     else "browser observation",
                 )
@@ -258,9 +263,8 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
             observations.append(
                 dict(
                     check="screenshots",
-                    passed=all(not a.get("missing") for a in actual["artifacts"])
-                    and len(actual["artifacts"]) == 2,
-                    reason="viewport and full-page screenshots required",
+                    passed=None if any(a.get("missing") for a in actual["artifacts"]) else True,
+                    reason="bounded screenshot capture; omissions need judgment",
                 )
             )
             continue
@@ -298,7 +302,14 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
                         dict(check=key, passed=False, actual=None, reason="product file missing")
                     )
                     continue
+                except ObservationUnavailable as error:
+                    observations.append(dict(check=key, passed=None, actual=None, reason=str(error)))
+                    continue
                 if key == "bytesUnchangedFrom":
+                    if snapshots[expected] is None:
+                        observations.append(dict(check=key, passed=None, actual=None,
+                                                 reason="Baseline snapshot omitted"))
+                        continue
                     value, expected = raw == snapshots[expected], True
                 elif key == "fileBytesEquals":
                     value = raw.decode()
@@ -309,13 +320,18 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
                     except ValueError:
                         value, valid = "invalid JSON output", False
             passed = valid and equal(value, expected)
+            if actual and (
+                key.startswith("stdout") and actual.get("omittedBytes", {}).get("stdout")
+                or key.startswith("stderr") and actual.get("omittedBytes", {}).get("stderr")
+            ):
+                passed = None
             reason = "matched" if passed else "observable mismatch"
             observations.append(dict(check=key, passed=passed, actual=value, reason=reason))
-    if phase == "validation" and markers:
-        raise ValueError("Stub marker remains; final Validation cannot pass")
-    state = "PASS" if all(o["passed"] for o in observations) else "FAIL"
+    state = ("FAIL" if any(o["passed"] is False for o in observations) else
+             "pending-judgment" if not observations or any(o["passed"] is None for o in observations)
+             else "PASS")
     summary = dict(id=s["id"], state=state, reason="observations evaluated")
-    return dict(summary, observations=observations, stubActions=markers, actions=results)
+    return dict(summary, observations=observations, flags=flags, actions=results)
 
 
 def _cleanup(root, control):
@@ -351,7 +367,8 @@ def run(
     cleanup = dict(quiescenceVerified=True, activeProcessesAfterTeardown=0, childLaunched=False)
     try:
         scenarios = validate(document, product, targets)
-        is_web = any(b.get("kind") == "web" for b in targets.values())
+        is_web = any("web" in a for s in scenarios
+                     if s.get("evidenceTier") != "scenario: unvalidated" for a in s["actions"])
         # Hang guards, not speed targets: cold Windows Python under load exceeded 3s (run 24).
         # Defaults fit inside any caller-supplied outer budget.
         run_seconds = run_seconds if run_seconds is not None else (90 if is_web else 120)
@@ -381,46 +398,27 @@ def run(
             end = min(deadline, time.monotonic() + scenario_seconds)
             if end <= time.monotonic():
                 raise TimeoutError("Run deadline; scenario unperformed")
+            if s.get("evidenceTier") == "scenario: unvalidated":
+                results.append(dict(id=s["id"], state="pending-judgment", unperformed=True,
+                                    reason=s.get("validationMessage", "Worker executable needed")))
+                continue
             with ExitStack() as stack:
                 temp = tempfile.mkdtemp(prefix="seldon-semantic-")
-                root, count = Path(temp), 0
+                root = Path(temp)
                 stack.callback(_cleanup, root, cleanup)
                 for base, dirs, files in os.walk(product, followlinks=False):
                     dirs[:] = [name for name in dirs if name not in SOURCE_IGNORED]
                     files = [name for name in files if name not in SOURCE_IGNORED]
-                    count += len(files) + len(dirs)
-                    if count > 128:
-                        raise ValueError("Product source exceeds128 entries")
                     for name in [*dirs, *files]:
+                        if time.monotonic() >= end:
+                            raise TimeoutError("Snapshot deadline; observation unperformed")
                         raw = Path(base) / name
                         if raw.is_symlink() or raw.is_junction():
                             raise ValueError("Product source cannot contain links/junctions")
                         source = path(product, (Path(base) / name).relative_to(product).as_posix())
-                        if name in files and (
-                            source.suffix == ".py"
-                            or (
-                                is_web
-                                and source.suffix.lower()
-                                in {
-                                    ".html",
-                                    ".css",
-                                    ".js",
-                                    ".json",
-                                    ".txt",
-                                    ".csv",
-                                    ".png",
-                                    ".jpg",
-                                    ".jpeg",
-                                    ".svg",
-                                    ".webp",
-                                    ".ico",
-                                    ".woff",
-                                    ".woff2",
-                                }
-                            )
-                        ):
-                            if source.stat().st_size > 262144:
-                                raise ValueError("Product source exceeds256KiB per file")
+                        if name in dirs:
+                            (root / source.relative_to(Path(product).resolve())).mkdir(parents=True, exist_ok=True)
+                        if name in files:
                             destination = root / source.relative_to(Path(product).resolve())
                             destination.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copyfile(source, destination)
@@ -487,9 +485,7 @@ if __name__ == "__main__":
         raise SystemExit(call(cmd))
     if sys.argv[1:2] == ["--worker"]:
         try:
-            s, targets, phase, seconds, deadline, web, judgments, stop_file = json.loads(
-                read(Path(sys.argv[2]), 131072)
-            )
+            s, targets, phase, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
             result = execute(
                 s, Path.cwd(), targets, phase, seconds, deadline, web, judgments, stop_file
             )

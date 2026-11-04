@@ -62,6 +62,20 @@ def judgment_response(response, record):
         raise ValueError("A negative verdict needs at least one concrete gap in gaps")
     if parsed["verdict"] == "positive" and parsed["gaps"]:
         raise ValueError("Resolve the gaps or return a negative/inconclusive verdict")
+    if parsed["verdict"] == "positive":
+        meaning = parsed["meaning"]
+        if record["question"] == "user-decision" and meaning.get("decision") not in {
+            "approve", "decline", "cancel", "changes-requested"
+        }:
+            raise ValueError("meaning.decision must name approve, decline, cancel or changes-requested")
+        if record["question"] == "vision-intent" and meaning.get("impact") not in {"preserved", "changed", "narrowed"}:
+            raise ValueError("meaning.impact must name preserved, changed or narrowed")
+        if record["question"] == "planning-size":
+            if meaning.get("size") not in {"tiny", "small", "medium", "large"} or not isinstance(meaning.get("process"), str) or not meaning["process"].strip():
+                raise ValueError("meaning needs size=tiny|small|medium|large and a nonblank process")
+            if any(ref["payload"].get("facts", {}).get("intake", {}).get("fields", {}).get("sizeOverride")
+                   for ref in record["sourceRefs"]) and type(meaning.get("overrideAccepted")) is not bool:
+                raise ValueError("meaning.overrideAccepted must interpret the recorded user's size override")
     return {key: parsed[key] for key in ("verdict", "rationale", "meaning", "gaps")}
 
 FIELD_RULES = {
@@ -83,13 +97,14 @@ FIELD_RULES = {
         "at Lock; never infer consent. Optional designRefs=[{path,type,sha256,provenance,use}] "
         "names existing relative hashed visual files, never instructions or executable code. "
         "URLs grant no browsing/runtime permission; report unviewable/conflicting refs. "
-        "Before A, record expansion={mode:product|quality,reason,upgrades:[{id,text,kind,impact, "
-        "disposition:accept|reject|defer}]}: 3Ã¢â‚¬â€œ7 stable unique IDs plus quality_bar/Done. "
-        "Product improves rough ideas; quality adds no features to precise scope. Dispositions "
-        "are recommendations only. One complete A shows all fields and records the actual "
-        "user reply, including Yes; upserts/by:user/confirmed flags grant nothing. "
-        "Changes: adjusts the proposal; no separate Expand confirmation. Trace accepted "
-        "expansionRefs downstream in requirement/decision/acceptance fields, not locked vision. "
+        "Before A, record expansion={mode,reason,upgrades:[{id,text,kind,impact, "
+        "disposition:accept|reject|defer}]} with stable unique IDs and quality/Done. "
+        "An LLM judges adequacy, never a count. Record qualityCriteria for applicable UX/visual, "
+        "performance, maintainability, architecture, observability and failures; research reasons "
+        "and choices; openLoop={metric,provenance,stopConditions} agreed at Lock; brownfield "
+        "existing behavior/evidence before change planning. All full fields appear in A. "
+        "Accepted macro/micro upgrades retain expansionRefs downstream. Exact user words "
+        "are interpreted by a bound 1j judgment; no upsert or proposed disposition grants consent. "
         "Legacy compile needs fields.validation (Python argv string array) and requirementFiles "
         "(extra protected relative paths, possibly empty); see compilationMetadata. Initial "
         "vision authoring needs neither."
@@ -159,11 +174,11 @@ TYPED_CONTRACTS = {
         "expectedSupervision nextGate reviewerDecisionId "
         "confirmation supersedes adaptation",
         "fields.optional": "schema=dot-intake-v1; "
-        "recipe=baseline-amendment|coherent-plan|outcome-waves "
-        "(must meet conservative fact-derived minimum). "
-        "baseline is derived, not a request.fields key.",
+        "recipe: open process proposal, never a fact-derived minimum; "
+        "sizeOverride: {size,words,sourceRef}, interpreted by the same 1j contract. "
+        "baselineRevisions is derived, not a request.fields key.",
         "requestKind": "new|feature|fix|refactor|continue",
-        "sizeEstimate": "S|M|L",
+        "sizeEstimate": "tiny|small|medium|large; LLM recommendation is shown with user override",
         "delta": "Exact keys summary,outcome: nonblank strings; "
         "nodeIds,interfaceIds: arrays of strings; "
         "successCriteria,ownershipAreas: nonempty string arrays.",
@@ -173,8 +188,7 @@ TYPED_CONTRACTS = {
         "reversibility=nonblank, risks=string array (nonempty "
         "unless ordinary).",
         "dependencyBreadth": "Exact keys producerIds,crossWaveContracts: string arrays.",
-        "constraints": "Exact keys runtime,security: string arrays; "
-        "spend,frictionBudget: nonblank strings.",
+        "constraints": "Exact keys runtime,security: string arrays. No budget decision.",
         "remainingFields": "rationale,expectedSupervision,nextGate,reviewerDecisionId: "
         "nonblank strings; assumptions:string array; "
         "confirmation:null for draft; supersedes:null or "
@@ -185,7 +199,7 @@ TYPED_CONTRACTS = {
         "previousRecipe must match resolved baseline, reason "
         "nonblank, affectedObligationIds known string IDs, "
         "evidenceRefs nonempty strings, authority existing non-null "
-        "authorityShape. Downgrade needs adaptation; never "
+        "authorityShape. This retains provenance, not a recipe minimum; never "
         "manufacture authority to satisfy it.",
     },
     "harness_reviewer_catalog": {
@@ -383,7 +397,7 @@ def typed_draft_help(tool):
         fields = {
             "schema": "dot-intake-v1",
             "requestKind": "new",
-            "sizeEstimate": "S",
+            "sizeEstimate": "small",
             "delta": {
                 "summary": "Reject malformed parser input",
                 "nodeIds": [],
@@ -402,8 +416,6 @@ def typed_draft_help(tool):
             "constraints": {
                 "runtime": [],
                 "security": [],
-                "spend": "No provider calls in this draft",
-                "frictionBudget": "One focused parser check",
             },
             "rationale": "Plan the parser rejection and rollback behavior",
             "assumptions": [],
@@ -554,11 +566,11 @@ def schema_help(
             "record": "Wait for a separate actual external chat reply to the displayed question. "
             "Fields: gate, request_id, expected_revision, quoted_message, "
             "quote_sha256, actor_label. "
-            "The card lists the owner's vocabulary, including plain Yes; no approve/origin/by "
+            "A recorded 1j judgment interprets the exact words against request/subject/source; no approve/origin/by "
             "field is accepted. Do not recycle the preceding native refusal as a new answer.",
             "consumer": "Recording grants decision only, never launch. Use separate legal advance "
-            "or exact start/resume after approval. No/Cancel, conditions, missing/stale/mismatched "
-            "answers grant nothing. Reuse chat credit; never silently force native approval.",
+            "or exact start/resume after approval. Missing/stale/inconclusive interpretation stays pending; "
+            "answers grant nothing. Submit the pending judgment to resume the retained reply without another user decision.",
         }
     if tool == "harness_revise_test":
         result.update(

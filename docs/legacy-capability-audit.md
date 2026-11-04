@@ -1,5 +1,34 @@
 # Legacy capability audit for the local Seldon extraction
 
+STAGE-1I (C2-C4/C8-C10/C14/C24/C26, I1-I6/I8/I9): DESIGN — the
+golden/journey provider had no bound semantic judge. Siblings: keyword A/B/C
+consent, AST audit tiers, marker RED, qualitative FAIL and Contracts admission.
+Owner: existing golden harness scripts one public 1j prepare/submit/read path;
+process exits/output/cleanup remain real. Dispatch retains awaiting judgment,
+and the original worker PID consumes each verdict once and continues judged
+Contracts to Build under the same B. Post-exit scheduling remains Stage 2c;
+no PID, provider-call, provenance or quiescence guard is bypassed.
+Delivered-root assessments resolve through verified delivery to the recorded
+validation worktree; fixture tools/logs and checkout line endings cannot rebind it.
+Verdicts finish before acceptance capture; replacing a judgment during capture
+correctly stales that attempt and grants no credit.
+The generated scenario transport now reads its full owned JSON payload; the
+131072-byte evidence-reader cap had misreported full 1j packets as product ERROR.
+Consumers retain judgment IDs, binding hashes and current verdict fields; full
+fact packets stay in 1j, avoiding duplicate review shards and spurious cap exhaustion.
+Runtime friction: one web-file run took 745.17s, with the extra gap around preview;
+the instrumented repeat measured preview at 20.12s. Cause remains unreproduced
+(preview/audit_process owner); retain timing on recurrence, without guessing a fix.
+Intake now uses baselineRevisions; B binds the complete current plan revision.
+Both evidence-relevance packet owners consume execution_witnesses; actual
+provider finding-closure execution is not established by the scripted journeys.
+Disposition: integration candidate; final counts, exact patch and gate outcome
+are in work/lanes/stage-1i-report.md. Exit: the final 19-case golden gate proves
+real RED/GREEN, refusal/change/replay/reconnect, stale credit and 1a impact/history.
+This supersedes the 1b intake namespace blocker and 1b/1c harness diagnosis;
+SCEN-COV-1's old unknown-adapter ERROR and AST-tier conclusions are superseded.
+actual-provider/full-vision acceptance, L0-L3 and later review/loop rows stay open.
+
 JUDGMENT-1 (Stage 1j, C2/C3/C4, I1/I2/I4/I5/I6/I9): DESIGN — no shared
 typed owner retains absent/inconclusive semantic judgments and bounded exact-fix
 disposition. Sibling consumers: intent/consent/expansion (1b), execution/test

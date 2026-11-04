@@ -288,6 +288,7 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         current = worker_job_status(workspace, job_id)
         while "terminal" not in current and current["status"] not in {
             "failed",
+            "pending-judgment",
             "readmitted",
             "abandoned",
         }:
@@ -374,12 +375,15 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
             },
         }
         result["didRunProvider"] = run["didExecuteRealProvider"]
+        if "terminal" not in result and run["status"] == "pending-judgment":
+            result["status"] = "pending-judgment"
     elif paths:
         raise ValueError("worker-job-dispatch-record-ambiguous")
     if result["status"] != "completed" or result.get("terminal", {}).get(
         "dispatchStatus", ""
     ).startswith("plan-failed"):
-        result["reason"] = "Failed or stalled work: harness_recovery can readmit within B."
+        result["reason"] = ("Awaiting judgment; inspect the bound candidate before revalidation."
+                            if result["status"] == "pending-judgment" else "Failed or stalled work: harness_recovery can readmit within B.")
     from codex_harness.core.planner_recovery import worker_status
 
     return worker_status(workspace, result)
@@ -426,11 +430,25 @@ def execute_worker_job(workspace, job_id):
             setup=setup,
             intent_nodes=intent_nodes,
         )
-        from codex_harness.core.planner_candidate import deliver
+        from codex_harness.core.planner_candidate import deliver, judgments_for, revalidate
+
+        deadline = time.monotonic() + request["options"]["timeout"]
+        handled = set()
+        while run["status"] == "pending-judgment" and time.monotonic() < deadline:
+            with open_plan_store(workspace) as store:
+                pending = next(b for b in run["beads"].values() if b["status"] == "awaiting judgment")
+                verdict = judgments_for(store, pending["integrated"]["root"]).get("execution", {})
+                if (verdict.get("positiveCredit") or verdict.get("concreteGap")) and verdict["id"] not in handled:
+                    handled.add(verdict["id"])
+                    revalidate(store, job_id, "worker-judgment-continuation")
+                    run = read_record_json(Path(run["repo"]).parent / "evidence/run.json")
+            if run["status"] == "pending-judgment":
+                time.sleep(0.2)
 
         deliver(workspace, request, run)
         terminal.update(runId=run["runId"], dispatchStatus=run["status"])
-        terminal["status"] = "failed" if run["status"].startswith("plan-failed") else "completed"
+        terminal["status"] = ("pending-judgment" if run["status"] == "pending-judgment" else
+                              "failed" if run["status"].startswith("plan-failed") else "completed")
     except Exception as error:
         terminal["error"] = {"type": type(error).__name__, "message": str(error)}
     terminal["at"] = _now()

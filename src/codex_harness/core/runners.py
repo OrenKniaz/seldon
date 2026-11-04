@@ -22,6 +22,80 @@ from codex_harness.core.planner_audits import AuditTemporaryDirectory as Tempora
 CMD_META = '&|<>^%!"\r\n'
 
 
+def executable_scenarios(trace, document):
+    """Project worker test commands from the compiled trace, preserving revision links."""
+    from copy import deepcopy
+    from codex_harness.core.spine import Spine, requirement_refs
+
+    document = deepcopy(document)
+    if not trace:
+        return document
+    spine = Spine(dict(trace))
+    tests, covered = [], set()
+    for key in spine.ids("test"):
+        node = spine.node(key)
+        execution = node["fields"].get("execution")
+        if execution is None:
+            continue
+        requirements = [f"{r['id']}@{r['revision']}" for r in requirement_refs(spine, key)]
+        covered.update(r.split("@", 1)[0] for r in requirements)
+        tests.append(dict(
+            id=key, testRef=dict(id=key, revision=spine.revision(key)),
+            rationale=execution["rationale"], requirementRefs=requirements,
+            contractRefs=[f"{k}@{spine.revision(k)}" for k in spine.ancestors(key)
+                          if spine.node(k)["kind"] in {"architecture", "design", "contract"}],
+            setup={}, actions=[dict(id="execute", process=dict(argv=execution["argv"]))],
+            observe=[dict(action="execute", exitEquals=0)], verdict="all",
+        ))
+    # Replace only compiler placeholders; authored observations remain independent evidence.
+    document["scenarios"] = [s for s in document["scenarios"] if not (
+        not s["actions"] and s["requirementRefs"]
+        and all(r.split("@", 1)[0] in covered for r in s["requirementRefs"]))] + tests
+    ids = [s["id"] for s in document["scenarios"]]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Executable test IDs must be distinct from scenario IDs")
+    return document
+
+
+def execution_sources(root, trace):
+    """Bounded source capture is judge context, never executable eligibility."""
+    import hashlib
+
+    root, sources = Path(root).resolve(), []
+    for node in (trace or {}).get("nodes", []):
+        if node["kind"] != "test":
+            continue
+        fields = node["fields"]
+        names = [fields.get("module", ""), *fields.get("execution", {}).get("argv", [])]
+        for name in dict.fromkeys(names):
+            file = (root / name).resolve()
+            if not file.is_relative_to(root) or not file.is_file():
+                continue
+            with file.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                stream.seek(0)
+                raw = stream.read(16385)
+            body = raw[:16384].decode("utf-8", errors="replace")
+            sources.append(dict(testId=node["id"], path=file.relative_to(root).as_posix(),
+                                sha256=digest, body=body, omitted=file.stat().st_size > 16384,
+                                flags=[p for p in ("SELDON-STUB", "mock", "TODO") if p in body]))
+    return sources
+
+
+def execution_witnesses(integrated):
+    """Admit bound observations for relevance judgment, without language/coverage gates."""
+    import hashlib
+
+    validation = integrated.get("validation", {})
+    observations = (validation.get("observations") or {}).get("tests", [])
+    observations = [*observations, *integrated.get("semantic", {}).get("results", [])]
+    if not observations and validation:
+        observations = [validation]
+    return [dict(id=o.get("id") or f"process-{i}", artifactPaths=[], observation=o,
+                 sha256=hashlib.sha256(json.dumps(o, sort_keys=True).encode()).hexdigest())
+            for i, o in enumerate(observations)]
+
+
 def _module_startup_identity():
     """Bind supported interpreter hooks, not arbitrary startup customization.
 
@@ -1082,7 +1156,7 @@ def _resolve_runner(manifest: Mapping) -> Runner:
 def validate_proof(
     repo: Path, manifest: Mapping | Plan, module: str, *, owned_files: tuple[str, ...] = ()
 ) -> dict:
-    """Require useful observed unittest execution, or command exit success."""
+    """Observe process success; collected test counts never decide meaningfulness."""
     runner = resolve_runner(manifest)
     command = []
     try:
@@ -1119,13 +1193,6 @@ def validate_proof(
                 for record in records
             )
             tests_run = observations.get("testsRun")
-            valid = (
-                not observations.get("reason")
-                and type(tests_run) is int
-                and tests_run == len(records)
-                and type(observations.get("selected")) is int
-                and observations["selected"] >= tests_run
-            )
             return {
                 "module": module,
                 **result,
@@ -1134,7 +1201,8 @@ def validate_proof(
                 "testsRun": tests_run,
                 "successfulTests": successful,
                 "nonSkippedTestsRun": observed,
-                "passed": bool(result["passed"] and valid and observed > 0 and successful > 0),
+                "passed": result["passed"],
+                "judgmentStatus": "pending-judgment",
             }
         result = run_audit_process(
             command, cwd=repo / runner.cwd, capture_output=True, text=True, timeout=120

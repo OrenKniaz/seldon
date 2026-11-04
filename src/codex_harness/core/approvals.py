@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from contextlib import nullcontext
 from copy import deepcopy
 from uuid import uuid4
 
@@ -11,38 +12,16 @@ from codex_harness.core.reviewer_evidence import review_tier
 from codex_harness.core.spine import Spine
 
 EFFECTS = {
-    "A": "Approve confirms understanding and locks this scope and these expansion decisions.",
-    "B": "Yes authorizes scoped work, workers, all reviews, validation and quiescent same-work "
-    "recovery within B's limits. User provider/model restrictions apply to reviewers. "
+    "A": "Your decision confirms understanding and locks this scope and these expansion decisions.",
+    "B": "Your decision authorizes scoped work, workers, reviews, validation and quiescent same-work "
+    "recovery. User provider/model restrictions apply to reviewers. "
     "Cross-subscription is preferred, never required; two distinct same-provider reviewers "
     "are accepted. No separate exception decision is needed.",
 }
 EVENT = "approval-v2-recorded"
-AFFIRMATIVE = {
-    "approve",
-    "approved",
-    "yes",
-    "accept",
-    "accepted",
-    "i approve",
-    "i accept",
-    "confirmed",
-}
-CHOICES = ["Yes", "Approve", "No", "Cancel", "Changes: <text>"]
+CHOICES = ["Reply in your own words; approve, decline, or describe changes"]
 
 UNDERSTANDING_FIELDS = tuple(aliases[0] for _, aliases in SECTIONS if aliases[0] != "assumptions")
-INTENT_FIELDS = {key for _, aliases in SECTIONS for key in aliases} | {
-    "expansion",
-    "journey",
-    "taste",
-    "designRefs",
-}
-
-
-def decision(words):
-    return " ".join(words.casefold().split()).rstrip(".!")
-
-
 def fingerprint(value):
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
@@ -64,7 +43,17 @@ def records(store, event):
 
 def current(store, kind):
     """Only the latest decision counts; a refusal supersedes earlier consent."""
-    return next((r for r in records(store, EVENT) if r["subject"]["kind"] == kind), None)
+    saved = next((r for r in records(store, EVENT) if r["subject"]["kind"] == kind), None)
+    request = latest_request(store, kind)
+    if saved and request and request["request_id"] != saved["request_id"]:
+        responded = {r["request_id"] for r in records(store, "confirmation-responded")}
+        if request["request_id"] not in responded and any(
+            r["request_id"] == request["request_id"] for r in records(store, "confirmation-pending-judgment")
+        ):
+            return dict(saved, state="pending-judgment")
+    if saved and saved["state"] == "approved" and not saved.get("judgment"):
+        return dict(saved, state="pending-judgment")
+    return saved
 
 
 def latest_request(store, kind):
@@ -82,8 +71,45 @@ def intent(vision):
     return {
         "title": vision["title"],
         "understanding": vision["text"],
-        "fields": {k: v for k, v in vision["fields"].items() if k in INTENT_FIELDS},
+        "fields": deepcopy(vision["fields"]),
     }
+
+
+def assess(store, purpose, facts, *, subject_ids=None, prepare=True):
+    """Bind gathered facts to the single 1j judgment; never infer a verdict."""
+    identity = fingerprint(dict(purpose=purpose, facts=facts))
+    with nullcontext() if not prepare or store.connection.in_transaction else store._transaction():
+        for saved in records(store, "semantic-assessment-requested"):
+            if saved["factsDigest"] == identity:
+                result = store.judgment(saved["judgmentId"])
+                if result["current"]:
+                    return dict(result, purpose=purpose)
+        if not prepare:
+            return dict(status="pending-judgment", positiveCredit=False, concreteGap=False,
+                        meaning={}, purpose=purpose)
+        store._event("semantic-facts", dict(purpose=purpose, facts=facts))
+        event_id = store.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        judgment = store.prepare_judgment(question=purpose,
+            subject_ids=subject_ids or store.spine().ids("vision"), source_event_ids=[event_id])
+        store._event("semantic-assessment-requested", dict(factsDigest=identity, judgmentId=judgment["id"]))
+        return dict(store.judgment(judgment["id"]), purpose=purpose)
+
+
+def expansion_assessment(store, *, prepare=True):
+    vision = store.spine().node(store.spine().ids("vision")[0])
+    return assess(store, "vision-expansion", dict(vision=vision,
+        question="Are the macro/micro improvements and applicable quality criteria adequate? "
+        "Consider UX/visual, performance, maintainability, architecture, observability and failure "
+        "behavior; research reasons/choices, open-loop metric/provenance/stops and brownfield "
+        "existing behavior/evidence where applicable. Counts never establish adequacy."), prepare=prepare)
+
+
+def intent_assessment(store, vision, *, prepare=True):
+    locked = json.loads(store._meta()["locked_vision_json"])
+    return assess(store, "vision-intent", dict(before=locked, after=vision,
+        diff=field_diff(locked, vision), question="Judge complete before/after intent and impact. "
+        "meaning.impact is preserved, changed or narrowed; explain affected trace items. "
+        "Narrowing must become a visible user-approved deviation."), prepare=prepare)
 
 
 def reviewer_tuple(reviewer):
@@ -157,7 +183,8 @@ def subject(store, kind, proposed_action=None):
         explanation = "Additional review round after the cumulative allowance was spent"
     return {
         **result,
-        "aFingerprint": fingerprint(subject(store, "A")),
+        "planRevision": store._revision(),
+        "aFingerprint": (current(store, "A") or {}).get("fingerprint", fingerprint(subject(store, "A"))),
         "execution": dict(workers=execution["workers"], **limits),
         "reviewers": reviewers,
         "reviewTier": review_tier(reviewers),
@@ -198,13 +225,21 @@ def field_diff(before, after, path=""):
 
 def render(payload, changes):
     lines = [
-        f"Your decision: approve {payload['kind']}? Reply {', '.join(CHOICES)}.",
+        f"Your decision: {payload['kind']}. {CHOICES[0]}.",
         payload["effect"],
     ]
     if payload["kind"] == "B":
-        lines.append(f"B includes up to {payload['reviewAllowance']} reviews in total.")
         lines.append("Review tier: " + payload["reviewTier"])
         lines.append("catalog: " + payload["catalog"])
+        budget_fields = {"reviewPolicy", "scheduledReviewStarts", "repairReserve", "reviewAllowance", "allowanceReason"}
+        payload = {k: v for k, v in payload.items() if k not in budget_fields}
+        payload["execution"] = {k: v for k, v in payload["execution"].items() if k != "callCap"}
+        changes = deepcopy([c for c in changes if c["field"].split(".")[0] not in budget_fields and c["field"] != "execution.callCap"])
+        for change in changes:
+            if change["field"] == "execution":
+                for side in ("before", "after"):
+                    if isinstance(change[side], dict):
+                        change[side].pop("callCap", None)
     lines.extend(
         f"{title}:\n{json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)}"
         for title, value in (
@@ -225,20 +260,12 @@ def proposal(store, kind, proposed_action=None):
         diff=changes,
         card=render(payload, changes),
     )
-    if kind == "B":
-        from codex_harness.core.provider_call_budget import usage
-
-        result["usage"] = {
-            "reviewUsed": usage(store, "review"),
-            "workerUsed": usage(store, "worker"),
-        }
-        result["card"] += (
-            f"\nReview starts: {result['usage']['reviewUsed']} used; "
-            f"{max(0, payload['reviewAllowance'] - result['usage']['reviewUsed'])} remaining."
-            f"\nWorker starts: {result['usage']['workerUsed']} used; "
-            f"{max(0, payload['execution']['callCap'] - result['usage']['workerUsed'])} remaining."
-            " Usage is cumulative and does not verify provider quota."
-        )
+    if kind == "A" and store._meta()["locked_vision_json"] and changes:
+        impact = intent_assessment(store, store.spine().node(store.spine().ids("vision")[0]), prepare=False)
+        result["intentJudgment"] = impact
+        result["deviation"] = dict(judgmentId=impact.get("id"), diff=changes,
+                                   impact=impact["meaning"].get("impact", "pending-judgment"))
+        result["card"] += "\nProposed charter deviation (requires your approval):\n" + canonical(result["deviation"])
     return result
 
 
@@ -250,29 +277,47 @@ def require_approval(store, kind, proposed_action=None):
     saved = current(store, kind)
     if saved and saved["state"] == "approved" and saved["fingerprint"] == proposed["fingerprint"]:
         return saved
+    if kind == "A" and saved and saved["state"] == "approved":
+        impact = proposed.get("intentJudgment", {})
+        if impact.get("positiveCredit") and impact["meaning"].get("impact") == "preserved":
+            return saved
     code = f"plan-{kind.lower()}-consent-required"
     error = PlanStoreError(code, code + ": " + proposed["card"])
     error.approval = proposed
     raise error
 
 
-def record_approval(store, request, *, words, actor, channel, affirmative, state, conditions=""):
+def record_approval(store, request, *, words, actor, channel, affirmative, state, conditions="", source=None):
     """Caller owns the SQLite transaction encompassing response and scope recheck."""
     if not isinstance(words, str) or not isinstance(actor, str) or not actor.strip():
         raise ValueError("approval-words-and-actor-required")
     payload = request["subject"]
-    answer = decision(words)
-    if state not in {"stale", "decline", "cancel"}:
-        if conditions:
-            state = "changes-requested"
-        elif answer in {"no", "cancel"}:
-            state = "declined" if answer == "no" else "cancel"
-        elif not affirmative or state != "accept" or answer not in AFFIRMATIVE:
-            state = "changes-requested"
-    if state == "accept" and fingerprint(payload) != fingerprint(
+    judgment = None
+    if fingerprint(payload) != fingerprint(
         subject(store, payload["kind"], request.get("proposedAction"))
     ):
         state = "stale"
+    if state not in {"stale", "decline", "declined", "cancel"}:
+        if payload["kind"] == "A":
+            judgment = expansion_assessment(store)
+            if judgment["positiveCredit"] and request.get("deviation"):
+                judgment = intent_assessment(store, store.spine().node(store.spine().ids("vision")[0]))
+                if judgment["meaning"].get("impact") not in {"preserved", "changed", "narrowed"}:
+                    judgment = dict(judgment, positiveCredit=False, concreteGap=False, status="pending-judgment")
+        if judgment is None or judgment["positiveCredit"]:
+            judgment = assess(store, "user-decision", dict(request_id=request["request_id"],
+                subject=payload, revision=request["plan_revision"], words=words, actor=actor,
+                channel=channel, conditions=conditions, source=source, question="Interpret these exact user words "
+                "against this displayed subject. meaning.decision is approve, decline, cancel or "
+                "changes-requested. Ambiguity stays inconclusive. Do not invent user authority."),
+                subject_ids=store.spine().ids() if payload["kind"] == "B" else None)
+            choice = judgment["meaning"].get("decision") if judgment["positiveCredit"] else None
+            state = {"approve": "accept", "decline": "declined", "cancel": "cancel",
+                     "changes-requested": "changes-requested"}.get(choice, "pending-judgment")
+        else:
+            state = "pending-judgment"
+        if judgment["concreteGap"]:
+            state = "changes-requested"
     record = dict(
         id=uuid4().hex,
         subject=payload,
@@ -284,8 +329,10 @@ def record_approval(store, request, *, words, actor, channel, affirmative, state
         state="approved" if affirmative and state == "accept" else state,
         request_id=request["request_id"],
         human_identity_verified=False,
+        judgment=judgment,
+        deviation=request.get("deviation"),
     )
-    if state != "stale":
+    if state not in {"stale", "pending-judgment"}:
         store._event(EVENT, record)
     if record["state"] == "approved" and payload["kind"] == "A":
         spine = Spine(store._data())

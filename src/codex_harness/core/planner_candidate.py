@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -12,63 +13,131 @@ def file_hashes(root, names):
     from codex_harness.core.planner_jobs import _inside
 
     files = {name: _inside(root, Path(root) / name) for name in names}
-    return {
-        name: hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
-        for name, file in sorted(files.items())
-    }
+    hashes = {}
+    for name, file in sorted(files.items()):
+        if file.is_file():
+            with file.open("rb") as stream:
+                hashes[name] = hashlib.file_digest(stream, "sha256").hexdigest()
+        else:
+            hashes[name] = None
+    return hashes
+
+
+def observation_files(root):
+    from codex_harness.core.semantic_runner import SOURCE_IGNORED
+
+    root, names = Path(root).resolve(), []
+    for base, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = [n for n in dirs if n not in SOURCE_IGNORED]
+        for name in files:
+            if name not in SOURCE_IGNORED:
+                names.append((Path(base) / name).relative_to(root).as_posix())
+    return file_hashes(root, names)
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def _execution_identity(plan):
+    from codex_harness.core import runners
+    from codex_harness.core.dispatch import _semantic_identity
+
+    return dict(_semantic_identity(plan), executionAdapter=file_hashes(
+        Path(__file__).parent, [Path(__file__).name, Path(runners.__file__).name]))
+
+
+def _evidence_digest(proof):
+    assessment = {"evidenceBinding", "state", "admitted", "passed", "judgmentStatus",
+                  "judgmentId", "gaps", "assessedObservationState"}
+    return _digest({k: v for k, v in proof.items() if k not in assessment})
+
+
+def assess_execution(proof, judgment=None):
+    """Consume shared current judgment credit; process failures remain observations."""
+    if _evidence_digest(proof) != proof["evidenceBinding"]:
+        raise ValueError("Execution observation hash changed; retain original evidence")
+    result = dict(proof, admitted=False, passed=False, judgmentStatus="pending-judgment")
+    for key in ("gaps", "judgmentId", "assessedObservationState"):
+        result.pop(key, None)
+    contracts = proof["phase"] == "contracts"
+    observed = proof["observedState"]
+    result["state"] = observed if observed in {"ERROR", "FAIL"} else "pending-judgment"
+    meaning = (judgment or {}).get("meaning", {})
+    bound = bool(judgment and judgment.get("candidate") == proof["candidate"]
+                 and judgment.get("current") and meaning.get("check") == "execution"
+                 and meaning.get("evidenceBinding") == proof["evidenceBinding"])
+    if not bound:
+        return result
+    result["judgmentId"] = judgment["id"]
+    if judgment["concreteGap"]:
+        result.update(state="FAIL", judgmentStatus="judged", gaps=judgment["gaps"])
+    elif judgment["positiveCredit"] and meaning.get("meaningful") is True and (
+        meaning.get("correctFailureReason") is True if contracts
+        else meaning.get("noStubMockGaps") is True
+    ):
+        result["judgmentStatus"] = "judged"
+        if observed == "pending-judgment" and proof["results"] and all(
+            not r.get("unperformed") and r.get("actions") for r in proof["results"]
+        ):
+            missing = [o["check"] for r in proof["results"] for o in r.get("observations", [])
+                       if o["passed"] is None]
+            answers = meaning.get("qualitativeChecks", {})
+            if missing and isinstance(answers, dict) and all(answers.get(k) is True for k in missing):
+                observed = "RED" if contracts and any(
+                    r["state"] == "FAIL" for r in proof["results"]) else "PASS"
+                result["assessedObservationState"] = observed
+        if observed == ("RED" if contracts else "PASS"):
+            result.update(state=observed, admitted=True, passed=not contracts)
+    return result
 
 
 def _semantic_validation(root, plan, record, phase):
     from codex_harness.core import semantic_runner
-    from codex_harness.core.dispatch import _git, _semantic_identity
+    from codex_harness.core.dispatch import _git
+    from codex_harness.core.runners import executable_scenarios, execution_sources
 
-    identity = _semantic_identity(plan)
+    identity = _execution_identity(plan)
     red = record.get("contractsRed")
     if phase == "build" and (
-        not red or red.get("state") != "RED" or any(red.get(k) != v for k, v in identity.items())
+        not red or red.get("state") != "RED" or not red.get("admitted")
+        or any(red.get(k) != v for k, v in identity.items())
     ):
-        raise ValueError(
-            "semantic-v1 requires current Contracts RED; scenarios/contracts/runner changed"
-        )
+        raise ValueError("Current judged Contracts RED required; refresh changed bindings")
+    sources = execution_sources(root, plan.trace)
     names = {name for bead in plan.beads.values() for name in bead.owned_files}
     before = file_hashes(root, names)
-    results = semantic_runner.run(
-        plan.semantic["scenarios"],
-        root,
-        plan.semantic["targets"],
-        "contracts" if phase == "contracts" else "validation",
-        judgments=record.get("judgments"),
-    )
-    if file_hashes(root, names) != before:
+    observed_files = observation_files(root)
+    document = executable_scenarios(plan.trace, plan.semantic["scenarios"])
+    results = semantic_runner.run(document, root, plan.semantic["targets"],
+                                  "contracts" if phase == "contracts" else "validation")
+    if observation_files(root) != observed_files:
         raise ValueError("Validation candidate bytes changed during observation")
-    expected = plan.semantic["scenarios"]["scenarios"]
-    contracts = phase == "contracts"
-    admitted = len(results) == len(expected) and all(
-        r["id"] == s["id"]
-        and r["state"] == ("FAIL" if contracts else "PASS")
-        and r.get("stubActions", []) == ([a["id"] for a in s["actions"]] if contracts else [])
-        for r, s in zip(results, expected, strict=True)
+    expected = [s["id"] for s in document["scenarios"]]
+    states = [r["state"] for r in results]
+    complete = [r["id"] for r in results] == expected and bool(expected)
+    observed = ("ERROR" if not complete or "ERROR" in states else
+                "RED" if phase == "contracts" and "FAIL" in states else
+                "FAIL" if "FAIL" in states else
+                "pending-judgment" if "pending-judgment" in states else "PASS")
+    # A partial run cannot establish correct RED, even if an earlier test failed.
+    if phase == "contracts" and "pending-judgment" in states and observed != "ERROR":
+        observed = "pending-judgment"
+    proof = dict(
+        **identity, phase="contracts" if phase == "contracts" else "validation",
+        observedState=observed, candidateCommit=_git(root, "rev-parse", "HEAD"),
+        candidateTree=_git(root, "rev-parse", "HEAD^{tree}"), candidateFiles=before,
+        observationFiles=observed_files,
+        candidate=_digest(dict(files=observed_files, **identity)),
+        baseline=None if not red else dict(candidate=red["candidate"],
+                                          evidenceBinding=red["evidenceBinding"]),
+        linkedRed=_digest(red) if red else None, results=results, testSources=sources,
+        tests=[dict(id=s["id"], requirementRefs=s["requirementRefs"],
+                    contractRefs=s["contractRefs"], testRef=s.get("testRef"),
+                    rationale=s.get("rationale")) for s in document["scenarios"]],
     )
-    passed = admitted and not contracts
-    state = (
-        ("RED" if contracts else "PASS")
-        if admitted
-        else ("ERROR" if contracts or any(r["state"] == "ERROR" for r in results) else "FAIL")
-    )
-    return {
-        **identity,
-        "phase": "contracts" if phase == "contracts" else "validation",
-        "state": state,
-        "passed": passed,
-        "admitted": admitted,
-        "candidateCommit": _git(root, "rev-parse", "HEAD"),
-        "candidateTree": _git(root, "rev-parse", "HEAD^{tree}"),
-        "candidateFiles": before,
-        "linkedRed": hashlib.sha256(json.dumps(red, sort_keys=True).encode()).hexdigest()
-        if red
-        else None,
-        "results": results,
-    }
+    proof["evidenceBinding"] = _evidence_digest(proof)
+    return assess_execution(proof, record.get("judgments", {}).get("execution"))
 
 
 def _read_git(root, *arguments):
@@ -103,9 +172,12 @@ def retained(workspace, job_id):
     if (directory / "stop.json").exists():
         raise ValueError("revalidate: quarantined attempt; readmit within B")
     request = jobs._request(directory)
-    terminal = read_record_json(jobs._inside(directory, directory / "terminal.json"))
+    terminal_path = jobs._inside(directory, directory / "terminal.json")
+    terminal = read_record_json(terminal_path if terminal_path.is_file() else directory / "started.json")
     if terminal.get("requestDigest") != request["requestDigest"]:
         raise ValueError("revalidate: terminal identity mismatch; inspect original job")
+    if not terminal_path.is_file() and terminal.get("pid") != os.getpid():
+        raise ValueError("revalidate: wait for the original worker owner or verified quiescence")
     paths = list(directory.glob("runs/*/evidence/run.json"))
     if len(paths) != 1:
         raise ValueError("revalidate: one retained run required; inspect job evidence")
@@ -115,28 +187,17 @@ def retained(workspace, job_id):
     if run["planRevision"] != request["publicationRevision"] or plan.semantic is None:
         raise ValueError("revalidate: retained semantic publication required; inspect job")
     manifest = read_record_json(directory / "plan/sample.json")
-    builds = [
-        plan.beads[key] for key, b in manifest["beads"].items() if b["semanticPhase"] == "build"
-    ]
-    if len(builds) != 1:
-        raise ValueError("revalidate: one completed Build required; inspect run")
-    bead = run["beads"][builds[0].id]
+    pending = [key for key in plan.beads if
+               (run["beads"][key].get("integrated") or {}).get("semantic", {}).get("state")
+               in {"FAIL", "ERROR", "pending-judgment"}]
+    if len(pending) != 1:
+        raise ValueError("revalidate: select one retained observed candidate")
+    bead_id = pending[0]
+    bead = run["beads"][bead_id]
     state = read_record_json(
         jobs._inside(directory, Path(bead["evidenceDir"]) / "integration-state.json")
     )
-    semantic = (bead.get("integrated") or {}).get("semantic", {})
-    verifier_error = (
-        not semantic
-        and bead["status"].startswith("bead failed:")
-        and bead.get("candidate", {}).get("commit") == state.get("candidateCommit")
-        and bead.get("guard", {}).get("passed") is True
-    )
-    if not verifier_error and (
-        semantic.get("phase") != "validation" or semantic.get("state") not in {"FAIL", "ERROR"}
-    ):
-        raise ValueError(
-            "revalidate: no failed Validation candidate; inspect or finish Build first"
-        )
+    semantic = bead["integrated"]["semantic"]
     root = jobs._inside(directory, Path(state["candidateWorktree"]))
     semantic = semantic or state
     repo = jobs._inside(directory, Path(run["repo"]))
@@ -152,7 +213,7 @@ def retained(workspace, job_id):
     return dict(
         runPath=str(path),
         runDigest=jobs._digest(run),
-        bead=builds[0].id,
+        bead=bead_id,
         candidateCommit=semantic["candidateCommit"],
         candidateTree=semantic["candidateTree"],
         verifier=d._semantic_identity(plan),
@@ -253,73 +314,99 @@ def delivered_candidate(store, repo):
 
 
 def judgment_binding(store, repo):
-    manifest = store._manifest(store.spine())
-    names = {n for b in manifest["beads"].values() for n in b["ownedFiles"]}
-    from codex_harness.core.approvals import fingerprint, intent
-    from codex_harness.core.semantic_runner import web_toolchain
+    """Candidate identity includes worker tests, trace, product bytes and observation tools."""
+    from codex_harness.core.graph import load_plan
+    from codex_harness.core.planner_audits import AuditTemporaryDirectory
 
-    return dict(
-        files=file_hashes(repo, names),
-        scenarios=fingerprint(manifest["semantic"]),
-        intent=fingerprint(
-            intent(store.locked_acceptance_spine().node(store.spine().ids("vision")[0]))
-        ),
-        tools=web_toolchain(None, False),
-    )
+    root = Path(repo).resolve()
+    _, run = current_job_run(store)
+    if root in {store.workspace.resolve(), Path(run["repo"]).resolve()}:
+        if root == store.workspace.resolve():
+            delivered_candidate(store, root)
+        elif (_read_git(root, "status", "--porcelain") or
+              _read_git(root, "rev-parse", "HEAD^{tree}") != run["semanticValidation"]["candidateTree"]):
+            raise ValueError("judgment: integrated candidate changed; select unchanged observations")
+        root = Path(next(b["integrated"]["root"] for b in run["beads"].values()
+            if (b.get("integrated") or {}).get("semantic", {}).get("candidate") ==
+            run["semanticValidation"]["candidate"]))
+    manifest = store._manifest(store.spine())
+    with AuditTemporaryDirectory(prefix="seldon-judgment-") as temp:
+        file = Path(temp) / "sample.json"
+        file.write_text(json.dumps(manifest), encoding="utf-8")
+        plan = load_plan(file)
+    return dict(files=observation_files(root), **_execution_identity(plan))
 
 
 def judgments_for(store, repo):
+    """Resolve 1j records through the canonical consumer; never trust legacy passed flags."""
     from codex_harness.core.approvals import records
 
-    binding = judgment_binding(store, repo)
-    result = {}
+    candidate = _digest(judgment_binding(store, repo))
+    result, seen = {}, set()
     for row in records(store, "candidate-judgment"):
-        if row["binding"] == binding:
-            result.setdefault(row["check"], row)
+        if row.get("candidate") != candidate or not row.get("judgmentId"):
+            continue
+        if row["check"] in seen:
+            continue
+        seen.add(row["check"])
+        judgment = store.judgment(row["judgmentId"], candidate=candidate)
+        meaning = judgment["meaning"]
+        if (judgment["current"] and meaning.get("check") == row["check"]
+                and meaning.get("evidenceBinding") == row["evidenceBinding"]):
+            result.setdefault(row["check"], dict({key: judgment[key] for key in (
+                "id", "binding", "candidate", "status", "current", "positiveCredit", "concreteGap",
+                "verdict", "rationale", "meaning", "gaps", "source", "sourceVerified")},
+                passed=True if judgment["positiveCredit"] else
+                       False if judgment["concreteGap"] else None))
     return result
 
 
-def record_judgment(store, *, repo, check, passed, statement, by):
-    """Retain a caller-mediated human observation, never turn it into machine measurement."""
-    from codex_harness.core import planner_jobs as jobs
-
-    if check not in {"textContrastAA", "visualQuality"} or type(passed) is not bool:
-        raise ValueError("judgment: select textContrastAA or visualQuality and a boolean verdict")
-    if any(not isinstance(v, str) or not v.strip() for v in (statement, by)):
-        raise ValueError("judgment: actual observation words and observer required")
-    spine = store.spine()
-    fields = spine.node(spine.ids("vision")[0])["fields"]
-    if not any(t.get("kind") == "web" for t in fields.get("targets", {}).values()):
-        raise ValueError("judgment: web candidate required")
+def record_judgment(store, *, repo, check, judgment_id=None, passed=None, statement=None, by=None):
+    """Prepare or attach the one 1j judgment. Caller observations alone grant no credit."""
+    if not isinstance(check, str) or not check.strip():
+        raise ValueError("judgment: name the assessment check")
     root = Path(repo).resolve()
-    directory, run = current_job_run(store)
-    job_id = jobs._request(directory)["jobId"]
-    if root in {store.workspace.resolve(), Path(run["repo"]).resolve()}:
-        delivered_candidate(store, root)
+    binding = judgment_binding(store, root)
+    candidate = _digest(binding)
+    spine = store.spine()
+    subjects = sorted({*spine.ids("test"), *spine.ids("requirement"), *spine.ids("vision")})
+    _, run = current_job_run(store)
+    proofs = [(b.get("integrated") or {}).get("semantic") for b in run["beads"].values()]
+    proof = next((p for p in proofs if p and p.get("candidate") == candidate), None)
+    if proof is None:
+        raise ValueError("judgment: select the unchanged observed candidate")
+    evidence_binding = proof["evidenceBinding"] if check == "execution" else _digest(
+        dict(candidate=candidate, check=check, results=proof["results"]))
+    if judgment_id is None:
+        with store._transaction():
+            store._event("candidate-observation", dict(check=check, candidate=candidate,
+                evidenceBinding=evidence_binding, proof=proof,
+                callerObservation=dict(passed=passed, statement=statement, by=by),
+                humanIdentityVerified=False))
+            event_id = store.connection.execute("SELECT max(id) FROM events").fetchone()[0]
+        judgment = store.prepare_judgment(question=(
+            f"Assess {check}: meaningful tests, correct failure reason and identified stub/mock gaps. "
+            f"Return meaning.check={check!r}, meaning.evidenceBinding={evidence_binding!r}; "
+            "for execution positive credit also requires meaningful:true and "
+            "correctFailureReason:true (Contracts) or noStubMockGaps:true (Validation). "
+            "Uncertain assessments stay inconclusive/unsupported; negative verdicts name gaps."),
+            subject_ids=subjects, source_event_ids=[event_id], candidate=candidate)
     else:
-        selected = retained(store.workspace, job_id)
-        bead = run["beads"][selected["bead"]]
-        if root != Path(bead["integrated"]["root"]).resolve():
-            raise ValueError("judgment: select the unchanged retained Validation candidate")
-    row = dict(
-        check=check,
-        passed=passed,
-        statement=statement,
-        by=by,
-        binding=judgment_binding(store, root),
-        humanIdentityVerified=False,
-        source="caller-mediated human observation",
-    )
+        judgment = store.judgment(judgment_id, candidate=candidate)
+        packets = [r["payload"] for r in judgment["sourceRefs"] if r["kind"] == "candidate-observation"]
+        if (not judgment["current"] or not any(
+            p.get("candidate") == candidate and p.get("check") == check
+            and p.get("evidenceBinding") == evidence_binding for p in packets)
+            or {r["id"] for r in judgment["subjectRefs"]} != set(subjects)):
+            raise ValueError("judgment: bind the current candidate observation and subjects")
     with store._transaction():
-        store._event("candidate-judgment", row)
-    from codex_harness.core.planner_consent_views import status_next
-
-    row["next"] = status_next(store.status(), store=store)
-    return row
+        store._event("candidate-judgment", dict(check=check, candidate=candidate,
+            evidenceBinding=evidence_binding, judgmentId=judgment["id"]))
+    return store.judgment(judgment["id"], candidate=candidate)
 
 
 def revalidate(store, job_id, request_id):
-    """Rerun verifiers, then let the existing integrator accept or reject the candidate."""
+    """Reuse unchanged observations, consume judgment, then use the ordinary integrator."""
     from codex_harness.core import dispatch as d
     from codex_harness.core import planner_jobs as jobs
 
@@ -333,26 +420,20 @@ def revalidate(store, job_id, request_id):
     run = read_record_json(path)
     plan = d.graph.load_plan(directory / "plan")
     bead = run["beads"][selected["bead"]]
-    red = bead["contractsRed"]
-    if any(red.get(k) != v for k, v in d._semantic_identity(plan).items()):
-        contracts = run["beads"][plan.beads[selected["bead"]].depends_on[0]]
-        red_root = jobs._inside(directory, Path(contracts["integrated"]["root"]))
-        red = d._semantic_validation(red_root, plan, contracts, "contracts")
-        d._write_record(Path(bead["evidenceDir"]) / f"contracts-{request_id}.json", red)
-    if red["state"] != "RED":
-        raise ValueError(
-            "revalidate: retained Contracts no longer RED; inspect verifier results: "
-            + json.dumps(red["results"])
-        )
-    bead["contractsRed"] = red
-    bead["judgments"] = (
-        judgments_for(store, Path(bead["integrated"]["root"]))
-        if any(t.get("kind") == "web" for t in plan.semantic["targets"].values())
-        else {}
-    )
+    phase = manifest["beads"][selected["bead"]]["semanticPhase"]
+    root = Path(bead["integrated"]["root"])
+    proof = bead["integrated"]["semantic"]
+    if (any(proof.get(k) != v for k, v in _execution_identity(plan).items())
+            or observation_files(root) != proof["observationFiles"]):
+        raise ValueError("revalidate: changed evidence requires fresh execution before judgment")
+    bead["judgments"] = judgments_for(store, root)
+    proof = assess_execution(proof, bead["judgments"].get("execution"))
     receipt = jobs._inside(directory, Path(bead["evidenceDir"]) / "integrated.json")
-    if receipt.exists():
-        receipt.rename(receipt.with_name(f"validation-{request_id}.json"))
+    original = read_record_json(receipt)
+    if original["semantic"]["evidenceBinding"] != proof["evidenceBinding"]:
+        raise ValueError("revalidate: original observation receipt differs")
+    original.update(semantic=proof, validation=dict(passed=proof["passed"]))
+    d._write_record(receipt, original)
     bead["status"] = "running"
     bead["integrated"] = None
     d._integrate_bead(
@@ -368,11 +449,12 @@ def revalidate(store, job_id, request_id):
     if bead["integrated"] is None:
         raise ValueError("revalidate refused: " + bead["status"] + "; inspect attempt provenance")
     proof = bead["integrated"]["semantic"]
-    run["semanticValidation"] = proof
+    run["semanticContracts" if phase == "contracts" else "semanticValidation"] = proof
     run["status"] = (
-        (d.STATUS_MOCK_ONLY if run["isMocked"] else d.STATUS_VALIDATED)
-        if proof["passed"]
-        else f"plan-failed: {selected['bead']} {bead['status']}"
+        "pending-judgment" if proof["state"] == "pending-judgment" else
+        "pending-build" if phase == "contracts" and proof["admitted"] else
+        (d.STATUS_MOCK_ONLY if run["isMocked"] else d.STATUS_VALIDATED) if proof["passed"] else
+        f"plan-failed: {selected['bead']} {bead['status']}"
     )
     run["finishedAt"] = d._now()
     index = list(d.graph.topological_order(plan)).index(selected["bead"])
@@ -387,7 +469,21 @@ def revalidate(store, job_id, request_id):
         bead.get("specRefs"),
     )
     d._write_record(path, run)
+    if (phase == "contracts" and proof["admitted"] and
+            read_record_json(directory / "started.json")["pid"] == os.getpid()):
+        workers = jobs._workers(manifest, request["options"]["workers"])
+        run = d.run_plan(directory / "plan", work_root=directory / "runs",
+            resume_run_dir=path.parent.parent,
+            provider_for={w["bead"]: w["provider"] for w in workers},
+            model_for={w["bead"]: w["model"] for w in workers},
+            effort_for={w["bead"]: w["effort"] for w in workers},
+            max_parallel=request["options"]["maxParallel"], timeout=request["options"]["timeout"],
+            max_provider_calls=request["options"]["callCap"], execution_job=directory,
+            setup=store.spine().node(store.spine().ids("vision")[0])["fields"].get("setup", {}),
+            intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"])
+        proof = run.get("semanticValidation") or run["semanticContracts"]
     delivery = deliver(store.workspace, request, run)
     return dict(
-        state=proof["state"], results=proof["results"], delivery=delivery, runId=run["runId"]
+        state="pending-build" if run["status"] == "pending-build" else proof["state"],
+        results=proof["results"], delivery=delivery, runId=run["runId"]
     )

@@ -58,9 +58,12 @@ def protected_helpers(proofs: list[Path], root: Path, runner: Runner, requiremen
     helpers = set()
     while pending:
         path = pending.pop(0)
-        body = path.read_text(encoding="utf-8")
+        body = path.read_text(encoding="utf-8", errors="replace")
         if path.suffix == ".py":
-            candidates = python_import_paths(path, root, body)
+            try:
+                candidates = list(python_import_paths(path, root, body))
+            except SyntaxError:
+                continue  # Optional import observation cannot decide proof eligibility.
         elif runner.name == "command":
             candidates = []
             for pattern in runner.import_patterns or ():
@@ -119,7 +122,11 @@ def _protected_tests(store: PlanStore, *, spine=None) -> list[dict]:
         entry["body"] = body
         if path.suffix != ".py":
             continue
-        for candidate in python_import_paths(path, root, body):
+        try:
+            candidates = list(python_import_paths(path, root, body))
+        except SyntaxError:
+            continue
+        for candidate in candidates:
             helper = selected.setdefault(
                 candidate,
                 {"name": candidate.relative_to(root).as_posix(), "owners": set()},

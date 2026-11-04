@@ -31,18 +31,10 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
             "chat-confirmation-quote-hash-mismatch: quote_sha256 must be the hex SHA-256 of "
             "quoted_message's exact UTF-8 bytes (no added newline)"
         )
-    choice = quoted_message.strip()
-    conditions = ""
-    if not choice:
+    if not quoted_message.strip():
         raise ValueError("chat-confirmation-choice-required")
-    if choice.casefold().startswith("changes:"):
-        conditions = choice[8:].strip() or choice
-    action = "cancel" if choice.casefold() == "cancel" else "accept"
-    content = dict(
-        approve=choice.casefold() not in {"no", "cancel"},
-        statement=quoted_message,
-        conditions=conditions,
-    )
+    # Neutral transport envelope. Only the bound judgment interprets these words.
+    action, content = "accept", dict(approve=True, statement=quoted_message, conditions="")
     evidence = dict(
         request_id=request_id,
         revision=expected_revision,
@@ -160,6 +152,7 @@ def prepare_confirmation(
             channel=CHAT if _chat else NATIVE,
             choices=approvals.CHOICES,
         )
+        request["judgment"] = approvals.expansion_assessment(store) if kind == "A" else None
         consumed = {r["request_id"] for r in records(store, RESPONSE)}
         latest = approvals.latest_request(store, kind)
         if (
@@ -168,7 +161,7 @@ def prepare_confirmation(
             and latest["request_id"] not in consumed
             and all(latest.get(k) == request[k] for k in ("fingerprint", "gate", "channel"))
         ):
-            return latest
+            return dict(latest, judgment=request["judgment"])
         store._event(REQUEST, request)
         return request
 
@@ -179,6 +172,33 @@ def prepare_chat_confirmation(store, gate, **scope):
 
 def complete_confirmation(store, request_id, action, content=None):
     return _complete_confirmation(store, request_id, action, content)
+
+
+def resume_confirmation(store, request_id, gate):
+    saved = next((r for r in records(store, "confirmation-pending-judgment")
+                  if r["request_id"] == request_id), None)
+    if saved is None or saved["gate"] != gate:
+        raise ValueError("confirmation-pending-response-required")
+    return _complete_confirmation(store, request_id, saved["action"], saved["content"],
+                                  chat=saved.get("chat"), expected_gate=gate)
+
+
+def apply_judgment(store, judgment):
+    """Resume only the latest retained human reply; interpreting it never launches work."""
+    if not (judgment["positiveCredit"] or judgment["concreteGap"]):
+        return None
+    seen = set()
+    for saved in records(store, "confirmation-pending-judgment"):
+        if saved["request_id"] in seen:
+            continue
+        seen.add(saved["request_id"])
+        consumed = any(r["request_id"] == saved["request_id"] for r in records(store, RESPONSE))
+        if not consumed and saved["judgment"]["id"] == judgment["id"]:
+            return resume_confirmation(store, saved["request_id"], saved["gate"])
+    saved = next(iter(records(store, "acceptance-consent-pending")), None)
+    if saved and saved["judgment"]["id"] == judgment["id"]:
+        return store.accept(by=saved["by"], statement=saved["statement"])
+    return None
 
 
 def complete_chat_confirmation(
@@ -223,16 +243,10 @@ def _complete_confirmation(
         state = action
         affirmative = False
         if action == "accept":
-            state = (
-                "conditional"
-                if content["conditions"]
-                else "accept"
-                if content["approve"]
-                else "declined"
-            )
+            state = "accept" if content["approve"] else "declined"
             affirmative = state == "accept"
         latest = approvals.latest_request(store, request.get("subject", {}).get("kind"))
-        if "subject" not in request or latest != request and affirmative:
+        if "subject" not in request or latest != request:
             state = "stale"
         record = None
         if "subject" in request:
@@ -245,6 +259,7 @@ def _complete_confirmation(
                 affirmative=affirmative,
                 state=state,
                 conditions=(content or {}).get("conditions", ""),
+                source=chat or dict(action=action, content=content, source_verified=False),
             )
             state = record["state"]
         outcome = dict(
@@ -258,6 +273,7 @@ def _complete_confirmation(
             approval_id=record["id"] if state == "approved" else None,
             provenance=channel,
             human_identity_verified=False,
+            judgment=record.get("judgment") if record else None,
         )
         if state == "changes-requested":
             outcome["reasonCode"] = "approval-changes-requested"
@@ -265,5 +281,5 @@ def _complete_confirmation(
             outcome["scope"] = request["proposedAction"]["execution"]
         if chat is not None:
             outcome["chat"] = chat
-        store._event(RESPONSE, outcome)
+        store._event("confirmation-pending-judgment" if state == "pending-judgment" else RESPONSE, outcome)
         return outcome

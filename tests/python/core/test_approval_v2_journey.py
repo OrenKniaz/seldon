@@ -8,6 +8,7 @@ from tests.python.core import semantic_wiring_support
 from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.review_support import finish_review
 from tests.python.core.semantic_wiring_support import execute, workers
+from tests.python.core.test_golden_path import judge_executions, scripted_judgment, settle_decision
 
 from codex_harness.core import dispatch, planner_jobs
 from codex_harness.core.mcp_planner import PlannerServer
@@ -83,13 +84,23 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         server = PlannerServer(store.workspace)
         assert not call("harness_plan_status")["isError"]
 
+    def interpret(reply, decision="approve"):
+        assert not reply["isError"], reply
+        outcome = reply["structuredContent"]
+        assert outcome["state"] == "pending-judgment" and outcome.get("approval_id") is None
+        outcome = settle_decision(lambda tool, **args: call(tool, **args)["structuredContent"], outcome, decision)
+        if outcome.get("state") in {"declined", "changes-requested"}:
+            outcome["chatConfirmation"] = call("harness_prepare_chat_confirmation", gate=outcome["gate"])["structuredContent"]
+        return outcome
+
     def approve(request):
         kind = request["subject"]["kind"].lower()
         if journey == f"reconnect-{kind}":
             reopen()
         if journey in {f"decline-{kind}", f"change-{kind}"}:
             quote = "No" if journey.startswith("decline") else "Changes: reduce scope"
-            refused = external_reply(server, request, quote)["structuredContent"]
+            refused = interpret(external_reply(server, request, quote),
+                                "decline" if quote == "No" else "changes-requested")
             assert refused["approval_id"] is None
             assert refused["state"] == ("declined" if quote == "No" else "changes-requested")
             held = workspace_wire(
@@ -111,7 +122,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
             ]
         confirmations.append(request["gate"])
         result = external_reply(server, request)
-        assert not result["isError"] and result["structuredContent"]["state"] == "approved", result
+        assert interpret(result)["state"] == "approved", result
         if journey == f"replay-{kind}":
             replayed = external_reply(server, request)
             assert replayed["isError"]
@@ -155,6 +166,11 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         vision["fields"].update(targets=targets, scenarios=scenarios)
         call("harness_upsert_nodes", nodes=[n for n in authored if n["id"] != "V1"] + [vision])
         assert store._revision() != a["plan_revision"]
+        assert not store.status()["approval"]["granted"]
+        from codex_harness.core.approvals import intent_assessment
+
+        scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"],
+                          intent_assessment(store, vision, prepare=False), dict(impact="preserved"))
         assert store.status()["approval"]["granted"]
     for phase in PHASES[PHASES.index(store.phase()) + 1 : PHASES.index("roundtable") + 1]:
         if phase == "roundtable":
@@ -204,6 +220,25 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         execution=options,
         reviewer_node_id="CHOICE",
     )["structuredContent"]
+    if journey == "stale-a":
+        # B covers the whole plan: a changed decision must stale an interpretation
+        # even when V1, worker tuples and reviewers are unchanged. The old stale-A
+        # branch only changed the vision and could not catch this missing binding.
+        pending_b = external_reply(server, b)["structuredContent"]
+        assert pending_b["state"] == "pending-judgment" and pending_b["approval_id"] is None
+        decision = store.spine().node("D")
+        decision["text"] += " Preserve the readback contract during delivery."
+        call("harness_upsert_node", node=decision)
+        stale_b = scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"],
+                                   pending_b["judgment"], dict(decision="approve"))
+        assert not stale_b["current"]["positiveCredit"] and not stale_b["current"]["current"]
+        assert stale_b["decision"] is None
+        stale_reply = external_reply(server, b)["structuredContent"]
+        assert stale_reply["state"] == "stale" and stale_reply["approval_id"] is None
+        call("harness_compile")
+        manifest = store._manifest(store.spine())
+        options["expected_revision"] = manifest["planRevision"]
+        b = call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options)["structuredContent"]
     approve(b)
     if run22:
         # Replacement is a real catalog/selection producer, not injected consent.
@@ -242,11 +277,11 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         b = renewed["structuredContent"]
         assert b["diff"] and any(d["field"] == "reviewers" for d in b["diff"])
         conditional = external_reply(server, b, "Approve but use fewer reviews")
-        outcome = conditional["structuredContent"]
+        outcome = interpret(conditional, "changes-requested")
         assert outcome["state"] == "changes-requested" and not outcome["approval_id"]
         b = outcome["chatConfirmation"]
         assert "Changes from your previous decision" in b["card"]
-        assert b["card"] in conditional["content"][0]["text"]
+        assert call("harness_prepare_chat_confirmation", gate="plan-execution")["structuredContent"]["card"] == b["card"]
         approve(b)
     call("harness_advance", to_phase="roundtable")
     (store.workspace / "sample.json").write_text(json.dumps(manifest))
@@ -273,6 +308,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         )
         call("harness_worker_start", **options)
     fake_workers = workers()
+    judge_executions(store.workspace, monkeypatch)
     if is_web:
         from tests.python.core.semantic_runner_support import WEB_PAGE
 
@@ -385,11 +421,14 @@ def test_canonical_plan_contracts_red_build_validation_pass(
                 assert not store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchone()
                 target.write_bytes(original)
         confirmations.append("accept")
-        call(
+        pending = call(
             "harness_accept",
             by="user",
             statement="SOURCE-ONLY external owner: Yes, meets the locked vision.",
         )
+        assert not store.status()["acceptance"]["accepted"]
+        assert interpret(pending)["id"]
+        assert store.status()["acceptance"]["accepted"]
         if journey == "delivery":
             target.write_bytes(original + b"# edited after C\n")
             assert not store.status()["acceptance"]["accepted"]

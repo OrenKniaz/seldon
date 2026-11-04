@@ -64,7 +64,7 @@ SECTIONS = (
 
 EXPANSION_NEXT = (
     "Expansion required before Vision Lock. Record it with harness_upsert_node on the vision "
-    "node: fields.expansion = {mode: product|quality, reason, upgrades: [3–7 x {id, text, kind, "
+    "node: fields.expansion = {mode, reason, upgrades: [{id, text, kind, "
     "impact, disposition: accept|reject|defer}]} plus nonblank quality_bar and done_feels_like "
     "(harness_schema vision has the rules). Dispositions are proposals; the single Vision Lock "
     "question shows them for the user's accept/reject/defer. There is no separate Expand "
@@ -72,8 +72,8 @@ EXPANSION_NEXT = (
 )
 
 
-def expansion_status(vision: dict, *, downstream_nodes: list[dict] | None = None) -> dict:
-    """Assess declared semantics only; dispositions never establish user consent."""
+def expansion_status(vision: dict, *, downstream_nodes: list[dict] | None = None, judgment=None) -> dict:
+    """Validate links/shape and project the judge's adequacy; never count meaning."""
     fields = vision["fields"]
     expansion = fields.get("expansion")
     expansion = expansion if isinstance(expansion, dict) else {}
@@ -85,13 +85,13 @@ def expansion_status(vision: dict, *, downstream_nodes: list[dict] | None = None
     def text(value):
         return isinstance(value, str) and bool(value.strip())
 
-    if expansion.get("mode") not in ("product", "quality"):
-        gap("expansion.mode", "Choose product or quality.")
+    if not text(expansion.get("mode")):
+        gap("expansion.mode", "Describe the improvement approach.")
     if not text(expansion.get("reason")):
         gap("expansion.reason", "Explain the mode in one line.")
     upgrades = expansion.get("upgrades")
-    if not isinstance(upgrades, list) or not 3 <= len(upgrades) <= 7:
-        gap("expansion.upgrades", "Propose 3–7 upgrades.")
+    if not isinstance(upgrades, list):
+        gap("expansion.upgrades", "Record proposed upgrades as a list; adequacy needs judgment.")
     for index, upgrade in enumerate(upgrades if isinstance(upgrades, list) else []):
         path = f"expansion.upgrades[{index}]"
         if not isinstance(upgrade, dict):
@@ -121,6 +121,10 @@ def expansion_status(vision: dict, *, downstream_nodes: list[dict] | None = None
         if isinstance(ref, str)
     }
     return dict(
+        status="judged" if judgment and (judgment["positiveCredit"] or judgment["concreteGap"]) else "pending-judgment",
+        positiveCredit=bool(judgment and judgment["positiveCredit"]),
+        concreteGap=bool(judgment and judgment["concreteGap"]),
+        judgment=judgment,
         gaps=gaps,
         acceptedUpgradeRefs=accepted,
         untracedAcceptedUpgradeRefs=(

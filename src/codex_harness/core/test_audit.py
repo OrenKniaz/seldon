@@ -7,11 +7,8 @@ use temporary copies; failing output is saved under state/runs in the repository
 from __future__ import annotations
 
 import argparse
-import ast
-import fnmatch
 import io
 import json
-import re
 import shutil
 import subprocess
 import tarfile
@@ -20,7 +17,7 @@ from uuid import uuid4
 
 from codex_harness.core.graph import load_plan, topological_order
 from codex_harness.core.planner_audits import AuditTemporaryDirectory
-from codex_harness.core.runners import Runner, resolve_runner, validate_proof
+from codex_harness.core.runners import resolve_runner, validate_proof
 from codex_harness.core.spine import (
     Spine,
     compile_manifest,
@@ -40,194 +37,19 @@ PROSPECTIVE_WARNING = (
 )
 
 
-def _interface_assertion(tree: ast.Module, function: ast.AST, owned: set[str]) -> bool:
-    """Follow imported interfaces into assertion arguments, including setup values."""
-    bindings = set()
-    # Subprocess/HTTP tests exercise the same public boundary without importing it.
-    # This recognizes a planned assertion, not executed RED or product acceptance.
-    imported = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update((a.asname or a.name.split(".")[0], a.name) for a in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            imported.update((a.asname or a.name, f"{node.module}.{a.name}") for a in node.names)
-    launches = {name for name, module in imported.items() if module.startswith("subprocess")}
-    product = {name.rsplit(".", 1)[-1] for name in owned}
-    subprocess_interface = any(
-        isinstance(node, ast.Call)
-        and ast.unparse(node.func).split(".")[0] in launches
-        and any(
-            isinstance(arg, ast.Constant)
-            and isinstance(arg.value, str)
-            and arg.value.replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".py") in product
-            for arg in ast.walk(tree)
-        )
-        for node in ast.walk(tree)
-    )
-    if subprocess_interface:
-        bindings.update(
-            name
-            for name, module in imported.items()
-            if module.startswith(("subprocess", "urllib.request", "http.client"))
-        )
-    bindings.update(
-        name
-        for name, module in imported.items()
-        if module in owned or module.rsplit(".", 1)[0] in owned
-    )
-
-    def references(node):
-        return {
-            child.id if isinstance(child, ast.Name) else ast.unparse(child)
-            for child in ast.walk(node)
-            if isinstance(child, ast.Name | ast.Attribute)
-        }
-
-    assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign | ast.AnnAssign)]
-    while True:
-        before = bindings.copy()
-        for node in assignments:
-            if node.value is not None and references(node.value).intersection(bindings):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                bindings.update(ast.unparse(target) for target in targets)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.withitem) and references(node.context_expr) & bindings:
-                if node.optional_vars is not None:
-                    bindings.add(ast.unparse(node.optional_vars))
-            elif isinstance(node, ast.FunctionDef) and references(node) & bindings:
-                bindings.add(node.name)
-        if bindings == before:
-            break
-    for node in ast.walk(function):
-        if isinstance(node, ast.Assert) and references(node.test).intersection(bindings):
-            return True
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr.startswith("assert")
-        ):
-            if any(
-                references(argument).intersection(bindings)
-                for argument in [*node.args, *(kw.value for kw in node.keywords)]
-            ):
-                return True
-        if (
-            isinstance(node, ast.With)
-            and any(
-                isinstance(item.context_expr, ast.Call)
-                and isinstance(item.context_expr.func, ast.Attribute)
-                and item.context_expr.func.attr.startswith("assert")
-                for item in node.items
-            )
-            and references(node).intersection(bindings)
-        ):
-            return True
-    return False
-
-
-def _imports_owned(source: str, proof: Path, owned: set[Path], runner: Runner) -> bool:
-    for pattern in runner.import_patterns:
-        for match in re.finditer(pattern, source):
-            specifier = match[1]
-            if not specifier or not specifier.startswith(("./", "../")):
-                continue
-            target = proof.parent / specifier
-            candidates = [target, *(Path(str(target) + ext) for ext in (".ts", ".js"))]
-            candidates.extend(target / ("index" + ext) for ext in (".ts", ".js"))
-            if target.suffix == ".js":
-                candidates.append(target.with_suffix(".ts"))
-            if any(
-                candidate.resolve() in owned and candidate.is_file() for candidate in candidates
-            ):
-                return True
-    return False
-
-
 def audit_prospective_tests(*, template: str | Path, manifest: dict, spine: Spine) -> dict:
-    """Classify planned interfaces; execution owns collection and RED→GREEN.
+    """Gather linked test source; only a bound LLM verdict can judge meaningfulness."""
+    from codex_harness.core.runners import execution_sources
 
-    An analyzer limitation is advisory and never an invitation to rewrite a real
-    interface proof. No test import or subprocess runs during planning.
-    """
-    repo, runner, findings = Path(template), resolve_runner(manifest), []
-
-    def unrecognized(bead, module, output):
-        findings.append(
-            dict(
-                code="prospective-interface-unrecognized",
-                severity="info",
-                bead=bead,
-                module=module,
-                output=output,
-            )
-        )
-
-    paths = runner.proof_paths(repo)
-    for bead_id, bead in manifest["beads"].items():
-        module = bead["proofModule"]
-        selected = [
-            p
-            for p in paths
-            if (
-                p.relative_to(repo).as_posix() == module
-                if runner.name == "command"
-                else fnmatch.fnmatchcase(p.name, module)
-            )
-        ]
-        owned = {
-            name.removeprefix("src/")[:-3].removesuffix("/__init__").replace("/", ".")
-            for name in bead["ownedFiles"]
-            if name.endswith(".py")
-        }
-        if not selected:
-            unrecognized(bead_id, module, "No protected proof matched; execution must collect it.")
-        for path in selected:
-            try:
-                source = path.read_text(encoding="utf-8-sig")
-                if runner.name == "command":
-                    recognized = bool(runner.assert_patterns and runner.import_patterns) and (
-                        any(re.search(pattern, source) for pattern in runner.assert_patterns)
-                        and _imports_owned(
-                            source,
-                            path,
-                            {(repo / name).resolve() for name in bead["ownedFiles"]},
-                            runner,
-                        )
-                    )
-                else:
-                    tree = ast.parse(source)
-                    tests = [
-                        n
-                        for n in ast.walk(tree)
-                        if isinstance(n, ast.FunctionDef) and n.name.startswith("test")
-                    ]
-                    recognized = bool(tests) and all(
-                        _interface_assertion(tree, test, owned) for test in tests
-                    )
-                if not recognized:
-                    unrecognized(
-                        bead_id,
-                        module,
-                        "Planned interface assertion is unrecognized; "
-                        "execution must prove collection and RED→GREEN.",
-                    )
-            except (OSError, SyntaxError, UnicodeError) as error:
-                unrecognized(bead_id, module, str(error))
-    for requirement in spine.ids("requirement"):
-        if not any(requirement in spine.ancestors(key) for key in spine.ids("test")):
-            unrecognized(requirement, "", "Requirement has no linked proof; execution remains due.")
+    sources = execution_sources(template, spine.to_dict())
     return dict(
-        baseline="template",
-        proofLevel="prospective",
-        ok=True,
-        evidenceTier="audit: unrecognized interface" if findings else "audit: recognized interface",
-        findings=findings,
-        expectedFailures=[],
-        collection=[],
-        redBaseline=[],
-        didRunValidation=False,
-        integrationChecked=False,
-        integrationReason="Planning classification only; collection and RED→GREEN await execution.",
+        baseline="template", proofLevel="prospective", ok=True,
+        evidenceTier="audit: pending judgment", judgmentStatus="pending-judgment",
+        findings=[], expectedFailures=[], collection=[], redBaseline=[],
+        testSources=sources, testRefs=[dict(id=k, revision=spine.revision(k))
+                                     for k in spine.ids("test")],
+        didRunValidation=False, integrationChecked=False,
+        integrationReason="Source observations only; meaningfulness and correct RED await judgment.",
         integrationProof=None,
     )
 

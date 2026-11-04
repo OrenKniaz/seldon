@@ -175,78 +175,10 @@ def migrate(store):
             ):
                 raise ValueError("usage-migration-worker-claim-invalid")
             _import(store, "worker", f"v1-worker:{directory.name}:{ordinal}", claim)
-    # V1 combined cards displayed a complete canonical snapshot and lock effect.
-    # Excerpt-only native cards cannot establish the complete V2 scope.
-    responses = approvals.records(store, "confirmation-responded")
-    for kind, gates in (
-        ("A", {"align", "vision-lock", "align+vision-lock"}),
-        ("B", {"plan-execution"}),
-    ):
-        request = next(
-            (r for r in approvals.records(store, "confirmation-requested") if r["gate"] in gates),
-            None,
-        )
-        response = next(
-            (r for r in responses if request and r["request_id"] == request["request_id"]), {}
-        )
-        actor = _declared_actor(request, response) if request else None
-        payload = request.get("subject") if request else None
-        if request and payload is None and kind == "A" and "\nControls:" in request["card"]:
-            card = request["card"]
-            raw = card.split("\nControls:", 1)[1].split("\n", 1)[1]
-            try:
-                snapshot, _ = json.JSONDecoder().raw_decode(raw)
-                visions = [n for n in snapshot["nodes"] if n["kind"] == "vision"]
-            except (ValueError, KeyError, TypeError):
-                visions = []
-            expected_digest = hashlib.sha256(card.encode("utf-8")).hexdigest()
-            if (
-                len(visions) == 1
-                and request.get("workspace") == str(store.workspace)
-                and request.get("card_digest") == expected_digest
-                and response.get("card_digest") == expected_digest
-                and approvals.EFFECTS["A"] in card
-                and request["gate"] == "align+vision-lock"
-                and all(
-                    store.connection.execute(
-                        "SELECT 1 FROM approvals WHERE id=? AND gate=? AND plan_revision=? "
-                        'AND "by"=? AND statement=?',
-                        (
-                            response.get("approval_ids", {}).get(gate),
-                            gate,
-                            request["plan_revision"],
-                            response.get("provenance"),
-                            response.get("content", {}).get("statement"),
-                        ),
-                    ).fetchone()
-                    for gate in ("align", "vision-lock")
-                )
-                and approvals.intent(visions[0]) == approvals.subject(store, "A")["scope"]
-            ):
-                payload = approvals.subject(store, "A")
-        if (
-            payload
-            and actor is not None
-            and response.get("state") == "approved"
-            and response.get("action") == "accept"
-            and response.get("content", {}).get("approve") is True
-            and response["content"].get("conditions") == ""
-            and response.get("provenance") == request.get("channel", "mcp-client-elicitation")
-            and (
-                request.get("subject") is None
-                or request["card"] == approvals.render(payload, request.get("diff", []))
-            )
-            and payload == approvals.subject(store, kind, request.get("proposedAction"))
-        ):
-            approvals.record_approval(
-                store,
-                {**request, "subject": payload},
-                words=response["content"]["statement"],
-                actor=actor,
-                channel=response["provenance"],
-                affirmative=True,
-                state="accept",
-            )
+    # Retain V1 requests/responses as source originals, not interpreted consent.
+    # A fresh bound 1j judgment is required before any migrated decision grants credit.
+    store._event("legacy-decisions-pending-judgment", dict(
+        requestIds=[r["request_id"] for r in approvals.records(store, "confirmation-requested")]))
     for consumed in approvals.records(store, "worker-execution-consumed"):
         request = next(
             (

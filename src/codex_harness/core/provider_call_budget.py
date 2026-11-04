@@ -97,7 +97,7 @@ def bind_run(directory, plan_dir, run_dir, *, max_provider_calls, resume=False, 
         previous = json.loads(raw.decode("utf-8"))
         status = previous.get("status")
         terminal = isinstance(status, str) and (
-            status in {STATUS_MOCK_ONLY, STATUS_VALIDATED, STATUS_VALIDATED_NO_INTEGRATION}
+            status in {STATUS_MOCK_ONLY, STATUS_VALIDATED, STATUS_VALIDATED_NO_INTEGRATION, "pending-build"}
             or (status.startswith("plan-failed: ") and bool(status[len("plan-failed: ") :].strip()))
         )
         try:

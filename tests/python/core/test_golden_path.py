@@ -22,6 +22,332 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 
+def scripted_judgment(call, judgment, meaning, verdict="positive", gaps=None, response=None):
+    """Script a semantic provider reply; the real store owns binding and consumption."""
+    reply = call("harness_submit_judgment", judgment_id=judgment["id"],
+                response=response if response is not None else json.dumps(dict(judgmentId=judgment["id"], binding=judgment["binding"],
+                    verdict=verdict, rationale="Scripted fixture assessment; no actual provider or human authentication",
+                    meaning=meaning, gaps=gaps or [])), source="golden:scripted-semantic-provider")
+    current = call("harness_judgment", judgment_id=judgment["id"],
+                   **({"candidate": judgment["candidate"]} if judgment.get("candidate") else {}))
+    assert current["binding"] == judgment["binding"]
+    return dict(reply, current=current)
+
+
+def settle_decision(call, outcome, decision="approve"):
+    # These old delivery fixtures explicitly intend approval and preserve scope when
+    # adding proof adapters. The separate intent journey scripts ambiguity/narrowing.
+    meanings = {"vision-expansion": {}, "user-decision": {"decision": decision},
+                "vision-intent": {"impact": "preserved"}}
+    for _ in range(3):
+        if outcome.get("state") != "pending-judgment":
+            return outcome
+        judgment = outcome["judgment"]
+        reply = scripted_judgment(call, judgment, meanings[judgment["purpose"]])
+        outcome = reply["decision"]
+    assert outcome["state"] != "pending-judgment", outcome
+    return outcome
+
+
+def judge_executions(workspace, patcher, *, contracts_gap=None, pending_execution=False):
+    """One fake semantic provider for real dispatch observations, shared by all journeys."""
+    from codex_harness.core import dispatch
+    from codex_harness.core.mcp_planner import PlannerServer
+    from codex_harness.core.planner_candidate import assess_execution
+    from tests.python.core.mcp_planner_support import workspace_wire
+
+    observe = dispatch._semantic_validation
+
+    def judged(root, plan, record, phase):
+        proof = observe(root, plan, record, phase)
+        if pending_execution:
+            return proof
+        with_server = PlannerServer(workspace)
+        try:
+            def call(tool, **args):
+                reply = workspace_wire(with_server, tool, expected_workspace=str(workspace), **args)
+                assert not reply["isError"], reply
+                return reply["structuredContent"]
+
+            with_server._store()
+            with with_server.store._transaction():
+                with_server.store._event("execution-observed", proof)
+                event = with_server.store.connection.execute("SELECT max(id) FROM events").fetchone()[0]
+            prepared = call("harness_prepare_judgment", question="Assess meaningfulness, correct RED and stub/mock gaps",
+                subject_ids=with_server.store.spine().ids(), source_event_ids=[event], candidate=proof["candidate"])
+            gaps = contracts_gap() if phase == "contracts" and contracts_gap else []
+            meaning = dict(check="execution", evidenceBinding=proof["evidenceBinding"], meaningful=True,
+                correctFailureReason=True, noStubMockGaps=True,
+                qualitativeChecks={o["check"]: True for r in proof["results"]
+                                   for o in r.get("observations", []) if o["passed"] is None})
+            reply = scripted_judgment(call, prepared, meaning, "negative" if gaps else "positive", gaps)
+            return assess_execution(proof, reply["current"])
+        finally:
+            with_server.close()
+
+    patcher.setattr(dispatch, "_semantic_validation", judged)
+
+
+def judge_candidate(call, observation):
+    """Replace legacy static candidate verdicts with the public bound 1j request."""
+    observation = {k: v for k, v in observation.items() if k != "judgment_id"}
+    prepared = call("harness_accept_assess", judgment=observation)
+    packet = prepared["sourceRefs"][0]["payload"]
+    scripted_judgment(call, prepared, dict(check=packet["check"], evidenceBinding=packet["evidenceBinding"],
+        meaningful=True, correctFailureReason=True, noStubMockGaps=True,
+        qualitativeChecks={o["check"]: True for r in packet["proof"]["results"]
+                           for o in r.get("observations", []) if o["passed"] is None}))
+    return call("harness_accept_assess", judgment=dict(repo=observation["repo"], check=observation["check"],
+                                                     judgment_id=prepared["id"]))
+
+
+def planning_intent_golden(workspace):
+    """Protect intake→Lock→own words→reload and complete-field narrowing.
+
+    Catch count-based ceremony, keyword consent and hidden intent changes outside
+    the former field subset. Stage 1a proves trace links, not semantic authority;
+    1j proves judgment storage, not canonical intake/consent consumers.
+    """
+    from copy import deepcopy
+    from tests.python.core.mcp_planner_support import workspace_wire
+    from tests.python.core.semantic_wiring_support import node
+    from codex_harness.core.mcp_planner import PlannerServer
+
+    workspace.mkdir(parents=True)
+    server = PlannerServer(workspace)
+
+    def call(tool_name, **args):
+        reply = workspace_wire(server, tool_name, expected_workspace=str(workspace), **args)
+        assert not reply["isError"], (tool_name, reply)
+        return reply.get("structuredContent", {})
+
+    def reload():
+        nonlocal server
+        server.close()
+        server = PlannerServer(workspace)
+        server._store()
+
+    def words(card, text):
+        return call("harness_record_chat_confirmation", gate=card["gate"], request_id=card["request_id"],
+                    expected_revision=card["plan_revision"], quoted_message=text,
+                    quote_sha256=hashlib.sha256(text.encode()).hexdigest(), actor_label="scripted owner")
+
+    try:
+        call("harness_plan_start", idea="Tune both existing sensor channels", name="sensor", plan_mode="semantic-v1")
+        existing = node("EX", "feature", ["V1"])
+        existing["text"] = "Read both sensor channels"
+        call("harness_upsert_node", node=existing)
+        ref = dict(id="EX", revision=server.store.spine().revision("EX"))
+        evidence = node("BASE", "result", ["EX"], evidence=dict(itemRef=ref, candidate="retained-baseline",
+            source=dict(reference="fixture:baseline", realProvider=False, historical=True),
+            observation=dict(reference="fixture:two-channel-readback", outcome="passed"), state="integrated"))
+        call("harness_upsert_node", node=evidence)
+        template = call("harness_schema", tool="harness_intake")["draftTemplate"]["node"]
+        template["fields"].update(sizeEstimate="large", recipe="slim: direct trace and one review",
+            requestKind="refactor", ambiguity=dict(level="high", reasons=["Calibration not measured"]),
+            dependencyBreadth=dict(producerIds=["sensor", "analyser"], crossWaveContracts=["readback"]))
+        route = call("harness_intake", node=template, expected_spine_revision=server.store._revision())["routing"]
+        assert route["state"] == "pending-judgment" and route["size"] is None
+        scripted_judgment(call, route["judgment"], dict(size="tiny", process="Direct requirement/test trace, one bounded review"))
+        route = call("harness_intake", node=template, expected_spine_revision=server.store._revision())["routing"]
+        assert route["size"] == "tiny" and "Direct" in route["process"] and route["overrideAvailable"]
+        template["fields"]["sizeOverride"] = dict(size="small", words="Treat this as small so we review the migration", sourceRef="fixture:owner-message-1")
+        override = call("harness_intake", node=template, expected_spine_revision=server.store._revision())["routing"]
+        scripted_judgment(call, override["judgment"], dict(size="tiny", process="Collapsed trace with migration review", overrideAccepted=True))
+        reload()
+        route = call("harness_intake", node=template, expected_spine_revision=server.store._revision())["routing"]
+        assert route["size"] == "small" and route["userOverride"]["sourceRef"] == "fixture:owner-message-1"
+        facts = route["judgment"]["sourceRefs"][0]["payload"]["facts"]
+        assert {n["id"] for n in facts["baseline"]["nodes"]} >= {"EX", "BASE"}
+        vision = server.store.spine().node("V1")
+        vision["fields"].update(
+            quality_bar="Preserve readback while calibrating", done_feels_like="Residual noise meets the agreed metric",
+            qualityCriteria=dict(ux="Readable channel status", performance="Readback under 20ms", maintainability="One calibration owner",
+                architecture="Existing channel interface", observability="Retain metric per iteration", failures="Keep last valid calibration"),
+            expansion=dict(mode="macro and micro", reason="One useful upgrade suffices for this small dream", upgrades=[
+                dict(id="UP1", text="Retain the best calibration", kind="micro", impact="Recover after a bad iteration", disposition="accept")]),
+            research=dict(reason="Optimum is unknown", choices=["Measured sweep", "Adaptive search"], sourceRef="fixture:research-choice"),
+            openLoop=dict(metric="Residual noise dB", provenance="fixture:owner-metric", stopConditions=["Reach -30dB", "Owner stops the search"]),
+            brownfield=dict(behaviorRefs=["EX"], evidenceRefs=["BASE"], reason="Map existing readback before changing calibration"),
+            operatingEnvelope=dict(channels=[1, 2]))
+        call("harness_upsert_node", node=vision)
+        call("harness_upsert_node", node=node("R_UP", "requirement", ["EX"], expansionRefs=["UP1"]))
+        card = call("harness_prepare_chat_confirmation", gate="align+vision-lock")
+        pending = words(card, "Yes")
+        assert pending["state"] == "pending-judgment" and pending["approval_id"] is None
+        after_expansion = scripted_judgment(call, pending["judgment"], {})["decision"]
+        assert after_expansion["judgment"]["purpose"] == "user-decision"
+        scripted_judgment(call, after_expansion["judgment"], {}, verdict="inconclusive")
+        reload()
+        assert not call("harness_plan_status")["approval"]["granted"]
+        quote = after_expansion["judgment"]["sourceRefs"][0]["payload"]["facts"]
+        assert quote["words"] == "Yes" and quote["request_id"] == card["request_id"]
+        pending = words(card, "Proceed with both channels and keep the best calibration")
+        approved = scripted_judgment(call, pending["judgment"], dict(decision="approve"))["decision"]
+        assert approved["state"] == "approved" and not approved["human_identity_verified"]
+        reload()
+        assert call("harness_plan_status")["approval"]["granted"]
+        locked = server.store.locked_acceptance_spine().node("V1")
+        assert locked["fields"]["openLoop"]["provenance"] == "fixture:owner-metric"
+        from codex_harness.core.planner_vision import expansion_status
+        assert expansion_status(locked, downstream_nodes=server.store.list_nodes())["untracedAcceptedUpgradeRefs"] == []
+        narrowed = deepcopy(locked)
+        narrowed["fields"]["operatingEnvelope"]["channels"] = [1]
+        changed = call("harness_upsert_node", node=narrowed)
+        assert changed["judgment"]["status"] == "pending-judgment"
+        assert not call("harness_plan_status")["approval"]["granted"]
+        scripted_judgment(call, changed["judgment"], dict(impact="narrowed"))
+        card = call("harness_prepare_chat_confirmation", gate="align+vision-lock")
+        assert card["deviation"]["impact"] == "narrowed" and "Proposed charter deviation" in card["card"]
+        assert any("operatingEnvelope" in d["field"] for d in card["diff"])
+        final = settle_decision(call, words(card, "I approve the deviation: drop channel two"))
+        assert final["state"] == "approved"
+        reload()
+        assert server.store.locked_acceptance_spine().node("V1")["fields"]["operatingEnvelope"]["channels"] == [1]
+        assert call("harness_plan_status")["approval"]["granted"]
+        print("golden planning: tiny process; explicit size override; one accepted upgrade; ambiguous consent pending; visible narrowing approved")
+    finally:
+        server.close()
+
+
+def execution_judgment_golden(workspace):
+    """Protect compiled worker tests -> real observations -> stored, bound 1j verdicts.
+
+    Catch marker-only RED, source/domain refusal, lost brownfield GREEN, wrong-reason
+    RED and missing-judgment FAIL. Trace-only 1a and record-only 1j never execute a
+    worker test. Only judge replies are scripted; all exits/output/cleanup are real.
+    """
+    from codex_harness.core.mcp_planner import PlannerServer
+    from codex_harness.core.graph import load_plan
+    from codex_harness.core.planner_candidate import _semantic_validation, assess_execution
+    from codex_harness.core.runners import execution_witnesses
+    from tests.python.core.mcp_planner_support import workspace_wire
+    from tests.python.core.semantic_wiring_support import node
+
+    workspace.mkdir(parents=True)
+    server = PlannerServer(workspace)
+
+    def call(tool, **args):
+        reply = workspace_wire(server, tool, expected_workspace=str(workspace), **args)
+        assert reply['isError'] is False, (tool, reply)
+        return reply['structuredContent']
+
+    def git(*args):
+        return subprocess.run(['git', '-C', str(product), *args], check=True,
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+
+    def retain(proof):
+        # This is the observation writer, never a fake process or provider result.
+        receipt = workspace / (proof['evidenceBinding'] + '.json')
+        receipt.write_text(json.dumps(proof), encoding='utf-8')
+        with server.store._transaction():
+            server.store._event('execution-observed', json.loads(receipt.read_text('utf-8')))
+            event_id = server.store.connection.execute('SELECT max(id) FROM events').fetchone()[0]
+        return call('harness_prepare_judgment', question=(
+            'Assess meaningfulness, correct failure reason and stub/mock gaps in these real observations'),
+            subject_ids=['R_NEW', 'R_BASE', 'T_NEW', 'T_BASE'],
+            source_event_ids=[event_id], candidate=proof['candidate'])
+
+    def judge(prepared, proof, verdict, gaps=()):
+        meaning = dict(check='execution', evidenceBinding=proof['evidenceBinding'],
+                       meaningful=True, correctFailureReason=True, noStubMockGaps=True)
+        return scripted_judgment(call, prepared, meaning, verdict, list(gaps))["current"]
+
+    try:
+        call('harness_plan_start', idea='Preserve baseline readback and add both channels',
+             name='execution-judgment', plan_mode='semantic-v1')
+        call('harness_upsert_nodes', nodes=[
+            node('F', 'feature', ['V1']),
+            node('R_BASE', 'requirement', ['F'], behavior='Preserve baseline readback'),
+            node('R_NEW', 'requirement', ['F'], behavior='Read both channels'),
+            node('T_BASE', 'test', ['R_BASE'], module='baseline.sensor', level='semantic',
+                 execution=dict(argv=[sys.executable, '-B', 'baseline.sensor'],
+                                rationale='Preserve existing baseline readback')),
+            node('T_NEW', 'test', ['R_NEW'], module='verify.unfamiliar', level='semantic',
+                 execution=dict(argv=[sys.executable, '-B', 'verify.unfamiliar'],
+                                rationale='Observe both channels from the candidate data path')),
+            node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat'], dependsOn=[],
+                 lessons=[], semanticPhase='contracts'),
+            node('B', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat'], dependsOn=['C'],
+                 lessons=[], semanticPhase='build'),
+        ])
+        template = workspace / 'template'
+        template.mkdir(exist_ok=True)
+        product = workspace / 'candidate'
+        product.mkdir()
+        (product / 'channels.dat').write_text('missing')
+        (product / 'baseline.sensor').write_text(
+            "print('SELDON-STUB is a diagnostic string, baseline remains GREEN')\n")
+        (product / 'verify.unfamiliar').write_text("raise RuntimeError('verifier startup failed')\n")
+        (product / 'payload.binary').write_bytes(b'x' * 262145)
+        for index in range(130):
+            (product / f'asset-{index}.opaque').write_text(str(index))
+        call('harness_compile')
+        manifest = server.store._manifest(server.store.spine())
+        compiled = workspace / 'compiled'
+        compiled.mkdir()
+        (compiled / 'sample.json').write_text(json.dumps(manifest), encoding='utf-8')
+        plan = load_plan(compiled)
+        git('init', '-q')
+        git('add', '.')
+        git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'baseline')
+        broken = _semantic_validation(product, plan, {}, 'contracts')
+        assert broken['observedState'] == 'RED' and broken['state'] == 'pending-judgment'
+        request = retain(broken)
+        gap = judge(request, broken, 'negative', ['Verifier fails during startup before reading channels'])
+        rejected = assess_execution(broken, gap)
+        assert rejected['state'] == 'FAIL' and not rejected['admitted'] and rejected['gaps']
+        (product / 'verify.unfamiliar').write_text(
+            "from pathlib import Path\nimport sys\n"
+            "assert Path('payload.binary').stat().st_size == 262145\n"
+            "assert len(list(Path('.').glob('asset-*.opaque'))) == 130\n"
+            "actual = Path('channels.dat').read_text()\n"
+            "print('observed channels:', actual)\n"
+            "if actual != 'ready:42,84':\n"
+            "    print('missing behavior: both channel values', file=sys.stderr)\n"
+            "    sys.exit(2)\n")
+        git('add', '.')
+        git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker test')
+        red = _semantic_validation(product, plan, {}, 'contracts')
+        rows = {r['id']: r for r in red['results']}
+        assert rows['T_BASE']['state'] == 'PASS' and rows['T_BASE']['flags']
+        assert rows['T_NEW']['actions']['execute']['exit'] == 2
+        assert 'missing behavior:' in rows['T_NEW']['actions']['execute']['stderr']
+        assert all(r['cleanup']['quiescenceVerified'] for r in red['results'])
+        request = retain(red)
+        assert not assess_execution(red, call('harness_judgment', judgment_id=request['id'],
+                                             candidate=red['candidate']))['admitted']
+        red = assess_execution(red, judge(request, red, 'positive'))
+        assert red['state'] == 'RED' and red['admitted']
+        (product / 'channels.dat').write_text('ready:42,84')
+        git('add', '.')
+        git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker implementation')
+        green = _semantic_validation(product, plan, {'contractsRed': red}, 'build')
+        assert green['observedState'] == 'PASS' and green['state'] == 'pending-judgment'
+        assert not green['passed'] and green['judgmentStatus'] == 'pending-judgment'
+        assert all(r['state'] == 'PASS' for r in green['results'])
+        witnesses = execution_witnesses(dict(semantic=green))
+        assert {w['id'] for w in witnesses} == {'T_BASE', 'T_NEW'}
+        assert all(w['sha256'] and not w['artifactPaths'] for w in witnesses)
+        request = retain(green)
+        unsupported = judge(request, green, 'unsupported')
+        assert not unsupported['positiveCredit'] and not unsupported['concreteGap']
+        assert assess_execution(green, unsupported)['state'] == 'pending-judgment'
+        judge(request, green, 'positive')
+        server.close()
+        server = PlannerServer(workspace)
+        current = call('harness_judgment', judgment_id=request['id'], candidate=green['candidate'])
+        accepted = assess_execution(green, current)
+        assert accepted['passed'] and accepted['admitted'] and accepted['state'] == 'PASS'
+        changed = server.store.spine().node('R_NEW')
+        changed['text'] = 'Read a third channel too'
+        call('harness_upsert_node', node=changed)
+        stale = call('harness_judgment', judgment_id=request['id'], candidate=green['candidate'])
+        assert not assess_execution(green, stale)['admitted']
+    finally:
+        server.close()
+
+
 def judgment_contract_golden(workspace):
     """Protect pending/verdict durability through public submission, reload and consumption.
 
@@ -55,8 +381,7 @@ def judgment_contract_golden(workspace):
                         rationale="Scripted semantic assessment of retained sensor facts",
                         meaning={"assessment": "retained readback"}, gaps=gaps or [])
         response.update(changes)
-        return call("harness_submit_judgment", judgment_id=record["id"],
-                    response=json.dumps(response), source="scripted-judge:no-provider-launch")
+        return scripted_judgment(call, record, response["meaning"], response=json.dumps(response))
 
     try:
         call("harness_plan_start", idea="Preserve sensor readback", name="judgments", plan_mode="semantic-v1")
@@ -129,8 +454,7 @@ def judgment_contract_golden(workspace):
         call("harness_submit_judgment", judgment_id=malformed["id"], response="{}",
              source="scripted-judge", error=True)
         correctable = call("harness_prepare_judgment", question="Judge the revised sensor contract", subject_ids=["R1"])
-        call("harness_submit_judgment", judgment_id=correctable["id"], response="{",
-             source="scripted-judge")
+        scripted_judgment(call, correctable, {}, response="{")
         submit(correctable, "negative")  # Missing concrete gap: second exact fix.
         submit(correctable, "positive")
         reload()
@@ -330,12 +654,18 @@ def http_golden(workspace, semantic=False):
         if reply["isError"]:
             print("\n".join(c.get("text", "") for c in reply.get("content", [])))
         assert not reply["isError"], (tool_name, reply)
+        if tool_name in {"harness_upsert_node", "harness_upsert_nodes"} and store._meta()["locked_vision_json"]:
+            from codex_harness.core.approvals import intent_assessment
+            judgment = intent_assessment(store, store.spine().node("V1"), prepare=False)
+            if judgment.get("id") and not judgment["positiveCredit"]:
+                scripted_judgment(call, judgment, dict(impact="preserved"))
         return reply.get("structuredContent", {})
 
     def yes(card):
         decisions.append(card["gate"])
         reply = record(server, card, "Yes")
         assert not reply["isError"], reply
+        assert settle_decision(call, reply["structuredContent"])["state"] == "approved"
 
     product = """import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -575,9 +905,9 @@ class ConcurrentHTTP(unittest.TestCase):
             blocked = run_scenarios(
                 pending["scenarios"], workspace, pending["targets"], "validation"
             )
-            assert blocked[-1]["state"] == "ERROR", blocked
-            assert "scenario: unvalidated" in blocked[0]["reason"], blocked
-            assert not blocked[0]["cleanup"]["childLaunched"], blocked
+            assert blocked[-1]["state"] == "pending-judgment" and blocked[-1]["unperformed"], blocked
+            assert "observation adapter" in blocked[-1]["reason"], blocked
+            assert not blocked[-1].get("actions"), blocked  # Unknown intent never invents an execution.
             (workspace / "import_items.py").unlink()
             # Workers can supply an ordinary CLI verifier for the HTTP lifecycle.
             # Resolve the unvalidated intent before B; it grants no RED/GREEN credit.
@@ -727,12 +1057,11 @@ with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
                 audited = call("harness_audit_status", id=audit["attemptId"])
                 result = audited["result"]
                 assert result["ok"] and audited["proofCreditGranted"], audited
-                assert result["evidenceTier"] == "audit: unrecognized interface", result
-                assert all(f["severity"] == "info" for f in result["findings"])
-                assert {f["module"] for f in result["findings"]} == {"test_http*.py"}
+                assert result["evidenceTier"] == "audit: pending judgment", result
+                assert result["judgmentStatus"] == "pending-judgment"
                 assert not result["collection"] and not audited["didRunValidation"]
-                # The direct HTTP proof is recognized; only the opaque helper lowers the tier.
-                assert len(result["findings"]) == 1, result
+                # Source patterns cannot decide meaningfulness or reject an opaque helper.
+                assert not result["findings"], result
             call("harness_advance", to_phase="roundtable")
             assert store.status()["pending_gate"] != "passing-audit-required"
             call("harness_roundtable", max_rounds=1, max_total=2, timeout=5)
@@ -855,7 +1184,7 @@ with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
             assert accepted["structuredContent"]["result"]["passed"], accepted
             call("harness_accept_review", repo=run["repo"])
             decisions.append("accept")
-            call("harness_accept", by="user", statement="Yes")
+            settle_decision(call, call("harness_accept", by="user", statement="Yes"))
             assert store.status()["acceptance"]["accepted"]
             assert decisions == ["align+vision-lock", "plan-execution", "accept"]
             print(
@@ -885,6 +1214,10 @@ def provider_host(mode, workspace, surface, job_id=None):
     )
 
     workspace = Path(workspace)
+    provider_patch = pytest.MonkeyPatch()
+    judge_executions(workspace, provider_patch, pending_execution=surface == "web", contracts_gap=lambda: (
+        ["Contracts crashes before exercising the requested command behavior"]
+        if surface == "cli" and not (workspace / "valid-contracts-attempted").exists() else []))
     filename = "index.html" if surface == "web" else "hashslip.py"
     actual_popen = subprocess.Popen
     actual_audit = audit_process.run_audit_process
@@ -914,6 +1247,8 @@ def provider_host(mode, workspace, surface, job_id=None):
         first = surface == "cli" and not (workspace / "contracts-attempted").exists()
         if first:
             (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
+        else:
+            (workspace / "valid-contracts-attempted").write_text("attempted", encoding="utf-8")
         (root / filename).write_text(
             "<!doctype html>"
             + "".join(
@@ -1003,7 +1338,7 @@ def provider_host(mode, workspace, surface, job_id=None):
         raise SystemExit(planner_recovery.monitor(workspace, job_id))
     else:
         result = planner_jobs.execute_worker_job(workspace, job_id)
-        raise SystemExit(0 if result["status"] == "completed" else 1)
+        raise SystemExit(1 if result["status"] == "failed" else 0)
 
 
 @pytest.mark.parametrize("surface", ["cli", "web"])
@@ -1028,7 +1363,9 @@ def test_golden_path(tmp_path, request, surface):
     ordinary successful fixtures missed UNKNOWN holding delivery forever.
     """
     if surface == "cli":
+        planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
         judgment_contract_golden(tmp_path.parent / (tmp_path.name + "-judgment-contract"))
+        execution_judgment_golden(tmp_path.parent / (tmp_path.name + "-execution-judgment"))
         trace_contract_golden(tmp_path.parent / (tmp_path.name + "-trace-contract"))
         http_golden(tmp_path / "http-journey")
         http_golden(tmp_path / "shelflife-scenarios", semantic=True)
@@ -1116,10 +1453,13 @@ def test_golden_path(tmp_path, request, surface):
                 else "happy"
             )
             counts[category] += 1
+            call_started = time.monotonic()
             result = rpc(
                 "tools/call",
                 dict(name=tool_name, arguments=dict(expected_workspace=str(tmp_path), **arguments)),
             )
+            if time.monotonic() - call_started > 5:
+                print(f"golden wait: {tool_name} seconds={time.monotonic() - call_started:.2f}", flush=True)
             if result.get("isError") and not allow_error:
                 print(json.dumps(result))
             if allow_error:
@@ -1140,7 +1480,7 @@ def test_golden_path(tmp_path, request, surface):
         def yes(card):
             nonlocal decisions
             decisions += 1
-            call(
+            outcome = call(
                 "harness_record_chat_confirmation",
                 gate=card["gate"],
                 request_id=card["request_id"],
@@ -1149,6 +1489,7 @@ def test_golden_path(tmp_path, request, surface):
                 quote_sha256=hashlib.sha256(b"Yes").hexdigest(),
                 actor_label="scripted user",
             )
+            assert settle_decision(lambda tool, **args: call(tool, _probe=True, **args), outcome)["state"] == "approved"
 
         try:
             rpc(
@@ -1207,12 +1548,12 @@ def test_golden_path(tmp_path, request, surface):
                     },
                 )
                 probing = False
-            a = call("harness_understanding_card", **captured_run["understanding"])
-            yes(a)
-            filename = "index.html" if surface == "web" else "hashslip.py"
             nodes = captured_run["nodes"]
             scenarios = nodes[0]["fields"]["scenarios"]
             written = call("harness_upsert_nodes", nodes=nodes)
+            a = call("harness_understanding_card", **captured_run["understanding"])
+            yes(a)
+            filename = "index.html" if surface == "web" else "hashslip.py"
             call("harness_advance", to_phase="plan")
             preflight = call(
                 "harness_preflight",
@@ -1286,10 +1627,10 @@ def test_golden_path(tmp_path, request, surface):
             tier = "same-provider" if surface == "cli" else "cross-provider"
             assert b["subject"]["reviewTier"] == tier and f"Review tier: {tier}" in b["card"]
             assert "Cross-subscription is preferred, never required" in b["card"]
-            assert b["subject"]["scheduledReviewStarts"] == {"plan": 4, "full-vision": 4}
-            assert b["subject"]["repairReserve"] == 2
+            assert b["proposedAction"]["execution"]["callCap"] == options["call_cap"]
+            assert "reviewAllowance" not in b["card"] and "callCap" not in b["card"]
             assert all(r["name"] in b["card"] and r["model"] in b["card"] for r in reviewers)
-            assert b["card"].count("up to 10 reviews") == 1
+            assert "up to 10 reviews" not in b["card"]
             assert b["subject"]["catalog"] == "unverified"
             assert "catalog: unverified" in b["card"]
             yes(b)
@@ -1342,47 +1683,40 @@ def test_golden_path(tmp_path, request, surface):
                     ("execution.callCap", 4, 5)
                 ]
                 assert (
-                    sum(c["text"].count("Your decision: approve B?") for c in changed["content"])
+                    sum(c["text"].count("Your decision: B.") for c in changed["content"])
                     == 1
                 )
             job = call("harness_worker_start", **options)
             deadline = time.monotonic() + 300
-            while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
+            while job["status"] not in ("completed", "failed", "pending-judgment") and time.monotonic() < deadline:
                 job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
             if surface == "web":
                 saved = json.loads(Path(job["run"]["recordPath"]).read_text("utf-8"))
-                assert saved["semanticValidation"]["state"] == "FAIL"
+                assert job["status"] == saved["status"] == "pending-judgment"
+                assert saved["beads"]["C"]["status"] == "awaiting judgment"
+                assert saved["beads"]["B"]["attempt"] is None
+                assert "awaiting judgment" in saved["beads"]["B"]["status"]
+                roots = saved["beads"]["C"]["integrated"]["root"]
+                judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
+                                dict(repo=roots, check="execution"))
+                while not job["run"].get("semanticValidation") and time.monotonic() < deadline:
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
+                assert job["status"] == "pending-judgment", job
+                saved = json.loads(Path(job["run"]["recordPath"]).read_text("utf-8"))
+                assert saved["semanticContracts"]["state"] == "RED"
+                assert saved["semanticValidation"]["state"] == "pending-judgment"
                 roots = saved["beads"]["B"]["integrated"]["root"]
-                assert any(
-                    a["checks"]["textContrastAA"] is None
-                    for r in saved["semanticValidation"]["results"]
-                    for a in r["actions"].values()
-                )
-                call(
-                    "harness_accept_assess",
-                    judgment=dict(
-                        repo=roots,
-                        check="textContrastAA",
-                        passed=True,
-                        statement="Scripted human fixture observation: all gradient endpoints are"
-                        " white and generated label is dark; review retained viewport/f"
-                        "ull-page images in both motion preferences. This is not automa"
-                        "ted contrast proof.",
-                        by="scripted observer",
-                    ),
-                )
-                repaired = call(
-                    "harness_recovery",
-                    mode="resolve",
-                    job_id=job["jobId"],
-                    choice="revalidate",
-                    reason="Consume candidate-bound manual contrast observation within B",
-                )
-                assert repaired["validation"]["state"] == "PASS", repaired
-                job = call("harness_worker_status", job_id=job["jobId"])
+                assert any(a["checks"]["textContrastAA"] is None
+                           for r in saved["semanticValidation"]["results"] for a in r["actions"].values())
+                for check in ("textContrastAA", "execution"):
+                    judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
+                                    dict(repo=roots, check=check))
+                while job["status"] not in {"completed", "failed"} and time.monotonic() < deadline:
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
             if surface == "cli":
                 failed = json.loads(Path(job["run"]["recordPath"]).read_text())
-                assert failed["beads"]["C"]["integrated"]["semantic"]["state"] == "ERROR"
+                assert failed["beads"]["C"]["integrated"]["semantic"]["state"] == "FAIL"
+                assert failed["beads"]["C"]["integrated"]["semantic"]["gaps"]
                 probing = True
                 original = job["jobId"]
                 proof = call("harness_recovery", mode="inspect", job_id=original)
@@ -1404,7 +1738,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert resolved["quarantine"] is True
                 job = call("harness_worker_start", **options)
                 assert job["jobId"] == resolved["successor"] != original
-                while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
+                while job["status"] not in ("completed", "failed", "pending-judgment") and time.monotonic() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
                 assert job["status"] == "failed", job
                 stalled = job["jobId"]
@@ -1427,7 +1761,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert resolved["quarantine"] is True
                 job = call("harness_worker_start", **options)
                 assert job["jobId"] == resolved["successor"] != stalled
-                while job["status"] not in ("completed", "failed") and time.monotonic() < deadline:
+                while job["status"] not in ("completed", "failed", "pending-judgment") and time.monotonic() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
                 assert not (tmp_path / "abandoned.txt").exists()
                 probing = False
@@ -1447,6 +1781,7 @@ def test_golden_path(tmp_path, request, surface):
 
                 prompt = retained["beads"]["B"]["prompt"]
                 command = next(c for c in prompt.split("`") if "--preview ." in c)
+                preview_started = time.monotonic()
                 try:
                     preview = run_audit_process(
                         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
@@ -1461,6 +1796,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert observed["browserMode"] in {"normal", "single-process"}
                 assert cleanup["quiescenceVerified"]
                 assert cleanup["activeProcessesAfterTeardown"] == 0
+                print(f"golden preview: seconds={time.monotonic() - preview_started:.2f}", flush=True)
                 print(
                     f"golden web: scenarios={len(proof)}; journeys={len(actions)}; "
                     f"browserModes={sorted({a['browserMode'] for a in actions})}"
@@ -1471,23 +1807,16 @@ def test_golden_path(tmp_path, request, surface):
                     [sys.executable, "-B", str(tmp_path / filename), "--help"], cwd=tmp_path
                 ).startswith(b"usage:")
             if surface == "web":
-                call(
-                    "harness_accept_assess",
-                    judgment=dict(
-                        repo=str(tmp_path),
-                        check="visualQuality",
-                        passed=True,
-                        statement="Scripted observer: actual fixture page matches the locked read"
-                        "able quality bar and Done; source-only journey",
-                        by="scripted user",
-                    ),
-                )
+                before_judgment = call("harness_plan_status", _probe=True)
+                judgment = dict(captured_run["judgments"][-1], repo=str(tmp_path))
+                judge_candidate(lambda tool, **args: call(tool, _probe=True, **args), judgment)
+                assert call("harness_plan_status", _probe=True)["plan_revision"] == before_judgment["plan_revision"]
             call("harness_advance", to_phase="accept")
             deadline = time.monotonic() + 300
+            # Complete the bound verdict before capturing acceptance inputs. Replacing
+            # a static passed=True mid-capture is now a new authoritative judgment,
+            # so the old capture must lose credit; it cannot be treated as unchanged.
             acceptance = call("harness_accept_run", repo=str(tmp_path), subject="product")
-            if surface == "web":
-                judgment = dict(captured_run["judgments"][-1], repo=str(tmp_path))
-                call("harness_accept_assess", judgment=judgment, _probe=True)
             while acceptance.get("result") is None and time.monotonic() < deadline:
                 acceptance = call(
                     "harness_accept_status", id=acceptance["attemptId"], wait_seconds=60
@@ -1506,7 +1835,9 @@ def test_golden_path(tmp_path, request, surface):
                 for r in review["result"]["reviewers"]
             ] == reviewers
             decisions += 1
-            call("harness_accept", by="user", statement="yes")
+            pending_c = call("harness_accept", by="user", statement="yes")
+            assert not call("harness_plan_status", _probe=True)["acceptance"]["accepted"]
+            settle_decision(lambda tool, **args: call(tool, _probe=True, **args), pending_c)
             final_status = call("harness_plan_status", _probe=True)
             assert final_status["acceptance"]["accepted"]
             assert {s["id"] for s in final_status["acceptance"]["scenarios"]} == {
@@ -1556,6 +1887,11 @@ def test_golden_path(tmp_path, request, surface):
                 f"seconds={time.monotonic() - started:.2f}"
             )
         finally:
+            if "job" in locals() and job["status"] not in {"completed", "failed"}:
+                cleanup = rpc("tools/call", dict(name="harness_recovery", arguments=dict(
+                    expected_workspace=str(tmp_path), mode="resolve", job_id=job["jobId"],
+                    choice="abandon", reason="End failed golden fixture through its existing Job owner")))
+                assert not cleanup["isError"], cleanup
             process.stdin.close()
             try:
                 process.wait(timeout=10)

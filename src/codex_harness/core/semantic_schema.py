@@ -152,10 +152,9 @@ def web_journey(v, targets, *, draft=False):
     ):
         raise ValueError("Web journey requires a web target")
     fields(v["viewport"], ("width", "height"), ("width", "height"))
-    if tuple(v["viewport"][k] for k in ("width", "height")) not in ((375, 812), (1440, 900)) or any(
-        type(v["viewport"][k]) is not int for k in ("width", "height")
-    ):
-        raise ValueError("Web viewports are 375x812 and 1440x900")
+    if any(type(v["viewport"][k]) is not int or v["viewport"][k] <= 0
+           for k in ("width", "height")):
+        raise ValueError("Declare positive integer viewport dimensions")
     if v["reducedMotion"] not in ("reduce", "no-preference"):
         raise ValueError("Declare a reducedMotion preference")
     steps = array(v["steps"])
@@ -193,10 +192,6 @@ def web_journey(v, targets, *, draft=False):
             type(step["fragment"]) is not str or not step["fragment"].startswith("#")
         ):
             raise ValueError("Declare a fragment beginning with #")
-
-    if not any(isinstance(step, dict) and step.get("op") == "assertVisible" for step in steps):
-        raise ValueError("Web RED requires a positive assertVisible observation in every journey")
-
 
 def fields(value, allowed, required=()):
     if not isinstance(value, dict):
@@ -269,60 +264,30 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
         raise ValueError("Input exceeds 64KiB")
     if type(targets) is not dict:
         raise ValueError("Declare target bindings")
-    coverage = {}
     for name, binding in targets.items():
-        if planning:
-            # Planning retains opaque worker bindings for every product domain.
-            # The selected runner, not the graph, owns executable eligibility.
-            if not isinstance(name, str) or not name.strip() or not isinstance(binding, dict):
-                raise ValueError("Target bindings require nonblank IDs and finite JSON objects")
-            continue
-        if isinstance(binding, dict) and binding.get("kind") == "web":
-            fields(binding, ("kind", "entry"), ("kind", "entry"))
-            if binding["entry"] != "index.html" or (
-                require_entries and not path(product, binding["entry"]).is_file()
-            ):
-                raise ValueError("Web targets require index.html")
-            continue
-        fields(binding, ("entry", "module", "argv"), ("argv",))
-        if len(set(binding) & {"entry", "module"}) != 1:
-            raise ValueError("Declare exactly one entry or module target")
-        entry = path(product, target_entry(binding))
-        if entry.suffix != ".py" or (require_entries and not entry.is_file()):
-            raise ValueError(
-                "Declare an existing product Python entry or module package __main__.py"
-            )
-        if "module" in binding and require_entries:
-            count = len(binding["module"].split("."))
-            if not all((p / "__init__.py").is_file() for p in list(entry.parents)[:count]):
-                raise ValueError("Module package paths require owned __init__.py files")
-        argv(binding["argv"], product)
+        if not isinstance(name, str) or not name.strip() or not isinstance(binding, dict):
+            raise ValueError("Target bindings require nonblank IDs and finite JSON objects")
     if draft and document is None:
         return []
     fields(document, ("schema", "scenarios"), ("schema", "scenarios"))
-    scenarios = array(document["scenarios"], 16)
-    if document["schema"] != "seldon/scenarios-v1" or not scenarios and not planning:
-        raise ValueError("Use seldon/scenarios-v1 with 1..16 scenarios")
+    scenarios = document["scenarios"]
+    if (document["schema"] != "seldon/scenarios-v1" or not isinstance(scenarios, list)
+            or not scenarios and not planning):
+        raise ValueError("Use seldon/scenarios-v1 with a scenarios array")
     ids = set()
     for s in scenarios:
         keys = "id requirementRefs contractRefs setup actions observe verdict".split()
-        fields(s, [*keys, "evidenceTier", "validationMessage"], keys)
+        fields(s, [*keys, "evidenceTier", "validationMessage", "testRef", "rationale"], keys)
         if type(s["id"]) is not str or not s["id"] or s["id"] in ids or s["verdict"] != "all":
             raise ValueError("Use unique ids and verdict all")
         ids.add(s["id"])
-        if not planning and s.get("evidenceTier") == "scenario: unvalidated":
-            raise ValueError(
-                f"{s['id']}: scenario: unvalidated. Replace its actions/observations with "
-                "supported executable proof and save the vision before running RED/GREEN."
-            )
         for key in ("requirementRefs", "contractRefs"):
-            if (not array(s[key]) and not planning) or any(
+            if not isinstance(s[key], list) or any(
                 type(r) is not str or not r for r in s[key]
             ):
                 raise ValueError("Declare requirement and contract references")
-        if planning:
-            s.pop("evidenceTier", None)
-            s.pop("validationMessage", None)
+        s.pop("evidenceTier", None)
+        s.pop("validationMessage", None)
         fields(s["setup"], ("dirs", "files", "snapshots"))
         for directory in array(s["setup"].get("dirs", [])):
             resolved = path(product, directory)
@@ -351,11 +316,11 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 raise ValueError("Use unique snapshot ids")
             snapshots.add(f["id"])
         try:
-            if not s["requirementRefs"] or not s["contractRefs"]:
-                raise ValueError("Link requirementRefs and contractRefs to their owning nodes")
+            if not s["requirementRefs"]:
+                raise ValueError("Link requirementRefs to their owning nodes")
             actions, web_actions = set(), set()
             for a in array(s["actions"], 16):
-                fields(a, ("id", "cli", "web", "cwd", "http", "file"), ("id",))
+                fields(a, ("id", "cli", "web", "process", "cwd", "http", "file"), ("id",))
                 if "http" in a or "file" in a:
                     raise ValueError(
                         "HTTP/file actions need a worker-authored CLI verifier target "
@@ -364,12 +329,15 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 if (
                     type(a["id"]) is not str
                     or a["id"] in actions
-                    or len(set(a) & {"cli", "web"}) != 1
+                    or len(set(a) & {"cli", "web", "process"}) != 1
                 ):
                     raise ValueError("Use unique CLI actions")
                 if "web" in a:
                     fields(a, ("id", "web"), ("id", "web"))
                     web_journey(a["web"], targets, draft=draft)
+                    binding = targets.get(a["web"]["target"], {})
+                    if not planning and ("entry" not in binding or not path(product, binding["entry"]).is_file()):
+                        raise ValueError("Browser observation entry is unavailable")
                     v = a["web"]
                     if (
                         type(v["operation"]) is not str
@@ -377,9 +345,6 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                         or "\n" in v["operation"]
                     ):
                         raise ValueError("Declare a literal operation marker")
-                    coverage.setdefault((v["target"], v["operation"]), set()).add(
-                        (v["viewport"]["width"], v["reducedMotion"])
-                    )
                     actions.add(a["id"])
                     web_actions.add(a["id"])
                     continue
@@ -392,6 +357,11 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                     if not any(cwd == p or cwd in p.parents for p in created):
                         raise ValueError("Action cwd must be a directory created by setup")
                 actions.add(a["id"])
+                if "process" in a:
+                    fields(a["process"], ("argv",), ("argv",))
+                    if not argv(a["process"]["argv"], product):
+                        raise ValueError("Worker executable requires a nonempty argv")
+                    continue
                 v = a["cli"]
                 fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"))
                 if "stdin" in v:
@@ -409,8 +379,13 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                         content(v["stdin"])
                 if type(v["target"]) is not str or not draft and v["target"] not in targets:
                     raise ValueError("Action references an unknown target")
-                if targets.get(v["target"], {}).get("kind") == "web":
-                    raise ValueError("CLI action requires a Python target")
+                if not planning:
+                    binding = targets[v["target"]]
+                    fields(binding, ("entry", "module", "argv"), ("argv",))
+                    if len(set(binding) & {"entry", "module"}) != 1:
+                        raise ValueError("Python CLI adapter requires one entry or module; use process.argv for other tools")
+                    path(product, target_entry(binding))
+                    argv(binding["argv"], product)
                 if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
                     raise ValueError("Declare a literal operation marker")
                 argv(v["argv"], product, path(product, a["cwd"]) if "cwd" in a else product)
@@ -460,30 +435,9 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
             if any(sum(o.get("action") == a for o in s["observe"]) != 1 for a in web_actions):
                 raise ValueError("Each web journey requires exactly one complete gate observation")
         except ValueError as error:
-            if not planning:
-                raise
             s["evidenceTier"] = "scenario: unvalidated"
             s["validationMessage"] = str(error) + (
-                "; planning may proceed. Before execution, replace this scenario's actions/"
-                "observations with supported executable proof; no RED/GREEN or acceptance "
-                "credit is granted by this tier."
+                "; pending judgment. Supply worker-authored execution.argv for this test "
+                "or an observation adapter; no product failure or proof credit is inferred."
             )
-    incomplete = {
-        key
-        for key, views in coverage.items()
-        if views != {(w, m) for w in (375, 1440) for m in ("reduce", "no-preference")}
-    }
-    if incomplete and (planning or not draft):
-        if not planning:
-            raise ValueError("Each web operation requires both viewports and motion preferences")
-        for s in scenarios:
-            if any(
-                (a.get("web", {}).get("target"), a.get("web", {}).get("operation")) in incomplete
-                for a in s["actions"]
-            ):
-                s.update(
-                    evidenceTier="scenario: unvalidated",
-                    validationMessage="Before execution, add both viewports and motion "
-                    "preferences for each web operation.",
-                )
     return scenarios

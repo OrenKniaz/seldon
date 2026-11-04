@@ -518,7 +518,7 @@ TOOLS = [
             **dict.fromkeys(approvals.UNDERSTANDING_FIELDS, STRING),
             "assumptions": STRINGS,
             "expansion": {"type": "object"},
-            "taste": {"type": "object"},
+            **dict.fromkeys(("taste", "qualityCriteria", "research", "openLoop", "brownfield"), {"type": "object"}),
         },
         ["vision", "users", "first_user_moment", "scope_in", "scope_out", "assumptions"],
     ),
@@ -604,10 +604,8 @@ TOOLS = [
             ),
             "reopen_vision_lock": {
                 "type": "boolean",
-                "description": "Only when the user's latest reply explicitly asks to change the "
-                "approved vision, quality or done text. Never use it for your own rewording, "
-                "clarification or implementation consequences; record those as requirements, "
-                "notes or findings instead. Reopening costs the user another Vision Lock approval.",
+                "description": "Record a requested reopening. Complete before/after facts go to "
+                "the intent judge; this flag grants no consent or semantic verdict.",
             },
         },
         ["node"],
@@ -1658,7 +1656,6 @@ class PlannerServer:
         if name == "harness_record_chat_confirmation":
             from codex_harness.core.planner_confirmations import complete_chat_confirmation
             from codex_harness.core.planner_execution import complete_chat_execution
-
             arguments = {key: value for key, value in args.items() if key != "gate"}
             if args["gate"] == "execution":
                 outcome = complete_chat_execution(self._store(), **arguments)
@@ -1709,9 +1706,10 @@ class PlannerServer:
             "harness_judgment": "judgment",
         }
         if name in judgment_methods:
-            # This shared projection conveys semantic judgment only, never human consent.
             self.result_data = getattr(self._store(), judgment_methods[name])(**args)
-            return views.data_card("Semantic judgment (no human consent)", self.result_data)
+            if name == "harness_submit_judgment":
+                self.result_data["decision"] = confirmations.apply_judgment(self._store(), self.result_data)
+            return views.data_card("Semantic judgment and retained reply", self.result_data)
         if name == "harness_preflight":
             self.result_data = preflight_report(self.workspace, **args)
             return render_preflight(self.result_data)
@@ -1817,7 +1815,7 @@ class PlannerServer:
                 result = store.accept(**args)
                 self.result_data = result
                 return views.data_card(
-                    "Acceptance recorded",
+                    "Acceptance " + result.get("state", "recorded"),
                     {
                         "Approval": views.approval_label(result["by"], is_proxy=result["isProxy"]),
                         "Statement": result.get("statement"),
@@ -2196,7 +2194,7 @@ class PlannerServer:
                     "quality and Done before consent A."
                 )
             body = views.understanding_card(
-                **{k: v for k, v in args.items() if k not in {"expansion", "taste"}}
+                **{k: v for k, v in args.items() if k in {*approvals.UNDERSTANDING_FIELDS, "assumptions"}}
             )
             return body + "\n" + views.setup_card(node["fields"].get("setup", {}))
         if name == "harness_record_confirmation":
@@ -2237,6 +2235,8 @@ class PlannerServer:
                 args["node"], reopen_vision_lock=args.get("reopen_vision_lock", False)
             )
             self.result_data = {"id": args["node"]["id"]}
+            if args["node"]["kind"] == "vision" and store._meta()["locked_vision_json"]:
+                self.result_data["judgment"] = approvals.intent_assessment(store, store.spine().node(args["node"]["id"]), prepare=False)
             return f"Changed node: {args['node']['id']} (upserted)."
         if name == "harness_remove_node":
             store.remove_node(args["id"])
@@ -2398,7 +2398,7 @@ class PlannerServer:
             outcome = reply["structuredContent"].get(
                 "executionConfirmation", reply["structuredContent"]
             )
-            if outcome["state"] in {"stale", "unproved"}:
+            if outcome["state"] in {"stale", "unproved", "pending-judgment"}:
                 return reply
         arguments = {"gate": gate}
         if execution is not None:
@@ -2669,7 +2669,7 @@ class PlannerServer:
                     else self._execution_outcome_reply(pending, outcome)
                 )
                 if execution
-                else self._confirmation_reply(outcome, error=outcome["state"] != "approved")
+                else self._confirmation_reply(outcome, error=outcome["state"] not in {"approved", "pending-judgment"})
             )
             if execution and outcome["state"] == "approved":
                 reply = {**reply, "_meta": {"executionConfirmation": outcome}}

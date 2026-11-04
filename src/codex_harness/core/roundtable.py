@@ -1355,11 +1355,11 @@ def _execution_context(store, request):
     author = _execution_session(
         evidence["request"], evidence["stdout"], evidence["stderr"], author=True
     )
-    tests = {
-        row["id"]: row for row in evidence["integrated"]["validation"]["observations"]["tests"]
-    }
-    protected = {item["name"] for item in _protected_tests(store, spine=Spine(store._data()))}
+    from codex_harness.core.runners import execution_witnesses
+
+    tests = {row["id"]: row["observation"] for row in execution_witnesses(evidence["integrated"])}
     files = {}
+    selected_witnesses = []
     for member, origin in zip(members, origins, strict=True):
         if origin["sourceRun"]["planRevision"] != run["planRevision"]:
             raise ValueError("execution-origin-requirement-revision-changed")
@@ -1377,41 +1377,32 @@ def _execution_context(store, request):
                 raise ValueError("execution-specific-artifact-and-witness-required")
         if set(member["artifactPaths"]) - set(evidence["ownedFiles"]):
             raise ValueError("execution-artifact-not-owned")
-        relevant = [
-            scenario
-            for scenario in store.acceptance_scenarios()
-            if origin["finding"]["node_id"] in scenario.get("nodeIds", [])
-        ]
-        results = {row["id"]: row for row in run["results"]}
-        if not relevant or any(not results.get(row["id"], {}).get("passed") for row in relevant):
-            raise ValueError("execution-relevant-current-scenario-required")
+        # Hash selected owned artifacts. Relevance and meaningfulness belong to the judge;
+        # Python coverage, source-line and direct-call collection remain optional facts.
         for name in member["artifactPaths"]:
             files[name] = _assessment_file(Path(run["repo"]), name)
-        covered_artifacts = set()
         for key in member["witnessIds"]:
-            test = tests.get(key)
-            if (
-                not test
-                or test.get("source", {}).get("file") not in protected
-                or not test.get("lines")
-                or test.get("events") != [{"kind": "success"}]
-                or not any(
-                    call.get("file") in member["artifactPaths"] and call.get("phase") == "test"
-                    for call in test.get("ownedCalls", [])
+            observation = tests.get(key)
+            if observation is None:
+                raise ValueError("execution-witness-observation-missing")
+            source_file = observation.get("source", {}).get("file")
+            source_hash = observation.get("source", {}).get("sha256")
+            if source_file:
+                files[source_file] = _assessment_file(Path(run["repo"]), source_file)
+                if (
+                    source_hash and source_hash != files[source_file]["sha256"]
+                ):
+                    raise ValueError("execution-witness-source-hash-changed")
+            selected_witnesses.append(
+                dict(
+                    memberId=member["memberId"],
+                    witnessId=key,
+                    artifactPaths=member["artifactPaths"],
+                    observation=observation,
+                    sourceFile=source_file,
+                    sourceHash=source_hash,
                 )
-            ):
-                raise ValueError("execution-relevant-protected-artifact-observation-required")
-            name = test["source"]["file"]
-            files[name] = _assessment_file(Path(run["repo"]), name)
-            if files[name] != _assessment_file(store.workspace / "template", name):
-                raise ValueError("execution-protected-witness-source-changed")
-            covered_artifacts.update(
-                call["file"]
-                for call in test["ownedCalls"]
-                if call.get("file") in member["artifactPaths"] and call.get("phase") == "test"
             )
-        if covered_artifacts != set(member["artifactPaths"]):
-            raise ValueError("execution-every-implicated-artifact-needs-specific-observation")
     reviewer = request["reviewer"]
     if (
         not isinstance(reviewer, dict)
@@ -1441,6 +1432,15 @@ def _execution_context(store, request):
         productRun=run,
         origins=origins,
         execution=evidence,
+        selectedWitnesses=selected_witnesses,
+        relevanceQuestion=(
+            "Do these structurally bound observations establish the selected behavior? "
+            "Explain relevance and any concrete gaps from the retained artifacts and "
+            "observations. Missing Python line tracing or direct ownedCalls is only "
+            "missing optional instrumentation. It grants neither success nor failure. "
+            "Assess indirect calls, executable tests and unfamiliar evidence on their "
+            "actual meaning; do not require a language-specific witness shape."
+        ),
         authorObservation=author,
         files=files,
         reviewerExecutable=identity,

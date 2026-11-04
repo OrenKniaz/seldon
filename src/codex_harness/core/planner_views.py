@@ -66,12 +66,12 @@ def execution_assessment_contract():
             request=request,
             judgment=obj(
                 dict(
-                    repo=string,
-                    check=dict(type="string", enum=["textContrastAA", "visualQuality"]),
+                    repo=string, judgment_id=string,
+                    check=string,
                     passed=dict(type="boolean"),
                     statement=string,
                     by=string,
-                )
+                ), ["repo", "check"]
             ),
         ),
         [],
@@ -85,7 +85,7 @@ def execution_assessment_contract():
         inputSchema=schema,
         modes=dict(
             schema="Read only; creates no plan",
-            judgment="Web judgment binds files/scenarios/runtime; no machine proof or C",
+            judgment="Prepare/attach a 1j judgment bound to observed candidate/check; no implicit verdict or C",
             prepare="Read actual choices and exact canonical bindings; no reservation",
             request=(
                 "Explicit supplied reviewer/finite limits; existing "

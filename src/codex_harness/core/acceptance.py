@@ -23,7 +23,6 @@ from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.semantic_runner import SOURCE_IGNORED, web_toolchain
 from codex_harness.core.semantic_runner import run as run_semantic
-from codex_harness.core.semantic_schema import WEB
 from codex_harness.core.spine import Spine, compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
 
@@ -309,7 +308,7 @@ def run_scenarios(
         else time.monotonic()
         + sum(60 * len(item.get("steps", item.get("actions", []))) + 1.7 for item in scenarios)
     )
-    if semantic:
+    if isinstance(semantic, dict):
         document, targets = dict(schema="seldon/scenarios-v1", scenarios=scenarios), semantic
         raw_results = run_semantic(
             document,
@@ -332,8 +331,8 @@ def run_scenarios(
                 id=scenario["id"],
                 title=scenario["id"],
                 steps=[],
-                passed=raw["state"] == "PASS",
-                semantic=raw,
+                passed=None if raw["state"] == "pending-judgment" else raw["state"] == "PASS",
+                state=raw["state"], semantic=raw,
                 error=raw["reason"],
             )
             results.append(result)
@@ -519,16 +518,17 @@ def acceptance_inputs(store, repo, *, subject=None) -> dict:
     from codex_harness.core.planner_candidate import judgments_for
 
     if spine.semantic:
+        from codex_harness.core.runners import executable_scenarios
         document, targets, _ = plan_spine.semantic_spec(spine)
-        scenarios = document["scenarios"]
+        scenarios = executable_scenarios(spine.to_dict(), document)["scenarios"]
     if not scenarios:
         store.save_acceptance_scenarios(derive_scenarios(spine))
         scenarios = store.acceptance_scenarios()
     return dict(
         **({"semantic": targets} if spine.semantic else {}),
         **(
-            {"judgments": {k: v for k, v in judgments_for(store, repo).items() if k in WEB}}
-            if spine.semantic and any(t.get("kind") == "web" for t in targets.values())
+            {"judgments": judgments_for(store, repo)}
+            if spine.semantic
             else {}
         ),
         repo=str(Path(repo).absolute()),
@@ -633,6 +633,8 @@ def record_acceptance(store, captured, results, *, deadline=None) -> dict:
         "results": results,
         **({"webToolchain": captured["webToolchain"]} if "webToolchain" in captured else {}),
         "passed": bool(results) and all(r["passed"] for r in results),
+        "state": "FAIL" if any(r["passed"] is False for r in results) else
+                 "pending-judgment" if not results or any(r["passed"] is None for r in results) else "PASS",
     }
     _metadata_remaining(deadline)
     store.connection.execute(
@@ -768,6 +770,8 @@ def current_run(store) -> dict | None:
 
 def require_c_evidence(store, run):
     """The shared C gate for the writer and every status surface."""
+    if run and run.get("state") == "pending-judgment":
+        raise PlanStoreError("pending-judgment", "Prepare and submit a current bound execution judgment")
     if not run or not run["passed"]:
         _refuse("acceptance-scenarios-required")
     if store.spine().semantic:
@@ -1522,40 +1526,36 @@ def prepare_execution_assessment(store, selection):
             for row in origins
         ):
             raise ValueError("execution-finding-not-current-owned-requirement")
-        protected = {
-            row["name"] for row in roundtable._protected_tests(store, spine=Spine(store._data()))
-        }
+        from codex_harness.core.runners import execution_witnesses
         artifacts = [
             dict(path=name, **roundtable._assessment_file(Path(run["repo"]), name))
             for name in evidence["ownedFiles"]
         ]
-        witnesses = []
-        for observation in (
-            evidence["integrated"]["validation"].get("observations", {}).get("tests", [])
-        ):
-            name = observation.get("source", {}).get("file")
-            coverage = sorted(
-                {
-                    row["file"]
-                    for row in observation.get("ownedCalls", [])
-                    if row.get("phase") == "test" and row.get("file") in evidence["ownedFiles"]
-                }
-            )
-            if (
-                name in protected
-                and observation.get("events") == [{"kind": "success"}]
-                and observation.get("lines")
-                and coverage
-            ):
-                if roundtable._assessment_file(
-                    Path(run["repo"]), name
-                ) != roundtable._assessment_file(store.workspace / "template", name):
-                    raise ValueError("execution-protected-witness-source-changed")
-                witnesses.append(
-                    dict(id=observation["id"], artifactPaths=coverage, observation=observation)
-                )
+        witnesses = execution_witnesses(evidence["integrated"])
+        # Process, browser and state observations are structurally admitted here.
+        # Their relevance is an LLM question, not a Python import/coverage rule.
+        # dispatch verified the canonical originals and candidate before this read.
+        # The shared roundtable context must consume the same witness collector.
+        # This preparation grants no row closure or full-dream acceptance credit.
+        result["evidenceBinding"] = dict(
+            workerJobId=evidence["jobId"],
+            beadId=evidence["beadId"],
+            runId=evidence["runId"],
+            publicationRevision=evidence["publicationRevision"],
+            candidateCommit=evidence["candidateCommit"],
+            candidateTree=evidence["candidateTree"],
+            artifactHashes={a["path"]: a for a in artifacts},
+            observationHashes={w["id"]: w["sha256"] for w in witnesses},
+        )
+        result["judgmentStatus"] = "pending-judgment"
+        result["relevanceDecided"] = False
+        result["next"] = (
+            "Select observations and artifacts for a bound relevance judgment; "
+            "source language and owned-call coverage grant no semantic credit."
+        )
         if not witnesses:
-            raise ValueError("execution-relevant-protected-artifact-observation-required")
+            result.update(state="pending-judgment", witnesses=[], artifacts=artifacts)
+            return result
         result.update(
             state="draft_requires_explicit_choices",
             repo=run["repo"],
