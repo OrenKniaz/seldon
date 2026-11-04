@@ -11,7 +11,7 @@ CEILINGS = {
     "src/codex_harness/core/acceptance.py": 1918,
     "src/codex_harness/core/dispatch.py": 2781,
     "src/codex_harness/core/mcp_planner.py": 2901,
-    "src/codex_harness/core/plan_store.py": 3497,
+    "src/codex_harness/core/plan_store.py": 3495,
     "src/codex_harness/core/planner_views.py": 1647,
     "src/codex_harness/core/roundtable.py": 2095,
 }

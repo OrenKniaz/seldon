@@ -125,6 +125,15 @@ def next_command(server: PlannerServer, status: dict) -> str:
                 + confirm
             )
         return confirm
+    if gate == "requirements-have-tests" and store.spine().semantic:
+        return (
+            cmd('node --json "@vision.json"')
+            + (
+                " (save scenario intent in vision.fields.scenarios; unsupported shapes are "
+                "labelled scenario: unvalidated) then "
+            )
+            + advance
+        )
     if gate == "requirements-have-tests" and any(
         item["gap"] == "requirement-without-test" for item in status["coverage_gaps"]
     ):

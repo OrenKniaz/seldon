@@ -1500,8 +1500,6 @@ class PlanStore:
         fields = spine.node(spine.ids("vision")[0])["fields"]
         if not spine.semantic and ("validation" not in fields or "requirementFiles" not in fields):
             return None
-        if spine.semantic and not all(key in fields for key in ("scenarios", "targets")):
-            return None
         if spine.semantic and len(spine.ids("bead")) != 2:
             return None
         template = self.workspace / "template"

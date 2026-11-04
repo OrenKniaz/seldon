@@ -21,7 +21,7 @@ if __name__ == "__main__":
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def http_golden(workspace):
+def http_golden(workspace, semantic=False):
     """Protect subprocess HTTP planning through publication, real RED/GREEN and C.
 
     Catch ShelfLife's import-only audit deadlock and unknown concurrency helpers;
@@ -49,6 +49,8 @@ def http_golden(workspace):
         reply = workspace_wire(server, tool_name, expected_workspace=str(workspace), **args)
         if tool_name == "harness_accept_review":
             reply = finish_review(server, reply)
+        if reply["isError"]:
+            print("\n".join(c.get("text", "") for c in reply.get("content", [])))
         assert not reply["isError"], (tool_name, reply)
         return reply.get("structuredContent", {})
 
@@ -115,7 +117,10 @@ class ConcurrentHTTP(unittest.TestCase):
     try:
         rpc(server, "initialize", dict(protocolVersion="2025-06-18", capabilities={}))
         call(
-            "harness_plan_start", idea="Read shelf items over HTTP", name="http", plan_mode="legacy"
+            "harness_plan_start",
+            idea="Read shelf items over HTTP",
+            name="http",
+            plan_mode="semantic-v1" if semantic else "legacy",
         )
         store = server.store
         source_only_expansion(store)
@@ -131,39 +136,258 @@ class ConcurrentHTTP(unittest.TestCase):
         # Legacy understanding saves a node; request the shared A subject explicitly.
         yes(call("harness_prepare_chat_confirmation", gate="align+vision-lock"))
         vision = store.spine().node("V1")
-        vision["fields"].update(
-            validation=["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
-            requirementFiles=["tests"],
-        )
-        call(
-            "harness_upsert_nodes",
-            nodes=[
+        if semantic:
+            # Round 3 submitted only these importer scenarios; HTTP/UI were never
+            # submitted. Replay their missing coverage plus a proposed HTTP shape.
+            # Catch the Requirements deadlock at the public writer/compiler boundary;
+            # legacy HTTP and CLI-only journeys never exercised that boundary.
+            captured = {
+                "schema": "seldon/scenarios-v1",
+                "scenarios": [
+                    {
+                        "id": "S_IMPORT_MIXED",
+                        "requirementRefs": ["R4"],
+                        "contractRefs": ["G1"],
+                        "setup": {
+                            "dirs": ["data"],
+                            "files": [
+                                {
+                                    "path": "data/mixed.csv",
+                                    "utf8": (
+                                        "name,quantity,unit,expires\n"
+                                        "Rice,2,kg,2030-01-10\n"
+                                        "Beans,0,,\n"
+                                        ",1,,\n"
+                                        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                                        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx,1,,\n"
+                                        "Bad negative,-1,,\n"
+                                        "Bad fraction,1.5,,\n"
+                                        "Bad date,1,,2030-02-30\n"
+                                    ),
+                                }
+                            ],
+                        },
+                        "actions": [
+                            {
+                                "id": "import",
+                                "cli": {
+                                    "target": "importer",
+                                    "operation": "import-mixed",
+                                    "argv": [
+                                        {"path": "data/mixed.csv"},
+                                        "--db",
+                                        {"path": "data/pantry.sqlite3"},
+                                    ],
+                                },
+                            }
+                        ],
+                        "observe": [
+                            {
+                                "action": "import",
+                                "exitEquals": 0,
+                                "stdoutEquals": "imported 2, skipped 5\n",
+                                "stderrEquals": "",
+                            }
+                        ],
+                        "verdict": "all",
+                    },
+                    {
+                        "id": "S_IMPORT_UNREADABLE",
+                        "requirementRefs": ["R4"],
+                        "contractRefs": ["G1"],
+                        "setup": {"dirs": ["data"]},
+                        "actions": [
+                            {
+                                "id": "unreadable",
+                                "cli": {
+                                    "target": "importer",
+                                    "operation": "import-unreadable",
+                                    "argv": [
+                                        {"path": "data/missing.csv"},
+                                        "--db",
+                                        {"path": "data/pantry.sqlite3"},
+                                    ],
+                                },
+                            }
+                        ],
+                        "observe": [
+                            {
+                                "action": "unreadable",
+                                "exitEquals": 2,
+                                "stdoutEquals": "",
+                                "stderrNonempty": True,
+                            }
+                        ],
+                        "verdict": "all",
+                    },
+                ],
+            }
+            vision["fields"].update(
+                targets={"importer": {"entry": "import_items.py", "argv": []}},
+                scenarios=captured,
+            )
+            requirements = [node(f"R{i}", "requirement", ["F"]) for i in range(1, 6)]
+            owned = ["server.py", "import_items.py", "verify_http.py"]
+            nodes = [
                 vision,
                 node("F", "feature", ["V1"]),
-                node("R", "requirement", ["F"]),
+                *requirements,
+                node("G1", "design", [r["id"] for r in requirements]),
+                node(
+                    "C",
+                    "bead",
+                    ["G1"],
+                    ownedFiles=owned,
+                    dependsOn=[],
+                    lessons=[],
+                    semanticPhase="contracts",
+                ),
                 node(
                     "B",
                     "bead",
-                    ["R"],
-                    ownedFiles=["server.py"],
-                    dependsOn=[],
+                    ["G1"],
+                    ownedFiles=owned,
+                    dependsOn=["C"],
                     lessons=[],
-                    proofModule="test_http*.py",
+                    semanticPhase="build",
                 ),
-                node("T", "test", ["R"], level="e2e", module="test_http*.py"),
-            ],
-        )
-        template = workspace / "template"
-        (template / "tests").mkdir(parents=True)
-        for name, content in {
-            "server.py": product.replace("b'shelf'", "b'stub'"),
-            "tests/test_http.py": proof,
-            "tests/helpers.py": helper,
-            "tests/test_http_concurrent.py": opaque,
-        }.items():
-            (template / name).write_text(content, encoding="utf-8")
-        for phase in PHASES[PHASES.index(store.phase()) + 1 : PHASES.index("roundtable")]:
-            call("harness_advance", to_phase=phase)
+            ]
+            call("harness_upsert_nodes", nodes=nodes)
+            call("harness_advance", to_phase="plan")
+            call("harness_compile", include_detail=True)
+            assert not store.status()["coverage_gaps"], store.status()
+            planned_scenarios = store.acceptance_scenarios()
+            assert {
+                s["requirementRefs"][0]
+                for s in planned_scenarios
+                if s.get("evidenceTier") == "scenario: unvalidated"
+            } == {"R1", "R2", "R3", "R5"}
+            assert all(s["executable"] for s in planned_scenarios if s["id"].startswith("S_IMPORT"))
+            # Accept common HTTP request/response intent without pretending to run it.
+            vision["fields"]["scenarios"]["scenarios"].append(
+                dict(
+                    id="S_HTTP",
+                    requirementRefs=["R1", "R2", "R3", "R5"],
+                    contractRefs=["G1"],
+                    setup={},
+                    actions=[{"id": "get", "http": {"method": "GET", "path": "/items"}}],
+                    observe=[{"action": "get", "statusEquals": 200, "bodyEquals": "shelf"}],
+                    verdict="all",
+                )
+            )
+            call("harness_upsert_node", node=vision)
+            call("harness_compile", include_detail=True)
+            held = next(s for s in store.acceptance_scenarios() if s["id"] == "S_HTTP")
+            assert held["evidenceTier"] == "scenario: unvalidated" and not held["executable"]
+            from codex_harness.core.semantic_runner import run as run_scenarios
+
+            pending = store._manifest(store.spine())["semantic"]
+            (workspace / "import_items.py").write_text("# not executed\n")
+            blocked = run_scenarios(
+                pending["scenarios"], workspace, pending["targets"], "validation"
+            )
+            assert blocked[-1]["state"] == "ERROR", blocked
+            assert "scenario: unvalidated" in blocked[0]["reason"], blocked
+            assert not blocked[0]["cleanup"]["childLaunched"], blocked
+            (workspace / "import_items.py").unlink()
+            # Workers can supply an ordinary CLI verifier for the HTTP lifecycle.
+            # Resolve the unvalidated intent before B; it grants no RED/GREEN credit.
+            mixed = vision["fields"]["scenarios"]["scenarios"][0]
+            mixed["requirementRefs"] = [f"R{i}" for i in range(1, 6)]
+            mixed["actions"].append(
+                {
+                    "id": "http",
+                    "cli": {
+                        "target": "http",
+                        "operation": "read",
+                        "argv": [{"path": "data/pantry.sqlite3"}],
+                    },
+                }
+            )
+            mixed["observe"].append(
+                {"action": "http", "exitEquals": 0, "stdoutEquals": "Rice,Beans\n"}
+            )
+            vision["fields"]["targets"]["http"] = {"entry": "verify_http.py", "argv": []}
+            vision["fields"]["scenarios"]["scenarios"].pop()
+            call("harness_upsert_node", node=vision)
+            template = workspace / "template"
+            template.mkdir(exist_ok=True)
+            product = product.replace(
+                "self.wfile.write(b'shelf')",
+                "import sqlite3\n        with sqlite3.connect(sys.argv[2]) as db:\n"
+                "            rows = db.execute('select name from items')\n"
+                "            self.wfile.write(','.join(r[0] for r in rows).encode())",
+            )
+            (template / "server.py").write_text(product, encoding="utf-8")
+            importer = """import csv, sys
+try:
+    rows = list(csv.DictReader(open(sys.argv[1], encoding='utf-8')))
+except OSError:
+    print('unreadable', file=sys.stderr)
+    sys.exit(2)
+def valid(row):
+    from datetime import date
+    try:
+        if row['expires']: date.fromisoformat(row['expires'])
+        return 1 <= len(row['name']) <= 80 and int(row['quantity']) >= 0
+    except ValueError: return False
+import sqlite3
+accepted = [row for row in rows if valid(row)]
+with sqlite3.connect(sys.argv[3]) as db:
+    db.execute('create table if not exists items (name text)')
+    db.executemany('insert into items values (?)', [(r['name'],) for r in accepted])
+n = len(accepted)
+print(f'imported {n}, skipped {len(rows)-n}')
+"""
+            verifier = """import subprocess, sys
+from pathlib import Path
+from urllib.request import urlopen
+entry = str(Path(__file__).with_name('server.py'))
+with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
+                      stdout=subprocess.PIPE, text=True) as server:
+    try:
+        port = int(server.stdout.readline())
+        with urlopen(f'http://127.0.0.1:{port}/items', timeout=5) as response:
+            if response.status != 200: raise RuntimeError(response.status)
+            print(response.read().decode())
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+"""
+        else:
+            vision["fields"].update(
+                validation=["-B", "-m", "unittest", "discover", "-s", "tests", "-p"],
+                requirementFiles=["tests"],
+            )
+            call(
+                "harness_upsert_nodes",
+                nodes=[
+                    vision,
+                    node("F", "feature", ["V1"]),
+                    node("R", "requirement", ["F"]),
+                    node(
+                        "B",
+                        "bead",
+                        ["R"],
+                        ownedFiles=["server.py"],
+                        dependsOn=[],
+                        lessons=[],
+                        proofModule="test_http*.py",
+                    ),
+                    node("T", "test", ["R"], level="e2e", module="test_http*.py"),
+                ],
+            )
+            template = workspace / "template"
+            (template / "tests").mkdir(parents=True)
+            for name, content in {
+                "server.py": product.replace("b'shelf'", "b'stub'"),
+                "tests/test_http.py": proof,
+                "tests/helpers.py": helper,
+                "tests/test_http_concurrent.py": opaque,
+            }.items():
+                (template / name).write_text(content, encoding="utf-8")
+            for phase in PHASES[PHASES.index(store.phase()) + 1 : PHASES.index("roundtable")]:
+                call("harness_advance", to_phase=phase)
         choice = json.loads(
             (ROOT / "tests/fixtures/efficiency/jsonkeys-reviewers.json").read_text("utf-8")
         )["choice"]
@@ -176,11 +400,17 @@ class ConcurrentHTTP(unittest.TestCase):
         options = dict(
             expected_revision=manifest["planRevision"],
             max_parallel=1,
-            timeout=30,
-            call_cap=1,
-            workers=[dict(bead="B", provider="codex", model="gpt-6.1-sol", effort="medium")],
+            timeout=60 if semantic else 30,
+            call_cap=2 if semantic else 1,
+            workers=[
+                dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
+                for b in (("C", "B") if semantic else ("B",))
+            ],
         )
         with pytest.MonkeyPatch.context() as patch:
+            # These helpers also run before the stdio journey installs its absolute
+            # import path. Relative PYTHONPATH breaks runner children in temp cwd.
+            patch.setenv("PYTHONPATH", os.pathsep.join([str(ROOT / "src"), str(ROOT)]))
             patch.setattr(roundtable, "_executable", lambda *_: sys.executable)
             patch.setattr(
                 roundtable,
@@ -200,24 +430,32 @@ class ConcurrentHTTP(unittest.TestCase):
                     reviewer_node_id=choice["id"],
                 )
             )
-            audit = call("harness_audit", mode="prospective")
-            server.audits.dispatch_after_flush(store)
-            server.audits.thread.join(timeout=10)
-            server.audits.drain(store)
-            audited = call("harness_audit_status", id=audit["attemptId"])
-            result = audited["result"]
-            assert result["ok"] and audited["proofCreditGranted"], audited
-            assert result["evidenceTier"] == "audit: unrecognized interface", result
-            assert all(f["severity"] == "info" for f in result["findings"])
-            assert {f["module"] for f in result["findings"]} == {"test_http*.py"}
-            assert not result["collection"] and not audited["didRunValidation"]
-            # The direct HTTP proof is recognized; only the opaque helper lowers the tier.
-            assert len(result["findings"]) == 1, result
+            if not semantic:
+                audit = call("harness_audit", mode="prospective")
+                server.audits.dispatch_after_flush(store)
+                server.audits.thread.join(timeout=10)
+                server.audits.drain(store)
+                audited = call("harness_audit_status", id=audit["attemptId"])
+                result = audited["result"]
+                assert result["ok"] and audited["proofCreditGranted"], audited
+                assert result["evidenceTier"] == "audit: unrecognized interface", result
+                assert all(f["severity"] == "info" for f in result["findings"])
+                assert {f["module"] for f in result["findings"]} == {"test_http*.py"}
+                assert not result["collection"] and not audited["didRunValidation"]
+                # The direct HTTP proof is recognized; only the opaque helper lowers the tier.
+                assert len(result["findings"]) == 1, result
             call("harness_advance", to_phase="roundtable")
             assert store.status()["pending_gate"] != "passing-audit-required"
             call("harness_roundtable", max_rounds=1, max_total=2, timeout=5)
             call("harness_advance", to_phase="publish")
-            call("harness_publish", proof_level="prospective", reason="No reference implementation")
+            if semantic:
+                call("harness_publish")
+            else:
+                call(
+                    "harness_publish",
+                    proof_level="prospective",
+                    reason="No reference implementation",
+                )
             call("harness_advance", to_phase="execute")
             published = store.published_manifest(
                 store.status()["publication"]["published_revision"]
@@ -227,25 +465,93 @@ class ConcurrentHTTP(unittest.TestCase):
             def build(root):
                 (root / "server.py").write_text(product, encoding="utf-8")
 
-            run = dispatch.run_plan(
-                workspace, work_root=workspace / "runs", max_parallel=1, fake_workers={"B": build}
-            )
+            if semantic:
+                # C must consume the admitted job's real root delivery. Standalone
+                # dispatch proves scenarios, but never supplies that delivery.
+                contract_sources = {}
+                for filename, operation in (
+                    ("import_items.py", "import"),
+                    ("verify_http.py", "read"),
+                ):
+                    contract_sources[filename] = (
+                        "import sys\nprint('SELDON-STUB ' + "
+                        "('import-unreadable' if 'missing.csv' in ' '.join(sys.argv) "
+                        "else 'import-mixed'), file=sys.stderr)\nsys.exit(3)\n"
+                        if operation == "import"
+                        else "import sys\nprint('SELDON-STUB read', file=sys.stderr)\nsys.exit(3)\n"
+                    )
+                (workspace / "scripted-provider.json").write_text(
+                    json.dumps(
+                        {
+                            "contracts": contract_sources,
+                            "build": {
+                                "server.py": product,
+                                "import_items.py": importer,
+                                "verify_http.py": verifier,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                actual_popen = subprocess.Popen
+
+                def launch(argv, **kwargs):
+                    if "codex_harness.core.planner_jobs" in argv:
+                        argv = [
+                            sys.executable,
+                            "-B",
+                            str(Path(__file__).resolve()),
+                            "controller",
+                            str(workspace),
+                            "shelflife",
+                            argv[-1],
+                        ]
+                    return actual_popen(argv, **kwargs)
+
+                with pytest.MonkeyPatch.context() as process_patch:
+                    process_patch.setattr(subprocess, "Popen", launch)
+                    job = call("harness_worker_start", **options)
+                    deadline = time.monotonic() + 180
+                    while (
+                        job["status"] not in {"completed", "failed"} and time.monotonic() < deadline
+                    ):
+                        job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
+                assert job["status"] == "completed", job
+                run = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
+                assert run["delivery"]["root"] == str(workspace.resolve()), run
+            else:
+                run = dispatch.run_plan(
+                    workspace,
+                    work_root=workspace / "runs",
+                    max_parallel=1,
+                    fake_workers={"B": build},
+                )
             assert run["status"] == dispatch.STATUS_MOCK_ONLY, run
-            assert not run["baseline"]["validation"]["B"]["passed"], run
-            assert all(r["passed"] for r in run["requirementValidation"]), run
-            derived = call("harness_accept_scenarios", derive=True)
-            scenarios = derived["scenarios"]
-            for scenario in scenarios:
-                pattern = (
-                    "test_http.py"
-                    if scenario["id"] == "first-moment"
-                    else "test_http_concurrent.py"
-                )
-                scenario.update(
-                    steps=['"{python}" -B -m unittest discover -s "{repo}/tests" -p ' + pattern],
-                    expect={"exit": 0, "stderr": "OK"},
-                )
-            call("harness_accept_scenarios", scenarios=scenarios)
+            if not semantic:
+                assert not run["baseline"]["validation"]["B"]["passed"], run
+            if semantic:
+                assert run["beads"]["C"]["status"] == "contracts-red", run
+                assert next(r for r in run["requirementValidation"] if r["bead"] == "B")[
+                    "passed"
+                ], run
+            else:
+                assert all(r["passed"] for r in run["requirementValidation"]), run
+            if not semantic:
+                derived = call("harness_accept_scenarios", derive=True)
+                scenarios = derived["scenarios"]
+                for scenario in scenarios:
+                    pattern = (
+                        "test_http.py"
+                        if scenario["id"] == "first-moment"
+                        else "test_http_concurrent.py"
+                    )
+                    scenario.update(
+                        steps=[
+                            '"{python}" -B -m unittest discover -s "{repo}/tests" -p ' + pattern
+                        ],
+                        expect={"exit": 0, "stderr": "OK"},
+                    )
+                call("harness_accept_scenarios", scenarios=scenarios)
             call("harness_advance", to_phase="accept")
             accepted = finish_public_acceptance(
                 server,
@@ -263,7 +569,11 @@ class ConcurrentHTTP(unittest.TestCase):
             call("harness_accept", by="user", statement="Yes")
             assert store.status()["acceptance"]["accepted"]
             assert decisions == ["align+vision-lock", "plan-execution", "accept"]
-            print("golden http: decisions=3; subprocess HTTP + concurrency RED→GREEN; C accepted")
+            print(
+                "golden ShelfLife scenarios: decisions=3; admitted root delivery; C accepted"
+                if semantic
+                else "golden http: decisions=3; HTTP + concurrency RED->GREEN; C accepted"
+            )
     finally:
         server.close()
 
@@ -304,7 +614,14 @@ def provider_host(mode, workspace, surface, job_id=None):
     def controller_payload(argv, **options):
         return actual_audit(command("worker", str(workspace), job_id), **options)
 
+    def write_shelflife(root, phase):
+        payload = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))
+        for name, text in payload[phase].items():
+            (root / name).write_text(text, encoding="utf-8")
+
     def contracts(root):
+        if surface == "shelflife":
+            return write_shelflife(root, "contracts")
         first = surface == "cli" and not (workspace / "contracts-attempted").exists()
         if first:
             (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
@@ -325,6 +642,8 @@ def provider_host(mode, workspace, surface, job_id=None):
         )
 
     def build(root):
+        if surface == "shelflife":
+            return write_shelflife(root, "build")
         if surface == "cli" and not (workspace / "stall-attempted").exists():
             # A real descendant hangs mid-Build with uncommitted poisoned writes.
             # The Job owner must reap it; an exited fake cannot prove recovery.
@@ -421,6 +740,7 @@ def test_golden_path(tmp_path, request, surface):
     """
     if surface == "cli":
         http_golden(tmp_path / "http-journey")
+        http_golden(tmp_path / "shelflife-scenarios", semantic=True)
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
     started = time.monotonic()
@@ -576,9 +896,14 @@ def test_golden_path(tmp_path, request, surface):
                     (ROOT / "tests/fixtures/ux5-turn7-upsert.json").read_text("utf-8")
                 )
                 before = call("harness_show_node", id="V1")
-                refused = call("harness_upsert_node", node=captured["node"], allow_error=True)
-                assert "value" in str(refused)
-                assert call("harness_show_node", id="V1") == before
+                call("harness_upsert_node", node=captured["node"])
+                unvalidated = call("harness_plan_status")["acceptance"]["scenarios"]
+                assert any(
+                    s.get("evidenceTier") == "scenario: unvalidated"
+                    and "value" in s["validationMessage"]
+                    and not s["executable"]
+                    for s in unvalidated
+                ), unvalidated
                 captured_f3 = json.loads(
                     (ROOT / "tests/fixtures/f3-turn11-vision.json").read_text("utf-8")
                 )
@@ -794,6 +1119,8 @@ def test_golden_path(tmp_path, request, surface):
                 stalled = job["jobId"]
                 proof = call("harness_recovery", mode="inspect", job_id=stalled)
                 assert proof["verdict"] == "VERIFIED-QUIESCENT", proof
+                print("RECOVERY-1 inspect proof:", json.dumps(proof, sort_keys=True))
+                print("RECOVERY-1 job record:", json.dumps(job, sort_keys=True))
                 assert proof["controllerAndChildren"]["stopReason"] == "worker-stalled"
                 assert proof["controllerAndChildren"]["activeProcessesAfterTeardown"] == 0
                 poisoned = Path((tmp_path / "stall-attempted").read_text(encoding="utf-8"))

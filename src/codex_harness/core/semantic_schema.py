@@ -143,7 +143,7 @@ def target_entry(binding):
     return module.replace(".", "/") + "/__main__.py"
 
 
-def validate(document, product, targets, *, require_entries=True, draft=False):
+def validate(document, product, targets, *, require_entries=True, draft=False, planning=False):
     if len(json.dumps([document, targets], allow_nan=False).encode()) > 65536:
         raise ValueError("Input exceeds 64KiB")
     if type(targets) is not dict:
@@ -174,18 +174,28 @@ def validate(document, product, targets, *, require_entries=True, draft=False):
         return []
     fields(document, ("schema", "scenarios"), ("schema", "scenarios"))
     scenarios = array(document["scenarios"], 16)
-    if document["schema"] != "seldon/scenarios-v1" or not scenarios:
+    if document["schema"] != "seldon/scenarios-v1" or not scenarios and not planning:
         raise ValueError("Use seldon/scenarios-v1 with 1..16 scenarios")
     ids = set()
     for s in scenarios:
         keys = "id requirementRefs contractRefs setup actions observe verdict".split()
-        fields(s, keys, keys)
+        fields(s, [*keys, "evidenceTier", "validationMessage"], keys)
         if type(s["id"]) is not str or not s["id"] or s["id"] in ids or s["verdict"] != "all":
             raise ValueError("Use unique ids and verdict all")
         ids.add(s["id"])
+        if not planning and s.get("evidenceTier") == "scenario: unvalidated":
+            raise ValueError(
+                f"{s['id']}: scenario: unvalidated. Replace its actions/observations with "
+                "supported executable proof and save the vision before running RED/GREEN."
+            )
         for key in ("requirementRefs", "contractRefs"):
-            if not array(s[key]) or any(type(r) is not str or not r for r in s[key]):
+            if (not array(s[key]) and not planning) or any(
+                type(r) is not str or not r for r in s[key]
+            ):
                 raise ValueError("Declare requirement and contract references")
+        if planning:
+            s.pop("evidenceTier", None)
+            s.pop("validationMessage", None)
         fields(s["setup"], ("dirs", "files", "snapshots"))
         for directory in array(s["setup"].get("dirs", [])):
             resolved = path(product, directory)
@@ -213,99 +223,140 @@ def validate(document, product, targets, *, require_entries=True, draft=False):
             if type(f["id"]) is not str or f["id"] in snapshots:
                 raise ValueError("Use unique snapshot ids")
             snapshots.add(f["id"])
-        actions, web_actions = set(), set()
-        for a in array(s["actions"], 16):
-            fields(a, ("id", "cli", "web", "cwd", "http", "file"), ("id",))
-            if "http" in a or "file" in a:
-                raise ValueError(
-                    "HTTP/file-only actions unsupported in v1 (unsupported in semantic-v1)"
-                )
-            if type(a["id"]) is not str or a["id"] in actions or len(set(a) & {"cli", "web"}) != 1:
-                raise ValueError("Use unique CLI actions")
-            if "web" in a:
-                fields(a, ("id", "web"), ("id", "web"))
-                web_journey(a["web"], targets, draft=draft)
-                v = a["web"]
+        try:
+            if not s["requirementRefs"] or not s["contractRefs"]:
+                raise ValueError("Link requirementRefs and contractRefs to their owning nodes")
+            actions, web_actions = set(), set()
+            for a in array(s["actions"], 16):
+                fields(a, ("id", "cli", "web", "cwd", "http", "file"), ("id",))
+                if "http" in a or "file" in a:
+                    raise ValueError(
+                        "HTTP/file actions need a worker-authored CLI verifier target "
+                        "before execution"
+                    )
+                if (
+                    type(a["id"]) is not str
+                    or a["id"] in actions
+                    or len(set(a) & {"cli", "web"}) != 1
+                ):
+                    raise ValueError("Use unique CLI actions")
+                if "web" in a:
+                    fields(a, ("id", "web"), ("id", "web"))
+                    web_journey(a["web"], targets, draft=draft)
+                    v = a["web"]
+                    if (
+                        type(v["operation"]) is not str
+                        or not v["operation"]
+                        or "\n" in v["operation"]
+                    ):
+                        raise ValueError("Declare a literal operation marker")
+                    coverage.setdefault((v["target"], v["operation"]), set()).add(
+                        (v["viewport"]["width"], v["reducedMotion"])
+                    )
+                    actions.add(a["id"])
+                    web_actions.add(a["id"])
+                    continue
+                if "cwd" in a:
+                    cwd = path(product, a["cwd"])
+                    created = [path(product, d) for d in s["setup"].get("dirs", [])]
+                    created += [
+                        path(product, f["path"]).parent for f in s["setup"].get("files", [])
+                    ]
+                    if not any(cwd == p or cwd in p.parents for p in created):
+                        raise ValueError("Action cwd must be a directory created by setup")
+                actions.add(a["id"])
+                v = a["cli"]
+                fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"))
+                if "stdin" in v:
+                    if set(v["stdin"]) == {"holdOpen", "exitWithin"}:
+                        if (
+                            v["stdin"]["holdOpen"] is not True
+                            or type(v["stdin"]["exitWithin"]) is not int
+                            or not 1 <= v["stdin"]["exitWithin"] <= 20
+                        ):
+                            raise ValueError(
+                                "Held-open stdin needs holdOpen:true and exitWithin:1..20 seconds"
+                            )
+                    else:
+                        fields(v["stdin"], ("utf8", "base64"))
+                        content(v["stdin"])
+                if type(v["target"]) is not str or not draft and v["target"] not in targets:
+                    raise ValueError("Action references an unknown target")
+                if targets.get(v["target"], {}).get("kind") == "web":
+                    raise ValueError("CLI action requires a Python target")
                 if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
                     raise ValueError("Declare a literal operation marker")
-                coverage.setdefault((v["target"], v["operation"]), set()).add(
-                    (v["viewport"]["width"], v["reducedMotion"])
-                )
-                actions.add(a["id"])
-                web_actions.add(a["id"])
-                continue
-            if "cwd" in a:
-                cwd = path(product, a["cwd"])
-                created = [path(product, d) for d in s["setup"].get("dirs", [])]
-                created += [path(product, f["path"]).parent for f in s["setup"].get("files", [])]
-                if not any(cwd == p or cwd in p.parents for p in created):
-                    raise ValueError("Action cwd must be a directory created by setup")
-            actions.add(a["id"])
-            v = a["cli"]
-            fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"))
-            if "stdin" in v:
-                if set(v["stdin"]) == {"holdOpen", "exitWithin"}:
-                    if (
-                        v["stdin"]["holdOpen"] is not True
-                        or type(v["stdin"]["exitWithin"]) is not int
-                        or not 1 <= v["stdin"]["exitWithin"] <= 20
+                argv(v["argv"], product, path(product, a["cwd"]) if "cwd" in a else product)
+            if not actions or not array(s["observe"]):
+                raise ValueError("Declare product actions and finite observations")
+            for o in s["observe"]:
+                if isinstance(o, dict) and o.get("action") in web_actions:
+                    fields(o, ("action", *WEB), ("action", *WEB))
+                    if any(
+                        type(o[k])
+                        is not (int if k in ("consoleErrors", "externalRequests") else bool)
+                        or o[k] != (0 if k in ("consoleErrors", "externalRequests") else True)
+                        for k in WEB
                     ):
-                        raise ValueError(
-                            "Held-open stdin needs holdOpen:true and exitWithin:1..20 seconds"
-                        )
-                else:
-                    fields(v["stdin"], ("utf8", "base64"))
-                    content(v["stdin"])
-            if type(v["target"]) is not str or not draft and v["target"] not in targets:
-                raise ValueError("Action references an unknown target")
-            if targets.get(v["target"], {}).get("kind") == "web":
-                raise ValueError("CLI action requires a Python target")
-            if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
-                raise ValueError("Declare a literal operation marker")
-            argv(v["argv"], product, path(product, a["cwd"]) if "cwd" in a else product)
-        if not actions or not array(s["observe"]):
-            raise ValueError("Declare product actions and finite observations")
-        for o in s["observe"]:
-            if isinstance(o, dict) and o.get("action") in web_actions:
-                fields(o, ("action", *WEB), ("action", *WEB))
-                if any(
-                    type(o[k]) is not (int if k in ("consoleErrors", "externalRequests") else bool)
-                    or o[k] != (0 if k in ("consoleErrors", "externalRequests") else True)
-                    for k in WEB
-                ):
-                    raise ValueError("Web gates require true or zero error/request counts")
-                continue
-            fields(o, ["action", "path", *ACTION, *FILE])
-            if "action" in o and "path" in o:
-                raise ValueError(
-                    "An observation targets one action or one path, not both. File observations "
-                    "are checked after the scenario's last action; to check files between "
-                    "actions, split into separate scenarios."
+                        raise ValueError("Web gates require true or zero error/request counts")
+                    continue
+                fields(o, ["action", "path", *ACTION, *FILE])
+                if "action" in o and "path" in o:
+                    raise ValueError(
+                        "An observation targets one action or one path, not both. "
+                        "File observations "
+                        "are checked after the scenario's last action; to check files between "
+                        "actions, split into separate scenarios."
+                    )
+                reference = "action" if "action" in o else "path"
+                allowed = ACTION if reference == "action" else FILE
+                fields(o, [reference, *allowed], (reference,))
+                if len(o) < 2 or (reference == "action" and o[reference] not in actions):
+                    raise ValueError("Observation needs a known reference and expectations")
+                if reference == "path":
+                    path(product, o[reference])
+                for key, value in o.items():
+                    kind = {
+                        "exitEquals": int,
+                        "elapsedAtMost": int,
+                        "stdinOpenAtExit": bool,
+                        "stderrNonempty": bool,
+                        "fileAbsent": bool,
+                    }.get(key, str)
+                    if (
+                        key not in ("stdoutJsonEquals", "fileJsonEquals")
+                        and type(value) is not kind
+                    ):
+                        raise ValueError("Observation has the wrong JSON value type")
+                    if key == "bytesUnchangedFrom" and value not in snapshots:
+                        raise ValueError("Observation references an unknown snapshot")
+            if any(sum(o.get("action") == a for o in s["observe"]) != 1 for a in web_actions):
+                raise ValueError("Each web journey requires exactly one complete gate observation")
+        except ValueError as error:
+            if not planning:
+                raise
+            s["evidenceTier"] = "scenario: unvalidated"
+            s["validationMessage"] = str(error) + (
+                "; planning may proceed. Before execution, replace this scenario's actions/"
+                "observations with supported executable proof; no RED/GREEN or acceptance "
+                "credit is granted by this tier."
+            )
+    incomplete = {
+        key
+        for key, views in coverage.items()
+        if views != {(w, m) for w in (375, 1440) for m in ("reduce", "no-preference")}
+    }
+    if incomplete and (planning or not draft):
+        if not planning:
+            raise ValueError("Each web operation requires both viewports and motion preferences")
+        for s in scenarios:
+            if any(
+                (a.get("web", {}).get("target"), a.get("web", {}).get("operation")) in incomplete
+                for a in s["actions"]
+            ):
+                s.update(
+                    evidenceTier="scenario: unvalidated",
+                    validationMessage="Before execution, add both viewports and motion "
+                    "preferences for each web operation.",
                 )
-            reference = "action" if "action" in o else "path"
-            allowed = ACTION if reference == "action" else FILE
-            fields(o, [reference, *allowed], (reference,))
-            if len(o) < 2 or (reference == "action" and o[reference] not in actions):
-                raise ValueError("Observation needs a known reference and expectations")
-            if reference == "path":
-                path(product, o[reference])
-            for key, value in o.items():
-                kind = {
-                    "exitEquals": int,
-                    "elapsedAtMost": int,
-                    "stdinOpenAtExit": bool,
-                    "stderrNonempty": bool,
-                    "fileAbsent": bool,
-                }.get(key, str)
-                if key not in ("stdoutJsonEquals", "fileJsonEquals") and type(value) is not kind:
-                    raise ValueError("Observation has the wrong JSON value type")
-                if key == "bytesUnchangedFrom" and value not in snapshots:
-                    raise ValueError("Observation references an unknown snapshot")
-        if any(sum(o.get("action") == a for o in s["observe"]) != 1 for a in web_actions):
-            raise ValueError("Each web journey requires exactly one complete gate observation")
-    if not draft and any(
-        c != {(w, m) for w in (375, 1440) for m in ("reduce", "no-preference")}
-        for c in coverage.values()
-    ):
-        raise ValueError("Each web operation requires both viewports and motion preferences")
     return scenarios

@@ -456,9 +456,8 @@ def scenario_nodes(spine):
     """Scenario aliases refer to their declared requirement owners, never new spine nodes."""
     if not spine.semantic:
         return {}
-    scenarios = (
-        spine.node(spine.ids("vision")[0])["fields"].get("scenarios", {}).get("scenarios", [])
-    )
+    document, _, _ = semantic_spec(spine, draft=True)
+    scenarios = document["scenarios"]
     return {
         s["id"]: sorted({ref.split("@", 1)[0] for ref in s["requirementRefs"]}) for s in scenarios
     }
@@ -468,15 +467,44 @@ def semantic_spec(spine, product=None, *, draft=False):
     from codex_harness.core.semantic_schema import validate
 
     root = spine.node(spine.ids("vision")[0])["fields"]
+    root.setdefault("targets", {})
+    root.setdefault("scenarios", {"schema": "seldon/scenarios-v1", "scenarios": []})
     for field in ("scenarios", "targets"):
-        if not (draft and field not in root) and not isinstance(root.get(field), dict):
+        if not isinstance(root.get(field), dict):
             raise ValueError(
                 f"Missing/malformed {field}; author vision.fields.{field} as an object. "
                 "See harness_schema kind=vision semanticScenarios."
             )
     document, targets = root.get("scenarios"), root.get("targets", {})
+    if isinstance(document.get("scenarios"), list):
+        covered = {
+            ref.split("@", 1)[0]
+            for scenario in document["scenarios"]
+            for ref in scenario.get("requirementRefs", [])
+            if isinstance(ref, str)
+        }
+        for key in sorted(set(spine.ids("requirement")) - covered):
+            document["scenarios"].append(
+                dict(
+                    id=f"unvalidated-{key}",
+                    requirementRefs=[key],
+                    contractRefs=[],
+                    setup={},
+                    actions=[],
+                    observe=[],
+                    verdict="all",
+                    validationMessage=spine.node(key)["text"],
+                )
+            )
     try:
-        validate(document, product or Path.cwd(), targets, require_entries=False, draft=draft)
+        validate(
+            document,
+            product or Path.cwd(),
+            targets,
+            require_entries=False,
+            draft=draft,
+            planning=True,
+        )
         kinds = {"web" if t.get("kind") == "web" else "cli" for t in targets.values()}
         if len(kinds) > 1 or kinds and root.get("productSurface", next(iter(kinds))) not in kinds:
             raise ValueError("Targets must all be web or all CLI and match productSurface")
@@ -497,10 +525,6 @@ def semantic_spec(spine, product=None, *, draft=False):
                     )
                 if kind == "requirement":
                     covered.add(key)
-    gaps.extend(
-        f"{key} uncovered by any scenario"
-        for key in sorted(set(spine.ids("requirement")) - covered)
-    )
     if gaps:
         error = ValueError("Check semantic scenario references: " + "; ".join([*messages, *gaps]))
         error.open_gaps = gaps

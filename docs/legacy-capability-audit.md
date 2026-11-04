@@ -1,5 +1,63 @@
 # Legacy capability audit for the local Seldon extraction
 
+SCEN-COV-1: ShelfLife round 3 (20261104T131037-acc663-001-shelflife) stalled
+on missing vision.fields.scenarios, then R1/R2/R3/R5 uncovered after saving
+S_IMPORT_MIXED/S_IMPORT_UNREADABLE (CLI argv/path fixtures and exact stream/exit
+observations). No HTTP/UI scenario object was submitted in the retained turns.
+Owner: semantic_spec / semantic_schema.validate. Disposition: unsupported
+scenario vocabulary and uncovered requirements retain scenario: unvalidated in
+the canonical planning projection, exported SCENARIOS.json and acceptance view;
+planning proceeds, with no execution or acceptance credit. Runtime requires a
+supported executable replacement. Setup confinement and reference integrity
+remain enforced. Exit: golden replays both importer submissions, compiles HTTP
+intent at the labelled tier, refuses it before any child launch, then executes
+worker proof from CSV importer through SQLite to real HTTP and reaches C in
+three decisions. Original ShelfLife delivery and actual-provider acceptance
+remain unproven. First gate: 16 batch checks and web passed; the new fixture
+needed exist_ok for the compiler-created template and the size ceiling needed
+to ratchet down by two. Final gate: 17 batch checks passed, CLI failed on a
+fixture assertion that incorrectly demanded passed=true from the expected RED
+Contracts row; web passed (350.16s). Retained dispatch shows Contracts
+contracts-red and Build passed=true, including importer -> SQLite -> HTTP.
+The assertion now checks those distinct outcomes; corrected fixture is UNRUN
+because the two actual gate runs are exhausted. C on this new journey is
+unverified. A separate tag attempt was denied before tests because it selected
+a scratch directory outside the assigned root; that denied path was not retried.
+
+SCEN-COV-1 C follow-up supersedes the earlier unverified-C disposition above.
+The exact delivery owner error was "delivery: one retained candidate required
+before C/judgment": this fixture dispatched into workspace/runs instead of an
+admitted worker job, so no canonical root delivery existed. Fixed the fixture
+to use public worker admission, the existing controller/Windows Job, ordinary
+dispatch and root delivery; only provider execution is doubled. Kept the C
+integrity gate intact. Pin fixture child imports for changed cwd. First new
+CLI run stopped on a Contracts runner error (17.86s). Second reached ShelfLife C with
+three decisions and owner-verified root delivery, then failed the existing UX-5
+probe because acceptance_status dropped tier metadata (32.07s). Owner fix now
+preserves executable/evidenceTier/validationMessage and reuses the already-read
+latest run, keeping acceptance.py at 1918 lines. Read-only projection of that
+actual saved UX-5 producer now exposes S2/S3 as scenario: unvalidated and
+executable=false, including S2's exact unknown value-field reason. Both allowed
+CLI runs are exhausted; the projection fix has no fresh complete golden pass.
+CC's prior web pass (three decisions, 231.23s) is retained, not rerun. This is
+source-only fixture evidence; original ShelfLife/provider acceptance is unproven.
+
+SCEN-COV-1 / RECOVERY-1 regression investigation: CC's clean-main full gate
+reported a failed successor with VERIFIED-QUIESCENT but no stopReason, while
+ShelfLife and web reached C. Its retained runtime folder is access-denied to
+this lane; the failed CC terminal/dispatch records are requested, not inferred.
+Added inspect-proof and job-record prints at the exact existing stall assertion;
+the worker-stalled assertion, zero-process check and poison/quarantine checks
+are unchanged. The authorized local CLI golden then passed in 128.32s. Actual
+retained proof showed worker-stalled, seven processes before teardown, verified
+quiescence and zero processes afterward; the next readmission completed delivery
+and C. inspect returns the quiescence control unchanged; graph/spine do not
+filter that field. This does not establish the cause of CC's earlier failure.
+Disposition: unreproduced, original failed-job evidence needed before a causal
+repair; no speculative recovery-rule change or retry added. Exit: inspect CC's
+failed successor terminal/dispatch record and repair its actual owning failure,
+then retain a complete CLI pass after the final edit.
+
 AUDIT-HTTP-1: ShelfLife fight round 2 (20261101T163156-9ed2f4-001-shelflife,
 turns02/03) stalled on `prospective-no-interface-assertion` and
 `passing-audit-required`. Owner: test_audit.audit_prospective_tests. Disposition:

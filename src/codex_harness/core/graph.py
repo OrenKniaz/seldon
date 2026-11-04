@@ -203,6 +203,7 @@ def load_plan(path: Path) -> Plan:
                 manifest_path.parent,
                 manifest["semantic"]["targets"],
                 require_entries=False,
+                planning=True,
             )
             phases = {b.get("semanticPhase"): key for key, b in manifest["beads"].items()}
             if len(manifest["beads"]) != 2 or set(phases) != {"contracts", "build"}:

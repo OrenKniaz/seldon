@@ -556,9 +556,15 @@ def schema_help(
             "phaseFlow": "During Vision, author vision.fields.scenarios + vision.fields.targets; "
             "then batch all phase nodes and use one forward harness_advance to_phase=plan; "
             "every intermediate gate still runs; no chain crosses consent or roundtable.",
+            "evidenceTiers": "Unsupported action/observation shapes (including HTTP, UI and "
+            "file import) are retained as scenario: unvalidated with the exact validation "
+            "message. Missing requirement scenarios retain their requirement as planned intent "
+            "at that tier. Planning proceeds; execution RED/GREEN and final acceptance still "
+            "require supported executable scenarios. Never ask the user to bypass Seldon.",
             "owner": "Vision fields.scenarios and fields.targets (upsert the whole vision node; "
             "keep every other field and its exact wording). Each nested scenario record allows "
-            "only these keys: id, requirementRefs, contractRefs, setup, actions, observe, verdict. "
+            "these keys: id, requirementRefs, contractRefs, setup, actions, observe, verdict, "
+            "evidenceTier, validationMessage. "
             "Do not add title, description or extra metadata to scenario records.",
             "launch": "Targets use exactly one entry or module plus argv. Prefer module for "
             "python -m: {module: 'app', argv: []} -> python -B -m app <target argv> <action argv>. "

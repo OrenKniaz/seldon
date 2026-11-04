@@ -171,10 +171,14 @@ def render_markdown(spine: Spine) -> dict[str, str]:
     }
     rendered = {name: f"{_header(body)}\n\n{body}" for name, body in bodies.items()}
     if spine.semantic:
+        from codex_harness.core.spine import semantic_spec
+
+        document, targets, _ = semantic_spec(spine)
         rendered["SCENARIOS.json"] = (
             json.dumps(
                 {
-                    **{key: root[key] for key in ("scenarios", "targets")},
+                    "scenarios": document,
+                    "targets": targets,
                     "contracts": [spine.node(key) for key in spine.ids("design")],
                 },
                 sort_keys=True,

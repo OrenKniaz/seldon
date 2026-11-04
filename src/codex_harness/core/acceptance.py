@@ -37,17 +37,17 @@ def _hash(value) -> str:
 def derive_scenarios(spine) -> list[dict]:
     fields = spine.node(spine.ids("vision")[0])["fields"]
     if spine.semantic:
-        owners = plan_spine.scenario_nodes(spine)
+        document, _, _ = plan_spine.semantic_spec(spine, draft=True)
         return [
             dict(
                 s,
                 title=s["id"],
                 steps=s["actions"],
                 expect=s["observe"],
-                executable=True,
-                nodeIds=owners[s["id"]],
+                executable=s.get("evidenceTier") != "scenario: unvalidated",
+                nodeIds=sorted({ref.split("@", 1)[0] for ref in s["requirementRefs"]}),
             )
-            for s in fields.get("scenarios", {}).get("scenarios", [])
+            for s in document["scenarios"]
         ]
     scope = fields.get("scope_in", [])
     if isinstance(scope, str):
@@ -1867,31 +1867,31 @@ def acceptance_status(store) -> dict:
             if invalid_reason is None and (not approval or approval["runId"] != run["id"]):
                 invalid_reason = "acceptance-approval-required"
     valid = invalid_reason is None
-    previous = store.connection.execute("SELECT 1 FROM acceptance_runs LIMIT 1").fetchone()
     results = {item["id"]: item for item in run["results"]} if run else {}
     scenarios = [
         dict(
-            id=item["id"],
-            title=item["title"],
-            steps=item["steps"],
-            lastResult=("pass" if results[item["id"]]["passed"] else "fail")
-            if item["id"] in results
+            **{k: s[k] for k in s if k in "executable evidenceTier validationMessage".split()},
+            id=s["id"],
+            title=s["title"],
+            steps=s["steps"],
+            lastResult=("pass" if results[s["id"]]["passed"] else "fail")
+            if s["id"] in results
             else "not-run (stale)"
-            if previous
+            if previous_run
             else "not-run",
-            lastResultSubject=run_subject(run) if item["id"] in results else None,
+            lastResultSubject=run_subject(run) if s["id"] in results else None,
             lastResultNote=(
                 "scenarios verified against the reference implementation (dry run)"
-                if run_subject(run) == "oracle" and results[item["id"]]["passed"]
+                if run_subject(run) == "oracle" and results[s["id"]]["passed"]
                 else f"{run_subject(run)} scenario result"
             )
-            if item["id"] in results
+            if s["id"] in results
             else None,
-            runId=run["id"] if item["id"] in results else None,
-            stepResults=results[item["id"]]["steps"] if item["id"] in results else [],
-            error=results[item["id"]].get("error") if item["id"] in results else None,
+            runId=run["id"] if s["id"] in results else None,
+            stepResults=results[s["id"]]["steps"] if s["id"] in results else [],
+            error=results[s["id"]].get("error") if s["id"] in results else None,
         )
-        for item in store.acceptance_scenarios()
+        for s in store.acceptance_scenarios()
     ]
     return {
         "scenarios": scenarios,
