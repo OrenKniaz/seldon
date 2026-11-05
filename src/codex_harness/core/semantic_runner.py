@@ -1,4 +1,4 @@
-"""Python CLI and local web observations; not canonical admission or GUI acceptance.
+"""CLI, offline/served browser and HTTP observations; not admission or GUI acceptance.
 Windows Jobs contain normal descendants; trusted code, not an OS security sandbox."""
 
 import argparse
@@ -16,7 +16,7 @@ from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired, call
 
 from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.record_io import write_record_json
-from codex_harness.core.semantic_schema import LIMIT, WEB, argv, content, path, validate
+from codex_harness.core.semantic_schema import LIMIT, argv, content, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
 MODULE = "codex_harness.core.semantic_runner"
@@ -27,7 +27,7 @@ class ObservationUnavailable(ValueError):
     """A capture bound omits evidence; it is not a product verdict."""
 
 
-def web_toolchain(config, evidence):
+def web_toolchain(config, evidence, *, browser=True):
     defaults = dict(
         node="C:/nvm4w/nodejs/node.exe",
         playwright="C:/Users/oren/codex-harness/ui/node_modules/@playwright/test",
@@ -46,6 +46,8 @@ def web_toolchain(config, evidence):
     locations["adapter"] = str(Path(__file__).with_name("semantic_web.cjs").resolve())
     identities = {}
     for key, location in locations.items():
+        if not browser and key in ("playwright", "chromium"):
+            continue
         file = Path(location) / "package.json" if key == "playwright" else Path(location)
         if not file.is_file():
             raise ValueError(f"Web tool missing: {key}: {file}; configure SELDON_WEB_{key.upper()}")
@@ -53,7 +55,7 @@ def web_toolchain(config, evidence):
             identities[key] = dict(
                 path=str(file), sha256=hashlib.file_digest(stream, "sha256").hexdigest()
             )
-    if json.loads(Path(identities["playwright"]["path"]).read_text())["version"] != "1.59.1":
+    if browser and json.loads(Path(identities["playwright"]["path"]).read_text())["version"] != "1.59.1":
         raise ValueError("Web tool requires Playwright 1.59.1")
     if evidence is False:
         return identities
@@ -154,8 +156,8 @@ def equal(a, b):
     return a == b
 
 
-def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None, stop_file=None):
-    snapshots, results, flags = {}, {}, []
+def execute(s, root, targets, seconds, deadline, web=None, judgments=None, stop_file=None):
+    snapshots, results = {}, {}
     for directory in s["setup"].get("dirs", []):
         path(root, directory).mkdir(parents=True, exist_ok=True)
     for f in s["setup"].get("files", []):
@@ -178,7 +180,7 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
     for a in s["actions"]:
         if stop_file and Path(stop_file).exists():
             raise ValueError("Acceptance owner stopped; no new action child")
-        budget = min(30 if "web" in a else seconds, deadline - time.monotonic())
+        budget = min(30 if "web" in a or "http" in a else seconds, deadline - time.monotonic())
         if budget <= 0:
             raise TimeoutError("Scenario/run deadline; action unperformed")
         if "cli" in a and a["cli"].get("stdin", {}).get("holdOpen"):
@@ -187,16 +189,19 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
         guard = threading.Timer(budget, expired)
         guard.start()
         try:
-            if "web" in a:
+            if "web" in a or "http" in a:
+                v = a.get("web", a.get("http"))
+                binding = dict(targets[v["target"]])
+                if "server" in binding:
+                    binding["server"] = dict(binding["server"], argv=argv(binding["server"]["argv"], root))
                 request = root / ".web-request.json"
                 request.write_text(
                     json.dumps(
                         dict(
-                            journey=a["web"],
+                            journey=a.get("web"), http=a.get("http"), binding=binding,
                             tools=web,
                             root=str(root),
-                            phase=phase,
-                            entry=targets[a["web"]["target"]]["entry"],
+                            entry=binding.get("entry", "/"),
                             seconds=min(seconds, 10),
                             remaining=budget,
                         )
@@ -206,6 +211,8 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
                 captured = capture([web["node"], web["adapter"], str(request)], root, browser=True)
                 if captured["exit"]:
                     raise ValueError("Web adapter launch failed: " + captured["stderr"][:512])
+                if captured["omittedBytes"]["stdout"]:
+                    raise ObservationUnavailable("Browser/HTTP evidence exceeded capture bound; shorten the journey or response")
                 result = json.loads(captured["stdout"])
                 if result.get("state") == "ERROR":
                     result["reason"] += "\n" + captured["stderr"][-8192:]
@@ -213,9 +220,7 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
                         state="ERROR", reason=result["reason"], actions={**results, a["id"]: result}
                     )
                 results[a["id"]] = result
-                web["browserMode"] = result.get("browserMode")
-                if result.get("marker"):
-                    flags.append(dict(action=a["id"], pattern="SELDON-STUB"))
+                web["browserMode"] = result.get("browserMode") or web.get("browserMode")
                 continue
             cwd = path(root, a["cwd"]) if "cwd" in a else root
             if "process" in a:
@@ -239,29 +244,21 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
             result.update(action)
         finally:
             guard.cancel()
-        if "SELDON-STUB " in result["stderr"] + result["stdout"]:
-            flags.append(dict(action=a["id"], pattern="SELDON-STUB"))
         results[a["id"]] = result
     observations = []
     for o in s["observe"]:
         actual = results[o["action"]] if "action" in o else None
         if actual is not None and "checks" in actual:
             observations.extend(actual["steps"])
-            observations.extend(
-                dict(
-                    check=k,
-                    passed=(True if (judgments or {}).get(k, {}).get("positiveCredit") else
-                            False if (judgments or {}).get(k, {}).get("concreteGap") else None)
-                    if actual["checks"][k] is None
-                    else equal(actual["checks"][k], o[k]),
-                    judgment=(judgments or {}).get(k) if actual["checks"][k] is None else None,
-                    actual=actual["checks"][k],
-                    reason="pending-judgment"
-                    if actual["checks"][k] is None
-                    else "browser observation",
-                )
-                for k in WEB
-            )
+            for k in o.keys() - {"action"}:
+                value = actual["checks"][k]
+                judgment = (judgments or {}).get(k, {}) if value is None else {}
+                execution = (judgments or {}).get("execution", {})
+                if value is None and not judgment and execution.get("meaning", {}).get("qualitativeChecks", {}).get(k) is True:
+                    judgment = execution
+                passed = (True if judgment.get("positiveCredit") else False if judgment.get("concreteGap") else None) if value is None else equal(value, o[k])
+                observations.append(dict(check=k, passed=passed, actual=value, judgment=judgment or None,
+                                         reason="pending-judgment" if value is None else "browser observation"))
             observations.append(
                 dict(
                     check="screenshots",
@@ -333,7 +330,7 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
              "pending-judgment" if not observations or any(o["passed"] is None for o in observations)
              else "PASS")
     summary = dict(id=s["id"], state=state, reason="observations evaluated")
-    return dict(summary, observations=observations, flags=flags, actions=results)
+    return dict(summary, observations=observations, actions=results)
 
 
 def _cleanup(root, control):
@@ -370,7 +367,7 @@ def run(
     cleanup = dict(quiescenceVerified=True, activeProcessesAfterTeardown=0, childLaunched=False)
     try:
         scenarios = validate(document, product, targets)
-        is_web = any("web" in a for s in scenarios
+        is_web = any("web" in a or "http" in a for s in scenarios
                      if s.get("evidenceTier") != "scenario: unvalidated" for a in s["actions"])
         # Hang guards, not speed targets: cold Windows Python under load exceeded 3s (run 24).
         # Defaults fit inside any caller-supplied outer budget.
@@ -381,20 +378,17 @@ def run(
             action_seconds = min(10 if is_web else 20, scenario_seconds)
         if phase not in ("contracts", "validation") or os.name != "nt":
             raise ValueError("Use contracts/validation on Windows (held Job required)")
-        if is_web and all(
-            type(v) in (int, float) for v in (action_seconds, scenario_seconds, run_seconds)
-        ):
-            run_seconds = min(run_seconds, 90)
-            scenario_seconds = min(scenario_seconds, 30, run_seconds)
-            action_seconds = min(action_seconds, 10, scenario_seconds)
         budgets = (action_seconds, scenario_seconds, run_seconds)
+        if is_web and all(type(v) in (int, float) for v in budgets):
+            budgets = tuple(min(v, cap) for v, cap in zip(budgets, (10, 30, 90), strict=True))
+        action_seconds, scenario_seconds, run_seconds = budgets
         if (
             not all(type(v) in (int, float) for v in budgets)
             or not 0 < budgets[0] <= budgets[1] <= budgets[2] <= 120
         ):
             raise ValueError("Use positive ordered action/scenario/run budgets <=120s")
         deadline = time.monotonic() + run_seconds
-        web = web_toolchain(web_config, evidence_dir) if is_web else None
+        web = web_toolchain(web_config, evidence_dir, browser=any("web" in a for s in scenarios for a in s["actions"])) if is_web else None
         for s in scenarios:
             if should_stop and should_stop():
                 raise ValueError("Acceptance owner stopped; no new scenario child")
@@ -431,7 +425,6 @@ def run(
                         [
                             s,
                             targets,
-                            phase,
                             action_seconds,
                             end,
                             web,
@@ -492,9 +485,9 @@ if __name__ == "__main__":
         raise SystemExit(call(cmd))
     if sys.argv[1:2] == ["--worker"]:
         try:
-            s, targets, phase, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+            s, targets, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
             result = execute(
-                s, Path.cwd(), targets, phase, seconds, deadline, web, judgments, stop_file
+                s, Path.cwd(), targets, seconds, deadline, web, judgments, stop_file
             )
         except ERRORS as error:
             result = dict(state="ERROR", reason=str(error) or type(error).__name__)

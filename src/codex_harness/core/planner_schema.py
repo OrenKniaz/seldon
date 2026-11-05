@@ -685,7 +685,13 @@ def schema_help(
             "reload and compilation. Every absent observation remains awaiting. Integrated is "
             "distinct from validated live; neither records user acceptance.",
         }
-        result["semanticScenarios"] = {"writer": "harness_upsert_node", "read": {"tool": "harness_upsert_node", "kind": "vision"}}
+        result["semanticScenarios"] = {"writer": "harness_upsert_node", "read": {"tool": "harness_upsert_node", "kind": "vision"},
+            "served": {"targets": {"service": {"kind": "web", "entry": "/", "server": {
+                "argv": ["worker-executable", "--host", "{host}", "--port", "{port}"], "readyPath": "/", "readyWithin": 5}}},
+                "web": "steps: open, fill(locator,value), click, key, assertVisible; request:{method,path,statusEquals,json?,jsonEquals?}",
+                "api": {"id": "api", "http": {"target": "service", "method": "GET", "path": "/health", "statusEquals": 200}},
+                "observe": {"action": "api"}, "owner": "Seldon runner; shared 1j judges rendered evidence; no planner browser permissions"},
+        }
         result["compilationMetadata"] = {
             "owner": "Historical runner projection on vision.fields; no authoring eligibility.",
             "validation": "Legacy argv prefix; requirementFiles: extra protected relative paths.",

@@ -527,9 +527,9 @@ def build_packet(
         )
         if any(t.get("kind") == "web" for t in plan.semantic["targets"].values()):
             instruction += (
-                f" Preview and keyboard-test your page in a real browser with "
+                f" Offline preview and keyboard check (served flows use Seldon's declared server) with "
                 f'`& "{sys.executable}" -B -m codex_harness.core.semantic_runner --preview .`; '
-                "close the browser when done."
+                "close the browser when done. Seldon owns served UI/API observations; no OS/browser permission changes."
             )
         view_paragraphs = {}
         packet = "\n\n".join(

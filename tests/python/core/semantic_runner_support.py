@@ -90,5 +90,6 @@ def browser_readiness(tmp_path_factory):
     ]
     receipt = root.parent / "web-browser-readiness.json"
     receipt.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    assert result["state"] == "PASS", result
+    assert result["state"] == "pending-judgment", result
+    assert result["actions"] and not any(o["passed"] is False for o in result["observations"]), result
     return result

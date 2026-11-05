@@ -8,7 +8,9 @@ BATCH_GUIDANCE = (
     "empty, use one forward harness_advance "
     "to_phase=plan (furthest pre-roundtable phase); every intermediate gate still runs. "
     "Product files are owned by workers; verify via Seldon tools/scenarios, do not grep/search "
-    "the filesystem."
+    "the filesystem. "
+    "For browser/API observations read harness_schema's semanticScenarios section: Seldon's runner "
+    "owns loopback startup, Chromium, HTTP evidence and cleanup; no planner browser access."
 )
 
 

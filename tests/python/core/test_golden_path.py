@@ -354,7 +354,7 @@ def execution_judgment_golden(workspace):
         git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker test')
         red = _semantic_validation(product, plan, {}, 'contracts')
         rows = {r['id']: r for r in red['results']}
-        assert rows['T_BASE']['state'] == 'PASS' and rows['T_BASE']['flags']
+        assert rows['T_BASE']['state'] == 'PASS'  # Diagnostic prose never decides a semantic gap.
         assert rows['T_NEW']['actions']['execute']['exit'] == 2
         assert 'missing behavior:' in rows['T_NEW']['actions']['execute']['stderr']
         assert all(r['cleanup']['quiescenceVerified'] for r in red['results'])
@@ -1835,6 +1835,28 @@ with TemporaryDirectory(dir=root) as scratch:
         server.close()
 
 
+
+def served_product():
+    """Worker reply: a real server and UI write, with disk-backed API readback."""
+    return """import os, json
+from pathlib import Path
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+class App(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/api/state':
+            data = Path('state.json').read_bytes() if Path('state.json').exists() else b'{"saved":false}'
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(data)
+        else:
+            super().do_GET()
+    def do_POST(self):
+        assert self.path == '/api/state'
+        payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        Path('state.json').write_text(json.dumps(dict(saved=True, note=payload['note'])))
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+HTTPServer(('127.0.0.1', int(os.environ['SELDON_PORT'])), App).serve_forever()
+"""
+
+
 def provider_host(mode, workspace, surface, job_id=None):
     """Install external-provider doubles in each ordinary process owner.
 
@@ -1905,6 +1927,8 @@ def provider_host(mode, workspace, surface, job_id=None):
             (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
         else:
             (workspace / "valid-contracts-attempted").write_text("attempted", encoding="utf-8")
+        if surface == "web":
+            scripted_worker(packet(root, "C"), root, {"serve.py": served_product()})
         scripted_worker(packet(root, "C"), root, {filename:
             "<!doctype html><title>HashSlip</title><h1>HashSlip</h1>"
             if surface == "web"
@@ -1955,7 +1979,9 @@ def provider_host(mode, workspace, surface, job_id=None):
             (ROOT / "tests/fixtures/efficiency" / filename).read_text(encoding="utf-8")})
         if surface == "web":
             with (root / filename).open("a", encoding="utf-8") as out:
-                out.write("<style>h1{background:linear-gradient(white,#fff)}</style>")
+                out.write("<style>h1{background:linear-gradient(white,#fff)}</style>"
+                    "<input id='note' aria-label='Note'><button id='save' onclick=\"fetch('/api/state',{method:'POST',body:JSON.stringify({note:document.querySelector('#note').value})}).then(()=>this.textContent='Saved')\">Save</button>")
+            scripted_worker(packet(root, "B"), root, {"serve.py": served_product()})
 
     if surface == "shelflife":
         from codex_harness.core.provider_launch import ProviderNormalLaunch
@@ -2090,6 +2116,21 @@ def test_golden_path(tmp_path, request, surface):
         http_golden(tmp_path / "shelflife-scenarios", semantic=True)
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
+        from codex_harness.core.semantic_runner import run as observe
+        timeout_product = tmp_path / "timeout-product"
+        timeout_product.mkdir()
+        api = dict(target="service", method="GET", path="/", statusEquals=200)
+        timeout_spec = dict(schema="seldon/scenarios-v1", scenarios=[dict(id="timeout", requirementRefs=["R1"],
+            contractRefs=[], setup={}, actions=[dict(id="api", http=api)], observe=[dict(action="api")], verdict="all")])
+        before = time.monotonic()
+        timed = observe(timeout_spec, timeout_product, {"service": dict(server=dict(
+            argv=[sys.executable, "-B", "-c", "import time; time.sleep(60)"], readyPath="/", readyWithin=.25))}, "validation",
+            web_config=dict(chromium="missing-browser", playwright="missing-playwright"))[0]
+        assert timed["state"] == "ERROR" and "readiness timeout" in timed["reason"], timed
+        assert time.monotonic() - before < 15
+        assert timed["cleanup"]["quiescenceVerified"] and timed["cleanup"]["activeProcessesAfterTeardown"] == 0
+        assert timed["actions"]["api"]["server"]["stopped"]
+
     started = time.time()
     (tmp_path / "AGENTS.md").write_text(
         "Use gpt-6.1-sol at medium effort for all helper assignments, including reviews.\n",
@@ -2108,6 +2149,27 @@ def test_golden_path(tmp_path, request, surface):
             ROOT / "tests/fixtures/efficiency" / ("ux6.json" if surface == "web" else "run26.json")
         ).read_text("utf-8")
     )
+    if surface == "web":
+        # Regression: served UI/API plans were unsupported. Offline journeys never
+        # exercised server launch, HTTP persistence, readiness or teardown.
+        vision = captured_run["nodes"][0]["fields"]
+        vision["targets"]["served"] = dict(kind="web", entry="index.html",
+            server=dict(argv=[sys.executable, "-B", "serve.py"], readyPath="/", readyWithin=5))
+        journey = vision["scenarios"]["scenarios"][0]["actions"][0]["web"]
+        journey["target"] = "served"
+        scenario = vision["scenarios"]["scenarios"][0]
+        scenario["actions"].append(dict(id="api", http=dict(target="served", method="GET", path="/api/state", statusEquals=200, jsonEquals=dict(saved=True, note="Tea"))))
+        scenario["observe"].append(dict(action="api"))
+        scenario["observe"].append(dict(path="state.json", fileJsonEquals=dict(saved=True, note="Tea")))
+        journey["steps"].extend([
+            dict(op="fill", locator=dict(selector="#note"), value="Tea"),
+            dict(op="click", locator=dict(selector="#save")),
+            dict(op="assertVisible", locator=dict(text="Saved")),
+            dict(op="request", request=dict(method="GET", path="/api/state", statusEquals=200, jsonEquals=dict(saved=True, note="Tea"))),
+        ])
+        for n in captured_run["nodes"]:
+            if n["kind"] == "bead":
+                n["fields"]["ownedFiles"].append("serve.py")
     shutil.copy2(sys.executable, codex)
     shutil.copy2(sys.executable, tools / ("claude.exe" if os.name == "nt" else "claude"))
     # Keep OS/git/node tools while excluding the host's provider installations/bundles.
@@ -2522,7 +2584,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert saved["semanticContracts"]["state"] == "RED"
                 assert saved["semanticValidation"]["state"] == "pending-judgment"
                 roots = saved["beads"]["B"]["integrated"]["root"]
-                assert any(a["checks"]["textContrastAA"] is None
+                assert any(a["checks"].get("textContrastAA", False) is None
                            for r in saved["semanticValidation"]["results"] for a in r["actions"].values())
                 for check in ("textContrastAA", "execution"):
                     judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
@@ -2603,11 +2665,23 @@ def test_golden_path(tmp_path, request, surface):
                 # CLI journeys never render, and packet fixtures do not consume dispatch.
                 retained = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
                 proof = retained["semanticValidation"]["results"]
-                actions = [a for r in proof for a in r["actions"].values()]
+                actions = [a for r in proof for a in r["actions"].values() if a.get("browserMode")]
                 assert all(a["browserMode"] in {"normal", "single-process"} for a in actions)
                 modes = [a["browserMode"] for a in actions]
                 if "single-process" in modes:
                     assert set(modes[modes.index("single-process"):]) == {"single-process"}, modes
+                served = [a for a in actions if a.get("server")]
+                assert len(served) == 1, actions
+                api = proof[0]["actions"]["api"]
+                assert api["http"][0]["response"]["json"] == {"saved": True, "note": "Tea"}
+                assert api["server"]["stopped"] and not api.get("browserMode")
+                assert served[0]["server"]["ready"] and served[0]["server"]["stopped"]
+                assert served[0]["http"][0]["response"]["json"] == {"saved": True, "note": "Tea"}
+                assert any(a["url"].startswith("file://") for a in actions)
+                assert all(r["cleanup"]["quiescenceVerified"] and r["cleanup"]["activeProcessesAfterTeardown"] == 0 for r in proof)
+                import socket
+                with socket.socket() as probe:
+                    assert probe.connect_ex(("127.0.0.1", served[0]["server"]["port"])) != 0
                 # Execute the packet's actual shell command: a quoted Windows executable
                 # without PowerShell's & looks plausible but never opens the preview.
                 from codex_harness.core.audit_process import run_audit_process

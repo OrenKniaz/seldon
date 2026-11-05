@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CORE = "src/codex_harness/core"
-TOTAL_CEILING = 34854
+TOTAL_CEILING = 34846
 CEILINGS = {
     "src/codex_harness/core/acceptance.py": 1646,
     "src/codex_harness/core/dispatch.py": 2570,

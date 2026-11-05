@@ -1722,8 +1722,8 @@ def _semantic_identity(plan):
         ).hexdigest(),
         "contractsRevision": plan.requirement_files_revision,
         "runner": {
-            Path(m.__file__).name: _file_sha256(m.__file__)
-            for m in (semantic_runner, semantic_schema)
+            Path(m).name: _file_sha256(m)
+            for m in (semantic_runner.__file__, semantic_schema.__file__, Path(semantic_runner.__file__).with_name("semantic_web.cjs"))
         },
     }
 

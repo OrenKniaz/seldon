@@ -116,8 +116,8 @@ def _scenario_section(scenarios, *, semantic=False) -> str:
     if semantic:
         return (
             "## Semantic acceptance scenarios\n\n"
-            "See the vision fields.scenarios and fields.targets in canonical spine details; "
-            "these define the planned controller suite, not execution proof.\n"
+            "Graph test execution.argv/testRoots are canonical; vision fields.scenarios/targets "
+            "declare optional browser/HTTP observations. See canonical spine; no execution proof.\n"
         )
     return (
         "## Current acceptance scenarios\n\n"

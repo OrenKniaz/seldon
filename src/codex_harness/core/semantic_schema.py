@@ -142,12 +142,29 @@ def validate_trace_fields(node, nodes):
         text(execution["rationale"])
 
 
+def http_request(v, *, target=False):
+    keys = ["method", "path", "json", "statusEquals", "jsonEquals"]
+    fields(v, [*keys, *(["target"] if target else [])], ["method", "path", "statusEquals", *(["target"] if target else [])])
+    if target and (not isinstance(v["target"], str) or not v["target"]):
+        raise ValueError("HTTP requires a nonblank target ID")
+    if (not isinstance(v["method"], str) or not v["method"]
+            or not isinstance(v["path"], str) or not v["path"].startswith("/") or v["path"].startswith("//")
+            or type(v["statusEquals"]) is not int or not 100 <= v["statusEquals"] <= 599):
+        raise ValueError("HTTP requires a method, loopback-relative path and statusEquals:100..599")
+
+
+def operation(v):
+    if not isinstance(v["operation"], str) or not v["operation"] or "\n" in v["operation"]:
+        raise ValueError("Declare a literal operation marker")
+
+
 def web_journey(v, targets, *, draft=False, label="vision.fields.scenarios.scenarios.actions.web"):
     fields(
         v,
         ("target", "operation", "viewport", "reducedMotion", "steps"),
         ("target", "operation", "viewport", "reducedMotion", "steps"), label,
     )
+    operation(v)
     if (
         type(v["target"]) is not str
         or (v["target"] in targets or not draft)
@@ -164,20 +181,28 @@ def web_journey(v, targets, *, draft=False, label="vision.fields.scenarios.scena
     if not steps or steps[0] != {"op": "open"}:
         raise ValueError("Journey must start with open")
     for index, step in enumerate(steps):
-        fields(step, ("op", "locator", "key", "fragment"), ("op",), f"{label}.steps[{index}]")
+        fields(step, ("op", "locator", "key", "fragment", "request", "value"), ("op",), f"{label}.steps[{index}]")
+        if step["op"] == "request":
+            fields(step, ("op", "request"), ("op", "request"))
+            http_request(step["request"])
+            continue
+        if step["op"] == "fill":
+            fields(step, ("op", "locator", "value"), ("op", "locator", "value"))
+            if not isinstance(step["value"], str):
+                raise ValueError("Fill requires a string value")
         op = step["op"]
         operand = {
             "open": None,
             "assertVisible": "locator",
             "assertHidden": "locator",
-            "focus": "locator",
+            "focus": "locator", "fill": "locator",
             "click": "locator",
             "key": "key",
             "assertFocus": "locator",
             "assertFragment": "fragment",
         }
-        if op not in operand or set(step) != {"op", *([operand[op]] if operand[op] else [])}:
-            raise ValueError("Unknown web step or operands")
+        if op not in operand or set(step) != {"op", *([operand[op]] if operand[op] else []), *(["value"] if op == "fill" else [])}:
+            raise ValueError(f"Unknown web step or operands: {step!r}; use op/operand shapes {operand!r}")
         if op == "open" and index:
             raise ValueError("Open occurs once at the start")
         if "locator" in step:
@@ -322,35 +347,40 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
         try:
             if not s["requirementRefs"]:
                 raise ValueError("Link requirementRefs to their owning nodes")
-            actions, web_actions = set(), set()
+            actions, web_actions, http_actions = set(), set(), set()
             for a in array(s["actions"], 16):
                 fields(a, ("id", "cli", "web", "process", "cwd", "http", "file"), ("id",), f"{label}.actions")
-                if "http" in a or "file" in a:
-                    raise ValueError(
-                        "HTTP/file actions need a worker-authored CLI verifier target "
-                        "before execution"
-                    )
+                if "file" in a:
+                    raise ValueError("File actions need a worker-authored verifier")
                 if (
                     type(a["id"]) is not str
                     or a["id"] in actions
-                    or len(set(a) & {"cli", "web", "process"}) != 1
+                    or len(set(a) & {"cli", "web", "http", "process"}) != 1
                 ):
                     raise ValueError("Use unique CLI actions")
-                if "web" in a:
-                    fields(a, ("id", "web"), ("id", "web"), f"{label}.actions")
-                    web_journey(a["web"], targets, draft=draft, label=f"{label}.actions.web")
-                    binding = targets.get(a["web"]["target"], {})
-                    if not planning and ("entry" not in binding or not path(product, binding["entry"]).is_file()):
+                if "web" in a or "http" in a:
+                    kind = "web" if "web" in a else "http"
+                    fields(a, ("id", kind), ("id", kind), f"{label}.actions")
+                    v = a[kind]
+                    if kind == "web":
+                        web_journey(v, targets, draft=draft, label=f"{label}.actions.web")
+                    else:
+                        http_request(v, target=True)
+                    binding = targets.get(v["target"], {})
+                    if kind == "web" and not planning and "server" not in binding and ("entry" not in binding or not path(product, binding["entry"]).is_file()):
                         raise ValueError("Browser observation entry is unavailable")
-                    v = a["web"]
-                    if (
-                        type(v["operation"]) is not str
-                        or not v["operation"]
-                        or "\n" in v["operation"]
-                    ):
-                        raise ValueError("Declare a literal operation marker")
+                    if kind == "http" or "server" in binding:
+                        if "server" not in binding:
+                            raise ValueError("HTTP observation requires target.server with argv, readyPath, readyWithin")
+                        server = binding["server"]
+                        fields(server, ("argv", "readyPath", "readyWithin"), ("argv", "readyPath", "readyWithin"))
+                        if not argv(server["argv"], product):
+                            raise ValueError("Declare worker server.argv; SELDON_HOST/SELDON_PORT or {host}/{port} bind loopback")
+                        http_request(dict(method="GET", path=server["readyPath"], statusEquals=200))
+                        if type(server["readyWithin"]) not in (int, float) or not 0 < server["readyWithin"] <= 10:
+                            raise ValueError("Declare server.readyWithin in (0,10] seconds")
+                    (web_actions if kind == "web" else http_actions).add(a["id"])
                     actions.add(a["id"])
-                    web_actions.add(a["id"])
                     continue
                 if "cwd" in a:
                     cwd = path(product, a["cwd"])
@@ -390,12 +420,14 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                         raise ValueError("Python CLI adapter requires one entry or module; use process.argv for other tools")
                     path(product, target_entry(binding))
                     argv(binding["argv"], product)
-                if type(v["operation"]) is not str or not v["operation"] or "\n" in v["operation"]:
-                    raise ValueError("Declare a literal operation marker")
+                operation(v)
                 argv(v["argv"], product, path(product, a["cwd"]) if "cwd" in a else product)
             if not actions or not array(s["observe"]):
                 raise ValueError("Declare product actions and finite observations")
             for o in s["observe"]:
+                if isinstance(o, dict) and o.get("action") in http_actions:
+                    fields(o, ("action",), ("action",))
+                    continue
                 if isinstance(o, dict) and o.get("action") in web_actions:
                     fields(o, ("action", *WEB), ("action", *WEB), f"{label}.observe")
                     if any(
@@ -436,7 +468,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                         raise ValueError("Observation has the wrong JSON value type")
                     if key == "bytesUnchangedFrom" and value not in snapshots:
                         raise ValueError("Observation references an unknown snapshot")
-            if any(sum(o.get("action") == a for o in s["observe"]) != 1 for a in web_actions):
+            if any(sum(o.get("action") == a for o in s["observe"]) != 1 for a in web_actions | http_actions):
                 raise ValueError("Each web journey requires exactly one complete gate observation")
         except ValueError as error:
             s["evidenceTier"] = "scenario: unvalidated"
