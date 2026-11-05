@@ -12,6 +12,8 @@ def consent_recovery(code):
 
 def semantic_consent_next(status, result, *, plan_authorized=False):
     """Three decisions; missing information and changed scope still require a reply."""
+    if status.get("phase") == "accept" and (action := status.get("reviewResolution", {}).get("findingDispositionPrerequisite", {}).get("nextAction")):
+        return action["message"]
     if navigation := judgment_navigation(status.get("pendingSemanticJudgments", []), review_complete=status.get("reviewResolution", {}).get("review", {}).get("current") is True):
         return navigation["message"]
     if result.get("chatConfirmation") or result.get("channel") == "chat-confirmation":
@@ -94,14 +96,6 @@ def status_next(status, *, store):
             return views.review_resolution_next(status["reviewResolution"])
         return "harness_advance to_phase=execute"
     if phase == "accept":
-        if acceptance.get("invalidReason") == "acceptance-findings-open":
-            return (
-                "harness_accept_assess schema=true; inspect actual acquisition choices. "
-                "Preserve AF originals; record any intended declaration "
-                "before fresh assessment. "
-                "A later disposition mutation stales current support; support never clears "
-                "findings or native final acceptance."
-            )
         return (
             semantic_consent_next(status, {})
             if status.get("planMode") == "semantic-v1"

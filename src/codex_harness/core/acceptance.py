@@ -784,8 +784,7 @@ def require_c_evidence(store, run):
                 raise ValueError("delivery: visualQuality human judgment remains unproven")
         except ValueError as error:
             raise PlanStoreError("acceptance-delivery-invalid", str(error)) from error
-    if review_instructions.has_blocking_findings(store.acceptance_findings()):
-        _refuse("acceptance-findings-open")
+    store.require_finding_dispositions()
     if reason := store.acceptance_review_guard(run["id"]):
         _refuse(reason)
 
@@ -817,13 +816,12 @@ INVALID_MESSAGES = {
     "acceptance-scenarios-required": "All current acceptance scenarios must pass.",
     "acceptance-approval-required": "Acceptance approval is required for the current run.",
     "acceptance-review-required": "An acceptance review is required for the current run.",
-    "acceptance-findings-open": "Acceptance findings remain open.",
     "plan-clarifications-open": "Open questions must be answered before acceptance.",
 }
 
 
 def acceptance_next(reason, repo=None) -> str:
-    if reason in {"acceptance-execution-pending", "acceptance-execution-required"}:
+    if reason == "acceptance-execution-pending":
         return (
             "harness_accept_status id=<attemptId>; inspect the admitted attempt; "
             "never replay uncertain work."
@@ -837,8 +835,6 @@ def acceptance_next(reason, repo=None) -> str:
             "Review and save the current scenarios with harness_accept_scenarios, "
             "then harness_accept_run repo=<integrated-repo> subject=product."
         )
-    if reason == "acceptance-findings-open":
-        return "Resolve open acceptance findings with harness_resolve_finding."
     if reason == "plan-clarifications-open":
         return "Answer the open questions with harness_answer before acceptance."
     if reason == "acceptance-review-required":
@@ -857,8 +853,33 @@ def _refuse(reason, repo=None):
     )
 
 
+def acceptance_run_prerequisite(store):
+    """Canonical run recovery facts; finding_state owns prerequisite ordering."""
+    run = _latest_run(store)
+    repo = run["repo"] if run else "<integrated-repo>"
+    reason = run_invalid_reason(store, run) or (
+        "acceptance-product-required" if run and run_subject(run) != "product" else None)
+    if reason is None:
+        return None
+    tool = ("harness_accept_rebind" if reason in {"revision-algorithm-upgraded", "legacy-unbound"}
+            else "harness_accept_status" if reason == "acceptance-execution-pending"
+            else "harness_accept_run")
+    arguments = dict(repo=repo, **({"subject": "product"} if tool == "harness_accept_run" else {}))
+    message = acceptance_next(reason, repo)
+    if reason == "scenarios-changed":
+        tool, arguments = "harness_accept_scenarios", {}
+    elif reason == "vision-unlocked":
+        tool, arguments = "harness_record_confirmation", dict(gate="vision-lock")
+    if tool == "harness_accept_status":
+        attempt = store.connection.execute("SELECT id FROM acceptance_attempts ORDER BY rowid DESC LIMIT 1").fetchone()
+        arguments = dict(id=attempt["id"])
+        message = "harness_accept_status id=" + attempt["id"] + "; inspect the admitted owner; never replay uncertain work."
+    return dict(kind="acceptance_run_required", state="pending-judgment", reason=reason,
+                mcpTool=tool, arguments=arguments, message=message)
+
+
 def rebind_acceptance(store, repo, env=None) -> dict:
-    """Rerun v1 evidence without changing the authorship of prior decisions."""
+    """Migrate execution evidence only; reviews and C require current judgments."""
     with store._transaction():
         if store.phase() != "accept":
             raise PlanStoreError("acceptance-phase-required", "Next: Advance to accept first")
@@ -868,139 +889,24 @@ def rebind_acceptance(store, repo, env=None) -> dict:
         reason = run_invalid_reason(store, old_run)
         if reason not in ("revision-algorithm-upgraded", "legacy-unbound"):
             if reason is None:
-                raise PlanStoreError(
-                    "acceptance-rebind-not-required", "Next: Check current acceptance status"
-                )
+                raise PlanStoreError("acceptance-rebind-not-required", "Next: Check current acceptance status")
             _refuse(reason, old_run["repo"] if old_run else None)
         if Path(repo).resolve() != Path(old_run["repo"]).resolve():
             _refuse("product-changed")
-        if old_run["revision"] != _integrated_revision_v1(repo):
-            _refuse("product-changed")
-        row = store.connection.execute(
-            "SELECT result_json FROM acceptance_approvals ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        approval = json.loads(row[0]) if row else None
-        if not approval or approval["runId"] != old_run["id"]:
-            _refuse("acceptance-approval-required")
-        if not old_run["passed"]:
-            _refuse("acceptance-scenarios-required")
-        if review_instructions.has_blocking_findings(store.acceptance_findings()):
-            _refuse("acceptance-findings-open")
-        reviews = [
-            json.loads(row[0])
-            for row in store.connection.execute("SELECT result_json FROM acceptance_reviews")
-            if json.loads(row[0])["runId"] == old_run["id"]
-        ]
-        if not reviews:
-            _refuse("acceptance-review-required")
-
         if reason == "legacy-unbound":
-            spine = store.locked_acceptance_spine()
-            revisions = {
-                row["id"]: row["revision"]
-                for row in store.connection.execute("SELECT id, revision FROM nodes")
-            }
-            at = _now()
-            for scenario in _raw_scenarios(store):
-                if "nodeRevisions" in scenario:
-                    continue
-                refs = set(scenario.get("nodeIds", [])) | set(spine.ids("vision"))
-                if refs - revisions.keys():
-                    _refuse("scenarios-changed")
-                steps = scenario["steps"]
-                executable = bool(steps) and bool(
-                    scenario["expect"] or isinstance(steps[-1], dict) and steps[-1].get("expect")
-                )
-                scenario.update(
-                    nodeRevisions={key: revisions[key] for key in sorted(refs)},
-                    nodeRevisionsBackfilled=True,
-                    nodeRevisionsBackfilledAt=at,
-                    by="harness",
-                    status="planned" if executable else "draft",
-                    executable=executable,
-                )
-                store.connection.execute(
-                    "UPDATE acceptance_scenarios SET scenario_json=? WHERE id=?",
-                    (json.dumps(scenario), scenario["id"]),
-                )
-            store._event(
-                "acceptance-scenario-bindings-backfilled",
-                {"reboundFrom": old_run["id"], "at": at, "by": "harness"},
-            )
-        # The old run remains immutable; this preimage checks the migrated scenario
-        # set after execution while still requiring its original v1 product digest.
-        old_binding = {**old_run, "scenarioRevision": _hash(store.acceptance_scenarios())}
-
-    try:
-        run = run_acceptance(store, repo, env, subject="product")
-    except PlanStoreError as error:
-        if error.code == "acceptance-revision-changed":
-            reason = run_invalid_reason(store, old_binding)
-            if reason != "revision-algorithm-upgraded":
-                _refuse(reason or "product-changed")
-        raise
+            store.save_acceptance_scenarios([
+                dict(item, nodeRevisionsBackfilled=True, nodeRevisionsBackfilledAt=_now(), by="harness")
+                if "nodeRevisions" not in item else item for item in _raw_scenarios(store)])
+            store._event("acceptance-scenario-bindings-backfilled", dict(reboundFrom=old_run["id"], by="harness"))
+    run = run_acceptance(store, repo, env, subject="product")
     with store._transaction():
-        # Check the old binding again after execution, under the write reservation.
         if store.phase() != "accept":
             raise PlanStoreError("acceptance-phase-required", "Next: Advance to accept first")
-        reason = run_invalid_reason(store, old_binding)
-        if reason != "revision-algorithm-upgraded":
-            _refuse(reason or "product-changed")
-        reason = run_invalid_reason(store, run)
-        if reason:
+        if reason := run_invalid_reason(store, run):
             _refuse(reason)
         if _latest_run(store) != run:
-            raise PlanStoreError(
-                "acceptance-revision-changed", "Next: Rerun acceptance on the current revision"
-            )
-        if not run["passed"]:
-            _refuse("acceptance-scenarios-required")
-        if review_instructions.has_blocking_findings(store.acceptance_findings()):
-            _refuse("acceptance-findings-open")
-        latest_approval = store.connection.execute(
-            "SELECT result_json FROM acceptance_approvals ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        if not latest_approval or json.loads(latest_approval[0]) != approval:
-            _refuse("acceptance-approval-required")
-        provenance = {
-            "reboundFrom": old_run["id"],
-            "reason": "revision algorithm upgraded; product unchanged",
-            "by": "harness",
-        }
-        rebound_reviews = []
-        for review in reviews:
-            rebound = {
-                "id": uuid4().hex,
-                "stage": "acceptance",
-                "runId": run["id"],
-                "originalReviewId": review["id"],
-                **provenance,
-            }
-            store.connection.execute(
-                "INSERT INTO acceptance_reviews VALUES (?, ?)", (rebound["id"], json.dumps(rebound))
-            )
-            rebound_reviews.append(rebound)
-        # `by` always identifies the approver. The harness actor is explicit in
-        # the rebind provenance, never impersonating a fresh user/proxy decision.
-        rebound_approval = {
-            **approval,
-            "id": uuid4().hex,
-            "runId": run["id"],
-            "originalApprovalId": approval["id"],
-            "reboundFrom": old_run["id"],
-            "reason": provenance["reason"],
-            "rebind": provenance,
-        }
-        store.connection.execute(
-            "INSERT INTO acceptance_approvals VALUES (?, ?)",
-            (rebound_approval["id"], json.dumps(rebound_approval)),
-        )
-        result = {
-            "run": run,
-            "reviews": rebound_reviews,
-            "approval": rebound_approval,
-            **provenance,
-        }
+            raise PlanStoreError("acceptance-revision-changed", "Next: Rerun acceptance on the current revision")
+        result = dict(run=run, reboundFrom=old_run["id"], by="harness")
         store._event("acceptance-rebound", result)
     return result
 
@@ -1661,6 +1567,7 @@ def acceptance_status(store) -> dict:
     if snapshot is not None:
         snapshot["acceptanceRun"] = run
     findings = store.acceptance_findings()
+    disposition = store.finding_state()["dispositionPrerequisite"]
     approval = store.connection.execute(
         "SELECT result_json FROM acceptance_approvals ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
@@ -1679,8 +1586,12 @@ def acceptance_status(store) -> dict:
                 require_c_evidence(store, run)
             except PlanStoreError as error:
                 invalid_reason = error.code
-            if invalid_reason is None and (not approval or approval["runId"] != run["id"]):
-                invalid_reason = "acceptance-approval-required"
+            if invalid_reason is None:
+                consent = store.judgment(approval["judgmentId"]) if approval and approval.get("judgmentId") else {}
+                if (not approval or approval["runId"] != run["id"] or not consent.get("positiveCredit")
+                    or not any(ref["payload"].get("facts", {}).get("subject", {}).get("run", {}).get("id") == run["id"]
+                               for ref in consent.get("sourceRefs", []))):
+                    invalid_reason = "acceptance-approval-required"
     valid = invalid_reason is None
     results = {item["id"]: item for item in run["results"]} if run else {}
     scenarios = [
@@ -1716,9 +1627,13 @@ def acceptance_status(store) -> dict:
         "isProxy": approval["isProxy"] if valid else None,
         "accepted": valid,
         "invalidReason": invalid_reason,
-        "invalidMessage": INVALID_MESSAGES.get(invalid_reason),
+        "invalidMessage": (disposition["nextAction"]["message"]
+                           if invalid_reason == "pending-judgment" and not disposition["complete"]
+                           else INVALID_MESSAGES.get(invalid_reason)),
         "repo": previous_run["repo"] if previous_run else None,
-        "next": acceptance_next(invalid_reason, previous_run["repo"] if previous_run else None)
+        "next": (disposition["nextAction"]["message"]
+                 if disposition["nextAction"] is not None
+                 else acceptance_next(invalid_reason, previous_run["repo"] if previous_run else None))
         if invalid_reason
         else "harness_plan_status",
         "approval": approval,

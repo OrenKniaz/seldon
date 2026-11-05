@@ -210,22 +210,13 @@ def resume_plan(
             if resolution["nextAction"]["kind"] == "existing_canonical_blocker":
                 result["reasonCode"] = "canonical-prerequisite"
                 return finish()
-            blockers = resolution["blockingOpenFindings"]
-            if blockers is None:
+            prerequisite = resolution.get("findingDispositionPrerequisite")
+            if prerequisite is None:
                 return finish()
-            if blockers:
+            if prerequisite["nextAction"] is not None:
                 result.update(
                     reasonCode="canonical-prerequisite",
-                    nextAction={
-                        **resolution["nextAction"],
-                        "kind": "reconcile_findings",
-                        "findingIds": [row["id"] for row in blockers],
-                        "manifestRevision": resolution["manifestRevision"],
-                        "auditMode": resolution["audit"]["proofLevel"] or "unknown",
-                        "findingDetails": [
-                            {"id": row["id"], "detailRoute": row["detailRoute"]} for row in blockers
-                        ],
-                    },
+                    nextAction=prerequisite["nextAction"],
                 )
                 return finish()
             # Publication continuation uses its configured prerequisites. Worker

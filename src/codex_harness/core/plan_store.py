@@ -290,7 +290,7 @@ class PlanStore:
         return record
 
     def judgment(self, judgment_id: str, *, candidate=None) -> dict:
-        """The shared consumer: credit requires a current bound explicit verdict."""
+        """Credit requires current bindings, including explicit review/run facts for C."""
         record = self._judgment_record(judgment_id)
         snapshot = getattr(self, "_review_read_snapshot", None)
         if snapshot is not None and "judgmentSpine" not in snapshot:
@@ -299,14 +299,12 @@ class PlanStore:
         current = not record.get("supersededBy") and all(ref["id"] in spine.ids() and spine.revision(ref["id"]) == ref["revision"]
                       for ref in record["subjectRefs"] + record["evidenceRefs"])
         if current:
-            for ref in record["sourceRefs"]:
-                binding = ref["payload"].get("facts", {}).get("reviewBinding")
-                if binding is not None:
-                    current = (binding == review_binding(self, binding["memberIds"], convergence=binding["convergence"], run_id=binding["runId"])
-                               and ("acceptanceRun" not in binding or binding["acceptanceRun"] is not None
-                                    and binding["acceptanceRun"]["id"] == binding["runId"]))
-                    if not current:
-                        break
+            current = all(binding is not None
+                and binding == review_binding(self, binding["memberIds"], convergence=binding["convergence"], run_id=binding["runId"])
+                and ("acceptanceRun" not in binding or binding["acceptanceRun"] is not None and binding["acceptanceRun"]["id"] == binding["runId"])
+                and (facts.get("subject", {}).get("kind") != "C" or binding["runId"] is not None and binding["runId"] == facts["subject"].get("run", {}).get("id"))
+                for facts in (ref["payload"].get("facts", {}) for ref in record["sourceRefs"])
+                if (binding := facts.get("reviewBinding")) is not None or facts.get("subject", {}).get("kind") == "C")
         candidate_current = record["candidate"] is None or candidate == record["candidate"]
         reason = record["error"] if record.get("supersededBy") else None if current and candidate_current else (
             "Refresh changed subject/evidence bindings" if not current else "Supply the current bound candidate")
@@ -2219,9 +2217,7 @@ class PlanStore:
 
     def _check_publish(self) -> None:
         self._check_approval("vision-lock", self._revision())
-        if any(row["state"] == "open" and row.get("stage") not in {"readiness", "acceptance"}
-               for row in self.finding_state()["members"]):
-            raise PlanStoreError("plan-findings-open", "Resolve the current concrete judgment gaps")
+        self.require_finding_dispositions()
         if self._open("clarifications"):
             raise PlanStoreError("plan-clarifications-open", "Resolve open clarifications")
 
@@ -2617,7 +2613,7 @@ class PlanStore:
             )
         from codex_harness.core.acceptance import derive_scenarios
 
-        with self._transaction():
+        with nullcontext() if self.connection.in_transaction else self._transaction():
             spine = self.locked_acceptance_spine()
             required = {item["id"] for item in derive_scenarios(spine)}
             current = Spine(self._data())
@@ -2930,8 +2926,26 @@ class PlanStore:
                 status = "pending"
             members.append(dict(source, state=state, status=status, resolution=resolution,
                                 judgmentIds=list(dict.fromkeys(linked)), cluster_id=groups.get(source["id"])))
-        snapshot["findingState"] = dict(members=members, pendingJudgments=pending)
+        required = [row for row in members if row["state"] != "closed" and row.get("stage") != "readiness"]
+        ids = [row["id"] for row in required]
+        action = dict(kind="reconcile_findings", state="pending-judgment", question="finding-disposition",
+                      findingIds=ids, mcpTool="harness_resolve_findings",
+                      message="harness_resolve_findings: prepare finding-disposition for obligation ids "
+                              + ", ".join(ids) + "; supply evidence-backed dispositions and reasons, then submit the returned bound judgment.")
+        if not required:
+            action = None
+        if any(row.get("stage") == "acceptance" for row in required):
+            from codex_harness.core.acceptance import acceptance_run_prerequisite
+            if recovery := acceptance_run_prerequisite(self):
+                action = dict(recovery, findingIds=ids, message=recovery["message"] + "; retained obligations: " + ", ".join(ids))
+        snapshot["findingState"] = dict(members=members, pendingJudgments=pending,
+            dispositionPrerequisite=dict(complete=not required, members=required, nextAction=action))
         return snapshot["findingState"]
+
+    def require_finding_dispositions(self):
+        prerequisite = self.finding_state()["dispositionPrerequisite"]
+        if not prerequisite["complete"]:
+            raise PlanStoreError("pending-judgment", prerequisite["nextAction"]["message"])
 
     def review_prerequisite(self, revision):
         from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
@@ -2993,15 +3007,11 @@ class PlanStore:
         if not isinstance(refs, list) or not refs:
             raise ValueError("review-closure-node-evidence-required")
         spine = self.spine()
-        nodes = set()
         for ref in refs:
             if not isinstance(ref, dict) or set(ref) != {"nodeId", "revision"}:
                 raise ValueError("review-closure-node-reference-invalid")
             if ref["nodeId"] not in spine.ids() or spine.revision(ref["nodeId"]) != ref["revision"]:
                 raise ValueError("review-closure-artifact-stale-or-absent")
-            nodes.add(ref["nodeId"])
-        if row["node_id"] != "plan" and row["node_id"] not in nodes:
-            refs = [*refs, dict(nodeId=row["node_id"], revision=spine.revision(row["node_id"]))]
         for field, table, binding in (
             ("reviewIds", "review_runs", "plan_revision"),
             ("auditIds", "audit_runs", "manifest_revision"),
@@ -3020,50 +3030,33 @@ class PlanStore:
             not isinstance(value, str) for value in obligations
         ):
             raise ValueError("review-closure-obligation-reference-invalid")
-        owners = set()
         for value in obligations:
             if value not in spine.ids():
                 raise ValueError("review-closure-obligation-reference-invalid")
-            owners.update(
-                n
-                for n in [value, *spine.ancestors(value)]
-                if spine.node(n)["kind"] in {"requirement", "vision"}
-            )
         if status == "deferred" and not obligations:
             raise ValueError("review-closure-deferred-obligation-required")
-        return {
-            **deepcopy(closure),
-            "nodeRefs": refs,
-            "obligationNodeIds": sorted(owners),
-            "status": status,
-            "closure": "unverified",
-            "reason": "Targeted assessment and observed separation producers unavailable",
-        }
 
     def resolve_findings(self, dispositions: list[dict]) -> dict:
         """Judge each named member against current evidence; never close a cluster implicitly."""
         from codex_harness.core.approvals import assess
-        from codex_harness.core.roundtable import _table, findings
         if not isinstance(dispositions, list) or not dispositions:
             raise ValueError("At least one finding disposition is required")
         with self._transaction():
-            _table(self)
-            reviews = {row["id"]: row for row in findings(self, expand=True)}
-            acceptance = {row["id"]: row for row in self.acceptance_findings()}
+            members = {row["id"]: row for row in self.finding_state()["members"]}
             ids = [item.get("id") for item in dispositions]
             if len(set(ids)) != len(ids):
                 raise ValueError("Supply each finding member exactly once")
             for item in dispositions:
                 if (set(item) - {"id", "status", "resolution", "closure"}
-                    or item.get("id") not in reviews | acceptance
+                    or item.get("id") not in members
                     or item.get("status") not in {"resolved", "rejected", "deferred"}
                     or not isinstance(item.get("resolution"), str) or not item["resolution"].strip()):
                     raise ValueError("Supply known member id, disposition and nonempty resolution")
                 if "closure" in item:
-                    if item["id"] not in reviews:
+                    if members[item["id"]].get("stage") == "acceptance":
                         raise ValueError("Acceptance closure producer unavailable; retain pending judgment")
-                    self._closure_declaration(item["closure"], reviews[item["id"]],
-                                              [reviews[item["id"]]], item["status"])
+                    self._closure_declaration(item["closure"], members[item["id"]],
+                                              [members[item["id"]]], item["status"])
             judgment = assess(self, "finding-disposition", dict(
                 members=[row for row in finding_records(self) if row["id"] in ids], proposals=dispositions,
                 reviewBinding=review_binding(self, ids),
@@ -3093,72 +3086,10 @@ class PlanStore:
         if self._open("clarifications"):
             return "plan-clarifications-open"
 
-        def original_review(review):
-            # Rebind carries a reference, never a newly executed review. Follow only
-            # links recorded by the existing rebind producer, preserving originals.
-            seen = set()
-            while isinstance(review, dict) and "originalReviewId" in review:
-                review_id = review.get("id")
-                if not isinstance(review_id, str) or review_id in seen:
-                    return None
-                seen.add(review_id)
-                current_id, previous_id = review.get("runId"), review.get("reboundFrom")
-                if (
-                    not isinstance(previous_id, str)
-                    or current_id == previous_id
-                    or review.get("by") != "harness"
-                    or review.get("stage") != "acceptance"
-                    or review.get("reason") != "revision algorithm upgraded; product unchanged"
-                    or "reviewers" in review
-                    or "isMocked" in review
-                ):
-                    return None
-                runs = []
-                for identity in (current_id, previous_id):
-                    saved = self.connection.execute(
-                        "SELECT result_json FROM acceptance_runs WHERE id=?", (identity,)
-                    ).fetchone()
-                    runs.append(json.loads(saved[0]) if saved else None)
-                if (
-                    any(not isinstance(run, dict) or run.get("passed") is not True for run in runs)
-                    or runs[0].get("id") != current_id
-                    or runs[1].get("id") != previous_id
-                    or runs[0].get("repo") != runs[1].get("repo")
-                    or runs[0].get("planRevision") != runs[1].get("planRevision")
-                ):
-                    return None
-                receipts = (
-                    json.loads(row[0])
-                    for row in self.connection.execute(
-                        "SELECT payload_json FROM events WHERE kind='acceptance-rebound'"
-                    )
-                )
-                if not any(
-                    receipt.get("run") == runs[0]
-                    and receipt.get("reboundFrom") == previous_id
-                    and receipt.get("by") == "harness"
-                    and review in receipt.get("reviews", [])
-                    for receipt in receipts
-                ):
-                    return None
-                original_id = review.get("originalReviewId")
-                saved = self.connection.execute(
-                    "SELECT result_json FROM acceptance_reviews WHERE id=?", (original_id,)
-                ).fetchone()
-                review = json.loads(saved[0]) if saved else None
-                if (
-                    not isinstance(review, dict)
-                    or review.get("id") != original_id
-                    or review.get("runId") != previous_id
-                ):
-                    return None
-            return review
-
         for row in self.connection.execute("SELECT result_json FROM acceptance_reviews"):
             review = json.loads(row[0])
             if not isinstance(review, dict) or review.get("runId") != run_id:
                 continue
-            review = original_review(review)
             if not isinstance(review, dict) or review.get("isMocked") is not False:
                 continue
             reviewers = review.get("reviewers")
@@ -3201,7 +3132,7 @@ class PlanStore:
                 acceptance._refuse(reason, run["repo"] if run else None)
             acceptance.require_c_evidence(self, run)
             from codex_harness.core.approvals import assess
-            judgment = assess(self, "user-decision", dict(subject=dict(kind="C", run=run),
+            judgment = assess(self, "user-decision", dict(subject=dict(kind="C", run=run), reviewBinding=review_binding(self, run_id=run["id"]),
                 revision=self._revision(), request_id="C:" + run["id"], words=statement, actor=by, channel="caller-message",
                 question="Interpret exact owner words for this delivered candidate. "
                 "meaning.decision is approve, decline, cancel or changes-requested; ambiguity stays pending."))
@@ -3352,7 +3283,7 @@ class PlanStore:
             if meta["phase"] in {"roundtable", "publish"}:
                 kind = status["continuation"]["planning"]["kind"]
                 status["pending_gate"] = {
-                    "reconcile_findings": "plan-findings-open",
+                    "reconcile_findings": "pending-judgment",
                     "review_policy_hold": "plan-review-policy-unmet",
                     "compile_required": "compile-required",
                     "audit_required": "passing-audit-required",

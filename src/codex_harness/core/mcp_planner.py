@@ -390,8 +390,8 @@ TOOLS = [
     ),
     _tool(
         "harness_accept_rebind",
-        "Rerun scenarios and rebind prior acceptance after legacy binding or revision algorithm "
-        "migration with unchanged product.",
+        "Refresh execution evidence after legacy binding or revision algorithm migration. "
+        "Review credit and C require fresh current bound judgments.",
         {"repo": STRING},
     ),
     _tool(
@@ -826,7 +826,7 @@ def resume_next(data=None, *, cli_prefix=None):
     resolution = (data.get("canonicalStatus") or {}).get("reviewResolution")
     if resolution and kind in {
         "existing_canonical_blocker",
-        "reconcile_findings",
+        "reconcile_findings", "acceptance_run_required",
         "compile_required",
         "audit_required",
         "review_required",
@@ -1274,7 +1274,7 @@ class PlannerServer:
                 and name in {"harness_advance", "harness_publish"}
                 and operation_error_code
                 in {
-                    "plan-findings-open",
+                    "pending-judgment",
                     "plan-publication-evidence-required",
                     "plan-review-policy-unmet",
                 }
@@ -1408,7 +1408,7 @@ class PlannerServer:
             and name in {"harness_advance", "harness_publish"}
             and operation_error_code
             in {
-                "plan-findings-open",
+                "pending-judgment",
                 "plan-publication-evidence-required",
                 "plan-review-policy-unmet",
             }
@@ -1620,7 +1620,7 @@ class PlannerServer:
             and status.get("reviewResolution")
             and error_code
             in {
-                "plan-findings-open",
+                "pending-judgment",
                 "plan-publication-evidence-required",
                 "plan-review-policy-unmet",
             }

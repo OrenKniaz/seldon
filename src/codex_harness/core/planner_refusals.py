@@ -12,6 +12,12 @@ TEACHING = (
 # Codes observed in runs 15–23 and UX journeys, grouped by their owning rule.
 RULES = [
     (
+        "pending-judgment",
+        "Judgment is pending.",
+        "A current bound semantic judgment is required.",
+        None,
+    ),
+    (
         "approval-changes-requested",
         "Your response requests changes or qualifies the displayed approval.",
         "Qualified or unclear words cannot approve the complete A or B subject.",
@@ -84,7 +90,7 @@ RULES = [
     ),
     (
         (
-            "canonical-prerequisite plan-findings-open "
+            "canonical-prerequisite "
             "plan-publication-evidence-required plan-review-policy-unmet "
             "acceptance-run-required acceptance-review-required "
             "acceptance-attempt-unknown acceptance-review-interrupted "

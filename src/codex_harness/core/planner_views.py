@@ -373,23 +373,14 @@ def continuation_projection(status: dict, resolution: dict) -> dict:
     policy = status.get("reviewPolicy", {})
     if blocker:
         action.update(blocker)
+    elif resolution.get("findingDispositionPrerequisite", {}).get("nextAction") is not None:
+        action.update(resolution["findingDispositionPrerequisite"]["nextAction"])
     elif phase not in {"roundtable", "publish", "execute"}:
         action["kind"] = "not_applicable"
         result["classification"] = "outside-bounded-planning-scope"
         return result
     elif resolution.get("blockingOpenFindings") is None:
         return result
-    elif resolution["blockingOpenFindings"]:
-        round_id = resolution["blockingOpenFindings"][0]["roundId"]
-        action.update(
-            kind="reconcile_findings",
-            findingIds=[row["id"] for row in resolution["blockingOpenFindings"]],
-            inspection={
-                "mcpTool": "harness_review",
-                "arguments": {"id": round_id},
-                "cliArguments": ["review", round_id],
-            },
-        )
     elif navigation := judgment_navigation(status.get("pendingSemanticJudgments", []), review_complete=resolution["review"]["current"]):
         action.update(navigation)
     elif policy.get("active") and not policy["eligible"]:
@@ -451,7 +442,6 @@ def continuation_projection(status: dict, resolution: dict) -> dict:
 def review_resolution_state(store, status: dict) -> dict:
     """Read existing canonical facts; advisory only, never a loop or admission lease."""
     from codex_harness.core.plan_quality import _roundtable
-    from codex_harness.core.roundtable import findings
 
     def known(value):
         return (
@@ -495,11 +485,6 @@ def review_resolution_state(store, status: dict) -> dict:
             return None, False
         return value[:512], len(value) > 512
 
-    def relation(revision):
-        if not known(revision) or not known(manifest):
-            return "unknown"
-        return "current" if revision == manifest else "stale"
-
     priority = None
     try:
         gate = status.get("pending_gate")
@@ -532,40 +517,10 @@ def review_resolution_state(store, status: dict) -> dict:
         # manifest is absent. Broken review reads must still remain unknown.
         if priority is not None:
             state["nextAction"] = priority
-        rows = findings(store)
-        blocking, deferred = [], []
-        for row in sorted(rows, key=lambda item: item["id"]):
-            if row.get("stage") == "readiness":
-                continue
-            if not known(row.get("id")) or not isinstance(row.get("memberIds"), list):
-                raise ValueError("Unknown recorded finding membership")
-            if row["state"] != "open" and row["status"] != "deferred":
-                continue
-            item = {
-                "id": row["id"],
-                "recordedRevision": row.get("plan_revision"),
-                "revisionRelation": relation(row.get("plan_revision")),
-                "detailRoute": {
-                    "roundId": row.get("round_id"),
-                    "mcpTool": "harness_review",
-                    "cliCommand": "review",
-                },
-            }
-            if row["state"] == "open":
-                for public, source in (("finding", "finding"), ("suggestion", "suggestion")):
-                    item[public], item[public + "Truncated"] = excerpt(row.get(source))
-                item.update(
-                    memberIds=sorted(row["memberIds"]),
-                    nodeId=row.get("node_id"),
-                    roundId=row.get("round_id"),
-                    severity=row.get("severity"),
-                    status="open",
-                )
-                blocking.append(item)
-            else:
-                item["resolution"], item["resolutionTruncated"] = excerpt(row.get("resolution"))
-                deferred.append(item)
-        state.update(blockingOpenFindings=blocking, deferredFindings=deferred)
+        prerequisite = store.finding_state()["dispositionPrerequisite"]
+        state.update(findingDispositionPrerequisite=prerequisite,
+                     blockingOpenFindings=prerequisite["members"],
+                     deferredFindings=[row for row in prerequisite["members"] if row["status"] == "deferred"])
         if known(manifest):
             audit = store.passing_audit(manifest)
             prerequisite = store.review_prerequisite(manifest)
@@ -607,6 +562,7 @@ def review_resolution_state(store, status: dict) -> dict:
             state["snapshotChanged"] = True
             raise ValueError("Resolution observation changed during read")
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError, StopIteration):
+        state.pop("findingDispositionPrerequisite", None)
         state.update(
             blockingOpenFindings=None,
             deferredFindings=None,
@@ -684,8 +640,8 @@ def review_author_handoff(store, status: dict, *, cli_prefix=None) -> dict:
         result["reviewPolicy"] = state["reviewPolicy"]
     try:
         blockers = {row["id"] for row in state["blockingOpenFindings"]}
-        observed_members = findings(store, "open", expand=True)
-        rows = [row for row in observed_members if (row.get("cluster_id") or row["id"]) in blockers]
+        observed_members = findings(store, expand=True)
+        rows = [row for row in observed_members if row["id"] in blockers]
         members = []
         for row in sorted(rows, key=lambda item: item["id"])[:16]:
             member = {
@@ -740,7 +696,7 @@ def review_author_handoff(store, status: dict, *, cli_prefix=None) -> dict:
             or store.manifest_revision() != state["manifestRevision"]
             or store.phase() != state["phase"]
             or review_resolution_state(store, store.status()) != state
-            or findings(store, "open", expand=True) != observed_members
+            or findings(store, expand=True) != observed_members
         ):
             raise ValueError("Author handoff changed during read")
         result.update(
@@ -820,11 +776,8 @@ def refusal_help(code, message: str, status: dict) -> str | None:
             "How to fix: ask the user each open question (ids in harness_plan_status), record "
             "their answers with harness_answer, then retry."
         )
-    if code == "plan-findings-open":
-        return (
-            "How to fix: repair the plan for each open review finding, or record a reasoned "
-            "disposition with harness_resolve_findings; then compile, audit and review again."
-        )
+    if code == "pending-judgment":
+        return message
     if code == "plan-publication-evidence-required":
         missing = []
         if "passing audit" in message:
@@ -868,20 +821,8 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
             if cli_prefix is not None
             else "Answer the actual open questions with harness_answer."
         )
-    if kind == "reconcile_findings":
-        ids = ", ".join(action["findingIds"][:3]) + (
-            "; more in status" if len(action["findingIds"]) > 3 else ""
-        )
-        route = (
-            cmd('resolve --id <recorded-id> --resolution "<evidence and reason>"')
-            + " with exactly one of --resolved, --rejected, or --deferred"
-            if cli_prefix is not None
-            else (
-                "harness_resolve_findings with recorded ids, "
-                "evidence-backed dispositions and reasons"
-            )
-        )
-        return f"Inspect and repair recorded findings ({ids}); use {route}; refresh {refresh}."
+    if kind in {"reconcile_findings", "acceptance_run_required"}:
+        return action["message"]
     if kind == "review_policy_hold":
         return review_policy_next(state["reviewPolicy"], cli_prefix=cli_prefix)
     if kind == "compile_required":

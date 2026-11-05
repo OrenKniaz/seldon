@@ -1303,7 +1303,7 @@ with TemporaryDirectory(dir=root) as scratch:
                 assert continuation["kind"] == "reconcile_findings" and members[1]["id"] in continuation["findingIds"]
                 proposals = [dict(id=row["id"], status="resolved",
                     resolution="The real importer/SQLite/HTTP verifier supplies readback evidence")
-                    for row in roundtable.findings(store, expand=True) if row["state"] == "open" or row["id"] == members[0]["id"]]
+                    for row in roundtable.findings(store, expand=True) if row["state"] != "closed" or row["id"] == members[0]["id"]]
                 pending = call("harness_resolve_findings", findings=proposals)
                 scripted_judgment(call, pending["judgment"], dict(memberDispositions={row["id"]: "resolved" for row in proposals}))
                 assert call("harness_resolve_findings", findings=proposals)["dispositions"] == len(proposals)
@@ -1311,7 +1311,7 @@ with TemporaryDirectory(dir=root) as scratch:
                 retained = call("harness_review", id=rejected["roundId"])["findingMembers"]
                 assert {first_closure_id, pending["judgment"]["id"]} <= set(next(r for r in retained if r["id"] == members[0]["id"])["judgmentIds"])
                 uncertain = [r for r in roundtable.findings(store, expand=True) if r["finding"] == "Evidence access unavailable"]
-                assert len(uncertain) == 1 and uncertain[0]["state"] == "pending"
+                assert len(uncertain) == 1 and uncertain[0]["state"] == "closed"
                 assert not call("harness_plan_status", full=True)["reviewResolution"]["blockingOpenFindings"]
                 preliminary = store.spine().node("R2")
                 preliminary["text"] += " Preserve readback while repairing the reviewed plan."
@@ -1361,7 +1361,7 @@ with TemporaryDirectory(dir=root) as scratch:
                 if replacement["convergence"]:
                     scripted_judgment(call, replacement["convergence"], dict(action="ready"))
                 held = workspace_wire(server, "harness_advance", expected_workspace=str(workspace), to_phase="publish")
-                assert held["isError"] and "plan-findings-open" in str(held)
+                assert held["isError"] and held.get("refusalCode") == "pending-judgment"
                 carried_proposals = [dict(id=r["id"], status="resolved", resolution="Bound readback observations address A's retained obligation") for r in carried]
                 closure = call("harness_resolve_findings", findings=carried_proposals)
                 scripted_judgment(call, closure["judgment"], dict(memberDispositions={r["id"]: "resolved" for r in carried}))
@@ -1374,10 +1374,28 @@ with TemporaryDirectory(dir=root) as scratch:
                 reviewed = call("harness_roundtable", max_rounds=2, timeout=5)
             assert len(reviewed["successfulReviews"]) == 2, reviewed
             if semantic:
+                scripted_judgment(call, reviewed["convergence"], dict(action="ready"))
+                # DV10: stale closures + fresh positive reviews used to publish.
+                # Earlier stale-binding checks never attempted that publication.
+                retained = [r for r in roundtable.findings(store, expand=True) if r["id"] in review_history_ids]
+                assert retained and all(r["state"] == "pending" for r in retained)
+                held = workspace_wire(server, "harness_advance", expected_workspace=str(workspace), to_phase="publish")
+                assert held["isError"] and held.get("refusalCode") == "pending-judgment", held
+                assert "What happened: Judgment is pending." in str(held)
+                for row in retained:
+                    assert row["id"] in str(held)
+                status = call("harness_plan_status", full=True)
+                assert status["phase"] == "roundtable"
+                continuation = status["continuation"]["recommendation"]
+                assert continuation["question"] == "finding-disposition"
+                assert set(continuation["findingIds"]) == {r["id"] for r in retained}
+                assert continuation["mcpTool"] == "harness_resolve_findings"
+                pending = call("harness_resolve_findings", findings=proposals)
+                scripted_judgment(call, pending["judgment"], dict(memberDispositions={row["id"]: "resolved" for row in proposals}))
+                assert call("harness_resolve_findings", findings=proposals)["dispositions"] == len(proposals)
                 rejected_ids = {part["judgmentId"] for row in rejected["reviewers"] for part in row["shardDetails"]}
                 assert not rejected_ids & {part["judgmentId"] for row in reviewed["reviewers"] for part in row["shardDetails"]}
                 convergence = reviewed["convergence"]
-                scripted_judgment(call, convergence, dict(action="ready"))
                 # Canonical full + compact shard evidence deliberately shares all
                 # spine refs. Earlier coverage used only one shard per reviewer,
                 # so purpose/whole-spine dedup hid the other required request.
@@ -1551,42 +1569,40 @@ with TemporaryDirectory(dir=root) as scratch:
                 ),
             )
             assert accepted["structuredContent"]["result"]["passed"], accepted
-            if semantic:
-                # A real acceptance review produces the finding; a later product edit
-                # must invalidate its positive closure judgment even with unchanged plan/template.
-                def acceptance_gap(launch, *_):
-                    request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
-                    reviewer = request["sourceRefs"][0]["payload"]["facts"]["reviewer"]
-                    # A negative verdict with no presentation findings still creates
-                    # concrete obligations. The next positive packet must carry them.
-                    items = []
-                    return tuple(v.replace("source-only", reviewer["model"]).replace("Some(High)", "Some(Medium)") if isinstance(v,str) else v
-                                 for v in protocol(launch.cli, text=scripted_review_reply(launch, items, verdict="negative",
-                                     rationale="The readback finding needs candidate-bound assessment", gaps=["Readback assessment is pending"])))
-                with pytest.MonkeyPatch.context() as gap:
-                    gap.setattr(roundtable, "_run", acceptance_gap)
-                    assessed = call("harness_accept_review", repo=run["repo"])
-                acceptance_members = assessed["findings"]
-                review_history_ids.update(row["id"] for row in acceptance_members)
-                assert len(acceptance_members) == 2 and all(r.get("judgmentGap") and r["state"] == "open" for r in acceptance_members)
-                call("harness_accept_review", repo=run["repo"])
-                assert all(r["state"] == "open" for r in store.acceptance_findings())
-                held = workspace_wire(server, "harness_accept", expected_workspace=str(workspace), by="user", statement="Yes")
-                assert held["isError"] and "acceptance-findings-open" in str(held)
-                dispositions = [dict(id=row["id"], status="resolved", resolution="Real readback meets this finding on candidate A") for row in acceptance_members]
+            def acceptance_gap(launch, *_):
+                request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
+                reviewer = request["sourceRefs"][0]["payload"]["facts"]["reviewer"]
+                # A negative verdict with no presentation findings still creates
+                # concrete obligations. The next positive packet must carry them.
+                items = []
+                return tuple(v.replace("source-only", reviewer["model"]).replace("Some(High)", "Some(Medium)") if isinstance(v,str) else v
+                             for v in protocol(launch.cli, text=scripted_review_reply(launch, items, verdict="negative",
+                                 rationale="The readback finding needs candidate-bound assessment", gaps=["Readback assessment is pending"])))
+            with pytest.MonkeyPatch.context() as gap:
+                gap.setattr(roundtable, "_run", acceptance_gap)
+                acceptance_members = call("harness_accept_review", repo=run["repo"])["findings"]
+            review_history_ids.update(row["id"] for row in acceptance_members)
+            assert len(acceptance_members) == 2 and all(row["state"] == "open" for row in acceptance_members)
+            dispositions = [dict(id=row["id"], status="resolved", resolution="Current readback addresses this retained obligation")
+                            for row in acceptance_members]
+            if not semantic:
                 prepared = call("harness_resolve_findings", findings=dispositions)
                 scripted_judgment(call, prepared["judgment"], dict(memberDispositions={row["id"]:"resolved" for row in acceptance_members}))
                 product = Path(run["repo"])
                 source = (product / "server.py").read_text(encoding="utf-8")
-                changed = source.replace("','.join", "';'.join")
+                changed = source.replace("self.end_headers()",
+                    "self.send_header('Content-Type', 'text/plain')\n        self.end_headers()")
                 assert changed != source
                 scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": changed})
                 stale = call("harness_judgment", judgment_id=prepared["judgment"]["id"])
                 assert not stale["current"] and not stale["positiveCredit"]
-                refused = call("harness_resolve_findings", findings=dispositions)
-                assert refused["state"] == "pending-judgment" and refused["dispositions"] == 0 and refused["owner"] is None
-                pending_requests = call("harness_plan_status")["pendingSemanticJudgments"]
-                assert any(r["id"] == refused["judgment"]["id"] and r["current"] is False for r in pending_requests)
+                # Round 2: the run is the disposition's producer. Earlier coverage
+                # reran it manually while guidance advertised immediately stale judgments.
+                status = call("harness_plan_status", full=True)
+                action = status["continuation"]["recommendation"]
+                assert action["mcpTool"] == "harness_accept_run", action
+                assert "harness_accept_run" in status["acceptance"]["next"]
+                assert status["acceptance"]["accepted"] is False
                 assert all(row["state"] == "pending" for row in store.acceptance_findings())
                 scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": source})
                 assert call("harness_resolve_findings", findings=dispositions)["dispositions"] == len(dispositions)
@@ -1597,19 +1613,108 @@ with TemporaryDirectory(dir=root) as scratch:
                 scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": changed})
                 assert all(r["state"] == "pending" for r in store.acceptance_findings())
                 assert all(r["status"] != "resolved" for r in store.acceptance_findings())
-                scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": source})
-                assert all(r["state"] == "closed" for r in store.acceptance_findings() if r["id"] in {d["id"] for d in dispositions})
+                # Same regression at C: execute the changed candidate and obtain
+                # fresh positive reviews, then try acceptance before disposition.
+                action = call("harness_plan_status", full=True)["continuation"]["recommendation"]
+                assert action["mcpTool"] == "harness_accept_run"
+                admitted = workspace_wire(server, action["mcpTool"], expected_workspace=str(workspace), **action["arguments"])
+                waiting = call("harness_plan_status", full=True)["continuation"]["recommendation"]
+                assert waiting["mcpTool"] == "harness_accept_status"
+                assert waiting["arguments"]["id"] == admitted["structuredContent"]["attemptId"]
+                rerun = finish_public_acceptance(server, admitted)
+                assert rerun["structuredContent"]["result"]["passed"], rerun
+            # Migration refreshes execution only. No review/approval lineage is
+            # restored; both legacy inputs must proceed through fresh judgments.
+            from codex_harness.core import acceptance
+            original_approval = call("harness_plan_status")["acceptance"]["approval"]
+            old_run = acceptance._latest_run(store)
+            legacy = dict(old_run, revisionAlgorithm="git-diff-v1",
+                          revision=acceptance._integrated_revision_v1(run["repo"]))
+            # Historical persisted input only; judgments and refreshed runs still
+            # come from their canonical producers, with no mocked acceptance.
+            with store._transaction():
+                if not semantic:
+                    legacy_scenarios = acceptance._raw_scenarios(store)
+                    for item in legacy_scenarios:
+                        del item["nodeRevisions"]
+                        store.connection.execute("UPDATE acceptance_scenarios SET scenario_json=? WHERE id=?",
+                                                 (json.dumps(item), item["id"]))
+                    legacy["scenarioRevision"] = acceptance._hash(legacy_scenarios)
+                store.connection.execute("UPDATE acceptance_runs SET result_json=? WHERE id=?",
+                                         (json.dumps(legacy), legacy["id"]))
+            status = call("harness_plan_status", full=True)
+            action = status["continuation"]["recommendation"]
+            assert action["mcpTool"] == "harness_accept_rebind", action
+            refreshed = call(action["mcpTool"], **action["arguments"])
+            refreshed_id = refreshed["run"]["id"]
+            assert refreshed["run"]["passed"] and refreshed_id != legacy["id"]
+            assert "approval" not in refreshed and "reviews" not in refreshed
+            status = call("harness_plan_status", full=True)
+            assert status["acceptance"]["accepted"] is False
+            assert status["acceptance"]["approval"] == original_approval
+            assert status["continuation"]["recommendation"]["question"] == "finding-disposition"
             if not semantic:
-                call("harness_accept_review", repo=run["repo"])
+                # Upgrade fixture: retain a base-produced positive C with no review
+                # binding. Prior replays created only newly bound C, missing revival
+                # of historical consent after template drift and fresh same-run reviews.
+                from codex_harness.core.approvals import assess
+                from codex_harness.core.reviewer_evidence import review_binding
+                historical = assess(store, "user-decision", dict(subject=dict(kind="C", run=refreshed["run"]),
+                    reviewBinding=review_binding(store, run_id=refreshed_id), words="Yes", actor="user"))
+                scripted_judgment(call, historical, dict(decision="approve"))
+                historical = store._judgment_record(historical["id"])
+                for ref in historical["sourceRefs"]:
+                    ref["payload"]["facts"].pop("reviewBinding", None)
+                historical["binding"] = hashlib.sha256(json.dumps({key: historical[key] for key in
+                    ("id", "question", "subjectRefs", "evidenceRefs", "sourceRefs", "candidate")},
+                    sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+                legacy_c = dict(id="legacy-unbound-C", runId=refreshed_id, by="user", statement="Yes",
+                                isProxy=False, judgmentId=historical["id"], human_identity_verified=False)
+                with store._transaction():
+                    store._event("judgment-recorded", historical)
+                    store.connection.execute("INSERT INTO acceptance_approvals VALUES (?, ?)",
+                                             (legacy_c["id"], json.dumps(legacy_c)))
+            # Before fresh review, changed template bytes grant no credit. Earlier
+            # replays restored lineage instead of exercising current judgments.
+            template_file = next(path for path in (workspace / "template").rglob("*.py") if path.is_file())
+            template_file.write_text(template_file.read_text(encoding="utf-8") + "\n# Changed migration review input\n", encoding="utf-8")
+            required = call("harness_plan_status", full=True)["reviewResolution"]["findingDispositionPrerequisite"]["members"]
+            dispositions = [dict(id=row["id"], status="resolved", resolution="Current execution and review address this retained obligation") for row in required]
+            assert store.acceptance_review_guard(refreshed_id) == "acceptance-review-required"
+            call("harness_accept_review", repo=run["repo"])
+            held = workspace_wire(server, "harness_accept", expected_workspace=str(workspace), by="user", statement="Yes")
+            assert held["isError"] and held["refusalCode"] == "pending-judgment", held
+            for row in required:
+                assert row["id"] in str(held)
+            prepared = call("harness_resolve_findings", findings=dispositions)
+            facts = prepared["judgment"]["sourceRefs"][0]["payload"]["facts"]
+            assert prepared["judgment"]["current"] and facts["reviewBinding"]["runId"] == refreshed_id
+            scripted_judgment(call, prepared["judgment"], dict(memberDispositions={row["id"]: "resolved" for row in dispositions}))
+            assert call("harness_resolve_findings", findings=dispositions)["dispositions"] == len(dispositions)
+            status = call("harness_plan_status", full=True)
+            assert status["acceptance"]["accepted"] is False
+            assert status["acceptance"]["invalidReason"] == "acceptance-approval-required", status["acceptance"]
+            assert "harness_accept" in status["acceptance"]["next"]
+            if not semantic:
+                assert status["acceptance"]["approval"] == legacy_c
+                assert not call("harness_judgment", judgment_id=historical["id"])["positiveCredit"]
             decisions.append("accept")
-            settle_decision(call, call("harness_accept", by="user", statement="Yes"))
+            fresh_c = settle_decision(call, call("harness_accept", by="user", statement="Yes"))
+            assert fresh_c["runId"] == refreshed_id and fresh_c["by"] == "user"
+            assert call("harness_judgment", judgment_id=fresh_c["judgmentId"])["positiveCredit"]
             assert store.status()["acceptance"]["accepted"]
             assert decisions == (["align+vision-lock", "plan-execution", "plan-execution", "plan-execution", "accept"] if semantic
                                  else ["align+vision-lock", "plan-execution", "accept"])
+            # After completed migration/C, further template drift must stale both
+            # review credit and C's canonical judgment; finding holds cannot mask it.
+            template_file.write_text(template_file.read_text(encoding="utf-8") + "\n# Changed after current C\n", encoding="utf-8")
+            assert store.acceptance_review_guard(refreshed_id) == "acceptance-review-required"
+            assert not call("harness_judgment", judgment_id=fresh_c["judgmentId"])["current"]
+            assert call("harness_plan_status")["acceptance"]["accepted"] is False
             print(
-                "golden ShelfLife: malformed two-fix/steer; negative minor/conflict pending; actual-delta reuse; importer/SQLite/HTTP RED->GREEN; C accepted"
+                "golden ShelfLife: malformed two-fix/steer; negative minor/conflict pending; actual-delta reuse; importer/SQLite/HTTP RED->GREEN; fresh C accepted; template drift held"
                 if semantic
-                else "golden http: decisions=3; HTTP + concurrency RED->GREEN; C accepted"
+                else "golden http: decisions=3; HTTP + concurrency RED->GREEN; fresh C accepted; template drift held"
             )
     finally:
         server.close()

@@ -51,7 +51,7 @@ def execution_scope(
         if (
             (status["vision_lock_stale"] if "vision_lock_stale" in status else False)
             or status["open_clarifications"]
-            or resolution["blockingOpenFindings"] != []
+            or resolution.get("findingDispositionPrerequisite", {}).get("complete") is not True
             or (
                 (not semantic and resolution["audit"]["current"] is not True)
                 or resolution["review"]["current"] is not True

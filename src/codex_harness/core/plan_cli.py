@@ -1255,7 +1255,7 @@ def main(argv=None) -> int:
                 code in str(reply)
                 for code in (
                     "plan-publication-evidence-required",
-                    "plan-findings-open",
+                    "pending-judgment",
                     "plan-review-policy-unmet",
                 )
             ):
@@ -1300,7 +1300,7 @@ def main(argv=None) -> int:
                 and any(
                     code in str(reply)
                     for code in (
-                        "plan-findings-open",
+                        "pending-judgment",
                         "plan-publication-evidence-required",
                         "plan-review-policy-unmet",
                     )

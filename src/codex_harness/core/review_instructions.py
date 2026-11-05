@@ -15,10 +15,6 @@ RUNNER_GUARANTEES = (
 )
 
 
-def has_blocking_findings(rows):
-    return any(row["state"] == "open" for row in rows)
-
-
 def status(row):
     return row["status"]
 

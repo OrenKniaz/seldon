@@ -27,7 +27,7 @@ from codex_harness.core.approvals import require_approval
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
-from codex_harness.core.reviewer_evidence import finding_records, review_tier, single_provider_notice
+from codex_harness.core.reviewer_evidence import finding_records, review_tier
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
@@ -1905,58 +1905,3 @@ def findings(store: PlanStore, status=None, *, expand=False) -> list[dict]:
                 item["outOfShard"] = any(member["outOfShard"] for member in members)
             result.append(item)
     return result
-
-
-def render_roundtable_card(result: dict, findings: list[dict]) -> str:
-    lines = [f"Roundtable: plan {result['planRevision'][:12]}"]
-    if result.get("reviewIndependence") == "single-provider":
-        lines.append(single_provider_notice(result))
-    lines.append(f"Cross-subscription: {str(result['crossSubscription']).lower()}")
-    lines.append(f"Round budget: {result.get('maxRounds', 2)} per reviewer per revision")
-    for reviewer in result["reviewers"]:
-        lines.append(
-            f"- {reviewer['name']}: {reviewer['provider']} / {reviewer.get('model', 'default')}; "
-            f"{reviewer['findings']} findings, {reviewer['invalid']} invalid; "
-            f"exit {reviewer['exitCode']}"
-            f"; packetBound: {str(reviewer.get('packetBound')).lower()}; "
-            f"outOfPacketTools: {json.dumps(reviewer.get('outOfPacketTools', []))}"
-        )
-        if reviewer.get("round"):
-            lines.append(
-                f"  round {reviewer['round']}/{result['maxRounds']} for this revision "
-                f"· {reviewer['total']} total"
-            )
-        for shard in reviewer.get("shardDetails", []):
-            access = shard.get("accessObservation", {})
-            if access.get("outcome") == "failure":
-                lines.append(
-                    f"  Access failure: {access['failureCategory']}. {access['nextAction']}"
-                )
-        if reviewer.get("artifactPath"):
-            lines.append(f"  Failure artifact: {reviewer['artifactPath']}")
-            lines.append("  stderr: " + reviewer["stderrPreview"])
-    current = [item for item in findings if item["plan_revision"] == result["planRevision"]]
-    for severity in _SEVERITIES:
-        group = [item for item in current if item["severity"] == severity]
-        if group:
-            label = " (advisory)" if severity in ("minor", "note") else ""
-            lines.extend(["", f"{severity.capitalize()}{label}:"])
-        for item in group:
-            lines.append(
-                f"- {item['node_id']} ({item['id']}, {item['status']}): {item['finding']} "
-                f"Suggestion: {item['suggestion']}"
-            )
-            if item["resolution"]:
-                lines.append(f"  Resolution: {item['resolution']}")
-    lines.extend(["", "Next:"])
-    if not result["reviewers"]:
-        lines.append("- Make a provider executable available and run the roundtable.")
-    elif not result["crossSubscription"] and not result.get("reviewIndependence"):
-        lines.append("- Run the second provider when available for cross-subscription review.")
-    if result["invalid"]:
-        lines.append("- Correct rejected-unparsed responses and rerun the affected reviewers.")
-    if review_instructions.has_blocking_findings(current):
-        lines.append("- Fix open findings, verify the affected plan items and record resolutions.")
-    elif result["reviewers"] and not result["invalid"]:
-        lines.append("- Recheck planner quality before advancing to publish.")
-    return "\n".join(lines) + "\n"
