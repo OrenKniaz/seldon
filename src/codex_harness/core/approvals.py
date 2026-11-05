@@ -148,7 +148,7 @@ def subject(store, kind, proposed_action=None):
     if execution is None:
         raise PlanStoreError("plan-b-consent-required", "Prepare B with exact workers and limits")
     # execution_scope owns tuple/limit validation; this internal subject binds its result.
-    limits = {k: execution[k] for k in ("callCap", "maxParallel", "timeout")}
+    limits = {k: execution[k] for k in ("maxParallel", "timeout")}
     from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
 
     _, node, catalog = selection_inputs(store)
@@ -157,30 +157,9 @@ def subject(store, kind, proposed_action=None):
         reviewers, selection = delivery_review_selection(node["fields"])
     if not reviewers:
         raise ValueError("reviewer-selection-required-before-B: propose exact delivery reviewers")
-    from codex_harness.core.provider_call_budget import DEFAULT_REVIEW_ROUNDS
-
-    policy = deepcopy(previous.get("reviewPolicy")) or dict(
-        maxRounds=DEFAULT_REVIEW_ROUNDS, maxTotal=None, timeout=900
-    )
-    policy["timeout"] = max(900, policy["timeout"])  # Formal acceptance's actual launch timeout.
-    for key, value in action.get("reviewLimits", {}).items():
-        if key == "maxTotal" and value is None and policy[key] is not None:
-            policy[key] = None
-        elif value is not None and policy[key] is not None and value > policy[key]:
-            policy[key] = value
     actual = action.get("reviewer")
     if actual is not None and reviewer_tuple(actual) not in reviewers:
         reviewers.append(reviewer_tuple(actual))
-    scheduled = {stage: len(reviewers) * policy["maxRounds"] for stage in ("plan", "full-vision")}
-    allowance = max(sum(scheduled.values()) + len(reviewers), previous.get("reviewAllowance", 0))
-    explanation = previous.get(
-        "allowanceReason", "Plan and formal acceptance rounds plus one repair round in reserve"
-    )
-    if action.get("renewReviews"):
-        from codex_harness.core.provider_call_budget import usage
-
-        allowance = max(allowance, usage(store, "review") + len(reviewers))
-        explanation = "Additional review round after the cumulative allowance was spent"
     return {
         **result,
         "planRevision": store._revision(),
@@ -190,11 +169,6 @@ def subject(store, kind, proposed_action=None):
         "reviewTier": review_tier(reviewers),
         "catalog": "unverified" if catalog is None else "recorded",
         "reviewSelection": selection,
-        "reviewPolicy": policy,
-        "scheduledReviewStarts": scheduled,
-        "repairReserve": allowance - sum(scheduled.values()),
-        "reviewAllowance": allowance,
-        "allowanceReason": explanation,
     }
 
 
@@ -231,15 +205,6 @@ def render(payload, changes):
     if payload["kind"] == "B":
         lines.append("Review tier: " + payload["reviewTier"])
         lines.append("catalog: " + payload["catalog"])
-        budget_fields = {"reviewPolicy", "scheduledReviewStarts", "repairReserve", "reviewAllowance", "allowanceReason"}
-        payload = {k: v for k, v in payload.items() if k not in budget_fields}
-        payload["execution"] = {k: v for k, v in payload["execution"].items() if k != "callCap"}
-        changes = deepcopy([c for c in changes if c["field"].split(".")[0] not in budget_fields and c["field"] != "execution.callCap"])
-        for change in changes:
-            if change["field"] == "execution":
-                for side in ("before", "after"):
-                    if isinstance(change[side], dict):
-                        change[side].pop("callCap", None)
     lines.extend(
         f"{title}:\n{json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)}"
         for title, value in (
@@ -285,6 +250,11 @@ def require_approval(store, kind, proposed_action=None):
     error = PlanStoreError(code, code + ": " + proposed["card"])
     error.approval = proposed
     raise error
+
+
+def require_reviewers(store, reviewers):
+    for reviewer in reviewers:
+        require_approval(store, "B", dict(reviewer=reviewer))
 
 
 def record_approval(store, request, *, words, actor, channel, affirmative, state, conditions="", source=None):

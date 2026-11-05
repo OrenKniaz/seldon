@@ -55,7 +55,7 @@ def recovery_verdict(directory, request):
 
 TOOL = dict(
     name="harness_recovery",
-    description="Inspect workers or review:<attemptId>; resolve checks machine prerequisites.",
+    description="Inspect workers or review:/audit:/acceptance:<attemptId>; release quarantines uncertain owners without claiming process exit.",
     inputSchema=dict(
         type="object",
         properties={
@@ -74,6 +74,69 @@ def disposition(store, job_id):
     return next((r for r in approvals.records(store, RESOLVED) if r["jobId"] == job_id), None)
 
 
+def attempt_proof(store, job_id):
+    """Existing admission records own non-worker lifetimes too; no second store."""
+    kind, identifier = job_id.split(":", 1)
+    if kind == "review":
+        from codex_harness.core.planner_review import status
+
+        attempt = status(store, identifier)
+    elif kind in {"audit", "acceptance"}:
+        row = store.connection.execute(
+            f"SELECT id,state,error FROM {kind}_attempts WHERE id=?", (identifier,)
+        ).fetchone()
+        attempt = dict(row) if row else None
+    else:
+        raise ValueError("recovery-attempt-kind-unknown")
+    if attempt is None:
+        raise ValueError("recovery-attempt-unknown")
+    return dict(
+        jobId=job_id,
+        attempt=attempt,
+        verdict="UNKNOWN",
+        ownershipReleased=bool(disposition(store, job_id)),
+        quiescenceVerified=False,
+        options=["abandon"],
+    )
+
+
+def release_attempt(store, job_id, reason):
+    """Release logical ownership, quarantine late results, never attest process exit."""
+    kind, identifier = job_id.split(":", 1)
+    proof = attempt_proof(store, job_id)
+    if previous := disposition(store, job_id):
+        return previous
+    if proof["attempt"]["state"] in {"completed", "stale", "stopped", "superseded"}:
+        raise ValueError("recovery-attempt-already-terminal")
+    if kind == "review":
+        from codex_harness.core.acceptance_recovery import ABANDONED
+        from codex_harness.core.planner_review import UPDATED
+
+        store._event(ABANDONED, dict(attemptId=identifier, reason=reason))
+        store._event(
+            UPDATED, dict(attemptId=identifier, state="abandoned", result=None, error=reason)
+        )
+    else:
+        if kind == "acceptance":
+            (store.workspace / ".codex-harness" / f"acceptance-stop-{identifier}").touch()
+        store.connection.execute(
+            f"UPDATE {kind}_attempts SET state='abandoned',error=? WHERE id=?",
+            (reason, identifier),
+        )
+    resolved = dict(
+        jobId=job_id,
+        choice="abandon",
+        reason=reason,
+        proof=proof,
+        quarantine=True,
+        ownershipReleased=True,
+        quiescenceVerified=False,
+        successor=None,
+    )
+    store._event(RESOLVED, resolved)
+    return resolved
+
+
 def worker_status(workspace, result):
     with open_plan_store_readonly(workspace) as store:
         resolved = disposition(store, result["jobId"])
@@ -85,9 +148,12 @@ def worker_status(workspace, result):
                 reason="Worker ended; readmit within the same B via harness_recovery.",
             )
     if resolved:
-        state = {"abandon": "abandoned", "readmit": "readmitted", "revalidate": "revalidated"}[
-            resolved["choice"]
-        ]
+        state = {
+            "abandon": "abandoned",
+            "readmit": "readmitted",
+            "revalidate": "revalidated",
+            "steer": "steering-required",
+        }[resolved["choice"]]
         if resolved["choice"] == "revalidate":
             validation = resolved.get("validation", {})
             state = (
@@ -99,7 +165,7 @@ def worker_status(workspace, result):
                 if validation
                 else "revalidating"
             )
-        result.update(status=state, recovery=resolved)
+        result.update(status=state, recovery=resolved, ownershipReleased=True)
         if resolved["choice"] == "revalidate":
             result["reason"] = "Inspect recovery.validation for retained revalidation and delivery."
     return result
@@ -110,17 +176,16 @@ def admission_id(store, publication):
     while resolved := disposition(store, job_id):
         if resolved["choice"] == "abandon":
             raise ValueError("recovery-abandoned-terminal: evidence and quarantine retained")
-        if resolved["choice"] == "revalidate":
+        if resolved["choice"] in {"revalidate", "steer"}:
             return job_id
         job_id = resolved["successor"]
     return job_id
 
 
 def inspect(workspace, job_id):
-    if job_id.startswith("review:"):
-        from codex_harness.core.planner_review import recovery_proof
-
-        return recovery_proof(workspace, job_id)
+    if ":" in job_id:
+        with open_plan_store_readonly(workspace) as store:
+            return attempt_proof(store, job_id)
     directory = jobs._directory(workspace, job_id)
     request = jobs._request(directory)
     receipt_path = jobs._inside(directory, directory / "quiescence.json")
@@ -148,6 +213,21 @@ def inspect(workspace, job_id):
             )
         ],
     )
+    paths = list(directory.glob("runs/*/evidence/run.json"))
+    run = read_record_json(jobs._inside(directory, paths[0])) if len(paths) == 1 else {}
+    proof["faultBeads"] = [
+        key
+        for key, bead in run.get("beads", {}).items()
+        if bead.get("attempt")
+        and bead["status"]
+        not in {
+            "contracts-red",
+            "requirement-validated",
+            jobs.dispatch.STATUS_MOCK_ONLY,
+            "already-satisfied",
+            "reused",
+        }
+    ]
     from codex_harness.core.planner_candidate import retained
 
     try:
@@ -164,7 +244,11 @@ def inspect(workspace, job_id):
     with open_plan_store_readonly(workspace) as store:
         proof["disposition"] = disposition(store, job_id)
     if resolved := proof["disposition"]:
-        retryable = resolved.get("validation", {}).get("state") in {"FAIL", "ERROR", "pending-judgment"}
+        retryable = resolved.get("validation", {}).get("state") in {
+            "FAIL",
+            "ERROR",
+            "pending-judgment",
+        }
         proof["options"] = ["revalidate"] if retryable and "revalidate" in proof["options"] else []
     proof["proofDigest"] = jobs._digest(proof)
     return proof
@@ -180,13 +264,23 @@ def resolve(store, job_id, choice, reason):
     ):
         raise ValueError("recovery-choice-and-reason-required")
     with store._transaction():
+        if ":" in job_id:
+            if choice != "abandon":
+                raise ValueError("uncertain-attempt-requires-abandon: no automatic replay")
+            return release_attempt(store, job_id, reason)
         if choice != "abandon":
             approvals.require_approval(store, "B")
         if choice in {"readmit", "abandon"} and not disposition(store, job_id):
             end_attempt(store.workspace, job_id)
         proof = inspect(store.workspace, job_id)
+        previous = proof["disposition"]
+        steered = previous and previous["choice"] == "steer" and choice == "readmit"
+        if steered:
+            judgment = store.judgment(previous["judgment"]["id"], candidate=proof["requestDigest"])
+            if not judgment["positiveCredit"] or judgment["meaning"].get("action") != "readmit":
+                raise ValueError("recovery-steering-pending: submit the bound 1j direction first")
         if proof["disposition"] and not (
-            choice == "revalidate" and "revalidate" in proof["options"]
+            steered or choice == "revalidate" and "revalidate" in proof["options"]
         ):
             raise ValueError(
                 "recovery-already-resolved: inspect disposition and original run evidence"
@@ -198,6 +292,19 @@ def resolve(store, job_id, choice, reason):
                 )
             if not proof["revalidation"]["available"]:
                 raise ValueError(proof["revalidation"]["reason"])
+        # Derive the bound from the existing successor chain, never a competing
+        # retry counter. The third fault requests semantics through 1j.
+        cursor = jobs._request(jobs._directory(store.workspace, job_id))["publicationRevision"]
+        recoveries = dict.fromkeys(proof["faultBeads"] or [None], 0)
+        while cursor != job_id:
+            prior = disposition(store, cursor)
+            if not prior or prior["choice"] != "readmit":
+                raise ValueError("recovery-job-not-in-publication-chain")
+            for bead in recoveries.keys() & set(prior["proof"].get("faultBeads", []) or [None]):
+                recoveries[bead] += 1
+            cursor = prior["successor"]
+        if choice == "readmit" and any(count >= 2 for count in recoveries.values()) and not steered:
+            choice = "steer"
         resolved = dict(
             jobId=job_id,
             choice=choice,
@@ -208,6 +315,17 @@ def resolve(store, job_id, choice, reason):
             if choice == "readmit"
             else None,
         )
+        if steered:
+            resolved["steeringJudgmentId"] = judgment["id"]
+        if choice == "steer":
+            store._event("worker-recovery-exhausted", dict(jobId=job_id, proof=proof))
+            event_id = store.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+            resolved["judgment"] = store.prepare_judgment(
+                question="Two automatic bead recoveries failed. What is the next safe direction within the accepted vision? Record steering; scope changes require the user.",
+                subject_ids=store.spine().ids("vision"),
+                source_event_ids=[event_id],
+                candidate=proof["requestDigest"],
+            )
         store._event(RESOLVED, resolved)
     if choice == "revalidate":
         from codex_harness.core.planner_candidate import revalidate
@@ -265,7 +383,7 @@ def monitor(workspace, job_id):
             command,
             cwd=workspace,
             capture_output=False,
-            timeout=request["options"]["timeout"] * request["options"]["callCap"] + 600,
+            timeout=request["options"]["timeout"] * (len(request["options"]["workers"]) + 1) + 600,
             env={**os.environ, **dict.fromkeys(("TEMP", "TMP", "TMPDIR"), str(temp))},
             stop_when=stop_when,
         )

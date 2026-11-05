@@ -1143,6 +1143,10 @@ with TemporaryDirectory(dir=root) as scratch:
                     vision,
                     node("F", "feature", ["V1"]),
                     node("R", "requirement", ["F"]),
+                    node("R_STATUS", "requirement", ["F"], text="Read readiness over HTTP"),
+                    node("A", "bead", ["R_STATUS"], ownedFiles=["status.py"], dependsOn=[],
+                         lessons=[], proofModule="test_status.py"),
+                    node("T_STATUS", "test", ["R_STATUS"], level="e2e", module="test_status.py"),
                     node(
                         "B",
                         "bead",
@@ -1159,6 +1163,8 @@ with TemporaryDirectory(dir=root) as scratch:
             (template / "tests").mkdir(parents=True)
             for name, content in {
                 "server.py": product.replace("b'shelf'", "b'stub'"),
+                "status.py": product.replace("b'shelf'", "b'stub'"),
+                "tests/test_status.py": proof.replace("'server.py'", "'status.py'").replace("b'shelf'", "b'ready'"),
                 "tests/test_http.py": proof,
                 "tests/helpers.py": helper,
                 "tests/test_http_concurrent.py": opaque,
@@ -1177,12 +1183,11 @@ with TemporaryDirectory(dir=root) as scratch:
         manifest = call("harness_compile", include_detail=True)
         options = dict(
             expected_revision=manifest["planRevision"],
-            max_parallel=1,
+            max_parallel=1 if semantic else 2,
             timeout=60 if semantic else 30,
-            call_cap=2 if semantic else 1,
             workers=[
                 dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
-                for b in (("C", "B") if semantic else ("B",))
+                for b in (("C", "B") if semantic else ("A", "B"))
             ],
         )
         with pytest.MonkeyPatch.context() as patch:
@@ -1191,7 +1196,11 @@ with TemporaryDirectory(dir=root) as scratch:
             patch.setenv("PYTHONPATH", os.pathsep.join([str(ROOT / "src"), str(ROOT)]))
             patch.setattr(roundtable, "_executable", lambda *_: sys.executable)
             review_history_ids = set()
+            provider_launches = []
             def positive_review(launch, *_):
+                provider_launches.append(launch)
+                if "\n## Bound Judgment\n" not in launch.stdin_text:
+                    return protocol(launch.cli, text=json.dumps(dict(ready=True, canVerify=True, blockers=[], questions=[])))
                 request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
                 history = request["sourceRefs"][0]["payload"]["facts"]["packet"]
                 assert all(key in history for key in review_history_ids)
@@ -1199,6 +1208,14 @@ with TemporaryDirectory(dir=root) as scratch:
                     if isinstance(v, str) else v for v in protocol(launch.cli, text=scripted_review_reply(launch,
                         [], verdict="positive", rationale="The planned HTTP import, persistence and readback cover the accepted local dream")))
             patch.setattr(roundtable, "_run", positive_review)
+            # The former call ceiling hid a separate readiness launch owner with no B check.
+            # Ordinary review tests never exercised this public worker-packet consumer.
+            selected_reviewers = [{k: r[k] if k != "effort" else r[k]["value"]
+                                   for k in ("name", "provider", "model", "effort")}
+                                  for r in choice["fields"]["reviewers"]]
+            refused = workspace_wire(server, "harness_readiness", expected_workspace=str(workspace),
+                                     reviewers=selected_reviewers, beads=["C" if semantic else "B"])
+            assert refused["isError"] and "plan-b-consent-required" in str(refused)
             yes(
                 call(
                     "harness_prepare_chat_confirmation",
@@ -1208,7 +1225,29 @@ with TemporaryDirectory(dir=root) as scratch:
                 )
             )
             if not semantic:
+                # Mixed consent must refuse the entire selection before spending a start.
+                # Earlier refusal tests used all-unapproved rosters and missed orphaned
+                # required-slot attempts after an approved first reviewer ran.
+                call("harness_adopt_review_policy", expectedManifestRevision=manifest["planRevision"],
+                     slots=[dict(name=r["name"], provider=r["provider"], required=True) for r in selected_reviewers])
+                mixed = [selected_reviewers[0], dict(selected_reviewers[1], name="unapproved-observer")]
+                def refuse_mixed(tool, **arguments):
+                    before = len(provider_launches)
+                    reply = workspace_wire(server, tool, expected_workspace=str(workspace), reviewers=mixed, **arguments)
+                    assert reply["isError"] and reply["refusalCode"] == "plan-b-consent-required", reply
+                    text = "\n".join(c.get("text", "") for c in reply["content"])
+                    assert text.count("Next: ") == 1 and "harness_prepare_chat_confirmation gate=plan-execution" in text
+                    return len(provider_launches) - before
+                mixed_launches = {"readiness": refuse_mixed("harness_readiness", beads=["B"])}
+            readiness = call("harness_readiness", reviewers=selected_reviewers, beads=["C" if semantic else "B"])
+            assert readiness["invalid"] == 0
+            if not semantic:
+                interrupted = call("harness_audit", mode="prospective")
+                server.audits.close(store)  # Supported owner cleanup before dispatch.
+                released = call("harness_audit_status", id=interrupted["attemptId"])
+                assert released["state"] == "abandoned" and not released["proofCreditGranted"]
                 audit = call("harness_audit", mode="prospective")
+                assert audit["attemptId"] != interrupted["attemptId"]
                 server.audits.dispatch_after_flush(store)
                 server.audits.thread.join(timeout=10)
                 server.audits.drain(store)
@@ -1222,6 +1261,11 @@ with TemporaryDirectory(dir=root) as scratch:
                 assert not result["findings"], result
             call("harness_advance", to_phase="roundtable")
             assert store.status()["pending_gate"] != "passing-audit-required"
+            if not semantic:
+                mixed_launches["roundtable"] = refuse_mixed("harness_roundtable", timeout=5)
+                exists = store.connection.execute("SELECT 1 FROM sqlite_master WHERE name='review_attempts'").fetchone()
+                attempts = [dict(row) for row in store.connection.execute("SELECT * FROM review_attempts")] if exists else []
+                assert mixed_launches == {"readiness": 0, "roundtable": 0} and not attempts, (mixed_launches, attempts)
             if semantic:
                 # Protect complete source members and invocation/revision-bound authority.
                 # Earlier coverage merged opposing findings and never retried an unchanged packet.
@@ -1235,7 +1279,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     return protocol(launch.cli, text="[]")
                 with pytest.MonkeyPatch.context() as bad:
                     bad.setattr(roundtable, "_run", malformed_review)
-                    exhausted = call("harness_roundtable", max_rounds=2, timeout=5, error=True)
+                    exhausted = call("harness_roundtable", timeout=5, error=True)
                 assert sorted(exhausted_calls.values()) == [3, 3]
                 assert exhausted["findings"] == 0 and not exhausted["successfulReviews"]
                 exhausted_ids = set(exhausted_calls)
@@ -1268,7 +1312,7 @@ with TemporaryDirectory(dir=root) as scratch:
                         gaps=["HTTP readback evidence needs judgment"] if concrete else []))
                 with pytest.MonkeyPatch.context() as bad:
                     bad.setattr(roundtable, "_run", conflicting_review)
-                    rejected = call("harness_roundtable", max_rounds=2, timeout=5)
+                    rejected = call("harness_roundtable", timeout=5)
                 assert not rejected["successfulReviews"]
                 # Only invocation metadata changes on the otherwise identical initial dossier.
                 assert all(r["shardDetails"][0]["reviewInvocationId"] != exhausted["reviewers"][i]["shardDetails"][0]["reviewInvocationId"]
@@ -1351,7 +1395,7 @@ with TemporaryDirectory(dir=root) as scratch:
                 with pytest.MonkeyPatch.context() as reshard:
                     reshard.setattr(roundtable, "packet_shards", split_dossier)
                     reshard.setattr(roundtable, "_run", reshard_review)
-                    replacement = call("harness_roundtable", max_rounds=1, max_total=2, timeout=5)
+                    replacement = call("harness_roundtable", timeout=5)
                 assert len(replacement["successfulReviews"]) == 2, replacement
                 carried = [r for r in roundtable.findings(store, expand=True) if r.get("judgmentId") == replaced["judgment"]]
                 assert {r["finding"] for r in carried} == {reshard_gap, "Retain the readback finding across dossier replacement"}, carried
@@ -1371,8 +1415,16 @@ with TemporaryDirectory(dir=root) as scratch:
                 review_history_ids.update(r["id"] for r in carried)
                 reviewed = replacement
             else:
-                reviewed = call("harness_roundtable", max_rounds=2, timeout=5)
+                reviewed = call("harness_roundtable", timeout=5)
             assert len(reviewed["successfulReviews"]) == 2, reviewed
+            # Preserve recorded scope after deleting quota totals: raw SQLite integers
+            # previously rendered as unknown; review results alone missed this status consumer.
+            visible = workspace_wire(server, "harness_plan_status", expected_workspace=str(workspace), full=True)
+            assert not visible["isError"]
+            assert "recorded review scope: packet only (recorded)" in visible["content"][0]["text"]
+            if not semantic:
+                policy = visible["structuredContent"]["reviewPolicy"]
+                assert policy["eligible"] and all(not row["incompleteAttempt"] for row in policy["slots"]), policy
             if semantic:
                 scripted_judgment(call, reviewed["convergence"], dict(action="ready"))
                 # DV10: stale closures + fresh positive reviews used to publish.
@@ -1469,9 +1521,8 @@ with TemporaryDirectory(dir=root) as scratch:
                 store.status()["publication"]["published_revision"]
             )
             (workspace / "sample.json").write_text(json.dumps(published), encoding="utf-8")
-
-            def build(root):
-                (root / "server.py").write_text(product, encoding="utf-8")
+            if not semantic:
+                options["expected_revision"] = store.status()["published_revision"]
 
             if semantic:
                 # C must consume the admitted job's real root delivery. Standalone
@@ -1523,13 +1574,56 @@ with TemporaryDirectory(dir=root) as scratch:
                 run = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
                 assert run["delivery"]["root"] == str(workspace.resolve()), run
             else:
-                run = dispatch.run_plan(
-                    workspace,
-                    work_root=workspace / "runs",
-                    max_parallel=1,
-                    fake_workers={"B": build},
-                )
-            assert run["status"] == dispatch.STATUS_MOCK_ONLY, run
+                # Independent real failures A, B, then A+B must not pool their
+                # allowances. Earlier serial C/B faults never exercised this union.
+                actual_popen = subprocess.Popen
+                def launch(argv, **kwargs):
+                    if "codex_harness.core.planner_jobs" in argv:
+                        argv = [sys.executable, "-B", str(Path(__file__).resolve()),
+                                "controller", str(workspace), "parallel-http", argv[-1]]
+                    return actual_popen(argv, **kwargs)
+                products = {"A": {"status.py": product.replace("b'shelf'", "b'ready'")},
+                            "B": {"server.py": product}}
+                def start_fault(faults):
+                    (workspace / "scripted-provider.json").write_text(
+                        json.dumps(dict(products=products, fail=list(faults))), encoding="utf-8")
+                    job = call("harness_worker_start", **options)
+                    deadline = time.monotonic() + 180
+                    while job["status"] not in {"completed", "failed"} and time.monotonic() < deadline:
+                        job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
+                    return job
+                with pytest.MonkeyPatch.context() as process_patch:
+                    process_patch.setattr(subprocess, "Popen", launch)
+                    for faults, expected in ((("A",), "readmit"), (("B",), "readmit"),
+                                             (("A", "B"), "readmit"), (("A", "B"), "steer")):
+                        job = start_fault(faults)
+                        assert job["status"] == "failed", job
+                        recovered = call("harness_recovery", mode="resolve", job_id=job["jobId"],
+                            choice="readmit", reason="Recover the observed HTTP worker faults")
+                        assert set(recovered["proof"]["faultBeads"]) == set(faults)
+                        assert recovered["choice"] == expected, recovered
+                    assert recovered["successor"] is None
+                    scripted_judgment(call, recovered["judgment"], dict(action="readmit",
+                        direction="Keep both accepted HTTP services; use a fresh isolated attempt"))
+                    directed = call("harness_recovery", mode="resolve", job_id=job["jobId"],
+                        choice="readmit", reason="Apply the recorded same-scope direction")
+                    assert directed["steeringJudgmentId"] == recovered["judgment"]["id"]
+                    job = start_fault(())
+                assert job["status"] == "completed", job
+                run = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
+            assert run["status"] == (dispatch.STATUS_VALIDATED if semantic else dispatch.STATUS_MOCK_ONLY), run
+            if semantic:
+                # Catch loss of native job/controller/snapshot/attempt authority when quota
+                # code is deleted. Earlier fake_workers bypassed all those launch checks.
+                for bead in run["beads"].values():
+                    attempt = Path(bead["evidenceDir"]) / "attempt"
+                    original = json.loads((attempt / "request.json").read_text())
+                    result = json.loads((attempt / "result.json").read_text())
+                    assert original["processId"] == result["processId"] > 0
+                    assert original["processProvenanceDigest"] == result["processProvenanceDigest"]
+                    assert (attempt / "process-provenance.json").is_file()
+                    assert result["exitCode"] == 0 and result["cleanup"]["controllerProcessExited"]
+                    assert bead["localProcessProvenance"]["state"] == "consistent"
             if not semantic:
                 assert not run["baseline"]["validation"]["B"]["passed"], run
             if semantic:
@@ -1540,7 +1634,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     "passed"
                 ], run
             else:
-                assert all(r["passed"] for r in run["requirementValidation"]), run
+                assert {r["bead"] for r in run["requirementValidation"] if r.get("passed")} == {"A", "B"}, run
             if not semantic:
                 derived = call("harness_accept_scenarios", derive=True)
                 scenarios = derived["scenarios"]
@@ -1558,6 +1652,27 @@ with TemporaryDirectory(dir=root) as scratch:
                     )
                 call("harness_accept_scenarios", scenarios=scenarios)
             call("harness_advance", to_phase="accept")
+            if not semantic:
+                # A real capture queues acknowledgement before scenarios may launch.
+                # A changed product must refuse here, not run and reject credit later.
+                admitted = call("harness_accept_run", repo=run["repo"], subject="product")
+                owner = server.acceptance
+                owner.changed.clear()
+                owner.dispatch_after_flush(store)
+                assert owner.changed.wait(timeout=15), "Product capture did not reach acknowledgement"
+                product_path = Path(run["repo"]) / "server.py"
+                original = product_path.read_text(encoding="utf-8")
+                product_path.write_text("from pathlib import Path; Path('.stale-scenario-ran').write_text('ran')\n" + original,
+                                        encoding="utf-8")
+                owner.drain(store)
+                owner.thread.join(timeout=30)
+                assert not owner.thread.is_alive(), "Stale acceptance did not terminate"
+                owner.drain(store)
+                refused = call("harness_accept_status", id=admitted["attemptId"], error=True)
+                assert not (Path(run["repo"]) / ".stale-scenario-ran").exists(), "Stale scenarios executed"
+                assert refused["result"] is None and "acceptance-revision-changed" in refused["error"]
+                assert "Rerun acceptance" in refused["error"]
+                product_path.write_text(original, encoding="utf-8")
             accepted = finish_public_acceptance(
                 server,
                 workspace_wire(
@@ -1842,15 +1957,43 @@ def provider_host(mode, workspace, surface, job_id=None):
             with (root / filename).open("a", encoding="utf-8") as out:
                 out.write("<style>h1{background:linear-gradient(white,#fff)}</style>")
 
+    if surface == "shelflife":
+        from codex_harness.core.provider_launch import ProviderNormalLaunch
+
+        class ScriptedWorker:
+            def provider_normal_command(self, **arguments):
+                return ProviderNormalLaunch(cli="codex", command=tuple(command("reply", str(workspace))),
+                    protections=("Scripted local provider; no actual provider acceptance",), stdin_text=arguments["prompt"])
+
+        dispatch.get_adapter = lambda _: ScriptedWorker()
+
     def workers(plan, **options):
+        if surface == "parallel-http":
+            payload = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))
+            def worker(bead):
+                def execute(root):
+                    if bead in payload["fail"]:
+                        crashed = actual_audit([sys.executable, "-B", "-c", "raise SystemExit(7)"],
+                                               cwd=root, timeout=5)
+                        assert crashed.returncode == 7 and crashed.audit_control["quiescenceVerified"]
+                        raise subprocess.CalledProcessError(crashed.returncode, crashed.args)
+                    scripted_worker(packet(root, bead), root, payload["products"][bead])
+                return execute
+            return actual_run(plan, **options, fake_workers={b: worker(b) for b in ("A", "B")})
         workers = {"B": build} if surface == "cli" else {"C": contracts, "B": build}
-        return actual_run(plan, **options, fake_workers=workers)
+        return actual_run(plan, **options, **({} if surface == "shelflife" else dict(fake_workers=workers)))
 
     def review(launch, *_):
         if "## Read-only candidate evidence" in launch.stdin_text:
             tier = "same-model" if surface == "cli" else "cross-provider"
             assert f"## Review tier: {tier}" in launch.stdin_text
             assert "catalog: unverified" in launch.stdin_text
+            if mode == "server" and surface == "cli" and not (workspace / ".codex-harness" / "review-crash-started").exists():
+                # A real provider wait survives a lost client until its process owner
+                # is killed. Recovery must not reuse that abandoned review's evidence.
+                (workspace / ".codex-harness" / "review-crash-started").write_text("started", encoding="utf-8")
+                actual_audit([sys.executable, "-B", "-c", "import time; time.sleep(600)"],
+                             cwd=workspace, timeout=900)
         text = "[]"
         if (
             mode == "server"
@@ -1873,6 +2016,15 @@ def provider_host(mode, workspace, surface, job_id=None):
     subprocess.Popen = launch
     roundtable._run = review
     dispatch.run_plan = workers
+    if mode == "reply":
+        prompt = sys.stdin.read()
+        phase = "contracts" if prompt.startswith("semantic-v1 contracts;") else "build"
+        sources = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))[phase]
+        scripted_worker(prompt, Path.cwd(), sources)
+        _, output, stderr = protocol("codex", text="Scripted worker completed the requested files")
+        print(output)
+        print(stderr.replace("source-only", "gpt-6.1-sol").replace("Some(High)", "Some(Medium)"), file=sys.stderr)
+        return
     if mode == "server":
         original_dispatch = mcp_planner.PlannerServer._dispatch
 
@@ -1900,7 +2052,7 @@ def provider_host(mode, workspace, surface, job_id=None):
 def test_golden_path(tmp_path, request, surface):
     """Protect idea→root product→accepted with three plain user decisions.
 
-    Catch late acceptance reviewer/budget questions, reapproval after repairs/recovery,
+    Catch quota removal dropping launch authority, late reviewer questions and reapproval after recovery,
     and changed limits launching without a diff; plan-review-only tests miss delivery.
     Replay run26/UX6 plans, reviewer tuples, schema refusals and browser actions.
     Catch incomplete preflight, invented TRACE nodes, illegal phase guidance and a late
@@ -1920,6 +2072,11 @@ def test_golden_path(tmp_path, request, surface):
     and status must agree; ordinary polling usually missed that transient window.
     Retain an observed browser fallback through the same bounded observation run;
     earlier per-scenario fallback forgot it and could exhaust S3/S4 on normal probes.
+    Catch unlimited third worker retries and interrupted acceptance/review ownership;
+    earlier fault twins retried twice but never restarted acceptance/review owners.
+    The HTTP journey also protects independent and joint bead recovery counts and
+    stale product capture: serial-only faults missed pooled counts; terminal-only
+    freshness checks missed scenarios executing against changed product bytes.
     Replay ShelfLife's dependency-free build with worker tests+code through C;
     its new assertion helper and fixture must reach the RED baseline as one bundle.
     Refuse multiple builds under DV2, then replan to contracts→single build→C.
@@ -1982,12 +2139,13 @@ def test_golden_path(tmp_path, request, surface):
             env=env,
         )
 
-        def read():
-            for line in process.stdout:
-                replies.put(json.loads(line))
-            replies.put(None)
+        def read(stream, sink):
+            for line in stream:
+                sink.put(json.loads(line))
+            sink.put(None)
 
-        threading.Thread(target=read, daemon=True).start()
+        reader = threading.Thread(target=read, args=(process.stdout, replies), daemon=True)
+        reader.start()
 
         rpc_id = 0
 
@@ -2061,6 +2219,26 @@ def test_golden_path(tmp_path, request, surface):
                 assert "Next: harness_advance to_phase=accept" in content, content
             revision = result.get("plannerConnection", {}).get("planRevision", revision)
             return result.get("structuredContent", {})
+
+        def crash_and_reconnect():
+            nonlocal process, reader, replies
+            process.kill()
+            process.wait(timeout=5)
+            assert process.returncode != 0
+            reader.join(timeout=5)
+            assert not reader.is_alive()
+            process.stdin.close()
+            process.stdout.close()
+            replies = queue.Queue()
+            process = subprocess.Popen(
+                [sys.executable, "-B", str(Path(__file__).resolve()), "server", str(tmp_path), surface],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, text=True,
+                encoding="utf-8", env=env)
+            reader = threading.Thread(target=read, args=(process.stdout, replies), daemon=True)
+            reader.start()
+            rpc("initialize", dict(protocolVersion="2024-11-05", capabilities={},
+                                   clientInfo=dict(name="golden-reconnect", version="1")))
+            rpc("notifications/initialized", {}, notification=True)
 
         def yes(card):
             nonlocal decisions
@@ -2164,7 +2342,6 @@ def test_golden_path(tmp_path, request, surface):
             assert all(
                 part in issues
                 for part in (
-                    "execution.call_cap",
                     "execution.expected_revision",
                     "execution.workers",
                     "reviewer-effort-invalid",
@@ -2188,7 +2365,6 @@ def test_golden_path(tmp_path, request, surface):
                 expected_revision=compiled["planRevision"],
                 max_parallel=1,
                 timeout=300,
-                call_cap=4,
                 workers=[
                     dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
                     for b in (("B",) if surface == "cli" else ("C", "B"))
@@ -2222,7 +2398,8 @@ def test_golden_path(tmp_path, request, surface):
             tier = "same-model" if surface == "cli" else "cross-provider"
             assert b["subject"]["reviewTier"] == tier and f"Review tier: {tier}" in b["card"]
             assert "Cross-subscription is preferred, never required" in b["card"]
-            assert b["proposedAction"]["execution"]["callCap"] == options["call_cap"]
+            assert "callCap" not in b["proposedAction"]["execution"]
+            assert not ({"reviewAllowance", "reviewPolicy", "scheduledReviewStarts", "repairReserve"} & b["subject"].keys())
             assert "reviewAllowance" not in b["card"] and "callCap" not in b["card"]
             assert all(r["name"] in b["card"] and r["model"] in b["card"] for r in reviewers)
             assert "up to 10 reviews" not in b["card"]
@@ -2232,8 +2409,6 @@ def test_golden_path(tmp_path, request, surface):
             call("harness_advance", to_phase="roundtable")
             plan_review = call(
                 "harness_roundtable",
-                max_rounds=1,
-                max_total=2,
                 timeout=5,
             )
             assert [
@@ -2277,11 +2452,11 @@ def test_golden_path(tmp_path, request, surface):
             call("harness_advance", to_phase="execute")
             if surface == "cli":
                 changed = call(
-                    "harness_worker_start", **{**options, "call_cap": 5}, allow_error=True
+                    "harness_worker_start", **{**options, "timeout": 301}, allow_error=True
                 )
                 diff = changed["structuredContent"]["chatConfirmation"]["diff"]
                 assert [(d["field"], d["before"], d["after"]) for d in diff] == [
-                    ("execution.callCap", 4, 5)
+                    ("execution.timeout", 300, 301)
                 ]
                 assert (
                     sum(c["text"].count("Your decision: B.") for c in changed["content"])
@@ -2438,6 +2613,21 @@ def test_golden_path(tmp_path, request, surface):
             # a static passed=True mid-capture is now a new authoritative judgment,
             # so the old capture must lose credit; it cannot be treated as unchanged.
             acceptance = call("harness_accept_run", repo=str(tmp_path), subject="product")
+            if surface == "cli":
+                interrupted_id = acceptance["attemptId"]
+                assert acceptance["state"] == "queued" and acceptance["result"] is None
+                crash_and_reconnect()
+                interrupted = call("harness_accept_status", id=interrupted_id, allow_error=True)["structuredContent"]
+                assert interrupted["state"] == "unknown-interrupted" and interrupted["result"] is None
+                released = call("harness_recovery", mode="resolve", job_id="acceptance:" + interrupted_id,
+                    choice="abandon", reason="Transport loss grants no result or consent")
+                assert released["ownershipReleased"] and released["quarantine"]
+                assert released["quiescenceVerified"] is False
+                old = call("harness_accept_status", id=interrupted_id, allow_error=True)["structuredContent"]
+                assert old["state"] == "abandoned" and old["result"] is None
+                assert not call("harness_plan_status", _probe=True)["acceptance"]["accepted"]
+                acceptance = call("harness_accept_run", repo=str(tmp_path), subject="product", _probe=True)
+                assert acceptance["attemptId"] != interrupted_id
             while acceptance.get("result") is None and time.time() < deadline:
                 acceptance = call(
                     "harness_accept_status", id=acceptance["attemptId"], wait_seconds=1
@@ -2445,6 +2635,22 @@ def test_golden_path(tmp_path, request, surface):
             assert acceptance.get("result") is not None, f"Acceptance poll deadline: {acceptance}"
             assert acceptance["result"]["passed"], acceptance
             review = call("harness_accept_review", repo=str(tmp_path))
+            if surface == "cli":
+                interrupted_id = review["attemptId"]
+                end = time.time() + 15
+                while not (tmp_path / ".codex-harness" / "review-crash-started").exists() and time.time() < end:
+                    time.sleep(0.05)
+                assert (tmp_path / ".codex-harness" / "review-crash-started").exists()
+                crash_and_reconnect()
+                interrupted = call("harness_accept_status", id=interrupted_id, allow_error=True)["structuredContent"]
+                assert interrupted["state"] == "unknown-interrupted"
+                released = call("harness_recovery", mode="resolve", job_id="review:" + interrupted_id,
+                    choice="abandon", reason="Lost review owner; quarantine evidence without inventing quiescence")
+                assert released["ownershipReleased"] and released["quiescenceVerified"] is False
+                old = call("harness_accept_status", id=interrupted_id, allow_error=True)["structuredContent"]
+                assert old["state"] == "abandoned" and old["result"] is None
+                review = call("harness_accept_review", repo=str(tmp_path), _probe=True)
+                assert review["attemptId"] != interrupted_id
             attempt_id = review["attemptId"]
             deadline = time.time() + 300
             while review["state"] in {"queued", "running"} and time.time() < deadline:

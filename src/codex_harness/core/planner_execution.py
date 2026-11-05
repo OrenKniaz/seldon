@@ -22,7 +22,7 @@ def _canonical_store(store):
 
 
 def execution_scope(
-    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap, _candidate=False
+    store, expected_revision, workers, *, max_parallel=2, timeout=900, _candidate=False
 ):
     """Read canonical scope; no event, approval, launch or provider query."""
     from codex_harness.core import planner_jobs as jobs
@@ -40,10 +40,8 @@ def execution_scope(
     if semantic and max_parallel != 1:
         raise ValueError("Parallel Build unsupported in semantic-v1; use max_parallel=1")
     selected = jobs._workers(manifest, workers)
-    if type(call_cap) is not int or call_cap < len(selected) or call_cap < 1:
-        raise ValueError("worker-job-call-cap-required")
     if type(max_parallel) is not int or max_parallel < 1 or not jobs._valid_timeout(timeout):
-        raise ValueError("worker-execution-limits-invalid")
+        raise ValueError("worker-execution-limits-invalid: use positive max_parallel and a finite positive timeout")
     if not _candidate:
         status = store.status()
         resolution = review_resolution_state(store, status)
@@ -69,7 +67,6 @@ def execution_scope(
         workers=selected,
         maxParallel=max_parallel,
         timeout=timeout,
-        callCap=call_cap,
     )
     scope["executableManifestDigest"] = approvals.executable_candidate(
         manifest, scope["templateFiles"]
@@ -84,7 +81,6 @@ def prepare_execution(
     *,
     max_parallel=2,
     timeout=900,
-    call_cap,
     _chat=False,
     _expected_request_id=None,
 ):
@@ -100,7 +96,6 @@ def prepare_execution(
             workers=workers,
             max_parallel=max_parallel,
             timeout=timeout,
-            call_cap=call_cap,
         ),
     )
     request["scope"] = request["proposedAction"]["execution"]

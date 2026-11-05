@@ -201,7 +201,6 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         expected_revision=manifest["planRevision"],
         max_parallel=1,
         timeout=5,
-        call_cap=2,
         workers=[
             dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium") for b in ("C", "B")
         ],
@@ -298,7 +297,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         return tuple(v.replace("source-only", model) if isinstance(v, str) else v for v in result)
 
     monkeypatch.setattr(roundtable, "_run", review_process)
-    call("harness_roundtable", reviewers=reviewers, max_rounds=1, max_total=2, timeout=5)
+    call("harness_roundtable", reviewers=reviewers, timeout=5)
     call("harness_advance", to_phase="publish")
     call("harness_publish")
     if run22:

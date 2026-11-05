@@ -1,5 +1,72 @@
 # Legacy capability audit for the local Seldon extraction
 
+STAGE-2B candidate (C8/C18/C20, I4-I6; DV8 OPEN): DESIGN — quota and
+launch authorization shared an owner. Siblings: worker starts, plan/acceptance
+review starts, execution assessments and readiness reviews. The candidate deletes
+provider_call_budget and approval_migration, B call/review allowances, renewals,
+review round/total caps, readiness call caps and their public plumbing. Retained
+budget events/tables/files are untouched and grant no converted admission.
+The existing jobs owner verifies the native request/controller/protected snapshot;
+attempt_provenance verifies run/attempt linkage and current B at launch. Review
+owners call the same approvals.require_approval directly. Attempt deadlines,
+provider context capacity and development efficiency metrics remain. The job
+monitor derives its bound from admitted worker count plus its existing judgment
+wait, instead of a removed call ceiling. PlanStore.finding_state remains unchanged.
+Readiness exposed a sibling authority gap: its separate launcher had a call cap
+but no current-B check. The candidate uses the same B owner at that launch boundary.
+Golden changes retain 19 cases, remove budget inputs, change the stale worker
+proposal regression to an unauthorized timeout, and add readiness B refusal and
+success. The ShelfLife worker double now starts a real scripted child through the
+ordinary dispatcher; immutable process/run/attempt originals, exit and root delivery
+are observed. Former fake_workers skipped the migrated authority checks entirely.
+CLI golden: initial readiness reply fixture selected the wrong envelope and failed
+in 11.64s. The corrected scripted selector passed the CLI journey in 210.14s,
+including quota-free B/review/root delivery/C and crash/stall recovery. No source
+rule, deadline or assertion was relaxed for that fixture error. The original
+scratch-root denial is resolved by CC's task-specific --add-dir correction.
+Full gate 1 passed 19/19 in 555.17s (18/291.31s + web 1/261.53s), within
+600s; its log is C:/seldon/tests/stage-2b/full-1.log. Subsequent source inspection
+found the replacement status view passed raw SQLite packetBound integers to a
+boolean renderer. It now uses the existing roundtable binding projection; the
+same golden consumes the rendered full status and checks recorded packet scope.
+This final projection edit is covered only by the final gate reported below.
+The final full-gate outcome/runtime and exact candidate are recorded in
+../stage-2b-report.md; this audit entry alone grants no full-suite or ladder credit.
+2d integration handoff: provider_call_budget.verify_job now lives in
+planner_jobs.verify_job; bind_run and claim_call's authority-only part now live
+in attempt_provenance.bind_run/verify_attempt. Initial controller identity and
+immutable admission/run/snapshot/attempt checks remain; 2b does not own 2d's
+pending-controller wait removal. Port 2d's continuation changes to these owners;
+do not restore the deleted budget module or drop initial launch authority. Bounded
+recovery/continuation acceptance remains 2d's outcome. L0/DV8 remain OPEN until
+actual authorized runs; scripted-provider suite results never establish them.
+
+STAGE-2B independent review R1 (C8/C18/C20, I5/I6): REJECT of patch
+7273a26bf913ba9bc8a93d320e962fc0b0766bcd97b09a5ddaed65041e9ba0ee
+identified the removed all-selected consent preflight. The previous 19/19 suite
+and quota deletion did not cover an approved reviewer followed by an unapproved
+one. A new segment in the existing CLI golden reproduced BOTH sibling starts in
+15.45s: readiness launched once; plan review launched once and left an orphan
+review_attempts row under a required slot. Per-launch checks alone were insufficient.
+The existing approvals owner now supplies require_reviewers: both batch owners
+check every selected tuple before packet/launch preparation; their per-launch
+checks remain. No quota counter, reservation or semantic authority is added.
+The same golden declares required roles through harness_adopt_review_policy,
+checks one B remedy, zero provider starts and no orphan attempts on both refusals,
+then runs the valid selection and requires an eligible, complete policy before
+continuing through publication/delivery/C. Prior all-unapproved and positive-only
+selections missed the approved-prefix failure.
+The first repaired CLI reached an inherited consumer mismatch: required-policy
+status still indexed removed closureFindings, replacing the B remedy with generic
+unknown status (17.35s). Removed that obsolete view branch; current policy reasons
+remain canonical, without a fallback field or weaker hold. Corrected R1 CLI
+golden passed in 248.44s: both mixed selections refused before any start, no orphan
+attempt remained, and the valid required-slot rerun completed through C. The one
+authorized final full-gate result, exact patch and any runtime limitation are in
+../stage-2b-report.md. No independent re-review or
+actual-provider/DV8/L0 acceptance is implied. The earlier 604.97s fast-ceiling miss
+remains retained history, not fresh evidence for this repair.
+
 STAGE-2A Round 5 (C4/C10/C11/C14/C18, I5/I6): the Round 4 request
 identity remains invocation/reviewer/shard or member. Binding currentness now
 precedes terminal-attempt guidance: a stale exhausted request requires refreshed
@@ -488,3 +555,8 @@ CONTRACT-ALIGNMENT owns this batch in `work/sprint-20261029/lane-contract-align`
 | Stage-2a2 Round 3 supersedes Round 2's lineage-credit conclusion: re-review found that historical credit bypassed current template bindings (I6). Siblings: template change before restoration and after completed rebind. Golden review-gate RED/52.53s returned credit after changed template bytes; a C-only check had been masked by retained-finding holds. | Deleted historical review traversal, approval/review copying and the restoration context/stage. Rebind refreshes execution only; retained records confer history, not credit. Ordinary reviews use current 1j verdicts. C's producer binds current review inputs/run, and its consumer requires a current positive verdict for that exact run. The existing run-first ordering remains. | Both legacy/revision replays obtain fresh reviews, the owner's complete retained-obligation set and fresh C through existing 1j, within unchanged allowances. They deny review/C credit on template drift before fresh review and after completed migration/C. Plan-change and product recovery journeys remain. Final gate, production reduction and exact candidate are in stage-2a2-report.md Round 3; no actual-provider/ladder/full-vision claim. |
 
 | Stage-2a2 Round 4 supersedes Round 3's C-consumer completeness claim (C14/C15/C23, I2/I6): upgraded stores retain positive C judgments lacking reviewBinding; after template drift plus fresh same-run reviews/dispositions, golden RED/42.65s observed accepted=True without fresh consent. Siblings: template additions, edits and deletions. Earlier replays created only newly bound C. | PlanStore.judgment now requires explicit current review/run binding for C source facts; absent or stale bindings confer no credit. The C gate and ordered continuation consume the same judgment currency; historical words/actors remain intact. | Existing HTTP golden seeds historical unbound C from a real 1j positive reply/current run, changes template input, obtains ordinary fresh reviews and all bound dispositions, observes acceptance-approval-required/fresh C guidance, then submits bound C and reaches acceptance. Existing plan/product migration and stale-bound-C journeys remain. Final gate and exact patch are in stage-2a2-report.md Round 4; scripted suite evidence only. |
+
+| STAGE-2d (C4/C18/C23/C25; I2/I4/I5/I6): review recovery advertised a `review:` ID but resolved through the worker-only directory parser; interrupted acceptance held its unique slot indefinitely; audit shutdown joined without a deadline; dispatch and resume owned separate retry/hold rules. | Candidate in `work/lanes/stage-2d`, base `be232aff29d970608bcc4d9c9675001f3f58c683`: existing recovery events now release/quarantine review, audit and acceptance admissions; late credit is excluded. Worker recovery derives each bead's allowance from canonical successor records and prepares a bound 1j steering question after two recoveries. Duplicate dispatch retry/import paths and the advisory resume store were removed. Stage 2a's finding owner is unchanged. Historical pre-review candidate (subsequently REJECTED for MED 1/2 below): targeted CLI GREEN/307.21s after correcting a test marker that changed the captured product; full gate 1 passed all 19 cases but missed the 600s fast budget (669.26s wall). See `work/lanes/stage-2d-report.md`. | Extended existing CLI golden: supported queued-audit cleanup; real worker crash/stall observations; per-bead exhaustion and judged direction; actual stdio server crash/reconnect during acceptance and review; fresh admission through C. No new cases or test files. All named CLI journeys passed, with three user decisions, 24 happy-path calls and explicit UNKNOWN cleanup after server loss; this is scripted-provider suite evidence only. |
+| STAGE-2d validation/efficiency: initial CLI launch could not open `C:/seldon/tests/stage-2d/cli-1.log` (access denied), so Python/pytest never started. Session write roots contained the literal `C:/seldon/tests$L`. | Superseded: CC restored the exact scratch write root and authorized continuation for 75 minutes. First executed CLI was RED/227.36s: the fault fixture wrote its review-started marker into the product after acceptance, correctly invalidating that run. The marker now lives under `.codex-harness`; failing evidence is retained in `C:/seldon/tests/stage-2d/cli-1-failure`, and corrected CLI passed/307.21s. Candidate removes 373 nonblank production lines versus the original 400 target; CC allows the 27-line shortfall only when further removal would be cosmetic. No remaining duplicate lifetime rule was identified for safe deletion within this lane; preserved continuation belongs to 2c. Full gate 1: 18 passed/379.27s + web 1 passed/287.22s = 19/19, wall 669.26s, fast budget MISSED. This was a shared-machine run; the cause of the slowdown is not established. Retained log: `C:/seldon/tests/stage-2d/full-gate-1.log`. One remaining full run checks the unchanged source/test candidate after this audit update; final outcome belongs to the report. | Final permitted full gate after the last edit must be GREEN; retain the 19-case ceiling and measure the 600s fast budget. No deadline increase, removed scenario, alternate scratch, unit test or actual-provider launch. |
+| STAGE-2d continuation boundary: `planner_jobs.execute_worker_job` waits in the original controller for judgment; `planner_candidate.revalidate` continues Build only in that PID, and the base `provider_call_budget.bind_run` rejects a replacement owner. Simply deleting that wait would strand the existing browser journey after Contracts. | CC explicitly assigned this handoff to Stage 2c on November 5: retain the working base observer wait here, with no expanded dependency on the budget module being deleted by parallel lane 2b. No fabricated ownership-release or process-quiescence claim. | Stage 2c proves a persisted pending-judgment handoff with no running attempt, consumes the same bound judgment after restart and finishes Build/C without repeating paid effects or resetting authority. Interrupted revalidation remains part of that unproven continuation boundary. No standalone deviation or ladder closure. |
+| STAGE-2d independent-review MED 1/2 (C4/C18/C23; TRIAGE BUG): the removed prelaunch product comparison allowed scenarios to run on changed bytes; recovery history pooled independent beads when the current fault set contained both. The earlier serial fault journey and terminal-only freshness checks missed these regressions. | Same owners/candidate repaired: `planner_acceptance` compares actual product identity after acknowledgement and before scenarios, refusing with one rerun remedy. `planner_recovery` derives each current bead's count separately from the existing successor history; no persisted counter or new judge path. Existing HTTP golden now uses two independently owned HTTP services through real Job-controlled worker failures: `{A}`, `{B}`, `{A,B}` readmit, then each bead's third fault steers. The prior duplicate serial exhaustion check was removed; crash/stall/transport-loss journeys remain. | Observed RED: review-cli-2.log/57.79s (`steer` instead of `readmit`); review-cli-4.log/111.23s (changed product's scenario actually executed). Both repairs GREEN in review-cli-5.log/334.50s, including refusal before the scenario launch marker and fresh C. Setup-only failures retained: review-cli-1/23.99s consumed the compile ID instead of the returned prospective publication ID; review-cli-3/77.14s assumed an undeclared integration row had a `passed` field. Tests now consume canonical publication and actual A/B validation rows; production contracts were preserved. Final full-gate result belongs to work/lanes/stage-2d-report.md; no source/test/audit edits follow that gate. |

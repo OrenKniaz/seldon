@@ -6,12 +6,12 @@ import hashlib
 import json
 import random
 import subprocess
-import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core import roundtable
+from codex_harness.core.approvals import require_approval, require_reviewers
 from codex_harness.core.plan_store import PlanStoreError
 
 QUESTION = (
@@ -175,7 +175,6 @@ def readiness_review(
     sample=None,
     seed=0,
     reviewers=None,
-    max_calls=None,
     runner=None,
     executable_for=None,
     timeout=900,
@@ -209,19 +208,9 @@ def readiness_review(
         identities.append((reviewer["name"], reviewer["provider"]))
     if len(set(identities)) != len(identities):
         raise ValueError("Duplicate readiness reviewer")
+    if runner is None:
+        require_reviewers(store, reviewers)
     calls = len(selected) * len(reviewers)
-    print(
-        f"Readiness planned calls: {len(selected)} beads × {len(reviewers)} reviewers = {calls}",
-        file=sys.stderr,
-        flush=True,
-    )
-    if max_calls is not None:
-        if type(max_calls) is not int or max_calls < 1 or calls > max_calls:
-            raise ValueError(
-                "Planned readiness calls exceed --max-calls (must be a positive integer)"
-            )
-    elif len(selected) > 12 or len(reviewers) > 2:
-        raise ValueError("Readiness exceeds 12 beads × 2 reviewers; supply --max-calls explicitly")
     revision = store.manifest_revision()
     if revision is None:
         raise ValueError("Readiness requires a current compiled manifest")
@@ -235,6 +224,8 @@ def readiness_review(
     batch, results = uuid4().hex, []
     for bead in selected:
         for reviewer in reviewers:
+            if runner is None:
+                require_approval(store, "B", dict(reviewer=reviewer))
             packet = packets[bead, reviewer["provider"]]
             record = dict(
                 id="RR-" + uuid4().hex,

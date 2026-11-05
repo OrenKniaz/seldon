@@ -67,7 +67,7 @@ def planning_prerequisites(
     if execution is None:
         action = (approvals.latest_request(store, "B") or {}).get("proposedAction", {})
     if execution is not None or "execution" not in action:
-        required = {"expected_revision", "workers", "call_cap"} - (execution or {}).keys()
+        required = {"expected_revision", "workers"} - (execution or {}).keys()
         missing.extend("execution." + key for key in sorted(required))
         if not required:
             try:
@@ -130,11 +130,6 @@ def prepare_confirmation(
                 raise PlanStoreError(
                     "plan-b-prerequisites-missing", "Missing B prerequisites: " + "; ".join(missing)
                 )
-            from codex_harness.core.provider_call_budget import usage
-
-            previous = approvals.current(store, "B")
-            if previous and usage(store, "review") >= previous["subject"]["reviewAllowance"]:
-                action["renewReviews"] = True
         else:
             from codex_harness.core.planner_vision import expansion_status
 

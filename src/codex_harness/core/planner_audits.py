@@ -343,7 +343,7 @@ class AuditOwner:
             if self.wake:
                 self.wake()
 
-        self.thread = threading.Thread(target=execute, name="planner-audit")
+        self.thread = threading.Thread(target=execute, name="planner-audit", daemon=True)
         try:
             self.thread.start()
         except RuntimeError as error:
@@ -361,13 +361,21 @@ class AuditOwner:
             )
 
     def close(self, store):
+        from codex_harness.core.planner_recovery import release_attempt
+
         if self.prepared:
             self.prepared[1].close()
             self.prepared = None
         if self.thread:
-            self.thread.join()
+            self.thread.join(timeout=5)
         if store is not None:
             self.drain(store)
+            with store._transaction():
+                for row in store.connection.execute(
+                    "SELECT id FROM audit_attempts WHERE owner=? AND state IN ('queued','running')",
+                    (self.instance,),
+                ).fetchall():
+                    release_attempt(store, "audit:" + row["id"], "Owner closed; audit cleanup UNKNOWN")
 
 
 def audit_synchronously(store):
@@ -378,7 +386,9 @@ def audit_synchronously(store):
             return attempt
         owner.dispatch_after_flush(store)
         if owner.thread is not None:
-            owner.thread.join()
+            owner.thread.join(timeout=900)
+            if owner.thread.is_alive():
+                owner.close(store)
         owner.drain(store)
         return store.audit_attempt(attempt["attemptId"], owner.instance)
     finally:

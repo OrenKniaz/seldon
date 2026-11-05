@@ -772,9 +772,8 @@ def _run_provider(
         planned["environmentIndicators"] = request["environmentIndicators"]
         planned["denialCapabilities"] = dict(DENIAL_CAPABILITIES)
     _write_record(attempt_dir / "request.json", request)
-    from codex_harness.core.provider_call_budget import claim_call
 
-    claim_call(execution_job or request.get("executionJob"), request, attempt_dir, timeout=timeout)
+    attempt_provenance.verify_attempt(execution_job or request.get("executionJob"), request, attempt_dir, timeout=timeout)
     try:
         with (
             events_path.open("wb") as events_file,
@@ -1405,7 +1404,6 @@ def _check_attempt_provenance(
         return True
     record.update(status=STATUS_PROVENANCE_HELD, reused=False)
     record["candidate"]["validated"] = False
-    record["attempt"].pop("recoverResult", None)
     return False
 
 
@@ -1426,19 +1424,7 @@ def _attempt_bead(
     if _hold_permission_guard(record, attempt_dir):
         return record
     launch = None
-    if attempt.get("recoverResult"):
-        request = read_record_json(attempt_dir / "request.json")
-        result = read_record_json(attempt_dir / "result.json")
-        mismatch = _completed_attempt_identity_error(record, request, result)
-        if mismatch:
-            record["status"] = f"rejected: attempt identity mismatch ({mismatch})"
-            attempt.pop("recoverResult", None)
-            return record
-        if not _check_attempt_provenance(record, request, result, bead["ownedFiles"]):
-            return record
-        attempt.update(result)
-        record["didRunProvider"] = result["didRunProvider"]
-    elif fake_worker is not None:
+    if fake_worker is not None:
         attempt["mode"] = "mock:test-worker"
     elif mock_provider == "reference":
         attempt["mode"] = "mock:reference"
@@ -1459,97 +1445,96 @@ def _attempt_bead(
             allowed_tools=_validation_tool_rules(record["provider"], bead, plan),
         )
         attempt.update(mode="provider-normal", launch=launch.to_payload(), dir=str(attempt_dir))
-    if not attempt.get("recoverResult"):
-        attempt_dir.mkdir()
-        request = {
-            "runId": record["runId"],
-            "bead": record["bead"],
-            "requirementId": f"{plan.name}-{record['bead']}:{'-'.join(bead['requirements'])}",
-            "baseCommit": attempt["baseCommit"],
-            **adapter_provenance(),
-            "executableSha256": _file_sha256(launch.command[0]) if launch else None,
-            "cwd": str(worktree),
-            "launch": launch.to_payload() if launch else {"command": [attempt["mode"]]},
-            "command": list(launch.command) if launch else [attempt["mode"]],
-            "mode": attempt["mode"],
-            "provider": record["provider"],
-            "model": record["model"],
-            "effort": record["effort"],
-            "ownedFiles": attempt_provenance.normalized_owned(bead["ownedFiles"]),
-            "prompt": record["prompt"],
-            "planRevision": record["planRevision"],
-            "requirementRefs": record["requirementRefs"],
-            "specRefs": record.get("specRefs"),
-            **_spec_binding(record),
-            "startedAt": _now(),
-            "status": "launching",
+    attempt_dir.mkdir()
+    request = {
+        "runId": record["runId"],
+        "bead": record["bead"],
+        "requirementId": f"{plan.name}-{record['bead']}:{'-'.join(bead['requirements'])}",
+        "baseCommit": attempt["baseCommit"],
+        **adapter_provenance(),
+        "executableSha256": _file_sha256(launch.command[0]) if launch else None,
+        "cwd": str(worktree),
+        "launch": launch.to_payload() if launch else {"command": [attempt["mode"]]},
+        "command": list(launch.command) if launch else [attempt["mode"]],
+        "mode": attempt["mode"],
+        "provider": record["provider"],
+        "model": record["model"],
+        "effort": record["effort"],
+        "ownedFiles": attempt_provenance.normalized_owned(bead["ownedFiles"]),
+        "prompt": record["prompt"],
+        "planRevision": record["planRevision"],
+        "requirementRefs": record["requirementRefs"],
+        "specRefs": record.get("specRefs"),
+        **_spec_binding(record),
+        "startedAt": _now(),
+        "status": "launching",
+    }
+    _write_record(attempt_dir / "request.json", request)
+    requirement_requests = {
+        requirement: {
+            **request,
+            "requirementId": requirement,
+            "attemptGroup": request["requirementId"],
         }
-        _write_record(attempt_dir / "request.json", request)
-        requirement_requests = {
-            requirement: {
-                **request,
-                "requirementId": requirement,
-                "attemptGroup": request["requirementId"],
-            }
-            for requirement in bead["requirements"]
-        }
-        for requirement, planned in requirement_requests.items():
-            directory = attempt_dir / requirement
-            directory.mkdir()
-            _write_record(directory / "request.json", planned)
-        try:
-            if launch is not None:
-                result = _run_provider(
-                    launch,
-                    worktree,
-                    attempt_dir,
-                    request,
-                    timeout,
-                    requirement_requests,
-                    execution_job=execution_job,
-                )
-            else:
-                request["didLaunchMockAttempt"] = True
-                _write_record(attempt_dir / "request.json", request)
-                if fake_worker is not None:
-                    fake_worker(worktree)
-                elif mock_provider == "reference":
-                    for owned in bead["ownedFiles"]:
-                        destination = worktree / owned
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(plan.root / "reference" / owned, destination)
-                result = _save_attempt_result(
-                    attempt_dir,
-                    request,
-                    requirement_requests,
-                    {
-                        **request,
-                        "status": "exited",
-                        "exitCode": 0,
-                        "finishedAt": _now(),
-                        "didRunProvider": False,
-                        "isMocked": True,
-                    },
-                    None,
-                    None,
-                )
-        except (OSError, subprocess.SubprocessError) as error:
-            attempt.update(
-                status="evidence-finalization-failed",
-                failure={"type": type(error).__name__, "message": str(error)},
+        for requirement in bead["requirements"]
+    }
+    for requirement, planned in requirement_requests.items():
+        directory = attempt_dir / requirement
+        directory.mkdir()
+        _write_record(directory / "request.json", planned)
+    try:
+        if launch is not None:
+            result = _run_provider(
+                launch,
+                worktree,
+                attempt_dir,
+                request,
+                timeout,
+                requirement_requests,
+                execution_job=execution_job,
             )
-            record["didRunProvider"] = bool(request.get("processId"))
-            record["status"] = "provider evidence-finalization-failed"
-            _observe_attempt(record, worktree, attempt_dir)
-            return record
-        attempt.update(result)
-        record["didRunProvider"] = result["didRunProvider"]
-        # Check the original again after execution; mutable result labels alone
-        # cannot restore a missing or changed controller observation.
-        if result.get("status") == "exited" and not _check_attempt_provenance(
-            record, request, result, bead["ownedFiles"]
-        ):
-            return record
+        else:
+            request["didLaunchMockAttempt"] = True
+            _write_record(attempt_dir / "request.json", request)
+            if fake_worker is not None:
+                fake_worker(worktree)
+            elif mock_provider == "reference":
+                for owned in bead["ownedFiles"]:
+                    destination = worktree / owned
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(plan.root / "reference" / owned, destination)
+            result = _save_attempt_result(
+                attempt_dir,
+                request,
+                requirement_requests,
+                {
+                    **request,
+                    "status": "exited",
+                    "exitCode": 0,
+                    "finishedAt": _now(),
+                    "didRunProvider": False,
+                    "isMocked": True,
+                },
+                None,
+                None,
+            )
+    except (OSError, subprocess.SubprocessError) as error:
+        attempt.update(
+            status="evidence-finalization-failed",
+            failure={"type": type(error).__name__, "message": str(error)},
+        )
+        record["didRunProvider"] = bool(request.get("processId"))
+        record["status"] = "provider evidence-finalization-failed"
+        _observe_attempt(record, worktree, attempt_dir)
+        return record
+    attempt.update(result)
+    record["didRunProvider"] = result["didRunProvider"]
+    # Check the original again after execution; mutable result labels alone
+    # cannot restore a missing or changed controller observation.
+    if result.get("status") == "exited" and not _check_attempt_provenance(
+        record, request, result, bead["ownedFiles"]
+    ):
+        return record
     _observe_attempt(record, worktree, attempt_dir)
     if record["status"] in DENIAL_HELD_STATUSES:
         return record
@@ -1942,7 +1927,6 @@ def run_plan(
     relaunch_ambiguous: bool = False,
     retry_blocked: str | None = None,
     require_denial_interception: bool = False,
-    max_provider_calls: int | None = None,
     execution_job: str | Path | None = None,
     setup: dict | None = None,
     intent_nodes: list[dict] | None = None,
@@ -1973,13 +1957,8 @@ def run_plan(
     source_fixture = mock_provider is not None or set(plan.beads).issubset(fake_workers or {})
     _verify_requirement_files(plan, manifest, plan.root / "template", source_fixture=source_fixture)
     order = graph.topological_order(plan)
-    retry_ids = {item.strip() for item in retry_blocked.split(",")} if retry_blocked else set()
-    if retry_ids and not resume_run_dir:
-        raise ValueError("retry_blocked requires resume_run_dir")
-    if retry_ids == {"all"}:
-        retry_ids = set(plan.beads)
-    elif retry_ids - set(plan.beads):
-        raise ValueError("retry_blocked contains unknown bead ids (or mixed 'all')")
+    if retry_blocked or relaunch_ambiguous:
+        raise ValueError("retry requires harness_recovery; dispatch never readmits an attempt")
     for bead_id in order:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", bead_id):
             raise ValueError(f"unsafe bead id {bead_id!r}")
@@ -1997,9 +1976,7 @@ def run_plan(
     effort_for, executable_for = effort_for or {}, executable_for or {}
     fake_workers = fake_workers or {}
     real_attempts = mock_provider is None and not set(plan.beads).issubset(fake_workers)
-    if real_attempts and (
-        execution_job is None or type(max_provider_calls) is not int or max_provider_calls < 1
-    ):
+    if real_attempts and execution_job is None:
         raise ValueError("provider-call-owned-native-job-required")
     for mapping in (provider_for, model_for, effort_for, executable_for, fake_workers):
         if set(mapping) - set(plan.beads):
@@ -2008,7 +1985,7 @@ def run_plan(
     run_dir = run_directory(work_root, run_id, manifest["beads"], resume_run_dir)
     repo, evidence, memory = run_dir / "repo", run_dir / "evidence", run_dir / "memory-workspace"
     if real_attempts:
-        from codex_harness.core.provider_call_budget import bind_run, verify_job
+        from codex_harness.core.planner_jobs import verify_job
 
         approved = verify_job(execution_job)["options"]
         if (
@@ -2028,12 +2005,11 @@ def run_plan(
 
         # Every real run is produced once by the original owned job controller.
         # CLI real resume is held. Only this controller may claim sequential
-        # terminal-preimage recovery of its original run, without resetting cap.
-        bind_run(
+        # terminal-preimage recovery of its original run.
+        attempt_provenance.bind_run(
             execution_job,
             plan.root,
             run_dir,
-            max_provider_calls=max_provider_calls,
             resume=resume_run_dir is not None,
             retry_options={"retryBlocked": retry_blocked, "relaunchAmbiguous": relaunch_ambiguous},
         )
@@ -2145,7 +2121,6 @@ def run_plan(
             record["integrationValidationHistory"].append(previous["integrationValidation"])
         record["resumeSummary"] = {
             "reused": [],
-            "redispatched": [],
             "invalidated": [],
             "retained": [],
         }
@@ -2218,7 +2193,8 @@ def run_plan(
             old = previous["beads"].get(bead_id)
             if old is None:
                 continue
-            old_attempt = old.get("attempt") or {}
+            if old.get("attempt") is None:
+                continue  # An unstarted dependent may continue; it is not a retry.
             old_evidence = Path(old.get("evidenceDir", evidence / bead_id))
             request_path, result_path = (
                 old_evidence / "attempt" / "request.json",
@@ -2228,28 +2204,6 @@ def run_plan(
                 request = read_record_json(request_path) if request_path.exists() else {}
             except (OSError, ValueError):
                 request = {}
-            # run.json may still be the pre-launch checkpoint after process death.
-            # Project completed fields only after exact request/result and selected
-            # worktree/base/packet checks; real process originals are still checked below.
-            minimal_fields = {
-                "cwd",
-                "baseCommit",
-                "startedAt",
-                "planRevision",
-                "requirementRefs",
-                "specRefs",
-            }
-            if result_path.exists() and old_attempt and set(old_attempt).issubset(minimal_fields):
-                result = read_record_json(result_path)
-                projection = {
-                    **old,
-                    "attempt": {
-                        key: value for key, value in old_attempt.items() if key != "startedAt"
-                    },
-                }
-                if _completed_attempt_identity_error(projection, request, result) is None:
-                    old["attempt"] = old_attempt = {**old_attempt, **result}
-                    old["didRunProvider"] = result.get("didRunProvider", False)
             uncertain = request.get("status") == "launching" and not result_path.exists()
             refs_match = _identity_refs(old) == _identity_refs(records[bead_id])
             # Explicit refs allow unaffected v2 beads to retain their original
@@ -2281,95 +2235,15 @@ def run_plan(
                     and integrated.get("semantic", {}).get("admitted")
                     and old.get("planRevision") == plan.plan_revision
                 )
-            if _hold_permission_guard(old, old_evidence / "attempt"):
+            # One recovery owner: resume reuses integrated proven work only.
+            # Every other outcome stays terminal in its old namespace;
+            # only harness_recovery may assign a fresh job within current B.
+            if (_hold_permission_guard(old, old_evidence / "attempt") or uncertain
+                    or not _check_attempt_provenance(old, owned_files=plan.beads[bead_id].owned_files)):
                 records[bead_id] = old
                 retained_failures.append(bead_id)
                 record["resumeSummary"]["retained"].append(
-                    {
-                        "bead": bead_id,
-                        "reason": "permission guard requires scoped user disposition"
-                        if old["status"] == STATUS_PERMISSION_HELD
-                        else "denial audit inconclusive: "
-                        + str(old["permissionGuard"]["auditReason"]),
-                    }
-                )
-            elif (
-                old_attempt.get("status") == "timed-out"
-                and old_attempt.get("cleanup", {}).get("controllerProcessExited") is not True
-            ):
-                # A terminal timeout does not establish that its owned child
-                # stopped. Retry flags cannot replace the saved exit observation.
-                records[bead_id] = old
-                retained_failures.append(bead_id)
-                record["resumeSummary"]["retained"].append(
-                    {
-                        "bead": bead_id,
-                        "reason": "timed-out attempt requires observed controller exit",
-                    }
-                )
-            elif old_attempt.get("status") == "cancelled" or (
-                old_attempt.get("failure")
-                and old_attempt.get("cleanup", {}).get("stopMethod") == "owned-Popen.kill"
-            ):
-                cleanup = old_attempt.get("cleanup", {})
-                if bead_id not in retry_ids or cleanup.get("controllerProcessExited") is not True:
-                    records[bead_id] = old
-                    retained_failures.append(bead_id)
-                    record["resumeSummary"]["retained"].append(
-                        {
-                            "bead": bead_id,
-                            "reason": (
-                                "cancelled"
-                                if old_attempt.get("status") == "cancelled"
-                                else "interrupted"
-                            )
-                            + " attempt requires targeted retry and observed controller exit",
-                        }
-                    )
-            elif uncertain and not relaunch_ambiguous:
-                records[bead_id] = old
-                old["status"] = "ambiguous launch"
-                retained_failures.append(bead_id)
-                record["resumeSummary"]["retained"].append(
-                    {"bead": bead_id, "reason": "ambiguous launch requires explicit relaunch"}
-                )
-            elif (validated or result_path.exists()) and not _check_attempt_provenance(
-                old, owned_files=plan.beads[bead_id].owned_files
-            ):
-                # Targeted retry creates a new attempt namespace, never repairs
-                # an old original. Cancellation/denial/ambiguous holds above win.
-                if bead_id not in retry_ids:
-                    records[bead_id] = old
-                    retained_failures.append(bead_id)
-                    record["resumeSummary"]["retained"].append(
-                        {"bead": bead_id, "reason": old["localProcessProvenance"]["code"]}
-                    )
-            elif old.get("status") == "blocked: worker reported" or "blocker" in old:
-                fresh_prompt = worker_packet.build_packet(
-                    plan,
-                    {**manifest["beads"][bead_id], "id": bead_id},
-                    repo,
-                    memory_prompt_for(memory),
-                    provider=records[bead_id]["provider"],
-                    proof_level=manifest.get("proofLevel"),
-                    setup=setup,
-                    intent_nodes=intent_nodes,
-                )
-                old_prompt = request.get("prompt") or old.get("prompt")
-                if bead_id not in retry_ids and (old_prompt is None or fresh_prompt == old_prompt):
-                    records[bead_id] = old
-                    retained_failures.append(bead_id)
-                    record["resumeSummary"]["retained"].append(
-                        {
-                            "bead": bead_id,
-                            "reason": "worker-reported blocker retained: "
-                            + (
-                                "packet unchanged"
-                                if old_prompt is not None
-                                else "prior packet unavailable"
-                            ),
-                        }
-                    )
+                    dict(bead=bead_id, reason="Original attempt requires canonical recovery"))
             elif (
                 validated
                 and identity_matches
@@ -2380,56 +2254,11 @@ def run_plan(
                 # dependencies have reached their current integration candidate.
                 records[bead_id] = old
                 old.update(status="reused", reused=True, acceptedPlanRevision=plan.plan_revision)
-            elif (
-                not uncertain
-                and result_path.exists()
-                and (
-                    not integrated
-                    or (
-                        (old_evidence / "integration-state.json").exists()
-                        and old.get("status", "").startswith("bead failed:")
-                    )
-                )
-                and old.get("planRevision") == plan.plan_revision
-                and refs_match
-            ):
-                result = read_record_json(result_path)
-                mismatch = _completed_attempt_identity_error(old, request, result)
-                if mismatch:
-                    records[bead_id] = old
-                    old["status"] = f"rejected: attempt identity mismatch ({mismatch})"
-                    old_attempt.pop("recoverResult", None)
-                    old["candidate"]["validated"] = False
-                    retained_failures.append(bead_id)
-                    record["resumeSummary"]["retained"].append(
-                        {"bead": bead_id, "reason": old["status"]}
-                    )
-                    continue
-                if result["status"] == "exited" and result["exitCode"] == 0:
-                    records[bead_id] = old
-                    old.update(status="pending", evidenceDir=str(old_evidence))
-                    old["attempt"] = {**(old.get("attempt") or {}), **result, "recoverResult": True}
-                    record["resumeSummary"]["retained"].append(
-                        {"bead": bead_id, "reason": "completed attempt recovered without relaunch"}
-                    )
-                    continue
-            if records[bead_id] is not old or (uncertain and relaunch_ambiguous):
-                history = copy.deepcopy(old)
-                history.pop("superseded", None)
-                history["status"] = "superseded"
-                history["evidenceDir"] = str(old_evidence)
-                if "blocker" in old and old.get("attempt"):
-                    blocker_path = Path(old["attempt"]["cwd"]) / ".harness" / "blocker.json"
-                    if blocker_path.exists() or blocker_path.is_symlink():
-                        archive = old_evidence / "superseded-blocker.json"
-                        blocker_path.rename(archive)
-                        history["blockerPath"] = str(archive)
-                records[bead_id]["superseded"] = [*old.get("superseded", []), history]
-                for artifact in (request_path, result_path, old_evidence / "integrated.json"):
-                    if artifact.exists():
-                        payload = read_record_json(artifact)
-                        payload["disposition"] = "superseded"
-                        _write_record(artifact, payload)
+            if records[bead_id] is not old:
+                records[bead_id] = old
+                retained_failures.append(bead_id)
+                record["resumeSummary"]["retained"].append(
+                    dict(bead=bead_id, reason="Fresh job required; original evidence retained"))
         for bead_id in retained_failures:
             fail(bead_id)
         for bead_id in order:
@@ -2542,48 +2371,38 @@ def run_plan(
                 if len(running) >= max_parallel:
                     break
                 try:
-                    if (current["attempt"] or {}).get("recoverResult"):
-                        bead_evidence = Path(current["evidenceDir"])
-                    else:
-                        bead_evidence = directory(evidence, bead_id)
-                        suffix = ""
-                        if bead_evidence.exists():
-                            number = 1
-                            while (bead_evidence / f"retry-{number}").exists():
-                                number += 1
-                            bead_evidence /= f"retry-{number}"
-                            suffix = f"-retry-{number}"
-                        bead_evidence.mkdir()
-                        base_commit = _git(repo, "rev-parse", "HEAD")
-                        worktree = directory(run_dir, f"bead-{bead_id}{suffix}")
-                        _git(
-                            repo,
-                            "worktree",
-                            "add",
-                            "-q",
-                            "-b",
-                            worktree.name,
-                            str(worktree),
-                            base_commit,
-                        )
-                        current["prompt"] = worker_packet.build_packet(
-                            plan,
-                            {**manifest["beads"][bead_id], "id": bead_id},
-                            worktree,
-                            memory_prompt_for(memory),
-                            provider=current["provider"],
-                            proof_level=manifest.get("proofLevel"),
-                            setup=setup,
-                            intent_nodes=intent_nodes,
-                        )
-                        current["attempt"] = {
-                            "cwd": str(worktree),
-                            "baseCommit": base_commit,
-                            "startedAt": _now(),
-                            "planRevision": current["planRevision"],
-                            "requirementRefs": current["requirementRefs"],
-                            **_spec_binding(current),
-                        }
+                    bead_evidence = directory(evidence, bead_id)
+                    bead_evidence.mkdir()
+                    base_commit = _git(repo, "rev-parse", "HEAD")
+                    worktree = directory(run_dir, f"bead-{bead_id}")
+                    _git(
+                        repo,
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        worktree.name,
+                        str(worktree),
+                        base_commit,
+                    )
+                    current["prompt"] = worker_packet.build_packet(
+                        plan,
+                        {**manifest["beads"][bead_id], "id": bead_id},
+                        worktree,
+                        memory_prompt_for(memory),
+                        provider=current["provider"],
+                        proof_level=manifest.get("proofLevel"),
+                        setup=setup,
+                        intent_nodes=intent_nodes,
+                    )
+                    current["attempt"] = {
+                        "cwd": str(worktree),
+                        "baseCommit": base_commit,
+                        "startedAt": _now(),
+                        "planRevision": current["planRevision"],
+                        "requirementRefs": current["requirementRefs"],
+                        **_spec_binding(current),
+                    }
                     current["redObservations"] = [p if p["phase"] == "contracts" else p["red"]
                         for b in records.values() if (p := (b.get("integrated") or {}).get("semantic")) and p["admitted"]]
                     current["evidenceDir"] = str(bead_evidence)
@@ -2616,7 +2435,6 @@ def run_plan(
                     bead_id for bead_id in order if bead_id in running and running[bead_id].done()
                 )
                 current = records[bead_id]
-                recovering_completed_attempt = bool((current["attempt"] or {}).get("recoverResult"))
                 try:
                     current.update(running.pop(bead_id).result())
                     if current["status"] == "running":
@@ -2635,12 +2453,6 @@ def run_plan(
                     # A worker exception fails its bead, preserving independent
                     # work and the failure in the same run's evidence.
                     current["status"] = f"bead failed: {type(error).__name__}: {error}"
-                if previous and not recovering_completed_attempt:
-                    request_path = Path(current["evidenceDir"]) / "attempt" / "request.json"
-                    if request_path.exists():
-                        request = read_record_json(request_path)
-                        if request.get("processId") or request.get("didLaunchMockAttempt"):
-                            record["resumeSummary"]["redispatched"].append(bead_id)
                 current["finishedAt"] = _now()
                 if plan.semantic is not None and current["integrated"]:
                     key = "semanticContracts" if manifest["beads"][bead_id]["semanticPhase"] == "contracts" else "semanticValidation"

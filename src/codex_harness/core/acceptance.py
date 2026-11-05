@@ -1289,8 +1289,6 @@ def prepare_execution_assessment(store, selection):
                 expected_manifest_revision=revision,
                 expected_product_run_id=run["id"],
                 reviewer=None,
-                max_rounds=None,
-                max_total=None,
                 timeout=None,
             ),
             executable=False,

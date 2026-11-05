@@ -487,7 +487,7 @@ def revalidate(store, job_id, request_id):
             model_for={w["bead"]: w["model"] for w in workers},
             effort_for={w["bead"]: w["effort"] for w in workers},
             max_parallel=request["options"]["maxParallel"], timeout=request["options"]["timeout"],
-            max_provider_calls=request["options"]["callCap"], execution_job=directory,
+            execution_job=directory,
             setup=store.spine().node(store.spine().ids("vision")[0])["fields"].get("setup", {}),
             intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"])
         proof = run.get("semanticValidation") or run["semanticContracts"]

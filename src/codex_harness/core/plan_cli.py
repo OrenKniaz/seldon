@@ -24,7 +24,6 @@ from codex_harness.core.plan_store import PHASES
 from codex_harness.core.planner_connection import connection_reply
 from codex_harness.core.planner_nodes import batch_nodes as write_batch_nodes
 from codex_harness.core.preflight import diagnostic_status
-from codex_harness.core.provider_call_budget import DEFAULT_REVIEW_ROUNDS
 from codex_harness.core.spine import compile_manifest
 
 TYPED_DECISION_SCHEMAS = {"dot-intake-v1", "dot-reviewer-selection-v1", "dot-wave-map-v1"}
@@ -280,7 +279,6 @@ def parser() -> argparse.ArgumentParser:
         "supervision-report": ("run",),
         "render": (),
         "roundtable": (),
-        "review-budget": (),
         "readiness": (),
         "findings": (),
         "resolve": (),
@@ -379,10 +377,8 @@ def parser() -> argparse.ArgumentParser:
     commands["confirm"].add_argument("--by", default="user")
     commands["worker-start"].add_argument("--max-parallel", type=int, default=2)
     commands["worker-start"].add_argument("--timeout", type=int, default=900)
-    commands["worker-start"].add_argument("--call-cap", type=int, required=True)
     commands["resume"].add_argument("--expected-revision")
     commands["resume"].add_argument("--request-execution", action="store_true")
-    commands["resume"].add_argument("--call-cap", type=int)
     commands["resume"].add_argument(
         "--workers", help="Explicit worker tuples as JSON or @JSON file"
     )
@@ -391,7 +387,6 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Caller report only; cannot authorize a resume launch",
     )
-    commands["resume"].add_argument("--reserved-worker-calls", type=int)
     commands["resume"].add_argument("--deadline", help="Caller-reported aware ISO deadline")
     commands["resume"].add_argument("--max-parallel", type=int, default=2)
     commands["resume"].add_argument("--timeout", type=int, default=900)
@@ -429,17 +424,14 @@ def parser() -> argparse.ArgumentParser:
     baseline.add_argument(
         "--baseline-ref", help="Git baseline ref; defaults to HEAD when available"
     )
-    commands["roundtable"].add_argument("--max-rounds", type=int, default=DEFAULT_REVIEW_ROUNDS)
     readiness_selection = commands["readiness"].add_mutually_exclusive_group()
     readiness_selection.add_argument("--beads", help="Comma-separated bead ids")
     readiness_selection.add_argument("--sample", type=int)
     commands["readiness"].add_argument("--seed", type=int, default=0)
     commands["readiness"].add_argument("--run", help="Run directory with implemented producers")
-    commands["readiness"].add_argument("--max-calls", type=int)
     commands["readiness"].add_argument(
         "--reviewer", action="append", default=[], help="Reviewer JSON or @file"
     )
-    commands["roundtable"].add_argument("--max-total", type=int)
     commands["roundtable"].add_argument(
         "--policy",
         help="Prospective role-policy JSON or @file; declare before any attempts. "
@@ -477,17 +469,6 @@ def parser() -> argparse.ArgumentParser:
 def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
     """Standard commands go through MCP unchanged; extensions reuse core owners."""
     command = args.command
-    if command == "review-budget":
-        from codex_harness.core.plan_store import open_plan_store
-        from codex_harness.core.planner_confirmations import prepare_chat_confirmation
-
-        if server.store is None:
-            server.store = open_plan_store(server.workspace)
-        data = prepare_chat_confirmation(
-            server.store,
-            "plan-execution",
-        )
-        return _reply(server, json.dumps(data, ensure_ascii=False, indent=2)), data
     if command == "advance" and (args.statement is not None or args.by != "planner"):
         if args.to != "roundtable" or server._store().phase() != "plan":
             raise ValueError("Explicit plan confirmation belongs to plan -> roundtable")
@@ -667,13 +648,7 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                     else {}
                 ),
                 **({"workers": read_json(args.workers)} if args.workers is not None else {}),
-                **(
-                    {"reserved_worker_calls": args.reserved_worker_calls}
-                    if args.reserved_worker_calls is not None
-                    else {}
-                ),
                 **({"deadline": args.deadline} if args.deadline is not None else {}),
-                **({"call_cap": args.call_cap} if args.call_cap is not None else {}),
             },
         ),
         "worker-start": (
@@ -683,7 +658,6 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 workers=read_json(args.workers),
                 max_parallel=args.max_parallel,
                 timeout=args.timeout,
-                call_cap=args.call_cap,
             ),
         ),
         "worker-status": (
@@ -706,7 +680,6 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 "seed": args.seed,
                 **({"beads": args.beads.split(",")} if args.beads is not None else {}),
                 **({"sample": args.sample} if args.sample is not None else {}),
-                **({"max_calls": args.max_calls} if args.max_calls is not None else {}),
                 **(
                     {"reviewers": [read_json(item) for item in args.reviewer]}
                     if args.reviewer
@@ -845,8 +818,6 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
             data = roundtable.run_roundtable(
                 store,
                 reviewers=reviewers,
-                max_rounds=args.max_rounds,
-                max_total=args.max_total,
                 **injection,
             )
             data["id"] = data["roundId"]
@@ -1081,8 +1052,6 @@ def main(argv=None) -> int:
                 return 0
         except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
             diagnostic = f"{getattr(error, 'code', 'tool-input-or-operation-error')}: {error}"
-            if getattr(error, "code", None) == "roundtable-total-budget-exhausted":
-                diagnostic = diagnostic.split(" Next:", 1)[0]
             reply, data = (
                 _reply(
                     server,
@@ -1111,21 +1080,12 @@ def main(argv=None) -> int:
             status = (
                 data if args.command == "status" and isinstance(data, dict) else server._status()
             )
-            if (
-                args.command == "review-budget"
-                and not server._store().connection.execute("SELECT 1 FROM nodes LIMIT 1").fetchone()
-            ):
-                next_step = (
-                    f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
-                    'start --idea "<idea>" --name "<name>"'
-                )
-            else:
-                next_step = next_command(
-                    server,
-                    server.result_data
-                    if args.command == "status" and not reply["isError"]
-                    else status,
-                )
+            next_step = next_command(
+                server,
+                server.result_data
+                if args.command == "status" and not reply["isError"]
+                else status,
+            )
             if args.command in {"worker-start", "worker-status"} and data and not reply["isError"]:
                 next_step = (
                     f'python -m codex_harness.core.plan_cli --workspace "{server.workspace}" '
@@ -1228,8 +1188,6 @@ def main(argv=None) -> int:
                     + prefix
                     + "roundtable "
                     + retry
-                    + f" --max-rounds {args.max_rounds}"
-                    + (f" --max-total {args.max_total}" if args.max_total is not None else "")
                 )
             elif command == "impact" and not status["published_revision"]:
                 next_step = (
@@ -1239,16 +1197,9 @@ def main(argv=None) -> int:
                     + "audit --oracle <existing-reference> "
                     "(or explicitly authorized --prospective); " + prefix + "quality"
                 )
-            elif command == "roundtable" and "roundtable-total-budget-exhausted" in str(reply):
-                next_step = (
-                    "Review held: the existing total-call cap is exhausted; "
-                    + prefix
-                    + "findings --expand; repair within existing author scope, "
-                    "then refresh status. No additional review launch is authorized."
-                )
             elif command == "roundtable" and server.store is not None:
                 next_step = (
-                    prefix + "roundtable --help (check the reported budget or input; "
+                    prefix + "roundtable --help (check the reported input; "
                     "retry only the affected reviewer)"
                 )
             elif command in ("publish", "advance") and any(

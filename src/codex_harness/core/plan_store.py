@@ -158,9 +158,6 @@ class PlanStore:
                     (name if name is not None else workspace.name,),
                 )
                 self._event("opened", {"name": self._meta()["name"]})
-            from codex_harness.core.approval_migration import migrate
-
-            migrate(self)
 
     def close(self) -> None:
         self.connection.close()
@@ -1617,7 +1614,7 @@ class PlanStore:
             while row := self.connection.execute(
                 "SELECT id,state,result_json FROM audit_attempts WHERE attempt_key=?", (key,)
             ).fetchone():
-                if row["state"] != "failed" or row["result_json"] is not None:
+                if row["state"] not in {"failed", "abandoned"} or row["result_json"] is not None:
                     return self.audit_attempt(row["id"], owner), False
                 # A terminal infrastructure failure has no verdict to reuse. Preserve
                 # its immutable row; derive the next admission slot under this lock.
@@ -1656,7 +1653,7 @@ class PlanStore:
                 (attempt_id, owner),
             ).fetchone()
             if row is None:
-                raise PlanStoreError("audit-owner-mismatch", "Only the running owner may complete")
+                return  # Released attempts never publish late audit credit.
             state, audit_id = "failed", None
             if result is not None:
                 result = {
@@ -2674,11 +2671,9 @@ class PlanStore:
         expected_manifest_revision,
         expected_product_run_id,
         reviewer,
-        max_rounds,
-        max_total,
         timeout,
     ):
-        """Prepare captured execution inputs; admission and usage occur only at real launch."""
+        """Prepare captured execution inputs; admission occurs only at real launch."""
         from codex_harness.core import acceptance_recovery as recovery
         from codex_harness.core import roundtable
 
@@ -2690,8 +2685,6 @@ class PlanStore:
                 expected_manifest_revision=expected_manifest_revision,
                 expected_product_run_id=expected_product_run_id,
                 reviewer=reviewer,
-                max_rounds=max_rounds,
-                max_total=max_total,
                 timeout=timeout,
             )
         )
@@ -3174,7 +3167,6 @@ class PlanStore:
 
     def _status(self) -> dict:
         from codex_harness.core.acceptance import acceptance_status
-        from codex_harness.core.roundtable import review_totals
         from codex_harness.core.planner_confirmation_cards import pending_decisions
 
         self.connection.execute("BEGIN")
@@ -3269,7 +3261,6 @@ class PlanStore:
                 "acceptance": acceptance,
                 "pendingDecisions": pending_decisions(self),
                 "pendingSemanticJudgments": self.finding_state()["pendingJudgments"],
-                "roundtable": review_totals(self, current_publication),
                 **({"reviewPolicy": review_policy} if review_policy["active"] else {}),
                 "readiness": self.readiness_status(current_publication),
             }

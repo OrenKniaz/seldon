@@ -1,4 +1,4 @@
-"""Captured acceptance work; only the MCP owner's serial thread writes PlanStore."""
+"""Captured acceptance work; only the serial owner admits current results."""
 
 import json
 import queue
@@ -16,20 +16,18 @@ from codex_harness.core.acceptance import (
     run_scenarios,
 )
 from codex_harness.core.plan_store import PlanStoreError
+from codex_harness.core.planner_recovery import release_attempt
 
 
 class AcceptanceOwner:
     def __init__(self, wake=None):
-        self.instance = uuid4().hex
-        self.wake = wake
-        self.prepared = None
-        self.thread = None
-        self.messages = queue.Queue()
-        self.changed = threading.Event()
-        self.stopped = threading.Event()
-        self.stop_file = None
-        self.deadline = None
-        self.active = None
+        self.instance, self.wake = uuid4().hex, wake
+        self.prepared = self.thread = self.deadline = self.active = self.stop_file = None
+        self.messages, self.changed, self.stopped = (
+            queue.Queue(),
+            threading.Event(),
+            threading.Event(),
+        )
 
     def _stop(self):
         self.stopped.set()
@@ -37,30 +35,22 @@ class AcceptanceOwner:
             self.stop_file.touch()
 
     def status(self, store, attempt_id):
-        exists = store.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='acceptance_attempts'"
+        row = store.connection.execute(
+            "SELECT * FROM acceptance_attempts WHERE id=?", (attempt_id,)
         ).fetchone()
-        row = (
-            store.connection.execute(
-                "SELECT * FROM acceptance_attempts WHERE id=?", (attempt_id,)
-            ).fetchone()
-            if exists
-            else None
-        )
         if row is None:
             raise PlanStoreError("acceptance-attempt-unknown", attempt_id)
         state = row["state"]
         if state in {"queued", "running"} and row["owner"] != self.instance:
             state = "unknown-interrupted"
-        inputs = json.loads(row["inputs_json"])
-        progress = json.loads(row["progress_json"])
+        inputs, progress = json.loads(row["inputs_json"]), json.loads(row["progress_json"])
         return dict(
             attemptId=attempt_id,
             state=state,
             ownerInstance=row["owner"],
             **{
-                key: inputs.get(key)
-                for key in (
+                k: inputs.get(k)
+                for k in (
                     "repo",
                     "subject",
                     "revision",
@@ -73,57 +63,41 @@ class AcceptanceOwner:
             progress=progress,
             productCaptured=inputs.get("revision") is not None,
             unfinishedScenarioIds=[
-                item["id"]
-                for item in inputs["scenarios"]
-                if item["id"] not in {done["id"] for done in progress}
+                s["id"] for s in inputs["scenarios"] if s["id"] not in {r["id"] for r in progress}
             ],
             scenarioCount=len(inputs["scenarios"]),
             startedAt=row["started_at"],
             deadlineAt=row["deadline_at"],
             result=json.loads(row["result_json"]) if row["result_json"] else None,
-            resultScope=(
-                "Captured product snapshot; current validity requires canonical freshness checks"
-            ),
             error=row["error"],
-            reason=row["error"] or "Owner not observed; child liveness UNKNOWN; no replay"
+            reason=row["error"],
+            quiescence="UNVERIFIED",
+            ownershipReleased=state not in {"queued", "running", "unknown-interrupted"},
+            resultScope="Captured snapshot; canonical freshness checks own current validity",
+            next="harness_recovery mode=resolve job_id=acceptance:"
+            + attempt_id
+            + " choice=abandon reason=<release uncertain owner>"
             if state == "unknown-interrupted"
             else None,
-            quiescence="UNVERIFIED",
         )
 
     def start(self, store, repo, *, subject):
         if self.thread is not None and self.thread.is_alive():
             return self.status(store, self.active)
-        captured = acceptance_inputs(store, repo, subject=subject)
         with store._transaction():
-            if acceptance_inputs(store, repo, subject=subject) != captured:
-                raise PlanStoreError(
-                    "acceptance-revision-changed", "Inputs changed during admission"
-                )
-            key = _hash(captured)
             row = store.connection.execute(
-                "SELECT id,attempt_key FROM acceptance_attempts "
-                "WHERE state IN ('queued','running','unknown-interrupted')"
+                "SELECT id FROM acceptance_attempts WHERE state IN ('queued','running','unknown-interrupted')"
             ).fetchone()
             if row:
-                result = self.status(store, row["id"])
-                result["reason"] = (
-                    "Existing acceptance owns this workspace; inspect status, never replay"
-                )
-                return result
-            while row := store.connection.execute(
-                "SELECT id FROM acceptance_attempts WHERE attempt_key=?", (key,)
-            ).fetchone():
-                # A separate explicit run after known termination is fresh execution.
-                # Polling uses status; uncertain/in-flight owners were refused above.
-                key = _hash([key, row["id"]])
+                return self.status(store, row["id"])
+            captured = acceptance_inputs(store, repo, subject=subject)
             attempt_id = uuid4().hex
+            key = _hash([captured, attempt_id])
             previous = store.connection.execute(
                 "SELECT id FROM acceptance_runs ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
             store.connection.execute(
-                "INSERT INTO acceptance_attempts "
-                "(id,attempt_key,owner,state,inputs_json,progress_json,superseded_run_id) "
+                "INSERT INTO acceptance_attempts (id,attempt_key,owner,state,inputs_json,progress_json,superseded_run_id) "
                 "VALUES (?,?,?,'queued',?,'[]',?)",
                 (
                     attempt_id,
@@ -144,28 +118,10 @@ class AcceptanceOwner:
             return
         attempt_id, captured = self.prepared
         self.prepared = None
+        started = datetime.now(UTC)
+        deadline = time.monotonic() + captured["maxExecutionSeconds"]
+        self.deadline, self.active = deadline, attempt_id
         with store._transaction():
-            try:
-                fresh = (
-                    acceptance_inputs(store, captured["repo"], subject=captured["subject"])
-                    == captured
-                )
-            except (PlanStoreError, OSError, ValueError):
-                fresh = False
-            if not fresh:
-                store.connection.execute(
-                    "UPDATE acceptance_attempts SET state='stale',error=? "
-                    "WHERE id=? AND owner=? AND state='queued'",
-                    (
-                        "Captured inputs changed before dispatch; no child launched",
-                        attempt_id,
-                        self.instance,
-                    ),
-                )
-                return
-            started = datetime.now(UTC)
-            deadline = time.monotonic() + captured["maxExecutionSeconds"]
-            self.deadline, self.active = deadline, attempt_id
             changed = store.connection.execute(
                 "UPDATE acceptance_attempts SET state='running',started_at=?,deadline_at=? "
                 "WHERE id=? AND owner=? AND state='queued'",
@@ -177,9 +133,7 @@ class AcceptanceOwner:
                 ),
             ).rowcount
             if changed != 1:
-                raise PlanStoreError(
-                    "acceptance-owner-mismatch", "Only the admitted owner may dispatch"
-                )
+                return  # A released admission cannot dispatch late.
 
         def emit(kind, value):
             self.messages.put((attempt_id, captured, kind, value))
@@ -188,29 +142,28 @@ class AcceptanceOwner:
                 self.wake()
 
         def execute():
+            def stopping():
+                return self.stopped.is_set() or self.stop_file.exists()
+
             try:
-                actual = capture_acceptance(
-                    captured, deadline=deadline, should_stop=self.stopped.is_set
-                )
+                actual = capture_acceptance(captured, deadline=deadline, should_stop=stopping)
                 acknowledged = threading.Event()
                 emit("captured", (actual, acknowledged))
                 while not acknowledged.wait(0.02):
-                    if self.stopped.is_set():
+                    if stopping() or time.monotonic() >= deadline:
                         return
-                if self.stopped.is_set():
+                if stopping():
                     return
-                if (
-                    capture_acceptance(captured, deadline=deadline, should_stop=self.stopped.is_set)
-                    != actual
-                ):
+                if capture_acceptance(captured, deadline=deadline, should_stop=stopping) != actual:
                     raise PlanStoreError(
-                        "acceptance-revision-changed", "Product changed before launch"
+                        "acceptance-revision-changed",
+                        "Product changed before launch. Rerun acceptance on the current integrated revision.",
                     )
                 results = run_scenarios(
                     captured["repo"],
                     captured["scenarios"],
                     on_result=lambda result: emit("progress", result),
-                    should_stop=self.stopped.is_set,
+                    should_stop=stopping,
                     deadline=deadline,
                     semantic=captured.get("semantic"),
                     judgments=captured.get("judgments"),
@@ -221,15 +174,14 @@ class AcceptanceOwner:
                     for item in results
                     for step in [*item["steps"], item.get("semantic", {})]
                 ):
-                    emit(
-                        "unknown",
-                        "Child cleanup uncertain; no further metadata or scenario children",
-                    )
-                elif not self.stopped.is_set():
-                    terminal = capture_acceptance(
-                        captured, deadline=deadline, should_stop=self.stopped.is_set
-                    )
-                    emit("complete", (actual, terminal, results))
+                    emit("unknown", "Child cleanup uncertain; evidence quarantined")
+                elif not stopping():
+                    terminal = capture_acceptance(captured, deadline=deadline, should_stop=stopping)
+                    if actual != terminal:
+                        raise PlanStoreError(
+                            "acceptance-revision-changed", "Product changed during execution"
+                        )
+                    emit("complete", (actual, results))
             except Exception as error:
                 unknown = isinstance(error, subprocess.TimeoutExpired) or getattr(
                     error, "code", None
@@ -249,101 +201,75 @@ class AcceptanceOwner:
         if self.deadline is not None and time.monotonic() >= self.deadline:
             self._stop()
             with store._transaction():
-                store.connection.execute(
-                    "UPDATE acceptance_attempts SET state='unknown-interrupted',error=? "
-                    "WHERE id=? AND owner=? AND state='running'",
-                    (
-                        "Whole-run deadline exhausted; metadata/child liveness UNKNOWN; no replay",
-                        self.active,
-                        self.instance,
-                    ),
+                release_attempt(
+                    store,
+                    "acceptance:" + self.active,
+                    "Whole-run deadline exhausted; child liveness UNKNOWN",
                 )
             self.deadline = None
         while not self.messages.empty():
             attempt_id, captured, kind, value = self.messages.get_nowait()
-            if kind == "captured":
-                actual, acknowledged = value
-                with store._transaction():
-                    row = store.connection.execute(
-                        "SELECT state FROM acceptance_attempts WHERE id=? AND owner=?",
-                        (attempt_id, self.instance),
-                    ).fetchone()
-                    try:
-                        fresh = (
-                            acceptance_inputs(store, captured["repo"], subject=captured["subject"])
-                            == captured
-                        )
-                    except (PlanStoreError, OSError, ValueError):
-                        fresh = False
-                    if (
-                        row is None
-                        or row["state"] != "running"
-                        or not fresh
-                        or self.stopped.is_set()
-                    ):
-                        self._stop()
-                        if row and row["state"] == "running":
-                            store.connection.execute(
-                                "UPDATE acceptance_attempts SET state='stale',error=? WHERE id=?",
-                                (
-                                    "Canonical inputs changed before metadata acknowledgement",
-                                    attempt_id,
-                                ),
-                            )
-                    else:
-                        store.connection.execute(
-                            "UPDATE acceptance_attempts SET inputs_json=? WHERE id=?",
-                            (json.dumps(actual), attempt_id),
-                        )
-                acknowledged.set()  # Only after the canonical capture transaction committed.
-                continue
+            acknowledged = None
             with store._transaction():
                 row = store.connection.execute(
                     "SELECT * FROM acceptance_attempts WHERE id=? AND owner=? AND state='running'",
                     (attempt_id, self.instance),
                 ).fetchone()
                 if row is None:
-                    continue  # An interrupted owner can never publish late credit.
-                if kind == "progress":
-                    progress = json.loads(row["progress_json"])
-                    progress.append(value)
-                    store.connection.execute(
-                        "UPDATE acceptance_attempts SET progress_json=? WHERE id=?",
-                        (json.dumps(progress), attempt_id),
-                    )
+                    if kind == "captured":
+                        value[1].set()
                     continue
-                result, error, state = None, None, "failed"
-                if kind == "complete":
-                    actual, terminal, results = value
+                if kind == "captured":
+                    actual, acknowledged = value
                     try:
-                        if actual != terminal:
+                        if (
+                            acceptance_inputs(store, captured["repo"], subject=captured["subject"])
+                            != captured
+                        ):
                             raise PlanStoreError(
                                 "acceptance-revision-changed",
-                                "Product metadata changed during execution",
+                                "Canonical inputs changed before launch",
                             )
-                        result = record_acceptance(store, actual, results, deadline=self.deadline)
-                        state = "completed"
+                        store.connection.execute(
+                            "UPDATE acceptance_attempts SET inputs_json=? WHERE id=?",
+                            (json.dumps(actual), attempt_id),
+                        )
+                    except (PlanStoreError, OSError, ValueError) as error:
+                        self._stop()
+                        release_attempt(store, "acceptance:" + attempt_id, str(error))
+                elif kind == "progress":
+                    store.connection.execute(
+                        "UPDATE acceptance_attempts SET progress_json=? WHERE id=?",
+                        (json.dumps([*json.loads(row["progress_json"]), value]), attempt_id),
+                    )
+                    continue
+                elif kind == "unknown":
+                    self._stop()
+                    release_attempt(store, "acceptance:" + attempt_id, value)
+                else:
+                    result, error, state = None, None, "failed"
+                    try:
+                        if kind == "complete":
+                            actual, results = value
+                            result = record_acceptance(
+                                store, actual, results, deadline=self.deadline
+                            )
+                            state = "completed"
+                        else:
+                            error = value
                     except (PlanStoreError, OSError, ValueError) as failure:
                         state, error = "stale", str(failure)
-                        if getattr(failure, "code", None) in {
-                            "acceptance-deadline-exhausted",
-                            "acceptance-owner-stopped",
-                        }:
-                            state = "unknown-interrupted"
-                            self._stop()
-                else:
-                    error = value
-                    if kind == "unknown":
-                        state = "unknown-interrupted"
-                        self._stop()
-                store.connection.execute(
-                    "UPDATE acceptance_attempts SET state=?,result_json=?,error=? WHERE id=?",
-                    (state, json.dumps(result) if result else None, error, attempt_id),
-                )
-                store._event(
-                    "acceptance-attempt-completed", dict(attemptId=attempt_id, state=state)
-                )
-                self.deadline = None
+                    store.connection.execute(
+                        "UPDATE acceptance_attempts SET state=?,result_json=?,error=? WHERE id=?",
+                        (state, json.dumps(result) if result else None, error, attempt_id),
+                    )
+                    store._event(
+                        "acceptance-attempt-completed", dict(attemptId=attempt_id, state=state)
+                    )
+                if kind != "captured":
+                    self.deadline = None
+            if acknowledged:
+                acknowledged.set()
 
     def wait_timeout(self):
         return max(0.01, self.deadline - time.monotonic()) if self.deadline is not None else None
@@ -352,13 +278,14 @@ class AcceptanceOwner:
         self._stop()
         self.prepared = None
         if store is not None:
-            self.drain(store)
             with store._transaction():
-                store.connection.execute(
-                    "UPDATE acceptance_attempts SET state='unknown-interrupted',error=? "
-                    "WHERE owner=? AND state IN ('queued','running')",
-                    ("Owner closed; child liveness UNKNOWN; no replay", self.instance),
-                )
+                for row in store.connection.execute(
+                    "SELECT id FROM acceptance_attempts WHERE owner=? AND state IN ('queued','running')",
+                    (self.instance,),
+                ).fetchall():
+                    release_attempt(
+                        store, "acceptance:" + row["id"], "Owner closed; child liveness UNKNOWN"
+                    )
 
 
 def job_status(self, arguments):
@@ -396,13 +323,17 @@ def job_status(self, arguments):
         data = self.acceptance.status(self._store(), arguments["id"])
         self.result_data = data
         result = data["result"]
-        failed = data["state"] in {"failed", "stale", "unknown-interrupted"} or bool(
+        failed = data["state"] in {"failed", "stale", "unknown-interrupted", "abandoned"} or bool(
             result and not result["passed"]
         )
         body = (
             views.acceptance_run_card(result) if result else views.data_card("Acceptance job", data)
         )
-        next_step = "harness_accept_status id=" + data["attemptId"]
+        next_step = data.get("next") or "harness_accept_status id=" + data["attemptId"]
+        if data["state"] == "abandoned":
+            next_step = (
+                "Inspect quarantined evidence; a new explicit harness_accept_run is required"
+            )
         if result and not failed:
             next_step = (
                 "harness_accept_run repo=<integrated-repo> subject=product"

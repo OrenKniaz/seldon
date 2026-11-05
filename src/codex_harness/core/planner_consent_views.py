@@ -6,7 +6,7 @@ def consent_recovery(code):
     return (
         f"harness_prepare_chat_confirmation gate={gate}; show the complete subject and field "
         "diff, wait for the actual reply, then harness_record_chat_confirmation. "
-        "For first B supply execution={expected_revision,workers,call_cap,max_parallel,timeout}."
+        "For first B supply execution={expected_revision,workers,max_parallel,timeout}."
     )
 
 

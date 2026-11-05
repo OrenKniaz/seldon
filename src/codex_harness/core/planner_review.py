@@ -97,11 +97,9 @@ def status(store, attempt_id):
 
     if resolved := disposition(store, "review:" + attempt_id):
         result.update(
-            state="stopped" if resolved["choice"] == "abandon" else "superseded",
+            state="abandoned", result=None, ownershipReleased=True, quiescenceVerified=False,
             recovery=resolved,
-            next="Review stopped; spent claim retained"
-            if resolved["choice"] == "abandon"
-            else "harness_accept_review with the original arguments to admit the one retry",
+            next="Review quarantined; inspect retained evidence before a new explicit admission",
         )
         return result
     if state == "unknown-interrupted":
@@ -109,7 +107,7 @@ def status(store, attempt_id):
             outcome="UNKNOWN",
             reason="Owner not observed; paid starts/liveness UNKNOWN. No automatic replay.",
             next=(
-                "Inspect the original owner and outcome; UNKNOWN stays held. "
+                "Release the interrupted original without claiming process exit: "
                 f"harness_recovery mode=resolve job_id=review:{attempt_id} "
                 "choice=abandon reason=<stop with spent claim retained> stops without retry."
             ),
@@ -122,26 +120,6 @@ def ensure_active(store, attempt_id):
 
     if disposition(store, "review:" + attempt_id):
         raise PlanStoreError("acceptance-review-disposed", "Late owner cannot launch or publish")
-
-
-def recovery_proof(workspace, job_id):
-    from codex_harness.core.plan_store import open_plan_store_readonly
-    from codex_harness.core.planner_recovery import disposition
-    from codex_harness.core.provider_call_budget import usage
-
-    with open_plan_store_readonly(workspace) as store:
-        observed = status(store, job_id.removeprefix("review:"))
-        if observed is None:
-            raise ValueError("review-attempt-unknown")
-        proof = dict(
-            jobId=job_id,
-            verdict="UNKNOWN" if observed["state"] == "unknown-interrupted" else observed["state"],
-            attempt=observed,
-            spentCalls=usage(store, "review"),
-        )
-        proof["proofDigest"] = approvals.fingerprint(proof)
-        proof["disposition"] = disposition(store, job_id)
-        return proof
 
 
 def status_reply(server, attempt_id):
@@ -158,7 +136,7 @@ def status_reply(server, attempt_id):
         body += "\n" + views.review_card(data["failure"])
     if data.get("result"):
         body += "\n" + views.review_card(data["result"])
-    failed = data["state"] in {"failed", "unknown-interrupted"}
+    failed = data["state"] in {"failed", "unknown-interrupted", "abandoned"}
     next_step = data.get("next", "harness_accept_status id=" + attempt_id)
     if data["state"] in {"completed", "failed"}:
         server.result_data = data.get("result") or data.get("approval") or data.get("failure")
@@ -217,19 +195,12 @@ class ReviewOwner:
             selected_execution_support(store, support, repo=arguments["repo"])
         with store._transaction():
             previous = next(iter(entries(store)), None)
-            successor = None
             if previous:
                 observed = status(store, previous["attemptId"])
                 resolved = disposition(store, "review:" + previous["attemptId"])
-                if resolved:
-                    if resolved["choice"] == "abandon":
-                        raise ValueError("acceptance-review-stopped: recovery chose stop")
-                    if arguments != previous["arguments"]:
-                        raise ValueError("review-retry-requires-original-arguments")
-                    successor = resolved["successor"]
-                elif observed["state"] in {"queued", "running", "unknown-interrupted"}:
+                if not resolved and observed["state"] in {"queued", "running", "unknown-interrupted"}:
                     return observed
-            attempt_id = successor or uuid4().hex
+            attempt_id = uuid4().hex
             entry = dict(
                 attemptId=attempt_id,
                 repo=str(Path(arguments["repo"]).resolve()),

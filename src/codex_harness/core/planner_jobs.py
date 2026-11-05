@@ -137,8 +137,57 @@ def _valid_timeout(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
 
 
+def verify_job(directory, record=None):
+    from codex_harness.core.plan_store import open_plan_store_readonly
+    from codex_harness.core.planner_execution import admitted_execution
+
+    if directory is None:
+        raise ValueError("provider-call-owned-native-job-required")
+    directory = Path(directory).resolve()
+    workspace = directory.parent.parent.parent
+    request = _request(directory)
+    if _directory(workspace, request["jobId"]) != directory:
+        raise ValueError("provider-call-job-path-invalid")
+    scope = request.get("executionScope")
+    if not isinstance(scope, dict):
+        raise ValueError("provider-call-native-scope-required")
+    started = read_record_json(_inside(directory, directory / "started.json"))
+    if (
+        started.get("requestDigest") != request["requestDigest"]
+        or started.get("pid") != os.getpid()
+    ):
+        raise ValueError("provider-call-owned-controller-required")
+    with open_plan_store_readonly(workspace) as store:
+        if not admitted_execution(
+            store, request.get("executionRequestId"), scope, request["jobId"]
+        ):
+            raise ValueError("provider-call-execution-binding-stale")
+    snapshot = read_record_json(_inside(directory, directory / "plan/sample.json"))
+    if (
+        _digest(snapshot) != request["manifestDigest"]
+        or _files(directory / "plan/template") != request["templateFiles"]
+    ):
+        raise ValueError("provider-call-protected-snapshot-changed")
+    if record is not None:
+        from codex_harness.core.attempt_provenance import normalized_owned
+
+        selected = next((w for w in scope["workers"] if w["bead"] == record.get("bead")), None)
+        bead = snapshot["beads"].get(record.get("bead"), {})
+        if (
+            selected is None
+            or any(record.get(k) != selected[k] for k in ("provider", "model", "effort"))
+            or record.get("planRevision") != request["publicationRevision"]
+            or normalized_owned(record.get("ownedFiles", []))
+            != normalized_owned(bead.get("ownedFiles", []))
+            or record.get("requirementRefs") != bead.get("requirementRefs")
+            or record.get("specRefs") != bead.get("specRefs")
+        ):
+            raise ValueError("provider-call-worker-scope-mismatch")
+    return request
+
+
 def start_worker_job(
-    store, expected_revision, workers, *, max_parallel=2, timeout=900, call_cap=None
+    store, expected_revision, workers, *, max_parallel=2, timeout=900
 ):
     """Admit once under B; recovery alone assigns successor attempts."""
     if type(max_parallel) is not int or max_parallel < 1:
@@ -160,12 +209,6 @@ def start_worker_job(
                 maxParallel=max_parallel,
                 timeout=timeout,
             )
-            if "callCap" in previous["options"]:
-                options["callCap"] = (
-                    previous["options"]["callCap"] if call_cap is None else call_cap
-                )
-            elif call_cap is not None:
-                raise ValueError("worker-job-publication-already-admitted-with-other-options")
             if previous["options"] != options:
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
         return worker_job_status(store.workspace, job_id)
@@ -187,14 +230,12 @@ def start_worker_job(
         selection,
         max_parallel=max_parallel,
         timeout=timeout,
-        call_cap=call_cap,
     )
     require_execution(store, scope)
     options = {
         "workers": selection,
         "maxParallel": max_parallel,
         "timeout": timeout,
-        "callCap": call_cap,
     }
     directory.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -292,6 +333,7 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
             "pending-judgment",
             "readmitted",
             "abandoned",
+            "steering-required",
         }:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -336,7 +378,6 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         else "unproven"
     )
     result["actorIdentityVerified"] = False
-    result["providerCallCap"] = request["options"].get("callCap")
     result["capacityVerified"] = False
     for name in ("started", "terminal"):
         path = directory / f"{name}.json"
@@ -425,7 +466,6 @@ def execute_worker_job(workspace, job_id):
             effort_for={row["bead"]: row["effort"] for row in workers},
             max_parallel=request["options"]["maxParallel"],
             timeout=request["options"]["timeout"],
-            max_provider_calls=request["options"]["callCap"],
             execution_job=directory,
             setup=setup,
             intent_nodes=intent_nodes,

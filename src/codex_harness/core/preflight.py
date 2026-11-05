@@ -78,7 +78,7 @@ def preflight_report(
 
     missing = (
         "harness_plan_start reviewer-selection-required-before-B "
-        "execution.expected_revision execution.workers execution.call_cap"
+        "execution.expected_revision execution.workers"
     ).split()
     revision = "unknown"
     if (workspace / ".codex-harness/plan.sqlite3").is_file():

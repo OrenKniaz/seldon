@@ -28,7 +28,7 @@ from codex_harness.core.planner_connection import connection_reply, workspace_re
 from codex_harness.core.planner_guidance import BATCH_GUIDANCE
 from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.planner_refusal_events import record_refusals, refusal_status
-from codex_harness.core.planner_refusals import TEACHING, compact_refusal, refusal_context
+from codex_harness.core.planner_refusals import TEACHING, compact_refusal
 from codex_harness.core.planner_schema import node_error_help, schema_help, validate_input as _validate
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
 from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
@@ -215,8 +215,6 @@ TOOLS = [
                     }
                 ),
             },
-            "max_rounds": {"type": "integer", "minimum": 1},
-            "max_total": {"type": "integer", "minimum": 1},
             "timeout": {"type": "number", "exclusiveMinimum": 0},
         },
         [],
@@ -228,7 +226,6 @@ TOOLS = [
             "beads": STRINGS,
             "sample": {"type": "integer"},
             "seed": {"type": "integer"},
-            "max_calls": {"type": "integer"},
             "reviewers": {
                 "type": "array",
                 "minItems": 1,
@@ -501,8 +498,6 @@ TOOLS = [
             },
             "execution_authorized": {"type": "boolean"},
             "request_execution": {"type": "boolean"},
-            "call_cap": {"type": "integer"},
-            "reserved_worker_calls": {"type": "integer"},
             "deadline": STRING,
             "max_parallel": {"type": "integer"},
             "timeout": {"type": "integer"},
@@ -557,9 +552,8 @@ TOOLS = [
                     },
                     "max_parallel": {"type": "integer"},
                     "timeout": {"type": "integer"},
-                    "call_cap": {"type": "integer"},
                 },
-                ["expected_revision", "workers", "call_cap"],
+                ["expected_revision", "workers"],
             ),
         },
         ["gate"],
@@ -683,7 +677,7 @@ TOOLS = [
     _tool(
         "harness_worker_start",
         "Start once under exact native/chat execution consent; return a durable job ID. "
-        "call_cap bounds local attempts; subscription capacity is unverified. No automatic retry.",
+        "Subscription capacity is unverified. No automatic retry.",
         {
             "expected_revision": STRING,
             "workers": {
@@ -693,9 +687,8 @@ TOOLS = [
             },
             "max_parallel": {"type": "integer"},
             "timeout": {"type": "integer"},
-            "call_cap": {"type": "integer"},
         },
-        ["expected_revision", "workers", "call_cap"],
+        ["expected_revision", "workers"],
     ),
     _tool(
         "harness_worker_status",
@@ -812,7 +805,7 @@ def resume_next(data=None, *, cli_prefix=None):
         return (
             "harness_plan_resume request_execution=true expected_revision="
             + revision
-            + " workers=<exact bead/provider/model/effort tuples> call_cap=<local-call-ceiling>"
+            + " workers=<exact bead/provider/model/effort tuples>"
             " max_parallel=<parallel-limit> timeout=<per-worker-seconds> "
             "(opens a native decision; does not itself approve)."
         )
@@ -1211,7 +1204,6 @@ class PlannerServer:
         if name == "harness_accept_status":
             return connection_reply(self._acceptance_job_status(arguments), self.workspace)
         operation_error_code = None
-        error_message = ""
         uncertain_dispatch = False
         dispatch_started = False
         try:
@@ -1267,7 +1259,6 @@ class PlannerServer:
             operation_error_code = getattr(error, "code", None)
             if getattr(error, "approval", None):
                 self.result_data = error.approval
-            error_message = str(error)
             # These advance/publish prerequisites precede writes in canonical transactions.
             uncertain_dispatch = dispatch_started and not (
                 isinstance(error, PlanStoreError)
@@ -1460,12 +1451,11 @@ class PlannerServer:
             reply.setdefault("structuredContent", {}).update(phase)
             text = f"\nStill in {current}; next legal phase: {next_phase or 'none'}."
             reply["content"][0]["text"] = text.strip() + "\n" + reply["content"][0]["text"]
-        refusal_values = refusal_context(self, is_error, error_message, operation_error_code)
         reply = connection_reply(
             reply,
             self.workspace,
             status,
-            refusal_values=refusal_values,
+            refusal_values={"result": self.result_data, "code": operation_error_code},
         )
         if name == "harness_prepare_chat_confirmation" and not is_error:
             reply["content"][0]["text"] = body + "\n\n" + reply["content"][0]["text"]
@@ -2429,9 +2419,9 @@ class PlannerServer:
             }
         if self._pending_confirmation is not None:
             raise ValueError("worker-execution-pending: answer or cancel the displayed request")
-        if any(key not in arguments for key in ("expected_revision", "workers", "call_cap")):
-            raise ValueError("worker-execution-explicit-publication-workers-call-cap-required")
-        proposal = {key: arguments[key] for key in ("expected_revision", "workers", "call_cap")}
+        if any(key not in arguments for key in ("expected_revision", "workers")):
+            raise ValueError("worker-execution-explicit-publication-workers-required")
+        proposal = {key: arguments[key] for key in ("expected_revision", "workers")}
         proposal.update(
             max_parallel=arguments.get("max_parallel", 2), timeout=arguments.get("timeout", 900)
         )
@@ -2482,7 +2472,7 @@ class PlannerServer:
         )
         proposal = {
             key: pending["arguments"][key]
-            for key in ("expected_revision", "workers", "call_cap", "max_parallel", "timeout")
+            for key in ("expected_revision", "workers", "max_parallel", "timeout")
             if key in pending["arguments"]
         }
         return self._offer_chat_confirmation(

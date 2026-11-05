@@ -594,7 +594,7 @@ def schema_help(
             "claim are unverified; SHA-256 binds only the literal supplied UTF-8 quote.",
             "prepare": "Semantic-v1 A via harness_understanding_card: expansion, quality, "
             "Done/taste; align and vision-lock prepare that same A. B=plan-execution "
-            "use execution={expected_revision,workers,call_cap}; optional max_parallel/timeout. "
+            "use execution={expected_revision,workers}; optional max_parallel/timeout. "
             "The canonical producer binds the full displayed question and current inputs.",
             "record": "Wait for a separate actual external chat reply to the displayed question. "
             "Fields: gate, request_id, expected_revision, quoted_message, "

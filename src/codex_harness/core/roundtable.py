@@ -21,9 +21,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
-from codex_harness.core import provider_call_budget as review_budget
 from codex_harness.core import review_instructions
-from codex_harness.core.approvals import require_approval
+from codex_harness.core.approvals import require_approval, require_reviewers
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
@@ -92,119 +91,6 @@ def _table(store: PlanStore) -> None:
 def _event(store: PlanStore, kind: str, payload: dict) -> None:
     if callable(getattr(store, "_event", None)):
         store._event(kind, payload)
-
-
-def review_totals(store: PlanStore, revision: str | None) -> list[dict]:
-    tables = {
-        row[0]
-        for row in store.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
-    attempts = []
-    for table in ("review_attempts", "review_runs"):
-        if table in tables:
-            attempts.extend(dict(row) for row in store.connection.execute(f"SELECT * FROM {table}"))
-    for _, header in _execution_reservations(store):
-        request = header["request"]
-        attempts.append(
-            dict(
-                id=header["registrationId"],
-                plan_revision=request["expected_manifest_revision"],
-                reviewer=request["reviewer"]["name"],
-                provider=request["reviewer"]["provider"],
-            )
-        )
-    unique = {row["id"]: row for row in attempts}
-    counts = {}
-    for row in unique.values():
-        key = (row["reviewer"], row["provider"])
-        item = counts.setdefault(key, dict(reviewer=key[0], provider=key[1], round=0, total=0))
-        item["total"] += 1
-        item["round"] += row["plan_revision"] == revision
-        if "packetBound" in row:
-            item.setdefault("reviews", []).append(
-                {"id": row["id"], "planRevision": row["plan_revision"], **_binding_fields(row)}
-            )
-    budgets = {}
-    for row in store.connection.execute(
-        "SELECT payload_json FROM events WHERE kind='roundtable-completed' ORDER BY rowid"
-    ):
-        event = json.loads(row[0])
-        for reviewer in event["reviewers"]:
-            budgets[(reviewer["name"], reviewer["provider"])] = event.get("maxRounds", 2)
-    for key, item in counts.items():
-        item["maxRounds"] = budgets.get(key, 2)
-        item["text"] = (
-            f"round {item['round']}/{item['maxRounds']} for this revision · {item['total']} total"
-        )
-    return [counts[key] for key in sorted(counts)]
-
-
-def _total_exhaustion_advice(store, reviewer, revision, total, max_total):
-    """Describe existing originals without treating budget exhaustion as diagnosis."""
-    saved = store.connection.execute(
-        "SELECT * FROM review_runs WHERE reviewer=? AND provider=? ORDER BY rowid DESC LIMIT 1",
-        (reviewer["name"], reviewer["provider"]),
-    ).fetchone()
-    details = {
-        "usageUnit": "logical review attempts",
-        "reviewer": reviewer["name"],
-        "provider": reviewer["provider"],
-        "id": None,
-        "failureCause": "Unknown; no completed ordinary review record",
-    }
-    prefix = f'python -m codex_harness.core.plan_cli --workspace "{store.workspace}" '
-    inspection = "Inspect existing state: " + prefix + "status"
-    if saved is not None:
-        row = dict(saved)
-        try:
-            shards = json.loads(row.get("shardDetails") or "[]")
-            prior = json.loads(row.get("reshardedFrom") or "null")
-            if not isinstance(shards, list) or not all(isinstance(item, dict) for item in shards):
-                raise ValueError("Unavailable retained shard details")
-            errors = [
-                item["primaryError"]["reason"]
-                for item in shards
-                if isinstance(item.get("primaryError"), dict)
-                and isinstance(item["primaryError"].get("reason"), str)
-            ]
-            cause = (
-                "Unknown beyond the recorded errors"
-                if errors
-                else "No final failure recorded"
-                if row.get("exit_code") == 0 and row.get("invalid") == 0
-                else "Unknown; no recorded error explanation"
-            )
-        except (TypeError, ValueError):
-            errors, prior, cause = None, None, "Unknown; retained error details unavailable"
-        details.update(
-            id=row["id"],
-            roundId=row["round_id"],
-            manifestRevision=row["plan_revision"],
-            recordedRevisionIsCurrent=row["plan_revision"] == revision,
-            recordKind="Latest recorded completed ordinary review; excludes pending reservations",
-            exitCode=row["exit_code"],
-            invalid=row["invalid"],
-            findings=row["findings"],
-            shards=row.get("shards"),
-            recordedErrors=errors,
-            priorReshardReason=prior.get("reason") if isinstance(prior, dict) else None,
-            failureCause=cause,
-        )
-        inspection = "Inspect retained review: " + prefix + f'review "{row["id"]}"'
-    # CLI's existing adapter removes the " Next:" suffix. Keep observed facts
-    # and inspection before it; escape that delimiter inside untrusted JSON text.
-    encoded = json.dumps(details, ensure_ascii=False, sort_keys=True).replace(
-        " Next:", " Next\\u003a"
-    )
-    return (
-        f"Review budget used {total}/{max_total} "
-        f"total logical review attempts; current manifest {revision}. "
-        "No additional review launch is authorized by this exhausted request.\n"
-        f"Recorded review: {encoded}\n{inspection}"
-        " Next: Review remains held at the existing total cap. Inspect retained records and "
-        "findings --expand; repair within existing author scope, then refresh status. "
-        "Repair does not authorize another review; preserve spent attempts and limits."
-    )
 
 
 def _test_bodies(store: PlanStore, protected=None) -> str:
@@ -807,11 +693,10 @@ def _review_shard(
         directory = TemporaryDirectory(prefix="harness-roundtable-")
         if before_launch is not None or runner is None:
             checking_launch = True
-            reserved = before_launch is not None and before_launch() is True
-            if runner is None and not reserved:
-                review_budget.claim_planning_review_start(
-                    store, reviewer, limits={"timeout": timeout}
-                )
+            if before_launch is not None:
+                before_launch()
+            if runner is None:
+                require_approval(store, "B", dict(reviewer=reviewer))
             checking_launch = False
         attempted = True
         while True:
@@ -1334,14 +1219,11 @@ def _execution_context(store, request):
     identity = _executable_identity(executable) if executable else None
     if identity is None:
         raise ValueError("execution-reviewer-executable-unavailable")
-    # Explicit positive finite limits never infer reviewer authority from worker grants.
+    # A bounded attempt deadline never infers reviewer authority from worker grants.
     import math
 
     if (
-        any(
-            type(request[key]) is not int or request[key] < 1 for key in ("max_rounds", "max_total")
-        )
-        or type(request["timeout"]) not in (int, float)
+        type(request["timeout"]) not in (int, float)
         or not math.isfinite(request["timeout"])
         or request["timeout"] <= 0
     ):
@@ -1643,7 +1525,7 @@ def assess_execution_findings(store, **request):
         if _execution_context(store, request) != header["context"]:
             raise ValueError("execution-prelaunch-selection-changed")
         with TemporaryDirectory(prefix="harness-execution-review-") as cwd:
-            if not review_budget.admit_execution_assessment(store, header):
+            if not _admit_execution_assessment(store, header):
                 return store.execution_assessment_state()
             attempted = True
             response = _run(launch, Path(cwd), request["timeout"], raw=True)
@@ -1685,6 +1567,41 @@ def assess_execution_findings(store, **request):
     return store.commit_execution_assessment(header["registrationId"])
 
 
+def _admit_review(store, reviewer, run_id, revision, *, mocked=False):
+    with store._transaction():
+        if store.manifest_revision() != revision:
+            raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
+        if not mocked:
+            require_approval(store, "B", dict(reviewer=reviewer))
+        _table(store)
+        store.connection.execute(
+            "CREATE TABLE IF NOT EXISTS review_attempts (id TEXT PRIMARY KEY, "
+            "plan_revision TEXT, reviewer TEXT, provider TEXT)"
+        )
+        store.connection.execute(
+            "INSERT OR IGNORE INTO review_attempts VALUES (?, ?, ?, ?)",
+            (run_id, revision, reviewer["name"], reviewer["provider"]),
+        )
+
+
+def _admit_execution_assessment(store, header):
+    from codex_harness.core import acceptance_recovery as recovery
+
+    request, context = header["request"], header["context"]
+    with store._transaction():
+        if _execution_context(store, request) != context:
+            raise ValueError("execution-selection-raced-before-reservation")
+        if any(old["request"] == request and old["context"] == context
+               for _, old in _execution_events(store, "execution-assessment-reserved")):
+            return False
+        require_approval(store, "B", dict(reviewer=request["reviewer"]))
+        root = _execution_directory(store, header["registrationId"])
+        root.mkdir(parents=True, exist_ok=False)
+        recovery._write(root, "packet", header["packet"].encode("utf-8"))
+        store._event("execution-assessment-reserved", header)
+    return True
+
+
 def run_roundtable(
     store: PlanStore,
     *,
@@ -1692,8 +1609,6 @@ def run_roundtable(
     runner=None,
     executable_for=None,
     timeout=900,
-    max_rounds=review_budget.DEFAULT_REVIEW_ROUNDS,
-    max_total=None,
     token_budgets=None,
 ) -> dict:
     """Run provider-normal reviews, then atomically store findings and the result.
@@ -1710,10 +1625,6 @@ def run_roundtable(
         raise ValueError(
             "Review requires a compilable manifest: add validation and requirementFiles"
         )
-    if type(max_rounds) is not int or max_rounds < 1:
-        raise ValueError("max-rounds must be a positive integer")
-    if max_total is not None and (type(max_total) is not int or max_total < 1):
-        raise ValueError("max-total must be a positive integer")
     report = quality_report(store)
     selected = (
         require_approval(store, "B")["subject"]["reviewers"]
@@ -1727,14 +1638,13 @@ def run_roundtable(
         "crossSubscription": len({reviewer["provider"] for reviewer in selected}) > 1,
         "findings": 0,
         "invalid": 0,
-        "maxRounds": max_rounds,
-        "maxTotal": max_total,
     }
     runs = []
     identities = [(item["name"], item["provider"]) for item in selected]
-    reservations = {}
     if len(identities) != len(set(identities)):
         raise ValueError("Duplicate reviewer in roundtable")
+    if runner is None:
+        require_reviewers(store, selected)
     dossiers = {
         provider: packet_shards(
             store, provider, report=report, token_budget=(token_budgets or {}).get(provider)
@@ -1742,37 +1652,11 @@ def run_roundtable(
         for provider in dict.fromkeys(item["provider"] for item in selected)
     }
     bind_review_dossiers(store, dossiers, selected, invocation_id=result["roundId"])
-    for reviewer in selected:
-        review_budget.review_capacity(store, reviewer, revision, max_rounds, max_total)
-        if runner is None:
-            require_approval(
-                store,
-                "B",
-                dict(
-                    reviewer=reviewer,
-                    reviewLimits=dict(maxRounds=max_rounds, maxTotal=max_total, timeout=timeout),
-                ),
-            )
     result.update(coverage(selected))
-    for reviewer in selected:
-        reservations[(reviewer["name"], reviewer["provider"])] = uuid4().hex
     for reviewer in selected:
         started_at = _now()
         record = {**reviewer, "exitCode": 0, "findings": 0, "invalid": 0, "rejected": []}
-        run_id = reservations[(reviewer["name"], reviewer["provider"])]
-
-        def admit(reviewer=reviewer, record=record, run_id=run_id):
-            record["round"], record["total"] = review_budget.admit_review(
-                store,
-                reviewer,
-                run_id,
-                revision,
-                max_rounds,
-                max_total,
-                timeout,
-                mocked=runner is not None,
-            )
-            return True
+        run_id = uuid4().hex
 
         result["reviewers"].append(record)
         provider = reviewer["provider"]
@@ -1787,7 +1671,7 @@ def run_roundtable(
             token_budget=(token_budgets or {}).get(provider),
             report=report,
             shards=dossiers[provider],
-            before_launch=admit,
+            before_launch=lambda: _admit_review(store, reviewer, run_id, revision, mocked=runner is not None),
         ):
             if shard_record["invalid"] and not record["rejected"]:
                 record["exitCode"] = shard_record["exitCode"]

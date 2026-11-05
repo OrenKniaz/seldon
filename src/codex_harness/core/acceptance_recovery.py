@@ -346,17 +346,10 @@ class ReviewAttempt:
 
         if not mocked:
             from codex_harness.core import approvals
-            from codex_harness.core import provider_call_budget as budget
 
             with store._transaction():
                 for reviewer in selected:
-                    record = approvals.require_approval(
-                        store, "B", dict(reviewer=reviewer, reviewLimits={"timeout": 900})
-                    )
-                    if budget.usage(store, "review") >= record["subject"]["reviewAllowance"]:
-                        budget._reserve(
-                            store, "review", record["subject"]["reviewAllowance"], reviewer
-                        )
+                    approvals.require_approval(store, "B", dict(reviewer=reviewer))
         attempt = attempt_id or uuid4().hex
         root = _directory(store, attempt)
         _safe(root, root)
@@ -417,6 +410,8 @@ class ReviewAttempt:
     def capture(self, reviewer, shard, launch, executable, response):
         if self.abandoned:
             return
+        from codex_harness.core.planner_review import ensure_active
+
         try:
             slots = [slot for slot in self.header["slots"] if slot["reviewer"] == reviewer]
             position = self.next_slot.get(reviewer["name"], 0)
@@ -450,6 +445,7 @@ class ReviewAttempt:
                 "stderr": _write(self.root, slot["id"] + ".stderr", stderr.encode("utf-8")),
             }
             with self.store._transaction():
+                ensure_active(self.store, self.id)
                 if _events(self.store, STARTED, self.id) != [(self.event_id, self.header)]:
                     raise ValueError("Review registration changed or is ambiguous")
                 if any(
@@ -537,6 +533,11 @@ class ReviewAttempt:
 
     def read_returns(self):
         """Validate sealed originals independently of current product freshness."""
+        from codex_harness.core.planner_review import ensure_active
+
+        ensure_active(self.store, self.id)
+        if _events(self.store, ABANDONED, self.id):
+            raise ValueError("review-originals-quarantined")
         header = self.header
         completions = _events(self.store, COMPLETED, self.id)
         slots = header["slots"]

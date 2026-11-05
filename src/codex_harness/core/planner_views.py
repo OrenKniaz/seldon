@@ -55,8 +55,6 @@ def execution_assessment_contract():
             expected_manifest_revision=string,
             expected_product_run_id=string,
             reviewer=reviewer,
-            max_rounds=dict(type="integer", minimum=1),
-            max_total=dict(type="integer", minimum=1),
             timeout=dict(type="number", exclusiveMinimum=0),
         )
     )
@@ -98,7 +96,7 @@ def execution_assessment_contract():
             choices="harness_accept_assess prepare={} / accept-assess --prepare",
             selection="Select returned finding_ids/bead_id, implicated artifacts and witnesses",
             reviewer="Authorized name/provider/model/effort; no catalog or entitlement inferred",
-            limits="Finite positive max_rounds/max_total/timeout; worker grants exclude reviews",
+            limits="Finite positive timeout; current B authorizes the exact reviewer",
         ),
         output=dict(
             preparation="requestTemplate, artifacts/witnesses/choices and unavailable reasons",
@@ -321,18 +319,11 @@ def review_policy_next(policy: dict, *, cli_prefix=None) -> str:
             if cli_prefix is not None
             else "harness_review_policy"
         )
-    if policy["closureFindings"]:
-        return (
-            "Hold: targeted per-member assessment and observed-separation producers "
-            "are unavailable; "
-            "declarations, linked records and legacy [] do not certify semantic repair. "
-            "Inspect retained findings/declarations; no automatic retry or scope waiver."
-        )
     return (
         "Hold: "
         + ", ".join(policy["reasons"])
         + "; inspect actual review details and retry only declared required slots within existing "
-        "authorization/caps. Unlisted attempts cannot be made optional after failure."
+        "authorization. Unlisted attempts cannot be made optional after failure."
     )
 
 
@@ -442,6 +433,7 @@ def continuation_projection(status: dict, resolution: dict) -> dict:
 def review_resolution_state(store, status: dict) -> dict:
     """Read existing canonical facts; advisory only, never a loop or admission lease."""
     from codex_harness.core.plan_quality import _roundtable
+    from codex_harness.core.roundtable import _binding_fields
 
     def known(value):
         return (
@@ -461,7 +453,6 @@ def review_resolution_state(store, status: dict) -> dict:
         "deferredFindings": None,
         "audit": {"current": None, "proofLevel": None},
         "review": {"current": None, "successfulReviewIds": None},
-        "budget": {"reservation": "unknown_to_product", "owner": "host_consumer"},
         "scope": (
             "Host-driven plan resolution/publication guidance; not worker or product acceptance."
         ),
@@ -533,7 +524,8 @@ def review_resolution_state(store, status: dict) -> dict:
             if state["audit"]["proofLevel"] not in {None, "prospective", "oracle-verified"}:
                 raise ValueError("Unknown recorded audit mode")
             ids = [row["id"] for row in reviews]
-            state["review"] = {"current": prerequisite["complete"], "successfulReviewIds": sorted(ids)}
+            state["review"] = {"current": prerequisite["complete"], "successfulReviewIds": sorted(ids),
+                               "reviewers": [_binding_fields(row) for row in reviews]}
             if any(row.get("carriedForward") for row in reviews):
                 state["review"].update(
                     carriedForward=True, message="review current (carried forward after repairs)"
@@ -869,10 +861,10 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
                     if cli_prefix is not None
                     else review_command
                 )
-                + " within host-reserved capacity and existing round/total caps; refresh "
+                + "; refresh "
                 + refresh
             )
-        return review_command + " within host-reserved capacity; refresh " + refresh
+        return review_command + "; refresh " + refresh
     if kind == "attempt_phase_advance":
         return (
             (
@@ -1169,7 +1161,6 @@ def roundtable_card(result: dict, rows: list[dict]) -> str:
             {
                 "Revision": result["planRevision"],
                 "Cross-subscription": result["crossSubscription"],
-                "Round budget": f"{result.get('maxRounds', 2)} per reviewer per revision",
                 "Reviewers": [
                     f"{row['name']}: exit {row['exitCode']}; {row['invalid']} invalid; "
                     f"{row['findings']} findings"
@@ -1293,19 +1284,16 @@ def _gate_lines(status: dict) -> list[str]:
     else:
         audit_text = "not run yet" if phase_index < PHASES.index("roundtable") else "unknown"
     review = resolution.get("review") or {}
-    rounds = "; ".join(f"{row['reviewer']}: {row['text']}" for row in status["roundtable"])
     if review.get("current"):
-        review_text = "✓ current" + (f" · {rounds}" if rounds else "")
+        review_text = "✓ current"
         if review.get("carriedForward"):
             review_text = review["message"]
         if review.get("qualityStatus") in {"warn", "fail"} and review.get("advice"):
             review_text += f" · ⚠ {_short(review['advice'], 140)}"
     elif review.get("current") is False:
-        review_text = "needs a fresh review of the current version" + (
-            f" (last: {rounds})" if rounds else ""
-        )
+        review_text = "needs a fresh review of the current version"
     else:
-        review_text = rounds or "not yet"
+        review_text = "not yet"
     publication = status.get("publication") or {}
     if publication.get("up_to_date"):
         published = f"✓ up to date ({_short_revision(status['published_revision'])})"
@@ -1375,7 +1363,7 @@ def status_card(status: dict, questions: list[dict]) -> str:
 def status_details(status: dict) -> list[str]:
     """Compact footer lines: short ids and recorded review scope for the agent."""
     scopes = sorted(
-        {review_scope(review) for row in status["roundtable"] for review in row.get("reviews", [])}
+        {review_scope(review) for review in status.get("reviewResolution", {}).get("review", {}).get("reviewers", [])}
     )
     return [
         f"- Pending gate: {status['pending_gate'] or 'none'}",

@@ -5,10 +5,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+from datetime import datetime
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from codex_harness.core.record_io import open_record_read, write_record_json_once
+from codex_harness.core.record_io import open_record_read, read_record_json, write_record_json_once
 
 SCHEMA = "seldon/local-process-provenance-v1"
 SCHEMA_V2 = "seldon/local-process-provenance-v2"
@@ -285,3 +287,100 @@ def read_and_compare(
             **observation("unavailable", "attempt-provenance-unavailable"),
             "detail": f"{type(error).__name__}: {error}",
         }
+
+
+def bind_run(directory, plan_dir, run_dir, *, resume=False, retry_options=None):
+    from codex_harness.core import planner_jobs as jobs
+    from codex_harness.core.dispatch import (
+        STATUS_MOCK_ONLY,
+        STATUS_VALIDATED,
+        STATUS_VALIDATED_NO_INTEGRATION,
+    )
+
+    directory = Path(directory).resolve()
+    request = jobs.verify_job(directory)
+    run_dir, plan_dir = Path(run_dir).resolve(), Path(plan_dir).resolve()
+    if (
+        plan_dir != directory / "plan"
+        or run_dir.parent != directory / "runs"
+    ):
+        raise ValueError("provider-call-fixed-job-run-required")
+    jobs._inside(directory, run_dir)
+    if resume:
+        original = read_record_json(jobs._inside(directory, directory / "dispatch-run.json"))
+        if original != {
+            "requestDigest": request["requestDigest"],
+            "runDir": str(run_dir),
+            "pid": os.getpid(),
+        }:
+            raise ValueError("provider-call-original-resume-required")
+        with open_record_read(jobs._inside(directory, run_dir / "evidence/run.json")) as stream:
+            raw = stream.read()
+        previous = json.loads(raw.decode("utf-8"))
+        status = previous.get("status")
+        terminal = isinstance(status, str) and (
+            status in {STATUS_MOCK_ONLY, STATUS_VALIDATED, STATUS_VALIDATED_NO_INTEGRATION, "pending-build"}
+            or (status.startswith("plan-failed: ") and bool(status[len("plan-failed: ") :].strip()))
+        )
+        try:
+            finished = datetime.fromisoformat(previous.get("finishedAt"))
+            timestamp_valid = finished.tzinfo is not None and finished.utcoffset() is not None
+        except (TypeError, ValueError):
+            timestamp_valid = False
+        if not terminal or not timestamp_valid:
+            raise ValueError("provider-call-terminal-original-required")
+        digest = hashlib.sha256(raw).hexdigest()
+        claims = jobs._inside(directory, directory / "dispatch-resume")
+        claims.mkdir(exist_ok=True)
+        write_record_json_once(
+            claims / (digest + ".json"),
+            {
+                **original,
+                "priorRunSha256": digest,
+                "retryOptions": retry_options or {},
+            },
+        )
+        return
+    write_record_json_once(
+        directory / "dispatch-run.json",
+        {
+            "requestDigest": request["requestDigest"],
+            "runDir": str(run_dir),
+            "pid": os.getpid(),
+        },
+    )
+
+
+def verify_attempt(directory, record, attempt_dir, *, timeout=None):
+    from codex_harness.core import planner_jobs as jobs
+
+    directory = Path(directory).resolve()
+    request = jobs.verify_job(directory, record)
+    if timeout is not None and (
+        not jobs._valid_timeout(timeout) or timeout != request["options"]["timeout"]
+    ):
+        raise ValueError("provider-call-timeout-scope-mismatch")
+    original = read_record_json(jobs._inside(directory, directory / "dispatch-run.json"))
+    attempt_dir = Path(attempt_dir).resolve()
+    run_dir = jobs._inside(directory, Path(original["runDir"]))
+    if (
+        original.get("requestDigest") != request["requestDigest"]
+        or not attempt_dir.is_relative_to(run_dir)
+        or (
+            run_dir.parent != directory / "runs"
+            or original.get("pid") != os.getpid()
+            or record.get("runId") != run_dir.name
+        )
+    ):
+        raise ValueError("provider-call-run-binding-mismatch")
+    from codex_harness.core.plan_store import open_plan_store
+
+    with open_plan_store(directory.parent.parent.parent) as store:
+        with store._transaction():
+            from codex_harness.core.approvals import require_approval
+
+            require_approval(
+                store,
+                "B",
+                dict(execution=request["executionScope"]),
+            )

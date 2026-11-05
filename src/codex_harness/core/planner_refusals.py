@@ -2,7 +2,6 @@
 
 import json
 import re
-import sqlite3
 
 TEACHING = (
     "Never read, search or execute Seldon's implementation or runtime files. "
@@ -27,28 +26,6 @@ RULES = [
         "plan-a-consent-required plan-b-consent-required",
         "The requested work lacks current consent.",
         "Consent must match the complete current A or B subject, candidate and limits.",
-        None,
-    ),
-    (
-        (
-            "roundtable-total-budget-exhausted roundtable-budget-exhausted "
-            "execution-shared-review-budget-exhausted"
-        ),
-        "The requested review limits are exhausted.",
-        "Spent and uncertain starts remain counted; preparation and refusal reserve nothing.",
-        "ask the user to decide on higher cumulative limits through a fresh B question.",
-    ),
-    (
-        (
-            "usage-migration-missing-review-claims usage-migration-inconsistent-review-claims "
-            "usage-migration-worker-original-invalid usage-migration-worker-claims-inconsistent "
-            "usage-migration-worker-claim-invalid usage-migration-admission-original-invalid "
-            "usage-ledger-missing-after-conversion planning-review-budget-invalid-original "
-            "worker-execution-limits-invalid "
-            "worker-job-call-cap-required planning-review-policy-invalid"
-        ),
-        "The requested limits or retained usage originals are invalid.",
-        "Execution requires valid B limits and intact cumulative admission records.",
         None,
     ),
     (
@@ -146,10 +123,6 @@ def refusal_text(text, workspace, values):
                     "status",
                     "gate",
                     "reasonCode",
-                    "maxStarts",
-                    "spentAdmissions",
-                    "callCap",
-                    "providerCallCap",
                     "liveness",
                     "dispatchStatus",
                     "targetedAssessment",
@@ -178,7 +151,7 @@ def refusal_text(text, workspace, values):
         and previous.startswith(("harness_", "Ask the user", "ask the user"))
     ):
         action = previous
-    current.setdefault("unreported values", "unknown; no allowance or approval inferred")
+    current.setdefault("unreported values", "unknown; no approval inferred")
     action = action or (
         f"harness_plan_status expected_workspace={json.dumps(str(workspace))}"
         "; read-only; inspect the reported blocker for the supported next step. "
@@ -231,18 +204,6 @@ def refusal_code(text, values):
     if inner and inner[1] in MESSAGES:
         return inner[1]
     return coded[1] if coded else "tool-input-or-operation-error"
-
-
-def refusal_context(server, failed, message, code):
-    from codex_harness.core.provider_call_budget import planning_review_budget
-
-    values = {"result": server.result_data, "code": code}
-    if failed and server.store and any(word in message for word in ("budget", "cap-exhausted")):
-        try:
-            values["budget"] = planning_review_budget(server.store)
-        except (ValueError, OSError, sqlite3.Error):
-            values["budget"] = {"state": "unknown"}
-    return values
 
 
 def compact_refusal(name, reply, workspace, status, data):
