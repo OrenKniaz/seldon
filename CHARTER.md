@@ -74,15 +74,15 @@ Retros and the improvement pipeline (amendments to Seldon itself, lessons from i
 - **CC** sends Oren a weekly 1-page audit: C1–C26 × present/partial/missing + evidence, open Deviations, drift alerts.
 - **Deviations:** CC may open one (owner, expiry ≤ 7 days, restore plan) and notifies Oren the same day; Oren may veto. At expiry: restore, or Oren ratifies a charter change.
 
-## 8. Deviation register (registered 2026-11-04 by CC, Oren notified the same day; expiry 7 days; restore stages from the Oren-approved reset plan `work/ladder/design-review/astra-reset-1.md`)
+## 8. Deviation register (registered 2026-11-04 by CC, Oren notified the same day; expiry 7 days; DV2/3/5/6/8/9 re-dated by Oren 2026-11-05 to 2026-11-18, conditional on 2a landing + a real ShelfLife run within 24h and 2b/2d running in parallel; restore stages from the Oren-approved reset plan `work/ladder/design-review/astra-reset-1.md`)
 | ID | Breaks | What | Owner | Expires | Restore by |
 |---|---|---|---|---|---|
 | DV1 | C9, I7 | semantic-v1 has no test nodes in the trace graph | CC | 2026-11-11 | Stage 1a |
-| DV2 | C12, I7 | semantic-v1: exactly 2 serial beads, max_parallel=1 | CC | 2026-11-11 | Stage 3a |
-| DV3 | C17 | semantic-v1 rejects waves; waves only in legacy mode | CC | 2026-11-11 | Stage 3b |
+| DV2 | C12, I7 | semantic-v1: exactly 2 serial beads, max_parallel=1 | CC | 2026-11-18 | Stage 3a |
+| DV3 | C17 | semantic-v1 rejects waves; waves only in legacy mode | CC | 2026-11-18 | Stage 3b |
 | DV4 | I1, I3, C14 | closed scenario vocabulary; stub-marker RED; AST test audit | CC | 2026-11-11 | Stages 1c+2a |
-| DV5 | C1, C16 | the planner choreographs transitions; steering is advisory heuristics | CC | 2026-11-11 | Stages 2c+3b |
-| DV6 | C15 | no full-dream completeness check (finite scenarios only) | CC | 2026-11-11 | Stage 4a |
+| DV5 | C1, C16 | the planner choreographs transitions; steering is advisory heuristics | CC | 2026-11-18 | Stages 2c+3b |
+| DV6 | C15 | no full-dream completeness check (finite scenarios only) | CC | 2026-11-18 | Stage 4a |
 | DV7 | C11 | "two reviewers" can be the same model tuple, with no label | CC | 2026-11-11 | Stage 2a |
-| DV8 | C8 | B/review/call budgets exist in the product (v1 has no budget) | CC | 2026-11-11 | Stage 2b |
-| DV9 | — | two execution models (legacy + semantic) coexist | CC | 2026-11-11 | Stage 3d |
+| DV8 | C8 | B/review/call budgets exist in the product (v1 has no budget) | CC | 2026-11-18 | Stage 2b |
+| DV9 | — | two execution models (legacy + semantic) coexist | CC | 2026-11-18 | Stage 3d |
