@@ -516,19 +516,14 @@ def build_packet(
     if plan.semantic is not None:
         phase = raw_bead["semanticPhase"]
         instruction = (
-            "Write minimal index.html with DOM text SELDON-STUB <operation> for each declared "
-            "operation. Omit positive asserted content so every journey fails assertVisible; "
-            "do not implement interactions yet."
+            "Write meaningful semantic integration/E2E tests for the declared requirements in "
+            "owned files. Run them against current behavior; report the command, observed "
+            "behavioral RED and why it fails. Preserve baseline GREEN. Never manufacture RED "
+            "with markers, forced exit codes or deliberate startup errors."
             if phase == "contracts"
-            and any(t.get("kind") == "web" for t in plan.semantic["targets"].values())
-            else "Write interface stubs and any harness. EVERY operation exits 3 and writes "
-            "exactly one stderr line SELDON-STUB <operation>, using the declared operation. "
-            "Write SELDON-STUB <operation> for the declared operation to stderr and exit 3 before "
-            "argument parsing, importing product modules, or product I/O. "
-            "Do not print unrelated operation markers."
-            if phase == "contracts"
-            else "Implement the product and your own unit tests. Preserve scenario data, contracts "
-            "and launch bindings. The controller runs identical scenarios for Validation."
+            else "Implement the product to make the same semantic tests GREEN. Preserve tests, "
+            "scenario data, contracts and launch bindings; report observed results. "
+            "The controller runs identical tests and scenarios for Validation."
         )
         if any(t.get("kind") == "web" for t in plan.semantic["targets"].values()):
             instruction += (
@@ -546,8 +541,8 @@ def build_packet(
                 "Never edit: " + ", ".join(plan.requirement_files),
                 "Stay in this worktree. Do not install, commit, push, read credentials or expand "
                 "permissions. Host/tool/sandbox denials block equivalent routes: stop and report. "
-                "Workers cannot submit verdicts or approve themselves. Report unit test results "
-                "and blockers. For every test name the behavior, regression and missing coverage.",
+                "Workers cannot submit verdicts or approve themselves. No unit tests. Report "
+                "results and blockers. For every test name the behavior, regression and missing coverage.",
                 json.dumps(raw_bead, sort_keys=True),
                 # SCENARIOS.json already carries the manifest's semantic block verbatim.
                 *(
@@ -811,8 +806,7 @@ def build_packet(
         "Reject tests that restate the implementation: copied constants or text, mirrored "
         "logic, source-reading assertions, self-comparisons, mocks that supply the asserted "
         "behavior, call-shape-only checks, and production seams added only for tests.\n"
-        "Prefer extending an existing journey/E2E test over adding unit tests; add a unit "
-        "test only for a distinct invariant no journey reaches.\n"
+        "Extend meaningful semantic integration/E2E tests only; no unit tests.\n"
         "Workers: for every new or changed test, name the protected behavior and a credible "
         "regression. Put one primary regression at the strongest owning boundary; add another "
         "layer only for a distinct uncovered risk. For repairs, show a real failure before the "

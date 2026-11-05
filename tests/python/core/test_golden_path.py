@@ -19,19 +19,38 @@ if __name__ == "__main__":
 
 
 ROOT = Path(__file__).resolve().parents[3]
+pytestmark = pytest.mark.fast
 
 
 
-def scripted_judgment(call, judgment, meaning, verdict="positive", gaps=None, response=None):
-    """Script a semantic provider reply; the real store owns binding and consumption."""
+def scripted_judgment(call, judgment=None, meaning=None, verdict="positive", gaps=None, response=None,
+                      *, rationale="Scripted fixture assessment; no actual provider or human authentication",
+                      **request):
+    """One test-only provider for any 1j question, with explicit semantics supplied by its caller.
+
+    Pass a prepared request or public prepare arguments. Never infer approval, equivalence,
+    reuse, continuation or acceptance from an empty response; the real 1j owner decides
+    binding, pending state and exact-fix disposition. Raw replies exercise that same owner.
+    """
+    if judgment is None:
+        judgment = call("harness_prepare_judgment", **request)
     reply = call("harness_submit_judgment", judgment_id=judgment["id"],
                 response=response if response is not None else json.dumps(dict(judgmentId=judgment["id"], binding=judgment["binding"],
-                    verdict=verdict, rationale="Scripted fixture assessment; no actual provider or human authentication",
+                    verdict=verdict, rationale=rationale,
                     meaning=meaning, gaps=gaps or [])), source="golden:scripted-semantic-provider")
     current = call("harness_judgment", judgment_id=judgment["id"],
                    **({"candidate": judgment["candidate"]} if judgment.get("candidate") else {}))
     assert current["binding"] == judgment["binding"]
     return dict(reply, current=current)
+
+
+def scripted_worker(packet, root, files):
+    """Script worker-authored files in response to the delivered packet, never proof results."""
+    instructions = packet.split("\n\n")[1]
+    assert "SELDON-STUB" not in instructions and "exits 3" not in instructions, instructions
+    assert "unit tests" not in instructions, instructions
+    for name, source in files.items():
+        (root / name).write_text(source, encoding="utf-8")
 
 
 def settle_decision(call, outcome, decision="approve"):
@@ -213,14 +232,16 @@ def planning_intent_golden(workspace):
 def execution_judgment_golden(workspace):
     """Protect compiled worker tests -> real observations -> stored, bound 1j verdicts.
 
-    Catch marker-only RED, source/domain refusal, lost brownfield GREEN, wrong-reason
-    RED and missing-judgment FAIL. Trace-only 1a and record-only 1j never execute a
-    worker test. Only judge replies are scripted; all exits/output/cleanup are real.
+    Catch packet-requested marker RED, source/domain refusal, lost brownfield GREEN,
+    wrong-reason RED and missing-judgment FAIL. Earlier coverage hand-wrote the verifier
+    without consuming a generated packet. Worker files and judge replies are scripted;
+    compiled execution commands, exits/output, candidate binding and cleanup are real.
     """
     from codex_harness.core.mcp_planner import PlannerServer
     from codex_harness.core.graph import load_plan
     from codex_harness.core.planner_candidate import _semantic_validation, assess_execution
     from codex_harness.core.runners import execution_witnesses
+    from codex_harness.core.worker_packet import build_packet
     from tests.python.core.mcp_planner_support import workspace_wire
     from tests.python.core.semantic_wiring_support import node
 
@@ -266,7 +287,7 @@ def execution_judgment_golden(workspace):
             node('T_NEW', 'test', ['R_NEW'], module='verify.unfamiliar', level='semantic',
                  execution=dict(argv=[sys.executable, '-B', 'verify.unfamiliar'],
                                 rationale='Observe both channels from the candidate data path')),
-            node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat'], dependsOn=[],
+            node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat', 'verify.unfamiliar'], dependsOn=[],
                  lessons=[], semanticPhase='contracts'),
             node('B', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat'], dependsOn=['C'],
                  lessons=[], semanticPhase='build'),
@@ -278,7 +299,6 @@ def execution_judgment_golden(workspace):
         (product / 'channels.dat').write_text('missing')
         (product / 'baseline.sensor').write_text(
             "print('SELDON-STUB is a diagnostic string, baseline remains GREEN')\n")
-        (product / 'verify.unfamiliar').write_text("raise RuntimeError('verifier startup failed')\n")
         (product / 'payload.binary').write_bytes(b'x' * 262145)
         for index in range(130):
             (product / f'asset-{index}.opaque').write_text(str(index))
@@ -288,16 +308,24 @@ def execution_judgment_golden(workspace):
         compiled.mkdir()
         (compiled / 'sample.json').write_text(json.dumps(manifest), encoding='utf-8')
         plan = load_plan(compiled)
+        for name in plan.requirement_files:
+            (product / name).write_bytes((template / name).read_bytes())
         git('init', '-q')
         git('add', '.')
         git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'baseline')
+        def worker(bead, files):
+            packet = build_packet(plan, dict(manifest['beads'][bead], id=bead), product, None)
+            scripted_worker(packet, product, files)
+
+        worker('C', {'verify.unfamiliar': "raise RuntimeError('verifier startup failed')\n"})
         broken = _semantic_validation(product, plan, {}, 'contracts')
         assert broken['observedState'] == 'RED' and broken['state'] == 'pending-judgment'
         request = retain(broken)
         gap = judge(request, broken, 'negative', ['Verifier fails during startup before reading channels'])
         rejected = assess_execution(broken, gap)
         assert rejected['state'] == 'FAIL' and not rejected['admitted'] and rejected['gaps']
-        (product / 'verify.unfamiliar').write_text(
+        worker('C', {'verify.unfamiliar':
+            "# Behavior: both channels; catches missing readback; baseline covers only startup.\n"
             "from pathlib import Path\nimport sys\n"
             "assert Path('payload.binary').stat().st_size == 262145\n"
             "assert len(list(Path('.').glob('asset-*.opaque'))) == 130\n"
@@ -305,7 +333,7 @@ def execution_judgment_golden(workspace):
             "print('observed channels:', actual)\n"
             "if actual != 'ready:42,84':\n"
             "    print('missing behavior: both channel values', file=sys.stderr)\n"
-            "    sys.exit(2)\n")
+            "    sys.exit(2)\n"})
         git('add', '.')
         git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker test')
         red = _semantic_validation(product, plan, {}, 'contracts')
@@ -319,7 +347,7 @@ def execution_judgment_golden(workspace):
                                              candidate=red['candidate']))['admitted']
         red = assess_execution(red, judge(request, red, 'positive'))
         assert red['state'] == 'RED' and red['admitted']
-        (product / 'channels.dat').write_text('ready:42,84')
+        worker('B', {'channels.dat': 'ready:42,84'})
         git('add', '.')
         git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker implementation')
         green = _semantic_validation(product, plan, {'contractsRed': red}, 'build')
@@ -419,6 +447,26 @@ def judgment_contract_golden(workspace):
         assert not credited["sourceVerified"] and credited["owner"] is None
         assert not read(pending)["positiveCredit"]
         assert not read(pending, candidate="sensor-candidate-2")["positiveCredit"]
+        # Stage 2 shares this provider, not a separate review/reuse/loop judge store.
+        # A reply of the wrong shape must still be repaired by canonical 1j below.
+        # Earlier fixtures only supplied execution and consent meanings.
+        for question, meaning in (
+            ("Does the revised plan address the readback gap?",
+             dict(reviewVerdict="changes-requested", rationale="Second channel is still absent")),
+            ("Are the findings equivalent and may this revision reuse the old review?",
+             dict(equivalent=False, reuse=False, memberDispositions={"channel-gap": "open"})),
+            ("What should the loop do after this observed failure?",
+             dict(action="repair", reason="Readback has an observed missing channel")),
+            ("Does this candidate meet the accepted dream and quality bar?",
+             dict(complete=False, noStubMockGaps=True, qualityBarMet=False)),
+        ):
+            result = scripted_judgment(call, question=question, subject_ids=["R1"],
+                evidence_ids=["E1"], source_event_ids=[event_id], meaning=meaning,
+                verdict="negative", gaps=["Second-channel readback is absent"])
+            reload()
+            retained = read(result["current"], candidate="sensor-candidate-1")
+            assert retained["concreteGap"] and not retained["positiveCredit"]
+            assert retained["meaning"] == meaning and retained["question"] == question
         # An unrelated addition must not discard a bound semantic decision.
         call("harness_upsert_node", node=node("OTHER", "feature", ["V1"]))
         assert read(pending, candidate="sensor-candidate-1")["positiveCredit"]
@@ -1086,18 +1134,13 @@ with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
             if semantic:
                 # C must consume the admitted job's real root delivery. Standalone
                 # dispatch proves scenarios, but never supplies that delivery.
-                contract_sources = {}
-                for filename, operation in (
-                    ("import_items.py", "import"),
-                    ("verify_http.py", "read"),
-                ):
-                    contract_sources[filename] = (
-                        "import sys\nprint('SELDON-STUB ' + "
-                        "('import-unreadable' if 'missing.csv' in ' '.join(sys.argv) "
-                        "else 'import-mixed'), file=sys.stderr)\nsys.exit(3)\n"
-                        if operation == "import"
-                        else "import sys\nprint('SELDON-STUB read', file=sys.stderr)\nsys.exit(3)\n"
-                    )
+                contract_sources = {
+                    # The ordinary importer loses rows with optional unit/date fields.
+                    # HTTP readback and row-count expectations expose the missing behavior.
+                    "import_items.py": importer.replace(
+                        "if valid(row)", "if valid(row) and row['unit'] and row['expires']"),
+                    "verify_http.py": verifier,
+                }
                 (workspace / "scripted-provider.json").write_text(
                     json.dumps(
                         {
@@ -1238,8 +1281,12 @@ def provider_host(mode, workspace, surface, job_id=None):
 
     def write_shelflife(root, phase):
         payload = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))
-        for name, text in payload[phase].items():
-            (root / name).write_text(text, encoding="utf-8")
+        scripted_worker(packet(root, "C" if phase == "contracts" else "B"), root, payload[phase])
+
+    def packet(root, bead):
+        record = json.loads((root.parent / "evidence/run.json").read_text(encoding="utf-8"))
+        request = Path(record["beads"][bead]["evidenceDir"]) / "attempt/request.json"
+        return json.loads(request.read_text(encoding="utf-8"))["prompt"]
 
     def contracts(root):
         if surface == "shelflife":
@@ -1249,21 +1296,12 @@ def provider_host(mode, workspace, surface, job_id=None):
             (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
         else:
             (workspace / "valid-contracts-attempted").write_text("attempted", encoding="utf-8")
-        (root / filename).write_text(
-            "<!doctype html>"
-            + "".join(
-                f"<p>SELDON-STUB {op}</p>"
-                for op in ("content", "navigation", "faq-pointer", "faq-keyboard")
-            )
+        scripted_worker(packet(root, "C"), root, {filename:
+            "<!doctype html><title>HashSlip</title><h1>HashSlip</h1>"
             if surface == "web"
-            else "raise RuntimeError('broken stub')"
+            else "raise RuntimeError('receipt startup failed')"
             if first
-            else "import sys\n"
-            "operation = 'help' if sys.argv[1:] == ['--help'] else 'receipt' "
-            "if not sys.argv[1:] or sys.argv[1:2] == ['--label'] and len(sys.argv) == 3 "
-            "else 'usage'\nprint('SELDON-STUB ' + operation, file=sys.stderr)\nsys.exit(3)\n",
-            encoding="utf-8",
-        )
+            else "print('Receipt pending')\n"})
 
     def build(root):
         if surface == "shelflife":
@@ -1284,7 +1322,8 @@ def provider_host(mode, workspace, surface, job_id=None):
                 cwd=root,
             )
             child.wait()
-        (root / filename).write_bytes((ROOT / "tests/fixtures/efficiency" / filename).read_bytes())
+        scripted_worker(packet(root, "B"), root, {filename:
+            (ROOT / "tests/fixtures/efficiency" / filename).read_text(encoding="utf-8")})
         if surface == "web":
             with (root / filename).open("a", encoding="utf-8") as out:
                 out.write("<style>h1{background:linear-gradient(white,#fff)}</style>")
@@ -1355,7 +1394,7 @@ def test_golden_path(tmp_path, request, surface):
     No model catalog is supplied: discovery-unavailable must still reach C with three
     decisions and catalog: unverified in B and the real acceptance packet. Catalog-backed
     fixtures missed the farm deadlock before B; exact proposed tuples must reach launches.
-    Stub results are suite evidence only, never actual-provider acceptance.
+    Scripted provider results are suite evidence only, never actual-provider acceptance.
     Replay UX-5's captured Unicode upsert and survive an uncaught malformed tool
     request plus tool stdout noise; direct handle_line tests miss pipe death.
     Replay ShelfLife: lose an exited owner's receipt, then hang a real descendant
@@ -1731,7 +1770,7 @@ def test_golden_path(tmp_path, request, surface):
                     mode="resolve",
                     job_id=original,
                     choice="readmit",
-                    reason="Repair the failed Contracts stub",
+                    reason="Repair the observed Contracts startup failure",
                 )
                 assert "card" not in resolved
                 assert resolved["proof"]["verdict"] == "ABANDONED"

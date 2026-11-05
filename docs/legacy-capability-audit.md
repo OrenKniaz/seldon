@@ -1,5 +1,36 @@
 # Legacy capability audit for the local Seldon extraction
 
+STAGE-2P (C3/C4/C13/C14; uses DV4/DV9, preserves I1-I9): DESIGN — the
+worker-packet producer still requested deleted stub semantics. Siblings: web DOM
+markers, CLI exit 3 and Build/legacy unit-test instructions. Owner: worker_packet.
+Disposition: replaced with semantic integration/E2E tests, observed behavioral
+RED, baseline preservation and the same tests GREEN; web keeps real preview.
+The golden now consumes generated packets before scripting worker-authored files,
+runs the compiled ordinary verifier, rejects startup-error RED via canonical 1j,
+then admits behavioral RED and persisted GREEN with verified process cleanup.
+The shared test-only 1j provider accepts any question/evidence bindings and explicit
+review, equivalence/reuse, loop and acceptance meanings; existing schema, pending
+and two exact-fix retries remain canonical. This proves harness readiness, not the
+later consumers. Main CLI/web and ShelfLife worker replies no longer fabricate
+marker RED. The approval support's retained marker fixture remains outside this
+producer repair; it is not the required L0 packet/worker path. DV4 stays partial.
+Exit: final <=19-case marked fast/golden gate, then Stage 2a; L0 must use this
+actual packet/worker path after 2e under task-specific provider authorization.
+No actual providers, L0-L3 or full-vision acceptance claimed. Final gate outcome,
+runtime and exact patch identity: work/lanes/stage-2p-report.md.
+Final gate: 18 passed in 188.55s; browser golden FAILED in 6548.33s (wall
+6739.67s), waiting for #freshness containing "Last received:" at cockpit/checks.js:21.
+Status-server replies also logged WinError 10053; cause is unproven. Owner:
+cockpit/status_server; exit: bounded actual browser readback with current status.
+The 75-minute lane timebox is exhausted; no retry or out-of-lane repair attempted.
+BLOCKED, not ready for 2a; fast-gate <=600s acceptance is not met.
+Receipt inspection also found BUG — T_HTTP prints an empty HTTP body and exits 0
+while its server logs a SQLite error; siblings: none established. Owner: golden's
+worker-authored verifier; unresolved. Exit: self-contained importer/SQLite/HTTP
+assertion shows ordinary behavioral RED then GREEN through the admitted job.
+The readback packet/worker/1j path passed, but this weaker ShelfLife verifier must
+not be credited as that integrated semantic test. No ladder credit is granted.
+
 STAGE-1I (C2-C4/C8-C10/C14/C24/C26, I1-I6/I8/I9): DESIGN — the
 golden/journey provider had no bound semantic judge. Siblings: keyword A/B/C
 consent, AST audit tiers, marker RED, qualitative FAIL and Contracts admission.

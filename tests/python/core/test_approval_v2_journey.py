@@ -16,6 +16,7 @@ from codex_harness.core.plan_store import PHASES
 
 semantic_plan = semantic_wiring_support.semantic_plan
 web_plan = semantic_wiring_support.web_plan
+pytestmark = pytest.mark.fast
 
 
 @pytest.mark.parametrize(
