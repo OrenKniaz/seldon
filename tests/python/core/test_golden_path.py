@@ -2288,6 +2288,44 @@ def test_golden_path(tmp_path, request, surface):
                     (ROOT / "tests/fixtures/ux5-turn7-upsert.json").read_text("utf-8")
                 )
                 before = call("harness_show_node", id="V1")
+                # Regression: r5 guessed nested shapes/writer across five refusals;
+                # captured, already-valid plans never consumed public schema examples.
+                from copy import deepcopy
+                schema_nodes = {}
+                for kind in ("vision", "test", "bead"):
+                    guide = call("harness_schema", tool="harness_upsert_node", kind=kind)
+                    for prerequisite in guide["prerequisiteNodes"]:
+                        call("harness_upsert_node", node=prerequisite)
+                    call("harness_upsert_node", **guide["example"])
+                    example = guide["example"]["node"]
+                    schema_nodes[kind] = example
+                    saved = call("harness_show_node", id=example["id"])
+                    assert saved["fields"] == example["fields"]
+                batch = call("harness_schema", tool="harness_upsert_nodes")
+                call("harness_upsert_nodes", **batch["example"])
+                malformed_node = call("harness_upsert_node", node=[], allow_error=True)
+                assert all(word in malformed_node["content"][0]["text"] for word in ("arguments.node", "allowed keys", "harness_upsert_node"))
+                wrong = call("harness_accept_scenarios", scenarios=[], allow_error=True)
+                assert "upsert_node" in wrong["content"][0]["text"]
+                unknown = call("harness_schema", tool="semanticScenarios", allow_error=True)
+                assert "harness_upsert_node" in unknown["content"][0]["text"]
+                for field, value, path, allowed in (
+                    ("scenarios", [], "vision.fields.scenarios", "allowed keys"),
+                    ("setup", {"database": "guess"}, "vision.fields.scenarios.scenarios[0].setup", "snapshots"),
+                    ("verdict", "any", "vision.fields.scenarios.scenarios[0]", "verdict"),
+                    ("execution", {"argv": ["python"], "rationale": "check"}, "T1.fields.execution", "testRoots"),
+                ):
+                    malformed = deepcopy(schema_nodes["test" if field == "execution" else "vision"])
+                    target = malformed["fields"] if field in {"scenarios", "execution"} else malformed["fields"]["scenarios"]["scenarios"][0]
+                    target[field] = value
+                    retained = call("harness_show_node", id=malformed["id"])["fields"]
+                    refusal = call("harness_upsert_node", node=malformed, allow_error=True)
+                    message = refusal["content"][0]["text"]
+                    assert all(word in message for word in (path, allowed, "harness_upsert_node")), message
+                    assert call("harness_show_node", id=malformed["id"])["fields"] == retained
+                call("harness_upsert_node", node={k: before[k] for k in ("id", "kind", "title", "text", "parents", "fields")})
+                for node_id in ("B1", "T1", "R1", "F1"):
+                    call("harness_remove_node", id=node_id)
                 call("harness_upsert_node", node=captured["node"])
                 unvalidated = call("harness_plan_status")["acceptance"]["scenarios"]
                 assert any(
@@ -2313,8 +2351,8 @@ def test_golden_path(tmp_path, request, surface):
                 nodes = [n for n in nodes if n["id"] != "C"]
                 nodes.append(dict(id="T_RECEIPT", kind="test", title="Binary receipt", text="Verify exact bytes through the real CLI",
                     parents=["G1"], fields=dict(module="checks/verify_hashslip.py", level="semantic",
-                        execution=dict(argv=[sys.executable, "-B", "checks/verify_hashslip.py"], testRoots=["checks"],
-                                       rationale="Observe the worker's exact binary receipt through its process"))))
+                        execution={**schema_nodes["test"]["fields"]["execution"],
+                            "argv": [sys.executable, "-B", "checks/verify_hashslip.py"], "testRoots": ["checks"]})))
                 bead = next(n for n in nodes if n["id"] == "B")
                 bead["parents"] = ["T_RECEIPT"]
                 bead["fields"].update(dependsOn=[], ownedFiles=["hashslip.py", "checks/verify_hashslip.py", "checks/receipt_helper.py", "checks/input.json", "checks/retired.json"])

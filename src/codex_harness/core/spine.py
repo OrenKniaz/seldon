@@ -572,8 +572,8 @@ def semantic_spec(spine, product=None, *, draft=False):
     for field in ("scenarios", "targets"):
         if not isinstance(root.get(field), dict):
             raise ValueError(
-                f"Missing/malformed {field}; author vision.fields.{field} as an object. "
-                "See harness_schema kind=vision semanticScenarios."
+                f"vision.fields.{field}: expected object; allowed keys "
+                f"{['schema', 'scenarios'] if field == 'scenarios' else 'target IDs'}; use harness_upsert_node."
             )
     document, targets = root.get("scenarios"), root.get("targets", {})
     if isinstance(document.get("scenarios"), list):

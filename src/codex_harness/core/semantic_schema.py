@@ -38,7 +38,7 @@ def validate_trace_fields(node, nodes):
             raise ValueError(f"{node['id']}: supply revision-bound references as an array")
         seen = set()
         for ref in values:
-            fields(ref, ("id", "revision"), ("id", "revision"))
+            fields(ref, ("id", "revision"), ("id", "revision"), f"{node['id']}.fields.references")
             key, revision = ref["id"], ref["revision"]
             text(key)
             if (key not in nodes or key in seen or kinds and nodes[key]["kind"] not in kinds
@@ -56,7 +56,7 @@ def validate_trace_fields(node, nodes):
             raise ValueError("Existing-baseline provenance belongs to an ordinary feature")
         baseline = f["baseline"]
         required = ("source", "behavior", "rationale", "codeRefs", "testRefs", "resultRefs")
-        fields(baseline, required, required)
+        fields(baseline, required, required, f"{node['id']}.fields.baseline")
         for key in ("source", "behavior", "rationale"):
             text(baseline[key])
         for key in ("codeRefs", "testRefs", "resultRefs"):
@@ -131,7 +131,7 @@ def validate_trace_fields(node, nodes):
             text(value)
     if kind == "test" and "execution" in f:
         execution = f["execution"]
-        fields(execution, ("argv", "rationale", "testRoots"), ("argv", "rationale", "testRoots"))
+        fields(execution, ("argv", "rationale", "testRoots"), ("argv", "rationale", "testRoots"), f"{node['id']}.fields.execution")
         if any(not isinstance(execution[k], list) or not execution[k] for k in ("argv", "testRoots")):
             raise ValueError("Declare execution argv and complete testRoots (modules, helpers and fixtures)")
         from codex_harness.core.graph import _file_path, _string
@@ -142,11 +142,11 @@ def validate_trace_fields(node, nodes):
         text(execution["rationale"])
 
 
-def web_journey(v, targets, *, draft=False):
+def web_journey(v, targets, *, draft=False, label="vision.fields.scenarios.scenarios.actions.web"):
     fields(
         v,
         ("target", "operation", "viewport", "reducedMotion", "steps"),
-        ("target", "operation", "viewport", "reducedMotion", "steps"),
+        ("target", "operation", "viewport", "reducedMotion", "steps"), label,
     )
     if (
         type(v["target"]) is not str
@@ -154,7 +154,7 @@ def web_journey(v, targets, *, draft=False):
         and targets.get(v["target"], {}).get("kind") != "web"
     ):
         raise ValueError("Web journey requires a web target")
-    fields(v["viewport"], ("width", "height"), ("width", "height"))
+    fields(v["viewport"], ("width", "height"), ("width", "height"), f"{label}.viewport")
     if any(type(v["viewport"][k]) is not int or v["viewport"][k] <= 0
            for k in ("width", "height")):
         raise ValueError("Declare positive integer viewport dimensions")
@@ -164,7 +164,7 @@ def web_journey(v, targets, *, draft=False):
     if not steps or steps[0] != {"op": "open"}:
         raise ValueError("Journey must start with open")
     for index, step in enumerate(steps):
-        fields(step, ("op", "locator", "key", "fragment"), ("op",))
+        fields(step, ("op", "locator", "key", "fragment"), ("op",), f"{label}.steps[{index}]")
         op = step["op"]
         operand = {
             "open": None,
@@ -182,7 +182,7 @@ def web_journey(v, targets, *, draft=False):
             raise ValueError("Open occurs once at the start")
         if "locator" in step:
             loc = step["locator"]
-            fields(loc, ("text", "selector", "role", "name"))
+            fields(loc, ("text", "selector", "role", "name"), label=f"{label}.steps[{index}].locator")
             if set(loc) not in ({"text"}, {"selector"}, {"role", "name"}) or any(
                 type(x) is not str or not x or len(x) > 256 for x in loc.values()
             ):
@@ -196,14 +196,14 @@ def web_journey(v, targets, *, draft=False):
         ):
             raise ValueError("Declare a fragment beginning with #")
 
-def fields(value, allowed, required=()):
+def fields(value, allowed, required=(), label="fields"):
     if not isinstance(value, dict):
-        raise ValueError(f"Unknown/missing fields; expected an object with {sorted(allowed)}")
+        raise ValueError(f"{label}: expected object; allowed keys {sorted(allowed)}; use harness_upsert_node")
     unknown, missing = set(value) - set(allowed), set(required) - value.keys()
     if unknown or missing:
         raise ValueError(
-            f"Unknown/missing fields: unknown {sorted(unknown)}, missing {sorted(missing)}; "
-            f"allowed {sorted(allowed)}. Read harness_schema for the owning record shape."
+            f"{label}: unknown {sorted(unknown)}, missing {sorted(missing)}; "
+            f"allowed keys {sorted(allowed)}; use harness_upsert_node"
         )
 
 
@@ -272,17 +272,18 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
             raise ValueError("Target bindings require nonblank IDs and finite JSON objects")
     if draft and document is None:
         return []
-    fields(document, ("schema", "scenarios"), ("schema", "scenarios"))
+    fields(document, ("schema", "scenarios"), ("schema", "scenarios"), "vision.fields.scenarios")
     scenarios = document["scenarios"]
     if (document["schema"] != "seldon/scenarios-v1" or not isinstance(scenarios, list)
             or not scenarios and not planning):
         raise ValueError("Use seldon/scenarios-v1 with a scenarios array")
     ids = set()
-    for s in scenarios:
+    for index, s in enumerate(scenarios):
+        label = f"vision.fields.scenarios.scenarios[{index}]"
         keys = "id requirementRefs contractRefs setup actions observe verdict".split()
-        fields(s, [*keys, "evidenceTier", "validationMessage", "testRef", "rationale"], keys)
+        fields(s, [*keys, "evidenceTier", "validationMessage", "testRef", "rationale"], keys, label)
         if type(s["id"]) is not str or not s["id"] or s["id"] in ids or s["verdict"] != "all":
-            raise ValueError("Use unique ids and verdict all")
+            raise ValueError(f"{label}: use unique id and verdict=all; allowed keys {keys}; use harness_upsert_node")
         ids.add(s["id"])
         for key in ("requirementRefs", "contractRefs"):
             if not isinstance(s[key], list) or any(
@@ -291,7 +292,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 raise ValueError("Declare requirement and contract references")
         s.pop("evidenceTier", None)
         s.pop("validationMessage", None)
-        fields(s["setup"], ("dirs", "files", "snapshots"))
+        fields(s["setup"], ("dirs", "files", "snapshots"), label=f"{label}.setup")
         for directory in array(s["setup"].get("dirs", [])):
             resolved = path(product, directory)
             if (
@@ -300,7 +301,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 raise ValueError("Setup creates only data/ directories, not Python source paths")
         snapshots = set()
         for f in array(s["setup"].get("files", [])):
-            fields(f, ("path", "utf8", "base64"), ("path",))
+            fields(f, ("path", "utf8", "base64"), ("path",), f"{label}.setup.files")
             if path(product, f["path"]).suffix.lower() == ".py":
                 raise ValueError("Setup is data-only; Python source is unsupported")
             if any(b.get("kind") == "web" for b in targets.values()):
@@ -313,7 +314,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 raise ValueError("Setup writes only data/ fixtures")
             content(f)
         for f in array(s["setup"].get("snapshots", [])):
-            fields(f, ("id", "path"), ("id", "path"))
+            fields(f, ("id", "path"), ("id", "path"), f"{label}.setup.snapshots")
             path(product, f["path"])
             if type(f["id"]) is not str or f["id"] in snapshots:
                 raise ValueError("Use unique snapshot ids")
@@ -323,7 +324,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 raise ValueError("Link requirementRefs to their owning nodes")
             actions, web_actions = set(), set()
             for a in array(s["actions"], 16):
-                fields(a, ("id", "cli", "web", "process", "cwd", "http", "file"), ("id",))
+                fields(a, ("id", "cli", "web", "process", "cwd", "http", "file"), ("id",), f"{label}.actions")
                 if "http" in a or "file" in a:
                     raise ValueError(
                         "HTTP/file actions need a worker-authored CLI verifier target "
@@ -336,8 +337,8 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 ):
                     raise ValueError("Use unique CLI actions")
                 if "web" in a:
-                    fields(a, ("id", "web"), ("id", "web"))
-                    web_journey(a["web"], targets, draft=draft)
+                    fields(a, ("id", "web"), ("id", "web"), f"{label}.actions")
+                    web_journey(a["web"], targets, draft=draft, label=f"{label}.actions.web")
                     binding = targets.get(a["web"]["target"], {})
                     if not planning and ("entry" not in binding or not path(product, binding["entry"]).is_file()):
                         raise ValueError("Browser observation entry is unavailable")
@@ -361,12 +362,12 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                         raise ValueError("Action cwd must be a directory created by setup")
                 actions.add(a["id"])
                 if "process" in a:
-                    fields(a["process"], ("argv",), ("argv",))
+                    fields(a["process"], ("argv",), ("argv",), f"{label}.actions.process")
                     if not argv(a["process"]["argv"], product):
                         raise ValueError("Worker executable requires a nonempty argv")
                     continue
                 v = a["cli"]
-                fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"))
+                fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"), f"{label}.actions.cli")
                 if "stdin" in v:
                     if set(v["stdin"]) == {"holdOpen", "exitWithin"}:
                         if (
@@ -378,13 +379,13 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                                 "Held-open stdin needs holdOpen:true and exitWithin:1..20 seconds"
                             )
                     else:
-                        fields(v["stdin"], ("utf8", "base64"))
+                        fields(v["stdin"], ("utf8", "base64"), label=f"{label}.actions.cli.stdin")
                         content(v["stdin"])
                 if type(v["target"]) is not str or not draft and v["target"] not in targets:
                     raise ValueError("Action references an unknown target")
                 if not planning:
                     binding = targets[v["target"]]
-                    fields(binding, ("entry", "module", "argv"), ("argv",))
+                    fields(binding, ("entry", "module", "argv"), ("argv",), f"vision.fields.targets.{v['target']}")
                     if len(set(binding) & {"entry", "module"}) != 1:
                         raise ValueError("Python CLI adapter requires one entry or module; use process.argv for other tools")
                     path(product, target_entry(binding))
@@ -396,7 +397,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                 raise ValueError("Declare product actions and finite observations")
             for o in s["observe"]:
                 if isinstance(o, dict) and o.get("action") in web_actions:
-                    fields(o, ("action", *WEB), ("action", *WEB))
+                    fields(o, ("action", *WEB), ("action", *WEB), f"{label}.observe")
                     if any(
                         type(o[k])
                         is not (int if k in ("consoleErrors", "externalRequests") else bool)
@@ -405,7 +406,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                     ):
                         raise ValueError("Web gates require true or zero error/request counts")
                     continue
-                fields(o, ["action", "path", *ACTION, *FILE])
+                fields(o, ["action", "path", *ACTION, *FILE], label=f"{label}.observe")
                 if "action" in o and "path" in o:
                     raise ValueError(
                         "An observation targets one action or one path, not both. "
@@ -415,7 +416,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                     )
                 reference = "action" if "action" in o else "path"
                 allowed = ACTION if reference == "action" else FILE
-                fields(o, [reference, *allowed], (reference,))
+                fields(o, [reference, *allowed], (reference,), f"{label}.observe")
                 if len(o) < 2 or (reference == "action" and o[reference] not in actions):
                     raise ValueError("Observation needs a known reference and expectations")
                 if reference == "path":

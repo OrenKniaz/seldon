@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Literal, NotRequired, TypedDict
 
 from codex_harness.core.planner_guidance import BATCH_GUIDANCE
-from codex_harness.core.spine import ALLOWED_PARENTS, SEMANTIC_PHASES, bead_contract, bead_rules
+from codex_harness.core.spine import ALLOWED_PARENTS, Spine, bead_contract, bead_rules, semantic_spec
 
 
 class Judgment(TypedDict):
@@ -362,6 +362,15 @@ def node_example(kind, semantic=False):
         }
     if semantic:
         vision["fields"]["planMode"] = "semantic-v1"
+        if kind == "vision":
+            vision["fields"].update(targets={"parser": {"entry": "hello.py", "argv": []}}, scenarios={
+                "schema": "seldon/scenarios-v1", "scenarios": [dict(id="S1", requirementRefs=["R1"],
+                    contractRefs=[], setup=dict(dirs=["data"], files=[dict(path="data/input.json", utf8="{")],
+                        snapshots=[dict(id="before", path="data/input.json")]),
+                    actions=[dict(id="reject", cli=dict(target="parser", operation="reject malformed input",
+                        argv=[{"path": "data/input.json"}]))],
+                    observe=[dict(action="reject", exitEquals=1), dict(path="data/input.json", bytesUnchangedFrom="before")],
+                    verdict="all")]})
     feature = _node("feature", "F1", ["V1"])
     requirement = _node(
         "requirement",
@@ -391,11 +400,20 @@ def node_example(kind, semantic=False):
         ),
         "test": (
             [vision, feature, requirement],
-            _node("test", "T1", ["R1"], {"module": "test_parser", "level": "semantic"}),
+            _node("test", "T1", ["R1"], {"module": "test_parser", "level": "semantic", "execution": dict(argv=["python", "test_parser.py"], testRoots=["test_parser.py"], rationale="Observe parser rejection and unchanged data")}),
         ),
     }
     if kind in examples:
-        return examples[kind]
+        prerequisites, example = examples[kind]
+        if semantic and kind == "bead":
+            test = node_example("test", True)[1]
+            prerequisites.append(test)
+            example["parents"] = [test["id"]]
+            example["fields"]["semanticPhase"] = "build"
+        snapshot = Spine(dict(schema="codex-harness/spine-v1", name="Schema example", nodes=[*prerequisites, example]))
+        if semantic:
+            semantic_spec(snapshot, draft=True)
+        return prerequisites, example
     # Templates bind real IDs/revisions at authoring time; never invent observations.
     parents = ["V1"] if "vision" in ALLOWED_PARENTS[kind] else ["R1"]
     return [vision, feature, requirement], _node(kind, "N1", parents)
@@ -667,27 +685,14 @@ def schema_help(
             "reload and compilation. Every absent observation remains awaiting. Integrated is "
             "distinct from validated live; neither records user acceptance.",
         }
-        result["semanticScenarios"] = {
-            "owner": "Retained vision.fields.scenarios/targets observation adapter; optional for "
-            "graph authoring. Opaque target bindings are retained at planning. Runner owners "
-            "decide executable support and record real observations; graph eligibility is open.",
-            "schema": "seldon/scenarios-v1; scenarios have id,requirementRefs,contractRefs,setup,"
-            "actions,observe,verdict. Unsupported execution remains unvalidated, never proof.",
-        }
+        result["semanticScenarios"] = {"writer": "harness_upsert_node", "read": {"tool": "harness_upsert_node", "kind": "vision"}}
         result["compilationMetadata"] = {
             "owner": "Historical runner projection on vision.fields; no authoring eligibility.",
             "validation": "Legacy argv prefix; requirementFiles: extra protected relative paths.",
         }
     if semantic:
-        prerequisites, design = node_example("design", True)
-        prerequisites.append(design)
-        _, contracts = node_example("bead", True)
-        contracts["parents"] = [design["id"]]
-        build = deepcopy(contracts)
-        contracts.update(id="C", title="Contracts")
-        build.update(id="B", title="Build")
-        build["fields"].update(semanticPhase=SEMANTIC_PHASES[1], dependsOn=["C"])
-        result.update(semanticBeads={"nodes": [contracts, build]}, beadRules=bead_rules(True))
+        prerequisites, build = node_example("bead", True)
+        result.update(semanticBeads={"prerequisiteNodes": prerequisites, "nodes": [build]}, beadRules=bead_rules(True))
     if tool == "harness_upsert_nodes":
         prerequisites, test = node_example("test", semantic)
         requirement = next(node for node in prerequisites if node["kind"] == "requirement")
@@ -706,8 +711,6 @@ def schema_help(
         if kind not in ALLOWED_PARENTS:
             raise ValueError(f"Unknown node kind: {kind}; choose one of {list(ALLOWED_PARENTS)}")
         prerequisites, example = node_example(kind, semantic)
-        if semantic and kind == "bead":
-            prerequisites.append(design)
         result.update(
             kind=kind,
             allowedParentKinds=sorted(ALLOWED_PARENTS[kind]),
@@ -718,30 +721,20 @@ def schema_help(
             "Later quality, compilation and phase gates still apply.",
             parentRule="Parent IDs must exist, be unique and acyclic, with allowed kinds.",
             prerequisiteNodes=prerequisites,
-            example={"node": contracts if semantic and kind == "bead" else example},
+            example={"node": example},
             exampleUse="Upsert prerequisites then example; adapt IDs, preserve accepted intent.",
         )
     return result
 
 
 def node_error_help(arguments, semantic=False):
-    """Explain rejected input without replacing or relaxing the owning validator."""
-    import json
-
+    """One writer remedy; the preceding validator error names the invalid shape."""
     node = arguments.get("node") if isinstance(arguments, dict) else None
     kind = node.get("kind") if isinstance(node, dict) else None
-    if not isinstance(kind, str) or kind not in ALLOWED_PARENTS:
-        return "Inspect harness_schema for required node keys, types and valid kinds."
-    _, example = node_example(kind, semantic)
-    return (
-        "Rule: "
-        + (bead_rules(semantic) if kind == "bead" else FIELD_RULES.get(kind, "Read harness_schema."))
-        + " Parent IDs must already exist with allowed kinds; fields remains open JSON."
-        + "\nExample: "
-        + json.dumps({"node": example}, ensure_ascii=False)
-        + f"\nUse harness_schema kind={kind} for prerequisites and the full input contract; "
-        "adapt IDs to the current plan and retain accepted intent."
-    )
+    writer = "harness_upsert_nodes" if isinstance(arguments, dict) and "nodes" in arguments else "harness_upsert_node"
+    return (f"Fix with {writer}; read harness_schema tool={writer}"
+            + (f" kind={kind}" if isinstance(kind, str) and kind in ALLOWED_PARENTS else "")
+            + " for its checked example with current IDs.")
 
 
 def validate_input(value, schema: dict, label="arguments") -> None:
@@ -757,7 +750,7 @@ def validate_input(value, schema: dict, label="arguments") -> None:
     }
     allowed = expected if isinstance(expected, list) else [expected]
     if not any(types[kind] for kind in allowed):
-        raise ValueError(f"{label} must be {expected}")
+        raise ValueError(f"{label} must be {expected}; allowed keys {sorted(schema.get('properties', {}))}")
     if "enum" in schema and value not in schema["enum"]:
         raise ValueError(f"{label} must be one of {schema['enum']}")
     if isinstance(value, str) and schema.get("minLength") and not value.strip():
@@ -766,7 +759,7 @@ def validate_input(value, schema: dict, label="arguments") -> None:
         missing = set(schema["required"]) - value.keys()
         extra = value.keys() - schema["properties"].keys()
         if missing or extra:
-            raise ValueError(f"{label}: missing {sorted(missing)}, unexpected {sorted(extra)}")
+            raise ValueError(f"{label}: missing {sorted(missing)}, unexpected {sorted(extra)}; allowed keys {sorted(schema['properties'])}")
         for key, item in value.items():
             validate_input(item, schema["properties"][key], f"{label}.{key}")
     if isinstance(value, list):
