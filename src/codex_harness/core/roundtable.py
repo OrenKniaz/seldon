@@ -27,7 +27,7 @@ from codex_harness.core.approvals import require_approval
 from codex_harness.core.plan_quality import quality_report, render_quality_card
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
 from codex_harness.core.proof_imports import _protected_tests
-from codex_harness.core.reviewer_evidence import review_tier, single_provider_notice
+from codex_harness.core.reviewer_evidence import finding_records, review_tier, single_provider_notice
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
@@ -64,39 +64,13 @@ def _now() -> str:
 
 def _table(store: PlanStore) -> None:
     store.connection.execute(
-        "CREATE TABLE IF NOT EXISTS review_findings ("
-        "id TEXT PRIMARY KEY, reviewer TEXT NOT NULL, provider TEXT NOT NULL, "
-        "status TEXT NOT NULL CHECK(status IN ('open','resolved','rejected','deferred')), "
-        "plan_revision TEXT NOT NULL, node_id TEXT NOT NULL, "
-        "severity TEXT NOT NULL CHECK(severity IN ('blocker','major','minor','note')), "
-        "finding TEXT NOT NULL, suggestion TEXT NOT NULL, resolution TEXT, "
-        "created_at TEXT NOT NULL, resolved_at TEXT, round_id TEXT, "
-        "CHECK(status='open' OR (resolution IS NOT NULL AND length(trim(resolution))>0)))"
-    )
-    columns = {row[1] for row in store.connection.execute("PRAGMA table_info(review_findings)")}
-    if "round_id" not in columns:
-        store.connection.execute("ALTER TABLE review_findings ADD COLUMN round_id TEXT")
-    if "outOfShard" not in columns:
-        store.connection.execute(
-            "ALTER TABLE review_findings ADD COLUMN outOfShard INTEGER NOT NULL DEFAULT 0"
-        )
-    schema = store.connection.execute(
-        "SELECT sql FROM sqlite_master WHERE name='review_findings'"
-    ).fetchone()[0]
-    if "'rejected'" in schema and "'deferred'" not in schema:
-        # Preserve existing findings while extending SQLite's status CHECK.
-        store.connection.execute("ALTER TABLE review_findings RENAME TO review_findings_old")
-        store.connection.execute(schema.replace("'rejected'", "'rejected','deferred'"))
-        store.connection.execute("INSERT INTO review_findings SELECT * FROM review_findings_old")
-        store.connection.execute("DROP TABLE review_findings_old")
-    store.connection.execute(
         "CREATE TABLE IF NOT EXISTS review_runs ("
         "id TEXT PRIMARY KEY, round_id TEXT NOT NULL, plan_revision TEXT NOT NULL, "
         "reviewer TEXT NOT NULL, provider TEXT NOT NULL, model TEXT, exit_code INTEGER, "
         "findings INTEGER NOT NULL, invalid INTEGER NOT NULL, "
         "started_at TEXT NOT NULL, finished_at TEXT NOT NULL)"
     )
-    for table in ("review_runs", "review_findings"):
+    for table in ("review_runs",):
         columns = {row[1] for row in store.connection.execute(f"PRAGMA table_info({table})")}
         for name, kind in (("packetBound", "INTEGER"), ("outOfPacketTools", "TEXT")):
             if name not in columns:
@@ -113,18 +87,6 @@ def _table(store: PlanStore) -> None:
     ):
         if name not in columns:
             store.connection.execute(f"ALTER TABLE review_runs ADD COLUMN {name} {kind}")
-    columns = {row[1] for row in store.connection.execute("PRAGMA table_info(review_findings)")}
-    for name, kind in (
-        ("cluster_id", "TEXT"),
-        ("stage", "TEXT NOT NULL DEFAULT 'roundtable'"),
-        ("kind", "TEXT"),
-        ("nodeIds", "TEXT"),
-        ("readiness_review_id", "TEXT"),
-        ("classification", "TEXT"),
-        ("scope_reason", "TEXT"),
-    ):
-        if name not in columns:
-            store.connection.execute(f"ALTER TABLE review_findings ADD COLUMN {name} {kind}")
 
 
 def _event(store: PlanStore, kind: str, payload: dict) -> None:
@@ -623,7 +585,7 @@ def default_reviewers(*, executable_for=None) -> list[dict]:
 def coverage(selected):
     return (
         {"reviewIndependence": "single-provider"}
-        if len(selected) >= 2 and review_tier(selected) == "same-provider"
+        if len(selected) >= 2 and review_tier(selected) in {"same-provider", "same-model"}
         else {}
     )
 
@@ -680,6 +642,12 @@ def _launch_review(reviewer, packet, executable, *, instructions=None):
 
     if not executable:
         raise OSError(f"Reviewer executable unavailable: {reviewer['provider']}")
+    if "\n## Bound review requests\n" in packet:
+        from codex_harness.core.planner_schema import JUDGMENT_RESPONSE_SCHEMA
+        requests = json.loads(packet.split("\n## Bound review requests\n", 1)[1])
+        packet += ("\n## Bound Judgment\n" + json.dumps(requests[reviewer["name"]], ensure_ascii=False)
+                   + "\nReturn ONLY JSON matching the shared Judgment response contract:\n"
+                   + json.dumps(JUDGMENT_RESPONSE_SCHEMA))
     launch = get_adapter(reviewer["provider"]).provider_normal_command(
         prompt=packet,
         prompt_via_stdin=True,
@@ -723,100 +691,82 @@ def _launch_review(reviewer, packet, executable, *, instructions=None):
     return launch
 
 
+def bind_review_dossiers(store, dossiers, selected, *, candidate_run=None, invocation_id=None):
+    invocation_id = invocation_id or uuid4().hex
+    for provider, shards in dossiers.items():
+        for shard in shards:
+            shard["reviewInvocationId"] = invocation_id
+            shard.setdefault("reviewRoundId", invocation_id)
+            shard["acceptanceRunId"] = candidate_run["id"] if candidate_run else None
+            requests = {r["name"]: store.review_judgment(r, shard)
+                        for r in selected if r["provider"] == provider}
+            shard["packet"] += "\n## Bound review requests\n" + json.dumps(requests, ensure_ascii=False)
+            shard["hash"] = hashlib.sha256(shard["packet"].encode("utf-8")).hexdigest()
+
+
+def review_members(store, judgment, shard):
+    from codex_harness.core.spine import scenario_nodes
+    known = set(store.spine().ids()) | {"plan"}
+    mapping = {key: value for key, value in scenario_nodes(store.spine()).items() if key not in known}
+    known |= mapping.keys()
+    valid = []
+    for item in judgment["meaning"].get("findings", []):
+        reported = item["node_id"]
+        for owner in mapping.get(reported, [reported if reported in known else "plan"]):
+            finding = dict(item, judgmentId=judgment["id"], node_id=owner, outOfShard=owner not in {*shard["nodeIds"], "plan"})
+            if reported not in known:
+                finding["finding"] = f"[{reported}] {item['finding']}"
+            if reported in mapping:
+                finding["scenarioId"] = reported
+            valid.append(finding)
+    if judgment["verdict"] == "negative":
+        valid.extend(dict(node_id="plan", severity="major", finding=gap,
+            suggestion=judgment["rationale"], classification="defect-in-plan", scope_reason=judgment["rationale"],
+            judgmentId=judgment["id"], judgmentGap=True, outOfShard=False) for gap in judgment["gaps"])
+    return valid
+
+
 def _parse_review_return(store, reviewer, shard, response, *, mocked):
-    """Shared ordinary/recovery parsing and binding, without any provider invocation."""
+    """Consume one bound 1j verdict; output structure alone grants no review credit."""
     record = {key: value for key, value in shard.items() if key != "packet"}
-    record.update(
-        exitCode=response[0], rejected=[], invalid=0, isMocked=mocked, didRunProvider=not mocked
-    )
-    output = response[1]
-    record.update(packet_binding(output, reviewer["provider"]))
+    record.update(exitCode=response[0], rejected=[], invalid=0,
+                  isMocked=mocked, didRunProvider=not mocked)
+    record.update(packet_binding(response[1], reviewer["provider"]))
     if record["exitCode"] != 0:
         raise ValueError(f"Reviewer exited with code {record['exitCode']}")
-    valid = []
-    from codex_harness.core.spine import scenario_nodes
-
-    known = set(store.spine().ids()) | {"plan"}
-    mapping = {
-        key: value for key, value in scenario_nodes(store.spine()).items() if key not in known
-    }
-    known |= mapping.keys()
-    for item in _last_array(_response(output, reviewer["provider"])):
-        reason = _invalid_reason(item)
-        if reason:
-            record["rejected"].append(
-                {"status": "rejected-unparsed", "reason": reason, "finding": item}
-            )
-        else:
-            reported = item["node_id"]
-            # Reviewer headings belong to the whole plan, never invented spine IDs.
-            for owner in mapping.get(reported, [reported if reported in known else "plan"]):
-                finding = dict(
-                    item, node_id=owner, outOfShard=owner not in {*shard["nodeIds"], "plan"}
-                )
-                if reported not in known:
-                    finding["finding"] = f"[{reported}] {item['finding']}"
-                if reported in mapping:
-                    finding["scenarioId"] = reported
-                valid.append(finding)
-    record["invalid"] = len(record["rejected"])
-    return record, valid
+    judgment = store.review_judgment(reviewer, shard, prepare=False)
+    if not judgment.get("id"):
+        raise ValueError("Prepare the bound 1j review before returning a verdict")
+    output = _response(response[1], reviewer["provider"])
+    if judgment["disposition"] == "complete":
+        from codex_harness.core.planner_schema import judgment_response
+        parsed = judgment_response(output, judgment)
+        if any(parsed[key] != judgment[key] for key in parsed):
+            raise ValueError("Original review reply differs from its retained judgment")
+    else:
+        judgment = store.submit_judgment(judgment_id=judgment["id"], response=output,
+                                         source="review:" + reviewer["name"], review_context=_binding_fields(record))
+    from codex_harness.core.acceptance_recovery import runtime_identity
+    try:
+        runtime = runtime_identity(reviewer["provider"], reviewer, response[1], response[2] if len(response) > 2 else "")
+    except (ValueError, TypeError, KeyError):
+        runtime = None
+    record.update(requestedProvider=reviewer["provider"], requestedModel=reviewer.get("model"),
+                  observedRuntime=runtime, runtimeVerified=runtime is not None and not mocked)
+    record.update(judgmentId=judgment["id"], verdict=judgment["verdict"],
+                  rationale=judgment["rationale"], disposition=judgment["disposition"],
+                  positiveCredit=judgment["positiveCredit"], owner=None)
+    if judgment["disposition"] in {"exact-fix", "steer"}:
+        record["rejected"].append(dict(status="pending-judgment", reason=judgment["error"]))
+        record["invalid"] = 1
+        return record, []
+    return record, review_members(store, judgment, shard)
 
 
 def _assessment_hash(value):
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
     ).hexdigest()
-
-
-def _scope_hash(row):
-    mutable = {"status", "resolution", "resolved_at", "cluster_id"}
-    return _assessment_hash({key: value for key, value in row.items() if key not in mutable})
-
-
-def advisory_finding_ids(store, revision=None):
-    """Unchanged judgments at their origin or eligible carry; unknown stays blocking."""
-    columns = {r[1] for r in store.connection.execute("PRAGMA table_info(review_findings)")}
-    if not {"classification", "scope_reason"} <= columns:
-        return set()
-    target, advisory = revision or store.manifest_revision(), set()
-    rows = [
-        dict(r)
-        for r in store.connection.execute(
-            "SELECT * FROM review_findings WHERE classification='beyond-brief' "
-            "OR severity IN ('minor','note')",
-        )
-    ]
-    for event in store.connection.execute(
-        "SELECT payload_json FROM events WHERE kind='roundtable-completed'"
-    ):
-        evidence = json.loads(event[0])
-        for row in rows:
-            if evidence.get("scopeJudgments", {}).get(row["id"]) != _scope_hash(row):
-                continue
-            run = store.connection.execute(
-                "SELECT * FROM review_runs WHERE round_id=? AND reviewer=? AND provider=?",
-                (row["round_id"], row["reviewer"], row["provider"]),
-            ).fetchone()
-            if run and (review_instructions.is_minor(row) or row["scope_reason"].strip()):
-                run = dict(run)
-                if (
-                    run["exit_code"] == run["invalid"] == 0
-                    and run["isMocked"] == 0
-                    and run["didRunProvider"] == run["packetBound"] == 1
-                    and evidence.get("scopeReviews", {}).get(run["id"]) == _assessment_hash(run)
-                    and (
-                        run["plan_revision"] == target
-                        or (
-                            revision is None
-                            and not store._plan_review_policies()
-                            and Spine(store._data()).semantic
-                            and store._review_repairs_match(run, store.review_nodes_digest())
-                        )
-                    )
-                ):
-                    advisory.add(row["id"])
-    return advisory
 
 
 def _assessment_file(repo, name):
@@ -850,6 +800,9 @@ def _review_shard(
     attempted = False
     started_at = _now()
     try:
+        if "\n## Bound review requests\n" not in shard["packet"]:
+            bind_review_dossiers(store, {reviewer["provider"]: [shard]}, [reviewer])
+        judgment = store.review_judgment(reviewer, shard)
         launch = _launch_review(reviewer, shard["packet"], executable)
         directory = TemporaryDirectory(prefix="harness-roundtable-")
         if before_launch is not None or runner is None:
@@ -861,15 +814,18 @@ def _review_shard(
                 )
             checking_launch = False
         attempted = True
-        response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
-        record["didRunProvider"] = runner is None
-        record["exitCode"], output = response[:2]
-        stderr = response[2] if len(response) > 2 else ""
+        while True:
+            response = (runner if runner is not None else _run)(launch, Path(directory.name), timeout)
+            record["didRunProvider"] = runner is None
+            record["exitCode"], output = response[:2]
+            stderr = response[2] if len(response) > 2 else ""
+            record, items = _parse_review_return(store, reviewer, shard, response, mocked=runner is not None)
+            if record.get("disposition") != "exact-fix" or capture is not None:
+                break
+            judgment = store.judgment(record["judgmentId"])
+            launch = replace(launch, stdin_text=launch.stdin_text + "\nExact fix required: " + judgment["error"])
         if capture is not None:
             capture(reviewer, shard, launch, executable, response)
-        record, items = _parse_review_return(
-            store, reviewer, shard, response, mocked=runner is not None
-        )
         if record["invalid"]:
             _diagnostic(store, result, record, launch, output, stderr)
     except (OSError, subprocess.TimeoutExpired, ValueError) as error:
@@ -979,11 +935,7 @@ def _review_dossier(
     before_launch=None,
     **packet_options,
 ):
-    """Retry the same logical invocation once, discarding superseded findings.
-
-    Keep the original attempt and its exact error/artifacts on the review record;
-    only the final dossier contributes findings and admission status.
-    """
+    """Replace overflowed dossiers once; the request owner retains obligations."""
     provider = reviewer["provider"]
     if provider not in PROVIDER_TOKEN_BUDGETS:
         raise ValueError(
@@ -1043,24 +995,12 @@ def _review_dossier(
             record["reshardedFrom"]["reshardError"] = str(error)
             yield from completed
             return
+        prior = record["reshardedFrom"]["shardDetails"][0]
+        for shard in shards:
+            shard["reviewRoundId"] = prior["reviewRoundId"]
+        bind_review_dossiers(store, {provider: shards}, [reviewer],
+            candidate_run={"id": prior["acceptanceRunId"]} if prior["acceptanceRunId"] else None)
         record["reshardedFrom"]["newShardCount"] = len(shards)
-
-
-def _merge_finding(merged, item):
-    """Deduplicate shard overlap per reviewer while retaining worst severity/tools."""
-    key = (item["node_id"], " ".join(item["finding"].split()).casefold())
-    if key not in merged:
-        merged[key] = item
-        return
-    prior = merged[key]
-    if item.get("classification") != prior.get("classification"):
-        prior["classification"] = "defect-in-plan"
-        prior["scope_reason"] = "Conflicting shard judgments; retain required defect"
-    if _SEVERITIES.index(item["severity"]) < _SEVERITIES.index(prior["severity"]):
-        prior["severity"], prior["suggestion"] = item["severity"], item["suggestion"]
-    prior["outOfPacketTools"] = sorted(set(prior["outOfPacketTools"] + item["outOfPacketTools"]))
-    prior["packetBound"] = not prior["outOfPacketTools"]
-    prior["outOfShard"] = prior.get("outOfShard", False) or item.get("outOfShard", False)
 
 
 def _response(output: str, provider: str) -> str:
@@ -1146,26 +1086,6 @@ def _binding_fields(row: dict) -> dict:
         "packetBound": bool(value) if value is not None else None,
         "outOfPacketTools": json.loads(tools) if isinstance(tools, str) else tools,
     }
-
-
-def _last_array(output: str) -> list:
-    decoder = json.JSONDecoder()
-    last = None
-    index = 0
-    while index < len(output):
-        if output[index] != "[":
-            index += 1
-            continue
-        try:
-            value, end = decoder.raw_decode(output, index)
-        except json.JSONDecodeError:
-            index += 1
-            continue
-        last = value
-        index = end  # Skip nested arrays inside this complete response.
-    if last is None:
-        raise ValueError("No JSON finding array in final review text")
-    return last
 
 
 def _invalid_reason(item) -> str | None:
@@ -1317,7 +1237,6 @@ def _execution_session(reviewer, output, stderr, *, author=False):
 def _execution_context(store, request):
     from codex_harness.core import acceptance, dispatch
     from codex_harness.core.acceptance_recovery import _executable_identity
-    from codex_harness.core.spine import Spine
 
     members = request["members"]
     if (
@@ -1811,7 +1730,6 @@ def run_roundtable(
         "maxRounds": max_rounds,
         "maxTotal": max_total,
     }
-    pending = []
     runs = []
     identities = [(item["name"], item["provider"]) for item in selected]
     reservations = {}
@@ -1823,6 +1741,7 @@ def run_roundtable(
         )
         for provider in dict.fromkeys(item["provider"] for item in selected)
     }
+    bind_review_dossiers(store, dossiers, selected, invocation_id=result["roundId"])
     for reviewer in selected:
         review_budget.review_capacity(store, reviewer, revision, max_rounds, max_total)
         if runner is None:
@@ -1857,7 +1776,6 @@ def run_roundtable(
 
         result["reviewers"].append(record)
         provider = reviewer["provider"]
-        merged = []
         for shard_record, items in _review_dossier(
             store,
             result,
@@ -1873,8 +1791,6 @@ def run_roundtable(
         ):
             if shard_record["invalid"] and not record["rejected"]:
                 record["exitCode"] = shard_record["exitCode"]
-            for item in items:
-                merged.append({**item, **_binding_fields(shard_record)})
             shard_record["invalid"] = len(shard_record["rejected"])
             record["rejected"].extend(shard_record["rejected"])
             for name in ("artifactPath", "stderrPreview", "primaryError", "cleanupWarning"):
@@ -1890,9 +1806,8 @@ def run_roundtable(
         record["didRunProvider"] = bool(record["shardDetails"]) and all(
             shard["didRunProvider"] for shard in record["shardDetails"]
         )
-        for item in merged:
-            pending.append((uuid4().hex, reviewer["name"], provider, revision, item, _now()))
-        record["findings"] = len(merged)
+        record["findings"] = sum(row.get("round_id") == result["roundId"] and row["reviewer"] == reviewer["name"]
+                                 and row["provider"] == provider for row in finding_records(store))
         record["invalid"] = len(record["rejected"])
         result["findings"] += record["findings"]
         result["invalid"] += record["invalid"]
@@ -1933,44 +1848,7 @@ def run_roundtable(
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(*run, snapshot) for run in runs],
         )
-        for item_id, reviewer, provider, revision, item, at in pending:
-            store.connection.execute(
-                "INSERT INTO review_findings "
-                "(id, reviewer, provider, status, plan_revision, node_id, severity, "
-                "finding, suggestion, created_at, round_id, packetBound, "
-                "outOfPacketTools, outOfShard, classification, scope_reason) "
-                "VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    item_id,
-                    reviewer,
-                    provider,
-                    revision,
-                    item["node_id"],
-                    item["severity"],
-                    item["finding"],
-                    item["suggestion"],
-                    at,
-                    result["roundId"],
-                    item["packetBound"],
-                    json.dumps(item["outOfPacketTools"]),
-                    item["outOfShard"],
-                    item.get("classification", "defect-in-plan"),
-                    item.get("scope_reason", ""),
-                ),
-            )
         result["clusters"] = store.cluster_review_findings(result["roundId"])
-        result["scopeJudgments"] = {
-            row["id"]: _scope_hash(dict(row))
-            for row in store.connection.execute(
-                "SELECT * FROM review_findings WHERE round_id=?", (result["roundId"],)
-            )
-        }
-        result["scopeReviews"] = {
-            row["id"]: _assessment_hash(dict(row))
-            for row in store.connection.execute(
-                "SELECT * FROM review_runs WHERE round_id=?", (result["roundId"],)
-            )
-        }
         result["packetBound"] = all(item["packetBound"] for item in result["reviewers"])
         result["outOfPacketTools"] = sorted(
             {tool for item in result["reviewers"] for tool in item["outOfPacketTools"]}
@@ -1980,7 +1858,8 @@ def run_roundtable(
             item["didRunProvider"] for item in result["reviewers"]
         )
         result["successfulReviews"] = store.successful_reviews(revision)
-        result["crossSubscription"] = len(result["successfulReviews"]) > 1
+        result["crossSubscription"] = len({row["provider"] for row in result["successfulReviews"]}) > 1
+        result["convergence"] = store.review_convergence(prepare=True)
         _event(store, "roundtable-completed", result)
     return result
 
@@ -1991,32 +1870,20 @@ def resolve_finding(store: PlanStore, id: str, *, resolution: str, status="resol
 
 
 def findings(store: PlanStore, status=None, *, expand=False) -> list[dict]:
-    if status is not None and status not in ("open", "resolved", "rejected", "deferred"):
+    if status is not None and status not in ("open", "pending", "closed", "resolved", "rejected", "deferred"):
         raise ValueError("Unknown finding status")
-    exists = store.connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_findings'"
-    ).fetchone()
-    if not exists:
-        return []
-    rows = [
-        {
-            **dict(row),
-            **_binding_fields(dict(row)),
-            "outOfShard": bool(dict(row).get("outOfShard", False)),
-            "cluster_id": dict(row).get("cluster_id"),
-        }
-        for row in store.connection.execute(
-            "SELECT * FROM review_findings ORDER BY created_at, rowid"
-        )
-    ]
+    rows = [{**row, **_binding_fields(row), "outOfShard": bool(row.get("outOfShard", False))}
+            for row in store.finding_state()["members"] if row.get("stage") != "acceptance"]
     groups = {}
     for row in rows:
         groups.setdefault(row["cluster_id"] or row["id"], []).append(row)
     result = []
     for canonical_id, members in groups.items():
         canonical = next(row for row in members if row["id"] == canonical_id)
-        for row in members if expand else [canonical]:
-            if status is not None and row["status"] != status:
+        representative = next((member for state in ("open", "pending") for member in members
+                               if member["state"] == state), canonical)
+        for row in members if expand else [representative]:
+            if status is not None and row["state" if status in {"open", "pending", "closed"} else "status"] != status:
                 continue
             item = {
                 **row,

@@ -6,14 +6,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CORE = "src/codex_harness/core"
-TOTAL_CEILING = 38303
+TOTAL_CEILING = 36229
 CEILINGS = {
-    "src/codex_harness/core/acceptance.py": 1918,
-    "src/codex_harness/core/dispatch.py": 2780,
-    "src/codex_harness/core/mcp_planner.py": 2901,
-    "src/codex_harness/core/plan_store.py": 3495,
-    "src/codex_harness/core/planner_views.py": 1647,
-    "src/codex_harness/core/roundtable.py": 2095,
+    "src/codex_harness/core/acceptance.py": 1733,
+    "src/codex_harness/core/dispatch.py": 2776,
+    "src/codex_harness/core/mcp_planner.py": 2883,
+    "src/codex_harness/core/plan_store.py": 3407,
+    "src/codex_harness/core/planner_views.py": 1646,
+    "src/codex_harness/core/roundtable.py": 1962,
 }
 
 

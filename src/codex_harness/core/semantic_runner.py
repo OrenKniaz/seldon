@@ -15,6 +15,7 @@ from pathlib import Path
 from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired, call
 
 from codex_harness.core.audit_process import run_audit_process
+from codex_harness.core.record_io import write_record_json
 from codex_harness.core.semantic_schema import LIMIT, WEB, argv, content, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
@@ -212,6 +213,7 @@ def execute(s, root, targets, phase, seconds, deadline, web=None, judgments=None
                         state="ERROR", reason=result["reason"], actions={**results, a["id"]: result}
                     )
                 results[a["id"]] = result
+                web["browserMode"] = result.get("browserMode")
                 if result.get("marker"):
                     flags.append(dict(action=a["id"], pattern="SELDON-STUB"))
                 continue
@@ -362,6 +364,7 @@ def run(
     judgments=None,
     should_stop=None,
     stop_file=None,
+    progress_path=None,
 ):
     results, scenarios = [], [{"id": None}]
     cleanup = dict(quiescenceVerified=True, activeProcessesAfterTeardown=0, childLaunched=False)
@@ -453,7 +456,11 @@ def run(
                 if completed.returncode or time.monotonic() > end:
                     raise TimeoutError("Runner failed or scenario deadline expired")
                 result = dict(json.loads(completed.stdout), id=s["id"], cleanup=control)
+                if is_web and any(a.get("browserMode") == "single-process" for a in result.get("actions", {}).values()):
+                    web["browserMode"] = "single-process"
                 results.append(result)
+                if progress_path is not None:
+                    write_record_json(progress_path, dict(scenario=s["id"], completed=len(results)))
                 if result["state"] == "ERROR":
                     break
     except ERRORS as error:

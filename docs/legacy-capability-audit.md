@@ -1,5 +1,190 @@
 # Legacy capability audit for the local Seldon extraction
 
+STAGE-2A Round 5 (C4/C10/C11/C14/C18, I5/I6): the Round 4 request
+identity remains invocation/reviewer/shard or member. Binding currentness now
+precedes terminal-attempt guidance: a stale exhausted request requires refreshed
+facts, and cannot steal the current worker continuation. The retained stale-A
+journey catches that admission regression; the CLI golden also checks stale
+terminal actions alongside both independent inconclusive shards.
+The new complete-review read also exposed repeated evaluation of unrelated
+completed judgment history. The one finding-state owner now evaluates current
+bindings for pending requests and obligation-linked judgments, retaining all raw
+history, member links, equivalence and disposition judgments. A retained-data
+profile attributed 13.54s of a 16.50s preparation to binding reads; narrowing
+that work preserves their authority. Convergence credits now share that same
+per-read observation, as evidence and candidate bindings already do; writers and
+subsequent reads still observe fresh facts. The public 30s deadline is unchanged.
+Manifest revision and convergence credits share the existing per-read snapshot;
+the next read/writer still reconstructs current bindings. The repeated table
+existence and nodesDigest checks are subsumed by the required-column check.
+The isolated browser path executes no Round 4 request/list consumers. Full run 1
+passed readiness but exposed the same deadline shape in integrated S4: every
+completed action had fallen back from normal launch to single-process, unlike
+CC3's normal-mode run. Re-probing the failed mode on each action spent the shared
+30s scenario budget. The runner now carries the observed fallback only to later
+actions in that bounded scenario; sandboxing, assertions and deadlines are unchanged.
+Full run 1: 18 passed/679.31s, web failed/234.67s; final outcome is in the report.
+Round 4 findings 1/2 remain deferred to 2a2. L0/DV7 remain open.
+
+STAGE-2A (C2-C4/C10/C11/C14/C16, I1-I9): DESIGN — review structure
+previously granted semantic authority. Siblings: Jaccard clustering, cluster-wide
+closure, revision-location reuse, empty/minor-only approval and semantic grades.
+Owner: PlanStore's existing 1j prepare/submit/read; roundtable executes independent
+reviewers. Candidate deletes semantic grades/AST heuristics and reconstruction
+prompts, retains exact commands and deterministic evidence hashes, and requires
+explicit bound verdicts/rationales/depth. Conflicting scope classifications remain
+pending; equivalence groups grant display membership only; each member's closure
+and actual-delta reuse require their own bound judgment. Three rounds trigger a
+convergence assessment, not approval. Requested provider/model and observed runtime
+remain distinct; same-model reviewers receive that lower label. DV7 remains OPEN
+until authorized L0 proves actual reviews and labeling; no ladder credit here.
+WEB-STALL-1: DESIGN — host sleep exposed waits without wall-clock/progress bounds;
+siblings: RPC writes/replies, HTTP startup/readback/teardown and cockpit fetch/body.
+Owner: golden/cockpit harness. Retained root cause is host sleep, not 2p. Candidate
+uses wall-clock polling/deadlines and held-request browser recovery; it adds no OS
+sleep-inhibition or host power changes. Receipt-less cleanup never grants success.
+ShelfLife verifier: assertion-only RED was observed in the admitted job (47.71s);
+previous verifier accepted empty HTTP success. Candidate now imports real CSV into
+private SQLite, asserts saved rows and HTTP status/body, and bounds its lifecycle.
+Gate 2 retained 17 non-browser passes and web through C, then found two fixture
+mistakes: malformed review correctly returned isError, and a cancelled browser route
+was aborted twice. The same fixture owners now expect the failure and observe client
+cancellation without repeating it. Validation: see stage-2a-report.md for final gate and exact
+patch. Existing 19-case marked fast gate remains; actual-provider/full-dream proof
+is unperformed. Native sealed malformed acceptance receipts remain pending rather
+than being relabeled as a different invocation; public 1j retains its two fixes.
+Exit: final golden <=600s GREEN, then authorized L0 after integrated 2e; verify
+independent plan reviews, evidence meaningfulness and same-model labeling there.
+
+STAGE-2A follow-up (C2-C4/C10/C11/C14/C16/C18, I1/I5/I6): the
+classification regression now consumes the equivalence judgment's bound member
+facts. The presentation projection is unchanged and supplies no semantic authority.
+This supersedes the initial projection blocker; review -> repair -> reuse -> B
+and ShelfLife through C reached execution in the renewed CLI run.
+The newly reached verifier exposed SQLite lifetime errors: connection context
+managers commit/rollback but do not close. The fixture importer, server and verifier
+now close their own connections explicitly before HTTP completion/temp cleanup.
+No cleanup exception is suppressed and no retry masks it. T_HTTP has observed
+assertion RED -> exit-0 Rice,Beans GREEN with empty stderr and verified quiescence.
+The same flow exposed orphan semantic requests. PlanStore now asks equivalence only
+for multiple members and prepares reuse only for positive original reviews; the
+existing submit owner alone materializes membership. Publication keeps its normal
+next action without fabricated verdicts. Final candidate/gate outcome supersedes the
+initial BLOCKED report only as recorded in stage-2a-report.md; L0/DV7 remain open.
+Renewed CLI golden: 1 passed in 183.91s; review/grouping/member closure/reuse,
+ShelfLife through C and the main fault/recovery journey are GREEN. Final full-gate
+result and exact patch remain in stage-2a-report.md; suite evidence is not L0.
+
+STAGE-2A independent review fixes (C2-C4/C10/C11/C14, I1/I2/I4/I6):
+REJECT of be14e839 is retained as source history; the five findings share one cause:
+review authority outlived or omitted part of its subject. The existing 1j read now
+checks one captured binding against all named members, exact planning evidence,
+revision, and the canonical current acceptance run/product revision where applicable.
+Review 1: removed normalized-text merging from both plan and acceptance ingestion;
+every source finding and its opposing suggestion/scope rationale survives to judgment.
+Review 2: acceptance closure and product-review bindings include the current run;
+the canonical reader checks product revision before reconstructing semantic inputs.
+A positive A disposition loses credit after changing only product bytes to B, and
+closure stays pending/open. Returning to the exact A restores only A's bound credit.
+Review 3: each admitted review invocation gets new judgment IDs; exact fixes and
+sealed recovery retain only that invocation's IDs. Two unchanged malformed dossiers
+exhaust both fix allowances; a fresh identical dossier accepts new, distinct replies.
+Review 4: cluster views choose an open/deferred representative across every member;
+closing A alone leaves B visible and continuation recommends reconciling B.
+Review 5: convergence binds current review/reuse credit as well as revision; reuse
+submissions and resolution expose the current request after three rounds and repair.
+Continuation consumes current pending judgments rather than recommending advancement.
+Golden CLI proves all five through canonical producers and scripted judge replies,
+then reaches ShelfLife C and the main recovery journey: 1 passed in 229.20s.
+One status read reuses its observed metadata snapshot (275.46s before reuse);
+submissions and closure writes always validate live bindings, including candidate
+changes between calls. No new judge store, retry counter, provider launch or unit test.
+Final candidate, 19-case gate and exact patch identity: stage-2a-report.md. Actual
+provider/L0/full-vision acceptance and DV7 closure remain unperformed.
+
+STAGE-2A final gate blocker: the first full review-fix run passed 19/19 in
+561.62s; the second/final authorized run passed 18 non-browser cases in 310.04s,
+then failed web in 306.38s (combined 616.42s, above the 600s fast-gate ceiling).
+The cockpit displayed its stale warning but checks.js:49 timed out after 8s
+waiting for refreshed "Last received:" status. Cause is unresolved; this is not
+evidence of host sleep or permission failure. Owner: cockpit refresh/check harness.
+Exit: establish the recovery failure cause, then a newly authorized final full
+gate must pass within 600s. Both full-run allowances are used; candidate is BLOCKED.
+
+STAGE-2A ROUND 3 (C2-C4/C10/C11/C14/C18, I2/I4/I5/I6): DESIGN --
+the 66f70ae0 re-review rejected two owners for one finding's authority. This
+supersedes the prior closure/convergence completion claims above; history is retained.
+Owner: PlanStore.finding_state computes every effective member and outstanding
+request from immutable source facts and current 1j judgments. New plan, acceptance
+and readiness source facts use append-only events; archived mutable status/resolution
+columns are ignored. Dispositions write no closure status. Current positive member
+credit closes; a current concrete negative opens; unavailable/stale/inconclusive
+judgment stays pending and never supplies a concrete-failure blocker.
+The same binding covers immutable members, revision and canonical acceptance run/
+product revision. Applying closure preserves its judgment; changing product bytes
+removes effective closure, and returning to the exact bound candidate restores it.
+Every negative review gap is retained even when meaning.findings is empty; later
+positive packets carry the member IDs. A fresh positive review alone cannot clear
+those obligations: the real C gate still refuses until explicit current disposition.
+An inconclusive major finding stays pending. Default groups retain open members.
+Requests are keyed by reviewer/member/subject identity; both reuse requests remain
+visible, and one positive reviewer plus convergence cannot satisfy complete review.
+Publication, continuation and quality/cards share review_prerequisite; independent
+counts, mutable closure reads/writes and legacy closure-credit projections are gone.
+One read reuses captured metadata and latest event records only within that call;
+the cache is cleared before returning, and submit/disposition writers bind live facts.
+The cockpit recovery failure above has a concrete owner race: an automatic retry
+can hold refresh when a manual click arrives, and the boolean guard drops the click.
+Manual refresh now replaces/aborts that owner; retired replies cannot render or clear
+the new owner. Browser coverage deliberately holds a second automatic retry before
+manual recovery and keeps the same 8s check. No timeout increase or host power change.
+All five prior regressions remain in the same CLI golden; no new test cases/files,
+unit tests, judge store or retry counter. Exact final gate/runtime and patch identity
+are in stage-2a-report.md; provider/L0/full-vision and DV7 closure remain unperformed.
+
+Round 3 full run 1: 17 passed and the new CLI link-history assertion failed in
+135.75s; web then failed its initial freshness read at checks.js:29 in 265.24s.
+The link assertion incorrectly expected A to reference a judgment naming only B
+and the gap. The fixture now explicitly includes A in that later proposal; the
+same assertion remains and the owner never invents a link to an unbound member.
+The initial browser read failed before the controlled retry scenario. Read-only
+profiling of its retained workspace found repeated record copying and two current-
+run validations in one snapshot (2.015s, 328527 response bytes). Immutable record
+reads and the validated run observation are now reused within that single read;
+the measured snapshot is 1.453s, with one validation. This narrows the performance
+diagnosis; final browser outcome remains in the report, not inferred from a profile.
+All timers remain unchanged; stale pending requests are exposed as stale, and all
+historical member judgment links are retained independently of effective closure.
+
+Round 3 allocated run 2: all 18 non-browser cases passed in 333.98s; web failed
+in 265.97s at recovery, showing the 5s request deadline inside the 8s DOM wait
+(combined 599.95s). This is NOT a green full gate. Both full-run allowances are used.
+Local Playwright _unrouteInternal removes future handlers without settling paused
+invocations. The harness removed its interceptor with requests still paused; that
+was not a controlled end to fault injection. It now switches the same interceptor
+to real route.continue() before manual refresh and removes it only after readback.
+The second automatic held request and the original deadlines remain. This final
+harness repair is syntax-checked only; a new authorized full gate is required.
+
+STAGE-2A Round 4 (C4/C10/C11/C18; I2/I5/I6): DESIGN -- request
+supersession used purpose/whole-spine identity instead of its bound invocation and
+shard/member subject. The canonical PlanStore list now keys captured invocation
+(including native request correlation), reviewer and actual packet/member subject.
+It exposes submitReady and submit/fresh-invocation/refresh actions; terminal steer
+attempts cannot advertise submission. Cards and continuation share one presentation
+of this list; publication requires all live plan-review requests (product review
+is distinguished by its canonical acceptance-run binding). No new judge plumbing.
+Golden consumes two inconclusive canonical shards from one reviewer: both visible;
+one positive leaves the other required and publication pending; both positives clear
+the request prerequisite. Exhausted malformed attempts offer fresh invocation,
+never submission. Previous coverage used one shard/reviewer and checked only errors.
+The first CLI rerun reached acceptance but exceeded its 30s public review bound;
+the request gate had included the active product review. Run-bound scope is now read
+from the same list. Exact final gate and patch are recorded in stage-2a-report.md.
+Re-review 3 findings 1 and 2 are OUT OF SCOPE and unchanged: pending-obligation gate
+semantics and resharded negative-gap retention belong to follow-up lane 2a2. No claim
+of their closure, actual-provider/L0 acceptance or DV7 closure is made here.
+
 STAGE-2P (C3/C4/C13/C14; uses DV4/DV9, preserves I1-I9): DESIGN — the
 worker-packet producer still requested deleted stub semantics. Siblings: web DOM
 markers, CLI exit 3 and Build/legacy unit-test instructions. Owner: worker_packet.
@@ -289,6 +474,8 @@ CONTRACT-ALIGNMENT owns this batch in `work/sprint-20261029/lane-contract-align`
 
 | Observation and evidence | Owner and disposition | Practical exit |
 | --- | --- | --- |
+| Stage-2a flake (C14/C18/C23/C25, I6): original production + held publication reproduced valid pending Build evidence with running run/unknown MCP status (112.57s). Retained successor 30090394f15b reached verifier S10 13.70s after the last monitored evidence write, then hit the 15s no-progress clock. | Dispatch/semantic runner/job status owners publish pending status with the evidence snapshot and completed-scenario progress in existing monitored evidence. PlanStore.finding_state remains sole finding/request owner. Repair targets: web 3/3 and CLI 3/3 GREEN. Historical S4 deadline did not recur. One original CLI repetition stopped at the preliminary HTTP 5s startup deadline; subsequent repetitions passed, cause unproven. | Required two consecutive full golden gates are recorded in stage-2a-report.md, Flake section. At any future HTTP startup recurrence capture the existing child startup/error boundary; no deadline increase. Suite evidence only; actual-provider/full-vision acceptance remains unperformed. Superseding final outcome: full gate 1 GREEN/490.18s, full gate 2 RED/381.79s (S3 scenario deadline, S4 unperformed). The owner now retains the observed fallback across the same bounded run; its targeted web Build reached PASS, then harness_accept_status timed out (1638.89s total). No full gate on this final mode-cache edit. Timebox expired; acceptance cleanup remains unverified after server exit, process inventory denied. Fresh owner-status diagnosis and a renewed full-gate/time budget are required; no completion claimed. |
+| Stage-2a Round 6 (C11/C14/C18, I2/I5/I6): review4 #1 and rereview3 #2 share an undefined dossier replacement lifecycle. Golden RED/42.27s observed A's concrete gap missing from the replacement packet. | PlanStore retains accepted plan-review members/gaps in the judgment transaction and retires prior pending requests for the same reviewer and current binding when a new invocation replaces them. Distinct live shard identities remain; immutable accepted obligations survive positive replacements. The dossier runner carries the original logical round identity. Producer-side deferred writes and implicit read-time request dedup are removed. Rereview3 #1 remains out of scope for 2a2. | New scripted golden reaches publication only after disposing A's retained finding/gap, without waiting on retired B; CLI targeted GREEN. Two final full-gate results and exact candidate are in stage-2a-report.md Round 6. No actual-provider/full-vision credit claimed. |
 | Captured F3/UX5 writes, Run25 S8/HC evidence, four-scenario web validation and UX4 click-first RED did not compose with their consumers. | PlanStore/semantic schema, acceptance, roundtable and consent owners: repaired together; retained fixtures and owning behavior tests cover the required seams. Final audit also extended unchanged-subject B reuse from chat to native; the same owner test checks no persistence change before consuming the request. | Exact candidate passes the source gates, then an authorized pinned CLI/web cohort proves root delivery, formal review and C; no real cohort credit here. |
 | Stdio retained-candidate recovery blocked in Git reads that inherited the RPC input stream; real golden web traces identified the calls. | Candidate/dispatch/steering subprocess owners: closed stdin explicitly; the real browser/stdio journey now consumes candidate-bound contrast judgment and reaches C. | Retained-failure recovery completes without losing the RPC connection; scenario children have explicit cleanup receipts. Missing receipts remain UNKNOWN. The single broad gate exposed an outer TimeoutExpired diagnostic lacking the runner timeout vocabulary despite verified teardown; normalization is repaired at the runner, with the existing hung-renderer check as its exit. |
 | The review's eight optional seams remain: approved-roster rediscovery, shard/start allowance, durable review owner recovery, C negative vocabulary, long-scenario budget parity, atomic same-work delivery repair, asset/packet capacity, typed failure/delivery status. | Existing approvals/review/budget/candidate/runner/status owners; deferred from this bounded batch, without weakening their current holds. | Run each ranked row's decisive owner check before claiming closure; preserve failed/assisted runs in any real cohort. |

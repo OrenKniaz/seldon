@@ -6,7 +6,7 @@ const end = Date.now() + cfg.remaining * 1000; const remaining = () => { const m
   if (ms <= 0) throw Error('Web scenario timeout'); return ms; };
 async function openBrowser() {
   let browser;
-  for (const browserMode of ['normal', 'single-process']) {
+  for (const browserMode of tools.browserMode === 'single-process' ? ['single-process'] : ['normal', 'single-process']) {
     try {
       browser = await chromium.launch({executablePath: tools.chromium, headless: !preview, chromiumSandbox: true, timeout: remaining(), args: browserMode === 'normal' ? [] : ['--single-process']});
       const context = await browser.newContext({viewport: j?.viewport, reducedMotion: j?.reducedMotion, offline: true, serviceWorkers: 'block', acceptDownloads: false});

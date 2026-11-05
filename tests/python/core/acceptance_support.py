@@ -2,11 +2,11 @@ import time
 
 
 def drain_acceptance(owner, store, timeout=20):
-    deadline = time.monotonic() + timeout
-    while owner.thread and owner.thread.is_alive() and time.monotonic() < deadline:
+    deadline = time.time() + timeout
+    while owner.thread and owner.thread.is_alive() and time.time() < deadline:
         owner.thread.join(timeout=0.01)
         owner.drain(store)
-    assert not owner.thread or not owner.thread.is_alive()
+    assert not owner.thread or not owner.thread.is_alive(), f"Acceptance exceeded {timeout}s wall-clock deadline"
     owner.drain(store)
 
 

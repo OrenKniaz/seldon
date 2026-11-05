@@ -8,7 +8,7 @@ from tests.python.core import semantic_wiring_support
 from tests.python.core.planning_support import source_only_expansion
 from tests.python.core.review_support import finish_review
 from tests.python.core.semantic_wiring_support import execute, workers
-from tests.python.core.test_golden_path import judge_executions, scripted_judgment, settle_decision
+from tests.python.core.test_golden_path import judge_executions, scripted_judgment, scripted_review_reply, settle_decision
 
 from codex_harness.core import dispatch, planner_jobs
 from codex_harness.core.mcp_planner import PlannerServer
@@ -292,7 +292,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     # Synthetic external-process telemetry, never actual provider/product qualification.
     def review_process(launch, *_):
         provider = launch.cli
-        result = protocol(provider, text="[]")
+        result = protocol(provider, text=scripted_review_reply(launch, [], verdict="positive",
+            rationale="Independent plan review: all greeting requirements have executable semantic coverage"))
         model = next(r["model"] for r in reviewers if r["provider"] == provider)
         return tuple(v.replace("source-only", model) if isinstance(v, str) else v for v in result)
 

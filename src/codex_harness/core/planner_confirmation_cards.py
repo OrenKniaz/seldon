@@ -30,19 +30,3 @@ def pending_decisions(store):
         if key not in consumed and key not in pending:
             pending[key] = dict(reply, judgment=store.judgment(reply["judgment"]["id"]))
     return list(pending.values())
-
-
-def pending_judgments(store):
-    """Expose the latest consumer question per purpose after a reload or batch edit."""
-    from codex_harness.core.approvals import records
-
-    result, seen = [], set()
-    for request in records(store, "semantic-assessment-requested"):
-        judgment = store.judgment(request["judgmentId"])
-        purpose = judgment["question"]
-        if purpose in seen:
-            continue
-        seen.add(purpose)
-        if judgment["status"] == "pending-judgment":
-            result.append({key: judgment[key] for key in ("id", "question", "status", "current", "disposition", "positiveCredit", "concreteGap")})
-    return result

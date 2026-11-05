@@ -353,6 +353,7 @@ def review(
     for provider, executable in executables.items():
         if not executable:
             raise ValueError(f"Reviewer executable unavailable: {provider}")
+    roundtable.bind_review_dossiers(store, dossiers, selected, candidate_run=run)
     attempt = recovery.ReviewAttempt.start(
         store,
         repo,

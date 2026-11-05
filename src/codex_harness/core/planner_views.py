@@ -4,6 +4,7 @@ import sqlite3
 
 from codex_harness.core.plan_store import PHASES
 from codex_harness.core.planner_vision import render_vision
+from codex_harness.core.planner_consent_views import judgment_navigation
 from codex_harness.core.review_instructions import status
 from codex_harness.core.reviewer_evidence import single_provider_notice
 from codex_harness.core.spine import Spine
@@ -269,7 +270,7 @@ def closure_declaration_example(store) -> dict:
 
     if store is None:
         return {"state": "held", "reason": "Start a plan; no finding/record IDs available"}
-    rows = [row for row in findings(store) if row["status"] == "open"]
+    rows = [row for row in findings(store) if row["state"] == "open"]
     revision = store.manifest_revision()
     if not rows or not revision:
         return {
@@ -389,6 +390,8 @@ def continuation_projection(status: dict, resolution: dict) -> dict:
                 "cliArguments": ["review", round_id],
             },
         )
+    elif navigation := judgment_navigation(status.get("pendingSemanticJudgments", []), review_complete=resolution["review"]["current"]):
+        action.update(navigation)
     elif policy.get("active") and not policy["eligible"]:
         action["kind"] = "review_policy_hold"
         result["classification"] = "configured-policy-hold"
@@ -536,7 +539,7 @@ def review_resolution_state(store, status: dict) -> dict:
                 continue
             if not known(row.get("id")) or not isinstance(row.get("memberIds"), list):
                 raise ValueError("Unknown recorded finding membership")
-            if row["status"] not in {"open", "deferred"}:
+            if row["state"] != "open" and row["status"] != "deferred":
                 continue
             item = {
                 "id": row["id"],
@@ -548,7 +551,7 @@ def review_resolution_state(store, status: dict) -> dict:
                     "cliCommand": "review",
                 },
             }
-            if row["status"] == "open":
+            if row["state"] == "open":
                 for public, source in (("finding", "finding"), ("suggestion", "suggestion")):
                     item[public], item[public + "Truncated"] = excerpt(row.get(source))
                 item.update(
@@ -565,9 +568,8 @@ def review_resolution_state(store, status: dict) -> dict:
         state.update(blockingOpenFindings=blocking, deferredFindings=deferred)
         if known(manifest):
             audit = store.passing_audit(manifest)
-            reviews = store.successful_reviews(manifest)
-            if audit is not None and not isinstance(audit, dict) or not isinstance(reviews, list):
-                raise ValueError("Unreadable current evidence")
+            prerequisite = store.review_prerequisite(manifest)
+            reviews = prerequisite["reviews"]
             state["audit"] = {
                 "current": bool(audit),
                 "proofLevel": (audit.get("proofLevel", "oracle-verified") if audit else None),
@@ -576,25 +578,20 @@ def review_resolution_state(store, status: dict) -> dict:
             if state["audit"]["proofLevel"] not in {None, "prospective", "oracle-verified"}:
                 raise ValueError("Unknown recorded audit mode")
             ids = [row["id"] for row in reviews]
-            if not all(known(item) for item in ids):
-                raise ValueError("Unknown current review identity")
-            state["review"] = {"current": bool(ids), "successfulReviewIds": sorted(ids)}
+            state["review"] = {"current": prerequisite["complete"], "successfulReviewIds": sorted(ids)}
             if any(row.get("carriedForward") for row in reviews):
                 state["review"].update(
                     carriedForward=True, message="review current (carried forward after repairs)"
                 )
             if state["phase"] in {"roundtable", "publish", "execute"}:
                 quality, evidence, advice = _roundtable(store)
-                check = dict(status=quality, evidence=evidence, advice=advice)
-                if check["status"] not in {"pass", "warn", "fail"}:
-                    raise ValueError("Unknown roundtable quality state")
-                advice, truncated = excerpt(check["advice"])
+                advice, truncated = excerpt(advice)
                 state["review"].update(
-                    qualityStatus=check["status"],
+                    qualityStatus=quality,
                     advice=advice,
                     adviceTruncated=truncated,
                     detailRoute={
-                        "roundId": check["evidence"].get("roundId"),
+                        "roundId": evidence.get("roundId"),
                         "mcpTool": "harness_review",
                         "cliCommand": "review",
                     },
@@ -644,6 +641,8 @@ def review_finding_members(store, review: dict) -> list[dict]:
                 "provider",
                 "severity",
                 "status",
+                "state",
+                "judgmentIds",
                 "finding",
                 "suggestion",
                 "resolution",
@@ -912,7 +911,7 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
             + " OR "
             + cmd("audit --oracle <existing-reference>")
         )
-    if kind == "review_required":
+    if kind == "review_required" and "message" not in action:
         review = state["review"]
         review_command = cmd("roundtable") if cli_prefix is not None else "harness_roundtable"
         if review.get("qualityStatus") == "fail" and review["current"]:
@@ -963,7 +962,7 @@ def review_resolution_next(state: dict, *, cli_prefix=None) -> str:
             + " (attempt only; canonical gates recheck)"
             + review_warning(state)
         )
-    return "Refresh " + refresh + "; canonical state or resolution scope is unavailable."
+    return action.get("message", "Refresh " + refresh + "; canonical state or resolution scope is unavailable.")
 
 
 def review_warning(state: dict) -> str:

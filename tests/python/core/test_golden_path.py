@@ -44,6 +44,15 @@ def scripted_judgment(call, judgment=None, meaning=None, verdict="positive", gap
     return dict(reply, current=current)
 
 
+def scripted_review_reply(launch, findings, *, verdict, rationale, gaps=()):
+    """Script only a provider reply to the actual bound review packet."""
+    request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split(
+        "\nReturn ONLY JSON", 1)[0])
+    return json.dumps(dict(judgmentId=request["id"], binding=request["binding"],
+        verdict=verdict, rationale=rationale, meaning=dict(findings=findings,
+            depth="Focused semantic E2E review of this small local product; inspect data preservation and failure paths"), gaps=list(gaps)))
+
+
 def scripted_worker(packet, root, files):
     """Script worker-authored files in response to the delivered packet, never proof results."""
     instructions = packet.split("\n\n")[1]
@@ -255,7 +264,7 @@ def execution_judgment_golden(workspace):
 
     def git(*args):
         return subprocess.run(['git', '-C', str(product), *args], check=True,
-                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
 
     def retain(proof):
         # This is the observation writer, never a fake process or provider result.
@@ -671,6 +680,17 @@ def trace_contract_golden(workspace):
             server.close()
 
 
+HTTP_DEADLINE = """import os as _os, threading as _threading, time as _time
+_http_end = _time.time() + 15
+def _http_watchdog():
+    while _time.time() < _http_end:
+        _time.sleep(.25)
+    _os.write(2, b'HTTP verifier exceeded 15s wall-clock deadline, including startup/readback/cleanup\\n')
+    _os._exit(124)
+_threading.Thread(target=_http_watchdog, daemon=True).start()
+"""
+
+
 def http_golden(workspace, semantic=False):
     """Protect subprocess HTTP planning through publication, real RED/GREEN and C.
 
@@ -695,13 +715,13 @@ def http_golden(workspace, semantic=False):
     server = PlannerServer(workspace)
     decisions = []
 
-    def call(tool_name, **args):
+    def call(tool_name, *, error=False, **args):
         reply = workspace_wire(server, tool_name, expected_workspace=str(workspace), **args)
         if tool_name == "harness_accept_review":
             reply = finish_review(server, reply)
-        if reply["isError"]:
+        if reply["isError"] and not error:
             print("\n".join(c.get("text", "") for c in reply.get("content", [])))
-        assert not reply["isError"], (tool_name, reply)
+        assert reply["isError"] is error, (tool_name, reply)
         if tool_name in {"harness_upsert_node", "harness_upsert_nodes"} and store._meta()["locked_vision_json"]:
             from codex_harness.core.approvals import intent_assessment
             judgment = intent_assessment(store, store.spine().node("V1"), prepare=False)
@@ -728,7 +748,7 @@ server = ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), API)
 print(server.server_port, flush=True)
 server.serve_forever()
 """
-    proof = """import subprocess, sys, unittest
+    proof = HTTP_DEADLINE + """import queue, subprocess, sys, threading, unittest
 from pathlib import Path
 from urllib.request import urlopen
 class HTTP(unittest.TestCase):
@@ -737,15 +757,20 @@ class HTTP(unittest.TestCase):
                               cwd=Path(__file__).resolve().parents[1],
                               stdout=subprocess.PIPE, text=True) as server:
             try:
-                port = int(server.stdout.readline())
+                ports = queue.Queue()
+                threading.Thread(target=lambda: ports.put(server.stdout.readline()), daemon=True).start()
+                try:
+                    port = int(ports.get(timeout=5))
+                except queue.Empty:
+                    raise TimeoutError("HTTP server did not publish a port within 5s")
                 with urlopen(f'http://127.0.0.1:{port}/items', timeout=5) as response:
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.read(), b'shelf')
             finally:
-                server.terminate()
+                server.kill()
                 server.wait(timeout=5)
 """
-    helper = """import subprocess, sys
+    helper = HTTP_DEADLINE + """import queue, subprocess, sys, threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from urllib.request import urlopen
@@ -754,14 +779,19 @@ def simultaneous():
                           cwd=Path(__file__).resolve().parents[1],
                           stdout=subprocess.PIPE, text=True) as server:
         try:
-            port = int(server.stdout.readline())
+            ports = queue.Queue()
+            threading.Thread(target=lambda: ports.put(server.stdout.readline()), daemon=True).start()
+            try:
+                port = int(ports.get(timeout=5))
+            except queue.Empty:
+                raise TimeoutError("HTTP server did not publish a port within 5s")
             def get(_):
                 with urlopen(f'http://127.0.0.1:{port}/items', timeout=5) as response:
                     return response.status, response.read()
             with ThreadPoolExecutor(max_workers=4) as pool:
                 return list(pool.map(get, range(4)))
         finally:
-            server.terminate()
+            server.kill()
             server.wait(timeout=5)
 """
     opaque = """import unittest
@@ -981,12 +1011,14 @@ class ConcurrentHTTP(unittest.TestCase):
             template.mkdir(exist_ok=True)
             product = product.replace(
                 "self.wfile.write(b'shelf')",
-                "import sqlite3\n        with sqlite3.connect(sys.argv[2]) as db:\n"
+                "import sqlite3\n        from contextlib import closing\n"
+                "        with closing(sqlite3.connect(sys.argv[2])) as db:\n"
                 "            rows = db.execute('select name from items')\n"
                 "            self.wfile.write(','.join(r[0] for r in rows).encode())",
             )
             (template / "server.py").write_text(product, encoding="utf-8")
             importer = """import csv, sys
+from contextlib import closing
 try:
     rows = list(csv.DictReader(open(sys.argv[1], encoding='utf-8')))
 except OSError:
@@ -1000,25 +1032,46 @@ def valid(row):
     except ValueError: return False
 import sqlite3
 accepted = [row for row in rows if valid(row)]
-with sqlite3.connect(sys.argv[3]) as db:
+with closing(sqlite3.connect(sys.argv[3])) as db, db:
     db.execute('create table if not exists items (name text)')
     db.executemany('insert into items values (?)', [(r['name'],) for r in accepted])
 n = len(accepted)
 print(f'imported {n}, skipped {len(rows)-n}')
 """
-            verifier = """import subprocess, sys
+            verifier = HTTP_DEADLINE + """import queue, sqlite3, subprocess, sys, threading
+from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.request import urlopen
-entry = str(Path(__file__).with_name('server.py'))
-with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
-                      stdout=subprocess.PIPE, text=True) as server:
+root = Path(__file__).resolve().parent
+# T_HTTP runs independently of scenario setup. Import real input into a private DB;
+# catch empty HTTP success, SQLite startup errors and optional-field row loss.
+with TemporaryDirectory(dir=root) as scratch:
+    csv = Path(scratch) / 'items.csv'
+    db = Path(scratch) / 'items.sqlite3'
+    csv.write_text('name,quantity,unit,expires\\nRice,2,kg,2030-01-10\\nBeans,0,,\\n')
+    imported = subprocess.run([sys.executable, '-B', str(root / 'import_items.py'),
+        str(csv), '--db', str(db)], capture_output=True, text=True, timeout=5)
+    assert imported.returncode == 0, imported.stderr
+    assert imported.stdout == 'imported 2, skipped 0\\n', imported.stdout
+    with closing(sqlite3.connect(db)) as connection:
+        assert connection.execute('select name from items order by rowid').fetchall() == [('Rice',), ('Beans',)]
+    server = subprocess.Popen([sys.executable, '-B', str(root / 'server.py'), '0', str(db)],
+        stdout=subprocess.PIPE, text=True)
     try:
-        port = int(server.stdout.readline())
+        ports = queue.Queue()
+        threading.Thread(target=lambda: ports.put(server.stdout.readline()), daemon=True).start()
+        try:
+            port = int(ports.get(timeout=5))
+        except queue.Empty:
+            raise TimeoutError('HTTP startup deadline: 5s')
         with urlopen(f'http://127.0.0.1:{port}/items', timeout=5) as response:
-            if response.status != 200: raise RuntimeError(response.status)
-            print(response.read().decode())
+            assert response.status == 200, response.status
+            body = response.read().decode()
+            assert body == 'Rice,Beans', f'Expected imported rows over HTTP, got {body!r}'
+            print(body)
     finally:
-        server.terminate()
+        server.kill()
         server.wait(timeout=5)
 """
         else:
@@ -1079,16 +1132,15 @@ with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
             # import path. Relative PYTHONPATH breaks runner children in temp cwd.
             patch.setenv("PYTHONPATH", os.pathsep.join([str(ROOT / "src"), str(ROOT)]))
             patch.setattr(roundtable, "_executable", lambda *_: sys.executable)
-            patch.setattr(
-                roundtable,
-                "_run",
-                lambda launch, *_: tuple(
-                    v.replace("source-only", "gpt-6.1-sol").replace("Some(High)", "Some(Medium)")
-                    if isinstance(v, str)
-                    else v
-                    for v in protocol(launch.cli, text="[]")
-                ),
-            )
+            review_history_ids = set()
+            def positive_review(launch, *_):
+                request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
+                history = request["sourceRefs"][0]["payload"]["facts"]["packet"]
+                assert all(key in history for key in review_history_ids)
+                return tuple(v.replace("source-only", "gpt-6.1-sol").replace("Some(High)", "Some(Medium)")
+                    if isinstance(v, str) else v for v in protocol(launch.cli, text=scripted_review_reply(launch,
+                        [], verdict="positive", rationale="The planned HTTP import, persistence and readback cover the accepted local dream")))
+            patch.setattr(roundtable, "_run", positive_review)
             yes(
                 call(
                     "harness_prepare_chat_confirmation",
@@ -1112,7 +1164,221 @@ with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
                 assert not result["findings"], result
             call("harness_advance", to_phase="roundtable")
             assert store.status()["pending_gate"] != "passing-audit-required"
-            call("harness_roundtable", max_rounds=1, max_total=2, timeout=5)
+            if semantic:
+                # Protect complete source members and invocation/revision-bound authority.
+                # Earlier coverage merged opposing findings and never retried an unchanged packet.
+                exhausted_calls, original_packets = {}, {}
+                def malformed_review(launch, *_):
+                    request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
+                    key = request["id"]
+                    facts = request["sourceRefs"][0]["payload"]["facts"]
+                    original_packets[facts["reviewer"]["name"]] = facts["packetSha256"]
+                    exhausted_calls[key] = exhausted_calls.get(key, 0) + 1
+                    return protocol(launch.cli, text="[]")
+                with pytest.MonkeyPatch.context() as bad:
+                    bad.setattr(roundtable, "_run", malformed_review)
+                    exhausted = call("harness_roundtable", max_rounds=2, timeout=5, error=True)
+                assert sorted(exhausted_calls.values()) == [3, 3]
+                assert exhausted["findings"] == 0 and not exhausted["successfulReviews"]
+                exhausted_ids = set(exhausted_calls)
+                # Terminal exact-fix exhaustion must teach fresh invocation, not
+                # advertise a submission the owner necessarily rejects. Older flows
+                # inspected the error count but never consumed its next-step card.
+                terminal = call("harness_plan_status", full=True)
+                requests = {r["id"]: r for r in terminal["pendingSemanticJudgments"]}
+                assert all(not requests[key]["submitReady"] and requests[key]["action"] == "fresh-invocation" for key in exhausted_ids)
+                guidance = terminal["continuation"]["recommendation"]
+                assert guidance["kind"] == "review_required"
+                assert "fresh invocation" in guidance["message"] and "submit" not in guidance["message"]
+                conflict = dict(node_id="R2", severity="major", finding="HTTP readback evidence needs judgment",
+                    suggestion="Prove persistence of both imported rows", classification="defect-in-plan",
+                    scope_reason="Required readback could be missing")
+                opposing = dict(conflict, suggestion="Explain whether extra readback coverage exceeds the brief",
+                    classification="beyond-brief", scope_reason="Additional coverage might exceed the brief")
+                def conflicting_review(launch, *_):
+                    request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
+                    name = request["sourceRefs"][0]["payload"]["facts"]["reviewer"]["name"]
+                    assert request["id"] not in exhausted_ids
+                    assert request["sourceRefs"][0]["payload"]["facts"]["packetSha256"] == original_packets[name]
+                    concrete = name == choice["fields"]["reviewers"][0]["name"]
+                    findings = [conflict, opposing] if concrete else [dict(conflict,
+                        finding="Evidence access unavailable", suggestion="Obtain readback observations")]
+                    return protocol(launch.cli, text=scripted_review_reply(launch, findings,
+                        verdict="negative" if concrete else "inconclusive",
+                        rationale="Readback is unproven until its real observations are assessed" if concrete
+                            else "Unavailable observations cannot establish a concrete gap",
+                        gaps=["HTTP readback evidence needs judgment"] if concrete else []))
+                with pytest.MonkeyPatch.context() as bad:
+                    bad.setattr(roundtable, "_run", conflicting_review)
+                    rejected = call("harness_roundtable", max_rounds=2, timeout=5)
+                assert not rejected["successfulReviews"]
+                # Only invocation metadata changes on the otherwise identical initial dossier.
+                assert all(r["shardDetails"][0]["reviewInvocationId"] != exhausted["reviewers"][i]["shardDetails"][0]["reviewInvocationId"]
+                           for i,r in enumerate(rejected["reviewers"]))
+                held = workspace_wire(server, "harness_advance", expected_workspace=str(workspace), to_phase="publish")
+                assert held["isError"]
+                equivalence = rejected["clusters"]["judgment"]
+                members = equivalence["sourceRefs"][0]["payload"]["facts"]["members"]
+                assert len([row for row in members if row.get("judgmentGap")]) == 1
+                members = [row for row in members if row["finding"] == conflict["finding"] and not row.get("judgmentGap")]
+                assert len(members) == 2 and {row["suggestion"] for row in members} == {conflict["suggestion"], opposing["suggestion"]}
+                assert {row["scope_reason"] for row in members} == {conflict["scope_reason"], opposing["scope_reason"]}
+                assert equivalence["status"] == "pending-judgment"
+                scripted_judgment(call, equivalence, dict(groups=[[row["id"] for row in members]]),
+                    rationale="The two independently retained members concern readback; neither rationale is discarded")
+                first = [dict(id=members[0]["id"], status="resolved", resolution="Readback verifier covers the first member")]
+                pending = call("harness_resolve_findings", findings=first)
+                first_closure_id = pending["judgment"]["id"]
+                scripted_judgment(call, pending["judgment"], dict(memberDispositions={members[0]["id"]: "resolved"}))
+                call("harness_resolve_findings", findings=first)
+                remainder = call("harness_review", id=rejected["roundId"])["findingMembers"]
+                assert {row["id"] for row in remainder if row["id"] in {m["id"] for m in members} and row["status"] == "open"} == {members[1]["id"]}
+                projected = roundtable.findings(store)
+                assert any(row["id"] == members[1]["id"] and row["status"] == "open" for row in projected)
+                # Every concrete negative gap survives independently of presentation;
+                # an inconclusive major item remains pending, never a false blocker.
+                gap_rows = [r for r in roundtable.findings(store, expand=True) if r.get("judgmentGap")]
+                assert len(gap_rows) == 1 and all(r["state"] == "open" for r in gap_rows)
+                review_history_ids.update(row["id"] for row in roundtable.findings(store, expand=True))
+                assert all(r["id"] in {row["id"] for row in remainder} for r in gap_rows)
+                continuation = call("harness_plan_status", full=True)["continuation"]["recommendation"]
+                assert continuation["kind"] == "reconcile_findings" and members[1]["id"] in continuation["findingIds"]
+                proposals = [dict(id=row["id"], status="resolved",
+                    resolution="The real importer/SQLite/HTTP verifier supplies readback evidence")
+                    for row in roundtable.findings(store, expand=True) if row["state"] == "open" or row["id"] == members[0]["id"]]
+                pending = call("harness_resolve_findings", findings=proposals)
+                scripted_judgment(call, pending["judgment"], dict(memberDispositions={row["id"]: "resolved" for row in proposals}))
+                assert call("harness_resolve_findings", findings=proposals)["dispositions"] == len(proposals)
+                assert call("harness_judgment", judgment_id=pending["judgment"]["id"])["positiveCredit"]
+                retained = call("harness_review", id=rejected["roundId"])["findingMembers"]
+                assert {first_closure_id, pending["judgment"]["id"]} <= set(next(r for r in retained if r["id"] == members[0]["id"])["judgmentIds"])
+                uncertain = [r for r in roundtable.findings(store, expand=True) if r["finding"] == "Evidence access unavailable"]
+                assert len(uncertain) == 1 and uncertain[0]["state"] == "pending"
+                assert not call("harness_plan_status", full=True)["reviewResolution"]["blockingOpenFindings"]
+                preliminary = store.spine().node("R2")
+                preliminary["text"] += " Preserve readback while repairing the reviewed plan."
+                call("harness_upsert_node", node=preliminary)
+                options["expected_revision"] = call("harness_compile", include_detail=True)["planRevision"]
+                yes(call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options, reviewer_node_id=choice["id"]))
+            if not semantic:
+                reviewer = choice["fields"]["reviewers"][0]
+                # Protect dossier replacement: accepted A obligations survive B's
+                # overflow; publication must await their disposition, never retired B.
+                # Prior independent-shard checks never replaced a partly judged dossier.
+                original_shards = roundtable.packet_shards
+                replaced, abandoned = {}, []
+                reshard_gap = "Resharding must retain the imported-row evidence gap"
+                def split_dossier(owner, provider, *, token_budget=None, **kwargs):
+                    if token_budget is not None:
+                        return original_shards(owner, provider, token_budget=token_budget, **kwargs)
+                    full_packet = original_shards(owner, provider, **kwargs)[0]
+                    focused_packet = original_shards(owner, provider, token_budget=full_packet["estimatedTokens"] - 1, **kwargs)[0]
+                    return [full_packet, focused_packet]
+                def reshard_review(launch, *_):
+                    request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
+                    facts = request["sourceRefs"][0]["payload"]["facts"]
+                    if facts["reviewer"]["name"] == reviewer["name"]:
+                        if not replaced:
+                            replaced.update(invocation=facts["invocationId"], judgment=request["id"])
+                            return protocol(launch.cli, text=scripted_review_reply(launch, [dict(node_id="plan", severity="major",
+                                finding="Retain the readback finding across dossier replacement", suggestion="Retain the HTTP observations",
+                                classification="defect-in-plan", scope_reason="Required readback remains unproven")],
+                                verdict="negative", rationale="A's concrete readback gap needs disposition", gaps=[reshard_gap]))
+                        if facts["invocationId"] == replaced["invocation"]:
+                            abandoned.append(request["id"])
+                            return (1, "", "prompt is too long: context window exceeded")
+                        assert reshard_gap in launch.stdin_text
+                    return protocol(launch.cli, text=scripted_review_reply(launch, [], verdict="positive",
+                        rationale="Replacement dossier reviewed; retained obligations require their own disposition"))
+                with pytest.MonkeyPatch.context() as reshard:
+                    reshard.setattr(roundtable, "packet_shards", split_dossier)
+                    reshard.setattr(roundtable, "_run", reshard_review)
+                    replacement = call("harness_roundtable", max_rounds=1, max_total=2, timeout=5)
+                assert len(replacement["successfulReviews"]) == 2, replacement
+                carried = [r for r in roundtable.findings(store, expand=True) if r.get("judgmentId") == replaced["judgment"]]
+                assert {r["finding"] for r in carried} == {reshard_gap, "Retain the readback finding across dossier replacement"}, carried
+                assert all(r["state"] == "open" for r in carried)
+                assert abandoned and not set(abandoned) & {r["id"] for r in call("harness_plan_status")["pendingSemanticJudgments"]}
+                assert all(not call("harness_judgment", judgment_id=key)["current"] for key in abandoned)
+                if replacement["convergence"]:
+                    scripted_judgment(call, replacement["convergence"], dict(action="ready"))
+                held = workspace_wire(server, "harness_advance", expected_workspace=str(workspace), to_phase="publish")
+                assert held["isError"] and "plan-findings-open" in str(held)
+                carried_proposals = [dict(id=r["id"], status="resolved", resolution="Bound readback observations address A's retained obligation") for r in carried]
+                closure = call("harness_resolve_findings", findings=carried_proposals)
+                scripted_judgment(call, closure["judgment"], dict(memberDispositions={r["id"]: "resolved" for r in carried}))
+                call("harness_resolve_findings", findings=carried_proposals)
+                assert store.review_prerequisite(store.manifest_revision())["complete"]
+                assert not call("harness_plan_status", full=True)["reviewResolution"]["blockingOpenFindings"]
+                review_history_ids.update(r["id"] for r in carried)
+                reviewed = replacement
+            else:
+                reviewed = call("harness_roundtable", max_rounds=2, timeout=5)
+            assert len(reviewed["successfulReviews"]) == 2, reviewed
+            if semantic:
+                rejected_ids = {part["judgmentId"] for row in rejected["reviewers"] for part in row["shardDetails"]}
+                assert not rejected_ids & {part["judgmentId"] for row in reviewed["reviewers"] for part in row["shardDetails"]}
+                convergence = reviewed["convergence"]
+                scripted_judgment(call, convergence, dict(action="ready"))
+                # Canonical full + compact shard evidence deliberately shares all
+                # spine refs. Earlier coverage used only one shard per reviewer,
+                # so purpose/whole-spine dedup hid the other required request.
+                reviewer = choice["fields"]["reviewers"][0]
+                full = roundtable.packet_shards(store, reviewer["provider"])[0]
+                focused = roundtable.packet_shards(store, reviewer["provider"], token_budget=full["estimatedTokens"] - 1)[0]
+                assert full["hash"] != focused["hash"]
+                shards = [full, focused]
+                roundtable.bind_review_dossiers(store, {reviewer["provider"]: shards}, [reviewer])
+                shard_requests = [store.review_judgment(reviewer, shard, prepare=False) for shard in shards]
+                meaning = dict(findings=[], depth="Assess both bound evidence shards independently; observations unavailable")
+                for request in shard_requests:
+                    scripted_judgment(call, request, meaning, verdict="inconclusive")
+                visible = {r["id"]: r for r in call("harness_plan_status")["pendingSemanticJudgments"]}
+                # Explicit replacement retires exhausted requests; they cannot
+                # take continuation from the distinct live shard identities.
+                assert not exhausted_ids & visible.keys()
+                assert all(visible[r["id"]]["submitReady"] for r in shard_requests)
+                assert visible[shard_requests[0]["id"]]["requestKey"] != visible[shard_requests[1]["id"]]["requestKey"]
+                meaning["depth"] = "Completed independent assessment of the bound import and HTTP evidence shard"
+                scripted_judgment(call, shard_requests[0], meaning)
+                partial = call("harness_plan_status", full=True)
+                assert shard_requests[1]["id"] in partial["continuation"]["recommendation"]["judgmentIds"]
+                assert not partial["reviewResolution"]["review"]["current"]
+                held = workspace_wire(server, "harness_advance", expected_workspace=str(workspace), to_phase="publish")
+                assert held["isError"] and "plan-publication-evidence-required" in str(held)
+                scripted_judgment(call, shard_requests[1], meaning)
+                assert call("harness_plan_status", full=True)["reviewResolution"]["review"]["current"]
+                amended = store.spine().node("R2")
+                amended["text"] += " HTTP readback must preserve both imported rows."
+                call("harness_upsert_node", node=amended)
+                manifest = call("harness_compile", include_detail=True)
+                options["expected_revision"] = manifest["planRevision"]
+                assert not store.successful_reviews(manifest["planRevision"])
+                assert not call("harness_judgment", judgment_id=convergence["id"])["current"]
+                pending = call("harness_resolve_findings", findings=proposals)
+                scripted_judgment(call, pending["judgment"], dict(memberDispositions={row["id"]: "resolved" for row in proposals}))
+                closed = call("harness_resolve_findings", findings=proposals)
+                assert len(closed["reuseJudgments"]) == 2
+                # Requests are distinct by reviewer/member, never hidden by purpose.
+                requests = closed["reuseJudgments"]
+                pending_ids = {row["id"] for row in call("harness_plan_status")["pendingSemanticJudgments"]}
+                assert {r["id"] for r in requests} <= pending_ids
+                first_reuse = scripted_judgment(call, requests[0], dict(reuse=True))
+                scripted_judgment(call, first_reuse["convergence"], dict(action="ready"))
+                partial = call("harness_plan_status", full=True)
+                assert requests[1]["id"] in {r["id"] for r in partial["pendingSemanticJudgments"]}
+                assert partial["continuation"]["recommendation"]["kind"] == "judgment_required"
+                assert partial["reviewResolution"]["review"]["current"] is False
+                result = scripted_judgment(call, requests[1], dict(reuse=True),
+                    rationale="The actual delta clarifies existing readback; the real verifier covers both rows")
+                current_convergence = result["convergence"]
+                assert current_convergence["current"] and current_convergence["id"] != convergence["id"]
+                assert len(store.successful_reviews(manifest["planRevision"])) == 2
+                pending_ids = {row["id"] for row in call("harness_plan_status")["pendingSemanticJudgments"]}
+                assert current_convergence["id"] in pending_ids
+                assert call("harness_plan_status", full=True)["continuation"]["recommendation"]["kind"] == "judgment_required"
+                scripted_judgment(call, current_convergence, dict(action="ready"))
+                yes(call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options, reviewer_node_id=choice["id"]))
             call("harness_advance", to_phase="publish")
             if semantic:
                 call("harness_publish")
@@ -1172,11 +1438,11 @@ with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
                 with pytest.MonkeyPatch.context() as process_patch:
                     process_patch.setattr(subprocess, "Popen", launch)
                     job = call("harness_worker_start", **options)
-                    deadline = time.monotonic() + 180
+                    deadline = time.time() + 180
                     while (
-                        job["status"] not in {"completed", "failed"} and time.monotonic() < deadline
+                        job["status"] not in {"completed", "failed"} and time.time() < deadline
                     ):
-                        job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=10)
+                        job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 assert job["status"] == "completed", job
                 run = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
                 assert run["delivery"]["root"] == str(workspace.resolve()), run
@@ -1225,13 +1491,63 @@ with subprocess.Popen([sys.executable, '-B', entry, '0', sys.argv[1]],
                 ),
             )
             assert accepted["structuredContent"]["result"]["passed"], accepted
-            call("harness_accept_review", repo=run["repo"])
+            if semantic:
+                # A real acceptance review produces the finding; a later product edit
+                # must invalidate its positive closure judgment even with unchanged plan/template.
+                def acceptance_gap(launch, *_):
+                    request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
+                    reviewer = request["sourceRefs"][0]["payload"]["facts"]["reviewer"]
+                    # A negative verdict with no presentation findings still creates
+                    # concrete obligations. The next positive packet must carry them.
+                    items = []
+                    return tuple(v.replace("source-only", reviewer["model"]).replace("Some(High)", "Some(Medium)") if isinstance(v,str) else v
+                                 for v in protocol(launch.cli, text=scripted_review_reply(launch, items, verdict="negative",
+                                     rationale="The readback finding needs candidate-bound assessment", gaps=["Readback assessment is pending"])))
+                with pytest.MonkeyPatch.context() as gap:
+                    gap.setattr(roundtable, "_run", acceptance_gap)
+                    assessed = call("harness_accept_review", repo=run["repo"])
+                acceptance_members = assessed["findings"]
+                review_history_ids.update(row["id"] for row in acceptance_members)
+                assert len(acceptance_members) == 2 and all(r.get("judgmentGap") and r["state"] == "open" for r in acceptance_members)
+                call("harness_accept_review", repo=run["repo"])
+                assert all(r["state"] == "open" for r in store.acceptance_findings())
+                held = workspace_wire(server, "harness_accept", expected_workspace=str(workspace), by="user", statement="Yes")
+                assert held["isError"] and "acceptance-findings-open" in str(held)
+                dispositions = [dict(id=row["id"], status="resolved", resolution="Real readback meets this finding on candidate A") for row in acceptance_members]
+                prepared = call("harness_resolve_findings", findings=dispositions)
+                scripted_judgment(call, prepared["judgment"], dict(memberDispositions={row["id"]:"resolved" for row in acceptance_members}))
+                product = Path(run["repo"])
+                source = (product / "server.py").read_text(encoding="utf-8")
+                changed = source.replace("','.join", "';'.join")
+                assert changed != source
+                scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": changed})
+                stale = call("harness_judgment", judgment_id=prepared["judgment"]["id"])
+                assert not stale["current"] and not stale["positiveCredit"]
+                refused = call("harness_resolve_findings", findings=dispositions)
+                assert refused["state"] == "pending-judgment" and refused["dispositions"] == 0 and refused["owner"] is None
+                pending_requests = call("harness_plan_status")["pendingSemanticJudgments"]
+                assert any(r["id"] == refused["judgment"]["id"] and r["current"] is False for r in pending_requests)
+                assert all(row["state"] == "pending" for row in store.acceptance_findings())
+                scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": source})
+                assert call("harness_resolve_findings", findings=dispositions)["dispositions"] == len(dispositions)
+                assert call("harness_judgment", judgment_id=prepared["judgment"]["id"])["positiveCredit"]
+                assert all(r["state"] == "closed" for r in store.acceptance_findings() if r["id"] in {d["id"] for d in dispositions})
+                # Applying a closure never changes immutable facts. A later candidate
+                # edit must remove effective closure everywhere, including ordinary reads.
+                scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": changed})
+                assert all(r["state"] == "pending" for r in store.acceptance_findings())
+                assert all(r["status"] != "resolved" for r in store.acceptance_findings())
+                scripted_worker(run["beads"]["B"]["prompt"], product, {"server.py": source})
+                assert all(r["state"] == "closed" for r in store.acceptance_findings() if r["id"] in {d["id"] for d in dispositions})
+            if not semantic:
+                call("harness_accept_review", repo=run["repo"])
             decisions.append("accept")
             settle_decision(call, call("harness_accept", by="user", statement="Yes"))
             assert store.status()["acceptance"]["accepted"]
-            assert decisions == ["align+vision-lock", "plan-execution", "accept"]
+            assert decisions == (["align+vision-lock", "plan-execution", "plan-execution", "plan-execution", "accept"] if semantic
+                                 else ["align+vision-lock", "plan-execution", "accept"])
             print(
-                "golden ShelfLife scenarios: decisions=3; admitted root delivery; C accepted"
+                "golden ShelfLife: malformed two-fix/steer; negative minor/conflict pending; actual-delta reuse; importer/SQLite/HTTP RED->GREEN; C accepted"
                 if semantic
                 else "golden http: decisions=3; HTTP + concurrency RED->GREEN; C accepted"
             )
@@ -1265,6 +1581,19 @@ def provider_host(mode, workspace, surface, job_id=None):
     actual_popen = subprocess.Popen
     actual_audit = audit_process.run_audit_process
     actual_run = dispatch.run_plan
+    actual_write = dispatch._write_record
+
+    def publish(path, record):
+        actual_write(path, record)
+        if (surface == "web" and path.name == "run.json"
+                and record.get("semanticValidation", {}).get("state") == "pending-judgment"):
+            # Hold the real producer after publication so MCP must consume this
+            # transition, rather than usually missing it between status polls.
+            end = time.monotonic() + 10
+            while not (workspace / "validation-observed").exists() and time.monotonic() < end:
+                time.sleep(0.05)
+
+    dispatch._write_record = publish
 
     def command(role, project, job=None):
         return [sys.executable, "-B", str(Path(__file__).resolve()), role, project, surface] + (
@@ -1321,7 +1650,7 @@ def provider_host(mode, workspace, surface, job_id=None):
                 ],
                 cwd=root,
             )
-            child.wait()
+            child.wait(timeout=600)
         scripted_worker(packet(root, "B"), root, {filename:
             (ROOT / "tests/fixtures/efficiency" / filename).read_text(encoding="utf-8")})
         if surface == "web":
@@ -1333,7 +1662,7 @@ def provider_host(mode, workspace, surface, job_id=None):
 
     def review(launch, *_):
         if "## Read-only candidate evidence" in launch.stdin_text:
-            tier = "same-provider" if surface == "cli" else "cross-provider"
+            tier = "same-model" if surface == "cli" else "cross-provider"
             assert f"## Review tier: {tier}" in launch.stdin_text
             assert "catalog: unverified" in launch.stdin_text
         text = "[]"
@@ -1351,7 +1680,8 @@ def provider_host(mode, workspace, surface, job_id=None):
             ).replace("Some(High)", "Some(Medium)" if surface == "web" else "Some(Medium)")
             if isinstance(value, str)
             else value
-            for value in protocol(launch.cli, text=text)
+            for value in protocol(launch.cli, text=scripted_review_reply(launch, json.loads(text),
+                verdict="positive", rationale="Independent plan assessment: required behaviors are covered; trace note is advisory"))
         )
 
     subprocess.Popen = launch
@@ -1400,6 +1730,10 @@ def test_golden_path(tmp_path, request, surface):
     Replay ShelfLife: lose an exited owner's receipt, then hang a real descendant
     mid-Build. Both attempts must be quarantined and readmitted under the same B;
     ordinary successful fixtures missed UNKNOWN holding delivery forever.
+    Hold the Build observation publication before finalization: pending evidence
+    and status must agree; ordinary polling usually missed that transient window.
+    Retain an observed browser fallback through the same bounded observation run;
+    earlier per-scenario fallback forgot it and could exhaust S3/S4 on normal probes.
     """
     if surface == "cli":
         planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
@@ -1410,7 +1744,7 @@ def test_golden_path(tmp_path, request, surface):
         http_golden(tmp_path / "shelflife-scenarios", semantic=True)
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
-    started = time.monotonic()
+    started = time.time()
     (tmp_path / "AGENTS.md").write_text(
         "Use gpt-6.1-sol at medium effort for all helper assignments, including reviews.\n",
         encoding="utf-8",
@@ -1466,20 +1800,43 @@ def test_golden_path(tmp_path, request, surface):
 
         threading.Thread(target=read, daemon=True).start()
 
-        def rpc(method, params):
-            process.stdin.write(
-                json.dumps(
-                    dict(jsonrpc="2.0", id=calls, method=method, params=params), ensure_ascii=False
-                )
-                + "\n"
-            )
-            process.stdin.flush()
-            while True:
-                reply = replies.get(timeout=180)
+        rpc_id = 0
+
+        def rpc(method, params, *, timeout=90, notification=False):
+            nonlocal rpc_id
+            rpc_id += 1
+            expected_id = rpc_id
+            end = time.time() + timeout
+
+            def send():
+                try:
+                    message = dict(jsonrpc="2.0", method=method, params=params)
+                    if not notification:
+                        message["id"] = expected_id
+                    process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+                    process.stdin.flush()
+                    if notification:
+                        replies.put(expected_id)
+                except (OSError, ValueError) as error:
+                    replies.put(error)
+
+            # A server that stops reading must not trap the test in a pipe write.
+            threading.Thread(target=send, daemon=True).start()
+            while time.time() < end:
+                try:
+                    reply = replies.get(timeout=min(0.25, max(0.001, end - time.time())))
+                except queue.Empty:
+                    continue
+                if notification and reply == expected_id:
+                    return None
+                assert not isinstance(reply, Exception), f"Golden MCP transport failed: {reply}"
                 assert reply is not None, (tmp_path / "server.log").read_text()
                 if "id" in reply:
+                    assert reply["id"] == expected_id, reply
                     assert "error" not in reply, reply
                     return reply["result"]
+            pytest.fail(f"Golden MCP deadline after {timeout}s: {params.get('name', method)}; "
+                        f"pid={process.pid}; inspect {tmp_path / 'server.log'}")
 
         def call(tool_name, *, allow_error=False, _probe=False, **arguments):
             nonlocal calls, revision
@@ -1492,13 +1849,13 @@ def test_golden_path(tmp_path, request, surface):
                 else "happy"
             )
             counts[category] += 1
-            call_started = time.monotonic()
+            call_started = time.time()
             result = rpc(
                 "tools/call",
                 dict(name=tool_name, arguments=dict(expected_workspace=str(tmp_path), **arguments)),
             )
-            if time.monotonic() - call_started > 5:
-                print(f"golden wait: {tool_name} seconds={time.monotonic() - call_started:.2f}", flush=True)
+            if time.time() - call_started > 5:
+                print(f"golden wait: {tool_name} seconds={time.time() - call_started:.2f}", flush=True)
             if result.get("isError") and not allow_error:
                 print(json.dumps(result))
             if allow_error:
@@ -1539,10 +1896,7 @@ def test_golden_path(tmp_path, request, surface):
                     clientInfo=dict(name="golden", version="1"),
                 ),
             )
-            process.stdin.write(
-                json.dumps(dict(jsonrpc="2.0", method="notifications/initialized")) + "\n"
-            )
-            process.stdin.flush()
+            rpc("notifications/initialized", {}, notification=True, timeout=5)
             call("harness_plan_status")
             call(
                 "harness_plan_start",
@@ -1663,7 +2017,7 @@ def test_golden_path(tmp_path, request, surface):
                 }
                 for r in choice["fields"]["reviewers"]
             ]
-            tier = "same-provider" if surface == "cli" else "cross-provider"
+            tier = "same-model" if surface == "cli" else "cross-provider"
             assert b["subject"]["reviewTier"] == tier and f"Review tier: {tier}" in b["card"]
             assert "Cross-subscription is preferred, never required" in b["card"]
             assert b["proposedAction"]["execution"]["callCap"] == options["call_cap"]
@@ -1699,7 +2053,7 @@ def test_golden_path(tmp_path, request, surface):
                     memberIds=[row["id"]],
                     nodeRefs=[dict(nodeId="G1", revision=written["revisions"]["G1"])],
                 )
-                call(
+                disposition = call(
                     "harness_resolve_findings",
                     findings=[
                         dict(
@@ -1710,6 +2064,12 @@ def test_golden_path(tmp_path, request, surface):
                         )
                     ],
                 )
+                assert disposition["state"] == "pending-judgment" and disposition["owner"] is None
+                scripted_judgment(lambda tool, **args: call(tool, _probe=True, **args), disposition["judgment"],
+                    dict(memberDispositions={row["id"]: "resolved"}))
+                disposition = call("harness_resolve_findings", findings=[dict(id=row["id"],
+                    status="resolved", resolution=captured_closure["resolution"], closure=closure)], _probe=True)
+                assert disposition["dispositions"] == 1
             call("harness_advance", to_phase="publish")
             call("harness_publish")
             call("harness_advance", to_phase="execute")
@@ -1726,9 +2086,9 @@ def test_golden_path(tmp_path, request, surface):
                     == 1
                 )
             job = call("harness_worker_start", **options)
-            deadline = time.monotonic() + 300
-            while job["status"] not in ("completed", "failed", "pending-judgment") and time.monotonic() < deadline:
-                job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
+            deadline = time.time() + 300
+            while job["status"] not in ("completed", "failed", "pending-judgment") and time.time() < deadline:
+                job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
             if surface == "web":
                 saved = json.loads(Path(job["run"]["recordPath"]).read_text("utf-8"))
                 assert job["status"] == saved["status"] == "pending-judgment"
@@ -1738,10 +2098,12 @@ def test_golden_path(tmp_path, request, surface):
                 roots = saved["beads"]["C"]["integrated"]["root"]
                 judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
                                 dict(repo=roots, check="execution"))
-                while not job["run"].get("semanticValidation") and time.monotonic() < deadline:
+                while not job["run"].get("semanticValidation") and time.time() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 assert job["status"] == "pending-judgment", job
                 saved = json.loads(Path(job["run"]["recordPath"]).read_text("utf-8"))
+                assert saved["status"] == "pending-judgment", saved["status"]
+                (tmp_path / "validation-observed").write_text("observed", encoding="utf-8")
                 assert saved["semanticContracts"]["state"] == "RED"
                 assert saved["semanticValidation"]["state"] == "pending-judgment"
                 roots = saved["beads"]["B"]["integrated"]["root"]
@@ -1750,7 +2112,7 @@ def test_golden_path(tmp_path, request, surface):
                 for check in ("textContrastAA", "execution"):
                     judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
                                     dict(repo=roots, check=check))
-                while job["status"] not in {"completed", "failed"} and time.monotonic() < deadline:
+                while job["status"] not in {"completed", "failed"} and time.time() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
             if surface == "cli":
                 failed = json.loads(Path(job["run"]["recordPath"]).read_text())
@@ -1759,7 +2121,7 @@ def test_golden_path(tmp_path, request, surface):
                 probing = True
                 original = job["jobId"]
                 proof = call("harness_recovery", mode="inspect", job_id=original)
-                while proof["verdict"] != "VERIFIED-QUIESCENT" and time.monotonic() < deadline:
+                while proof["verdict"] != "VERIFIED-QUIESCENT" and time.time() < deadline:
                     time.sleep(0.1)
                     proof = call("harness_recovery", mode="inspect", job_id=original)
                 assert proof["verdict"] == "VERIFIED-QUIESCENT", proof
@@ -1777,8 +2139,8 @@ def test_golden_path(tmp_path, request, surface):
                 assert resolved["quarantine"] is True
                 job = call("harness_worker_start", **options)
                 assert job["jobId"] == resolved["successor"] != original
-                while job["status"] not in ("completed", "failed", "pending-judgment") and time.monotonic() < deadline:
-                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
+                while job["status"] not in ("completed", "failed", "pending-judgment") and time.time() < deadline:
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 assert job["status"] == "failed", job
                 stalled = job["jobId"]
                 proof = call("harness_recovery", mode="inspect", job_id=stalled)
@@ -1800,8 +2162,8 @@ def test_golden_path(tmp_path, request, surface):
                 assert resolved["quarantine"] is True
                 job = call("harness_worker_start", **options)
                 assert job["jobId"] == resolved["successor"] != stalled
-                while job["status"] not in ("completed", "failed", "pending-judgment") and time.monotonic() < deadline:
-                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=60)
+                while job["status"] not in ("completed", "failed", "pending-judgment") and time.time() < deadline:
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 assert not (tmp_path / "abandoned.txt").exists()
                 probing = False
             assert job["status"] == "completed", job
@@ -1814,13 +2176,16 @@ def test_golden_path(tmp_path, request, surface):
                 proof = retained["semanticValidation"]["results"]
                 actions = [a for r in proof for a in r["actions"].values()]
                 assert all(a["browserMode"] in {"normal", "single-process"} for a in actions)
+                modes = [a["browserMode"] for a in actions]
+                if "single-process" in modes:
+                    assert set(modes[modes.index("single-process"):]) == {"single-process"}, modes
                 # Execute the packet's actual shell command: a quoted Windows executable
                 # without PowerShell's & looks plausible but never opens the preview.
                 from codex_harness.core.audit_process import run_audit_process
 
                 prompt = retained["beads"]["B"]["prompt"]
                 command = next(c for c in prompt.split("`") if "--preview ." in c)
-                preview_started = time.monotonic()
+                preview_started = time.time()
                 try:
                     preview = run_audit_process(
                         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
@@ -1835,7 +2200,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert observed["browserMode"] in {"normal", "single-process"}
                 assert cleanup["quiescenceVerified"]
                 assert cleanup["activeProcessesAfterTeardown"] == 0
-                print(f"golden preview: seconds={time.monotonic() - preview_started:.2f}", flush=True)
+                print(f"golden preview: seconds={time.time() - preview_started:.2f}", flush=True)
                 print(
                     f"golden web: scenarios={len(proof)}; journeys={len(actions)}; "
                     f"browserModes={sorted({a['browserMode'] for a in actions})}"
@@ -1843,7 +2208,8 @@ def test_golden_path(tmp_path, request, surface):
             assert (tmp_path / filename).is_file()
             if surface == "cli":
                 assert subprocess.check_output(
-                    [sys.executable, "-B", str(tmp_path / filename), "--help"], cwd=tmp_path
+                    [sys.executable, "-B", str(tmp_path / filename), "--help"], cwd=tmp_path,
+                    timeout=10,
                 ).startswith(b"usage:")
             if surface == "web":
                 before_judgment = call("harness_plan_status", _probe=True)
@@ -1851,21 +2217,22 @@ def test_golden_path(tmp_path, request, surface):
                 judge_candidate(lambda tool, **args: call(tool, _probe=True, **args), judgment)
                 assert call("harness_plan_status", _probe=True)["plan_revision"] == before_judgment["plan_revision"]
             call("harness_advance", to_phase="accept")
-            deadline = time.monotonic() + 300
+            deadline = time.time() + 300
             # Complete the bound verdict before capturing acceptance inputs. Replacing
             # a static passed=True mid-capture is now a new authoritative judgment,
             # so the old capture must lose credit; it cannot be treated as unchanged.
             acceptance = call("harness_accept_run", repo=str(tmp_path), subject="product")
-            while acceptance.get("result") is None and time.monotonic() < deadline:
+            while acceptance.get("result") is None and time.time() < deadline:
                 acceptance = call(
-                    "harness_accept_status", id=acceptance["attemptId"], wait_seconds=60
+                    "harness_accept_status", id=acceptance["attemptId"], wait_seconds=1
                 )
+            assert acceptance.get("result") is not None, f"Acceptance poll deadline: {acceptance}"
             assert acceptance["result"]["passed"], acceptance
             review = call("harness_accept_review", repo=str(tmp_path))
             attempt_id = review["attemptId"]
-            deadline = time.monotonic() + 300
-            while review["state"] in {"queued", "running"} and time.monotonic() < deadline:
-                review = call("harness_accept_status", id=attempt_id, wait_seconds=60)
+            deadline = time.time() + 300
+            while review["state"] in {"queued", "running"} and time.time() < deadline:
+                review = call("harness_accept_status", id=attempt_id, wait_seconds=1)
                 assert review["attemptId"] == attempt_id, review
             assert review["state"] == "completed", review
             assert review["result"]["id"] == attempt_id, review
@@ -1902,7 +2269,9 @@ def test_golden_path(tmp_path, request, surface):
                 for key in ("plan_revision", "pending_gate", "open_findings", "next", "acceptance"):
                     assert observed[key] == final_status[key], key
                 if surface == "web":
-                    subprocess.run(
+                    from codex_harness.core.audit_process import run_audit_process
+
+                    checked = run_audit_process(
                         [
                             "node",
                             str(ROOT / "tests/browser/cockpit/checks.js"),
@@ -1910,9 +2279,11 @@ def test_golden_path(tmp_path, request, surface):
                             observed["plan_revision"],
                             observed["next"],
                         ],
-                        check=True,
+                        cwd=tmp_path,
                         timeout=45,
                     )
+                    assert checked.returncode == 0, (checked.stdout, checked.stderr)
+                    assert checked.audit_control["quiescenceVerified"]
             after = {
                 p: p.read_bytes() for p in (tmp_path / ".codex-harness").rglob("*") if p.is_file()
             }
@@ -1923,21 +2294,36 @@ def test_golden_path(tmp_path, request, surface):
             print(
                 f"golden {surface}: decisions={decisions}; planner MCP calls={calls}; "
                 f"happy={counts['happy']}; probes={counts['probes']}; polls={counts['polls']}; "
-                f"seconds={time.monotonic() - started:.2f}"
+                f"seconds={time.time() - started:.2f}"
             )
         finally:
-            if "job" in locals() and job["status"] not in {"completed", "failed"}:
-                cleanup = rpc("tools/call", dict(name="harness_recovery", arguments=dict(
-                    expected_workspace=str(tmp_path), mode="resolve", job_id=job["jobId"],
-                    choice="abandon", reason="End failed golden fixture through its existing Job owner")))
-                assert not cleanup["isError"], cleanup
-            process.stdin.close()
+            failing = sys.exc_info()[0] is not None
             try:
+                if "job" in locals() and job["status"] not in {"completed", "failed"}:
+                    cleanup = rpc("tools/call", dict(name="harness_recovery", arguments=dict(
+                        expected_workspace=str(tmp_path), mode="resolve", job_id=job["jobId"],
+                        choice="abandon", reason="End failed golden fixture through its existing Job owner")), timeout=10)
+                    assert not cleanup["isError"], cleanup
+                if failing:
+                    process.kill()  # Unblock any outstanding pipe writer before closing stdin.
+                else:
+                    closed = threading.Event()
+                    def close_input():
+                        try:
+                            process.stdin.close()
+                        finally:
+                            closed.set()
+                    threading.Thread(target=close_input, daemon=True).start()
+                    end = time.time() + 5
+                    while not closed.wait(.25):
+                        assert time.time() < end, "Golden stdin close exceeded 5s wall-clock deadline"
                 process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            assert process.returncode == 0, (tmp_path / "server.log").read_text("utf-8")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+            if not failing:
+                assert process.returncode == 0, (tmp_path / "server.log").read_text("utf-8")
 
 
 if __name__ == "__main__":

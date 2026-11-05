@@ -6,7 +6,6 @@ import ast
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import stat
 import subprocess
@@ -20,7 +19,7 @@ from uuid import uuid4
 from codex_harness.core import intake, waves
 from codex_harness.core.graph import load_plan
 from codex_harness.core.planner_schema import Judgment, judgment_response
-from codex_harness.core.reviewer_evidence import native_reviewer
+from codex_harness.core.reviewer_evidence import finding_records, native_reviewer, review_binding
 from codex_harness.core.spine import (
     SCHEMA,
     Spine,
@@ -33,41 +32,6 @@ from codex_harness.core.spine import (
 )
 from codex_harness.core.spine_render import render_markdown
 from codex_harness.core.test_audit import ORACLE_LABEL, PROSPECTIVE_LABEL, PROSPECTIVE_WARNING
-
-
-def cluster_findings(rows: list[dict]) -> list[dict]:
-    """Read-only deterministic Jaccard components; input order breaks severity ties.
-
-    A round_id identifies the shared invocation across reviewers and shards.
-    Unbound legacy findings remain singletons rather than inventing lineage.
-    """
-    groups = {}
-    for row in sorted(rows, key=lambda row: row.get("created_at", "")):
-        key = (row.get("round_id") or row["id"], row["node_id"], row.get("stage"))
-        groups.setdefault(key, []).append(row)
-    clusters = []
-    severities = ("blocker", "major", "minor", "low", "note")
-    for group in groups.values():
-        tokens = [set(re.findall(r"[^\W_]+", row["finding"].lower())) for row in group]
-        parents = list(range(len(group)))
-
-        def root(index, parents=parents):
-            while parents[index] != index:
-                index = parents[index]
-            return index
-
-        for i, left in enumerate(tokens):
-            for j in range(i):
-                union = left | tokens[j]
-                if union and len(left & tokens[j]) / len(union) >= 0.6:
-                    parents[root(i)] = root(j)
-        components = {}
-        for i, row in enumerate(group):
-            components.setdefault(root(i), []).append(row)
-        for members in components.values():
-            canonical = min(members, key=lambda row: severities.index(row["severity"]))
-            clusters.append({**canonical, "members": members, "memberCount": len(members)})
-    return clusters
 
 
 PHASES = (
@@ -263,6 +227,9 @@ class PlanStore:
         return Spine(self._data())
 
     def _judgment_record(self, judgment_id: str) -> Judgment:
+        snapshot = getattr(self, "_review_read_snapshot", None)
+        if snapshot is not None and judgment_id in snapshot.get("judgmentRecords", {}):
+            return snapshot["judgmentRecords"][judgment_id]
         row = self.connection.execute(
             "SELECT payload_json FROM events WHERE kind='judgment-recorded' "
             "AND json_extract(payload_json, '$.id')=? ORDER BY id DESC LIMIT 1",
@@ -325,18 +292,30 @@ class PlanStore:
     def judgment(self, judgment_id: str, *, candidate=None) -> dict:
         """The shared consumer: credit requires a current bound explicit verdict."""
         record = self._judgment_record(judgment_id)
-        spine = self.spine()
-        current = all(ref["id"] in spine.ids() and spine.revision(ref["id"]) == ref["revision"]
+        snapshot = getattr(self, "_review_read_snapshot", None)
+        if snapshot is not None and "judgmentSpine" not in snapshot:
+            snapshot["judgmentSpine"] = self.spine()
+        spine = snapshot["judgmentSpine"] if snapshot is not None else self.spine()
+        current = not record.get("supersededBy") and all(ref["id"] in spine.ids() and spine.revision(ref["id"]) == ref["revision"]
                       for ref in record["subjectRefs"] + record["evidenceRefs"])
+        if current:
+            for ref in record["sourceRefs"]:
+                binding = ref["payload"].get("facts", {}).get("reviewBinding")
+                if binding is not None:
+                    current = (binding == review_binding(self, binding["memberIds"], convergence=binding["convergence"], run_id=binding["runId"])
+                               and ("acceptanceRun" not in binding or binding["acceptanceRun"] is not None
+                                    and binding["acceptanceRun"]["id"] == binding["runId"]))
+                    if not current:
+                        break
         candidate_current = record["candidate"] is None or candidate == record["candidate"]
-        reason = None if current and candidate_current else (
+        reason = record["error"] if record.get("supersededBy") else None if current and candidate_current else (
             "Refresh changed subject/evidence bindings" if not current else "Supply the current bound candidate")
         judged = current and candidate_current and record["status"] == "judged"
         return dict(record, status="judged" if judged else "pending-judgment",
                     current=current and candidate_current, positiveCredit=judged and record["verdict"] == "positive",
                     concreteGap=judged and record["verdict"] == "negative", refreshReason=reason)
 
-    def submit_judgment(self, *, judgment_id, response, source) -> dict:
+    def submit_judgment(self, *, judgment_id, response, source, review_context=None) -> dict:
         """An initial response gets exactly two exact fixes; every return releases ownership."""
         _nonempty(source, "source")
         with self._transaction():
@@ -361,9 +340,22 @@ class PlanStore:
             self._event("judgment-response", dict(id=judgment_id, binding=record["binding"],
                         response=response, source=source, sourceVerified=False))
             self._event("judgment-recorded", record)
+            facts = next((r["payload"]["facts"] for r in record["sourceRefs"] if "facts" in r["payload"]), {})
+            if "reviewBinding" in facts and record["error"] is None and (record["question"] == "plan-review" and facts["reviewBinding"]["runId"] is None
+                    or record["question"] != "plan-review" and record["verdict"] == "negative"):
+                from codex_harness.core.roundtable import review_members
+                reviewer = facts.get("reviewer", facts.get("review", {}))
+                for item in review_members(self, record if record["question"] == "plan-review" else dict(record, meaning={}), facts):
+                    self._event("finding-recorded", dict(item, **(review_context or {}), id=uuid4().hex,
+                        reviewer=reviewer.get("name", reviewer.get("reviewer", "judge")), provider=reviewer.get("provider", "judge"),
+                        plan_revision=facts.get("manifestRevision", facts.get("revision")), round_id=facts.get("roundId", facts.get("invocationId")),
+                        created_at=_now(), stage="acceptance" if facts["reviewBinding"]["runId"] else "roundtable", runId=facts["reviewBinding"]["runId"]))
             if record["question"] == "vision-intent":
                 self._classify_vision_edit(self.spine().node(self.spine().ids("vision")[0]))
-        return self.judgment(judgment_id)
+        result = self.judgment(judgment_id)
+        if record["question"] == "review-reuse" and result["positiveCredit"]:
+            result["convergence"] = self.review_convergence(prepare=True)
+        return result
 
     def list_nodes(self, kind: str | None = None) -> list[dict]:
         """Read the current nodes without writing planning truth."""
@@ -1488,6 +1480,9 @@ class PlanStore:
         return manifest
 
     def manifest_revision(self) -> str | None:
+        snapshot = getattr(self, "_review_read_snapshot", None)
+        if snapshot is not None and "manifestRevision" in snapshot:
+            return snapshot["manifestRevision"]
         data = self._data()
         if not data["nodes"]:
             return None
@@ -1497,7 +1492,10 @@ class PlanStore:
             return None
         template = self.workspace / "template"
         try:
-            return compile_manifest(spine, template if template.is_dir() else None)["planRevision"]
+            revision = compile_manifest(spine, template if template.is_dir() else None)["planRevision"]
+            if snapshot is not None:
+                snapshot["manifestRevision"] = revision
+            return revision
         except ValueError as error:
             if not (spine.semantic and getattr(self, "_reading_status", False)):
                 raise
@@ -1823,12 +1821,8 @@ class PlanStore:
                     bool(row["packetBound"]) if row.get("packetBound") is not None else None
                 )
                 result["reviewers"].append(row)
-            findings = [
-                dict(f)
-                for f in self.connection.execute(
-                    "SELECT * FROM review_findings WHERE round_id=?", (rows[0]["round_id"],)
-                )
-            ]
+            origins = {part["judgmentId"] for row in rows for part in json.loads(row["shardDetails"] or "[]") if part.get("judgmentId")}
+            findings = [f for f in self.finding_state()["members"] if f.get("round_id") == rows[0]["round_id"] or f.get("judgmentId") in origins]
         for row in result["reviewers"]:
             counts = {}
             for finding in findings:
@@ -1839,17 +1833,6 @@ class PlanStore:
         policy = self.plan_review_policy_state(self.manifest_revision())
         if policy["active"]:
             result["reviewPolicy"] = policy
-        member_ids = {row["id"] for row in findings}
-        declarations = [
-            json.loads(row[0])
-            for row in self.connection.execute(
-                "SELECT payload_json FROM events WHERE kind='finding-closure-declared' ORDER BY id"
-            )
-        ]
-        if any(member_ids.intersection(item["memberIds"]) for item in declarations):
-            result["closureDeclarations"] = [
-                item for item in declarations if member_ids.intersection(item["memberIds"])
-            ]
         return result
 
     def readiness_reviews(self, revision: str | None = None) -> list[dict]:
@@ -1933,51 +1916,6 @@ class PlanStore:
             )
         ]
 
-    def _prospective_closure_facts(self, adopted_at: str, revision: str) -> list[dict]:
-        from codex_harness.core.roundtable import advisory_finding_ids, findings
-
-        advisory = advisory_finding_ids(self)
-        declarations = [
-            json.loads(row[0])
-            for row in self.connection.execute(
-                "SELECT payload_json FROM events WHERE kind='finding-closure-declared' ORDER BY id"
-            )
-        ]
-        result = []
-        for row in findings(self, expand=True):
-            if (
-                row.get("stage") == "readiness"
-                or row["created_at"] < adopted_at
-                or row["id"] in advisory
-            ):
-                continue
-            declaration = next(
-                (item for item in reversed(declarations) if row["id"] in item["memberIds"]), None
-            )
-            result.append(
-                dict(
-                    id=row["id"],
-                    nodeId=row["node_id"],
-                    disposition=row["status"],
-                    recordedRevision=row["plan_revision"],
-                    closure="unverified",
-                    reasons=[
-                        "targeted-assessment-producer-unavailable",
-                        "observed-separation-producer-unavailable",
-                    ],
-                    retainedObligation=True,
-                    deferred=row["status"] == "deferred",
-                    obligationVerification="unverified",
-                    declaration=declaration,
-                    declarationBindingCurrent=bool(
-                        declaration
-                        and declaration["expectedManifestRevision"] == revision
-                        and declaration["status"] == row["status"]
-                    ),
-                )
-            )
-        return result
-
     def plan_review_policy_state(self, revision: str) -> dict:
         """One derived prospective gate projection; legacy history keeps its old credit.
 
@@ -1998,11 +1936,12 @@ class PlanStore:
             manifestRevision=revision,
             declaredRevision=policy["manifestRevision"],
             eligible=False,
+            state="pending-judgment",
+            owner=None,
             slots=[],
             requiredFailures=[],
             optionalFailures=[],
             successfulReviewIds=[],
-            closureFindings=self._prospective_closure_facts(policies[0]["at"], revision),
             producerAvailability=dict(
                 observedSeparation="unavailable",
                 targetedAssessment="unavailable",
@@ -2094,6 +2033,8 @@ class PlanStore:
                 and run.get("isMocked") == 0
                 and run.get("didRunProvider") == 1
                 and run.get("packetBound") == 1
+                and native_reviewer(dict(provider=run["provider"], shards=run.get("shards"),
+                                         shardDetails=json.loads(run.get("shardDetails") or "[]")), self)
             )
             observation = dict(
                 **slot,
@@ -2113,146 +2054,111 @@ class PlanStore:
                 )
         if result["requiredFailures"]:
             result["reasons"].append("review-required-latest-attempt-not-passed")
-        if result["closureFindings"]:
-            result["reasons"].append("review-closure-unverified")
         result["eligible"] = not result["reasons"]
+        result["state"] = "judged" if result["eligible"] else "pending-judgment"
         return result
 
-    def review_nodes_digest(self) -> dict | None:
-        """Bind semantic review repairs to original nodes and non-derived template bytes."""
-        spine = Spine(self._data())
-        if not spine.semantic:
-            return None
-
-        def digest(value):
-            return hashlib.sha256(_json(value).encode()).hexdigest()
-
-        nodes = {}
-        for node in spine.to_dict()["nodes"]:
-            item = deepcopy(node)
-            if item["kind"] == "vision":
-                repairs = {key: item["fields"].pop(key, None) for key in ("scenarios", "targets")}
-                nodes[item["id"]] = dict(intent=digest(item), repairs=digest(repairs))
-            else:
-                nodes[item["id"]] = digest(item)
+    def review_nodes_digest(self) -> dict:
+        """Capture exact planning nodes and template bytes without semantic repair exceptions."""
+        spine = self.spine()
         template = self.workspace / "template"
-        rendered = render_markdown(spine)
-        files = {}
-        if template.is_dir():
-            sources = requirement_file_sources(template, [p.name for p in template.iterdir()])
-            for name, path in sources.items():
-                raw = path.read_bytes()
-                files[name] = (
-                    {"derived": hashlib.sha256(raw).hexdigest()}
-                    if name in rendered and raw == rendered[name].encode("utf-8")
-                    else hashlib.sha256(raw).hexdigest()
-                )
-        return dict(nodes=nodes, files=files)
+        sources = requirement_file_sources(template, [p.name for p in template.iterdir()]) if template.is_dir() else {}
+        return dict(nodes={node["id"]: hashlib.sha256(_json(node).encode()).hexdigest()
+                           for node in spine.to_dict()["nodes"]},
+                    files={name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in sources.items()})
 
-    def _review_repairs_match(self, row: dict, current: dict) -> bool:
-        from codex_harness.core.roundtable import advisory_finding_ids
+    def review_judgment(self, reviewer, shard, *, prepare=True):
+        if "\n## Bound review requests\n" in shard["packet"]:
+            requests = json.loads(shard["packet"].split("\n## Bound review requests\n", 1)[1])
+            return self.judgment(requests[reviewer["name"]]["id"])
+        from codex_harness.core.approvals import assess
 
-        saved = json.loads(row["nodesDigest"])
-        before_files, after_files = saved["files"], current["files"]
-        if before_files.keys() != after_files.keys():
-            return False
-        for name, left in before_files.items():
-            right = after_files[name]
-            if isinstance(right, dict) and (left == "derived" or isinstance(left, dict)):
-                continue  # Current canonical render; retain legacy derived-marker credit.
-            if isinstance(left, dict) and set(left) == {"derived"}:
-                left = left["derived"]  # Retained bytes from the reviewed canonical render.
-            if left != right:
-                return False
-        advisory = advisory_finding_ids(self, row["plan_revision"])
-        findings = [
-            dict(item)
-            for item in self.connection.execute(
-                "SELECT * FROM review_findings WHERE round_id=?", (row["round_id"],)
-            )
-            if item["id"] not in advisory
-        ]
-        if any(
-            f["status"] not in {"resolved", "rejected", "deferred"} or f["severity"] == "blocker"
-            for f in findings
-        ):
-            return False
-        allowed = {f["node_id"] for f in findings}
-        allowed.update(key for f in findings for key in json.loads(f.get("nodeIds") or "[]"))
-        before, after = saved["nodes"], current["nodes"]
-        for key in before.keys() | after.keys():
-            left, right = before.get(key), after.get(key)
-            if isinstance(left, dict) or isinstance(right, dict):
-                if not left or not right or left["intent"] != right["intent"]:
-                    return False
-                # Scenario/target edits are repairs only when the round raised findings.
-                if left["repairs"] != right["repairs"] and not findings:
-                    return False
-            elif left != right and key not in allowed:
-                return False
-        return True
+        facts = dict(reviewer=reviewer, invocationId=shard["reviewInvocationId"],
+            reviewBinding=review_binding(self, run_id=shard.get("acceptanceRunId")), manifestRevision=self.manifest_revision(),
+            packet=shard["packet"], packetSha256=shard["hash"], nodeIds=shard["nodeIds"], roundId=shard["reviewRoundId"],
+            question="Independently judge whether this plan leads to the whole accepted dream. Judge relevance and meaning of all evidence, regardless of language or instrumentation. Return an explicit verdict and rationale; meaning.findings contains structured findings. Empty or minor-only findings do not imply approval. meaning.depth records the chosen review depth and its consequence-based reason. Keep each reviewer's verdict separate; unavailable evidence stays inconclusive.")
+        with nullcontext() if self.connection.in_transaction or not prepare else self._transaction():
+            if prepare:
+                for row in list(self.connection.execute("SELECT payload_json FROM events WHERE id IN (SELECT max(id) FROM events "
+                        "WHERE kind='judgment-recorded' GROUP BY json_extract(payload_json, '$.id'))")):
+                    prior = json.loads(row[0])
+                    before = next((r["payload"]["facts"] for r in prior["sourceRefs"] if "facts" in r["payload"]), {})
+                    if (prior["question"] == "plan-review" and prior["status"] == "pending-judgment" and not prior.get("supersededBy")
+                            and before.get("reviewer", {}).get("name") == reviewer["name"] and before["reviewer"]["provider"] == reviewer["provider"]
+                            and before.get("invocationId") != facts["invocationId"] and before.get("reviewBinding") == facts["reviewBinding"]):
+                        prior.update(disposition="steer", owner=None, supersededBy=facts["invocationId"], error="Dossier superseded; inspect its replacement")
+                        self._event("judgment-recorded", prior)
+            return assess(self, "plan-review", facts, subject_ids=self.spine().ids(), prepare=prepare)
+
+    def review_reuse(self, row, current, *, prepare=False):
+        from codex_harness.core.approvals import assess
+        details = json.loads(row.get("shardDetails") or "[]")
+        originals = [self.judgment(part["judgmentId"]) for part in details if part.get("judgmentId")]
+        member_ids = [r["id"] for r in finding_records(self) if r.get("round_id") == row["round_id"]
+                      and r["reviewer"] == row["reviewer"] and r["provider"] == row["provider"]]
+        return assess(self, "review-reuse", dict(review=dict(row), before=originals,
+            reviewBinding=review_binding(self, member_ids),
+            beforeDigest=json.loads(row["nodesDigest"]), afterDigest=current,
+            currentNodes=self.list_nodes(), currentRevision=self.manifest_revision(),
+            question="Judge the actual revision delta, including repaired and changed evidence. "
+            "May this independent prior review still supply approval for this exact revision? "
+            "meaning.reuse must be explicit; unchanged field locations or similar text grant no credit."),
+            subject_ids=self.spine().ids(), prepare=prepare)
 
     def successful_reviews(self, revision: str) -> list[dict]:
         """Latest explicitly real successful run per provider; unknown history is excluded."""
-        exists = self.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
-        ).fetchone()
-        if not exists:
-            return []
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(review_runs)")}
-        if (
-            not {
-                "plan_revision",
-                "provider",
-                "exit_code",
-                "invalid",
-                "finished_at",
-                "id",
-                "isMocked",
-                "didRunProvider",
-            }
-            <= columns
-        ):
+        if not {"plan_revision", "provider", "reviewer", "id", "shardDetails", "shards", "nodesDigest"} <= columns:
             return []
         policy = self.plan_review_policy_state(revision)
         carry = (
-            "nodesDigest" in columns
-            and not policy["active"]
+            not policy["active"]
             and Spine(self._data()).semantic
             and revision is not None
             and revision == self.manifest_revision()
         )
         snapshot = self.review_nodes_digest() if carry else None
-        latest = {}
+        latest, seen = {}, set()
         for row in self.connection.execute(
-            "SELECT * FROM review_runs WHERE (plan_revision=? OR ?) AND exit_code=0 AND invalid=0 "
-            "AND isMocked=0 AND didRunProvider=1 ORDER BY finished_at DESC, id DESC",
+            "SELECT * FROM review_runs WHERE (plan_revision=? OR ?) ORDER BY finished_at DESC, rowid DESC",
             (revision, bool(carry)),
         ):
             row = dict(row)
+            if policy["active"] and row["id"] not in policy["successfulReviewIds"]:
+                continue
+            identity = (row["provider"], row["reviewer"])
+            if identity in seen:
+                continue
+            details = json.loads(row.get("shardDetails") or "[]")
+            if not native_reviewer(dict(provider=row["provider"], shards=row.get("shards"), shardDetails=details),
+                                   self, current=row["plan_revision"] == revision):
+                continue
             if row["plan_revision"] != revision:
-                if not row.get("nodesDigest") or not self._review_repairs_match(row, snapshot):
+                if not row.get("nodesDigest"):
                     continue
-                row.update(carriedForward=True, carriedFromRevision=row["plan_revision"])
+                reuse = self.review_reuse(row, snapshot)
+                if not (reuse["positiveCredit"] and reuse["meaning"].get("reuse") is True):
+                    continue
+                row.update(carriedForward=True, carriedFromRevision=row["plan_revision"], reuseJudgmentId=reuse["id"])
             latest.setdefault((row["provider"], row["reviewer"]), row)
-        result = [latest[key] for key in sorted(latest)]
-        if policy["active"] and revision == self.manifest_revision():
-            allowed = set(policy["successfulReviewIds"])
-            # Resolve latest per required/optional slot before provider aggregation;
-            # older successes cannot mask failed latest attempts after adoption.
-            eligible = [
-                dict(row)
-                for row in self.connection.execute(
-                    "SELECT * FROM review_runs WHERE plan_revision=? "
-                    "ORDER BY finished_at DESC, rowid DESC",
-                    (revision,),
-                )
-                if row["id"] in allowed
-            ]
-            result = eligible
-        return result
+        return [latest[key] for key in sorted(latest)]
+
+    def review_convergence(self, *, prepare=False):
+        from codex_harness.core.approvals import assess
+        rows = [dict(row) for row in self.connection.execute("SELECT * FROM review_runs ORDER BY rowid")]
+        if len({row["round_id"] for row in rows}) < 3:
+            return None
+        return assess(self, "plan-convergence", dict(rounds=rows, currentNodes=self.list_nodes(),
+            reviewBinding=review_binding(self, convergence=True),
+            revision=self.manifest_revision(), defaultRounds=3,
+            question="After these independent review rounds, judge convergence and consequence-scaled "
+            "depth. meaning.action is ready, repair, continue-review or steer. Three rounds never "
+            "grant approval automatically. Explain remaining concrete gaps or readiness."),
+            subject_ids=self.spine().ids(), prepare=prepare)
 
     def _check_evidence(self, revision: str) -> None:
+        from codex_harness.core.approvals import require_approval
+        require_approval(self, "B")
         policy = self.plan_review_policy_state(revision)
         if policy["active"] and not policy["eligible"]:
             raise PlanStoreError(
@@ -2269,8 +2175,8 @@ class PlanStore:
                 "audit-binding-required: legacy unbound prospective history "
                 "grants no current credit"
             )
-        if not self.successful_reviews(revision):
-            missing.append("successful review (roundtable)")
+        if not self.review_prerequisite(revision)["complete"]:
+            missing.append("current positive verdict from every selected reviewer and current convergence judgment")
         if missing:
             raise PlanStoreError(
                 "plan-publication-evidence-required",
@@ -2312,15 +2218,10 @@ class PlanStore:
         ]
 
     def _check_publish(self) -> None:
-        from codex_harness.core.roundtable import advisory_finding_ids, findings
-
         self._check_approval("vision-lock", self._revision())
-        advisory = advisory_finding_ids(self)
-        if any(
-            row.get("stage", "roundtable") != "readiness" and row["id"] not in advisory
-            for row in findings(self, "open", expand=True)
-        ):
-            raise PlanStoreError("plan-findings-open", "Resolve open roundtable findings")
+        if any(row["state"] == "open" and row.get("stage") not in {"readiness", "acceptance"}
+               for row in self.finding_state()["members"]):
+            raise PlanStoreError("plan-findings-open", "Resolve the current concrete judgment gaps")
         if self._open("clarifications"):
             raise PlanStoreError("plan-clarifications-open", "Resolve open clarifications")
 
@@ -2975,30 +2876,90 @@ class PlanStore:
             scope="current registered AF execution support only; native final acceptance unchanged",
         )
 
-    def acceptance_findings(self) -> list[dict]:
-        return [
-            json.loads(row[0])
-            for row in self.connection.execute(
-                "SELECT result_json FROM acceptance_findings ORDER BY rowid"
-            )
-        ]
+    def finding_state(self) -> dict:
+        """The sole effective obligation state and outstanding-request projection."""
+        snapshot = getattr(self, "_review_read_snapshot", None)
+        if snapshot is None:
+            self._review_read_snapshot = {}
+            try:
+                return self.finding_state()
+            finally:
+                self._review_read_snapshot = None
+        if "findingState" in snapshot:
+            return snapshot["findingState"]
+        records = [json.loads(row[0]) for row in self.connection.execute("SELECT payload_json FROM events WHERE id IN "
+                "(SELECT max(id) FROM events WHERE kind='judgment-recorded' "
+                "GROUP BY json_extract(payload_json, '$.id')) ORDER BY id")]
+        records = {record["id"]: record for record in records}
+        snapshot["judgmentRecords"] = records
+        sources = finding_records(self)
+        linked = {source.get("judgmentId") for source in sources}
+        judgments, pending, groups = {}, [], {}
+        for record in reversed(list(records.values())):
+            facts = next((r["payload"]["facts"] for r in record["sourceRefs"] if "facts" in r["payload"]), {})
+            reviewer = facts.get("reviewer", facts.get("review", {}))
+            identity = (facts.get("invocationId", facts.get("request_id", record["id"])),
+                        (reviewer.get("provider"), reviewer.get("name", reviewer.get("reviewer"))),
+                        facts.get("packetSha256") or tuple(facts.get("reviewBinding", {}).get("memberIds") or [r["id"] for r in record["subjectRefs"]]))
+            judgment = self.judgment(record["id"]) if (record["status"] == "pending-judgment" or record["id"] in linked or facts.get("reviewBinding", {}).get("memberIds") or record["question"] == "finding-equivalence") else record
+            judgments[record["id"]] = judgment
+            if record["status"] == "pending-judgment" and not record.get("supersededBy"):
+                action = "refresh" if not judgment["current"] else "fresh-invocation" if record["disposition"] == "steer" else "submit"
+                pending.append(dict(requestKey=identity, action=action, submitReady=action == "submit", acceptanceRunId=facts.get("reviewBinding", {}).get("runId"),
+                                    **{k: judgment[k] for k in ("id", "question", "status", "current", "disposition", "positiveCredit", "concreteGap")}))
+            if record["question"] == "finding-equivalence" and judgment["positiveCredit"]:
+                for group in judgment["meaning"].get("groups", []):
+                    for key in group:
+                        groups.setdefault(key, group[0])
+        members = []
+        for source in sources:
+            origin = judgments.get(source.get("judgmentId"), {})
+            state = "open" if origin.get("concreteGap") else "pending"
+            status, resolution, linked, decision = state, "", [source["judgmentId"]] if source.get("judgmentId") else [], None
+            for judgment in judgments.values():
+                facts = next((r["payload"]["facts"] for r in judgment["sourceRefs"] if "facts" in r["payload"]), {})
+                if source["id"] not in facts.get("reviewBinding", {}).get("memberIds", []):
+                    continue
+                linked.append(judgment["id"])
+                if judgment["question"] == "finding-disposition" and judgment["positiveCredit"] and decision is None:
+                    decision = judgment
+                    status = judgment["meaning"]["memberDispositions"][source["id"]]
+                    state = "closed" if status in {"resolved", "rejected"} else "open" if status == "open" and origin.get("concreteGap") else "pending"
+                    resolution = next((p["resolution"] for p in facts["proposals"] if p["id"] == source["id"]), judgment["rationale"])
+            if state == "pending" and status != "deferred":
+                status = "pending"
+            members.append(dict(source, state=state, status=status, resolution=resolution,
+                                judgmentIds=list(dict.fromkeys(linked)), cluster_id=groups.get(source["id"])))
+        snapshot["findingState"] = dict(members=members, pendingJudgments=pending)
+        return snapshot["findingState"]
 
-    def cluster_review_findings(self, round_id: str) -> int:
-        """Store membership inside the ingest transaction, retaining every source row."""
-        rows = [
-            dict(row)
-            for row in self.connection.execute(
-                "SELECT * FROM review_findings WHERE round_id=? ORDER BY created_at, rowid",
-                (round_id,),
-            )
-        ]
-        clusters = cluster_findings(rows)
-        for cluster in clusters:
-            self.connection.executemany(
-                "UPDATE review_findings SET cluster_id=? WHERE id=?",
-                [(cluster["id"], member["id"]) for member in cluster["members"]],
-            )
-        return len(clusters)
+    def review_prerequisite(self, revision):
+        from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
+        reviews = self.successful_reviews(revision)
+        _, node, _ = selection_inputs(self)
+        selected = delivery_review_selection(node["fields"])[0] if node else []
+        expected = {(r["provider"], r["name"]) for r in selected}
+        convergence = self.review_convergence() if reviews else None
+        return dict(complete=bool(expected) and expected <= {(r["provider"], r["reviewer"]) for r in reviews}
+                    and not any(r["submitReady"] and r["question"] == "plan-review" and r["acceptanceRunId"] is None for r in self.finding_state()["pendingJudgments"])
+                    and (convergence is None or convergence["positiveCredit"] and convergence["meaning"].get("action") == "ready"),
+                    reviews=reviews, convergence=convergence)
+
+    def acceptance_findings(self) -> list[dict]:
+        return [r for r in self.finding_state()["members"] if r.get("stage") == "acceptance"]
+
+    def cluster_review_findings(self, round_id: str) -> dict:
+        from codex_harness.core.approvals import assess
+        rows = [row for row in finding_records(self) if row.get("round_id") == round_id]
+        if len(rows) < 2:
+            return dict(count=len(rows), judgment=None)
+        judgment = assess(self, "finding-equivalence", dict(members=rows,
+            reviewBinding=review_binding(self, [row["id"] for row in rows]),
+            question="Which findings describe the same concrete gap? meaning.groups lists disjoint "
+            "groups of exact member IDs. Equivalence grants display grouping only, never closure."),
+            subject_ids=self.spine().ids())
+        groups = judgment["meaning"].get("groups", []) if judgment["positiveCredit"] else []
+        return dict(count=len(rows) - sum(len(group)-1 for group in groups), judgment=judgment)
 
     def _closure_declaration(self, closure, row, members, status):
         """Validate links, never infer semantic truth or observed independence."""
@@ -3079,92 +3040,50 @@ class PlanStore:
             "reason": "Targeted assessment and observed separation producers unavailable",
         }
 
-    def resolve_findings(self, dispositions: list[dict]) -> int:
-        """Validate the whole batch under one writer lock, then resolve atomically.
-
-        The 1-based item index is also the JSONL line number. Overlapping targets
-        are refused so one batch cannot assign conflicting reasons to a cluster.
-        """
+    def resolve_findings(self, dispositions: list[dict]) -> dict:
+        """Judge each named member against current evidence; never close a cluster implicitly."""
+        from codex_harness.core.approvals import assess
         from codex_harness.core.roundtable import _table, findings
-
         if not isinstance(dispositions, list) or not dispositions:
             raise ValueError("At least one finding disposition is required")
         with self._transaction():
             _table(self)
             reviews = {row["id"]: row for row in findings(self, expand=True)}
             acceptance = {row["id"]: row for row in self.acceptance_findings()}
-            errors, targets, prepared = [], set(), []
-            for line, item in enumerate(dispositions, 1):
-                if not isinstance(item, dict) or set(item) not in (
-                    {"id", "status", "resolution"},
-                    {"id", "status", "resolution", "closure"},
-                ):
-                    errors.append(f"Line {line}: expected id, status and resolution")
-                    continue
-                item_id, status, resolution = (item[key] for key in ("id", "status", "resolution"))
-                if not isinstance(item_id, str) or item_id not in reviews | acceptance:
-                    errors.append(f"Line {line}: Unknown finding: {item_id}")
-                    continue
-                if status not in ("resolved", "rejected", "deferred"):
-                    errors.append(f"Line {line}: Invalid finding resolution status")
-                if not isinstance(resolution, str) or not resolution.strip():
-                    errors.append(f"Line {line}: A nonempty resolution is required")
-                row = reviews.get(item_id)
-                canonical_id = (row["cluster_id"] or item_id) if row else item_id
-                if canonical_id in targets:
-                    errors.append(f"Line {line}: Duplicate cluster disposition: {canonical_id}")
-                targets.add(canonical_id)
-                declaration = None
+            ids = [item.get("id") for item in dispositions]
+            if len(set(ids)) != len(ids):
+                raise ValueError("Supply each finding member exactly once")
+            for item in dispositions:
+                if (set(item) - {"id", "status", "resolution", "closure"}
+                    or item.get("id") not in reviews | acceptance
+                    or item.get("status") not in {"resolved", "rejected", "deferred"}
+                    or not isinstance(item.get("resolution"), str) or not item["resolution"].strip()):
+                    raise ValueError("Supply known member id, disposition and nonempty resolution")
                 if "closure" in item:
-                    if row is None:
-                        errors.append(f"Line {line}: acceptance closure producer unavailable")
-                    else:
-                        members = [
-                            member
-                            for member in reviews.values()
-                            if (member["cluster_id"] or member["id"]) == canonical_id
-                        ]
-                        try:
-                            declaration = self._closure_declaration(
-                                item["closure"], row, members, status
-                            )
-                        except (ValueError, TypeError, KeyError) as error:
-                            errors.append(f"Line {line}: {error}")
-                prepared.append((canonical_id, status, resolution, row is not None, declaration))
-            if errors:
-                raise ValueError("Invalid dispositions; no changes applied:\n" + "\n".join(errors))
-            for item_id, status, resolution, is_review, declaration in prepared:
-                if is_review:
-                    members = [
-                        row
-                        for row in reviews.values()
-                        if (row["cluster_id"] or row["id"]) == item_id
-                    ]
-                    at = _now()
-                    for member in members:
-                        self.connection.execute(
-                            "UPDATE review_findings SET status=?, resolution=?, resolved_at=? "
-                            "WHERE id=?",
-                            (status, resolution, at, member["id"]),
-                        )
-                        self._event(
-                            "finding-" + status,
-                            {
-                                "id": member["id"],
-                                "resolution": resolution,
-                                "clusteredWith": item_id if member["id"] != item_id else None,
-                            },
-                        )
-                    if declaration is not None:
-                        self._event("finding-closure-declared", declaration)
-                else:
-                    finding = {**acceptance[item_id], "status": status, "resolution": resolution}
-                    self.connection.execute(
-                        "UPDATE acceptance_findings SET result_json=? WHERE id=?",
-                        (_json(finding), item_id),
-                    )
-                    self._event("acceptance-finding-resolved", finding)
-        return len(prepared)
+                    if item["id"] not in reviews:
+                        raise ValueError("Acceptance closure producer unavailable; retain pending judgment")
+                    self._closure_declaration(item["closure"], reviews[item["id"]],
+                                              [reviews[item["id"]]], item["status"])
+            judgment = assess(self, "finding-disposition", dict(
+                members=[row for row in finding_records(self) if row["id"] in ids], proposals=dispositions,
+                reviewBinding=review_binding(self, ids),
+                currentNodes=self.list_nodes(), currentEvidence=self.review_nodes_digest(), revision=self.manifest_revision(),
+                question="Judge each exact member's proposed disposition against the actual current "
+                "repair/counterevidence and revision delta. meaning.memberDispositions maps exact IDs "
+                "to resolved, rejected, deferred or open. Missing/unavailable closure evidence stays "
+                "pending. A cluster ID never authorizes closure of another member."),
+                subject_ids=self.spine().ids())
+            judgment = self.judgment(judgment["id"])
+            if not judgment["positiveCredit"]:
+                return dict(dispositions=0, state="pending-judgment", judgment=judgment, owner=None)
+            approved = judgment["meaning"].get("memberDispositions", {})
+            reuse = [self.review_reuse(dict(row), self.review_nodes_digest(), prepare=True)
+                     for row in self.connection.execute("SELECT * FROM review_runs WHERE nodesDigest IS NOT NULL AND plan_revision!=?", (self.manifest_revision(),))
+                     if native_reviewer(dict(provider=row["provider"], shards=row["shards"],
+                         shardDetails=json.loads(row["shardDetails"])), self, current=False)]
+            return dict(dispositions=sum(approved.get(item["id"]) == item["status"] for item in dispositions),
+                        state="judged", judgment=judgment, reuseJudgments=reuse,
+                        convergence=self.review_convergence(prepare=True), owner=None)
 
     def resolve_acceptance_finding(self, item_id, *, resolution, status="resolved") -> None:
         self.resolve_findings([dict(id=item_id, status=status, resolution=resolution)])
@@ -3246,7 +3165,7 @@ class PlanStore:
             if (
                 isinstance(reviewers, list)
                 and reviewers
-                and all(native_reviewer(reviewer) for reviewer in reviewers)
+                and all(native_reviewer(reviewer, self) for reviewer in reviewers)
                 and (
                     len({reviewer["provider"] for reviewer in reviewers}) >= 2
                     or review.get("reviewIndependence") == "single-provider"
@@ -3310,10 +3229,12 @@ class PlanStore:
 
     def status(self) -> dict:
         self._reading_status, self._manifest_error = True, None
+        self._review_read_snapshot = {}
         try:
             status = self._status()
         finally:
             self._reading_status = False
+            self._review_read_snapshot = None
         if self._manifest_error:
             vision = self.spine().ids("vision")[0]
             gap = dict(gap="semantic-scenarios-invalid", id=vision, message=self._manifest_error)
@@ -3323,7 +3244,7 @@ class PlanStore:
     def _status(self) -> dict:
         from codex_harness.core.acceptance import acceptance_status
         from codex_harness.core.roundtable import review_totals
-        from codex_harness.core.planner_confirmation_cards import pending_decisions, pending_judgments
+        from codex_harness.core.planner_confirmation_cards import pending_decisions
 
         self.connection.execute("BEGIN")
         try:
@@ -3370,24 +3291,15 @@ class PlanStore:
                 and up_to_date
                 and not open_clarifications
                 and (Spine(data).semantic or self.passing_audit(current_publication))
-                and self.successful_reviews(current_publication)
+                and self.review_prerequisite(current_publication)["complete"]
             ):
                 pending = None
             if index > PHASES.index("vision-lock") and not credit:
                 pending = "approval:vision-lock"
             acceptance = acceptance_status(self)
             review_policy = self.plan_review_policy_state(current_publication)
-            open_findings, open_members = 0, 0
-            columns = {
-                row[1] for row in self.connection.execute("PRAGMA table_info(review_findings)")
-            }
-            if columns:
-                # Legacy rows without stored membership are individual findings.
-                cluster_key = "coalesce(cluster_id, id)" if "cluster_id" in columns else "id"
-                open_findings, open_members = self.connection.execute(
-                    f"SELECT count(DISTINCT {cluster_key}), count(*) FROM review_findings "
-                    "WHERE status='open'"
-                ).fetchone()
+            open_rows = [r for r in self.finding_state()["members"] if r["state"] == "open" and r.get("stage") != "acceptance"]
+            open_findings, open_members = len({r["cluster_id"] or r["id"] for r in open_rows}), len(open_rows)
             if meta["phase"] == "accept" and credit and acceptance["accepted"]:
                 pending = None
             status = {
@@ -3425,7 +3337,7 @@ class PlanStore:
                 "phase_index": index + 1,
                 "acceptance": acceptance,
                 "pendingDecisions": pending_decisions(self),
-                "pendingSemanticJudgments": pending_judgments(self),
+                "pendingSemanticJudgments": self.finding_state()["pendingJudgments"],
                 "roundtable": review_totals(self, current_publication),
                 **({"reviewPolicy": review_policy} if review_policy["active"] else {}),
                 "readiness": self.readiness_status(current_publication),
@@ -3448,7 +3360,7 @@ class PlanStore:
                     "attempt_phase_advance": None,
                     "attempt_publication": "current-revision-published",
                     "unavailable_refresh": "continuation-unavailable",
-                }.get(kind, pending)
+                }.get(kind, "semantic-judgment-required" if kind == "judgment_required" else pending)
             return status
         finally:
             self.connection.rollback()

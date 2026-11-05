@@ -345,8 +345,7 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         if record.get("requestDigest") != request["requestDigest"]:
             raise ValueError("worker-job-outcome-identity-mismatch")
         result[name] = record
-        if name == "terminal":
-            result["status"] = record["status"]
+        result["status"] = record["status"] if name == "terminal" else "running"
     runs = directory / "runs"
     paths = list(runs.glob("*/evidence/run.json")) if runs.is_dir() else []
     if len(paths) == 1:
@@ -383,7 +382,7 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
         "dispatchStatus", ""
     ).startswith("plan-failed"):
         result["reason"] = ("Awaiting judgment; inspect the bound candidate before revalidation."
-                            if result["status"] == "pending-judgment" else "Failed or stalled work: harness_recovery can readmit within B.")
+                            if result["status"] == "pending-judgment" else "Worker started; completion and current liveness remain unproven." if result["status"] == "running" else "Failed or stalled work: harness_recovery can readmit within B.")
     from codex_harness.core.planner_recovery import worker_status
 
     return worker_status(workspace, result)

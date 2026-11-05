@@ -2,7 +2,7 @@
 
 const byId = id => document.getElementById(id);
 let previous = null;
-let refreshing = false;
+let refreshOwner = null;
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -86,13 +86,21 @@ function render(report) {
   byId("permissions").append(element("pre", JSON.stringify(report.savedPermissions, null, 2)));
 }
 
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
+async function refresh(manual = false) {
+  if (refreshOwner && !manual) return;
+  const previousOwner = refreshOwner;
+  const controller = new AbortController();
+  refreshOwner = controller;
+  previousOwner?.abort(new Error("Replaced by manual refresh"));
+  const deadline = Date.now() + 5000;
+  const timeout = setInterval(() => {
+    if (Date.now() >= deadline) controller.abort(new Error("Status request exceeded 5s wall-clock deadline"));
+  }, 250);
   try {
-    const response = await fetch("/api/status", {cache: "no-store"});
+    const response = await fetch("/api/status", {cache: "no-store", signal: controller.signal});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const report = await response.json();
+    if (refreshOwner !== controller) return;
     if (!report || typeof report !== "object" || !("plan" in report) || !("runs" in report)) {
       throw new Error("Status response unavailable");
     }
@@ -102,6 +110,7 @@ async function refresh() {
     byId("proof-warning")?.remove();
     byId("freshness").textContent = `Last received: ${new Date().toLocaleString()}`;
   } catch (error) {
+    if (refreshOwner !== controller) return;
     if (!byId("proof-warning")) {
       const warning = element("p", "Proof freshness unconfirmed: refresh failed.");
       warning.id = "proof-warning";
@@ -111,10 +120,11 @@ async function refresh() {
       `Status unavailable: ${error.message}` :
       `Stale snapshot — refresh failed; proof freshness is unconfirmed: ${error.message}`;
   } finally {
-    refreshing = false;
+    clearInterval(timeout);
+    if (refreshOwner === controller) refreshOwner = null;
   }
 }
 
-byId("refresh").addEventListener("click", refresh);
+byId("refresh").addEventListener("click", () => refresh(true));
 refresh();
 setInterval(refresh, 5000);

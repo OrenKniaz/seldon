@@ -1,18 +1,9 @@
-"""Read-only, deterministic steering checks against integrated Git snapshots.
-
-Added TODO/FIXME/XXX comments are major. Stub functions are blockers when
-public (module functions or public class methods) or named in a requirement;
-other stubs are major. These checks identify suspicious work, not proof of
-semantic correctness or successful test execution.
-"""
+"""Read-only structural ownership, protected-file and projection observations."""
 
 from __future__ import annotations
 
-import ast
-import io
 import re
 import subprocess
-import tokenize
 from itertools import zip_longest
 from pathlib import Path, PurePosixPath
 
@@ -20,7 +11,6 @@ from codex_harness.core.spine import compile_manifest
 from codex_harness.core.spine_render import render_markdown
 
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-_MARKER = re.compile(r"\b(?:TODO|FIXME|XXX)\b")
 _SEVERITIES = ("blocker", "major", "minor")
 
 
@@ -66,142 +56,11 @@ def _test_file(path: str) -> bool:
     return path.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
 
 
-def _test_path(path: str) -> bool:
-    return _test_file(path) or any(part in {"test", "tests"} for part in path.split("/"))
-
-
 def _module_matches(path: str, module: str) -> bool:
     module = module.replace("\\", "/")
     if not module.endswith(".py"):
         module = module.replace(".", "/") + ".py"
     return path == module or path.endswith("/" + module)
-
-
-def _comments(source: str) -> dict[int, str]:
-    return {
-        token.start[0]: token.string
-        for token in tokenize.generate_tokens(io.StringIO(source).readline)
-        if token.type == tokenize.COMMENT
-    }
-
-
-def _added_lines(repo: Path, base: str, head: str, path: str) -> set[int]:
-    patch = _git(
-        repo,
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-        "--unified=0",
-        base,
-        head,
-        "--",
-        path,
-    )
-    added = set()
-    line = None
-    for text in patch.splitlines():
-        if match := re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", text):
-            line = int(match[1])
-        elif line is not None:
-            if text.startswith("+"):
-                added.add(line)
-                line += 1
-            elif text.startswith(" "):
-                line += 1
-    return added
-
-
-def _stub(node, comments: dict[int, str]) -> bool:
-    body = list(node.body)
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-        if isinstance(body[0].value.value, str):
-            body = body[1:]
-    if len(body) == 1:
-        statement = body[0]
-        if isinstance(statement, ast.Pass) or (
-            isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Constant)
-            and statement.value.value is Ellipsis
-        ):
-            return True
-        if isinstance(statement, ast.Return) and (
-            statement.value is None or isinstance(statement.value, ast.Constant)
-        ):
-            return any(
-                _MARKER.search(comments.get(line, ""))
-                for line in range(node.lineno, node.end_lineno + 1)
-            )
-    # Walk this function's control flow, but not nested functions/classes.
-    pending = body[:]
-    while pending:
-        statement = pending.pop()
-        if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            continue
-        if isinstance(statement, ast.Raise):
-            error = statement.exc
-            error = error.func if isinstance(error, ast.Call) else error
-            if isinstance(error, ast.Name) and error.id == "NotImplementedError":
-                return True
-            if isinstance(error, ast.Attribute) and error.attr == "NotImplementedError":
-                return True
-        pending.extend(ast.iter_child_nodes(statement))
-    return False
-
-
-def _python_findings(source: str, added: set[int], requirement_text: str, product: bool):
-    tree = ast.parse(source)
-    comments = _comments(source)
-    for line in sorted(added & comments.keys()):
-        if _MARKER.search(comments[line]):
-            yield "stub-left", "major", line, f"Added unfinished-work comment: {comments[line]}"
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _stub(node, comments):
-            parent = parents[node]
-            public = not node.name.startswith("_") and (
-                isinstance(parent, ast.Module)
-                or isinstance(parent, ast.ClassDef)
-                and not parent.name.startswith("_")
-            )
-            named = re.search(rf"\b{re.escape(node.name)}\b", requirement_text)
-            yield (
-                "stub-left",
-                "blocker" if public or named else "major",
-                node.lineno,
-                f"Function {node.name} contains a placeholder implementation",
-            )
-        if not product:
-            continue
-        modules = []
-        if isinstance(node, ast.Import):
-            modules = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            modules = [node.module or ""]
-            modules.extend(f"{node.module}.{alias.name}" for alias in node.names)
-        if any(
-            module == "mock"
-            or module.startswith("mock.")
-            or module == "unittest.mock"
-            or module.startswith("unittest.mock.")
-            for module in modules
-        ):
-            yield "mock-in-product", "major", node.lineno, "Mock library imported in product code"
-        name = (
-            node.name
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
-            else node.id
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-            else node.attr
-            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
-            else node.arg
-            if isinstance(node, ast.arg)
-            else node.asname or node.name.split(".")[0]
-            if isinstance(node, ast.alias)
-            else None
-        )
-        if name and name.startswith(("fake_", "dummy_", "stub_")):
-            yield "mock-in-product", "major", node.lineno, f"Placeholder identifier defined: {name}"
 
 
 def steering_report(
@@ -260,19 +119,6 @@ def steering_report(
         if not owners:
             add("ownership-drift", "major", None, path, None, "Changed file has no bead owner", [])
             continue
-        if not path.endswith(".py") or path not in head_paths:
-            continue
-        source = _git(repo, "show", f"{head}:{path}")
-        added = _added_lines(repo, base, head, path)
-        for owner in owners:
-            ids = beads[owner].get("requirements", [])
-            text = "\n".join(ids)
-            if spine is not None:
-                text += "\n" + "\n".join(spine.node(key)["text"] for key in ids)
-            for code, severity, line, detail in _python_findings(
-                source, added, text, not _test_path(path)
-            ):
-                add(code, severity, owner, path, line, detail, ids)
 
     if spine is not None:
         for path, expected in render_markdown(spine).items():

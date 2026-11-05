@@ -315,7 +315,7 @@ TOOLS = [
     ),
     _tool(
         "harness_resolve_findings",
-        "Atomically disposition an array of findings; canonical ids resolve every cluster member.",
+        "Judge proposed dispositions for exact finding members; pending judgments release ownership.",
         {
             "findings": {
                 "type": "array",
@@ -1765,30 +1765,12 @@ class PlannerServer:
             )
         if name == "harness_resolve_findings":
             store = self._store()
-            count = store.resolve_findings(args["findings"])
-            self.result_data = {"dispositions": count}
-            declarations = [row for row in args["findings"] if "closure" in row]
-            if declarations:
-                self.result_data["closureDeclarations"] = [
-                    dict(
-                        id=row["id"],
-                        closure="unverified",
-                        retainedObligation=True,
-                        reason="Targeted assessment and observed separation producers unavailable",
-                    )
-                    for row in declarations
-                ]
-                self.result_data["reviewPolicy"] = store.plan_review_policy_state(
-                    store.manifest_revision()
-                )
-            return f"Dispositioned {count} finding clusters atomically"
+            self.result_data = store.resolve_findings(args["findings"])
+            return json.dumps(self.result_data, ensure_ascii=False)
         if name == "harness_resolve_finding":
-            store = self._store()
-            status = args.get("status", "resolved")
-            store.resolve_findings(
-                [dict(id=args["id"], resolution=args["resolution"], status=status)]
-            )
-            return f"Finding {args['id']}: {status}"
+            self.result_data = self._store().resolve_findings([dict(
+                id=args["id"], resolution=args["resolution"], status=args.get("status", "resolved"))])
+            return json.dumps(self.result_data, ensure_ascii=False)
         if name.startswith("harness_accept"):
             from codex_harness.core.acceptance import (
                 derive_scenarios,

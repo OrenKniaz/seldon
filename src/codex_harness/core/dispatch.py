@@ -2208,6 +2208,8 @@ def run_plan(
         terminal.add(bead_id)
         blocked = {bead_id}
         waiting = records[bead_id]["status"] == "awaiting judgment"
+        if waiting:
+            record["status"] = "pending-judgment"
         for dependent in order:
             if dependent not in terminal and blocked.intersection(plan.beads[dependent].depends_on):
                 records[dependent]["status"] = (f"awaiting judgment: dependency {bead_id}" if waiting else f"blocked: dependency {bead_id} failed")
@@ -2754,12 +2756,8 @@ def run_plan(
                 )
     failure = next((bead_id for bead_id in order if bead_id not in done), None)
     if failure is not None:
-        status = ("pending-judgment" if records[failure]["status"] == "awaiting judgment"
-                  else f"plan-failed: {failure} {records[failure]['status']}")
-    elif (
-        record["integrationValidation"] is not None
-        and not record["integrationValidation"]["passed"]
-    ):
+        status = "pending-judgment" if records[failure]["status"] == "awaiting judgment" else f"plan-failed: {failure} {records[failure]['status']}"
+    elif record["integrationValidation"] and not record["integrationValidation"]["passed"]:
         status = "plan-failed: integration proof failed"
     else:
         status = (
@@ -2771,9 +2769,7 @@ def run_plan(
         )
     record.update(status=status, finishedAt=_now(), isLiveProductProof=False)
     attempted = [bead for bead in records.values() if (bead["attempt"] or {}).get("mode")]
-    record["didExecuteRealProvider"] = bool(attempted) and all(
-        _did_execute_real_provider(bead) for bead in attempted
-    )
+    record["didExecuteRealProvider"] = bool(attempted) and all(_did_execute_real_provider(bead) for bead in attempted)
     _update_efficiency(record)
     _write_record(evidence / "run.json", record)
     _notify_failures(record, evidence)

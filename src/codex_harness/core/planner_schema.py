@@ -3,7 +3,7 @@
 import ast
 import hashlib
 from copy import deepcopy
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from codex_harness.core.planner_guidance import BATCH_GUIDANCE
 from codex_harness.core.spine import ALLOWED_PARENTS, SEMANTIC_PHASES, bead_contract, bead_rules
@@ -29,6 +29,7 @@ class Judgment(TypedDict):
     owner: None
     source: str | None
     sourceVerified: bool
+    supersededBy: NotRequired[str]
     error: str | None
 
 
@@ -62,6 +63,38 @@ def judgment_response(response, record):
         raise ValueError("A negative verdict needs at least one concrete gap in gaps")
     if parsed["verdict"] == "positive" and parsed["gaps"]:
         raise ValueError("Resolve the gaps or return a negative/inconclusive verdict")
+    if record["question"] == "plan-review":
+        from codex_harness.core.roundtable import _invalid_reason
+        findings = parsed["meaning"].get("findings")
+        depth = parsed["meaning"].get("depth")
+        if not isinstance(depth, str) or not depth.strip():
+            raise ValueError("meaning.depth must state chosen review depth and consequence-based reason")
+        if not isinstance(findings, list):
+            raise ValueError("meaning.findings must be a list; verdict and rationale remain explicit")
+        for item in findings:
+            reason = _invalid_reason(item)
+            if reason:
+                raise ValueError(reason)
+    if record["question"] == "finding-equivalence" and parsed["verdict"] == "positive":
+        facts = next((ref["payload"]["facts"] for ref in record["sourceRefs"]
+                      if isinstance(ref.get("payload", {}).get("facts"), dict)), {})
+        ids = {row["id"] for row in facts.get("members", [])}
+        groups = parsed["meaning"].get("groups")
+        if not isinstance(groups, list) or any(not isinstance(group, list) or not group for group in groups):
+            raise ValueError("meaning.groups must list nonempty groups of exact member IDs")
+        flat = [key for group in groups for key in group]
+        if any(not isinstance(key, str) or key not in ids for key in flat) or len(set(flat)) != len(flat):
+            raise ValueError("Equivalence groups must contain disjoint captured member IDs")
+    if record["question"] == "finding-disposition" and parsed["verdict"] == "positive":
+        facts = next((ref["payload"]["facts"] for ref in record["sourceRefs"]
+                      if isinstance(ref.get("payload", {}).get("facts"), dict)), {})
+        ids = {row["id"] for row in facts.get("members", [])}
+        dispositions = parsed["meaning"].get("memberDispositions")
+        if (not isinstance(dispositions, dict) or set(dispositions) != ids
+            or any(value not in {"resolved", "rejected", "deferred", "open"} for value in dispositions.values())):
+            raise ValueError("meaning.memberDispositions must disposition every captured member exactly once")
+    if record["question"] == "review-reuse" and parsed["verdict"] == "positive" and type(parsed["meaning"].get("reuse")) is not bool:
+        raise ValueError("meaning.reuse must explicitly judge the actual revision delta")
     if parsed["verdict"] == "positive":
         meaning = parsed["meaning"]
         if record["question"] == "user-decision" and meaning.get("decision") not in {

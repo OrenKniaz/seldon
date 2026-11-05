@@ -86,4 +86,4 @@ Retros and the improvement pipeline (amendments to Seldon itself, lessons from i
 | DV7 | C11 | "two reviewers" can be the same model tuple, with no label | CC | 2026-11-11 | Stage 2a |
 | DV8 | C8 | B/review/call budgets exist in the product (v1 has no budget) | CC | 2026-11-18 | Stage 2b |
 | DV9 | — | two execution models (legacy + semantic) coexist | CC | 2026-11-18 | Stage 3d |
-| DV10 | I4, I6, I2, C11 | pending (not open) findings do not hold publication/C; a re-split review drops a shard's concrete gap (pre-existing at efc4a25; registered by CC 2026-11-05, Oren notified) | CC | 2026-11-08 | Lane 2a2 |
+| DV10 | I4, I6, I2, C11 | pending (not open) findings do not hold publication/C (pre-existing at efc4a25; registered by CC 2026-11-05, Oren notified; re-split gap half restored by Stage 2a) | CC | 2026-11-08 | Lane 2a2 |

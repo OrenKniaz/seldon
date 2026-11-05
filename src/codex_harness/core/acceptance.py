@@ -23,7 +23,7 @@ from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.semantic_runner import SOURCE_IGNORED, web_toolchain
 from codex_harness.core.semantic_runner import run as run_semantic
-from codex_harness.core.spine import Spine, compile_manifest, requirement_file_sources
+from codex_harness.core.spine import compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
 
 QUESTION = "Does this product achieve the locked vision for a real first-time user? List gaps."
@@ -724,6 +724,14 @@ def run_invalid_reason(store, run) -> str | None:
         return "acceptance-scenarios-required"
     if run["planRevision"] != store._revision():
         return "plan-changed"
+    if not Path(run["repo"]).is_dir():
+        return "product-changed"
+    algorithm = run.get("revisionAlgorithm", "git-diff-v1")
+    if algorithm not in {"git-diff-v1", "tree-bytes-v2"}:
+        return "revision-algorithm-unsupported"
+    current_revision = _integrated_revision_v1(run["repo"]) if algorithm == "git-diff-v1" else integrated_revision(run["repo"])
+    if run["revision"] != current_revision:
+        return "product-changed"
     if "webToolchain" in run:
         try:
             if run["webToolchain"] != web_toolchain(None, False):
@@ -749,17 +757,8 @@ def run_invalid_reason(store, run) -> str | None:
         scenarios
     ):
         return "scenarios-changed"
-    if not Path(run["repo"]).is_dir():
-        return "product-changed"
-    algorithm = run.get("revisionAlgorithm", "git-diff-v1")
     if algorithm == "git-diff-v1":
-        if run["revision"] != _integrated_revision_v1(run["repo"]):
-            return "product-changed"
         return "legacy-unbound" if legacy_unbound else "revision-algorithm-upgraded"
-    if algorithm != "tree-bytes-v2":
-        return "revision-algorithm-unsupported"
-    if run["revision"] != integrated_revision(run["repo"]):
-        return "product-changed"
     return "legacy-unbound" if legacy_unbound else None
 
 
@@ -1043,9 +1042,9 @@ def _candidate_evidence(store, repo, run, *, execution_assessment_ids=None):
         implementation.append(record)
 
     def finding_evidence(rows):
-        closed = [row for row in rows if row["status"] in ("resolved", "rejected")]
+        closed = [row for row in rows if row["state"] == "closed"]
         return {
-            "active": [row for row in rows if row["status"] not in ("resolved", "rejected")],
+            "active": [row for row in rows if row["state"] != "closed"],
             "closed": [
                 {
                     "id": row["id"],
@@ -1102,142 +1101,6 @@ def _candidate_evidence(store, repo, run, *, execution_assessment_ids=None):
     return result
 
 
-def _restore_scenario_commands(scenarios, prefixes):
-    """Validate and reconstruct a packet view; never mutate saved scenarios."""
-    restored = copy.deepcopy(scenarios)
-    for scenario in restored:
-        for step in scenario["steps"]:
-            if not isinstance(step, dict) or "plannedCommandReference" not in step:
-                continue
-            ref = step["plannedCommandReference"]
-            if (
-                "command" in step
-                or not isinstance(ref, dict)
-                or set(ref) != {"prefixRef", "suffix", "commandSha256"}
-                or any(not isinstance(value, str) for value in ref.values())
-                or ref["prefixRef"] not in prefixes
-                or not isinstance(prefixes[ref["prefixRef"]], str)
-            ):
-                raise ValueError("Invalid planned command reference")
-            command = prefixes[ref["prefixRef"]] + ref["suffix"]
-            if hashlib.sha256(command.encode("utf-8")).hexdigest() != ref["commandSha256"]:
-                raise ValueError("Planned command reference hash mismatch")
-            step.pop("plannedCommandReference")
-            step["command"] = command
-    return restored
-
-
-def _project_scenario_commands(scenarios):
-    """Factor beneficial exact prefixes, with separate packet-only binding IDs."""
-    ids = [row["id"] for row in scenarios]
-    if len(ids) != len(set(ids)) or any(
-        isinstance(step, dict) and "plannedCommandReference" in step
-        for row in scenarios
-        for step in row["steps"]
-    ):
-        return scenarios, {}
-    view, prefixes, groups = copy.deepcopy(scenarios), {}, {}
-
-    def encode(value):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-    for row in view:
-        for step in row["steps"]:
-            command = step.get("command") if isinstance(step, dict) else None
-            if isinstance(command, str) and len(command) >= 128:
-                groups.setdefault(command[:128], []).append(step)
-    for key in sorted(groups):
-        steps = groups[key]
-        if len(steps) < 2:
-            continue
-        prefix = os.path.commonprefix([step["command"] for step in steps])
-        binding_id = "PC" + str(len(prefixes) + 1)
-        projected = []
-        for step in steps:
-            command = step["command"]
-            projected.append(
-                {
-                    **{key: value for key, value in step.items() if key != "command"},
-                    "plannedCommandReference": {
-                        "prefixRef": binding_id,
-                        "suffix": command[len(prefix) :],
-                        "commandSha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
-                    },
-                }
-            )
-        # Reserve more than the shared instructions cost; small dossiers retain
-        # their existing representation byte for byte.
-        if len(encode(steps)) - len(encode(projected)) - len(encode({binding_id: prefix})) < 2048:
-            continue
-        prefixes[binding_id] = prefix
-        for step, replacement in zip(steps, projected, strict=True):
-            step.clear()
-            step.update(replacement)
-    if not prefixes:
-        return scenarios, {}
-    if _restore_scenario_commands(view, prefixes) != scenarios:
-        raise ValueError("Planned command projection did not reconstruct exact scenarios")
-    return view, prefixes
-
-
-def _project_run_commands(run, scenarios):
-    """Lossless packet view only; bindings reconstruct strings, not process identity."""
-    ids = [row["id"] for row in scenarios]
-    result_ids = [row["id"] for row in run["results"]]
-    if len(ids) != len(set(ids)) or len(result_ids) != len(set(result_ids)):
-        return run, {}
-    templates = {row["id"]: row for row in scenarios}
-    view, bindings, binding_ids = copy.deepcopy(run), {}, {}
-    for result in view["results"]:
-        planned = templates.get(result["id"], {}).get("steps", [])
-        for index, step in enumerate(result["steps"]):
-            if index >= len(planned) or "commandReference" in step:
-                continue
-            template = planned[index]
-            template = template if isinstance(template, str) else template.get("command")
-            expanded = step.get("command")
-            if not isinstance(template, str) or not isinstance(expanded, str):
-                continue
-            tokens = set(re.findall(r"\{(repo|home|data|python)\}", template))
-            if (
-                not template.startswith('"{python}"')
-                or not expanded.startswith('"')
-                or tokens - {"repo", "python"}
-                or re.search(
-                    r"\{(?:repo|home|data|python)\}\{(?:repo|home|data|python)\}", template
-                )
-            ):
-                continue
-            end = expanded.find('"', 1)
-            python = expanded[1:end] if end > 1 else ""
-            if not python or "\n" in python or "\r" in python:
-                continue
-            substitutions = {"python": python}
-            if "repo" in tokens:
-                if not isinstance(run.get("repo"), str):
-                    continue
-                substitutions["repo"] = run["repo"]
-            reconstructed = template
-            for name in ("repo", "home", "data", "python"):
-                if name in substitutions:
-                    reconstructed = reconstructed.replace("{" + name + "}", substitutions[name])
-            if reconstructed.encode("utf-8") != expanded.encode("utf-8"):
-                continue
-            key = json.dumps(substitutions, sort_keys=True, ensure_ascii=False)
-            if key not in binding_ids:
-                binding_ids[key] = "B" + str(len(bindings) + 1)
-                bindings[binding_ids[key]] = substitutions
-            step.pop("command")
-            step["commandReference"] = {
-                "scenarioId": result["id"],
-                "step": index + 1,
-                "templateSha256": hashlib.sha256(template.encode("utf-8")).hexdigest(),
-                "expandedSha256": hashlib.sha256(expanded.encode("utf-8")).hexdigest(),
-                "bindingRef": binding_ids[key],
-            }
-    return view, bindings
-
-
 def _prepare_acceptance_review(
     store, repo, reviewers, token_budgets, *, execution_assessment_ids=None
 ):
@@ -1269,37 +1132,7 @@ def _prepare_acceptance_review(
         + "\n\n"
     )
     scenarios = store.acceptance_scenarios()
-    planned_view, prefixes = _project_scenario_commands(scenarios)
-    prefix_section = ""
-    if prefixes:
-        prefix_section = (
-            "## Planned command prefix bindings\n\n"
-            + json.dumps(prefixes, ensure_ascii=False, sort_keys=True)
-            + "\n\n"
-            "Reconstruct plannedCommandReference by literal UTF8 prefixRef + suffix, then verify "
-            "commandSha256 BEFORE decoding programs. Recorded commandReference uses that template: "
-            "verify templateSha256, apply repo/home/data/python literal substitutions in order, "
-            "then verify expandedSha256. Bindings reconstruct strings, not process identity. "
-            "Scenario fields, expectations and proof bodies are unchanged. Scenario canonical hash "
-            + _hash(scenarios)
-            + " (sha256-json-sort_keys-default-utf8).\n\n"
-        )
-        included_header += prefix_section
-    packet_run, bindings = _project_run_commands(run, scenarios)
-    binding_section = ""
-    if bindings:
-        binding_section = (
-            "## Command reconstruction bindings\n\n"
-            + json.dumps(bindings, ensure_ascii=False, sort_keys=True)
-            + "\n\n"
-        )
-        included_header += binding_section + (
-            "commandReference identifies the scenario and one-based step in the untruncated "
-            "planned commands. Hashes are SHA256 of exact UTF8 strings. Apply literal "
-            "repo,home,data,python substitutions in that order; bindings reconstruct strings, "
-            "not observed process identity. Other outputs/fields are unchanged. Original run "
-            "canonical hash " + _hash(run) + " (sha256-json-sort_keys-default-utf8).\n"
-        )
+    planned_view, packet_run = scenarios, run
     included_header += review_instructions.instructions()
     context_data = dict(lockedVision=spine.node(spine.ids("vision")[0]), scenarioResults=packet_run)
     context = QUESTION + "\n" + json.dumps(context_data, ensure_ascii=False)
@@ -1331,18 +1164,6 @@ def _prepare_acceptance_review(
         )
         for provider in {r["provider"] for r in selected}
     }
-    if bindings and not all(
-        scenario_section in shard["packet"] and binding_section in shard["packet"]
-        for shards in dossiers.values()
-        for shard in shards
-    ):
-        raise ValueError("Command references require complete planned scenarios in every shard")
-    if prefixes and not all(
-        scenario_section in shard["packet"] and prefix_section in shard["packet"]
-        for shards in dossiers.values()
-        for shard in shards
-    ):
-        raise ValueError("Planned command references require complete bindings and scenarios")
     if (
         current_run(store) != run
         or recovery.identities(store, repo, run, **support_args) != original_identity
@@ -1352,10 +1173,7 @@ def _prepare_acceptance_review(
 
 
 def _acceptance_reviewer_findings(run, reviewer, record, parts):
-    merged = {}
-    for shard_record, items in parts:
-        for item in items:
-            roundtable._merge_finding(merged, {**item, **roundtable._binding_fields(shard_record)})
+    members = [{**item, **roundtable._binding_fields(shard)} for shard, items in parts for item in items]
     record["outOfPacketTools"] = list(
         dict.fromkeys(
             tool for shard in record["shardDetails"] for tool in shard["outOfPacketTools"]
@@ -1369,11 +1187,9 @@ def _acceptance_reviewer_findings(run, reviewer, record, parts):
             "stage": "acceptance",
             "reviewer": reviewer["name"],
             "provider": reviewer["provider"],
-            "status": "open",
-            "resolution": "",
             "runId": run["id"],
         }
-        for item in merged.values()
+        for item in members
     ]
 
 
@@ -1414,24 +1230,20 @@ def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, res
             raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
         if resumed or support is not None:
             attempt.validate(repo, run)
-        # The final event and aggregate bind immutable finding fields explicitly;
-        # later supported dispositions can change only status/resolution.
+        # Source members are append-only; current judgments alone supply effective state.
         result["findingHashes"] = {
             item["id"]: recovery.digest(
-                {k: v for k, v in item.items() if k not in ("status", "resolution")}
+                {k: v for k, v in item.items() if k not in ("status", "resolution", "state", "judgmentIds", "cluster_id")}
             )
             for item in pending
         }
         for finding in pending:
-            store.connection.execute(
-                "INSERT INTO acceptance_findings VALUES (?, ?)",
-                (finding["id"], json.dumps(finding)),
-            )
+            store._event("finding-recorded", finding)
         store.connection.execute(
             "INSERT INTO acceptance_reviews VALUES (?, ?)", (result["id"], json.dumps(result))
         )
         store._event("acceptance-reviewed", result)
-    return {**result, "findings": pending}
+    return {**result, "findings": [r for r in store.acceptance_findings() if r["id"] in result["findingIds"]]}
 
 
 def _admitted_acceptance_review(store, repo, run, attempt, saved):
@@ -1450,7 +1262,7 @@ def _admitted_acceptance_review(store, repo, run, attempt, saved):
         raise ValueError("Admitted review membership is inconsistent")
     members = [findings[key] for key in result["findingIds"]]
     if any(
-        recovery.digest({k: v for k, v in item.items() if k not in ("status", "resolution")})
+        recovery.digest({k: v for k, v in item.items() if k not in ("status", "resolution", "state", "judgmentIds", "cluster_id")})
         != result["findingHashes"][item["id"]]
         for item in members
     ):
@@ -1710,7 +1522,7 @@ def read_execution_finding_origins(store, finding_ids):
                 {
                     name: value
                     for name, value in findings[member].items()
-                    if name not in {"status", "resolution"}
+                    if name not in {"status", "resolution", "state", "judgmentIds", "cluster_id"}
                 }
             )
             != review["findingHashes"].get(member)
@@ -1845,6 +1657,9 @@ def acceptance_status(store) -> dict:
     previous_run = _latest_run(store)
     invalid_reason = run_invalid_reason(store, previous_run)
     run = previous_run if invalid_reason is None else None
+    snapshot = getattr(store, "_review_read_snapshot", None)
+    if snapshot is not None:
+        snapshot["acceptanceRun"] = run
     findings = store.acceptance_findings()
     approval = store.connection.execute(
         "SELECT result_json FROM acceptance_approvals ORDER BY rowid DESC LIMIT 1"

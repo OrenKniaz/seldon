@@ -12,20 +12,13 @@ def consent_recovery(code):
 
 def semantic_consent_next(status, result, *, plan_authorized=False):
     """Three decisions; missing information and changed scope still require a reply."""
-    pending = result.get("decision") or result
-    if pending.get("state") == "pending-judgment" or pending.get("status") == "pending-judgment":
-        return "Read the retained facts; obtain the LLM interpretation and harness_submit_judgment. The user's reply stays pending."
-    if status.get("pendingDecisions"):
-        return "Read pendingDecisions; interpret the retained reply with harness_submit_judgment, without asking again."
-    if status.get("pendingSemanticJudgments"):
-        return "Read pendingSemanticJudgments, fetch its retained facts with harness_judgment, then submit the LLM verdict."
-    if result.get("chatConfirmation"):
+    if navigation := judgment_navigation(status.get("pendingSemanticJudgments", []), review_complete=status.get("reviewResolution", {}).get("review", {}).get("current") is True):
+        return navigation["message"]
+    if result.get("chatConfirmation") or result.get("channel") == "chat-confirmation":
         return (
             "harness_record_chat_confirmation after showing the fresh card/diff "
             "and waiting for the reply."
         )
-    if result.get("channel") == "chat-confirmation":
-        return "Show request; wait for the actual reply, then harness_record_chat_confirmation."
     if (
         result.get("gate") in {"align+vision-lock", "plan-execution"}
         and result.get("state") != "approved"
@@ -142,3 +135,14 @@ def status_next(status, *, store):
     if acceptance.get("accepted"):
         return "Review the recorded acceptance above; harness_plan_status shows current evidence."
     return views.NEXT.get(phase, "Retry harness_plan_status.")
+
+
+def judgment_navigation(requests, *, review_complete=False):
+    """Present only the canonical request owner's submit/steer actions."""
+    ready = [r["id"] for r in requests if r["submitReady"]]
+    terminal = [r["id"] for r in requests if r["action"] == "fresh-invocation" and (not review_complete or r["acceptanceRunId"] is not None or r["question"] != "plan-review")]
+    if not ready and not terminal:
+        return None
+    return dict(kind="judgment_required" if ready else "review_required", judgmentIds=ready or terminal,
+                message=("Read the listed retained facts and harness_submit_judgment for submit-ready requests; do not ask the user again." if ready
+                         else "Steer into a fresh invocation; the listed exhausted attempts are terminal and cannot be retried."))

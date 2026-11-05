@@ -155,11 +155,11 @@ def readiness_status(store, revision, *, run=None, include_beads=()) -> dict:
         and item["plan_revision"] == revision
         and item["readiness_review_id"] in review_ids
     ]
-    states = [item["status"] for item in findings]
-    evidence["openFindingIds"] = [item["id"] for item in findings if item["status"] == "open"]
+    states = [item["state"] for item in findings]
+    evidence["openFindingIds"] = [item["id"] for item in findings if item["state"] == "open"]
     if "open" in states:
         status, advice = "fail", "Resolve open readiness findings and rerun readiness."
-    elif "deferred" in states:
+    elif any(item["status"] == "deferred" for item in findings):
         status, advice = "warn", "Deferred readiness blockers remain known gaps."
     elif all(row["ready"] and row["canVerify"] for row in rows):
         status, advice = "pass", ""
@@ -314,29 +314,13 @@ def readiness_review(
             for blocker in blockers:
                 finding_id = "F-" + uuid4().hex
                 record["findingIds"].append(finding_id)
-                store.connection.execute(
-                    "INSERT INTO review_findings (id, reviewer, provider, status, plan_revision, "
-                    "node_id, severity, finding, suggestion, created_at, round_id, packetBound, "
-                    "outOfPacketTools, stage, kind, nodeIds, readiness_review_id) "
-                    "VALUES (?, ?, ?, 'open', ?, ?, 'major', ?, ?, ?, ?, ?, ?, "
-                    "'readiness', ?, ?, ?)",
-                    (
-                        finding_id,
-                        record["reviewer"]["name"],
-                        record["reviewer"]["provider"],
-                        revision,
-                        (blocker["nodeIds"] or [record["beadId"]])[0],
-                        blocker["detail"],
-                        "Clarify the worker packet and rerun readiness.",
-                        roundtable._now(),
-                        batch,
-                        record["packetBound"],
-                        json.dumps(record["outOfPacketTools"]),
-                        blocker["kind"],
-                        json.dumps(blocker["nodeIds"]),
-                        record["id"],
-                    ),
-                )
+                store._event("finding-recorded", dict(id=finding_id, reviewer=record["reviewer"]["name"],
+                    provider=record["reviewer"]["provider"], plan_revision=revision,
+                    node_id=(blocker["nodeIds"] or [record["beadId"]])[0], severity="major",
+                    finding=blocker["detail"], suggestion="Clarify the worker packet and rerun readiness.",
+                    created_at=roundtable._now(), round_id=batch, stage="readiness", kind=blocker["kind"],
+                    nodeIds=blocker["nodeIds"], readiness_review_id=record["id"],
+                    packetBound=record["packetBound"], outOfPacketTools=record["outOfPacketTools"]))
             store.connection.execute(
                 "INSERT INTO readiness_reviews VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (

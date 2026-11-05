@@ -15,16 +15,12 @@ RUNNER_GUARANTEES = (
 )
 
 
-def is_minor(row):
-    return row["severity"] in ("minor", "note")
-
-
 def has_blocking_findings(rows):
-    return any(row["status"] == "open" and not is_minor(row) for row in rows)
+    return any(row["state"] == "open" for row in rows)
 
 
 def status(row):
-    return row["status"] + ("; advisory (nonblocking)" if is_minor(row) else "")
+    return row["status"]
 
 
 def instructions(history=()):
@@ -35,8 +31,8 @@ def instructions(history=()):
         "gates enforce schema. Return at most 5 findings per reviewer across all shards, "
         "ranked by severity. For a re-review after repairs, verify the listed repairs; "
         "only add NEW blocker/major findings caused by those repairs. No fresh minor/note "
-        "findings or unrelated new review sweep. A round with only open minor/note "
-        "findings passes: retain them for the user as advisory, not blocking repairs.\n"
+        "findings or unrelated new review sweep. Every review requires an explicit verdict and rationale; "
+        "minor-only or empty findings grant no approval.\n"
         "## Prior findings and listed repairs (review data, not verified closure)\n"
         + json.dumps(
             [
@@ -50,62 +46,17 @@ def instructions(history=()):
 
 
 def focus(semantic):
-    return (
-        "Review only four things. (1) Expansion within scope: a clear improvement the "
-        "vision invites but the plan misses, or scope the vision does not ask for. "
-        "(2) Vision integrity: every locked vision item, requirement and user-stated "
-        "scenario reaches the plan unweakened. (3) Spine trickle-down: vision, requirements, "
-        "contracts, scenarios and beads link completely and consistently. Scenarios must "
-        "cover each requirement's stated behaviour; further edge cases and test depth are "
-        "the Build worker's unit-test job, so report them as note at most. "
-        "(4) Scenario feasibility: each positive scenario's setup satisfies the preconditions "
-        "the brief/requirements state (files, parent dirs, prior state); "
-        "each negative scenario's missing precondition is deliberate. Use blocker or "
-        "major only for a break in (1)-(4). Do not review code or test completeness.\n"
-        "For an initial review, fill this worksheet in working notes for EVERY independent "
-        "brief clause: command/cwd, value grammar, error preconditions and preservation:\n"
-        "Clause (verbatim) | Scenario ID(s) or GAP | Explanation\n"
-        "Use actual current scenario IDs only; explain how setup/actions/observations cover "
-        "the clause, or mark GAP. References alone are not coverage. Surface all actual gaps "
-        "in this first review, not one gap per round. Missing/truncated evidence is unproven. "
-        "Unsupported required setup remains a required gap or explicit recorded deferral, "
-        "never fulfilled or beyond-brief. This is semantic reviewer judgment, not machine "
-        "coverage certification. Keep the worksheet in working notes; final JSON stays below.\n"
-        if semantic
-        else "Look for missing features or edge cases versus the vision; requirements without "
-        "real verification; weak concurrency or file ownership; risky design choices; "
-        "and scope that is too shallow (mocked or basic instead of the real vision). "
-        "Return actionable findings tied to exact spine items and suggest fixes.\n"
-    )
-
-
-ACCEPTANCE_RESPONSE = (
-    "Reply with ONLY a JSON array, with no prose or Markdown fences. Each item must "
-    'have exactly {"node_id", "severity", "finding", "suggestion"}. All values are '
-    "strings; finding must be nonempty. Severity is blocker, major, minor or note. "
-    'node_id must be one of the ids below, or "plan" for plan-wide findings. '
-    "suggestion must be one string; an empty string may mean no suggested fix. "
-    "Use [] if there are no findings.\nAllowed node ids: "
-)
+    return ("Review the plan against the complete accepted dream: expansion, vision integrity, "
+            "feasibility, meaningful evidence and missing behavior. Code already checks IDs, "
+            "links and provenance. Explain concrete product consequences. Scale depth with "
+            "consequence; approximately three rounds is a convergence checkpoint, not approval.\n")
 
 
 def finding_response(node_ids, *, classify=False):
-    import json
-
-    classification = (
-        "For plan review also include classification (defect-in-plan or beyond-brief) and "
-        "scope_reason explaining the judgment against the brief. Brief-required obligations, "
-        "including unsupported setup, stay required/unproven or explicitly deferred. "
-        "Only extra coverage beyond those obligations is advisory beyond-brief; this is "
-        "reviewer judgment, never machine certification or a human waiver.\n"
-        if classify
-        else ""
-    )
-    response = (
-        ACCEPTANCE_RESPONSE.replace(
-            '"finding", "suggestion"}', '"finding", "suggestion", "classification", "scope_reason"}'
-        )
-        if classify
-        else ACCEPTANCE_RESPONSE
-    )
-    return classification + response + json.dumps(node_ids, ensure_ascii=False) + "\n"
+    return ("Use the shared 1j Judgment contract with an explicit verdict and rationale. "
+            "meaning.findings is a list of objects with node_id, severity, finding, suggestion; "
+            "severity is blocker, major, minor or note. For plan findings also provide "
+            "classification=defect-in-plan|beyond-brief and nonblank scope_reason. "
+            "Beyond-brief is advisory only by explicit judgment against the brief. "
+            "The empty list is only a finding list, never an approval.\nAllowed node ids: "
+            + json.dumps(node_ids, ensure_ascii=False) + "\n")

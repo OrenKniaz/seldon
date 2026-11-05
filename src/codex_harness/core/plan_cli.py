@@ -194,7 +194,7 @@ def next_command(server: PlannerServer, status: dict) -> str:
             or not all(r["lastResult"] == "pass" for r in acceptance["scenarios"])
         ):
             return cmd('accept-run --subject product --repo "<integrated-repo>"')
-        if any(item["status"] == "open" for item in acceptance["findings"]):
+        if any(item["state"] == "open" for item in acceptance["findings"]):
             return cmd("accept-assess --schema") + (
                 " (inspect AF originals; intended declaration precedes fresh "
                 "assessment, never blind resolve after current support)"
@@ -769,12 +769,11 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                 item["text"] = item["text"].rsplit("\nNext: ", 1)[0]
         if command == "status" and args.brief and not reply["isError"]:
             status = server._status()
-            score = quality_report(server._store())["score"]
             reply["content"][0]["text"] = (
                 planner_views.banner(status)
                 + f" · workspace: {server.workspace} · Revision {status['plan_revision'][:12]}"
                 + f"\nphase: {status['phase']}\npending_gate: {status['pending_gate'] or 'none'}"
-                + f"\nPlanner quality: {score}/100 · {status['proofLevelLabel']}"
+                + f"\n{status['proofLevelLabel']}"
                 + f" · Worker readiness (advisory): {status['readiness']['status']}"
                 + f"\nOpen: {status['open_clarifications']} questions, "
                 + f"{status['open_assumptions']} assumptions"
@@ -876,7 +875,7 @@ def dispatch(server: PlannerServer, args) -> tuple[dict, dict | None]:
                         resolution="",
                     )
                     for row in data["findings"]
-                    if row["status"] == "open"
+                    if row["state"] == "open"
                 ]
             body = planner_views.findings_card(data["findings"])
             if not args.expand:

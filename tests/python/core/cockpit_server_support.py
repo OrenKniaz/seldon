@@ -1,8 +1,31 @@
+import queue
 import threading
+import time
 from contextlib import contextmanager
 from http.client import HTTPConnection
 
 from codex_harness.core import status_server
+
+
+def bounded(action, label):
+    """A stalled response or shutdown cannot own the golden beyond its wall deadline."""
+    replies = queue.Queue()
+    def run():
+        try:
+            replies.put((True, action()))
+        except Exception as error:
+            replies.put((False, error))
+    threading.Thread(target=run, daemon=True).start()
+    end = time.time() + 5
+    while time.time() < end:
+        try:
+            ok, value = replies.get(timeout=.25)
+        except queue.Empty:
+            continue
+        if not ok:
+            raise value
+        return value
+    raise TimeoutError(f"Cockpit {label} exceeded 5s wall-clock deadline")
 
 
 @contextmanager
@@ -19,11 +42,14 @@ def running(tmp_path, workspace=None, runs_root=None):
             yield connection
         finally:
             connection.close()
-            server.shutdown()
-            thread.join(timeout=5)
+            bounded(server.shutdown, "HTTP shutdown")
+            thread.join(timeout=1)
+            assert not thread.is_alive(), "Cockpit HTTP thread failed to terminate"
 
 
 def get(connection, path):
-    connection.request("GET", path)
-    response = connection.getresponse()
-    return response.status, dict(response.getheaders()), response.read()
+    def readback():
+        connection.request("GET", path)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    return bounded(readback, "HTTP fetch/readback")

@@ -110,7 +110,8 @@ def _semantic_validation(root, plan, record, phase):
     observed_files = observation_files(root)
     document = executable_scenarios(plan.trace, plan.semantic["scenarios"])
     results = semantic_runner.run(document, root, plan.semantic["targets"],
-                                  "contracts" if phase == "contracts" else "validation")
+        "contracts" if phase == "contracts" else "validation",
+        progress_path=Path(record["evidenceDir"]) / "semantic-progress.json" if record.get("evidenceDir") else None)
     if observation_files(root) != observed_files:
         raise ValueError("Validation candidate bytes changed during observation")
     expected = [s["id"] for s in document["scenarios"]]
@@ -186,7 +187,6 @@ def retained(workspace, job_id):
     plan = d.graph.load_plan(directory / "plan")
     if run["planRevision"] != request["publicationRevision"] or plan.semantic is None:
         raise ValueError("revalidate: retained semantic publication required; inspect job")
-    manifest = read_record_json(directory / "plan/sample.json")
     pending = [key for key in plan.beads if
                (run["beads"][key].get("integrated") or {}).get("semantic", {}).get("state")
                in {"FAIL", "ERROR", "pending-judgment"}]
@@ -199,7 +199,6 @@ def retained(workspace, job_id):
     )
     semantic = bead["integrated"]["semantic"]
     root = jobs._inside(directory, Path(state["candidateWorktree"]))
-    semantic = semantic or state
     repo = jobs._inside(directory, Path(run["repo"]))
     if _read_git(root, "status", "--porcelain") or (
         _read_git(root, "rev-parse", "HEAD") != semantic["candidateCommit"]
