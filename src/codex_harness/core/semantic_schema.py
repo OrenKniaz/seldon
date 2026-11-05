@@ -131,9 +131,12 @@ def validate_trace_fields(node, nodes):
             text(value)
     if kind == "test" and "execution" in f:
         execution = f["execution"]
-        fields(execution, ("argv", "rationale"), ("argv", "rationale"))
-        if not isinstance(execution["argv"], list) or not execution["argv"]:
-            raise ValueError("Worker-authored test execution requires a nonempty argv")
+        fields(execution, ("argv", "rationale", "testRoots"), ("argv", "rationale", "testRoots"))
+        if any(not isinstance(execution[k], list) or not execution[k] for k in ("argv", "testRoots")):
+            raise ValueError("Declare execution argv and complete testRoots (modules, helpers and fixtures)")
+        from codex_harness.core.graph import _file_path, _string
+        for root in execution["testRoots"]:
+            _file_path(_string(root))
         for value in execution["argv"]:
             text(value)
         text(execution["rationale"])

@@ -58,28 +58,26 @@ def executable_scenarios(trace, document):
 
 
 def execution_sources(root, trace):
-    """Bounded source capture is judge context, never executable eligibility."""
-    import hashlib
+    """Hash the complete declared bundle; bounded bodies are judge context only."""
+    from codex_harness.core.planner_candidate import _digest, file_hashes
+    from codex_harness.core.semantic_runner import SOURCE_IGNORED
+    from codex_harness.core.semantic_schema import path
 
     root, sources = Path(root).resolve(), []
-    for node in (trace or {}).get("nodes", []):
-        if node["kind"] != "test":
-            continue
-        fields = node["fields"]
-        names = [fields.get("module", ""), *fields.get("execution", {}).get("argv", [])]
-        for name in dict.fromkeys(names):
-            file = (root / name).resolve()
-            if not file.is_relative_to(root) or not file.is_file():
-                continue
-            with file.open("rb") as stream:
-                digest = hashlib.file_digest(stream, "sha256").hexdigest()
-                stream.seek(0)
-                raw = stream.read(16385)
-            body = raw[:16384].decode("utf-8", errors="replace")
-            sources.append(dict(testId=node["id"], path=file.relative_to(root).as_posix(),
-                                sha256=digest, body=body, omitted=file.stat().st_size > 16384,
-                                flags=[p for p in ("SELDON-STUB", "mock", "TODO") if p in body]))
-    return sources
+    roots = sorted({r for n in (trace or {}).get("nodes", []) if n["kind"] == "test"
+                    for r in n["fields"].get("execution", {}).get("testRoots", [])})
+    names = sorted({f.relative_to(root).as_posix() for r in roots
+                    for f in ([path(root, r)] if not path(root, r).is_dir() else path(root, r).rglob("*"))
+                    if not f.is_dir() and not any(p in SOURCE_IGNORED for p in f.relative_to(root).parts)})
+    hashes = file_hashes(root, names)
+    for name, digest in hashes.items():
+        raw = b""
+        if digest:
+            with (root / name).open("rb") as stream: raw = stream.read(16384)
+        body = raw.decode("utf-8", errors="replace")
+        sources.append(dict(path=name, sha256=digest, body=body,
+                            omitted=bool(digest and (root / name).stat().st_size > 16384)))
+    return dict(roots=roots, contentHash=_digest(dict(roots=roots, files=hashes)), files=sources)
 
 
 def execution_witnesses(integrated):

@@ -59,7 +59,11 @@ def scripted_worker(packet, root, files):
     assert "SELDON-STUB" not in instructions and "exits 3" not in instructions, instructions
     assert "unit tests" not in instructions, instructions
     for name, source in files.items():
-        (root / name).write_text(source, encoding="utf-8")
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        if source is None:
+            (root / name).unlink(missing_ok=True)
+        else:
+            (root / name).write_text(source, encoding="utf-8")
 
 
 def settle_decision(call, outcome, decision="approve"):
@@ -103,10 +107,10 @@ def judge_executions(workspace, patcher, *, contracts_gap=None, pending_executio
                 event = with_server.store.connection.execute("SELECT max(id) FROM events").fetchone()[0]
             prepared = call("harness_prepare_judgment", question="Assess meaningfulness, correct RED and stub/mock gaps",
                 subject_ids=with_server.store.spine().ids(), source_event_ids=[event], candidate=proof["candidate"])
-            gaps = contracts_gap() if phase == "contracts" and contracts_gap else []
+            gaps = contracts_gap() if contracts_gap else []
             meaning = dict(check="execution", evidenceBinding=proof["evidenceBinding"], meaningful=True,
                 correctFailureReason=True, noStubMockGaps=True,
-                qualitativeChecks={o["check"]: True for r in proof["results"]
+                qualitativeChecks={o["check"]: True for p in [proof, proof.get("red") or proof] for r in p["results"]
                                    for o in r.get("observations", []) if o["passed"] is None})
             reply = scripted_judgment(call, prepared, meaning, "negative" if gaps else "positive", gaps)
             return assess_execution(proof, reply["current"])
@@ -123,7 +127,7 @@ def judge_candidate(call, observation):
     packet = prepared["sourceRefs"][0]["payload"]
     scripted_judgment(call, prepared, dict(check=packet["check"], evidenceBinding=packet["evidenceBinding"],
         meaningful=True, correctFailureReason=True, noStubMockGaps=True,
-        qualitativeChecks={o["check"]: True for r in packet["proof"]["results"]
+        qualitativeChecks={o["check"]: True for p in [packet["proof"], packet["proof"].get("red") or packet["proof"]] for r in p["results"]
                            for o in r.get("observations", []) if o["passed"] is None}))
     return call("harness_accept_assess", judgment=dict(repo=observation["repo"], check=observation["check"],
                                                      judgment_id=prepared["id"]))
@@ -291,14 +295,14 @@ def execution_judgment_golden(workspace):
             node('R_BASE', 'requirement', ['F'], behavior='Preserve baseline readback'),
             node('R_NEW', 'requirement', ['F'], behavior='Read both channels'),
             node('T_BASE', 'test', ['R_BASE'], module='baseline.sensor', level='semantic',
-                 execution=dict(argv=[sys.executable, '-B', 'baseline.sensor'],
+                 execution=dict(argv=[sys.executable, '-B', 'baseline.sensor'], testRoots=['baseline.sensor'],
                                 rationale='Preserve existing baseline readback')),
             node('T_NEW', 'test', ['R_NEW'], module='verify.unfamiliar', level='semantic',
-                 execution=dict(argv=[sys.executable, '-B', 'verify.unfamiliar'],
+                 execution=dict(argv=[sys.executable, '-B', 'verify.unfamiliar'], testRoots=['verify.unfamiliar', 'helperlib'],
                                 rationale='Observe both channels from the candidate data path')),
-            node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat', 'verify.unfamiliar'], dependsOn=[],
+            node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat', 'verify.unfamiliar', 'helperlib/__init__.py'], dependsOn=[],
                  lessons=[], semanticPhase='contracts'),
-            node('B', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat'], dependsOn=['C'],
+            node('B', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat', 'helperlib/__init__.py'], dependsOn=['C'],
                  lessons=[], semanticPhase='build'),
         ])
         template = workspace / 'template'
@@ -308,6 +312,9 @@ def execution_judgment_golden(workspace):
         (product / 'channels.dat').write_text('missing')
         (product / 'baseline.sensor').write_text(
             "print('SELDON-STUB is a diagnostic string, baseline remains GREEN')\n")
+        (product / 'helperlib').mkdir()
+        (product / 'helperlib/__init__.py').write_text(
+            "from pathlib import Path\ndef read_channels():\n    return Path('channels.dat').read_text()\n")
         (product / 'payload.binary').write_bytes(b'x' * 262145)
         for index in range(130):
             (product / f'asset-{index}.opaque').write_text(str(index))
@@ -335,10 +342,10 @@ def execution_judgment_golden(workspace):
         assert rejected['state'] == 'FAIL' and not rejected['admitted'] and rejected['gaps']
         worker('C', {'verify.unfamiliar':
             "# Behavior: both channels; catches missing readback; baseline covers only startup.\n"
-            "from pathlib import Path\nimport sys\n"
+            "from pathlib import Path\nfrom helperlib import read_channels\nimport sys\n"
             "assert Path('payload.binary').stat().st_size == 262145\n"
             "assert len(list(Path('.').glob('asset-*.opaque'))) == 130\n"
-            "actual = Path('channels.dat').read_text()\n"
+            "actual = read_channels()\n"
             "print('observed channels:', actual)\n"
             "if actual != 'ready:42,84':\n"
             "    print('missing behavior: both channel values', file=sys.stderr)\n"
@@ -359,7 +366,7 @@ def execution_judgment_golden(workspace):
         worker('B', {'channels.dat': 'ready:42,84'})
         git('add', '.')
         git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker implementation')
-        green = _semantic_validation(product, plan, {'contractsRed': red}, 'build')
+        green = _semantic_validation(product, plan, {'attempt': {'baseCommit': red['candidateCommit']}}, 'build')
         assert green['observedState'] == 'PASS' and green['state'] == 'pending-judgment'
         assert not green['passed'] and green['judgmentStatus'] == 'pending-judgment'
         assert all(r['state'] == 'PASS' for r in green['results'])
@@ -376,6 +383,20 @@ def execution_judgment_golden(workspace):
         current = call('harness_judgment', judgment_id=request['id'], candidate=green['candidate'])
         accepted = assess_execution(green, current)
         assert accepted['passed'] and accepted['admitted'] and accepted['state'] == 'PASS'
+        # A strengthened assertion helper invalidates old RED, even though the
+        # module/argv are unchanged. The current base already passes this bundle;
+        # excerpt-only identity could reuse old RED and manufacture completion.
+        helper_base = git('rev-parse', 'HEAD').stdout.strip()
+        worker('B', {'helperlib/__init__.py':
+            "from pathlib import Path\ndef read_channels():\n    value = Path('channels.dat').read_text()\n"
+            "    assert '\\n' not in value, 'unexpected channel newline'\n    return value\n"})
+        git('add', 'helperlib/__init__.py')
+        git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker assertion helper')
+        no_red = _semantic_validation(product, plan, {'redObservations': [red], 'attempt': {'baseCommit': helper_base}}, 'build')
+        refused = assess_execution(no_red, judge(retain(no_red), no_red, 'positive'))
+        assert no_red['testSources']['contentHash'] != red['testSources']['contentHash']
+        assert no_red['red']['observedState'] == 'PASS'
+        assert refused['state'] == 'FAIL' and not refused['passed']
         changed = server.store.spine().node('R_NEW')
         changed['text'] = 'Read a third channel too'
         call('harness_upsert_node', node=changed)
@@ -576,10 +597,14 @@ def trace_contract_golden(workspace):
                     nodes.extend([node(architecture, "architecture", [r]), node(design, "design", [architecture]), node(contract, "contract", [design])])
                     parent = contract
                 nodes.extend([
-                    node(t, "test", [parent], module="sensor/readback", level="semantic", execution={"argv": ["opaque-simulator", "--measure"], "rationale": "Measure retained sensor behavior"}),
+                    node(t, "test", [parent], module="sensor/readback", level="semantic", execution={"argv": ["opaque-simulator", "--measure"], "testRoots": ["sensor"], "rationale": "Measure retained sensor behavior"}),
                     node(b, "bead", [t], ownedFiles=["sensor" + suffix + ".bin"], dependsOn=[], lessons=[], **({"semanticPhase": "build"} if mode == "semantic-v1" else {"proofModule": "sensor/readback"})),
                     node(c, "code", [b], path="sensor" + suffix + ".bin"),
                 ])
+            if full:
+                nodes = [n for n in nodes if n["id"] != "B2"]
+                next(n for n in nodes if n["id"] == "C2")["parents"] = ["T2"]
+                next(n for n in nodes if n["id"] == "B1")["parents"] = ["T1", "T2"]
             call("harness_upsert_nodes", nodes=nodes)
             additions = []
             for suffix in ("1", "2"):
@@ -629,7 +654,7 @@ def trace_contract_golden(workspace):
             assert reloaded == initial
             assert reloaded["trace"] == retained
             assert set(reloaded["traceRevisions"]) == {n["id"] for n in retained["nodes"]}
-            assert len(reloaded["beads"]) == 2
+            assert len(reloaded["beads"]) == (1 if full else 2)
             assert all(n["fields"]["level"] == "semantic" for n in retained["nodes"] if n["kind"] == "test")
             # Record an upward discovery without granting consent or silently editing R1.
             old_requirement = ref("R1")
@@ -927,6 +952,7 @@ class ConcurrentHTTP(unittest.TestCase):
                     level="semantic",
                     execution={
                         "argv": [sys.executable, "-B", "verify_http.py", "data/pantry.sqlite3"],
+                        "testRoots": ["verify_http.py"],
                         "rationale": "Planned importer/SQLite/HTTP readback verifier supplied and run later in this journey",
                     },
                 ),
@@ -940,16 +966,48 @@ class ConcurrentHTTP(unittest.TestCase):
                     semanticPhase="contracts",
                 ),
                 node(
-                    "B",
+                    "I",
                     "bead",
-                    ["G1"],
+                    ["T_HTTP"],
                     ownedFiles=owned,
                     dependsOn=["C"],
                     lessons=[],
                     semanticPhase="build",
                 ),
+                node(
+                    "B",
+                    "bead",
+                    ["G1"],
+                    ownedFiles=owned,
+                    dependsOn=["I", "C"],
+                    lessons=[],
+                    semanticPhase="build",
+                ),
             ]
             call("harness_upsert_nodes", nodes=nodes)
+            # DV2: refuse a multi-build plan before any worker can run, then
+            # replan through the public writer; earlier fixtures claimed multi-build.
+            refused = workspace_wire(server, "harness_compile", expected_workspace=str(workspace))
+            assert refused["isError"] and "semantic-v1 runs one build bead until Stage 3a (DV2): merge build beads into one" in str(refused)
+            bead = store.spine().node("B")
+            bead["fields"]["dependsOn"] = ["C"]
+            call("harness_upsert_node", node=bead)
+            call("harness_remove_node", id="I")
+            # A contracts-only plan needs a new build, not an impossible merge.
+            call("harness_remove_node", id="B")
+            missing_build = workspace_wire(server, "harness_compile", expected_workspace=str(workspace))
+            assert missing_build["isError"] and "add one build bead that depends on the contracts bead" in str(missing_build)
+            assert "merge build beads" not in str(missing_build)
+            call("harness_upsert_node", node=bead)
+            # Counting builds alone missed contracts-after-build early completion.
+            contracts = store.spine().node("C")
+            bead["fields"]["dependsOn"], contracts["fields"]["dependsOn"] = [], ["B"]
+            call("harness_upsert_nodes", nodes=[bead, contracts])
+            wrong_order = workspace_wire(server, "harness_compile", expected_workspace=str(workspace))
+            assert wrong_order["isError"] and "contracts must supply RED first" in str(wrong_order)
+            bead["fields"]["dependsOn"], contracts["fields"]["dependsOn"] = ["C"], []
+            call("harness_upsert_nodes", nodes=[bead, contracts])
+            assert not list((workspace / ".codex-harness" / "worker-jobs").glob("*/started.json"))
             call("harness_advance", to_phase="plan")
             call("harness_compile", include_detail=True)
             assert not store.status()["coverage_gaps"], store.status()
@@ -1458,6 +1516,8 @@ with TemporaryDirectory(dir=root) as scratch:
                 assert not run["baseline"]["validation"]["B"]["passed"], run
             if semantic:
                 assert run["beads"]["C"]["status"] == "contracts-red", run
+                assert set(run["beads"]) == {"C", "B"}
+                assert run["semanticValidation"]["red"]["evidenceBinding"] == run["semanticContracts"]["evidenceBinding"]
                 assert next(r for r in run["requirementValidation"] if r["bead"] == "B")[
                     "passed"
                 ], run
@@ -1575,7 +1635,7 @@ def provider_host(mode, workspace, surface, job_id=None):
     workspace = Path(workspace)
     provider_patch = pytest.MonkeyPatch()
     judge_executions(workspace, provider_patch, pending_execution=surface == "web", contracts_gap=lambda: (
-        ["Contracts crashes before exercising the requested command behavior"]
+        ["Worker verifier crashes before exercising the requested command behavior"]
         if surface == "cli" and not (workspace / "valid-contracts-attempted").exists() else []))
     filename = "index.html" if surface == "web" else "hashslip.py"
     actual_popen = subprocess.Popen
@@ -1635,6 +1695,26 @@ def provider_host(mode, workspace, surface, job_id=None):
     def build(root):
         if surface == "shelflife":
             return write_shelflife(root, "build")
+        if surface == "cli":
+            scripted_worker(packet(root, "B"), root, {"checks/verify_hashslip.py":
+                "# Exact binary receipt; catches missing CLI/data loss; scenarios alone had no worker test.\n"
+                "import subprocess, sys\nfrom pathlib import Path\nfrom receipt_helper import payload, check_receipt\n"
+                "command = Path(__file__).resolve().parents[1] / 'hashslip.py'\n"
+                "data = payload()\n"
+                "assert command.is_file(), 'missing receipt command'\n"
+                "run = subprocess.run([sys.executable, '-B', str(command)], input=data, capture_output=True, timeout=5)\n"
+                "check_receipt(data, run)\n",
+                "checks/receipt_helper.py":
+                "import hashlib, json\nfrom pathlib import Path\n"
+                "def payload():\n    assert sorted(p.name for p in Path(__file__).parent.glob('*.json')) == ['input.json'], 'retired fixture still present'\n"
+                "    return bytes(json.loads((Path(__file__).parent / 'input.json').read_text()))\n"
+                "def check_receipt(data, run):\n    assert run.returncode == 0 and not run.stderr, run.stderr\n"
+                "    assert json.loads(run.stdout) == dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), label=None)\n",
+                "checks/input.json": "[0, 255, 65]\n", "checks/retired.json": None})
+            if not (workspace / "contracts-attempted").exists():
+                (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
+                return scripted_worker(packet(root, "B"), root, {filename: "raise RuntimeError('receipt startup failed')\n"})
+            (workspace / "valid-contracts-attempted").write_text("attempted", encoding="utf-8")
         if surface == "cli" and not (workspace / "stall-attempted").exists():
             # A real descendant hangs mid-Build with uncommitted poisoned writes.
             # The Job owner must reap it; an exited fake cannot prove recovery.
@@ -1658,7 +1738,8 @@ def provider_host(mode, workspace, surface, job_id=None):
                 out.write("<style>h1{background:linear-gradient(white,#fff)}</style>")
 
     def workers(plan, **options):
-        return actual_run(plan, **options, fake_workers={"C": contracts, "B": build})
+        workers = {"B": build} if surface == "cli" else {"C": contracts, "B": build}
+        return actual_run(plan, **options, fake_workers=workers)
 
     def review(launch, *_):
         if "## Read-only candidate evidence" in launch.stdin_text:
@@ -1734,6 +1815,9 @@ def test_golden_path(tmp_path, request, surface):
     and status must agree; ordinary polling usually missed that transient window.
     Retain an observed browser fallback through the same bounded observation run;
     earlier per-scenario fallback forgot it and could exhaust S3/S4 on normal probes.
+    Replay ShelfLife's dependency-free build with worker tests+code through C;
+    its new assertion helper and fixture must reach the RED baseline as one bundle.
+    Refuse multiple builds under DV2, then replan to contracts→single build→C.
     """
     if surface == "cli":
         planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
@@ -1942,6 +2026,19 @@ def test_golden_path(tmp_path, request, surface):
                 )
                 probing = False
             nodes = captured_run["nodes"]
+            if surface == "cli":
+                nodes = [n for n in nodes if n["id"] != "C"]
+                nodes.append(dict(id="T_RECEIPT", kind="test", title="Binary receipt", text="Verify exact bytes through the real CLI",
+                    parents=["G1"], fields=dict(module="checks/verify_hashslip.py", level="semantic",
+                        execution=dict(argv=[sys.executable, "-B", "checks/verify_hashslip.py"], testRoots=["checks"],
+                                       rationale="Observe the worker's exact binary receipt through its process"))))
+                bead = next(n for n in nodes if n["id"] == "B")
+                bead["parents"] = ["T_RECEIPT"]
+                bead["fields"].update(dependsOn=[], ownedFiles=["hashslip.py", "checks/verify_hashslip.py", "checks/receipt_helper.py", "checks/input.json", "checks/retired.json"])
+                # The worker deletes this tracked baseline fixture. Additive copying
+                # left RED enumerating different inputs from integrated GREEN.
+                (tmp_path / "template/checks").mkdir(parents=True, exist_ok=True)
+                (tmp_path / "template/checks/retired.json").write_text("[1]\n", encoding="utf-8")
             scenarios = nodes[0]["fields"]["scenarios"]
             written = call("harness_upsert_nodes", nodes=nodes)
             a = call("harness_understanding_card", **captured_run["understanding"])
@@ -1989,7 +2086,7 @@ def test_golden_path(tmp_path, request, surface):
                 call_cap=4,
                 workers=[
                     dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
-                    for b in ("C", "B")
+                    for b in (("B",) if surface == "cli" else ("C", "B"))
                 ],
             )
             proposal = dict(gate="plan-execution", execution=options, reviewer_node_id=choice["id"])
@@ -2116,8 +2213,8 @@ def test_golden_path(tmp_path, request, surface):
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
             if surface == "cli":
                 failed = json.loads(Path(job["run"]["recordPath"]).read_text())
-                assert failed["beads"]["C"]["integrated"]["semantic"]["state"] == "FAIL"
-                assert failed["beads"]["C"]["integrated"]["semantic"]["gaps"]
+                assert failed["beads"]["B"]["integrated"]["semantic"]["state"] == "FAIL"
+                assert failed["beads"]["B"]["integrated"]["semantic"]["gaps"]
                 probing = True
                 original = job["jobId"]
                 proof = call("harness_recovery", mode="inspect", job_id=original)
@@ -2167,7 +2264,21 @@ def test_golden_path(tmp_path, request, surface):
                 assert not (tmp_path / "abandoned.txt").exists()
                 probing = False
             assert job["status"] == "completed", job
-            assert job["run"]["semanticContracts"]["state"] == "RED", job
+            if surface == "web":
+                assert job["run"]["semanticContracts"]["state"] == "RED", job
+            else:
+                retained = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
+                assert set(retained["beads"]) == {"B"}
+                red = retained["semanticValidation"]["red"]
+                assert red["observedState"] == "RED", red
+                assert any(r["id"] == "T_RECEIPT" and r["state"] == "FAIL" for r in red["results"])
+                observed = next(r for r in red["results"] if r["id"] == "T_RECEIPT")["actions"]["execute"]["stderr"]
+                assert "AssertionError: missing receipt command" in observed and "ModuleNotFoundError" not in observed
+                assert "retired fixture still present" not in observed
+                assert not (tmp_path / "checks/retired.json").exists()
+                assert all(r["cleanup"]["quiescenceVerified"] for r in red["results"])
+                assert retained["semanticValidation"]["testSources"] == red["testSources"]
+                assert retained["semanticValidation"]["judgmentId"]
             assert job["run"]["semanticValidation"]["state"] == "PASS", job
             if surface == "web":
                 # Protect mode provenance and preview guidance through canonical dispatch;

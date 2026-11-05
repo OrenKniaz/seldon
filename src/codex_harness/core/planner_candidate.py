@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from codex_harness.core.record_io import _record_guard, read_record_json
 
@@ -72,22 +73,25 @@ def assess_execution(proof, judgment=None):
     result["judgmentId"] = judgment["id"]
     if judgment["concreteGap"]:
         result.update(state="FAIL", judgmentStatus="judged", gaps=judgment["gaps"])
-    elif judgment["positiveCredit"] and meaning.get("meaningful") is True and (
-        meaning.get("correctFailureReason") is True if contracts
-        else meaning.get("noStubMockGaps") is True
-    ):
+    elif (judgment["positiveCredit"] and meaning.get("meaningful") is True
+          and meaning.get("correctFailureReason") is True
+          and (contracts or meaning.get("noStubMockGaps") is True)):
         result["judgmentStatus"] = "judged"
-        if observed == "pending-judgment" and proof["results"] and all(
-            not r.get("unperformed") and r.get("actions") for r in proof["results"]
-        ):
-            missing = [o["check"] for r in proof["results"] for o in r.get("observations", [])
-                       if o["passed"] is None]
-            answers = meaning.get("qualitativeChecks", {})
-            if missing and isinstance(answers, dict) and all(answers.get(k) is True for k in missing):
-                observed = "RED" if contracts and any(
-                    r["state"] == "FAIL" for r in proof["results"]) else "PASS"
-                result["assessedObservationState"] = observed
-        if observed == ("RED" if contracts else "PASS"):
+        for observation in ([proof] if contracts else [proof["red"], proof]):
+            observed, rows = observation["observedState"], observation["results"]
+            is_red = observation["phase"] == "contracts"
+            if observed == "pending-judgment" and rows and all(
+                not r.get("unperformed") and r.get("actions") for r in rows
+            ):
+                missing = [o["check"] for r in rows for o in r.get("observations", []) if o["passed"] is None]
+                answers = meaning.get("qualitativeChecks", {})
+                if missing and isinstance(answers, dict) and all(answers.get(k) is True for k in missing):
+                    observed = "RED" if is_red and any(r["state"] == "FAIL" for r in rows) else "PASS"
+            if observed != ("RED" if is_red else "PASS"):
+                if is_red and observed != "pending-judgment":
+                    result["state"] = "ERROR" if observed == "ERROR" else "FAIL"
+                break
+        else:
             result.update(state=observed, admitted=True, passed=not contracts)
     return result
 
@@ -98,44 +102,50 @@ def _semantic_validation(root, plan, record, phase):
     from codex_harness.core.runners import executable_scenarios, execution_sources
 
     identity = _execution_identity(plan)
-    red = record.get("contractsRed")
-    if phase == "build" and (
-        not red or red.get("state") != "RED" or not red.get("admitted")
-        or any(red.get(k) != v for k, v in identity.items())
-    ):
-        raise ValueError("Current judged Contracts RED required; refresh changed bindings")
-    sources = execution_sources(root, plan.trace)
-    names = {name for bead in plan.beads.values() for name in bead.owned_files}
-    before = file_hashes(root, names)
     observed_files = observation_files(root)
     document = executable_scenarios(plan.trace, plan.semantic["scenarios"])
+    requirements = {r["id"] for r in record.get("requirementRefs", [])}
+    document["scenarios"] = [s for s in document["scenarios"] if not requirements or
+        requirements.intersection(r.split("@", 1)[0] for r in s["requirementRefs"])]
+    sources = execution_sources(root, plan.trace)
+    tests = [dict(id=s["id"], requirementRefs=s["requirementRefs"],
+                  contractRefs=s["contractRefs"], testRef=s.get("testRef"),
+                  rationale=s.get("rationale")) for s in document["scenarios"]]
+    before = {name: observed_files.get(name) for bead in plan.beads.values() for name in bead.owned_files}
+    red = next((p for p in record.get("redObservations", []) if p["tests"] == tests and p["testSources"]["contentHash"] == sources["contentHash"]
+                and all(p.get(k) == v for k, v in identity.items())), None) if phase == "build" else None
+    if phase == "build" and red is None:
+        with TemporaryDirectory(prefix="trace-red-", dir=Path(root).parent) as scratch:
+            baseline = Path(scratch) / "base"
+            _git(root, "worktree", "add", "-q", "--detach", str(baseline), record["attempt"]["baseCommit"])
+            try:
+                if sources["roots"]:
+                    _git(baseline, "--literal-pathspecs", "restore", "--source", _git(root, "rev-parse", "HEAD"), "--worktree", "--no-overlay", "--", *sources["roots"])
+                if execution_sources(baseline, plan.trace)["contentHash"] != sources["contentHash"]:
+                    raise ValueError("Baseline test bundle differs from the candidate; regenerate the integration candidate")
+                red = _semantic_validation(baseline, plan, record, "contracts")
+            finally:
+                _git(root, "worktree", "remove", "--force", str(baseline))
     results = semantic_runner.run(document, root, plan.semantic["targets"],
         "contracts" if phase == "contracts" else "validation",
         progress_path=Path(record["evidenceDir"]) / "semantic-progress.json" if record.get("evidenceDir") else None)
     if observation_files(root) != observed_files:
         raise ValueError("Validation candidate bytes changed during observation")
-    expected = [s["id"] for s in document["scenarios"]]
     states = [r["state"] for r in results]
-    complete = [r["id"] for r in results] == expected and bool(expected)
+    complete = [r["id"] for r in results] == [t["id"] for t in tests] and bool(tests)
     observed = ("ERROR" if not complete or "ERROR" in states else
+                "pending-judgment" if phase == "contracts" and "pending-judgment" in states else
                 "RED" if phase == "contracts" and "FAIL" in states else
                 "FAIL" if "FAIL" in states else
                 "pending-judgment" if "pending-judgment" in states else "PASS")
-    # A partial run cannot establish correct RED, even if an earlier test failed.
-    if phase == "contracts" and "pending-judgment" in states and observed != "ERROR":
-        observed = "pending-judgment"
     proof = dict(
         **identity, phase="contracts" if phase == "contracts" else "validation",
         observedState=observed, candidateCommit=_git(root, "rev-parse", "HEAD"),
         candidateTree=_git(root, "rev-parse", "HEAD^{tree}"), candidateFiles=before,
         observationFiles=observed_files,
         candidate=_digest(dict(files=observed_files, **identity)),
-        baseline=None if not red else dict(candidate=red["candidate"],
-                                          evidenceBinding=red["evidenceBinding"]),
-        linkedRed=_digest(red) if red else None, results=results, testSources=sources,
-        tests=[dict(id=s["id"], requirementRefs=s["requirementRefs"],
-                    contractRefs=s["contractRefs"], testRef=s.get("testRef"),
-                    rationale=s.get("rationale")) for s in document["scenarios"]],
+        linkedRed=_digest(red) if red else None, red=red, results=results, testSources=sources,
+        tests=tests,
     )
     proof["evidenceBinding"] = _evidence_digest(proof)
     return assess_execution(proof, record.get("judgments", {}).get("execution"))
@@ -387,7 +397,7 @@ def record_judgment(store, *, repo, check, judgment_id=None, passed=None, statem
             f"Assess {check}: meaningful tests, correct failure reason and identified stub/mock gaps. "
             f"Return meaning.check={check!r}, meaning.evidenceBinding={evidence_binding!r}; "
             "for execution positive credit also requires meaningful:true and "
-            "correctFailureReason:true (Contracts) or noStubMockGaps:true (Validation). "
+            "correctFailureReason:true for the bound RED and noStubMockGaps:true for Validation. "
             "Uncertain assessments stay inconclusive/unsupported; negative verdicts name gaps."),
             subject_ids=subjects, source_event_ids=[event_id], candidate=candidate)
     else:

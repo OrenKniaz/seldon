@@ -1806,14 +1806,10 @@ def _integrate_bead(
                 "candidateCommit": integration_commit,
                 "candidateTree": record["candidate"]["tree"],
             }
-            red = record.get("contractsRed")
-            expected["linkedRed"] = (
-                hashlib.sha256(json.dumps(red, sort_keys=True).encode()).hexdigest()
-                if red
-                else None
-            )
             if (
                 any(semantic.get(k) != v for k, v in expected.items())
+                or (bead["semanticPhase"] == "build" and semantic["red"] not in record.get("redObservations", [])
+                    and semantic["red"]["candidateCommit"] != record["attempt"]["baseCommit"])
                 or prior.get("recoveryBinding") != binding
             ):
                 raise ValueError("integration recovery semantic receipt mismatch")
@@ -2580,13 +2576,6 @@ def run_plan(
                             setup=setup,
                             intent_nodes=intent_nodes,
                         )
-                        if (
-                            plan.semantic is not None
-                            and manifest["beads"][bead_id]["semanticPhase"] == "build"
-                        ):
-                            current["contractsRed"] = copy.deepcopy(
-                                records[plan.beads[bead_id].depends_on[0]]["integrated"]["semantic"]
-                            )
                         current["attempt"] = {
                             "cwd": str(worktree),
                             "baseCommit": base_commit,
@@ -2595,6 +2584,8 @@ def run_plan(
                             "requirementRefs": current["requirementRefs"],
                             **_spec_binding(current),
                         }
+                    current["redObservations"] = [p if p["phase"] == "contracts" else p["red"]
+                        for b in records.values() if (p := (b.get("integrated") or {}).get("semantic")) and p["admitted"]]
                     current["evidenceDir"] = str(bead_evidence)
                     current["status"] = "running"
                     _write_record(evidence / "run.json", record)
@@ -2651,18 +2642,9 @@ def run_plan(
                         if request.get("processId") or request.get("didLaunchMockAttempt"):
                             record["resumeSummary"]["redispatched"].append(bead_id)
                 current["finishedAt"] = _now()
-                if (
-                    plan.semantic is not None
-                    and current["integrated"]
-                    and manifest["beads"][bead_id]["semanticPhase"] == "contracts"
-                ):
-                    record["semanticContracts"] = current["integrated"]["semantic"]
-                if (
-                    plan.semantic is not None
-                    and current["integrated"]
-                    and manifest["beads"][bead_id]["semanticPhase"] == "build"
-                ):
-                    record["semanticValidation"] = current["integrated"]["semantic"]
+                if plan.semantic is not None and current["integrated"]:
+                    key = "semanticContracts" if manifest["beads"][bead_id]["semanticPhase"] == "contracts" else "semanticValidation"
+                    record[key] = current["integrated"]["semantic"]
                 if current["integrated"] and current["integrated"].get("claim"):
                     add_claim(current["integrated"]["claim"])
                 if current["status"] in {

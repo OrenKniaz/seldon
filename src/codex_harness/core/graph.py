@@ -237,6 +237,12 @@ def load_plan(path: Path) -> Plan:
                 else None,
                 capability_refs=validate_capability_refs(data.get("capabilityRefs", [])),
             )
+        if semantic and not any(b.get("semanticPhase") == "build" for b in manifest["beads"].values()):
+            raise PlanError("semantic-v1-build-missing", "add one build bead" + (" that depends on the contracts bead" if any(b.get("semanticPhase") == "contracts" for b in manifest["beads"].values()) else ""))
+        if semantic and sorted(str(b.get("semanticPhase", "")) for b in manifest["beads"].values()) not in (["build"], ["build", "contracts"]):
+            raise PlanError("semantic-v1-build-shape", "semantic-v1 runs one build bead until Stage 3a (DV2): merge build beads into one")
+        if semantic and len(beads) == 2 and any(bool(b.depends_on) != (manifest["beads"][k]["semanticPhase"] == "build") for k, b in beads.items()):
+            raise PlanError("semantic-v1-contract-order", "semantic-v1 contracts must supply RED first: set contracts dependsOn=[] and build dependsOn=[contracts bead id]")
         integration = manifest.get("integration", {})
         if not isinstance(integration, dict):
             raise PlanError("plan-schema-invalid", "Expected an integration object")

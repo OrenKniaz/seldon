@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -449,7 +450,8 @@ def execute_worker_job(workspace, job_id):
         terminal["status"] = ("pending-judgment" if run["status"] == "pending-judgment" else
                               "failed" if run["status"].startswith("plan-failed") else "completed")
     except Exception as error:
-        terminal["error"] = {"type": type(error).__name__, "message": str(error)}
+        terminal["error"] = {"type": type(error).__name__, "message": str(error),
+                             "traceback": "".join(traceback.format_exception(error, limit=-6))[-4096:]}
     terminal["at"] = _now()
     write_record_json_once(directory / "terminal.json", terminal)
     return terminal

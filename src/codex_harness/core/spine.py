@@ -73,8 +73,7 @@ def bead_rules(semantic=False):
         "Dependencies are acyclic. Optional provider is nonblank; capabilityRefs are unique "
         "lowercase dotted identifiers, requested/unverified, never permissions. "
         + (
-            f"Historical execution metadata semanticPhase in {SEMANTIC_PHASES}; "
-            "test nodes and arbitrary acyclic bead topology use the same trace contract."
+            "DV2 permits one build bead and an optional contracts supplier until Stage 3a."
             if semantic
             else ""
         )

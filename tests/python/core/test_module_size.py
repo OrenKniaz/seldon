@@ -9,7 +9,7 @@ CORE = "src/codex_harness/core"
 TOTAL_CEILING = 36229
 CEILINGS = {
     "src/codex_harness/core/acceptance.py": 1733,
-    "src/codex_harness/core/dispatch.py": 2776,
+    "src/codex_harness/core/dispatch.py": 2758,
     "src/codex_harness/core/mcp_planner.py": 2883,
     "src/codex_harness/core/plan_store.py": 3407,
     "src/codex_harness/core/planner_views.py": 1646,

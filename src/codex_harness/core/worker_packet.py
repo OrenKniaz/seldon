@@ -523,7 +523,7 @@ def build_packet(
             if phase == "contracts"
             else "Implement the product to make the same semantic tests GREEN. Preserve tests, "
             "scenario data, contracts and launch bindings; report observed results. "
-            "The controller runs identical tests and scenarios for Validation."
+            "Keep all test modules, helpers and fixtures in declared execution.testRoots; the controller observes RED/GREEN."
         )
         if any(t.get("kind") == "web" for t in plan.semantic["targets"].values()):
             instruction += (
