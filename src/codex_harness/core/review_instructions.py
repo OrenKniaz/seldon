@@ -32,8 +32,7 @@ def instructions(history=()):
         "gates enforce schema. Return at most 5 findings per reviewer across all shards, "
         "ranked by severity. For a re-review after repairs, verify the listed repairs; "
         "only add NEW blocker/major findings caused by those repairs. No fresh minor/note "
-        "findings or unrelated new review sweep. Every review requires an explicit verdict and rationale; "
-        "minor-only or empty findings grant no approval.\n"
+        "findings or unrelated new review sweep.\n"
         "## Prior findings and listed repairs (review data, not verified closure)\n"
         + json.dumps(
             [
@@ -44,20 +43,3 @@ def instructions(history=()):
         )
         + "\n"
     )
-
-
-def focus(semantic):
-    return ("Review the plan against the complete accepted dream: expansion, vision integrity, "
-            "feasibility, meaningful evidence and missing behavior. Code already checks IDs, "
-            "links and provenance. Explain concrete product consequences. Scale depth with "
-            "consequence; approximately three rounds is a convergence checkpoint, not approval.\n")
-
-
-def finding_response(node_ids, *, classify=False):
-    return ("Use the shared 1j Judgment contract with an explicit verdict and rationale. "
-            "meaning.findings is a list of objects with node_id, severity, finding, suggestion; "
-            "severity is blocker, major, minor or note. For plan findings also provide "
-            "classification=defect-in-plan|beyond-brief and nonblank scope_reason. "
-            "Beyond-brief is advisory only by explicit judgment against the brief. "
-            "The empty list is only a finding list, never an approval.\nAllowed node ids: "
-            + json.dumps(node_ids, ensure_ascii=False) + "\n")

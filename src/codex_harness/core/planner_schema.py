@@ -48,6 +48,32 @@ JUDGMENT_RESPONSE_SCHEMA = {
 }
 
 
+def judgment_example(record):
+    """A checked shape, never an assessment or approval of the bound evidence."""
+    import json
+    facts = next((r["payload"]["facts"] for r in record["sourceRefs"] if "facts" in r["payload"]), {})
+    meaning = {
+        "plan-review": dict(findings=[], depth="Focused review because this small local change has bounded consequences; inspect persistence and failure paths"),
+        "finding-equivalence": dict(groups=[[r["id"]] for r in facts.get("members", [])]),
+        "finding-disposition": dict(memberDispositions={r["id"]: "open" for r in facts.get("members", [])}),
+        "review-reuse": dict(reuse=False),
+        "plan-convergence": dict(action="continue-review"),
+        "user-decision": dict(decision="changes-requested"),
+        "vision-intent": dict(impact="changed"),
+        "planning-size": dict(size="small", process="Focused review of consequence and recovery", overrideAccepted=False),
+    }.get(record["question"], {})
+    example = dict(judgmentId=record["id"], binding=record["binding"], verdict="inconclusive",
+                   rationale="Example only; assess the bound evidence before answering", meaning=meaning, gaps=[])
+    judgment_response(json.dumps(dict(example, verdict="positive")), record)
+    return dict(responseExample=example, responseGuidance=(
+        "Replace example semantics with your assessment. Verdict: positive=established; negative=concrete gaps; "
+        "inconclusive=unresolved; unsupported=unavailable basis. meaning.depth accepts any nonblank string stating "
+        "chosen depth and consequence-based reason, not an enum. Findings use packet node_id, severity "
+        "(blocker|major|minor|note), finding and suggestion. For plan findings include classification "
+        "(defect-in-plan|beyond-brief) and scope_reason explaining WHAT/HOW against the brief; beyond-brief is "
+        "advisory only by explicit judgment. Empty or minor-only findings never imply approval."))
+
+
 def judgment_response(response, record):
     """Check only shape and identity. The caller's LLM supplies all semantic meaning."""
     import json
@@ -63,6 +89,8 @@ def judgment_response(response, record):
         raise ValueError("A negative verdict needs at least one concrete gap in gaps")
     if parsed["verdict"] == "positive" and parsed["gaps"]:
         raise ValueError("Resolve the gaps or return a negative/inconclusive verdict")
+    facts = next((ref["payload"]["facts"] for ref in record["sourceRefs"]
+                  if isinstance(ref.get("payload", {}).get("facts"), dict)), {})
     if record["question"] == "plan-review":
         from codex_harness.core.roundtable import _invalid_reason
         findings = parsed["meaning"].get("findings")
@@ -76,8 +104,6 @@ def judgment_response(response, record):
             if reason:
                 raise ValueError(reason)
     if record["question"] == "finding-equivalence" and parsed["verdict"] == "positive":
-        facts = next((ref["payload"]["facts"] for ref in record["sourceRefs"]
-                      if isinstance(ref.get("payload", {}).get("facts"), dict)), {})
         ids = {row["id"] for row in facts.get("members", [])}
         groups = parsed["meaning"].get("groups")
         if not isinstance(groups, list) or any(not isinstance(group, list) or not group for group in groups):
@@ -86,8 +112,6 @@ def judgment_response(response, record):
         if any(not isinstance(key, str) or key not in ids for key in flat) or len(set(flat)) != len(flat):
             raise ValueError("Equivalence groups must contain disjoint captured member IDs")
     if record["question"] == "finding-disposition" and parsed["verdict"] == "positive":
-        facts = next((ref["payload"]["facts"] for ref in record["sourceRefs"]
-                      if isinstance(ref.get("payload", {}).get("facts"), dict)), {})
         ids = {row["id"] for row in facts.get("members", [])}
         dispositions = parsed["meaning"].get("memberDispositions")
         if (not isinstance(dispositions, dict) or set(dispositions) != ids

@@ -166,11 +166,7 @@ def _packet(
         + "\n```\n",
         "## Scenario to owning node IDs\n" + json.dumps(scenario_nodes(spine)),
         "## Review instructions\n\n"
-        + review_instructions.instructions(review_history)
-        + review_instructions.focus(spine.semantic)
-        + review_instructions.finding_response(
-            spine.ids() + list(scenario_nodes(spine)), classify=True
-        ),
+        + review_instructions.instructions(review_history),
     ]
     return INCLUDED_HEADER + "\n".join(section for section in sections if section)
 
@@ -529,11 +525,9 @@ def _launch_review(reviewer, packet, executable, *, instructions=None):
     if not executable:
         raise OSError(f"Reviewer executable unavailable: {reviewer['provider']}")
     if "\n## Bound review requests\n" in packet:
-        from codex_harness.core.planner_schema import JUDGMENT_RESPONSE_SCHEMA
         requests = json.loads(packet.split("\n## Bound review requests\n", 1)[1])
         packet += ("\n## Bound Judgment\n" + json.dumps(requests[reviewer["name"]], ensure_ascii=False)
-                   + "\nReturn ONLY JSON matching the shared Judgment response contract:\n"
-                   + json.dumps(JUDGMENT_RESPONSE_SCHEMA))
+                   + "\nReturn ONLY JSON using responseExample's shape and responseGuidance; supply your own assessment.")
     launch = get_adapter(reviewer["provider"]).provider_normal_command(
         prompt=packet,
         prompt_via_stdin=True,

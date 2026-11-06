@@ -34,10 +34,10 @@ def scripted_judgment(call, judgment=None, meaning=None, verdict="positive", gap
     """
     if judgment is None:
         judgment = call("harness_prepare_judgment", **request)
+    example = dict(judgment["responseExample"], verdict=verdict, rationale=rationale,
+                   meaning=meaning, gaps=gaps or [])
     reply = call("harness_submit_judgment", judgment_id=judgment["id"],
-                response=response if response is not None else json.dumps(dict(judgmentId=judgment["id"], binding=judgment["binding"],
-                    verdict=verdict, rationale=rationale,
-                    meaning=meaning, gaps=gaps or [])), source="golden:scripted-semantic-provider")
+                response=response if response is not None else json.dumps(example), source="golden:scripted-semantic-provider")
     current = call("harness_judgment", judgment_id=judgment["id"],
                    **({"candidate": judgment["candidate"]} if judgment.get("candidate") else {}))
     assert current["binding"] == judgment["binding"]
@@ -48,9 +48,11 @@ def scripted_review_reply(launch, findings, *, verdict, rationale, gaps=()):
     """Script only a provider reply to the actual bound review packet."""
     request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split(
         "\nReturn ONLY JSON", 1)[0])
-    return json.dumps(dict(judgmentId=request["id"], binding=request["binding"],
-        verdict=verdict, rationale=rationale, meaning=dict(findings=findings,
-            depth="Focused semantic E2E review of this small local product; inspect data preservation and failure paths"), gaps=list(gaps)))
+    # R9 regression: prior fixtures invented a valid depth, hiding absent packet guidance.
+    reply = request["responseExample"]
+    reply.update(verdict=verdict, rationale=rationale, gaps=list(gaps))
+    reply["meaning"]["findings"] = findings
+    return json.dumps(reply)
 
 
 def scripted_worker(packet, root, files):
@@ -459,6 +461,15 @@ def judgment_contract_golden(workspace):
         request = dict(question="Does the retained measurement establish readback?", subject_ids=["R1"],
                        evidence_ids=["E1"], source_event_ids=[event_id])
         pending = call("harness_prepare_judgment", **request)
+        # The same producer teaches sibling shapes, not just reviewer replies.
+        # Earlier golden replies supplied these fields without reading any packet example.
+        for purpose in ("plan-review", "finding-equivalence", "finding-disposition", "review-reuse",
+                        "plan-convergence", "vision-intent", "planning-size", "user-decision"):
+            packet = call("harness_prepare_judgment", **dict(request, question=purpose))
+            example = packet["responseExample"]
+            reply = scripted_judgment(call, packet, response=json.dumps(example))
+            assert reply["current"]["fixesIssued"] == 0 and not reply["current"]["positiveCredit"]
+            assert reply["current"]["meaning"] == example["meaning"]
         reload()
         restored = read(pending, candidate="sensor-candidate-1")
         assert restored["status"] == "pending-judgment"
@@ -1279,11 +1290,14 @@ with TemporaryDirectory(dir=root) as scratch:
                     facts = request["sourceRefs"][0]["payload"]["facts"]
                     original_packets[facts["reviewer"]["name"]] = facts["packetSha256"]
                     exhausted_calls[key] = exhausted_calls.get(key, 0) + 1
-                    return protocol(launch.cli, text="[]")
+                    malformed = request["responseExample"]
+                    malformed["meaning"]["depth"] = ""
+                    return protocol(launch.cli, text=json.dumps(malformed))
                 with pytest.MonkeyPatch.context() as bad:
                     bad.setattr(roundtable, "_run", malformed_review)
                     exhausted = call("harness_roundtable", timeout=5, error=True)
                 assert sorted(exhausted_calls.values()) == [3, 3]
+                assert all("meaning.depth" in call("harness_judgment", judgment_id=key)["error"] for key in exhausted_calls)
                 assert exhausted["findings"] == 0 and not exhausted["successfulReviews"]
                 exhausted_ids = set(exhausted_calls)
                 # Terminal exact-fix exhaustion must teach fresh invocation, not
@@ -1420,6 +1434,8 @@ with TemporaryDirectory(dir=root) as scratch:
             else:
                 reviewed = call("harness_roundtable", timeout=5)
             assert len(reviewed["successfulReviews"]) == 2, reviewed
+            assert all(call("harness_judgment", judgment_id=part["judgmentId"])["fixesIssued"] == 0
+                       for row in reviewed["reviewers"] for part in row["shardDetails"])
             # Preserve recorded scope after deleting quota totals: raw SQLite integers
             # previously rendered as unknown; review results alone missed this status consumer.
             visible = workspace_wire(server, "harness_plan_status", expected_workspace=str(workspace), full=True)

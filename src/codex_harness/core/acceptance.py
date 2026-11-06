@@ -1047,9 +1047,6 @@ def _prepare_acceptance_review(
         included_header
         + QUESTION
         + "\nReview only this packet. "
-        + review_instructions.finding_response(
-            spine.ids() + list(plan_spine.scenario_nodes(store.spine()))
-        )
         + json.dumps(
             dict(context_data, renderedDocs=render_markdown(store.spine())), ensure_ascii=False
         )

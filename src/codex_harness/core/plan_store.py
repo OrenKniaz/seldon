@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from codex_harness.core import intake, waves
 from codex_harness.core.graph import load_plan
-from codex_harness.core.planner_schema import Judgment, judgment_response
+from codex_harness.core.planner_schema import Judgment, judgment_example, judgment_response
 from codex_harness.core.reviewer_evidence import finding_records, native_reviewer, review_binding
 from codex_harness.core.spine import (
     SCHEMA,
@@ -282,7 +282,7 @@ class PlanStore:
             record["binding"] = hashlib.sha256(_json(record).encode("utf-8")).hexdigest()
             record.update(status="pending-judgment", verdict=None, rationale=None, meaning={},
                 gaps=[], fixesIssued=0, disposition="judge", owner=None, source=None,
-                sourceVerified=False, error=None)
+                sourceVerified=False, error=None, **judgment_example(record))
             self._event("judgment-recorded", record)
         return record
 
