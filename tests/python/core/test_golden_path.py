@@ -827,7 +827,7 @@ def http_golden(workspace, semantic=False):
     from tests.python.core.review_support import finish_review
     from tests.python.core.semantic_wiring_support import node
 
-    from codex_harness.core import dispatch, roundtable
+    from codex_harness.core import dispatch, review_packets, review_provider, roundtable
     from codex_harness.core.mcp_planner import PlannerServer
     from codex_harness.core.plan_store import PHASES
 
@@ -1349,7 +1349,8 @@ with TemporaryDirectory(dir=root) as scratch:
             # These helpers also run before the stdio journey installs its absolute
             # import path. Relative PYTHONPATH breaks runner children in temp cwd.
             patch.setenv("PYTHONPATH", os.pathsep.join([str(ROOT / "src"), str(ROOT)]))
-            patch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+            for owner in (roundtable, review_provider):
+                patch.setattr(owner, "_executable", lambda *_: sys.executable)
             review_history_ids = set()
             provider_launches = []
             def positive_review(launch, *_):
@@ -1362,7 +1363,8 @@ with TemporaryDirectory(dir=root) as scratch:
                 return tuple(v.replace("source-only", "gpt-6.1-sol").replace("Some(High)", "Some(Medium)")
                     if isinstance(v, str) else v for v in protocol(launch.cli, text=scripted_review_reply(launch,
                         [], verdict="positive", rationale="The planned HTTP import, persistence and readback cover the accepted local dream")))
-            patch.setattr(roundtable, "_run", positive_review)
+            for owner in (roundtable, review_provider):
+                patch.setattr(owner, "_run", positive_review)
             # The former call ceiling hid a separate readiness launch owner with no B check.
             # Ordinary review tests never exercised this public worker-packet consumer.
             selected_reviewers = [{k: r[k] if k != "effort" else r[k]["value"]
@@ -1450,7 +1452,8 @@ with TemporaryDirectory(dir=root) as scratch:
                     malformed["meaning"]["depth"] = ""
                     return protocol(launch.cli, text=json.dumps(malformed))
                 with pytest.MonkeyPatch.context() as bad:
-                    bad.setattr(roundtable, "_run", malformed_review)
+                    for owner in (roundtable, review_provider):
+                        bad.setattr(owner, "_run", malformed_review)
                     exhausted = call("harness_roundtable", timeout=5, error=True)
                 assert sorted(exhausted_calls.values()) == [3, 3]
                 assert all("meaning.depth" in call("harness_judgment", judgment_id=key)["error"] for key in exhausted_calls)
@@ -1484,7 +1487,8 @@ with TemporaryDirectory(dir=root) as scratch:
                             else "Unavailable observations cannot establish a concrete gap",
                         gaps=["HTTP readback evidence needs judgment"] if concrete else []))
                 with pytest.MonkeyPatch.context() as bad:
-                    bad.setattr(roundtable, "_run", conflicting_review)
+                    for owner in (roundtable, review_provider):
+                        bad.setattr(owner, "_run", conflicting_review)
                     rejected = call("harness_roundtable", timeout=5)
                 assert not rejected["successfulReviews"]
                 # Only invocation metadata changes on the otherwise identical initial dossier.
@@ -1583,8 +1587,10 @@ with TemporaryDirectory(dir=root) as scratch:
                     return protocol(launch.cli, text=scripted_review_reply(launch, [], verdict="positive",
                         rationale="Replacement dossier reviewed; retained obligations require their own disposition"))
                 with pytest.MonkeyPatch.context() as reshard:
-                    reshard.setattr(roundtable, "packet_shards", split_dossier)
-                    reshard.setattr(roundtable, "_run", reshard_review)
+                    for owner in (roundtable, review_packets):
+                        reshard.setattr(owner, "packet_shards", split_dossier)
+                    for owner in (roundtable, review_provider):
+                        reshard.setattr(owner, "_run", reshard_review)
                     replacement = call("harness_roundtable", timeout=5)
                 assert len(replacement["successfulReviews"]) == 2, replacement
                 carried = [r for r in roundtable.findings(store, expand=True) if r.get("judgmentId") == replaced["judgment"]]
@@ -2187,7 +2193,8 @@ with TemporaryDirectory(dir=root) as scratch:
                              for v in protocol(launch.cli, text=scripted_review_reply(launch, items, verdict="negative",
                                  rationale="The readback finding needs candidate-bound assessment", gaps=["Readback assessment is pending"])))
             with pytest.MonkeyPatch.context() as gap:
-                gap.setattr(roundtable, "_run", acceptance_gap)
+                for owner in (roundtable, review_provider):
+                    gap.setattr(owner, "_run", acceptance_gap)
                 acceptance_members = call("harness_accept_review", repo=run["repo"])["findings"]
             review_history_ids.update(row["id"] for row in acceptance_members)
             assert len(acceptance_members) == 2 and all(row["state"] == "open" for row in acceptance_members)
@@ -2517,7 +2524,7 @@ def provider_host(mode, workspace, surface, job_id=None):
         mcp_planner,
         planner_jobs,
         planner_recovery,
-        roundtable,
+        review_provider, roundtable,
     )
 
     workspace = Path(workspace)
@@ -2691,7 +2698,7 @@ def provider_host(mode, workspace, surface, job_id=None):
         return actual
 
     subprocess.Popen = launch
-    roundtable._run = review
+    roundtable._run = review_provider._run = review
     dispatch.run_plan = workers
     if mode == "reply":
         prompt = sys.stdin.read()

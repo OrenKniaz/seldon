@@ -59,7 +59,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     from tests.python.core.mcp_planner_support import rpc, workspace_wire
     from tests.python.core.plan_store_support import mock_catalog, mock_choice
 
-    from codex_harness.core import roundtable
+    from codex_harness.core import review_provider, roundtable
 
     clarification = journey == "clarification"
     run22 = journey == "renew-reviewers"
@@ -351,7 +351,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(
     call("harness_advance", to_phase="roundtable")
     (store.workspace / "sample.json").write_text(json.dumps(manifest))
     reviewers = b["subject"]["reviewers"]
-    monkeypatch.setattr(roundtable, "_executable", lambda *_: sys.executable)
+    for owner in (roundtable, review_provider):
+        monkeypatch.setattr(owner, "_executable", lambda *_: sys.executable)
 
     # Synthetic external-process telemetry, never actual provider/product qualification.
     def review_process(launch, *_):
@@ -361,7 +362,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         model = next(r["model"] for r in reviewers if r["provider"] == provider)
         return tuple(v.replace("source-only", model) if isinstance(v, str) else v for v in result)
 
-    monkeypatch.setattr(roundtable, "_run", review_process)
+    for owner in (roundtable, review_provider):
+        monkeypatch.setattr(owner, "_run", review_process)
     call("harness_roundtable", reviewers=reviewers, timeout=5)
     call("harness_advance", to_phase="publish")
     call("harness_publish")

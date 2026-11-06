@@ -6,14 +6,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CORE = "src/codex_harness/core"
-TOTAL_CEILING = 34707
+TOTAL_CEILING = 34697
 CEILINGS = {
-    "src/codex_harness/core/acceptance.py": 1600,
+    "src/codex_harness/core/acceptance.py": 14,
+    "src/codex_harness/core/acceptance_reviews.py": 363,
+    "src/codex_harness/core/acceptance_revision.py": 164,
+    "src/codex_harness/core/acceptance_runs.py": 403,
+    "src/codex_harness/core/acceptance_scenarios.py": 279,
+    "src/codex_harness/core/acceptance_views.py": 102,
     "src/codex_harness/core/dispatch.py": 2482,
+    "src/codex_harness/core/execution_assessments.py": 740,
     "src/codex_harness/core/mcp_planner.py": 2857,
     "src/codex_harness/core/plan_store.py": 3322,
     "src/codex_harness/core/planner_views.py": 1575,
-    "src/codex_harness/core/roundtable.py": 1779,
+    "src/codex_harness/core/review_findings.py": 99,
+    "src/codex_harness/core/review_packets.py": 378,
+    "src/codex_harness/core/review_provider.py": 358,
+    "src/codex_harness/core/review_rounds.py": 454,
+    "src/codex_harness/core/roundtable.py": 15,
 }
 
 
@@ -61,10 +71,10 @@ def test_core_module_size_ratchets_without_new_exemptions():
         count = len(path.read_text(encoding="utf-8").splitlines())
         ceiling = CEILINGS.get(name, 1500)
         reason = ""
-        if name in CEILINGS and (count <= 1500 or count != ceiling):
-            reason = "remove this entry" if count <= 1500 else "ratchet ceiling to current count"
-        if ceiling > baseline.get(name, 1500) or (name in CEILINGS and name not in baseline):
-            reason = "new entries and raised ceilings are forbidden"
+        if name in CEILINGS and count != ceiling:
+            reason = "ratchet ceiling to current count"
+        if ceiling > baseline.get(name, 1500):
+            reason = "raised ceilings and new exemptions are forbidden"
         if count > ceiling or reason:
             failures.append(
                 f"{name}: count {count}, ceiling {ceiling}; {reason}; "
