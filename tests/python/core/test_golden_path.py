@@ -954,6 +954,9 @@ class ConcurrentHTTP(unittest.TestCase):
         yes(call("harness_prepare_chat_confirmation", gate="align+vision-lock"))
         vision = store.spine().node("V1")
         if semantic:
+            missing = call("harness_plan_status", full=True)["acceptance"]
+            assert not missing["candidatePrerequisite"]["complete"] and not missing["accepted"]
+            assert "retained candidate unavailable" in missing["invalidMessage"] and "harness_worker_start" in missing["next"]
             # Round 3 submitted only these importer scenarios; HTTP/UI were never
             # submitted. Replay their missing coverage plus a proposed HTTP shape.
             # Catch the Requirements deadlock at the public writer/compiler boundary;
@@ -1182,6 +1185,14 @@ class ConcurrentHTTP(unittest.TestCase):
                 "            self.wfile.write(','.join(r[0] for r in rows).encode())",
             )
             (template / "server.py").write_text(product, encoding="utf-8")
+            # A real template dependency is outside bead ownership and verifier roots.
+            (template / "table_name.txt").write_text("items", encoding="utf-8")
+            # Protect C20 at completion→delivery: dependencies formerly included
+            # provider configuration; the old blanket dot guard also lost product dot-files.
+            (template / ".codex").mkdir()
+            (template / ".codex/config.toml").write_text('# Template config must never be installed\n', encoding="utf-8")
+            (template / ".gitignore").write_text("*.local-product\n", encoding="utf-8")
+            product = product.replace("db.execute('select name from items')", "db.execute('select name from ' + __import__('pathlib').Path('table_name.txt').read_text())")
             importer = """import csv, sys
 from contextlib import closing
 try:
@@ -2014,8 +2025,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     scripted_worker(run["beads"]["B"]["prompt"], template, files)
                     stale = workspace_wire(server, "harness_accept_assess", expected_workspace=str(workspace),
                         judgment=dict(repo=run["repo"], check="execution"))
-                    expected_stale = "verification inputs changed" if len(roots) > 1 else "one retained candidate required"
-                    assert stale["isError"] and expected_stale in str(stale)
+                    assert stale["isError"] and "verification inputs changed" in str(stale)
                     edited_test = json.loads(json.dumps(original_test))
                     edited_test["text"] += " Observe current verifier " + filename + (" with product readback" if len(roots) > 1 else "")
                     edited_test["fields"]["execution"]["testRoots"] = roots
@@ -2030,9 +2040,18 @@ with TemporaryDirectory(dir=root) as scratch:
                             ownership["fields"]["ownedFiles"] = [filename if n == "verify_http.py" else n for n in ownership["fields"]["ownedFiles"]]
                             call("harness_upsert_node", node=ownership)
                     publish_verifier("Verifier declarations and filenames change HOW we observe the same accepted product; product obligations are unchanged")
+                    if filename == "verify_http.py":
+                        # Pre-upgrade jobs have dispatch identity but no retained-candidate record.
+                        (workspace / ".codex-harness/retained-candidate.json").unlink()
+                        remedy = call("harness_plan_status", full=True)["acceptance"]["candidatePrerequisite"]
+                        assert remedy["recoveryArguments"] == dict(mode="inspect", job_id=job["jobId"])
+                        inspected = call("harness_recovery", **remedy["recoveryArguments"])
+                        assert inspected["revalidation"]["available"], inspected
                     refreshed = call("harness_recovery", mode="resolve", job_id=job["jobId"], choice="revalidate",
                         reason="Observe the unchanged product with the current verifier, without another build")
                     assert refreshed["validation"]["state"] == "pending-judgment", refreshed
+                    observed_status = call("harness_plan_status", full=True)
+                    assert observed_status["acceptance"]["candidatePrerequisite"]["complete"], observed_status
                     run = json.loads(Path(job["run"]["recordPath"]).read_text())
                     root = Path(run["beads"]["B"]["integrated"]["root"])
                     assert file_hashes(root, product_hashes) == file_hashes(original_root, product_hashes) == product_hashes
@@ -2107,6 +2126,57 @@ with TemporaryDirectory(dir=root) as scratch:
                 ),
             )
             assert accepted["structuredContent"]["result"]["passed"], accepted
+            if semantic:
+                # C must reject a changed/missing delivered dependency even when
+                # acceptance against the intact integration passed. Owned-file-only
+                # delivery tests missed this productBaseline entry.
+                dependency = workspace / "table_name.txt"
+                assert dependency.read_text() == "items"
+                for changed in ("other_table", None):
+                    dependency.write_text(changed) if changed is not None else dependency.unlink()
+                    refused = workspace_wire(server, "harness_accept", expected_workspace=str(workspace),
+                        statement="The product meets the vision", by="proxy:scripted-owner")
+                    assert refused["isError"] and "table_name.txt" in str(refused) and "acceptance-delivery-invalid" in str(refused)
+                    if changed is not None:
+                        from codex_harness.core import planner_jobs
+                        from codex_harness.core.planner_candidate import deliver
+                        with pytest.raises(ValueError, match="existing table_name.txt changed"):
+                            deliver(workspace, planner_jobs._request(Path(job["evidenceDir"])), run)
+                    dependency.write_text("items", encoding="utf-8")
+                # r12: after a new publication and revalidation of the same job,
+                # a historical acceptance binding used to crash every status read.
+                # Frozen-publication journeys never reached that reader seam.
+                owner_record = workspace / ".codex-harness/retained-candidate.json"
+                owner = json.loads(owner_record.read_text())
+                assert ".codex/config.toml" in owner["productBaseline"]
+                assert ".codex/config.toml" not in owner["productHashes"] and not (workspace / ".codex").exists()
+                assert (workspace / ".gitignore").read_bytes() == (template / ".gitignore").read_bytes()
+                assert owner["productHashes"][".gitignore"] == hashlib.sha256((workspace / ".gitignore").read_bytes()).hexdigest()
+                assert owner["jobId"] == job["jobId"] and owner["runId"] == run["runId"]
+                assert owner["publicationRevision"] == store._meta()["published_revision"]
+                assert owner["candidateRoot"] == str(root) and owner["productBaseline"] == built_product
+                owner_record.rename(owner_record.with_suffix(".held"))
+                try:
+                    pending = call("harness_plan_status", full=True)["acceptance"]
+                    assert not pending["accepted"] and not pending["candidatePrerequisite"]["complete"]
+                    assert "retained candidate unavailable" in pending["invalidMessage"] and "harness_recovery" in pending["next"]
+                    refused = workspace_wire(server, "harness_accept_assess", expected_workspace=str(workspace),
+                        judgment=dict(repo=run["repo"], check="execution"))
+                    assert refused["isError"] and "retained candidate unavailable" in str(refused)
+                    refused = workspace_wire(server, "harness_accept", expected_workspace=str(workspace),
+                        statement="The retained product meets the vision", by="proxy:scripted-owner")
+                    assert refused["isError"] and "retained candidate unavailable" in str(refused)
+                finally:
+                    owner_record.with_suffix(".held").rename(owner_record)
+                owner_record.write_text(json.dumps(dict(owner, runId="unbound")), encoding="utf-8")
+                try:
+                    pending = call("harness_plan_status", full=True)["acceptance"]
+                    assert not pending["candidatePrerequisite"]["complete"] and not pending["accepted"]
+                    assert "candidate record is inconsistent" in pending["invalidMessage"]
+                    assert "harness_recovery" in pending["next"] and job["jobId"] in pending["next"]
+                finally:
+                    owner_record.write_text(json.dumps(owner), encoding="utf-8")
+                assert call("harness_plan_status", full=True)["acceptance"]["candidatePrerequisite"]["complete"]
             def acceptance_gap(launch, *_):
                 request = json.loads(launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0])
                 reviewer = request["sourceRefs"][0]["payload"]["facts"]["reviewer"]
@@ -2452,7 +2522,7 @@ def provider_host(mode, workspace, surface, job_id=None):
 
     workspace = Path(workspace)
     provider_patch = pytest.MonkeyPatch()
-    judge_executions(workspace, provider_patch, pending_execution=surface == "web", contracts_gap=lambda: (
+    judge_executions(workspace, provider_patch, pending_execution=surface == "web" or surface == "cli" and (workspace / "contracts-attempted").exists(), contracts_gap=lambda: (
         ["Worker verifier crashes before exercising the requested command behavior"]
         if surface == "cli" and not (workspace / "valid-contracts-attempted").exists() else []))
     filename = "index.html" if surface == "web" else "hashslip.py"
@@ -2464,9 +2534,7 @@ def provider_host(mode, workspace, surface, job_id=None):
 
     def publish(path, record):
         actual_write(path, record)
-        if (surface == "web" and path.name == "run.json"
-                and record.get("status") == "pending-judgment"
-                and record.get("semanticValidation", {}).get("state") == "pending-judgment"):
+        if (surface == "web" and path.name == "retained-candidate.json" and record["bead"] == "B"):
             # Hold the real producer after publication so MCP must consume this
             # transition, rather than usually missing it between status polls.
             end = time.monotonic() + 10
@@ -2809,6 +2877,8 @@ def test_golden_path(tmp_path, request, surface):
     ShelfLife R6: same-subject test/command and catalog repairs retain B through
     review, execution and C; frozen-plan journeys missed revision-bound churn.
     An unapproved worker model instead yields one reusable subject-diff card.
+    ShelfLife R12: verifier-only publications retain one candidate through status
+    and C; a missing owner keeps historical acceptance reads pending, never crashing.
     """
     if surface == "cli":
         request.getfixturevalue("http_journeys")
@@ -3378,6 +3448,14 @@ def test_golden_path(tmp_path, request, surface):
                 job = call("harness_worker_start", **options)
                 assert job["jobId"] == resolved["successor"] != original
                 while job["status"] not in ("completed", "failed", "pending-judgment") and time.time() < deadline:
+                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
+                # The web failure's continuation seam, without needing Chromium:
+                # scripted dispatch has a retained owner but no native dispatch-run record.
+                assert job["status"] == "pending-judgment", job
+                assert not (Path(job["evidenceDir"]) / "dispatch-run.json").exists()
+                judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
+                    dict(repo=job["run"]["beads"]["B"]["candidateRoot"], check="execution"))
+                while job["status"] not in {"completed", "failed"} and time.time() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 probing = False
             assert job["status"] == "completed", job

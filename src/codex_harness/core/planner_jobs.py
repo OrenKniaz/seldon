@@ -449,7 +449,7 @@ def dispatch_job(store, directory, request, resume_run_dir=None):
     workers = _workers(read_record_json(directory / "plan/sample.json"), request["options"]["workers"])
     spine = store.spine()
     from codex_harness.core.planner_recovery import RESOLVED
-    return dispatch.run_plan(directory / "plan", work_root=directory / "runs", resume_run_dir=resume_run_dir,
+    run = dispatch.run_plan(directory / "plan", work_root=directory / "runs", resume_run_dir=resume_run_dir,
         provider_for={w["bead"]: w["provider"] for w in workers},
         model_for={w["bead"]: w["model"] for w in workers},
         effort_for={w["bead"]: w["effort"] for w in workers},
@@ -458,6 +458,9 @@ def dispatch_job(store, directory, request, resume_run_dir=None):
         intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
         worker_outcomes=next((r["proof"].get("faultOutcomes", {}) for r in approvals.records(store, RESOLVED)
                               if r.get("successor") == request["jobId"]), {}))
+    from codex_harness.core.planner_candidate import deliver
+    deliver(store.workspace, request, run, request["publicationRevision"])
+    return run
 
 
 def execute_worker_job(workspace, job_id):
@@ -485,7 +488,7 @@ def execute_worker_job(workspace, job_id):
             if _publication(store, request["publicationRevision"])[0] != manifest:
                 raise ValueError("worker-job-publication-changed-before-launch")
             run = dispatch_job(store, directory, request)
-        from codex_harness.core.planner_candidate import deliver, judgments_for, revalidate
+        from codex_harness.core.planner_candidate import judgments_for, revalidate
 
         deadline = time.monotonic() + request["options"]["timeout"]
         handled = set()
@@ -500,7 +503,6 @@ def execute_worker_job(workspace, job_id):
             if run["status"] == "pending-judgment":
                 time.sleep(0.2)
 
-        deliver(workspace, request, run)
         terminal.update(runId=run["runId"], dispatchStatus=run["status"])
         terminal["status"] = ("pending-judgment" if run["status"] == "pending-judgment" else
                               "failed" if run["status"].startswith("plan-failed") else "completed")

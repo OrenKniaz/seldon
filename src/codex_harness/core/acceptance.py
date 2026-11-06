@@ -18,6 +18,7 @@ from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import review_instructions, roundtable
 from codex_harness.core import spine as plan_spine
+from codex_harness.core.planner_candidate import current_job_run, delivered_candidate, judgments_for
 from codex_harness.core.approvals import catalog_status, fingerprint
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
@@ -472,8 +473,6 @@ def acceptance_inputs(store, repo, *, subject=None) -> dict:
     spine = store.locked_acceptance_spine()
     spine = plan_spine.Spine(store._data()) if spine.semantic else spine
     scenarios = store.acceptance_scenarios()
-    from codex_harness.core.planner_candidate import judgments_for
-
     if spine.semantic:
         from codex_harness.core.runners import executable_scenarios
         document, targets, _ = plan_spine.semantic_spec(spine)
@@ -483,11 +482,7 @@ def acceptance_inputs(store, repo, *, subject=None) -> dict:
         scenarios = store.acceptance_scenarios()
     return dict(
         **({"semantic": targets} if spine.semantic else {}),
-        **(
-            {"judgments": judgments_for(store, repo)}
-            if spine.semantic
-            else {}
-        ),
+        **({"judgments": judgments_for(store, repo)} if spine.semantic else {}),
         repo=str(Path(repo).absolute()),
         subject=subject,
         planRevision=store._revision(),
@@ -721,7 +716,7 @@ def run_invalid_reason(store, run) -> str | None:
 
 def current_run(store) -> dict | None:
     run = _latest_run(store)
-    return run if run_invalid_reason(store, run) is None else None
+    return run if run_invalid_reason(store, run) is None and (not store.spine().semantic or current_job_run(store)[0]["complete"]) else None
 
 
 def require_c_evidence(store, run):
@@ -731,8 +726,6 @@ def require_c_evidence(store, run):
     if not run or not run["passed"]:
         _refuse("acceptance-scenarios-required")
     if store.spine().semantic:
-        from codex_harness.core.planner_candidate import delivered_candidate, judgments_for
-
         try:
             delivered_candidate(store, run["repo"])
             if run.get("webToolchain") and not judgments_for(store, run["repo"]).get(
@@ -813,6 +806,9 @@ def _refuse(reason, repo=None):
 def acceptance_run_prerequisite(store):
     """Canonical run recovery facts; finding_state owns prerequisite ordering."""
     run = _latest_run(store)
+    candidate = current_job_run(store)[0] if run and store.spine().semantic else dict(complete=True)
+    if not candidate["complete"]:
+        return dict(kind="acceptance_run_required", state="pending-judgment", reason="retained-candidate-required", mcpTool="harness_recovery", arguments=candidate["recoveryArguments"], message=candidate["next"])
     repo = run["repo"] if run else "<integrated-repo>"
     reason = run_invalid_reason(store, run) or (
         "acceptance-product-required" if run and run_subject(run) != "product" else None)
@@ -951,7 +947,6 @@ def _candidate_evidence(store, repo, run, *, execution_assessment_ids=None):
         ],
     }
     if run.get("webToolchain"):
-        from codex_harness.core.planner_candidate import judgments_for
 
         result["requiredJudgments"] = {
             "visualQuality": "Observe the actual page against the locked quality bar and Done"
@@ -1512,6 +1507,9 @@ def _execute_acceptance_review(
 
 
 def acceptance_status(store) -> dict:
+    """Read acceptance and its candidate prerequisite without turning a view into a gate."""
+    data = store._data()
+    candidate = current_job_run(store)[0] if data["nodes"] and store.spine().semantic else dict(complete=True)
     previous_run = _latest_run(store)
     invalid_reason = run_invalid_reason(store, previous_run)
     run = previous_run if invalid_reason is None else None
@@ -1530,6 +1528,7 @@ def acceptance_status(store) -> dict:
             "SELECT result_json FROM acceptance_reviews ORDER BY rowid"
         )
     ]
+    invalid_reason = invalid_reason if candidate["complete"] else "retained-candidate-required"
     if invalid_reason is None:
         if run_subject(run) != "product":
             invalid_reason = "acceptance-product-required"
@@ -1572,6 +1571,7 @@ def acceptance_status(store) -> dict:
         for s in store.acceptance_scenarios()
     ]
     return {
+        "candidatePrerequisite": candidate,
         "scenarios": scenarios,
         "lastRunSubject": run_subject(previous_run) if previous_run else None,
         "findings": findings,
@@ -1579,11 +1579,11 @@ def acceptance_status(store) -> dict:
         "isProxy": approval["isProxy"] if valid else None,
         "accepted": valid,
         "invalidReason": invalid_reason,
-        "invalidMessage": (disposition["nextAction"]["message"]
+        "invalidMessage": (candidate["reason"] if not candidate["complete"] else disposition["nextAction"]["message"]
                            if invalid_reason == "pending-judgment" and not disposition["complete"]
                            else INVALID_MESSAGES.get(invalid_reason)),
         "repo": previous_run["repo"] if previous_run else None,
-        "next": (disposition["nextAction"]["message"]
+        "next": candidate["next"] if not candidate["complete"] else (disposition["nextAction"]["message"]
                  if disposition["nextAction"] is not None
                  else acceptance_next(invalid_reason, previous_run["repo"] if previous_run else None))
         if invalid_reason

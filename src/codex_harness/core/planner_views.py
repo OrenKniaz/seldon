@@ -1308,7 +1308,7 @@ def _gate_lines(status: dict) -> list[str]:
     accepted = (
         "✓ " + approval_label(acceptance["approvedBy"], is_proxy=acceptance["isProxy"])
         if acceptance["accepted"]
-        else "not yet"
+        else acceptance.get("invalidMessage") or "not yet"
     )
     return [
         f"- Vision lock: {vision}",

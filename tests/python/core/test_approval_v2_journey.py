@@ -394,8 +394,9 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         )
     else:
         record = execute(store, work_root=job / "runs")
-    from codex_harness.core.planner_candidate import deliver
+    from codex_harness.core.planner_candidate import deliver, retain_candidate
 
+    retain_candidate(store.workspace, planner_jobs._request(job), record)
     if journey != "delivery":
         deliver(store.workspace, planner_jobs._request(job), record)
     assert record["status"] == dispatch.STATUS_MOCK_ONLY, record

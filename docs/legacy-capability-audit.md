@@ -1,5 +1,40 @@
 # Legacy capability audit for the local Seldon extraction
 
+STAGE-DELIV1 (C8/C15/C18/C23/C26, I6/I8/I9): TRIAGE DESIGN — publication
+identity was incorrectly used to rediscover the retained candidate. ShelfLife r12
+status03.err in fight-1 receipts/20261106T130810-2b2035 is the observed blocker.
+Siblings: verifier-only publications, revalidation, recovery successors, status,
+acceptance and judgment binding. Owner: planner_candidate completion writes the
+atomic retained-candidate record; readers use its named run/root and explain a
+pending prerequisite. Explicit recovery of pre-upgrade jobs uses dispatch-run.json,
+preserving original evidence. Disposition: source candidate under golden validation;
+exit: verifier edit → new publication → revalidation → status → C, plus missing-owner
+status and C/judgment refusal. Final gate/patch receipts: ../stage-deliv1-report.md.
+Real-provider revalidation and ShelfLife C remain unproven by this lane.
+
+Round 2 supersedes any web-completeness inference: CC's unsandboxed web gate
+failed at 45.35s. The retained terminal receipt identifies FileNotFoundError for
+dispatch-run.json during worker-judgment-continuation, despite an existing
+retained-candidate record. Eligibility now reads that named run; only explicit
+pre-upgrade recovery reads the original dispatch owner. HIGH P1 also found that
+delivery/C omitted unowned template dependencies. Completion now owns productHashes
+(baseline plus candidate files); delivery and C consume that complete map.
+P2's rejected job_id=<job> is replaced with inspection of the actual last admitted
+job from its canonical admission event. Golden exit: pending-worker continuation
+without dispatch-run.json, dependency mutation/missing-at-root refusal, and an
+accepted pre-upgrade recovery hint. Web remains unverified until CC reruns it.
+
+Round 3 (C14/C20, I6): CC reports round 2's normal-Chromium gate GREEN 19/19
+and P1/P2 confirmed; this supersedes the preceding web uncertainty for that patch.
+HIGH H2 found a local BUG: removing the blanket dot-path guard allowed template
+provider configuration to reach delivery. Completion now excludes reserved roots
+derived from the host configuration registry plus Git/Seldon metadata; delivery
+uses the same roots as a refusal backstop. Ordinary product dot-files remain product.
+Golden exit: template .codex/config.toml remains observed but is absent from the
+product map and workspace; template .gitignore is delivered unchanged through C.
+Final round-3 gate/patch receipts: ../stage-deliv1-report.md. Actual-provider
+ShelfLife revalidation/C remains outside this lane's evidence.
+
 STAGE-SPEED1 (C14/C18/C24/C26, I4/I5/I6/I9): TRIAGE DESIGN — the CLI golden
 serialized independent legacy HTTP, ShelfLife and CLI journeys. Baseline gate:
 18 CLI/guard cases 637.14s + isolated web 216.14s; 19/19 GREEN. The golden
