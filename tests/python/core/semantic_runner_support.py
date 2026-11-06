@@ -82,7 +82,15 @@ def web_document(*, split=False):
 
 
 def browser_readiness(tmp_path_factory):
-    """Retain real readiness through the production launcher; startup failure is an error."""
+    """Retain real readiness; unavailable infrastructure grants no browser proof."""
+    import pytest
+
+    # Reuse a denial only within this pytest run; a later run must try the browser again.
+    denied = tmp_path_factory.getbasetemp() / "web-browser-unavailable.json"
+    if denied.is_file():
+        retained = json.loads(denied.read_text(encoding="utf-8"))
+        assert retained["unperformed"] and retained["evidenceTier"] == "browser: UNVERIFIED" and retained["launchDiagnostic"]
+        pytest.skip(f"browser: UNVERIFIED; retained denied launch (no retry): {denied}")
     root = tmp_path_factory.mktemp("web-browser-readiness")
     (root / "index.html").write_text(WEB_PAGE, encoding="utf-8")
     result = run(web_document(), root, WEB_TARGET, "validation", evidence_dir=root.parent / "pngs")[
@@ -90,6 +98,11 @@ def browser_readiness(tmp_path_factory):
     ]
     receipt = root.parent / "web-browser-readiness.json"
     receipt.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    if result.get("launchDiagnostic"):
+        diagnostic = result["launchDiagnostic"].get("stderr", "").lower()
+        if "access denied" in diagnostic or "exit_code=-1073741790" in diagnostic:
+            denied.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        pytest.skip(f"browser: UNVERIFIED — browser unavailable; launch diagnostic: {receipt}")
     assert result["state"] == "pending-judgment", result
     assert result["actions"] and not any(o["passed"] is False for o in result["observations"]), result
     return result

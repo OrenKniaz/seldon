@@ -1,20 +1,21 @@
 // Trusted adapter: scenario data never becomes JavaScript or launch options.
 'use strict'; const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'); const {pathToFileURL, fileURLToPath} = require('node:url');
 const cfg = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); const {journey: j, tools, root, binding = {}} = cfg;
+const artifact = (bytes, extension) => { const sha256 = crypto.createHash('sha256').update(bytes).digest('hex'), file = path.join(tools.evidence, sha256 + '.' + extension); fs.writeFileSync(file, bytes); return {path: file, sha256}; };
 const end = Date.now() + cfg.remaining * 1000; const remaining = () => { const ms = Math.min(cfg.seconds * 1000, end - Date.now());
   if (ms <= 0) throw Error('Web scenario timeout'); return ms; };
 async function openBrowser() {
   let browser;
-  for (const browserMode of tools.browserMode === 'single-process' ? ['single-process'] : ['normal', 'single-process']) {
-    try {
-      browser = await require(tools.playwright).chromium.launch({executablePath: tools.chromium, headless: true, chromiumSandbox: true, timeout: remaining(), args: browserMode === 'normal' ? [] : ['--single-process']});
-      const context = await browser.newContext({viewport: j?.viewport, reducedMotion: j?.reducedMotion, offline: !binding.server, serviceWorkers: 'block', acceptDownloads: false});
-      const page = await context.newPage(); await page.goto('about:blank', {timeout: remaining()});
-      return {browser, context, page, browserMode};
-    } catch (error) { error.browserMode = browserMode;
-      if (browser) await browser.close();
-      if (browserMode !== 'normal' || !/GPU process exited unexpectedly|Target page, context or browser has been closed/i.test(error.message)) throw error;
-    }
+  try {
+    // Startup owns the remaining bounded window, not the per-step timeout; reserve teardown time.
+    browser = await require(tools.playwright).chromium.launch({executablePath: tools.chromium, headless: true, chromiumSandbox: true, timeout: Math.max(1, end - Date.now() - 2000)});
+    const context = await browser.newContext({viewport: j?.viewport, reducedMotion: j?.reducedMotion, offline: !binding.server, serviceWorkers: 'block', acceptDownloads: false});
+    const page = await context.newPage(); await page.goto('about:blank', {timeout: remaining()});
+    return {browser, context, page, browserMode: 'normal'};
+  } catch (error) {
+    error.launchDiagnostic = {kind: error.name === 'TimeoutError' ? 'launch-timeout' : 'launch-error', message: error.message.slice(0, 8192)};
+    if (browser) await browser.close().catch(closeError => { error.launchDiagnostic.cleanup = closeError.message; });
+    throw error;
   }
 }
 const {spawn} = require('node:child_process'), net = require('node:net'), {isDeepStrictEqual} = require('node:util');
@@ -26,7 +27,7 @@ async function request(spec, timeout = remaining(), readiness = false) {
     headers: {'Content-Type': 'application/json'}, body: spec.json === undefined ? undefined : JSON.stringify(spec.json), signal: AbortSignal.timeout(Math.max(1, Math.floor(timeout)))});
   if (readiness) { await response.body?.cancel(); return {response: {status: response.status}}; }
   const parts = []; let size = 0;
-  for await (const chunk of response.body) { size += chunk.length; if (size > 16384) throw Error('HTTP response exceeds 16KiB; observation unavailable'); parts.push(chunk); }
+  for await (const chunk of response.body || []) { size += chunk.length; if (size > 16384) throw Error('HTTP response exceeds 16KiB; observation unavailable'); parts.push(chunk); }
   const body = Buffer.concat(parts).toString('utf8'); let json;
   try { json = JSON.parse(body); } catch { /* Text responses remain observed text. */ }
   return {request: {...spec, url: url.href}, response: {status: response.status, body, json}};
@@ -65,17 +66,13 @@ async function stopServer() {
     if (binding.server) await startServer();
     const opened = cfg.http ? {} : await openBrowser();
     ({browser, browserMode} = opened); const {context, page} = opened;
-    toolchain.chromium = browser?.version(); const requests = [], errors = [], responses = [], steps = [], artifacts = [];
-    let activeStep; const causes = new WeakMap(), matches = (r, e) => r.url() === new URL(e.path, origin).href && r.request().method() === e.method.toUpperCase() && r.status() === e.statusEquals;
+    toolchain.chromium = browser?.version(); const requests = [], errors = [], responses = new Map(), steps = [], artifacts = []; let activeStep;
     const checks = {noHorizontalOverflow: true, consoleErrors: 0, externalRequests: 0, textContrastAA: null, headingStructure: null, reducedMotionRespected: null};
     const allowed = url => { if (origin) return new URL(url.replace(/^ws/, 'http')).origin === origin; try { const f = fileURLToPath(url), rel = path.relative(root, f);
       return !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.split(path.sep).some(p => p.startsWith('.')) && fs.statSync(f).isFile(); } catch { return false; } };
     if (context) { context.on('request', r => { if (!allowed(r.url())) requests.push(r.url().slice(0, 160)); });
     await context.routeWebSocket('**/*', ws => { if (origin && allowed(ws.url())) ws.connectToServer(); else { requests.push(ws.url().slice(0, 160)); ws.close(); } });
-    page.on('request', r => causes.set(r, activeStep));
-    page.on('response', r => { if (r.status() >= 400) { const owner = causes.get(r.request()), index = owner?.expectedErrors.findIndex(e => matches(r, e)) ?? -1;
-      if (index >= 0) owner.expectedErrors.splice(index, 1); responses.push({step: owner?.id, url: r.url(), status: r.status(), expected: index >= 0}); } });
-    page.on('requestfailed', r => errors.push({message: r.failure()?.errorText, url: r.url()}));
+    page.on('request', r => responses.set(r, {id: responses.size + 1, step: activeStep ?? null, url: r.url(), method: r.method(), expected: false}));
     page.on('console', msg => { if (msg.type() === 'error') errors.push({message: msg.text().slice(0, 160), url: msg.location().url}); });
     page.on('pageerror', err => errors.push(err.message.slice(0, 160)));
     page.on('popup', p => p.close()); await context.route('**/*', r => allowed(r.request().url()) &&
@@ -85,8 +82,8 @@ async function stopServer() {
       spec.selector ? page.locator('css=' + spec.selector) : page.getByRole(spec.role, {name: spec.name, exact: true});
     const http = [];
     for (const step of (cfg.http ? [{op: 'request', request: cfg.http}] : j.steps)) {
-      activeStep = {id: step.id, expectedErrors: [...(step.expectedErrors || [])]};
-      const expected = (step.expectedErrors || []).map(e => page.waitForResponse(r => causes.get(r.request()) === activeStep && matches(r, e), {timeout: remaining()}));
+      activeStep = step.id;
+      const expected = (step.expectedErrors || []).map(e => page.waitForResponse(r => { const observed = responses.get(r.request()); return observed.step === step.id && !observed.expected && observed.url === new URL(e.path, origin).href && observed.method === e.method.toUpperCase() && r.status() === e.statusEquals && (observed.expected = true); }, {timeout: remaining()}));
       page?.setDefaultTimeout(remaining()); page?.setDefaultNavigationTimeout(remaining()); let passed = true;
       if (step.op === 'request') {
         const observed = await request(step.request); http.push(observed);
@@ -120,16 +117,17 @@ async function stopServer() {
         if (await page.evaluate(() => document.documentElement.scrollHeight) > 12000) throw Error('PNG height exceeds bound');
         const bytes = await page.screenshot({fullPage, timeout: remaining()});
         if (bytes.length > 2097152) throw Error('PNG exceeds 2MiB');
-        const sha256 = crypto.createHash('sha256').update(bytes).digest('hex'); const file = path.join(tools.evidence, sha256 + '.png'); fs.writeFileSync(file, bytes);
-        artifacts.push({path: file, sha256, viewport: j.viewport, reducedMotion: j.reducedMotion, fullPage});
+        artifacts.push({...artifact(bytes, 'png'), viewport: j.viewport, reducedMotion: j.reducedMotion, fullPage});
       } catch (e) { artifacts.push({missing: true, reason: e.message.slice(0, 160), fullPage}); }
     }
-    const unexpected = [...responses.filter(r => !r.expected), ...errors.filter(e => !e.message?.startsWith('Failed to load resource: the server responded with a status of ') || !responses.some(r => r.url === e.url))];
+    const observed = await Promise.all([...responses].map(async ([r, row]) => { const response = await r.response(), bodyless = response && (r.method() === 'HEAD' || [204, 205, 304].includes(response.status()) || response.headers()['content-length'] === '0' && !response.headers()['transfer-encoding']), bytes = await response?.body().catch(error => { row.bodyDiagnostic = error.message; return bodyless ? Buffer.alloc(0) : null; });
+      return {...row, bodyComplete: bodyless || (response != null && !r.failure() && !(await response.finished())), status: response?.status() ?? null, body: bytes ? artifact(bytes, 'body') : null, transportDiagnostic: r.failure()?.errorText}; }));
+    const unexpected = [...observed.filter(r => !r.bodyComplete || !r.expected && r.status >= 400), ...errors.filter(e => !e.message?.startsWith('Failed to load resource: ') || !observed.some(r => r.url === e.url && (r.status >= 400 || r.transportDiagnostic || r.bodyDiagnostic)))];
     checks.consoleErrors = unexpected.length; checks.externalRequests = requests.length;
     result = {state: 'OBSERVED', browserMode, checks: cfg.http ? {} : checks, steps, artifacts, rendered,
-      toolchain, url: page?.url(), userAgent: page ? await page.evaluate(() => navigator.userAgent) : null, http, server: serverEvidence, responses, errors: unexpected.slice(0, 4), requests: requests.slice(0, 4)};
+      toolchain, url: page?.url(), userAgent: page ? await page.evaluate(() => navigator.userAgent) : null, http, server: serverEvidence, responses: observed, errors: unexpected.slice(0, 4), requests: requests.slice(0, 4)};
   } catch (error) {
-    result = {state: 'ERROR', reason: error.message.slice(0, 1500), browserMode: error.browserMode ?? browserMode, toolchain, server: serverEvidence};
+    result = {state: error.launchDiagnostic ? 'pending-judgment' : 'ERROR', reason: error.launchDiagnostic ? 'browser unavailable' : error.message.slice(0, 1500), launchDiagnostic: error.launchDiagnostic, browserMode: error.launchDiagnostic ? 'normal' : browserMode, toolchain, server: serverEvidence};
   } finally { try { if (browser) await browser.close(); } finally { await stopServer(); } }
-  process.stdout.write(JSON.stringify(result));
-})().catch(error => { process.stderr.write(error.message); process.exitCode = 1; });
+  process.stdout.write(JSON.stringify(result), () => process.exit(0));
+})().catch(error => process.stderr.write(error.message, () => process.exit(1)));

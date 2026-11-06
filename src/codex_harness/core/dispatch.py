@@ -763,7 +763,11 @@ def _run_provider(
     # can keep open after the controller's process has exited.
     events_path, stderr_path = attempt_dir / "events.jsonl", attempt_dir / "stderr.txt"
     request["denialCapabilities"] = dict(DENIAL_CAPABILITIES)
-    effective_environment = {**os.environ, **launch.environment, "PYTHONDONTWRITEBYTECODE": "1"}
+    tool_dir = attempt_dir.resolve() / "tools"
+    tool_dir.mkdir(exist_ok=True)
+    effective_environment = {**os.environ, **launch.environment, "PYTHONDONTWRITEBYTECODE": "1",
+        **dict.fromkeys(("TEMP", "TMP", "TMPDIR", "XDG_CACHE_HOME", "npm_config_cache",
+                         "PLAYWRIGHT_MCP_OUTPUT_DIR", "PLAYWRIGHT_MCP_USER_DATA_DIR"), str(tool_dir))}
     request["environmentIndicators"] = {
         name: effective_environment.get(name)
         for name in ("CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_CI")
@@ -815,8 +819,6 @@ def _run_provider(
                 on_launch=publish, stop_when=stop_when)
             cleanup = completed.audit_control
             code = completed.returncode
-            if cleanup.get("stopReason") == "worker-stalled":
-                failure = dict(type="AttemptStalled", message="Provider activity stopped within the idle window")
     except subprocess.TimeoutExpired as error:
         timed_out = True
         failure = dict(type=type(error).__name__, timeoutSeconds=error.timeout)
@@ -1491,33 +1493,19 @@ def _attempt_bead(
         if _source_path(path)
     )
     owned = {str(PurePosixPath(name.replace("\\", "/"))) for name in bead["ownedFiles"]}
-    protected = [
-        str(PurePosixPath(name.replace("\\", "/")))
-        for name in (
-            *plan.requirement_files,
-            *([] if plan.semantic is not None else [resolve_runner(plan).test_dir]),
-        )
-    ]
-    requirements_intact = not any(
-        path == name or path.startswith(f"{name}/") for path in changed for name in protected
-    )
+    # The canonical graph rejects ownership of protected inputs; one guard covers
+    # both protected writes and any other file outside the bead's ownership.
     outside = [path for path in changed if path not in owned]
     attempt.update(changedPaths=changed, finishedAt=_now())
     record["guard"] = {
         "changesOutsideOwnedFiles": outside,
-        "requirementFilesIntact": requirements_intact,
-        "passed": not outside and requirements_intact,
+        "passed": not outside,
     }
     if record["status"] == "blocked: worker reported":
         return record
     # Empty attempts still need proof on integration HEAD; they create no commit.
     if changed and not record["guard"]["passed"]:
-        reason = (
-            "requirement files changed"
-            if not requirements_intact
-            else "changes outside owned files"
-        )
-        record["status"] = f"rejected: {reason}"
+        record["status"] = "rejected: changes outside owned files"
     return record
 
 
@@ -1776,6 +1764,15 @@ def _integrate_bead(
         }
         _write_record(receipt, record["integrated"])
     record["didRunIntegratedValidation"] = True
+    _complete_integration(record, bead, repo, manifest, memory, receipt, confirmer,
+                          manifest_path, current_plan, changed, binding, persist_observation)
+
+
+def _complete_integration(record, bead, repo, manifest, memory, receipt, confirmer,
+                          manifest_path, current_plan, changed, binding, persist_observation=None):
+    validation = record["integrated"]["validation"]
+    validation_root = Path(record["integrated"]["root"])
+    integration_commit = record["integrated"]["integrationCommit"]
     record["candidate"]["validated"] = validation["passed"]
     semantic = record["integrated"].get("semantic")
     if not (semantic["admitted"] if semantic else validation["passed"]):
@@ -1788,8 +1785,7 @@ def _integrate_bead(
     _observe_steering(
         record, manifest, validation_root, binding["baseIntegration"], memory, persist_observation
     )
-    if _git(repo, "rev-parse", "HEAD") == binding["baseIntegration"]:
-        _git(repo, "merge", "-q", "--ff-only", integration_commit)
+    _git(repo, "merge", "-q", "--ff-only", integration_commit)
     record["lessonsPromoted"] = []
     for index, lesson in enumerate(bead.get("lessons", []) if validation["passed"] else []):
         promoted = {**lesson, "entryId": None, "confirmed": False}

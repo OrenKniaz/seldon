@@ -16,7 +16,7 @@ from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.record_io import write_record_json
-from codex_harness.core.semantic_schema import LIMIT, WEB, argv, content, path, validate
+from codex_harness.core.semantic_schema import LIMIT, argv, content, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
 MODULE = "codex_harness.core.semantic_runner"
@@ -214,13 +214,17 @@ def execute(s, root, targets, seconds, deadline, web=None, judgments=None, stop_
                 if captured["omittedBytes"]["stdout"]:
                     raise ObservationUnavailable("Browser/HTTP evidence exceeded capture bound; shorten the journey or response")
                 result = json.loads(captured["stdout"])
+                if result.get("launchDiagnostic"):
+                    result["launchDiagnostic"]["stderr"] = captured["stderr"]
+                    return dict(state="pending-judgment", reason="browser unavailable", unperformed=True,
+                                evidenceTier="browser: UNVERIFIED", launchDiagnostic=result["launchDiagnostic"],
+                                actions={**results, a["id"]: result})
                 if result.get("state") == "ERROR":
                     result["reason"] += "\n" + captured["stderr"][-8192:]
                     return dict(
                         state="ERROR", reason=result["reason"], actions={**results, a["id"]: result}
                     )
                 results[a["id"]] = result
-                web["browserMode"] = result.get("browserMode") or web.get("browserMode")
                 continue
             cwd = path(root, a["cwd"]) if "cwd" in a else root
             if "process" in a:
@@ -449,9 +453,10 @@ def run(
                 if completed.returncode or time.monotonic() > end:
                     raise TimeoutError("Runner failed or scenario deadline expired")
                 result = dict(json.loads(completed.stdout), id=s["id"], cleanup=control)
-                if is_web and any(a.get("browserMode") == "single-process" for a in result.get("actions", {}).values()):
-                    web["browserMode"] = "single-process"
                 results.append(result)
+                if result.get("launchDiagnostic"):
+                    results.extend(dict(result, id=later["id"], actions={}) for later in scenarios[len(results):])
+                    break  # One failed launch is diagnostic, never retry authority.
                 if progress_path is not None:
                     write_record_json(progress_path, dict(scenario=s["id"], completed=len(results)))
     except ERRORS as error:
@@ -473,11 +478,10 @@ def run(
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--preview"]:
         selection = Path(sys.argv[2] if len(sys.argv) > 2 else ".").resolve()
-        targets = json.loads(selection.read_text(encoding="utf-8"))["targets"] if selection.is_file() else {"preview": dict(kind="web", entry="index.html")}
-        journey = dict(target=sys.argv[3] if selection.is_file() else "preview", operation="preview", viewport=dict(width=1280, height=720), reducedMotion="no-preference", steps=[dict(id="preview", op="open")])
-        scenario = dict(id="preview", requirementRefs=["preview"], contractRefs=[], setup={}, actions=[dict(id="preview", web=journey)], observe=[dict(action="preview", **{k: 0 if k in ("consoleErrors", "externalRequests") else True for k in WEB})], verdict="all")
-        with tempfile.TemporaryDirectory(prefix="seldon-preview-") as evidence:
-            result = run(dict(schema="seldon/scenarios-v1", scenarios=[scenario]), selection.parent if selection.is_file() else selection, targets, "validation", evidence_dir=evidence, run_seconds=30)[0]
+        spec = json.loads((selection if selection.is_file() else selection / "SCENARIOS.json").read_text(encoding="utf-8"))
+        spec["scenarios"]["scenarios"] = [s for s in spec["scenarios"]["scenarios"] if len(sys.argv) <= 3 or sys.argv[3] == s["id"] or any(a.get("web", a.get("http", {})).get("target") == sys.argv[3] for a in s["actions"])]
+        result = run(spec["scenarios"], selection.parent if selection.is_file() else selection, spec["targets"], "validation", evidence_dir=(selection.parent if selection.is_file() else selection).parent / "evidence" / "preview")
+        result = result[0] if len(result) == 1 else result
     elif sys.argv[1:2] == ["--worker"]:
         try:
             s, targets, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))

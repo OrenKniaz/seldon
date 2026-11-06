@@ -3,7 +3,6 @@
 import hashlib
 import json
 import os
-import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -107,6 +106,10 @@ def _semantic_validation(root, plan, record, phase):
         return dict(state="incomplete", reason="incomplete: declared " + ", ".join(sources["missing"]) + " missing from candidate")
     identity = _execution_identity(plan)
     observed_files = observation_files(root)
+    product = ((record.get("integrated") or {}).get("semantic") or {}).get("productBaseline")
+    if phase == "build" and not record.get("integrated"):
+        product = {n: h for n, h in observed_files.items() if n not in plan.requirement_files
+                   and not any(n == r or n.startswith(r + "/") for r in sources["roots"])}
     document = executable_scenarios(plan.trace, plan.semantic["scenarios"])
     requirements = {r["id"] for r in record.get("requirementRefs", [])}
     document["scenarios"] = [s for s in document["scenarios"] if not requirements or
@@ -114,7 +117,8 @@ def _semantic_validation(root, plan, record, phase):
     tests = [dict(id=s["id"], requirementRefs=s["requirementRefs"],
                   contractRefs=s["contractRefs"], testRef=s.get("testRef"),
                   rationale=s.get("rationale")) for s in document["scenarios"]]
-    before = {name: observed_files.get(name) for bead in plan.beads.values() for name in bead.owned_files}
+    names = {name for bead in plan.beads.values() for name in bead.owned_files} | {f["path"] for f in sources["files"]} | set(((record.get("integrated") or {}).get("semantic") or {}).get("candidateFiles", {}))
+    before = {name: observed_files.get(name) for name in names}
     red = next((p for p in record.get("redObservations", []) if p["tests"] == tests and p["testSources"]["contentHash"] == sources["contentHash"]
                 and all(p.get(k) == v for k, v in identity.items())), None) if phase == "build" else None
     if phase == "build" and red is None:
@@ -143,36 +147,13 @@ def _semantic_validation(root, plan, record, phase):
         **identity, phase="contracts" if phase == "contracts" else "validation",
         observedState=observed, candidateCommit=_git(root, "rev-parse", "HEAD"),
         candidateTree=_git(root, "rev-parse", "HEAD^{tree}"), candidateFiles=before,
-        observationFiles=observed_files,
+        observationFiles=observed_files, productBaseline=product,
         candidate=_digest(dict(files=observed_files, **identity)),
         linkedRed=_digest(red) if red else None, red=red, results=results, testSources=sources,
         tests=tests,
     )
     proof["evidenceBinding"] = _evidence_digest(proof)
     return assess_execution(proof, record.get("judgments", {}).get("execution"))
-
-
-def _read_git(root, *arguments):
-    result = subprocess.run(
-        [
-            "git",
-            "--no-optional-locks",
-            "-c",
-            f"safe.directory={root.as_posix()}",
-            "-C",
-            str(root),
-            *arguments,
-        ],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        timeout=10,
-    )
-    if result.returncode:
-        raise ValueError(
-            "revalidate: cannot read retained Git evidence; inspect run: " + result.stderr[:512]
-        )
-    return result.stdout.strip()
 
 
 def retained(workspace, job_id):
@@ -198,35 +179,31 @@ def retained(workspace, job_id):
     plan = d.graph.load_plan(directory / "plan")
     if run["planRevision"] != request["publicationRevision"] or plan.semantic is None:
         raise ValueError("revalidate: retained semantic publication required; inspect job")
-    pending = [key for key in plan.beads if
-               (run["beads"][key].get("integrated") or {}).get("semantic", {}).get("state")
-               in {"FAIL", "ERROR", "pending-judgment"}]
-    if len(pending) != 1:
-        raise ValueError("revalidate: select one retained observed candidate")
-    bead_id = pending[0]
+    pending = [key for key in d.graph.topological_order(plan)
+               if (run["beads"][key].get("integrated") or {}).get("semantic")]
+    if not pending:
+        raise ValueError("revalidate: retain an observed candidate first")
+    bead_id = pending[-1]
     bead = run["beads"][bead_id]
-    state = read_record_json(
-        jobs._inside(directory, Path(bead["evidenceDir"]) / "integration-state.json")
-    )
     semantic = bead["integrated"]["semantic"]
-    root = jobs._inside(directory, Path(state["candidateWorktree"]))
+    root = jobs._inside(directory, Path(bead["integrated"]["root"]))
     repo = jobs._inside(directory, Path(run["repo"]))
-    if _read_git(root, "status", "--porcelain") or (
-        _read_git(root, "rev-parse", "HEAD") != semantic["candidateCommit"]
-        or _read_git(root, "rev-parse", "HEAD^{tree}") != semantic["candidateTree"]
+    if d._git(root, "status", "--porcelain") or (
+        d._git(root, "rev-parse", "HEAD") != semantic["candidateCommit"]
+        or d._git(root, "rev-parse", "HEAD^{tree}") != semantic["candidateTree"]
+        or observation_files(root) != semantic["observationFiles"]
     ):
         raise ValueError(
             "revalidate: retained candidate changed; inspect evidence before rebuilding"
         )
-    if _read_git(repo, "rev-parse", "HEAD") != state["baseIntegration"]:
-        raise ValueError("revalidate: integration base changed; inspect original run")
+    d._git(repo, "merge-base", "--is-ancestor", d._git(repo, "rev-parse", "HEAD"), semantic["candidateCommit"])
     return dict(
         runPath=str(path),
         runDigest=jobs._digest(run),
         bead=bead_id,
         candidateCommit=semantic["candidateCommit"],
         candidateTree=semantic["candidateTree"],
-        verifier=_execution_identity(plan),
+        verifier=_execution_identity(jobs.load_plan(Path(run.get("verificationPlan", directory / "plan/sample.json")))),
     )
 
 
@@ -243,15 +220,13 @@ def deliver(workspace, request, run):
     with _record_guard(directory / "stop.json"):
         if (directory / "stop.json").exists():
             raise ValueError("delivery: quarantined attempt; readmit within B")
-        manifest = read_record_json(directory / "plan/sample.json")
         repo = jobs._inside(directory, Path(run["repo"]))
         if d._git(repo, "rev-parse", "HEAD^{tree}") != run["semanticValidation"]["candidateTree"]:
             raise ValueError("delivery: integration tree differs from Validation PASS")
-        if _read_git(repo, "status", "--porcelain"):
+        if d._git(repo, "status", "--porcelain"):
             raise ValueError("delivery: source differs from validated candidate")
-        names = sorted({n for b in manifest["beads"].values() for n in b["ownedFiles"]})
         files, hashes = [], {}
-        for name in names:
+        for name in sorted(run["semanticValidation"]["candidateFiles"]):
             if Path(name).parts[0].startswith("."):
                 raise ValueError("delivery: metadata is not a product file")
             source = jobs._inside(repo, repo / name)
@@ -260,20 +235,20 @@ def deliver(workspace, request, run):
             hashes[name] = hashlib.sha256(raw).hexdigest() if raw is not None else None
             if target.exists() and target.read_bytes() != raw:
                 baseline = jobs._inside(directory, directory / "plan/template" / name)
-                if not baseline.is_file() or target.read_bytes() != baseline.read_bytes():
+                prior = run.get("delivery", {}).get("fileHashes", {}).get(name)
+                if hashlib.sha256(target.read_bytes()).hexdigest() != prior and (not baseline.is_file() or target.read_bytes() != baseline.read_bytes()):
                     raise ValueError(
                         f"delivery: existing {name} changed; preserve it and reconcile first"
                     )
-            if raw is not None:
-                files.append((raw, target))
+            files.append((raw, target))
         if hashes != run["semanticValidation"]["candidateFiles"]:
             raise ValueError("delivery: source differs from validated candidate bytes")
         for raw, target in files:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(raw)
+            target.write_bytes(raw) if raw is not None else target.unlink(missing_ok=True)
         run["delivery"] = dict(
             root=str(Path(workspace).resolve()),
-            files=[str(t) for _, t in files],
+            files=[str(t) for raw, t in files if raw is not None],
             fileHashes=hashes,
             candidateTree=run["semanticValidation"]["candidateTree"],
         )
@@ -289,28 +264,33 @@ def _check_delivery(delivery, root):
 
 
 def current_job_run(store):
+    from codex_harness.core.approvals import records
+    from codex_harness.core.runners import execution_sources
     from codex_harness.core import planner_jobs as jobs
     from codex_harness.core.planner_recovery import admission_id
 
-    directory = jobs._directory(
-        store.workspace, admission_id(store, store._meta()["published_revision"])
-    )
+    publication = store._meta()["published_revision"]
+    recovered = next((r for r in records(store, "worker-recovery-resolved") if
+                      r.get("validation", {}).get("publicationRevision") == publication), None)
+    directory = jobs._directory(store.workspace, recovered["jobId"] if recovered else admission_id(store, publication))
     paths = list(directory.glob("runs/*/evidence/run.json"))
     if len(paths) != 1:
         raise ValueError("delivery: one retained candidate required before C/judgment")
-    return directory, read_record_json(jobs._inside(directory, paths[0]))
+    run = read_record_json(jobs._inside(directory, paths[0]))
+    snapshot = Path(run.get("verificationPlan", directory / "plan/sample.json")).parent
+    trace = jobs.load_plan(snapshot).trace
+    if execution_sources(snapshot / "template", trace)["contentHash"] != execution_sources(store.workspace / "template", trace)["contentHash"]:
+        raise ValueError("delivery: verification inputs changed; revalidate the retained candidate")
+    return directory, run
 
 
 def delivered_candidate(store, repo):
     """C consumes the canonical delivery, including when review used the integration repo."""
-    directory, run = current_job_run(store)
+    _, run = current_job_run(store)
 
     delivery = run.get("delivery")
-    manifest = read_record_json(directory / "plan/sample.json")
-    names = {n for b in manifest["beads"].values() for n in b["ownedFiles"]}
     if (
         not delivery
-        or set(delivery.get("fileHashes", {})) != names
         or delivery["root"] != str(store.workspace.resolve())
         or delivery["candidateTree"] != run["semanticValidation"]["candidateTree"]
         or delivery["fileHashes"] != run["semanticValidation"]["candidateFiles"]
@@ -325,6 +305,7 @@ def delivered_candidate(store, repo):
 
 def judgment_binding(store, repo):
     """Candidate identity includes worker tests, trace, product bytes and observation tools."""
+    from codex_harness.core import dispatch as d
     from codex_harness.core.graph import load_plan
     from codex_harness.core.planner_audits import AuditTemporaryDirectory
 
@@ -333,8 +314,8 @@ def judgment_binding(store, repo):
     if root in {store.workspace.resolve(), Path(run["repo"]).resolve()}:
         if root == store.workspace.resolve():
             delivered_candidate(store, root)
-        elif (_read_git(root, "status", "--porcelain") or
-              _read_git(root, "rev-parse", "HEAD^{tree}") != run["semanticValidation"]["candidateTree"]):
+        elif (d._git(root, "status", "--porcelain") or
+              d._git(root, "rev-parse", "HEAD^{tree}") != run["semanticValidation"]["candidateTree"]):
             raise ValueError("judgment: integrated candidate changed; select unchanged observations")
         root = Path(next(b["integrated"]["root"] for b in run["beads"].values()
             if (b.get("integrated") or {}).get("semantic", {}).get("candidate") ==
@@ -416,49 +397,77 @@ def record_judgment(store, *, repo, check, judgment_id=None, passed=None, statem
 
 
 def revalidate(store, job_id, request_id):
-    """Reuse unchanged observations, consume judgment, then use the ordinary integrator."""
+    """Observe current verification inputs on retained product bytes, then consume 1j."""
     from codex_harness.core import dispatch as d
     from codex_harness.core import planner_jobs as jobs
+    from codex_harness.core.planner_execution import execution_scope, require_execution
+    from codex_harness.core.runners import execution_sources
 
     selected = retained(store.workspace, job_id)
     directory = jobs._directory(store.workspace, job_id)
     request = jobs._request(directory)
-    manifest, _ = jobs._publication(store, request["publicationRevision"])
-    if jobs._digest(manifest) != request["manifestDigest"]:
-        raise ValueError("revalidate: publication changed; inspect current plan")
+    publication = store._meta()["published_revision"]
+    manifest, template = jobs._publication(store, publication)
+    scope = execution_scope(store, publication, request["options"]["workers"],
+        max_parallel=request["options"]["maxParallel"], timeout=request["options"]["timeout"])
+    require_execution(store, scope)
     path = Path(selected["runPath"])
     run = read_record_json(path)
-    plan = d.graph.load_plan(directory / "plan")
+    plan_path = Path(run.get("verificationPlan", directory / "plan/sample.json"))
+    plan = d.graph.load_plan(plan_path)
     bead = run["beads"][selected["bead"]]
+    built_plan = jobs.load_plan(directory / "plan")
     phase = manifest["beads"][selected["bead"]]["semanticPhase"]
     root = Path(bead["integrated"]["root"])
     proof = bead["integrated"]["semantic"]
-    if (any(proof.get(k) != v for k, v in _execution_identity(plan).items())
-            or observation_files(root) != proof["observationFiles"]):
-        raise ValueError("revalidate: changed evidence requires fresh execution before judgment")
-    bead["judgments"] = judgments_for(store, root)
-    proof = assess_execution(proof, bead["judgments"].get("execution"))
-    receipt = jobs._inside(directory, Path(bead["evidenceDir"]) / "integrated.json")
+    if d._hold_permission_guard(bead, Path(bead["evidenceDir"]) / "attempt") or not d._check_attempt_provenance(bead, owned_files=built_plan.beads[selected["bead"]].owned_files):
+        raise ValueError("revalidate: inspect the retained attempt's permission/provenance hold")
+    receipt = jobs._inside(directory, Path(bead["integrated"]["receiptPath"]))
     original = read_record_json(receipt)
     if original["semantic"]["evidenceBinding"] != proof["evidenceBinding"]:
         raise ValueError("revalidate: original observation receipt differs")
+    if (proof["planRevision"] != manifest["planRevision"] or scope["templateFiles"] != jobs._files(plan_path.parent / "template")
+            or any(proof.get(k) != v for k, v in _execution_identity(plan).items())):
+        product = proof.get("productBaseline")
+        if product is None:
+            raise ValueError("revalidate: build product baseline required; readmit the current plan")
+        verifier_roots = execution_sources(root, plan.trace)["roots"]
+        before = jobs._files(plan_path.parent / "template")
+        frozen = jobs._inside(directory, jobs.directory(directory / "verification", request_id))
+        after = scope["templateFiles"]
+        plan, template = jobs.snapshot_plan(template, frozen, manifest, after), frozen / "template"
+        plan_path = frozen / "sample.json"
+        verifier_roots += execution_sources(template, plan.trace)["roots"]
+        changes = {n for n in before.keys() | after.keys() if before.get(n) != after.get(n)}
+        if any(after.get(n) != product[n] if n in product else not (n in built_plan.requirement_files or any(n == r or n.startswith(r + "/") for r in verifier_roots)) for n in changes):
+            raise ValueError("revalidate: product inputs changed; readmit the current plan")
+        root = frozen / "candidate"
+        d._git(Path(run["repo"]), "worktree", "add", "-q", "--detach", str(root), proof["candidateCommit"])
+        for name in changes:
+            target, source = jobs._inside(root, root / name), jobs._inside(template, template / name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes()) if source.is_file() else target.unlink(missing_ok=True)
+        d._git(root, "add", "--all")
+        d._commit(root, "Refresh verification inputs; retain product bytes")
+        added = observation_files(root).keys() - proof["observationFiles"].keys() - set(built_plan.requirement_files)
+        if (file_hashes(root, product) != product or any(not any(n == r or n.startswith(r + "/") for r in verifier_roots) for n in added)
+                or file_hashes(root, changes) != {n: after.get(n) for n in changes}):
+            raise ValueError("revalidate: retained product or captured verifier bytes changed; inspect candidate")
+        proof = _semantic_validation(root, plan, bead, phase)
+        if proof["state"] == "incomplete":
+            raise ValueError(proof["reason"])
+        receipt = frozen / "integrated.json"
+        original.update(root=str(root), integrationCommit=proof["candidateCommit"], receiptPath=str(receipt))
+        run["verificationPlan"] = str(plan_path)
+    else:
+        proof = assess_execution(proof, judgments_for(store, root).get("execution"))
     original.update(semantic=proof, validation=dict(passed=proof["passed"]))
+    bead["candidate"].update(commit=proof["candidateCommit"], tree=proof["candidateTree"])
     d._write_record(receipt, original)
-    bead["status"] = "running"
-    bead["integrated"] = None
-    d._integrate_bead(
-        bead,
-        manifest["beads"][selected["bead"]],
-        repo=Path(run["repo"]),
-        manifest=manifest,
-        memory=path.parent.parent / "memory-workspace",
-        receipt=receipt,
-        confirmer="harness-integrator",
-        manifest_path=directory / "plan/sample.json",
-    )
-    if bead["integrated"] is None:
-        raise ValueError("revalidate refused: " + bead["status"] + "; inspect attempt provenance")
-    proof = bead["integrated"]["semantic"]
+    bead["integrated"] = original
+    d._complete_integration(bead, manifest["beads"][selected["bead"]], Path(run["repo"]), manifest,
+        path.parent.parent / "memory-workspace", receipt, "harness-integrator", plan_path, plan,
+        bool(bead["attempt"]["changedPaths"]), original.get("recoveryBinding"))
     run["semanticContracts" if phase == "contracts" else "semanticValidation"] = proof
     run["status"] = (
         "pending-judgment" if proof["state"] == "pending-judgment" else
@@ -481,19 +490,10 @@ def revalidate(store, job_id, request_id):
     d._write_record(path, run)
     if (phase == "contracts" and proof["admitted"] and
             read_record_json(directory / "started.json")["pid"] == os.getpid()):
-        workers = jobs._workers(manifest, request["options"]["workers"])
-        run = d.run_plan(directory / "plan", work_root=directory / "runs",
-            resume_run_dir=path.parent.parent,
-            provider_for={w["bead"]: w["provider"] for w in workers},
-            model_for={w["bead"]: w["model"] for w in workers},
-            effort_for={w["bead"]: w["effort"] for w in workers},
-            max_parallel=request["options"]["maxParallel"], timeout=request["options"]["timeout"],
-            execution_job=directory,
-            setup=store.spine().node(store.spine().ids("vision")[0])["fields"].get("setup", {}),
-            intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"])
+        run = jobs.dispatch_job(store, directory, request, path.parent.parent)
         proof = run.get("semanticValidation") or run["semanticContracts"]
     delivery = deliver(store.workspace, request, run)
     return dict(
         state="pending-build" if run["status"] == "pending-build" else proof["state"],
-        results=proof["results"], delivery=delivery, runId=run["runId"]
+        results=proof["results"], delivery=delivery, runId=run["runId"], publicationRevision=publication
     )

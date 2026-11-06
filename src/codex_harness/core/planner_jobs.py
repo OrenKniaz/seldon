@@ -86,6 +86,15 @@ def _files(template):
     return {name: item["sha256"] for name, item in file_inputs(template).items()}
 
 
+def snapshot_plan(template, path, manifest, files):
+    path.mkdir(parents=True)
+    shutil.copytree(template, path / "template")
+    if files != _files(template) or files != _files(path / "template"):
+        raise ValueError("worker-job-template-changed-during-snapshot")
+    write_record_json_once(path / "sample.json", manifest)
+    return load_plan(path)
+
+
 def _publication(store, expected_revision):
     status = store.status()
     if status["published_revision"] != expected_revision or not expected_revision:
@@ -261,12 +270,7 @@ def start_worker_job(
         if before != scope["templateFiles"]:
             raise ValueError("worker-job-template-changed-before-snapshot")
         plan = directory / "plan"
-        plan.mkdir()
-        shutil.copytree(template, plan / "template")
-        if before != _files(template) or before != _files(plan / "template"):
-            raise ValueError("worker-job-template-changed-during-snapshot")
-        write_record_json_once(plan / "sample.json", manifest)
-        load_plan(plan)
+        snapshot_plan(template, plan, manifest, before)
         # Recheck after copying, before publishing an executable admission.
         if _publication(store, expected_revision)[0] != manifest:
             raise ValueError("worker-job-publication-changed-during-snapshot")
@@ -421,7 +425,8 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
                 if key in run
             },
             "beads": {
-                key: {field: bead.get(field) for field in ("status", "provider", "model", "effort")}
+                key: {**{field: bead.get(field) for field in ("status", "provider", "model", "effort", "guard")},
+                      "candidateRoot": (bead.get("integrated") or {}).get("root") or (bead.get("attempt") or {}).get("cwd")}
                 for key, bead in run["beads"].items()
             },
         }
@@ -438,6 +443,21 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
     from codex_harness.core.planner_recovery import worker_status
 
     return worker_status(workspace, result)
+
+
+def dispatch_job(store, directory, request, resume_run_dir=None):
+    workers = _workers(read_record_json(directory / "plan/sample.json"), request["options"]["workers"])
+    spine = store.spine()
+    from codex_harness.core.planner_recovery import RESOLVED
+    return dispatch.run_plan(directory / "plan", work_root=directory / "runs", resume_run_dir=resume_run_dir,
+        provider_for={w["bead"]: w["provider"] for w in workers},
+        model_for={w["bead"]: w["model"] for w in workers},
+        effort_for={w["bead"]: w["effort"] for w in workers},
+        max_parallel=request["options"]["maxParallel"], timeout=request["options"]["timeout"],
+        execution_job=directory, setup=spine.node(spine.ids("vision")[0])["fields"].get("setup", {}),
+        intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
+        worker_outcomes=next((r["proof"].get("faultOutcomes", {}) for r in approvals.records(store, RESOLVED)
+                              if r.get("successor") == request["jobId"]), {}))
 
 
 def execute_worker_job(workspace, job_id):
@@ -464,26 +484,7 @@ def execute_worker_job(workspace, job_id):
         with open_plan_store(workspace) as store:
             if _publication(store, request["publicationRevision"])[0] != manifest:
                 raise ValueError("worker-job-publication-changed-before-launch")
-            spine = store.spine()
-            setup = spine.node(spine.ids("vision")[0])["fields"].get("setup", {})
-            intent_nodes = store.locked_acceptance_spine().to_dict()["nodes"]
-            from codex_harness.core.planner_recovery import RESOLVED
-            worker_outcomes = next((r["proof"].get("faultOutcomes", {}) for r in approvals.records(store, RESOLVED)
-                                    if r.get("successor") == job_id), {})
-        workers = _workers(manifest, request["options"]["workers"])
-        run = dispatch.run_plan(
-            plan,
-            work_root=directory / "runs",
-            provider_for={row["bead"]: row["provider"] for row in workers},
-            model_for={row["bead"]: row["model"] for row in workers},
-            effort_for={row["bead"]: row["effort"] for row in workers},
-            max_parallel=request["options"]["maxParallel"],
-            timeout=request["options"]["timeout"],
-            execution_job=directory,
-            setup=setup,
-            intent_nodes=intent_nodes,
-            worker_outcomes=worker_outcomes,
-        )
+            run = dispatch_job(store, directory, request)
         from codex_harness.core.planner_candidate import deliver, judgments_for, revalidate
 
         deadline = time.monotonic() + request["options"]["timeout"]

@@ -366,7 +366,6 @@ def monitor(workspace, job_id):
             timeout=request["options"]["timeout"] * (len(request["options"]["workers"]) + 1) + 600,
             env={**os.environ, **dict.fromkeys(("TEMP", "TMP", "TMPDIR"), str(temp))},
             stop_when=lambda: "recovery-requested" if (directory / "stop.json").exists() else None,
-            stall_seconds=None,  # Each provider owns its idle/deadline clock; this is the batch supervisor.
         )
         control = getattr(result, "audit_control", {})
         code = result.returncode

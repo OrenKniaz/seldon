@@ -1503,7 +1503,7 @@ class PlannerServer:
     @staticmethod
     def _compact(data):
         """Keep gates/scalars; summarize bulky evidence without changing canonical data."""
-        bulk = {"semantic", "semanticContracts", "semanticValidation", "beads"}
+        bulk = {"semantic", "semanticContracts", "semanticValidation"} | (set() if "recordPath" in data else {"beads"})
         bulk |= {"continuation", "reviewResolution"}
 
         def summary(value):

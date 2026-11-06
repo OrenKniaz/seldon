@@ -851,11 +851,11 @@ def http_golden(workspace, semantic=False):
         return reply.get("structuredContent", {})
 
     def scope_how(rationale):
+        from codex_harness.core.approvals import scope_assessment
         call("harness_compile", include_detail=True)
-        pending = next(r for r in call("harness_plan_status")["pendingSemanticJudgments"]
-                       if r["question"] == "scope-intent" and r["current"])
-        judgment = call("harness_judgment", judgment_id=pending["id"])
-        scripted_judgment(call, judgment, dict(impact="HOW"), rationale=rationale)
+        judgment = scope_assessment(store, prepare=True)
+        if judgment.get("id") and not judgment["positiveCredit"]:
+            scripted_judgment(call, judgment, dict(impact="HOW"), rationale=rationale)
 
     def yes(card):
         decisions.append(card["gate"])
@@ -1328,7 +1328,7 @@ with TemporaryDirectory(dir=root) as scratch:
         options = dict(
             expected_revision=manifest["planRevision"],
             max_parallel=1 if semantic else 2,
-            timeout=25 if semantic else 15,
+            timeout=180 if semantic else 15,
             workers=[
                 dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
                 for b in (("B",) if semantic else ("A", "B"))
@@ -1531,7 +1531,6 @@ with TemporaryDirectory(dir=root) as scratch:
                 contracts["parents"] = ["T_HTTP"]
                 bead["fields"].update(ownedFiles=["server.py", "import_items.py", "verify_http.py"], dependsOn=["C"])
                 call("harness_upsert_nodes", nodes=[contracts, bead])
-                scope_how("Tests-first contracts/build ownership and restart-verifier repairs implement the same accepted local product")
                 options["workers"] = [dict(options["workers"][0], bead=b) for b in ("C", "B")]
                 # Repair the scripted worker's real verifier body too: read the
                 # same persisted rows after stopping and restarting the server.
@@ -1539,6 +1538,8 @@ with TemporaryDirectory(dir=root) as scratch:
                 lifecycle = ("    server = subprocess.Popen" + lifecycle).replace("            print(body)\n", "")
                 verifier = prefix + "    for restart in range(2):\n" + "\n".join(
                     "    " + line for line in lifecycle.splitlines()) + "\n    print(body)\n"
+                (template / "verify_http.py").write_text(verifier + "\n# Published verifier baseline\n", encoding="utf-8")
+                scope_how("Tests-first contracts/build ownership and restart-verifier repairs implement the same accepted local product")
                 options["expected_revision"] = call("harness_compile", include_detail=True)["planRevision"]
             if not semantic:
                 reviewer = choice["fields"]["reviewers"][0]
@@ -1766,31 +1767,39 @@ with TemporaryDirectory(dir=root) as scratch:
                 with pytest.MonkeyPatch.context() as process_patch:
                     process_patch.setattr(subprocess, "Popen", launch)
                     job = call("harness_worker_start", **options)
-                    deadline = time.time() + 180
+                    deadline = time.time() + options["timeout"]
                     while job["status"] not in {"completed", "failed"} and time.time() < deadline:
                         job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
-                    # r9: evidence silence killed active thinking. Earlier workers
-                    # returned immediately, so neither activity nor deadlines competed.
+                    # AUDIT1: a live writer pauses with a partial terminal envelope.
+                    # Immediate replies never exposed silence truncating valid evidence.
                     expired = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
                     assert expired["beads"]["C"]["status"] == "contracts-red", job
                     live = json.loads((workspace / ".codex-harness/live-provider.json").read_text())
                     assert live["outputSeconds"] >= 3 and live["cpuSeconds"] >= 3
+                    assert live["flushSeconds"] >= 125, live
                     contract_attempt = Path(expired["beads"]["C"]["evidenceDir"]) / "attempt"
                     assert "thinking" in (contract_attempt / "stderr.txt").read_text()
-                    silent_proof = call("harness_recovery", mode="inspect", job_id=job["jobId"])
-                    silent_attempt = Path(expired["beads"]["B"]["evidenceDir"]) / "attempt"
-                    stopped = json.loads((silent_attempt / "result.json").read_text())
-                    assert job["status"] == "failed" and stopped["cleanup"]["stopReason"] == "worker-stalled"
+                    complete = json.loads((contract_attempt / "result.json").read_text())
+                    assert complete["permissionGuard"]["telemetryComplete"] and complete["exitCode"] == 0
+                    assert (contract_attempt / "events.jsonl").read_text().endswith('{"type": "turn.completed"}\n')
+                    truncated_attempt = Path(expired["beads"]["B"]["evidenceDir"]) / "attempt"
+                    stopped = json.loads((truncated_attempt / "result.json").read_text())
+                    assert job["status"] == "failed" and stopped["exitCode"] == 0 and stopped["failure"] is None
+                    assert stopped["outputComplete"] and stopped["statusBeforePermissionHold"] == "exited"
                     assert stopped["cleanup"]["quiescenceVerified"] and stopped["cleanup"]["activeProcessesAfterTeardown"] == 0
-                    # This exercises the canonical per-provider owner, replacing
-                    # the former fake-worker child.wait fault in the CLI journey.
-                    silent = json.loads((workspace / ".codex-harness/silent-provider.json").read_text())
-                    assert time.time() - silent["started"] < options["timeout"], silent_proof
+                    guard = stopped["permissionGuard"]
+                    assert guard["requiresAuditHold"] and guard["auditReason"] == "malformed"
+                    assert guard["disposition"] == "unknown" and guard["didObservePermissionDenial"] is None
+                    assert guard["observationError"] == "Invalid or truncated provider event"
+                    assert expired["beads"]["B"]["status"] == dispatch.STATUS_AUDIT_HELD
+                    assert "held: denial audit inconclusive" in job["terminal"]["dispatchStatus"]
+                    assert not expired.get("delivery") and not expired.get("didRunIntegratedValidation")
                     recovered = call("harness_recovery", mode="resolve", job_id=job["jobId"],
-                        choice="readmit", reason="Readmit the genuinely silent provider within the same B")
+                        choice="readmit", reason="Supply the missing terminal event from a fresh provider within the same B")
                     assert recovered["choice"] == "readmit"
                     job = call("harness_worker_start", **options)
                     assert job["jobId"] == recovered["successor"]
+                    deadline = time.time() + options["timeout"]
                     while job["status"] not in {"completed", "failed"} and time.time() < deadline:
                         job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                     # r7: an omitted declared test crashed fallback RED in git restore.
@@ -1807,6 +1816,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     assert recovered["proof"]["controllerAndChildren"]["quiescenceVerified"]
                     job = call("harness_worker_start", **options)
                     assert job["jobId"] == recovered["successor"]
+                    deadline = time.time() + options["timeout"]
                     while job["status"] not in {"completed", "failed"} and time.time() < deadline:
                         job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 assert job["status"] == "completed", job
@@ -1878,6 +1888,11 @@ with TemporaryDirectory(dir=root) as scratch:
                             choice="readmit", reason="Recover the observed HTTP worker faults")
                         assert set(recovered["proof"]["faultBeads"]) == set(faults)
                         assert recovered["choice"] == expected, recovered
+                    if tuple(faults) == ("A", "B"):
+                        offending = job["run"]["beads"]["B"]
+                        assert offending["status"] == "rejected: changes outside owned files"
+                        assert offending["guard"]["changesOutsideOwnedFiles"] == ["unexpected.txt"]
+                        assert offending["candidateRoot"] == json.loads(Path(job["run"]["recordPath"]).read_text())["beads"]["B"]["attempt"]["cwd"]
                     assert recovered["successor"] is None
                     scripted_judgment(call, recovered["judgment"], dict(action="readmit",
                         direction="Keep both accepted HTTP services; use a fresh isolated attempt"))
@@ -1948,6 +1963,117 @@ with TemporaryDirectory(dir=root) as scratch:
                 assert step["cleanup"]["stopReason"] == "acceptance-stopped" and step["cleanup"]["activeProcessesAfterTeardown"] == 0
                 stopped_marker.unlink()
                 call("harness_accept_scenarios", scenarios=scenarios)
+            if semantic:
+                # r11: a passing product could not be re-observed after verifier
+                # edits; frozen-plan journeys rebuilt instead of retaining bytes.
+                from codex_harness.core.planner_candidate import file_hashes
+                product_hashes = file_hashes(Path(run["repo"]), ["server.py", "import_items.py"])
+                attempts = sorted((workspace / ".codex-harness/worker-jobs").rglob("attempt/request.json"))
+                original_root = Path(run["beads"]["B"]["integrated"]["root"])
+                original_proof = run["semanticValidation"]["evidenceBinding"]
+                baseline_verifier = (template / "verify_http.py").read_text(encoding="utf-8")
+                baseline_server = (template / "server.py").read_text(encoding="utf-8")
+                built_product = run["semanticValidation"]["productBaseline"]
+                original_test = store.spine().node("T_HTTP")
+
+                def publish_verifier(rationale):
+                    previous_publication = store._meta()["published_revision"]
+                    scope_how(rationale)
+                    options["expected_revision"] = call("harness_compile", include_detail=True)["planRevision"]
+                    assert options["expected_revision"] != previous_publication
+                    call("harness_advance", to_phase="roundtable")
+                    reviewed = call("harness_roundtable", timeout=5)
+                    members = [r for r in roundtable.findings(store, expand=True) if r["state"] != "closed"]
+                    if members:
+                        dispositions = [dict(id=r["id"], status="resolved", resolution="The unchanged product and current verifier preserve the reviewed readback obligation") for r in members]
+                        pending = call("harness_resolve_findings", findings=dispositions)
+                        scripted_judgment(call, pending["judgment"], dict(memberDispositions={r["id"]: "resolved" for r in members}))
+                        applied = call("harness_resolve_findings", findings=dispositions)
+                        for reuse in applied.get("reuseJudgments", []):
+                            reused = scripted_judgment(call, reuse, dict(reuse=True))
+                            if reused.get("convergence"):
+                                convergence = call("harness_judgment", judgment_id=reused["convergence"]["id"])
+                                if convergence["current"] and not convergence["positiveCredit"]:
+                                    scripted_judgment(call, convergence, dict(action="ready"))
+                    if reviewed.get("convergence"):
+                        convergence = call("harness_judgment", judgment_id=reviewed["convergence"]["id"])
+                        if convergence["current"] and not convergence["positiveCredit"]:
+                            scripted_judgment(call, convergence, dict(action="ready"))
+                    call("harness_advance", to_phase="publish")
+                    call("harness_publish")
+                    call("harness_advance", to_phase="execute")
+
+                # HIGH review: a later root expansion must never exempt built
+                # product bytes; frozen declarations missed this two-refresh attack.
+                # Rename/removal also needs the prior verifier root through C.
+                for filename, source, roots in (
+                    ("verify_http.py", baseline_verifier + "\nprint('retained-verifier-v2', file=sys.stderr)\n", ["verify_http.py", "server.py"]),
+                    ("verify_renamed.py", baseline_verifier, ["verify_renamed.py"]),
+                ):
+                    files = {"verify_http.py": source if filename == "verify_http.py" else None, filename: source}
+                    scripted_worker(run["beads"]["B"]["prompt"], template, files)
+                    stale = workspace_wire(server, "harness_accept_assess", expected_workspace=str(workspace),
+                        judgment=dict(repo=run["repo"], check="execution"))
+                    expected_stale = "verification inputs changed" if len(roots) > 1 else "one retained candidate required"
+                    assert stale["isError"] and expected_stale in str(stale)
+                    edited_test = json.loads(json.dumps(original_test))
+                    edited_test["text"] += " Observe current verifier " + filename + (" with product readback" if len(roots) > 1 else "")
+                    edited_test["fields"]["execution"]["testRoots"] = roots
+                    edited_test["fields"]["execution"]["argv"] = [filename if a == "verify_http.py" else a for a in edited_test["fields"]["execution"]["argv"]]
+                    call("harness_upsert_node", node=edited_test)
+                    if filename != "verify_http.py":
+                        renamed = store.spine().node("V1")
+                        renamed["fields"]["targets"]["http"]["entry"] = filename
+                        call("harness_upsert_node", node=renamed)
+                        for key in ("C", "B"):
+                            ownership = store.spine().node(key)
+                            ownership["fields"]["ownedFiles"] = [filename if n == "verify_http.py" else n for n in ownership["fields"]["ownedFiles"]]
+                            call("harness_upsert_node", node=ownership)
+                    publish_verifier("Verifier declarations and filenames change HOW we observe the same accepted product; product obligations are unchanged")
+                    refreshed = call("harness_recovery", mode="resolve", job_id=job["jobId"], choice="revalidate",
+                        reason="Observe the unchanged product with the current verifier, without another build")
+                    assert refreshed["validation"]["state"] == "pending-judgment", refreshed
+                    run = json.loads(Path(job["run"]["recordPath"]).read_text())
+                    root = Path(run["beads"]["B"]["integrated"]["root"])
+                    assert file_hashes(root, product_hashes) == file_hashes(original_root, product_hashes) == product_hashes
+                    proof = run["semanticValidation"]
+                    assert proof["productBaseline"] == built_product and built_product["server.py"] == product_hashes["server.py"]
+                    assert proof["planRevision"] == options["expected_revision"]
+                    assert proof["evidenceBinding"] != original_proof
+                    source_row = next(f for f in proof["testSources"]["files"] if f["path"] == filename)
+                    assert source_row["sha256"] == hashlib.sha256((template / filename).read_bytes()).hexdigest()
+                    stderr = next(r for r in proof["results"] if r["id"] == "T_HTTP")["actions"]["execute"]["stderr"]
+                    assert ("retained-verifier-v2" in stderr) is ("retained-verifier-v2" in source)
+                    assert all(r["cleanup"]["quiescenceVerified"] and r["cleanup"]["activeProcessesAfterTeardown"] == 0 for r in proof["results"])
+                    if len(roots) > 1:
+                        for changed in ("server.py",):
+                            scripted_worker(run["beads"]["B"]["prompt"], template,
+                                {changed: baseline_server + "\n# Product bytes changed after root expansion\n" if changed == "server.py" else "New product file\n"})
+                            fault = store.spine().node("T_HTTP")
+                            fault["text"] += " Inspect changed " + changed
+                            call("harness_upsert_node", node=fault)
+                            publish_verifier("Exercise recovery guards without changing accepted product behavior; verifier classification grants no product-write authority")
+                            refused = call("harness_recovery", mode="resolve", job_id=job["jobId"], choice="revalidate",
+                                reason="Reject changed or added product bytes even after verifier-root expansion")
+                            assert refused["validation"]["state"] == "ERROR" and "product inputs changed" in str(refused["validation"]), refused
+                            assert file_hashes(root, product_hashes) == product_hashes and not (root / "unowned-product.txt").exists()
+                            scripted_worker(run["beads"]["B"]["prompt"], template,
+                                {changed: baseline_server if changed == "server.py" else None})
+                # An externally added product file must also be refused by the
+                # canonical retained-candidate guard, before any observation launches.
+                scripted_worker(run["beads"]["B"]["prompt"], root, {"unowned-product.txt": "New product file\n"})
+                outside = call("harness_recovery", mode="inspect", job_id=job["jobId"])
+                assert not outside["revalidation"]["available"] and "retained candidate changed" in outside["revalidation"]["reason"]
+                scripted_worker(run["beads"]["B"]["prompt"], root, {"unowned-product.txt": None})
+                judge_candidate(call, dict(repo=str(root), check="execution"))
+                refreshed = call("harness_recovery", mode="resolve", job_id=job["jobId"], choice="revalidate",
+                    reason="Consume the current observation's bound execution judgment")
+                assert refreshed["validation"]["state"] == "PASS", refreshed
+                run = json.loads(Path(job["run"]["recordPath"]).read_text())
+                assert file_hashes(Path(run["repo"]), product_hashes) == product_hashes
+                assert (workspace / "verify_renamed.py").is_file() and not (workspace / "verify_http.py").exists()
+                assert sorted((workspace / ".codex-harness/worker-jobs").rglob("attempt/request.json")) == attempts
+                assert decisions == ["align+vision-lock", "plan-execution"]
             call("harness_advance", to_phase="accept")
             if not semantic:
                 # A real capture queues acknowledgement before scenarios may launch.
@@ -2270,23 +2396,38 @@ def served_product():
 from pathlib import Path
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 class App(SimpleHTTPRequestHandler):
+    def do_DELETE(self):
+        Path('state.json').unlink(missing_ok=True)
+        self.send_response(204); self.end_headers()
     def do_GET(self):
         dbpath = Path('scenario.sqlite3').resolve()
         import sqlite3
         with sqlite3.connect(dbpath) as db: db.execute('create table if not exists preview (value text)')
+        if self.path in ('/empty', '/reset', '/cached'):
+            self.send_response({'/empty': 204, '/reset': 205, '/cached': 304}[self.path]); self.end_headers(); return
+        if self.path == '/disconnect':
+            self.connection.close(); return
+        if self.path in ('/truncated200', '/truncated409'):
+            self.send_response(200 if self.path == '/truncated200' else 409); self.send_header('Content-Length', '64'); self.end_headers()
+            self.wfile.write(b'{'); self.wfile.flush(); self.close_connection = True; return
         if self.path in ('/overconsume', '/broken'):
             self.send_response(409 if self.path == '/overconsume' else 500); self.end_headers(); self.wfile.write(b'{}'); return
         if self.path == '/preview-db':
             self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(dict(path=str(dbpath), exists=dbpath.is_file())).encode()); return
-        if self.path == '/api/state':
-            data = Path('state.json').read_bytes() if Path('state.json').exists() else b'{"saved":false}'
+        if self.path in ('/api/state', '/seed'):
+            file = Path('seed.json' if self.path == '/seed' else 'state.json')
+            data = file.read_bytes() if file.exists() else (b'{"note":"Missing seed"}' if self.path == '/seed' else b'{"saved":false}')
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(data)
         else:
             super().do_GET()
     def do_POST(self):
-        assert self.path == '/api/state'
+        if self.path == '/submit':
+            from urllib.parse import parse_qs
+            Path('submission.json').write_text(json.dumps(parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode())))
+            self.send_response(302); self.send_header('Location', '/index.html#posted'); self.end_headers(); return
+        assert self.path in ('/api/state', '/seed')
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        Path('state.json').write_text(json.dumps(dict(saved=True, note=payload['note'])))
+        Path('seed.json' if self.path == '/seed' else 'state.json').write_text(json.dumps(dict(saved=True, note=payload['note'])))
         self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
 HTTPServer(('127.0.0.1', int(os.environ['SELDON_PORT'])), App).serve_forever()
 """
@@ -2318,14 +2459,13 @@ def provider_host(mode, workspace, surface, job_id=None):
     actual_popen = subprocess.Popen
     actual_audit = audit_process.run_audit_process
     actual_review = roundtable._run
-    if surface == "shelflife":
-        dispatch.run_audit_process = lambda *args, **options: actual_audit(*args, **options, stall_seconds=2)
     actual_run = dispatch.run_plan
     actual_write = dispatch._write_record
 
     def publish(path, record):
         actual_write(path, record)
         if (surface == "web" and path.name == "run.json"
+                and record.get("status") == "pending-judgment"
                 and record.get("semanticValidation", {}).get("state") == "pending-judgment"):
             # Hold the real producer after publication so MCP must consume this
             # transition, rather than usually missing it between status polls.
@@ -2399,11 +2539,22 @@ def provider_host(mode, workspace, surface, job_id=None):
             (ROOT / "tests/fixtures/efficiency" / filename).read_text(encoding="utf-8")})
         if surface == "web":
             with (root / filename).open("a", encoding="utf-8") as out:
+                # A normal larger document must not overflow adapter stdout when
+                # request evidence captures its body; the earlier tiny page hid it.
+                out.write("<!--" + "page content " * 2048 + "-->")
                 out.write("<style>h1{background:linear-gradient(white,#fff)}</style>"
                     "<input id='note' aria-label='Note'><button id='save' onclick=\"fetch('/api/state',{method:'POST',body:JSON.stringify({note:document.querySelector('#note').value})}).then(()=>this.textContent='Saved')\">Save</button>"
                     "<button id='overconsume' onclick=\"fetch('/overconsume').then(()=>this.textContent='Rejected')\">Overconsume</button>"
                     "<button id='happy' onclick=\"fetch('/overconsume').then(()=>this.textContent='Happy')\">Happy path</button>"
                     "<button id='broken' onclick=\"fetch('/broken').then(()=>this.textContent='Broken')\">Break</button>"
+                    "<button id='delete' onclick=\"fetch('/api/state',{method:'DELETE'}).then(()=>this.textContent='Deleted')\">Delete</button>"
+                    "<button id='empty' onclick=\"location.href='/empty'\">Empty navigation</button>"
+                    "<button id='cached' onclick=\"fetch('/cached').then(()=>this.textContent='Cached')\">Read cache</button>"
+                    "<button id='disconnect' onclick=\"fetch('/disconnect').catch(()=>this.textContent='Disconnected')\">Disconnect</button>"
+                    "<button id='truncated200' onclick=\"fetch('/truncated200').then(r=>r.text()).catch(()=>this.textContent='Truncated 200')\">Incomplete success</button>"
+                    "<button id='truncated409' onclick=\"fetch('/truncated409').then(r=>r.text()).catch(()=>this.textContent='Truncated 409')\">Incomplete conflict</button>"
+                    "<button id='read-seed' onclick=\"fetch('/seed').then(r=>r.json()).then(d=>document.querySelector('#seeded').textContent=d.note)\">Read seeded note</button><p id='seeded'></p>"
+                    "<form method='post' action='/submit'><input type='hidden' name='note' value='Posted'><button id='post-redirect'>Submit form</button></form>"
                     "<button id='failed-happy' onclick=\"fetch('/broken').then(()=>this.textContent='Failed happy')\">Another happy path</button>")
             scripted_worker(packet(root, "B"), root, {"serve.py": served_product()})
 
@@ -2499,15 +2650,18 @@ def provider_host(mode, workspace, surface, job_id=None):
                 while True:
                     print("awaiting cancellation", file=sys.stderr, flush=True)
                     time.sleep(.1)
-            if bead in payload["fail"]:
+            if bead in payload["fail"] and bead != "B":
                 raise SystemExit(7)
             sources = payload["products"][bead]
+            if bead in payload["fail"]:
+                sources["unexpected.txt"] = "Real product-folder ownership violation\n"
         else:
             sources = payload[phase]
         live = workspace / ".codex-harness/live-provider.json"
-        if surface == "shelflife" and phase == "contracts" and not live.exists():
-            # Accelerated 120s window = 2s: output-only and then CPU-only work,
-            # each longer than the silence window, with no evidence JSON writes.
+        slow_flush = surface == "shelflife" and phase == "contracts" and not live.exists()
+        if slow_flush:
+            # Output-only and CPU-only reasoning precede the delayed final flush;
+            # neither activity observation is a stream-completion witness.
             start = time.monotonic()
             while time.monotonic() - start < 3:
                 print("thinking", file=sys.stderr, flush=True)
@@ -2519,14 +2673,33 @@ def provider_host(mode, workspace, surface, job_id=None):
             live.write_text(json.dumps(dict(outputSeconds=output_seconds,
                                            cpuSeconds=time.monotonic() - start)))
         if surface == "shelflife" and phase == "build":
-            if not (workspace / ".codex-harness/silent-provider.json").exists():
-                (workspace / ".codex-harness/silent-provider.json").write_text(json.dumps(dict(started=time.time())))
-                time.sleep(600)
+            if not (workspace / ".codex-harness/truncated-provider").exists():
+                (workspace / ".codex-harness/truncated-provider").touch()
+                print('{"type": "turn.started"}\n{"type": "turn.com', end="", flush=True)
+                return  # Exit normally without ever supplying the missing final bytes.
             if "incomplete: declared verify_http.py missing from candidate" not in prompt:
                 sources["verify_http.py"] = None
         scripted_worker(prompt, Path.cwd(), sources)
+        # r11: the actual provider child consumes dispatch's supported output env.
+        # Earlier worker doubles never wrote tool output outside the product.
+        artifact = Path(os.environ["PLAYWRIGHT_MCP_OUTPUT_DIR"]) / "browser-console.log"
+        artifact.write_text("Scripted browser tool output\n", encoding="utf-8")
+        assert not artifact.is_relative_to(Path.cwd())
         _, output, stderr = protocol("codex", text="Scripted worker completed the requested files")
-        print(output)
+        if slow_flush:
+            # Real stdout file, partial JSON and no CPU/output activity beyond the
+            # former 120-second window. Restoring any shorter idle kill must fail
+            # this same journey, rather than escape an accelerated three-second twin.
+            sys.stdout.write(output[:-5])
+            sys.stdout.flush()
+            flush_started = time.monotonic()
+            time.sleep(125)
+            sys.stdout.write(output[-5:] + "\n")
+            sys.stdout.flush()
+            observed = json.loads(live.read_text())
+            live.write_text(json.dumps(dict(observed, flushSeconds=time.monotonic() - flush_started)))
+        else:
+            print(output)
         print(stderr.replace("source-only", "gpt-6.1-sol").replace("Some(High)", "Some(Medium)"), file=sys.stderr)
         return
     if mode == "server":
@@ -2568,7 +2741,7 @@ def http_journeys(tmp_path):
             completed = run_audit_process(
                 [sys.executable, "-B", str(Path(__file__).resolve()), "http-golden",
                  str(workspace), str(int(semantic))],
-                cwd=ROOT, timeout=600, stall_seconds=None, stop_when=stop.is_set,
+                cwd=ROOT, timeout=600, stop_when=stop.is_set,
                 on_launch=lambda _: ready.set())
             if completed.returncode:
                 workspace.mkdir(parents=True, exist_ok=True)
@@ -2623,8 +2796,8 @@ def test_golden_path(tmp_path, request, surface):
     ordinary successful fixtures missed UNKNOWN holding delivery forever.
     Hold the Build observation publication before finalization: pending evidence
     and status must agree; ordinary polling usually missed that transient window.
-    Retain an observed browser fallback through the same bounded observation run;
-    earlier per-scenario fallback forgot it and could exhaust S3/S4 on normal probes.
+    Keep unavailable normal Chromium pending with its launch diagnostic; earlier
+    fallback hid startup failure and supplied crash-prone single-process evidence.
     Catch unlimited third worker retries and interrupted acceptance/review ownership;
     earlier fault twins retried twice but never restarted acceptance/review owners.
     The HTTP journey also protects independent and joint bead recovery counts and
@@ -2645,7 +2818,6 @@ def test_golden_path(tmp_path, request, surface):
         execution_judgment_golden(tmp_path.parent / (tmp_path.name + "-execution-judgment"))
         trace_contract_golden(tmp_path.parent / (tmp_path.name + "-trace-contract"))
     if surface == "web":
-        request.getfixturevalue("web_browser_ready")
         from codex_harness.core.semantic_runner import run as observe
         timeout_product = tmp_path / "timeout-product"
         timeout_product.mkdir()
@@ -2660,6 +2832,18 @@ def test_golden_path(tmp_path, request, surface):
         assert time.monotonic() - before < 15
         assert timed["cleanup"]["quiescenceVerified"] and timed["cleanup"]["activeProcessesAfterTeardown"] == 0
         assert timed["actions"]["api"]["server"]["stopped"]
+        # CHROME1: a real executable that cannot speak Chromium's protocol must
+        # produce bounded, unverified infrastructure evidence, never a product FAIL.
+        # The healthy browser journeys never exercised normal launch rejection.
+        from tests.python.core.semantic_runner_support import WEB_PAGE, WEB_TARGET, web_document
+        (timeout_product / "index.html").write_text(WEB_PAGE, encoding="utf-8")
+        unavailable = observe(web_document(split=True), timeout_product, WEB_TARGET, "validation",
+                              web_config=dict(chromium=sys.executable))
+        assert len(unavailable) == 4 and all(r["state"] == "pending-judgment" for r in unavailable), unavailable
+        assert all(r["unperformed"] and r["evidenceTier"] == "browser: UNVERIFIED" for r in unavailable), unavailable
+        assert all("browser unavailable" in r["reason"] and r["launchDiagnostic"] for r in unavailable), unavailable
+        assert all(r["cleanup"]["quiescenceVerified"] and r["cleanup"]["activeProcessesAfterTeardown"] == 0 for r in unavailable)
+        request.getfixturevalue("web_browser_ready")
 
     started = time.time()
     (tmp_path / "AGENTS.md").write_text(
@@ -2687,9 +2871,20 @@ def test_golden_path(tmp_path, request, surface):
             server=dict(argv=[sys.executable, "-B", "-c", "import subprocess,sys; subprocess.Popen([sys.executable,'-B','serve.py']).wait()"], readyPath="/", readyWithin=5))
         journey = vision["scenarios"]["scenarios"][0]["actions"][0]["web"]
         journey["target"] = "served"
+        # Review P2: preview must preserve cross-target API/CLI prerequisites and
+        # their persistence checks; the former same-target fixture missed filtering.
+        vision["targets"]["seed-service"] = dict(vision["targets"]["served"])
         # r9: a deliberate negative path was counted as a console error. Existing
         # served journeys made only successful requests and never created preview DBs.
         scenario = vision["scenarios"]["scenarios"][0]
+        scenario["actions"].insert(0, dict(id="seed", http=dict(target="seed-service", method="POST", path="/seed", json=dict(note="Seeded"), statusEquals=200)))
+        scenario["actions"].insert(1, dict(id="seed-check", process=dict(argv=[sys.executable, "-B", "-c", "import json; from pathlib import Path; print(json.loads(Path('seed.json').read_text())['note'])"])))
+        scenario["observe"].extend([dict(action="seed"), dict(action="seed-check", exitEquals=0, stdoutEquals="Seeded\n"), dict(path="seed.json", fileJsonEquals=dict(saved=True, note="Seeded"))])
+        journey["steps"][1:1] = [dict(op="click", locator=dict(selector="#read-seed")), dict(op="assertVisible", locator=dict(text="Seeded"))]
+        # R3: a native form redirect completes without an exposed response body.
+        # Earlier empty-body/truncation journeys never exercised browser redirects.
+        journey["steps"][3:3] = [dict(id="formpost", op="click", locator=dict(selector="#post-redirect"), expectedErrors=[dict(method="POST", path="/submit", statusEquals=302)]), dict(op="assertFragment", fragment="#posted")]
+        scenario["observe"].append(dict(path="submission.json", fileJsonEquals=dict(note=["Posted"])))
         scenario["actions"].append(dict(id="api", http=dict(target="served", method="GET", path="/api/state", statusEquals=200, jsonEquals=dict(saved=True, note="Tea"))))
         scenario["observe"].append(dict(action="api"))
         scenario["observe"].append(dict(path="state.json", fileJsonEquals=dict(saved=True, note="Tea")))
@@ -2701,7 +2896,23 @@ def test_golden_path(tmp_path, request, surface):
             dict(id="overconsume", op="click", locator=dict(selector="#overconsume"), expectedErrors=[dict(method="GET", path="/overconsume", statusEquals=409)]),
             dict(op="assertVisible", locator=dict(text="Rejected")),
             dict(op="request", request=dict(method="GET", path="/preview-db", statusEquals=200)),
+            # r11: null-body HTTP crashed before any judgment; status-only coverage
+            # also lost successful declarations and their actual abort diagnostics.
+            dict(id="delete", op="click", locator=dict(selector="#delete"), expectedErrors=[dict(method="DELETE", path="/api/state", statusEquals=204)]),
+            dict(op="assertVisible", locator=dict(text="Deleted")),
+            dict(op="request", request=dict(method="DELETE", path="/api/state", statusEquals=204)),
+            dict(op="request", request=dict(method="HEAD", path="/index.html", statusEquals=200)),
+            dict(op="request", request=dict(method="GET", path="/reset", statusEquals=205)),
+            dict(op="request", request=dict(method="GET", path="/cached", statusEquals=304)),
+            dict(id="empty", op="click", locator=dict(selector="#empty"), expectedErrors=[dict(method="GET", path="/empty", statusEquals=204)]),
+            dict(op="assertVisible", locator=dict(text="Deleted")),
+            dict(id="cached", op="click", locator=dict(selector="#cached"), expectedErrors=[dict(method="GET", path="/cached", statusEquals=304)]),
+            dict(op="assertVisible", locator=dict(text="Cached")),
         ])
+        # Read back persistence after deletion, rather than asking the product to
+        # change its DELETE contract to fit the observer.
+        scenario["actions"][-1]["http"]["jsonEquals"] = dict(saved=False)
+        scenario["observe"][-1] = dict(path="state.json", fileAbsent=True)
         for n in captured_run["nodes"]:
             if n["kind"] == "bead":
                 n["fields"]["ownedFiles"].append("serve.py")
@@ -3123,7 +3334,9 @@ def test_golden_path(tmp_path, request, surface):
                 roots = saved["beads"]["C"]["integrated"]["root"]
                 judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
                                 dict(repo=roots, check="execution"))
-                while not job["run"].get("semanticValidation") and time.time() < deadline:
+                while (job["status"] not in {"failed", "completed"}
+                       and (not job["run"].get("semanticValidation") or job["status"] != "pending-judgment")
+                       and time.time() < deadline):
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 assert job["status"] == "pending-judgment", job
                 saved = json.loads(Path(job["run"]["recordPath"]).read_text("utf-8"))
@@ -3132,7 +3345,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert saved["semanticContracts"]["state"] == "RED"
                 assert saved["semanticValidation"]["state"] == "pending-judgment"
                 roots = saved["beads"]["B"]["integrated"]["root"]
-                assert any(a["checks"].get("textContrastAA", False) is None
+                assert any(a.get("checks", {}).get("textContrastAA", False) is None
                            for r in saved["semanticValidation"]["results"] for a in r["actions"].values())
                 for check in ("textContrastAA", "execution"):
                     judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
@@ -3190,19 +3403,22 @@ def test_golden_path(tmp_path, request, surface):
                 retained = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
                 proof = retained["semanticValidation"]["results"]
                 actions = [a for r in proof for a in r["actions"].values() if a.get("browserMode")]
-                assert all(a["browserMode"] in {"normal", "single-process"} for a in actions)
-                modes = [a["browserMode"] for a in actions]
-                if "single-process" in modes:
-                    assert set(modes[modes.index("single-process"):]) == {"single-process"}, modes
+                assert actions and all(a["browserMode"] == "normal" for a in actions)
                 served = [a for a in actions if a.get("server")]
                 assert len(served) == 1, actions
                 api = proof[0]["actions"]["api"]
-                assert api["http"][0]["response"]["json"] == {"saved": True, "note": "Tea"}
+                assert api["http"][0]["response"]["json"] == {"saved": False}
                 assert api["server"]["stopped"] and not api.get("browserMode")
                 assert served[0]["server"]["ready"] and served[0]["server"]["stopped"]
                 assert served[0]["http"][0]["response"]["json"] == {"saved": True, "note": "Tea"}
                 assert served[0]["checks"]["consoleErrors"] == 0
-                assert served[0]["responses"] == [dict(step="overconsume", url=served[0]["server"]["origin"] + "/overconsume", status=409, expected=True)]
+                assert [(r["step"], r["status"], Path(r["body"]["path"]).read_text() if r["body"] else None) for r in served[0]["responses"] if r["expected"]] == [("formpost", 302, None), ("overconsume", 409, "{}"), ("delete", 204, ""), ("empty", 204, ""), ("cached", 304, "")]
+                assert any(r["status"] == 302 and r.get("bodyDiagnostic") for r in served[0]["responses"]), served[0]
+                assert any(r["url"].split("#", 1)[0].endswith("/index.html") and r["body"] and Path(r["body"]["path"]).stat().st_size > 16384 for r in served[0]["responses"])
+                assert sum(r["method"] == "DELETE" for r in served[0]["responses"]) == 1
+                assert all(Path(r["body"]["path"]).read_bytes() == b"" for r in served[0]["responses"] if r["status"] == 204)
+                assert any(r["step"] == "empty" and r.get("transportDiagnostic") for r in served[0]["responses"]), served[0]
+                assert [(r["response"]["status"], r["response"]["body"]) for r in served[0]["http"][2:]] == [(204, ""), (200, ""), (205, ""), (304, "")]
                 assert served[0]["http"][1]["response"]["json"]["exists"] is True
                 assert any(a["url"].startswith("file://") for a in actions)
                 assert all(r["cleanup"]["quiescenceVerified"] and r["cleanup"]["activeProcessesAfterTeardown"] == 0 for r in proof)
@@ -3224,26 +3440,45 @@ def test_golden_path(tmp_path, request, surface):
                 from copy import deepcopy
                 negative = deepcopy(vision["scenarios"])
                 negative["scenarios"] = negative["scenarios"][:1]
-                negative["scenarios"][0]["actions"] = negative["scenarios"][0]["actions"][:1]
+                negative["scenarios"][0]["actions"] = [next(a for a in negative["scenarios"][0]["actions"] if a["id"] == "a1")]
                 negative["scenarios"][0]["observe"] = negative["scenarios"][0]["observe"][:1]
+                negative["scenarios"][0]["actions"][0]["web"]["steps"] = [s for s in journey["steps"] if s["op"] == "open" or s.get("id") == "overconsume"]
                 negative["scenarios"][0]["actions"][0]["web"]["steps"].extend([
                     dict(id="happy409", op="click", locator=dict(selector="#happy")),
                     dict(op="assertVisible", locator=dict(text="Happy")),
                     dict(id="negative500", op="click", locator=dict(selector="#broken"), expectedErrors=[dict(method="GET", path="/broken", statusEquals=500)]),
                     dict(op="assertVisible", locator=dict(text="Broken")),
                     dict(id="happy500", op="click", locator=dict(selector="#failed-happy")),
-                    dict(op="assertVisible", locator=dict(text="Failed happy"))])
+                    dict(op="assertVisible", locator=dict(text="Failed happy")),
+                    dict(id="disconnect", op="click", locator=dict(selector="#disconnect")),
+                    dict(op="assertVisible", locator=dict(text="Disconnected")),
+                    # P1: headers are not completion, including a declared error.
+                    # Existing HTTP failures never truncated a response body.
+                    dict(id="truncated200", op="click", locator=dict(selector="#truncated200")),
+                    dict(op="assertVisible", locator=dict(text="Truncated 200")),
+                    dict(id="truncated409", op="click", locator=dict(selector="#truncated409"), expectedErrors=[dict(method="GET", path="/truncated409", statusEquals=409)]),
+                    dict(op="assertVisible", locator=dict(text="Truncated 409"))])
                 failed = observe(negative, worker_root, vision["targets"], "validation")[0]
                 assert failed["state"] == "FAIL" and failed["cleanup"]["quiescenceVerified"], failed
-                assert [(r["step"], r["status"], r["expected"]) for a in failed["actions"].values() for r in a["responses"]] == [
-                    ("overconsume", 409, True), ("happy409", 409, False), ("negative500", 500, True), ("happy500", 500, False)]
+                assert failed["actions"]["a1"]["checks"]["consoleErrors"] == 5, failed
+                assert [(r["step"], r["status"], r["expected"]) for a in failed["actions"].values() for r in a["responses"] if r["status"] and r["status"] >= 400] == [
+                    ("overconsume", 409, True), ("happy409", 409, False), ("negative500", 500, True), ("happy500", 500, False), ("truncated409", 409, True)]
+                assert {r["status"] for r in failed["actions"]["a1"]["responses"] if (r.get("step") or "").startswith("truncated") and (r.get("bodyDiagnostic") or r.get("transportDiagnostic"))} == {200, 409}, failed
+                assert any(r["step"] == "disconnect" and r["status"] is None and r["transportDiagnostic"] for r in failed["actions"]["a1"]["responses"])
                 before_preview = subprocess.check_output(["git", "status", "--porcelain"], cwd=worker_root)
                 from codex_harness.core.planner_candidate import observation_files
                 before_files = observation_files(worker_root)
+                # A finished adapter must exit despite a referenced event-loop
+                # handle. Previously the preview had no such handle, hiding an
+                # implicit lifetime that could wait until the outer watchdog.
+                keepalive = tools / "keep-node-open.cjs"
+                keepalive.write_text("setInterval(() => {}, 1000);\n", encoding="utf-8")
+                preview_env = dict(os.environ, NODE_OPTIONS=(os.environ.get("NODE_OPTIONS", "")
+                    + " --require " + json.dumps(keepalive.as_posix())).strip())
                 preview_started = time.time()
                 preview = subprocess.Popen(
                     ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                    cwd=worker_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    cwd=worker_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=preview_env)
                 try:
                     # P2: headless preview must finish and reap its launcher/child
                     # server without an outer Job or any desktop window control.
@@ -3251,14 +3486,30 @@ def test_golden_path(tmp_path, request, surface):
                     assert preview.returncode == 0, errors
                     completion = json.loads(output)
                     assert completion["state"] == "pending-judgment", completion
-                    observed = completion["actions"]["preview"]
+                    assert set(completion["actions"]) == {a["id"] for a in scenario["actions"]}, completion
+                    assert completion["actions"]["seed"]["http"][0]["request"]["json"] == dict(note="Seeded")
+                    assert completion["actions"]["seed-check"]["stdout"].replace("\r\n", "\n") == "Seeded\n"
+                    assert all(o["passed"] is not False for o in completion["observations"]), completion
+                    observed = completion["actions"]["a1"]
+                    assert len(observed["steps"]) == len(journey["steps"]), completion
+                    assert observed["checks"]["consoleErrors"] == 0
+                    # Named previews previously opened a desktop page and erased
+                    # screenshots; check retained phone pixels and actual flow.
+                    import struct
+                    for artifact in observed["artifacts"]:
+                        png = Path(artifact["path"])
+                        assert png.is_relative_to(worker_root.parent / "evidence") and not png.is_relative_to(worker_root)
+                        data = png.read_bytes()
+                        assert hashlib.sha256(data).hexdigest() == artifact["sha256"]
+                        assert struct.unpack('>I', data[16:20])[0] == 375
+                    assert "Deleted" in observed["rendered"]["text"]
                     assert observed["url"].startswith("http://127.0.0.1:") and observed["server"]["ready"], observed
                     assert "HeadlessChrome/" in observed["userAgent"], observed
                     cleanup = completion["cleanup"]
                 finally:
                     if preview.poll() is None:
                         preview.communicate(timeout=135)  # The preview's own bounded owner ends it.
-                assert observed["browserMode"] in {"normal", "single-process"}
+                assert observed["browserMode"] == "normal"
                 assert cleanup["backend"] == "windows-job" and cleanup["membershipVerifiedBeforePayload"]
                 assert cleanup["quiescenceVerified"]
                 assert cleanup["activeProcessesAfterTeardown"] == 0

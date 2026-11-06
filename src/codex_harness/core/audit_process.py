@@ -158,7 +158,7 @@ class _WindowsJob:
         if not member.value:
             raise OSError("Audit bootstrap Job membership unverified; payload not released")
 
-    def active(self, *, activity=False):
+    def active(self):
         value = self.accounting_type()
         self._call(
             "QueryInformationJobObject",
@@ -168,7 +168,7 @@ class _WindowsJob:
             ctypes.sizeof(value),
             None,
         )
-        return (value.total, value.times[0], value.times[1]) if activity else value.active
+        return value.active
 
     def finish(self, process, control):
         control["teardownStarted"] = True
@@ -207,7 +207,7 @@ class _WindowsJob:
 
 
 def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdin,
-                          stop_when, stall_seconds, stdout, stderr, shell, on_launch):
+                          stop_when, stdout, stderr, shell, on_launch):
     import signal
 
     control = dict(backend="posix-process-group", membershipVerifiedBeforePayload=False,
@@ -217,35 +217,7 @@ def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdi
     with ExitStack() as files:
         if capture_output:
             stdout, stderr = files.enter_context(TemporaryFile()), files.enter_context(TemporaryFile())
-        if sys.platform == "darwin":
-            class Usage(ctypes.Structure):
-                # Apple's rusage_info_v0: UUID, user/system time, eight other uint64 fields.
-                _fields_ = [("uuid", ctypes.c_ubyte * 16), ("user", ctypes.c_uint64),
-                            ("system", ctypes.c_uint64), ("other", ctypes.c_uint64 * 8)]
-            libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-            libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-            libproc.proc_pid_rusage.restype = ctypes.c_int
-
-        def cpu(pid):
-            try:
-                if sys.platform.startswith("linux"):
-                    with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
-                        fields = stat.read().rsplit(")", 1)[1].split()
-                    return int(fields[11]) + int(fields[12])  # utime/stime kernel ticks.
-                if sys.platform == "darwin":
-                    usage = Usage()
-                    if libproc.proc_pid_rusage(pid, 0, ctypes.byref(usage)):
-                        code = ctypes.get_errno()
-                        raise OSError(code, os.strerror(code))
-                    return usage.user + usage.system
-                raise OSError("Audit CPU observation requires Linux or macOS")
-            except OSError as error:
-                if error.errno not in {2, 3}:  # Member exited during the snapshot.
-                    raise
-                return None
-
         def members():
-            # ps supplies membership only; its rounded CPU time misses quiet work.
             rows = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,stat="],
                 capture_output=True, text=True, timeout=1, check=True).stdout.splitlines()
             return tuple(int(pid) for pid, pgid, state in map(str.split, rows)
@@ -266,22 +238,10 @@ def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdi
                     process.stdin.close()
                 if on_launch:
                     on_launch(process.pid)
-                last_progress, next_check, previous = time.monotonic(), 0, None
                 while not exited() and time.monotonic() < deadline:
                     if stop_when and (reason := stop_when()):
                         control["stopReason"] = reason
                         break
-                    now = time.monotonic()
-                    if stall_seconds is not None and now >= next_check:
-                        next_check = now + 0.2
-                        observed = (tuple((pid, cpu(pid)) for pid in members()), tuple(
-                            (os.fstat(f.fileno()).st_size, os.fstat(f.fileno()).st_mtime_ns)
-                            for f in (stdout, stderr) if f is not None and hasattr(f, "fileno")))
-                        if observed != previous:
-                            previous, last_progress = observed, now
-                        if now - last_progress >= stall_seconds:
-                            control["stopReason"] = "worker-stalled"
-                            break
                     time.sleep(0.01)
                 timed_out = not exited() and time.monotonic() >= deadline
             finally:
@@ -334,20 +294,19 @@ def run_audit_process(
     env=None,
     stdin=subprocess.DEVNULL,
     stop_when=None,
-    stall_seconds=120,
     stdout=None,
     stderr=None,
     shell=False,
     on_launch=None,
 ):
-    """Run a noninteractive audit; preserve any explicitly supplied stdin file or pipe."""
+    """Collect closed output after exit/cancellation/deadline, never infer exit from silence."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
     if stdin is None:
         stdin = subprocess.DEVNULL
     if sys.platform != "win32":
         return _run_portable_process(args, cwd=cwd, capture_output=capture_output, text=text,
             timeout=timeout, env=env, stdin=stdin, stop_when=stop_when,
-            stall_seconds=stall_seconds, stdout=stdout, stderr=stderr, shell=shell, on_launch=on_launch)
+            stdout=stdout, stderr=stderr, shell=shell, on_launch=on_launch)
     if sys.implementation.name != "cpython":
         raise OSError("Windows audit containment requires CPython")
     import msvcrt
@@ -453,23 +412,11 @@ def run_audit_process(
             gate.write(config)
         control["payloadReleased"] = True
         deadline = time.monotonic() + timeout
-        last_progress, next_check, previous = time.monotonic(), 0, None
         while not records and "status" in channels and time.monotonic() < deadline:
             pump()
             if not records and stop_when and (reason := stop_when()):
                 control["stopReason"] = reason
                 break
-            now = time.monotonic()
-            if not records and stall_seconds is not None and now >= next_check:
-                next_check = now + 0.2
-                observed = (job.active(activity=True), len(buffers["stdout"]), len(buffers["stderr"]),
-                            tuple((os.fstat(f.fileno()).st_size, os.fstat(f.fileno()).st_mtime_ns)
-                                  for f in (stdout, stderr) if f is not None))
-                if observed != previous:
-                    previous, last_progress = observed, now
-                if now - last_progress >= stall_seconds:
-                    control["stopReason"] = "worker-stalled"
-                    break
             time.sleep(0.005)
         timed_out = not records and time.monotonic() >= deadline
         record = records[0] if records else None
