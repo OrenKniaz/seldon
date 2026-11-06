@@ -2549,6 +2549,58 @@ def provider_host(mode, workspace, surface, job_id=None):
         raise SystemExit(1 if result["status"] == "failed" else 0)
 
 
+@pytest.fixture
+def http_journeys(tmp_path):
+    """Overlap independent HTTP journeys; require their assertions and owned cleanup.
+
+    Separate interpreters isolate provider monkeypatches, workspaces and ports.
+    A failed child or unfinished process tree must fail the enclosing CLI case.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from codex_harness.core.audit_process import run_audit_process
+
+    stop = threading.Event()
+
+    def run_http(name, semantic, ready):
+        started = time.monotonic()
+        workspace = tmp_path.parent / (tmp_path.name + "-" + name)
+        try:
+            completed = run_audit_process(
+                [sys.executable, "-B", str(Path(__file__).resolve()), "http-golden",
+                 str(workspace), str(int(semantic))],
+                cwd=ROOT, timeout=600, stall_seconds=None, stop_when=stop.is_set,
+                on_launch=lambda _: ready.set())
+            if completed.returncode:
+                workspace.mkdir(parents=True, exist_ok=True)
+                failure_log = workspace / "journey-failure.log"
+                output = "=== stdout ===\n" + completed.stdout + "\n=== stderr ===\n" + completed.stderr
+                failure_log.write_text(output, encoding="utf-8")
+                tail = "\n".join(output.splitlines()[-60:])
+                assert completed.returncode == 0, f"{name}: full output: {failure_log}\nLast 60 lines:\n{tail}"
+            assert completed.audit_control["quiescenceVerified"]
+            assert completed.audit_control["activeProcessesAfterTeardown"] == 0
+            print(completed.stdout, file=sys.stderr, end="", flush=True)
+            print(f"golden {name}: seconds={time.monotonic() - started:.2f}", file=sys.stderr, flush=True)
+        finally:
+            ready.set()  # Also wake setup if launch failed; future.result retains that failure.
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = []
+        try:
+            for name, semantic in (("http-journey", False), ("shelflife-scenarios", True)):
+                ready = threading.Event()
+                future = pool.submit(run_http, name, semantic, ready)
+                pending.append(future)
+                assert ready.wait(60), f"HTTP journey did not start: {name}"
+                if future.done():
+                    future.result()
+            yield
+            for future in pending:
+                future.result()
+        finally:
+            stop.set()
+
+
 @pytest.mark.parametrize("surface", ["cli", "web"])
 def test_golden_path(tmp_path, request, surface):
     """Protect idea→root product→accepted with three plain user decisions.
@@ -2586,13 +2638,12 @@ def test_golden_path(tmp_path, request, surface):
     An unapproved worker model instead yields one reusable subject-diff card.
     """
     if surface == "cli":
+        request.getfixturevalue("http_journeys")
         cold_start_golden(tmp_path.parent / (tmp_path.name + "-cold-start"))
         planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
         judgment_contract_golden(tmp_path.parent / (tmp_path.name + "-judgment-contract"))
         execution_judgment_golden(tmp_path.parent / (tmp_path.name + "-execution-judgment"))
         trace_contract_golden(tmp_path.parent / (tmp_path.name + "-trace-contract"))
-        http_golden(tmp_path / "http-journey")
-        http_golden(tmp_path / "shelflife-scenarios", semantic=True)
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
         from codex_harness.core.semantic_runner import run as observe
@@ -3375,4 +3426,7 @@ def test_golden_path(tmp_path, request, surface):
 
 
 if __name__ == "__main__":
-    provider_host(*sys.argv[1:])
+    if sys.argv[1] == "http-golden":
+        http_golden(Path(sys.argv[2]), semantic=bool(int(sys.argv[3])))
+    else:
+        provider_host(*sys.argv[1:])

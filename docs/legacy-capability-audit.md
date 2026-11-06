@@ -1,5 +1,29 @@
 # Legacy capability audit for the local Seldon extraction
 
+STAGE-SPEED1 (C14/C18/C24/C26, I4/I5/I6/I9): TRIAGE DESIGN — the CLI golden
+serialized independent legacy HTTP, ShelfLife and CLI journeys. Baseline gate:
+18 CLI/guard cases 637.14s + isolated web 216.14s; 19/19 GREEN. The golden
+fixture now overlaps the two unchanged HTTP journeys with CLI in separate
+interpreters/sibling scratch workspaces, using the existing Windows Job owner and requiring
+successful exits plus verified quiescence. Cold-start entries, fault twins,
+assertions, product deadlines, production code and isolated web are unchanged.
+Owner: test_golden_path.py. Exit: two consecutive complete gates <=540s GREEN;
+exact results in ../stage-speed1-report.md. ShelfLife real-provider activity is
+unknown: command-line inspection was denied; pre-existing provider processes
+were visible. This is dev-gate evidence only, with no product-acceptance claim.
+The initial concurrent candidate nested mutable helper workspaces under the
+main product and correctly failed acceptance-revision-changed (473.43s, RED).
+Sibling roots supersede that isolation error without relaxing freshness checks.
+R2 supersedes any stability inference from the earlier passing gate: CC's
+confirmation passed 19/19 in 444s, then its loaded-machine publish gate failed
+the ShelfLife child with exit 1 and pytest-truncated output. Failed children now
+retain complete stdout/stderr in their own journey-failure.log; the assertion
+names that file and prints its last 60 lines. The failed publish workspace
+denies this session access; a readable retained copy is requested. Its cause
+remains unestablished, so passing diagnostic gates do not clear that defect.
+R2 exit: diagnose/fix that failure and three consecutive full GREEN gates <=540s;
+no retry, deadline change, assertion weakening or production change.
+
 HOT1 (C14/C20/C24/C26, I6/I9): TRIAGE DESIGN — shared provider context
 data belonged to roundtable orchestration, closing the approvals → planner_jobs
 → dispatch → worker_packet → roundtable cycle during ShelfLife r10 init.
