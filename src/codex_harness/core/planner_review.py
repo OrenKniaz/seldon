@@ -52,11 +52,8 @@ def delivery_review_selection(fields):
 
 
 def authorized_acceptance_reviewers(store, reviewers):
-    selected = (
-        approvals.require_approval(store, "B")["subject"]["reviewers"]
-        if reviewers is None
-        else list(reviewers)
-    )
+    approved = approvals.require_approval(store, "B")
+    selected = approved["subject"]["reviewers"] if reviewers is None else list(reviewers)
     acceptance_reviewers(selected)
     return selected
 

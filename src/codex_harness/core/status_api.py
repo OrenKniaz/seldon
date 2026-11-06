@@ -1,9 +1,11 @@
 """Read-only views of canonical plan status and recorded dispatch receipts."""
 
+import json
 import sqlite3
 import tomllib
 from pathlib import Path
 
+from codex_harness.core import planner_jobs
 from codex_harness.core.plan_store import open_plan_store_readonly
 from codex_harness.core.planner_consent_views import status_next
 from codex_harness.core.planner_guidance import planning_turn
@@ -20,6 +22,22 @@ def plan_status(store):
     if not store._data()["nodes"]:
         return result
     spine = store.spine()
+    result["continuedPlanChanges"] = []
+    if consent := store._current_approval("B"):
+        changes = store.connection.execute(
+            "SELECT kind,payload_json "
+            "FROM events WHERE (kind IN ('node-upserted','node-removed','spine-imported','protected-test-revised','wave-refinement-applied') OR json_type(payload_json,'$.nodeRevisions') IS NOT NULL) "
+            "AND id > (SELECT id FROM events WHERE kind='confirmation-requested' "
+            "AND json_extract(payload_json,'$.request_id')=?) ORDER BY 1", (consent["request_id"],))
+        previous = consent["subject"]["scope"].get("files", {})
+        files = planner_jobs.execution_inputs(store)["files"]
+        updates = {path for path in previous.keys() | files.keys() if previous.get(path) != files.get(path)}
+        for kind, raw in changes:
+            payload = json.loads(raw)
+            updates.update(payload.get("editedNodeIds", [payload.get("id", payload.get("nodeId", kind))]))
+            for key in ("affectedBeads", "affectedTests", "affectedWaves", "impactedRequirementIds"):
+                updates.update(payload.get("impact", {}).get(key, []))
+        result["continuedPlanChanges"] = sorted(updates)
     visions = spine.ids("vision")
     if visions:
         vision = spine.node(visions[0])

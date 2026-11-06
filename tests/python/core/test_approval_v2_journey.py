@@ -79,6 +79,19 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         assert not reply["isError"], reply
         return reply
 
+    def refresh_scope_refs():
+        # Refresh pinned trace references through the writer, then judge that
+        # metadata repair separately from the changed requirement obligation.
+        from codex_harness.core.approvals import intent_assessment
+        vision = store.spine().node("V1")
+        for scenario in vision["fields"]["scenarios"]["scenarios"]:
+            scenario["requirementRefs"] = [f"R@{store.spine().revision('R')}" if ref.split("@", 1)[0] == "R" else ref
+                                           for ref in scenario["requirementRefs"]]
+        call("harness_upsert_node", node=vision)
+        scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"],
+            intent_assessment(store, vision, prepare=False), dict(impact="preserved"),
+            rationale="Only current trace pins changed; the scenario's actions and observations are unchanged")
+
     def reopen():
         nonlocal server
         server.close()
@@ -95,7 +108,27 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         return outcome
 
     def approve(request):
+        nonlocal manifest
         kind = request["subject"]["kind"].lower()
+        if journey == "reconnect-b" and kind == "b":
+            # A pending interpretation survives same-subject repairs and reconnect.
+            # Frozen replies used to miss the all-node binding that renewed B.
+            pending = external_reply(server, request)["structuredContent"]
+            decision = store.spine().node("D")
+            decision["text"] += " Keep the existing readback contract during delivery."
+            call("harness_upsert_node", node=decision)
+            manifest = call("harness_compile", include_detail=True)["structuredContent"]
+            options["expected_revision"] = manifest["planRevision"]
+            reopen()
+            confirmations.append(request["gate"])
+            interpreted = scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"],
+                pending["judgment"], dict(decision="approve"))["decision"]
+            assert interpreted["state"] == "pending-judgment" and interpreted["judgment"]["purpose"] == "scope-intent"
+            resumed = scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"],
+                interpreted["judgment"], dict(impact="HOW"),
+                rationale="The decision only reiterates the existing readback contract; it changes no product obligation")
+            assert resumed["decision"]["state"] == "approved"
+            return
         if journey == f"reconnect-{kind}":
             reopen()
         if journey in {f"decline-{kind}", f"change-{kind}"}:
@@ -221,26 +254,53 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         reviewer_node_id="CHOICE",
     )["structuredContent"]
     if journey == "stale-a":
-        # B covers the whole plan: a changed decision must stale an interpretation
-        # even when V1, worker tuples and reviewers are unchanged. The old stale-A
-        # branch only changed the vision and could not catch this missing binding.
+        # Same-ID narrowing must stale an in-flight reply; the earlier candidate
+        # bound only IDs, so its user-decision judgment survived changed obligations.
         pending_b = external_reply(server, b)["structuredContent"]
         assert pending_b["state"] == "pending-judgment" and pending_b["approval_id"] is None
-        decision = store.spine().node("D")
-        decision["text"] += " Preserve the readback contract during delivery."
-        call("harness_upsert_node", node=decision)
+        changed_scope = store.spine().node("R")
+        changed_scope["text"] = "Only print the greeting; exit status is no longer required"
+        call("harness_upsert_node", node=changed_scope)
         stale_b = scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"],
                                    pending_b["judgment"], dict(decision="approve"))
-        assert not stale_b["current"]["positiveCredit"] and not stale_b["current"]["current"]
-        assert stale_b["decision"] is None
-        stale_reply = external_reply(server, b)["structuredContent"]
-        assert stale_reply["state"] == "stale" and stale_reply["approval_id"] is None
+        assert stale_b["decision"]["state"] == "pending-judgment" and stale_b["decision"]["approval_id"] is None
+        stale_b = scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"],
+            stale_b["decision"]["judgment"], dict(impact="WHAT"),
+            rationale="Exit status was part of the displayed product obligation and is now removed")
+        assert stale_b["decision"]["state"] == "stale" and stale_b["decision"]["approval_id"] is None
+        refresh_scope_refs()
         call("harness_compile")
         manifest = store._manifest(store.spine())
         options["expected_revision"] = manifest["planRevision"]
         b = call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options)["structuredContent"]
     approve(b)
+    if journey == "delivery":
+        # An unsure scope judge holds work but offers explicit B. A user's bound
+        # approval must retire that wait, not leave a redundant judgment prompt.
+        narrowed = store.spine().node("R")
+        narrowed["text"] = "Print Hello; the exit-status obligation is optional"
+        call("harness_upsert_node", node=narrowed)
+        refresh_scope_refs()
+        call("harness_compile")
+        pending_scope = next(r for r in call("harness_plan_status")["structuredContent"]["pendingSemanticJudgments"]
+                             if r["question"] == "scope-intent" and r["current"])
+        scope_judge = call("harness_judgment", judgment_id=pending_scope["id"])["structuredContent"]
+        scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"], scope_judge,
+                          {}, verdict="inconclusive")
+        manifest = call("harness_compile", include_detail=True)["structuredContent"]
+        options["expected_revision"] = manifest["planRevision"]
+        b = call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options)["structuredContent"]
+        assert b["scopeJudgment"]["status"] == "pending-judgment" and b["diff"]
+        approve(b)
+        assert not call("harness_judgment", judgment_id=scope_judge["id"])["structuredContent"]["current"]
+        assert scope_judge["id"] not in {r["id"] for r in call("harness_plan_status")["structuredContent"]["pendingSemanticJudgments"]}
     if run22:
+        # Same-ID narrowing shares the one real envelope-change card. Earlier
+        # reviewer renewal never changed the approved obligation's actual content.
+        narrowed = store.spine().node("R")
+        narrowed["text"] = "Print Hello; preserving the exit status is outside this requirement"
+        call("harness_upsert_node", node=narrowed)
+        refresh_scope_refs()
         # Replacement is a real catalog/selection producer, not injected consent.
         replacement = mock_catalog()
         replacement["id"] = "RC-00000000-0000-0000-0000-000000000002"
@@ -261,8 +321,15 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         )
         call("harness_reviewer_choice", node=selection, expected_spine_revision=store._revision())
         call("harness_compile")
+        pending_scope = next(r for r in call("harness_plan_status")["structuredContent"]["pendingSemanticJudgments"]
+                             if r["question"] == "scope-intent" and r["current"])
+        scope_judge = call("harness_judgment", judgment_id=pending_scope["id"])["structuredContent"]
+        scripted_judgment(lambda tool, **args: call(tool, **args)["structuredContent"], scope_judge,
+                          dict(impact="WHAT"), rationale="The exit-status obligation was explicitly removed under the same requirement ID")
+        call("harness_compile")
         manifest = store._manifest(store.spine())
         options["expected_revision"] = manifest["planRevision"]
+        options["workers"] = [dict(worker, model="gpt-6.1-terra") for worker in options["workers"]]
         refused = workspace_wire(
             server,
             "harness_advance",
@@ -275,13 +342,11 @@ def test_canonical_plan_contracts_red_build_validation_pass(
             "harness_prepare_chat_confirmation", gate="plan-execution", execution=options
         )
         b = renewed["structuredContent"]
-        assert b["diff"] and any(d["field"] == "reviewers" for d in b["diff"])
-        conditional = external_reply(server, b, "Approve but use fewer reviews")
-        outcome = interpret(conditional, "changes-requested")
-        assert outcome["state"] == "changes-requested" and not outcome["approval_id"]
-        b = outcome["chatConfirmation"]
+        # One real envelope expansion must survive its pending interpretation;
+        # the other change-b journey already proves refusal/changes-requested.
+        assert {d["field"] for d in b["diff"]} >= {"reviewers", "execution.workers", "scope.nodes.R.text", "scope.digest"}
         assert "Changes from your previous decision" in b["card"]
-        assert call("harness_prepare_chat_confirmation", gate="plan-execution")["structuredContent"]["card"] == b["card"]
+        assert call("harness_prepare_chat_confirmation", gate="plan-execution")["structuredContent"]["request_id"] == b["request_id"]
         approve(b)
     call("harness_advance", to_phase="roundtable")
     (store.workspace / "sample.json").write_text(json.dumps(manifest))
@@ -436,7 +501,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(
         assert confirmations == (["clarification"] if clarification else []) + [
             "align+vision-lock",
             "plan-execution",
-            *(["plan-execution"] if run22 else []),
+            *(["plan-execution"] if run22 or journey == "delivery" else []),
             "accept",
         ]
         requests = [

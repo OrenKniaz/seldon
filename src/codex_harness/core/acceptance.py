@@ -18,7 +18,7 @@ from uuid import uuid4
 from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import review_instructions, roundtable
 from codex_harness.core import spine as plan_spine
-from codex_harness.core.approvals import fingerprint, require_approval
+from codex_harness.core.approvals import catalog_status, fingerprint
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.semantic_runner import SOURCE_IGNORED, web_toolchain
@@ -1026,7 +1026,7 @@ def _prepare_acceptance_review(
     evidence = _candidate_evidence(store, repo, run, **support_args)
     included_header = (
         f"## Review tier: {roundtable.review_tier(selected)}; "
-        f"catalog: {require_approval(store, 'B')['subject']['catalog']}\n\n"
+        f"catalog: {catalog_status(store)}\n\n"
         "## Packet contents\n\nIncluded: locked vision/plan, protected tests and template-local "
         "imports, scenarios/results, manifest-owned candidate source and finding dispositions. "
         "Shards name feature slices; oversized bodies are marked. Unowned/non-source/config files, "

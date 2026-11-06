@@ -768,6 +768,13 @@ def http_golden(workspace, semantic=False):
                 scripted_judgment(call, judgment, dict(impact="preserved"))
         return reply.get("structuredContent", {})
 
+    def scope_how(rationale):
+        call("harness_compile", include_detail=True)
+        pending = next(r for r in call("harness_plan_status")["pendingSemanticJudgments"]
+                       if r["question"] == "scope-intent" and r["current"])
+        judgment = call("harness_judgment", judgment_id=pending["id"])
+        scripted_judgment(call, judgment, dict(impact="HOW"), rationale=rationale)
+
     def yes(card):
         decisions.append(card["gate"])
         reply = record(server, card, "Yes")
@@ -780,9 +787,11 @@ class API(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'shelf')
+        self.wfile.write(response_body().encode())
     def log_message(self, *args):
         pass
+def response_body() -> str:
+    return b'shelf'.decode()
 server = ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), API)
 print(server.server_port, flush=True)
 server.serve_forever()
@@ -835,6 +844,7 @@ def simultaneous():
 """
     opaque = """import unittest
 from helpers import simultaneous
+from test_status import HTTP as ReadinessHTTP
 class ConcurrentHTTP(unittest.TestCase):
     def test_simultaneous_requests(self):
         self.assertEqual(simultaneous(), [(200, b'shelf')] * 4)
@@ -951,13 +961,14 @@ class ConcurrentHTTP(unittest.TestCase):
                 targets={"importer": {"entry": "import_items.py", "argv": []}},
                 scenarios=captured,
             )
-            requirements = [node(f"R{i}", "requirement", ["F"]) for i in range(1, 6)]
+            requirements = [node(f"R{i}", "requirement", ["EXPORT_STORY"]) for i in range(1, 6)]
             owned = ["server.py", "import_items.py", "verify_http.py"]
             nodes = [
                 vision,
                 node("F", "feature", ["V1"]),
+                dict(node("EXPORT_STORY", "story", ["F"]), text="export locally"),
                 *requirements,
-                node("G1", "design", [r["id"] for r in requirements]),
+                dict(node("G1", "design", [r["id"] for r in requirements]), text="export locally"),
                 node(
                     "T_HTTP",
                     "test",
@@ -1082,7 +1093,7 @@ class ConcurrentHTTP(unittest.TestCase):
             template = workspace / "template"
             template.mkdir(exist_ok=True)
             product = product.replace(
-                "self.wfile.write(b'shelf')",
+                "self.wfile.write(response_body().encode())",
                 "import sqlite3\n        from contextlib import closing\n"
                 "        with closing(sqlite3.connect(sys.argv[2])) as db:\n"
                 "            rows = db.execute('select name from items')\n"
@@ -1160,7 +1171,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     node("R_STATUS", "requirement", ["F"], text="Read readiness over HTTP"),
                     node("A", "bead", ["R_STATUS"], ownedFiles=["status.py"], dependsOn=[],
                          lessons=[], proofModule="test_status.py"),
-                    node("T_STATUS", "test", ["R_STATUS"], level="e2e", module="test_status.py"),
+                    node("T_STATUS", "test", ["R_STATUS"], level="semantic", module="test_status.py"),
                     node(
                         "B",
                         "bead",
@@ -1168,9 +1179,12 @@ with TemporaryDirectory(dir=root) as scratch:
                         ownedFiles=["server.py"],
                         dependsOn=[],
                         lessons=[],
-                        proofModule="test_http*.py",
+                        proofModule="test_http.py",
                     ),
-                    node("T", "test", ["R"], level="e2e", module="test_http*.py"),
+                    node("T", "test", ["R", "R_STATUS"], level="e2e", module="test_http_concurrent.py"),
+                    node("first-moment", "acceptance", ["F"], nodeIds=["first-moment"],
+                         given="Both HTTP services start from clean data", steps=[], expect={},
+                         waveBoundaryIntegrationTestId="T", waveBoundaryIntegrationModule="test_http_concurrent.py"),
                 ],
             )
             template = workspace / "template"
@@ -1186,9 +1200,43 @@ with TemporaryDirectory(dir=root) as scratch:
                 (template / name).write_text(content, encoding="utf-8")
             for phase in PHASES[PHASES.index(store.phase()) + 1 : PHASES.index("roundtable")]:
                 call("harness_advance", to_phase=phase)
+        if not semantic:
+            # Report an actual applied wave refinement, not a fabricated event.
+            # Prior consent journeys only used upsert_nodes and missed this writer.
+            def outcome(wid, dependencies):
+                return dict(id=wid, outcome="Both accepted HTTP services remain available", demo="Run the HTTP checks",
+                    requirementIds=["R", "R_STATUS"], featureIds=["F"], storyIds=[], designIds=[], riskIds=[],
+                    exitScenarioIds=["first-moment"], dependsOnWaves=dependencies, incomingContractIds=[], outgoingContractIds=[])
+            obligations = [dict(id="O_" + key, kind=kind,
+                sourceRefs=[dict(id=key, revision=store.spine().revision(key))], waveIds=["first", "later"],
+                criterion="Preserve the accepted HTTP behavior", requiredEvidence=[evidence], requiredForFullVision=True)
+                for key, kind, evidence in (("R", "requirement", "source-test"),
+                    ("R_STATUS", "requirement", "source-test"), ("first-moment", "scenario", "clean-state-product"),
+                    ("V1", "review", "independent-review"))]
+            map_node = node("WAVES", "decision", ["V1"], schema="dot-wave-map-v1", order=["first", "later"],
+                waves=[outcome("first", []), outcome("later", ["first"])], contracts=[],
+                obligations=obligations, globalReviewObligationId="O_V1")
+            detail_nodes = [node("WD1", "design", ["WAVES"], schema="dot-wave-detail-v1", waveId="first",
+                detail="detailed", beadIds=["A", "B"], sketches=[], observedInterfaces=[], verificationObligationIds=[]),
+                node("WD2", "design", ["WAVES"], schema="dot-wave-detail-v1", waveId="later", detail="sketch", beadIds=[],
+                    sketches=[dict(id="SK_HTTP", title="Refine HTTP adapter ownership after observing the service",
+                        ownershipArea="HTTP adapter", requirementIds=["R"], expectedContractIds=[], risks=[],
+                        pendingProducerIds=["B"], detailAfterWaveId="first")], observedInterfaces=[], verificationObligationIds=[])]
+            call("harness_wave_map", map_node=map_node, detail_nodes=detail_nodes,
+                 expected_spine_revision=store._revision())
         choice = json.loads(
             (ROOT / "tests/fixtures/efficiency/jsonkeys-reviewers.json").read_text("utf-8")
         )["choice"]
+        if semantic:
+            # R7 starts with one build; review will re-partition its tests into C.
+            bead = store.spine().node("B")
+            bead["fields"]["dependsOn"] = []
+            call("harness_upsert_node", node=bead)
+            call("harness_remove_node", id="C")
+            # Existing incomplete implementation gives the later test worker a
+            # real assertion RED, rather than a missing-program startup error.
+            (template / "import_items.py").write_text(importer.replace(
+                "if valid(row)", "if valid(row) and row['unit'] and row['expires']"), encoding="utf-8")
         choice["fields"].update(catalogId=None, catalogDigest=None)
         for reviewer in choice["fields"]["reviewers"]:
             reviewer["choiceId"] = None
@@ -1201,7 +1249,7 @@ with TemporaryDirectory(dir=root) as scratch:
             timeout=60 if semantic else 30,
             workers=[
                 dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
-                for b in (("C", "B") if semantic else ("A", "B"))
+                for b in (("B",) if semantic else ("A", "B"))
             ],
         )
         with pytest.MonkeyPatch.context() as patch:
@@ -1228,7 +1276,7 @@ with TemporaryDirectory(dir=root) as scratch:
                                    for k in ("name", "provider", "model", "effort")}
                                   for r in choice["fields"]["reviewers"]]
             refused = workspace_wire(server, "harness_readiness", expected_workspace=str(workspace),
-                                     reviewers=selected_reviewers, beads=["C" if semantic else "B"])
+                                     reviewers=selected_reviewers, beads=["B"])
             assert refused["isError"] and "plan-b-consent-required" in str(refused)
             yes(
                 call(
@@ -1238,6 +1286,21 @@ with TemporaryDirectory(dir=root) as scratch:
                     reviewer_node_id=choice["id"],
                 )
             )
+            if semantic:
+                # Recording observed catalog metadata for the same exact reviewers
+                # must not broaden consent or introduce another B decision.
+                from tests.python.core.plan_store_support import mock_catalog
+                catalog = mock_catalog()
+                catalog["providers"][0]["choices"][0]["effort"]["value"] = "medium"
+                catalog = call("harness_reviewer_catalog", catalog=catalog,
+                               expected_spine_revision=store._revision())["catalog"]
+                choice["fields"].update(catalogId=catalog["id"], catalogDigest=catalog["digest"])
+                for reviewer in choice["fields"]["reviewers"]:
+                    reviewer["choiceId"] = catalog["providers"][0]["choices"][0]["choiceId"]
+                call("harness_reviewer_choice", node=choice, expected_spine_revision=store._revision())
+                scope_how("Catalog provenance now identifies the same reviewers; no product obligation changes")
+                manifest = call("harness_compile", include_detail=True)
+                options["expected_revision"] = manifest["planRevision"]
             if not semantic:
                 # Mixed consent must refuse the entire selection before spending a start.
                 # Earlier refusal tests used all-unapproved rosters and missed orphaned
@@ -1253,7 +1316,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     assert text.count("Next: ") == 1 and "harness_prepare_chat_confirmation gate=plan-execution" in text
                     return len(provider_launches) - before
                 mixed_launches = {"readiness": refuse_mixed("harness_readiness", beads=["B"])}
-            readiness = call("harness_readiness", reviewers=selected_reviewers, beads=["C" if semantic else "B"])
+            readiness = call("harness_readiness", reviewers=selected_reviewers, beads=["B"])
             assert readiness["invalid"] == 0
             if not semantic:
                 interrupted = call("harness_audit", mode="prospective")
@@ -1374,11 +1437,27 @@ with TemporaryDirectory(dir=root) as scratch:
                 uncertain = [r for r in roundtable.findings(store, expand=True) if r["finding"] == "Evidence access unavailable"]
                 assert len(uncertain) == 1 and uncertain[0]["state"] == "closed"
                 assert not call("harness_plan_status", full=True)["reviewResolution"]["blockingOpenFindings"]
-                preliminary = store.spine().node("R2")
-                preliminary["text"] += " Preserve readback while repairing the reviewed plan."
+                # ShelfLife R6: review repairs changed the revision and demanded B
+                # twice. Frozen-plan journeys never consumed a repaired test/command.
+                preliminary = store.spine().node("T_HTTP")
+                preliminary["text"] += " Assert imported rows survive SQLite and HTTP server restart."
+                preliminary["fields"]["execution"]["argv"] = [sys.executable, "-B", "verify_http.py"]
                 call("harness_upsert_node", node=preliminary)
+                # R7: one approved build becomes test-only contracts -> build,
+                # preserving scope, allowed tuple, concurrency and deadline.
+                contracts["fields"].update(ownedFiles=["verify_http.py"], dependsOn=[])
+                contracts["parents"] = ["T_HTTP"]
+                bead["fields"].update(ownedFiles=["server.py", "import_items.py", "verify_http.py"], dependsOn=["C"])
+                call("harness_upsert_nodes", nodes=[contracts, bead])
+                scope_how("Tests-first contracts/build ownership and restart-verifier repairs implement the same accepted local product")
+                options["workers"] = [dict(options["workers"][0], bead=b) for b in ("C", "B")]
+                # Repair the scripted worker's real verifier body too: read the
+                # same persisted rows after stopping and restarting the server.
+                prefix, lifecycle = verifier.split("    server = subprocess.Popen", 1)
+                lifecycle = ("    server = subprocess.Popen" + lifecycle).replace("            print(body)\n", "")
+                verifier = prefix + "    for restart in range(2):\n" + "\n".join(
+                    "    " + line for line in lifecycle.splitlines()) + "\n    print(body)\n"
                 options["expected_revision"] = call("harness_compile", include_detail=True)["planRevision"]
-                yes(call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options, reviewer_node_id=choice["id"]))
             if not semantic:
                 reviewer = choice["fields"]["reviewers"][0]
                 # Protect dossier replacement: accepted A obligations survive B's
@@ -1436,6 +1515,12 @@ with TemporaryDirectory(dir=root) as scratch:
             assert len(reviewed["successfulReviews"]) == 2, reviewed
             assert all(call("harness_judgment", judgment_id=part["judgmentId"])["fixesIssued"] == 0
                        for row in reviewed["reviewers"] for part in row["shardDetails"])
+            if semantic:
+                visible_repair = workspace_wire(server, "harness_plan_status", expected_workspace=str(workspace))
+                assert {"B", "C", "T_HTTP"} <= set(visible_repair["structuredContent"]["continuedPlanChanges"])
+                assert "Continued under existing B; updated:" in visible_repair["content"][0]["text"]
+                assert len([r for r in store.connection.execute("SELECT payload_json FROM events WHERE kind='confirmation-requested'")
+                            if json.loads(r[0])["gate"] == "plan-execution"]) == 1
             # Preserve recorded scope after deleting quota totals: raw SQLite integers
             # previously rendered as unknown; review results alone missed this status consumer.
             visible = workspace_wire(server, "harness_plan_status", expected_workspace=str(workspace), full=True)
@@ -1498,6 +1583,27 @@ with TemporaryDirectory(dir=root) as scratch:
                 amended = store.spine().node("R2")
                 amended["text"] += " HTTP readback must preserve both imported rows."
                 call("harness_upsert_node", node=amended)
+                call("harness_compile", include_detail=True)
+                # Same-ID scope edits previously bypassed B without any meaning
+                # check; frozen-ID consent tests never changed requirement content.
+                before_launches = len(provider_launches)
+                held = workspace_wire(server, "harness_readiness", expected_workspace=str(workspace),
+                                      reviewers=selected_reviewers, beads=["B"])
+                assert held["isError"] and held["refusalCode"] == "pending-judgment", held
+                scope_judge = held["structuredContent"]["scopeJudgment"]
+                assert scope_judge["current"] and scope_judge["question"] == "scope-intent"
+                assert "scope.nodes.R2.text" in {d["field"] for d in held["structuredContent"]["diff"]}
+                scripted_judgment(call, scope_judge, {}, verdict="inconclusive")
+                still_waiting = workspace_wire(server, "harness_readiness", expected_workspace=str(workspace),
+                                              reviewers=selected_reviewers, beads=["B"])
+                assert still_waiting["refusalCode"] == "pending-judgment"
+                assert still_waiting["structuredContent"]["scopeJudgment"]["id"] == scope_judge["id"]
+                assert len(provider_launches) == before_launches
+                scripted_judgment(call, scope_judge, dict(impact="HOW"),
+                    rationale="Both imported rows were already required by the accepted readback scenario; this wording repairs the trace")
+                assert "R2" in call("harness_plan_status")["continuedPlanChanges"]
+                assert len([r for r in store.connection.execute("SELECT payload_json FROM events WHERE kind='confirmation-requested'")
+                            if json.loads(r[0])["gate"] == "plan-execution"]) == 1
                 manifest = call("harness_compile", include_detail=True)
                 options["expected_revision"] = manifest["planRevision"]
                 assert not store.successful_reviews(manifest["planRevision"])
@@ -1525,7 +1631,7 @@ with TemporaryDirectory(dir=root) as scratch:
                 assert current_convergence["id"] in pending_ids
                 assert call("harness_plan_status", full=True)["continuation"]["recommendation"]["kind"] == "judgment_required"
                 scripted_judgment(call, current_convergence, dict(action="ready"))
-                yes(call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options, reviewer_node_id=choice["id"]))
+                assert call("harness_plan_status")["continuedPlanChanges"]
             call("harness_advance", to_phase="publish")
             if semantic:
                 call("harness_publish")
@@ -1546,13 +1652,7 @@ with TemporaryDirectory(dir=root) as scratch:
             if semantic:
                 # C must consume the admitted job's real root delivery. Standalone
                 # dispatch proves scenarios, but never supplies that delivery.
-                contract_sources = {
-                    # The ordinary importer loses rows with optional unit/date fields.
-                    # HTTP readback and row-count expectations expose the missing behavior.
-                    "import_items.py": importer.replace(
-                        "if valid(row)", "if valid(row) and row['unit'] and row['expires']"),
-                    "verify_http.py": verifier,
-                }
+                contract_sources = {"verify_http.py": verifier}
                 (workspace / "scripted-provider.json").write_text(
                     json.dumps(
                         {
@@ -1672,7 +1772,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     "passed"
                 ], run
             else:
-                assert {r["bead"] for r in run["requirementValidation"] if r.get("passed")} == {"A", "B"}, run
+                assert {r["bead"] for r in run["requirementValidation"] if r.get("passed")} == {"A", "B", "integration"}, run
             if not semantic:
                 derived = call("harness_accept_scenarios", derive=True)
                 scenarios = derived["scenarios"]
@@ -1830,7 +1930,9 @@ with TemporaryDirectory(dir=root) as scratch:
             # Before fresh review, changed template bytes grant no credit. Earlier
             # replays restored lineage instead of exercising current judgments.
             template_file = next(path for path in (workspace / "template").rglob("*.py") if path.is_file())
+            original_template = template_file.read_bytes()
             template_file.write_text(template_file.read_text(encoding="utf-8") + "\n# Changed migration review input\n", encoding="utf-8")
+            scope_how("The migration-review template comment changes no executable assertion or product obligation")
             required = call("harness_plan_status", full=True)["reviewResolution"]["findingDispositionPrerequisite"]["members"]
             dispositions = [dict(id=row["id"], status="resolved", resolution="Current execution and review address this retained obligation") for row in required]
             assert store.acceptance_review_guard(refreshed_id) == "acceptance-review-required"
@@ -1856,18 +1958,147 @@ with TemporaryDirectory(dir=root) as scratch:
             assert fresh_c["runId"] == refreshed_id and fresh_c["by"] == "user"
             assert call("harness_judgment", judgment_id=fresh_c["judgmentId"])["positiveCredit"]
             assert store.status()["acceptance"]["accepted"]
-            assert decisions == (["align+vision-lock", "plan-execution", "plan-execution", "plan-execution", "accept"] if semantic
-                                 else ["align+vision-lock", "plan-execution", "accept"])
+            assert decisions == ["align+vision-lock", "plan-execution", "accept"]
             # After completed migration/C, further template drift must stale both
             # review credit and C's canonical judgment; finding holds cannot mask it.
-            template_file.write_text(template_file.read_text(encoding="utf-8") + "\n# Changed after current C\n", encoding="utf-8")
+            retained_template = template_file.read_text(encoding="utf-8")
+            template_file.write_text(retained_template + "\n# Changed after current C\n", encoding="utf-8")
+            scope_how("The additional template comment preserves every approved behavior and acceptance assertion")
             assert store.acceptance_review_guard(refreshed_id) == "acceptance-review-required"
             assert not call("harness_judgment", judgment_id=fresh_c["judgmentId"])["current"]
             assert call("harness_plan_status")["acceptance"]["accepted"] is False
+            if not semantic:
+                from codex_harness.core.acceptance import run_wave_exits
+                from codex_harness.core.spine import SpineError
+                run_dir = Path(job["run"]["recordPath"]).parent.parent
+                with pytest.raises(SpineError, match="Publish the current scope"):
+                    run_wave_exits(store, run_dir, "first")
+                template_file.write_bytes(original_template)
+                scripted_worker(run["beads"]["B"]["prompt"], Path(run["repo"]), {"server.py": source})
+                exits = run_wave_exits(store, run_dir, "first")
+                assert exits["passed"] and all(r["passed"] for r in exits["results"])
+                context = store.prepare_wave_refinement("later", run_dir)
+                interface = next(f"{r['blob']}:{symbol['symbol']}" for r in context["interfaces"]
+                                 for symbol in r["symbols"] if symbol["symbol"] == "response_body")
+                response = dict(schema="dot-wave-refinement-response-v1", contextDigest=context["contextDigest"],
+                    refinements=[dict(sketchId="SK_HTTP", nodes=[
+                        node("T_NEXT", "test", ["R"], level="semantic", module="test_http.py"),
+                        node("NEXT", "bead", ["T_NEXT"], ownedFiles=["http_adapter.py"], dependsOn=["B"],
+                             lessons=[], proofModule="test_http.py")], interfaceRefs=[interface],
+                        reason="Split adapter ownership after observing the actual producer interface",
+                        replacedAssumptions=["Use the observed byte response contract"])], contradictions=[], questions=[])
+                proposal = store.record_wave_refinement(store._revision(), context["contextDigest"], json.dumps(response).encode())
+                assert proposal["state"] == "complete", proposal
+                applied = store.apply_wave_refinement(proposal["proposalId"], store._revision())
+                assert {"NEXT", "T_NEXT", "WD2"} == set(applied["editedNodeIds"])
+                scope_how("The new adapter bead/test and refined wave detail re-partition the same HTTP behavior using its observed interface")
+                visible = workspace_wire(server, "harness_plan_status", expected_workspace=str(workspace))
+                assert {"NEXT", "T_NEXT", "WD2", "later"} <= set(visible["structuredContent"]["continuedPlanChanges"])
+                assert "Continued under existing B; updated:" in visible["content"][0]["text"]
+                assert len([r for r in store.connection.execute("SELECT payload_json FROM events WHERE kind='confirmation-requested'")
+                            if json.loads(r[0])["gate"] == "plan-execution"]) == 1
+                # Node-only consent missed harness_revise_test: real assertion
+                # weakening kept every node unchanged, while admission consumed
+                # different protected bytes. Existing node edits missed this seam.
+                from codex_harness.core.planner_execution import execution_scope, require_execution
+                from codex_harness.core.plan_store import PlanStoreError
+                proof_path = template / "tests/test_http.py"
+                original_source = proof_path.read_text(encoding="utf-8")
+                weaker = original_source.replace("self.assertEqual(response.read(), b'shelf')", "self.assertTrue(response.read())")
+                assert weaker != original_source
+                roster = [dict(options["workers"][0], bead=k) for k in store.spine().ids("bead")]
+                def candidate_scope():
+                    revision = call("harness_compile", include_detail=True)["planRevision"]
+                    return execution_scope(store, revision, roster, max_parallel=1,
+                                           timeout=options["timeout"], _candidate=True)
+                prior_scope = candidate_scope()
+                for source, impact in [(weaker, "WHAT"),
+                    (weaker.replace("def test_status_and_body", "def test_http_response"), "HOW")]:
+                    nodes_before = store.spine().to_dict()
+                    before_source = proof_path.read_bytes().decode("utf-8")
+                    revision = call("harness_compile", include_detail=True)["planRevision"]
+                    call("harness_revise_test", node_id="T_NEXT", path="tests/test_http.py",
+                         expected_manifest_revision=revision,
+                         expected_file_sha256=hashlib.sha256(proof_path.read_bytes()).hexdigest(),
+                         source=source, reason="Scripted planner revises the linked HTTP acceptance check")
+                    assert nodes_before == store.spine().to_dict()
+                    scope = candidate_scope()
+                    with pytest.raises(ValueError, match="worker-execution-inputs-stale"):
+                        require_execution(store, prior_scope)
+                    with pytest.raises(PlanStoreError, match="pending-judgment") as held:
+                        require_execution(store, scope)
+                    question = held.value.approval["scopeJudgment"]
+                    facts = question["sourceRefs"][0]["payload"]["facts"]
+                    assert facts["before"]["files"]["tests/test_http.py"]["content"] == before_source
+                    assert facts["after"]["files"]["tests/test_http.py"]["content"] == source
+                    scripted_judgment(call, question, dict(impact=impact), rationale=(
+                        "Nonempty output replaces the accepted exact shelf response; acceptance is weakened" if impact == "WHAT"
+                        else "Only the test method name changes; the approved assertions and data flow are identical"))
+                    if impact == "WHAT":
+                        with pytest.raises(PlanStoreError, match="plan-b-consent-required"):
+                            require_execution(store, scope)
+                        approved_options = dict(options, workers=roster,
+                            expected_revision=call("harness_compile", include_detail=True)["planRevision"])
+                        card = call("harness_prepare_chat_confirmation", gate="plan-execution", execution=approved_options)
+                        assert "tests/test_http.py" in str(card["diff"]) and "self.assertTrue(response.read())" in str(card["diff"])
+                        assert call("harness_prepare_chat_confirmation", gate="plan-execution", execution=approved_options)["request_id"] == card["request_id"]
+                        yes(card)
+                    else:
+                        assert {"T_NEXT", "tests/test_http.py"} <= set(call("harness_plan_status")["continuedPlanChanges"])
+                    require_execution(store, scope)
+                    assert len([r for r in store.connection.execute("SELECT payload_json FROM events WHERE kind='confirmation-requested'")
+                                if json.loads(r[0])["gate"] == "plan-execution"]) == 2
+                    prior_scope = scope
+                assert decisions == ["align+vision-lock", "plan-execution", "accept", "plan-execution"]
+            else:
+                # Rank-based consent omitted design instructions delivered in
+                # SCENARIOS.json. Frozen requirements and story-only edits missed
+                # both third-party disclosure and ordinary technical refactors.
+                from codex_harness.core.approvals import scope_assessment
+                previous = scope_assessment(store)
+                for node_id, text, impact, cards in [
+                    ("G1", "export locally; split the exporter into two internal modules", "HOW", 1),
+                    ("G1", "upload exports to a third party", "WHAT", 2),
+                    ("EXPORT_STORY", "upload exports to a third party", "WHAT", 3),
+                ]:
+                    assert call("harness_judgment", judgment_id=previous["id"])["current"]
+                    unchanged = {k: store.spine().node(k) for k in store.spine().ids() if k != node_id}
+                    edited = store.spine().node(node_id)
+                    edited["text"] = text
+                    before_launches = len(provider_launches)
+                    call("harness_upsert_node", node=edited)
+                    assert unchanged == {k: store.spine().node(k) for k in unchanged}
+                    options["expected_revision"] = call("harness_compile", include_detail=True)["planRevision"]
+                    assert not call("harness_judgment", judgment_id=previous["id"])["current"]
+                    held = workspace_wire(server, "harness_readiness", expected_workspace=str(workspace),
+                                          reviewers=selected_reviewers, beads=["B"])
+                    assert held["refusalCode"] == "pending-judgment" and len(provider_launches) == before_launches
+                    previous = held["structuredContent"]["scopeJudgment"]
+                    scripted_judgment(call, previous, dict(impact=impact), rationale=(
+                        "Only internal module boundaries change; local export obligations remain identical" if impact == "HOW"
+                        else "Local export now discloses data to a third party despite unchanged generic feature/requirement text"))
+                    options["expected_revision"] = call("harness_compile", include_detail=True)["planRevision"]
+                    if impact == "WHAT":
+                        held = workspace_wire(server, "harness_readiness", expected_workspace=str(workspace),
+                                              reviewers=selected_reviewers, beads=["B"])
+                        assert held["refusalCode"] == "plan-b-consent-required" and len(provider_launches) == before_launches
+                        card = call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options)
+                        assert f"scope.nodes.{node_id}.text" in {d["field"] for d in card["diff"]}
+                        assert call("harness_prepare_chat_confirmation", gate="plan-execution", execution=options)["request_id"] == card["request_id"]
+                        yes(card)
+                    else:
+                        assert node_id in call("harness_plan_status")["continuedPlanChanges"]
+                    call("harness_readiness", reviewers=selected_reviewers, beads=["B"])
+                    assert len(provider_launches) == before_launches + len(selected_reviewers)
+                    assert all(text in launch.stdin_text for launch in provider_launches[before_launches:])
+                    assert len([r for r in store.connection.execute("SELECT payload_json FROM events WHERE kind='confirmation-requested'")
+                                if json.loads(r[0])["gate"] == "plan-execution"]) == cards
+                assert decisions == ["align+vision-lock", "plan-execution", "accept", "plan-execution", "plan-execution"]
+                assert not store.status()["acceptance"]["accepted"]  # New third-party work is unbuilt.
             print(
                 "golden ShelfLife: malformed two-fix/steer; negative minor/conflict pending; actual-delta reuse; importer/SQLite/HTTP RED->GREEN; fresh C accepted; template drift held"
                 if semantic
-                else "golden http: decisions=3; HTTP + concurrency RED->GREEN; fresh C accepted; template drift held"
+                else "golden http: original A/B/C; file WHAT approved; HOW reported; HTTP + concurrency RED->GREEN; template drift held"
             )
     finally:
         server.close()
@@ -2146,6 +2377,9 @@ def test_golden_path(tmp_path, request, surface):
     Replay ShelfLife's dependency-free build with worker tests+code through C;
     its new assertion helper and fixture must reach the RED baseline as one bundle.
     Refuse multiple builds under DV2, then replan to contracts→single build→C.
+    ShelfLife R6: same-subject test/command and catalog repairs retain B through
+    review, execution and C; frozen-plan journeys missed revision-bound churn.
+    An unapproved worker model instead yields one reusable subject-diff card.
     """
     if surface == "cli":
         planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
@@ -2543,7 +2777,7 @@ def test_golden_path(tmp_path, request, surface):
             assert "reviewAllowance" not in b["card"] and "callCap" not in b["card"]
             assert all(r["name"] in b["card"] and r["model"] in b["card"] for r in reviewers)
             assert "up to 10 reviews" not in b["card"]
-            assert b["subject"]["catalog"] == "unverified"
+            assert b["catalog"] == "unverified"
             assert "catalog: unverified" in b["card"]
             yes(b)
             call("harness_advance", to_phase="roundtable")
@@ -2591,17 +2825,28 @@ def test_golden_path(tmp_path, request, surface):
             call("harness_publish")
             call("harness_advance", to_phase="execute")
             if surface == "cli":
-                changed = call(
-                    "harness_worker_start", **{**options, "timeout": 301}, allow_error=True
-                )
+                # Preserve main's higher-deadline refusal: tuple-change checks alone
+                # miss accidental admission beyond the user's approved time limit.
+                changed = call("harness_worker_start", **{**options, "timeout": 301},
+                               allow_error=True, _probe=True)
                 diff = changed["structuredContent"]["chatConfirmation"]["diff"]
                 assert [(d["field"], d["before"], d["after"]) for d in diff] == [
                     ("execution.timeout", 300, 301)
+                ]
+                changed_options = {**options, "workers": [dict(options["workers"][0], model="gpt-6.1-terra")]}
+                changed = call("harness_worker_start", **changed_options, allow_error=True)
+                diff = changed["structuredContent"]["chatConfirmation"]["diff"]
+                assert [(d["field"], d["before"], d["after"]) for d in diff] == [
+                    ("execution.workers", [dict(provider="codex", model="gpt-6.1-sol", effort="medium")],
+                     [dict(provider="codex", model="gpt-6.1-sol", effort="medium"),
+                      dict(provider="codex", model="gpt-6.1-terra", effort="medium")])
                 ]
                 assert (
                     sum(c["text"].count("Your decision: B.") for c in changed["content"])
                     == 1
                 )
+                repeated_change = call("harness_worker_start", **changed_options, allow_error=True, _probe=True)
+                assert repeated_change["structuredContent"]["chatConfirmation"]["request_id"] == changed["structuredContent"]["chatConfirmation"]["request_id"]
             job = call("harness_worker_start", **options)
             deadline = time.time() + 300
             while job["status"] not in ("completed", "failed", "pending-judgment") and time.time() < deadline:

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from codex_harness.core import approvals
+from codex_harness.core import approvals, planner_jobs as jobs
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.planner_views import review_resolution_state
 from codex_harness.core.spine import Spine
@@ -25,8 +25,6 @@ def execution_scope(
     store, expected_revision, workers, *, max_parallel=2, timeout=900, _candidate=False
 ):
     """Read canonical scope; no event, approval, launch or provider query."""
-    from codex_harness.core import planner_jobs as jobs
-
     if _candidate:
         manifest, template = store._manifest(Spine(store._data())), store.workspace / "template"
         if not expected_revision or expected_revision not in {
@@ -64,78 +62,30 @@ def execution_scope(
         sourceManifestRevision=manifest.get("sourceManifestRevision", expected_revision),
         manifestDigest=jobs._digest(manifest),
         templateFiles=jobs._files(template),
+        inputs=jobs.execution_inputs(store),
         workers=selected,
         maxParallel=max_parallel,
         timeout=timeout,
     )
-    scope["executableManifestDigest"] = approvals.executable_candidate(
-        manifest, scope["templateFiles"]
-    )["manifestDigest"]
     return scope
-
-
-def prepare_execution(
-    store,
-    expected_revision,
-    workers,
-    *,
-    max_parallel=2,
-    timeout=900,
-    _chat=False,
-    _expected_request_id=None,
-):
-    from codex_harness.core.planner_confirmations import prepare_confirmation
-
-    request = prepare_confirmation(
-        store,
-        "plan-execution",
-        _chat=_chat,
-        _expected_request_id=_expected_request_id,
-        execution=dict(
-            expected_revision=expected_revision,
-            workers=workers,
-            max_parallel=max_parallel,
-            timeout=timeout,
-        ),
-    )
-    request["scope"] = request["proposedAction"]["execution"]
-    return request
-
-
-def prepare_chat_execution(store, *args, **kwargs):
-    return prepare_execution(store, *args, _chat=True, **kwargs)
-
-
-def complete_execution(store, request_id, action, content=None):
-    from codex_harness.core.planner_confirmations import complete_confirmation
-
-    return complete_confirmation(store, request_id, action, content)
-
-
-def complete_chat_execution(store, request_id, **reply):
-    from codex_harness.core.planner_confirmations import complete_chat_confirmation
-
-    return complete_chat_confirmation(store, request_id, gate="plan-execution", **reply)
 
 
 def require_execution(store, scope):
     _canonical_store(store)
+    approvals.scope_assessment(store, prepare=True)
+    if scope["inputs"] != jobs.execution_inputs(store):
+        raise ValueError("worker-execution-inputs-stale")
     return approvals.require_approval(
         store,
         "B",
         dict(execution=scope),
-    )["id"]
+    )
 
 
 def admit_execution(store, scope, job_id):
     """Record job provenance once the existing namespace owner has won admission."""
-    _canonical_store(store)
     with store._transaction():
-        record = approvals.require_approval(
-            store,
-            "B",
-            dict(execution=scope),
-        )
+        record = require_execution(store, scope)
         store._event(
             ADMITTED, dict(id=record["id"], jobId=job_id, scope=scope, channel=record["channel"])
         )
@@ -143,15 +93,5 @@ def admit_execution(store, scope, job_id):
 
 
 def admitted_execution(store, request_id, scope, job_id):
-    return any(
-        r["id"] == request_id and r["jobId"] == job_id and r["scope"] == scope
-        for r in approvals.records(store, ADMITTED)
-    )
-
-
-def admitted_execution_provenance(store, request_id, scope, job_id):
-    return next(
-        r["channel"]
-        for r in approvals.records(store, ADMITTED)
-        if r["id"] == request_id and r["jobId"] == job_id and r["scope"] == scope
-    )
+    return next((r for r in approvals.records(store, ADMITTED)
+                 if r["id"] == request_id and r["jobId"] == job_id and r["scope"] == scope), None)

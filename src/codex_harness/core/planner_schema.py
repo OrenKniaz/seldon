@@ -60,12 +60,17 @@ def judgment_example(record):
         "plan-convergence": dict(action="continue-review"),
         "user-decision": dict(decision="changes-requested"),
         "vision-intent": dict(impact="changed"),
+        "scope-intent": dict(impact="WHAT"),
         "planning-size": dict(size="small", process="Focused review of consequence and recovery", overrideAccepted=False),
     }.get(record["question"], {})
     example = dict(judgmentId=record["id"], binding=record["binding"], verdict="inconclusive",
                    rationale="Example only; assess the bound evidence before answering", meaning=meaning, gaps=[])
     judgment_response(json.dumps(dict(example, verdict="positive")), record)
-    return dict(responseExample=example, responseGuidance=(
+    # Symmetric shapes so the example never anchors the WHAT/HOW meaning.
+    alternatives = [dict(example, meaning=dict(impact="HOW"))] if record["question"] == "scope-intent" else []
+    for alternative in alternatives:
+        judgment_response(json.dumps(dict(alternative, verdict="positive")), record)
+    return dict(responseExample=example, responseAlternatives=alternatives, responseGuidance=(
         "Replace example semantics with your assessment. Verdict: positive=established; negative=concrete gaps; "
         "inconclusive=unresolved; unsupported=unavailable basis. meaning.depth accepts any nonblank string stating "
         "chosen depth and consequence-based reason, not an enum. Findings use packet node_id, severity "
@@ -125,8 +130,10 @@ def judgment_response(response, record):
             "approve", "decline", "cancel", "changes-requested"
         }:
             raise ValueError("meaning.decision must name approve, decline, cancel or changes-requested")
-        if record["question"] == "vision-intent" and meaning.get("impact") not in {"preserved", "changed", "narrowed"}:
-            raise ValueError("meaning.impact must name preserved, changed or narrowed")
+        if record["question"] in {"vision-intent", "scope-intent"} and meaning.get("impact") not in (
+            {"WHAT", "HOW"} if record["question"] == "scope-intent" else {"preserved", "changed", "narrowed"}
+        ):
+            raise ValueError("meaning.impact must answer the bound intent question")
         if record["question"] == "planning-size":
             if meaning.get("size") not in {"tiny", "small", "medium", "large"} or not isinstance(meaning.get("process"), str) or not meaning["process"].strip():
                 raise ValueError("meaning needs size=tiny|small|medium|large and a nonblank process")

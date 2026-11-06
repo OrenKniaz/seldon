@@ -4,7 +4,7 @@ import sqlite3
 
 from codex_harness.core.plan_store import PHASES
 from codex_harness.core.planner_vision import render_vision
-from codex_harness.core.planner_consent_views import judgment_navigation
+from codex_harness.core.planner_consent_views import continued_plan_changes, judgment_navigation
 from codex_harness.core.review_instructions import status
 from codex_harness.core.reviewer_evidence import single_provider_notice
 from codex_harness.core.spine import Spine
@@ -1329,7 +1329,7 @@ def status_card(status: dict, questions: list[dict]) -> str:
     phase = status["phase"]
     number = PHASES.index(phase) + 1 if phase in PHASES else "?"
     lines = [f"**Where things stand** · {phase.replace('-', ' ').title()} ({number} of 11)"]
-    lines.extend(_gate_lines(status))
+    lines.extend(_gate_lines(status) + continued_plan_changes(status))
     if questions:
         lines.append("**Questions waiting for you**")
         lines.extend(f"- {row['id']}: {_inline(row['question'])}" for row in questions)

@@ -177,17 +177,17 @@ class PlanStore:
             after = self._data()
             if before["nodes"] and before != after:
                 from codex_harness.core.spine import stale_evidence
-                current = Spine(after)
                 for node in after["nodes"]:
                     if node["kind"] == "vision" and node not in before["nodes"]:
                         self._classify_vision_edit(node)
-                normalized = stale_evidence(Spine(before), current)
-                submitted = {node["id"]: node for node in after["nodes"]}
-                changed = [key for key in normalized.ids() if normalized.node(key) != submitted[key]]
+                normalized = stale_evidence(Spine(before), Spine(after))
+                changed = [node["id"] for node in after["nodes"] if normalized.node(node["id"]) != node]
                 for node_id in changed:
                     self._write_node(normalized, node_id)
                 if changed:
                     self._event("trace-evidence-staled", {"ids": changed, "plan_revision": normalized.plan_revision()})
+            from codex_harness.core.approvals import scope_assessment
+            scope_assessment(self, prepare=True)
             self.connection.commit()
         except BaseException:
             self.connection.rollback()
@@ -288,13 +288,15 @@ class PlanStore:
 
     def judgment(self, judgment_id: str, *, candidate=None) -> dict:
         """Credit requires current bindings, including explicit review/run facts for C."""
+        from codex_harness.core.planner_jobs import execution_inputs
         record = self._judgment_record(judgment_id)
         snapshot = getattr(self, "_review_read_snapshot", None)
         if snapshot is not None and "judgmentSpine" not in snapshot:
             snapshot["judgmentSpine"] = self.spine()
         spine = snapshot["judgmentSpine"] if snapshot is not None else self.spine()
         current = not record.get("supersededBy") and all(ref["id"] in spine.ids() and spine.revision(ref["id"]) == ref["revision"]
-                      for ref in record["subjectRefs"] + record["evidenceRefs"])
+                      for ref in record["subjectRefs"] + record["evidenceRefs"]) and (record["question"] != "scope-intent" or all(
+                          ref["payload"].get("facts", {}).get("after", {}).get("digest") == execution_inputs(self)["digest"] for ref in record["sourceRefs"]))
         if current:
             current = all(binding is not None
                 and binding == review_binding(self, binding["memberIds"], convergence=binding["convergence"], run_id=binding["runId"])
@@ -896,10 +898,12 @@ class PlanStore:
         lock = self.wave_product_lock()
         snapshot = self._snapshot(publication)
         need(
-            snapshot.get("waveProductLock") == lock and snapshot["manifest"] == manifest,
+            snapshot.get("waveProductLock") == lock
+            and snapshot["manifest"].get("sourceManifestRevision", publication) == manifest["planRevision"],
             "Publication binding changed",
             "wave-publication-stale",
         )
+        manifest = snapshot["manifest"]
         run_dir = Path(run_dir).resolve()
         run_path = run_dir / "evidence/run.json"
         need(
@@ -1405,20 +1409,10 @@ class PlanStore:
         try:
             record = require_approval(self, kind)
         except PlanStoreError as error:
-            if error.code not in {"plan-a-consent-required", "plan-b-consent-required"}:
+            if error.code not in {"plan-a-consent-required", "plan-b-consent-required", "pending-judgment"}:
                 raise
             return None
-        return dict(
-            id=record["id"],
-            by=record["channel"],
-            statement=record["words"],
-            plan_revision=self._revision(),
-        )
-
-    def _check_approval(self, gate: str, revision: str) -> None:
-        from codex_harness.core.approvals import require_approval
-
-        require_approval(self, "A")
+        return record
 
     def compile_template(self, template: Path) -> dict:
         """Materialize the canonical spine before binding protected file contents."""
@@ -2213,12 +2207,14 @@ class PlanStore:
         ]
 
     def _check_publish(self) -> None:
-        self._check_approval("vision-lock", self._revision())
+        from codex_harness.core.approvals import require_approval
+        require_approval(self, "A")
         self.require_finding_dispositions()
         if self._open("clarifications"):
             raise PlanStoreError("plan-clarifications-open", "Resolve open clarifications")
 
     def advance(self, to_phase: str, *, by: str, statement: str | None = None) -> None:
+        from codex_harness.core.approvals import require_approval
         _nonempty(by, "by")
         with self._transaction():
             current = self.phase()
@@ -2242,23 +2238,19 @@ class PlanStore:
                     raise PlanStoreError("plan-expansion-required", status["next"])
             if target > index:
                 if index > PHASES.index("vision-lock"):
-                    self._check_approval("vision-lock", revision)
+                    require_approval(self, "A")
                 if current in ("align", "vision-lock"):
                     if statement is not None:
                         self.approve(current, by=by, statement=statement)
-                    self._check_approval(current, revision)
+                    require_approval(self, "A")
                 if current == "requirements":
                     self._check_coverage(spine, "test")
                 if current == "plan":
                     self._check_coverage(spine, "bead")
                     self._manifest(spine)
-                    from codex_harness.core.approvals import require_approval
-
                     consent = require_approval(self, "B")
                     statement, by = consent["words"], "user"
                 if to_phase == "publish":
-                    from codex_harness.core.approvals import require_approval
-
                     require_approval(self, "B")
                     self._check_publish()
                     self._check_evidence(self._manifest(spine)["planRevision"])
@@ -2576,10 +2568,11 @@ class PlanStore:
         }
 
     def locked_acceptance_spine(self) -> Spine:
+        from codex_harness.core.approvals import require_approval
         meta = self._meta()
         if not meta["locked_vision_json"]:
             raise PlanStoreError("acceptance-vision-unlocked", "Confirm the current locked vision")
-        self._check_approval("vision-lock", self._revision())
+        require_approval(self, "A")
         return self.spine()
 
     def acceptance_scenarios(self) -> list[dict]:
@@ -3199,9 +3192,9 @@ class PlanStore:
                 else {
                     "gate": approval_gate,
                     "granted": bool(credit),
-                    "origin": credit["by"] if credit else "unverified-or-unavailable",
+                    "origin": credit["channel"] if credit else "unverified-or-unavailable",
                     "approval_id": credit["id"] if credit else None,
-                    "plan_revision": credit["plan_revision"] if credit else revision,
+                    "plan_revision": revision,
                     "human_identity_verified": False,
                 }
             )

@@ -6,15 +6,15 @@ from contextlib import nullcontext
 from copy import deepcopy
 from uuid import uuid4
 
+from codex_harness.core import planner_jobs
 from codex_harness.core.plan_store import PlanStoreError
 from codex_harness.core.planner_vision import SECTIONS
 from codex_harness.core.reviewer_evidence import review_tier
-from codex_harness.core.spine import Spine
 
 EFFECTS = {
     "A": "Your decision confirms understanding and locks this scope and these expansion decisions.",
     "B": "Your decision authorizes scoped work, workers, reviews, validation and quiescent same-work "
-    "recovery. User provider/model restrictions apply to reviewers. "
+    "recovery and same-scope bead repartitioning inside this worker envelope. User provider/model restrictions apply to reviewers. "
     "Cross-subscription is preferred, never required; two distinct same-provider reviewers "
     "are accepted. No separate exception decision is needed.",
 }
@@ -112,6 +112,24 @@ def intent_assessment(store, vision, *, prepare=True):
         "Narrowing must become a visible user-approved deviation."), prepare=prepare)
 
 
+def scope_assessment(store, *, prepare=False, before=None):
+    saved = next((r for r in records(store, EVENT) if r["subject"]["kind"] == "B"), {})
+    before = before if before is not None else saved.get("subject", {}).get("scope", {}) if saved.get("state") == "approved" else {}
+    if not before:
+        return {}
+    after = planner_jobs.execution_inputs(store)
+    if before.get("digest") == after["digest"]:
+        return {}
+    old, new = before.get("nodes", {}), after["nodes"]
+    if any((old.get(k) or new[k])["kind"] in {"feature", "story", "requirement", "acceptance"} for k in old.keys() ^ new.keys()):
+        return dict(status="changed", meaning=dict(impact="WHAT"))
+    return assess(store, "scope-intent", dict(before=before, after=after, diff=field_diff(before, after),
+        question="Does this change alter WHAT the user approved — features, user-visible behavior, data flows, "
+        "external services/third parties, privacy/security posture, acceptance — or only HOW it is built? "
+        "meaning.impact is WHAT or HOW. Unsure stays inconclusive."),
+        subject_ids=list(after["nodes"]), prepare=prepare)
+
+
 def reviewer_tuple(reviewer):
     effort = reviewer.get("effort")
     return {
@@ -120,54 +138,48 @@ def reviewer_tuple(reviewer):
     }
 
 
-def executable_candidate(manifest, template_files):
-    """The executable preimage, excluding publication-only proof bookkeeping."""
-    executable = deepcopy(manifest)
-    if executable.get("proofLevel") == "prospective":
-        executable["planRevision"] = executable.pop("sourceManifestRevision")
-        executable.pop("proofLevel")
-        executable.pop("proofLevelReason")
-    return dict(manifestDigest=fingerprint(executable), templateFiles=template_files)
+def catalog_status(store):
+    from codex_harness.core.planner_review import selection_inputs
+
+    return "unverified" if selection_inputs(store)[2] is None else "recorded"
 
 
 def subject(store, kind, proposed_action=None):
     """Build from canonical content plus actual action arguments, never gate history."""
     if kind not in EFFECTS:
         raise ValueError("approval-kind-invalid")
-    spine = Spine(store._data())
-    visions = spine.ids("vision")
-    if len(visions) != 1:
-        raise PlanStoreError("plan-confirmation-card-unavailable", "One vision is required")
     result = dict(version=2, workspace=str(store.workspace), kind=kind, effect=EFFECTS[kind])
     if kind == "A":
-        return {**result, "scope": intent(spine.node(visions[0]))}
+        spine = store.spine()
+        return {**result, "scope": intent(spine.node(spine.ids("vision")[0]))}
     action = proposed_action or {}
-    previous = current(store, "B") or latest_request(store, "B") or {}
-    previous = previous.get("subject", {})
+    approved = next((r for r in records(store, EVENT) if r["subject"]["kind"] == "B"), {})
+    previous = (approved or latest_request(store, "B") or {}).get("subject", {})
     execution = action.get("execution", previous.get("execution"))
     if execution is None:
         raise PlanStoreError("plan-b-consent-required", "Prepare B with exact workers and limits")
+    limits = previous.get("execution", {}) if approved.get("state") == "approved" else {}
+    workers = {canonical({k: w[k] for k in ("provider", "model", "effort")}) for w in execution["workers"]}
+    workers.update(canonical({k: w[k] for k in ("provider", "model", "effort")}) for w in limits.get("workers", []))
     # execution_scope owns tuple/limit validation; this internal subject binds its result.
-    limits = {k: execution[k] for k in ("maxParallel", "timeout")}
     from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
 
-    _, node, catalog = selection_inputs(store)
-    reviewers, selection = [], None
-    if node:
-        reviewers, selection = delivery_review_selection(node["fields"])
-    if not reviewers:
+    _, node, _ = selection_inputs(store)
+    if node is None:
         raise ValueError("reviewer-selection-required-before-B: propose exact delivery reviewers")
+    reviewers, selection = delivery_review_selection(node["fields"])
     actual = action.get("reviewer")
     if actual is not None and reviewer_tuple(actual) not in reviewers:
         reviewers.append(reviewer_tuple(actual))
+    selection["stages"].sort()
     return {
         **result,
-        "planRevision": store._revision(),
-        "aFingerprint": (current(store, "A") or {}).get("fingerprint", fingerprint(subject(store, "A"))),
-        "execution": dict(workers=execution["workers"], **limits),
+        "scope": planner_jobs.execution_inputs(store),
+        "execution": dict(workers=[json.loads(w) for w in sorted(workers)],
+            maxParallel=max(execution["maxParallel"], limits.get("maxParallel", 0)),
+            timeout=max(execution["timeout"], limits.get("timeout", 0))),
         "reviewers": reviewers,
         "reviewTier": review_tier(reviewers),
-        "catalog": "unverified" if catalog is None else "recorded",
         "reviewSelection": selection,
     }
 
@@ -177,34 +189,23 @@ def field_diff(before, after, path=""):
         changes = []
         for key in sorted(before.keys() | after.keys()):
             field = f"{path}.{key}".lstrip(".")
-            if key not in before or key not in after:
-                changes.append(
-                    dict(
-                        field=field,
-                        before=before.get(key),
-                        after=after.get(key),
-                        beforePresent=key in before,
-                        afterPresent=key in after,
-                    )
-                )
-            else:
+            if key in before and key in after:
                 changes.extend(field_diff(before[key], after[key], field))
+            else:
+                changes.append(dict(field=field, before=before.get(key), after=after.get(key),
+                                    beforePresent=key in before, afterPresent=key in after))
         return changes
-    return (
-        []
-        if canonical(before) == canonical(after)
-        else [dict(field=path, before=before, after=after)]
-    )
+    return [] if canonical(before) == canonical(after) else [dict(field=path, before=before, after=after)]
 
 
-def render(payload, changes):
+def render(payload, changes, catalog):
     lines = [
         f"Your decision: {payload['kind']}. {CHOICES[0]}.",
         payload["effect"],
     ]
     if payload["kind"] == "B":
         lines.append("Review tier: " + payload["reviewTier"])
-        lines.append("catalog: " + payload["catalog"])
+        lines.append("catalog: " + catalog)
     lines.extend(
         f"{title}:\n{json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)}"
         for title, value in (
@@ -219,12 +220,16 @@ def proposal(store, kind, proposed_action=None):
     payload = subject(store, kind, proposed_action)
     previous = current(store, kind)
     changes = field_diff(previous["subject"] if previous else {}, payload)
+    catalog = catalog_status(store) if kind == "B" else None
     result = dict(
         subject=payload,
         fingerprint=fingerprint(payload),
         diff=changes,
-        card=render(payload, changes),
+        catalog=catalog,
+        card=render(payload, changes, catalog),
     )
+    if kind == "B":
+        result["scopeJudgment"] = scope_assessment(store)
     if kind == "A" and store._meta()["locked_vision_json"] and changes:
         impact = intent_assessment(store, store.spine().node(store.spine().ids("vision")[0]), prepare=False)
         result["intentJudgment"] = impact
@@ -240,13 +245,15 @@ def require_approval(store, kind, proposed_action=None):
         require_approval(store, "A")
     proposed = proposal(store, kind, proposed_action)
     saved = current(store, kind)
-    if saved and saved["state"] == "approved" and saved["fingerprint"] == proposed["fingerprint"]:
+    impact = proposed.get("scopeJudgment" if kind == "B" else "intentJudgment", {})
+    candidate = proposed["subject"]
+    if saved and impact.get("positiveCredit") and impact["meaning"].get("impact") == ("HOW" if kind == "B" else "preserved"):
+        candidate = dict(candidate, scope=saved["subject"]["scope"])
+    if saved and saved["state"] == "approved" and saved["fingerprint"] == fingerprint(candidate):
         return saved
-    if kind == "A" and saved and saved["state"] == "approved":
-        impact = proposed.get("intentJudgment", {})
-        if impact.get("positiveCredit") and impact["meaning"].get("impact") == "preserved":
-            return saved
-    code = f"plan-{kind.lower()}-consent-required"
+    pending = kind == "B" and impact and impact["status"] != "changed" and not (
+        impact.get("positiveCredit") or impact.get("concreteGap"))
+    code = "pending-judgment" if pending else f"plan-{kind.lower()}-consent-required"
     error = PlanStoreError(code, code + ": " + proposed["card"])
     error.approval = proposed
     raise error
@@ -262,25 +269,23 @@ def record_approval(store, request, *, words, actor, channel, affirmative, state
     if not isinstance(words, str) or not isinstance(actor, str) or not actor.strip():
         raise ValueError("approval-words-and-actor-required")
     payload = request["subject"]
-    judgment = None
-    if fingerprint(payload) != fingerprint(
-        subject(store, payload["kind"], request.get("proposedAction"))
-    ):
-        state = "stale"
-    if state not in {"stale", "decline", "declined", "cancel"}:
+    judgment = (scope_assessment(store, before=payload.get("scope", {}), prepare=True) or None) if payload["kind"] == "B" and state not in {"stale", "decline", "declined", "cancel"} else None
+    candidate = subject(store, payload["kind"], request.get("proposedAction"))
+    if judgment and judgment.get("positiveCredit") and judgment["meaning"].get("impact") == "HOW":
+        candidate = dict(candidate, scope=payload["scope"])
+    if fingerprint(payload) != fingerprint(candidate):
+        state = "pending-judgment" if judgment and judgment["status"] != "changed" and not (judgment.get("positiveCredit") or judgment.get("concreteGap")) else "stale"
+    if state not in {"stale", "decline", "declined", "cancel", "pending-judgment"}:
         if payload["kind"] == "A":
             judgment = expansion_assessment(store)
             if judgment["positiveCredit"] and request.get("deviation"):
                 judgment = intent_assessment(store, store.spine().node(store.spine().ids("vision")[0]))
-                if judgment["meaning"].get("impact") not in {"preserved", "changed", "narrowed"}:
-                    judgment = dict(judgment, positiveCredit=False, concreteGap=False, status="pending-judgment")
         if judgment is None or judgment["positiveCredit"]:
             judgment = assess(store, "user-decision", dict(request_id=request["request_id"],
                 subject=payload, revision=request["plan_revision"], words=words, actor=actor,
                 channel=channel, conditions=conditions, source=source, question="Interpret these exact user words "
                 "against this displayed subject. meaning.decision is approve, decline, cancel or "
-                "changes-requested. Ambiguity stays inconclusive. Do not invent user authority."),
-                subject_ids=store.spine().ids() if payload["kind"] == "B" else None)
+                "changes-requested. Ambiguity stays inconclusive. Do not invent user authority."))
             choice = judgment["meaning"].get("decision") if judgment["positiveCredit"] else None
             state = {"approve": "accept", "decline": "declined", "cancel": "cancel",
                      "changes-requested": "changes-requested"}.get(choice, "pending-judgment")
@@ -304,8 +309,15 @@ def record_approval(store, request, *, words, actor, channel, affirmative, state
     )
     if state not in {"stale", "pending-judgment"}:
         store._event(EVENT, record)
+    if record["state"] == "approved" and payload["kind"] == "B":
+        for pending in store.finding_state()["pendingJudgments"]:
+            if pending["question"] == "scope-intent":
+                prior = store._judgment_record(pending["id"])
+                prior.update(disposition="steer", owner=None, supersededBy=record["id"],
+                             error="Scope explicitly approved by a newer B decision")
+                store._event("judgment-recorded", prior)
     if record["state"] == "approved" and payload["kind"] == "A":
-        spine = Spine(store._data())
+        spine = store.spine()
         store.connection.execute(
             "UPDATE meta SET locked_vision_json=?, vision_lock_stale=0, vision_locked_revision=?",
             (json.dumps(spine.node(spine.ids("vision")[0])), spine.plan_revision()),

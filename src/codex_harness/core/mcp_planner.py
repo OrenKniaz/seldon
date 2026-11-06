@@ -1645,12 +1645,8 @@ class PlannerServer:
             return self.result_data["card"]
         if name == "harness_record_chat_confirmation":
             from codex_harness.core.planner_confirmations import complete_chat_confirmation
-            from codex_harness.core.planner_execution import complete_chat_execution
-            arguments = {key: value for key, value in args.items() if key != "gate"}
-            if args["gate"] == "execution":
-                outcome = complete_chat_execution(self._store(), **arguments)
-            else:
-                outcome = complete_chat_confirmation(self._store(), **args)
+            arguments = dict(args, gate="plan-execution" if args["gate"] == "execution" else args["gate"])
+            outcome = complete_chat_confirmation(self._store(), **arguments)
             if outcome["state"] in {"decline", "declined", "cancel", "changes-requested"}:
                 outcome["reason"] = "Decision " + outcome["state"] + "; approval was not granted."
                 outcome["chatConfirmation"] = self._prepare_chat_question(
@@ -2343,25 +2339,16 @@ class PlannerServer:
         return connection_reply(reply, self.workspace, status)
 
     def _prepare_chat_question(self, arguments, *, _expected_request_id=None):
-        from codex_harness.core.planner_execution import prepare_chat_execution
-
         if self._pending_confirmation is not None:
             raise ValueError("confirmation-pending: answer or cancel the displayed native request")
-        if arguments["gate"] == "execution":
-            if "execution" not in arguments:
-                raise ValueError("chat-execution-explicit-proposal-required")
-            question = prepare_chat_execution(
-                self._store(), **arguments["execution"], _expected_request_id=_expected_request_id
-            )
-        else:
-            if "execution" in arguments and arguments["gate"] != "plan-execution":
-                raise ValueError("chat-planning-question-refuses-execution-fields")
-            question = confirmations.prepare_chat_confirmation(
-                self._store(),
-                arguments["gate"],
-                _expected_request_id=_expected_request_id,
-                **{k: arguments[k] for k in confirmations.CHAT_SCOPE if k in arguments},
-            )
+        gate = "plan-execution" if arguments["gate"] == "execution" else arguments["gate"]
+        if arguments["gate"] == "execution" and "execution" not in arguments:
+            raise ValueError("chat-execution-explicit-proposal-required")
+        if "execution" in arguments and gate != "plan-execution":
+            raise ValueError("chat-planning-question-refuses-execution-fields")
+        question = confirmations.prepare_chat_confirmation(self._store(), gate,
+            _expected_request_id=_expected_request_id,
+            **{k: arguments[k] for k in confirmations.CHAT_SCOPE if k in arguments})
         return {**question, "source_verified": False, "human_identity_verified": False}
 
     def _offer_chat_confirmation(self, reply, gate, execution=None, *, request_id=None):
@@ -2400,7 +2387,6 @@ class PlannerServer:
         from codex_harness.core.plan_store import open_plan_store_readonly
         from codex_harness.core.planner_execution import (
             execution_scope,
-            prepare_execution,
             require_execution,
         )
         from codex_harness.core.planner_resume import resume_plan
@@ -2448,7 +2434,7 @@ class PlannerServer:
                 "id": request_id,
                 "result": self._offer_chat_confirmation(reply, "execution", proposal),
             }
-        prepared = prepare_execution(self._store(), **proposal)
+        prepared = confirmations.prepare_confirmation(self._store(), "plan-execution", execution=proposal)
         return self._native_question(
             request_id, prepared, purpose="execution", tool_name=name, arguments=dict(arguments)
         )
@@ -2666,9 +2652,7 @@ class PlannerServer:
 
         pending, self._pending_confirmation = self._pending_confirmation, None
         if pending.get("purpose") == "execution":
-            from codex_harness.core.planner_execution import complete_execution
-
-            outcome = complete_execution(self._store(), pending["request"]["request_id"], "cancel")
+            outcome = complete_confirmation(self._store(), pending["request"]["request_id"], "cancel")
             return {
                 "jsonrpc": "2.0",
                 "id": pending["tool_id"],

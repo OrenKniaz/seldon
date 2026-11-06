@@ -58,7 +58,13 @@ def _directory(workspace, job_id):
     return path
 
 
-def _files(template):
+def execution_inputs(store):
+    payload = dict(nodes={n["id"]: n for n in store.spine().to_dict()["nodes"]},
+                   files=file_inputs(store.workspace / "template"))
+    return dict(payload, digest=_digest(payload))
+
+
+def file_inputs(template):
     if template.is_symlink() or not template.is_dir():
         raise ValueError("worker-job-template-required")
     result = {}
@@ -68,12 +74,16 @@ def _files(template):
         if ".git" in path.relative_to(template).parts:
             raise ValueError("worker-job-template-git-metadata-refused")
         if path.is_file():
-            result[path.relative_to(template).as_posix()] = hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
+            raw = path.read_bytes()
+            result[path.relative_to(template).as_posix()] = dict(
+                sha256=hashlib.sha256(raw).hexdigest(), content=raw.decode("utf-8", errors="backslashreplace"))
         elif not path.is_dir():
             raise ValueError("worker-job-template-file-invalid")
     return result
+
+
+def _files(template):
+    return {name: item["sha256"] for name, item in file_inputs(template).items()}
 
 
 def _publication(store, expected_revision):
@@ -217,7 +227,7 @@ def start_worker_job(
         return reattach()
     from codex_harness.core.planner_execution import (
         admit_execution,
-        admitted_execution_provenance,
+        admitted_execution,
         execution_scope,
         require_execution,
     )
@@ -246,7 +256,7 @@ def start_worker_job(
         return reattach()
     try:
         execution_id = admit_execution(store, scope, job_id)
-        execution_provenance = admitted_execution_provenance(store, execution_id, scope, job_id)
+        execution_provenance = admitted_execution(store, execution_id, scope, job_id)["channel"]
         before = _files(template)
         if before != scope["templateFiles"]:
             raise ValueError("worker-job-template-changed-before-snapshot")

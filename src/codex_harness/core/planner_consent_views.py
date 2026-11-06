@@ -10,6 +10,12 @@ def consent_recovery(code):
     )
 
 
+def continued_plan_changes(status):
+    from codex_harness.core.planner_views import _inline
+    changes = [_inline(key) for key in status.get("continuedPlanChanges", [])]
+    return ["Continued under existing B; updated: " + ", ".join(changes)] if changes else []
+
+
 def semantic_consent_next(status, result, *, plan_authorized=False):
     """Three decisions; missing information and changed scope still require a reply."""
     if status.get("phase") == "accept" and (action := status.get("reviewResolution", {}).get("findingDispositionPrerequisite", {}).get("nextAction")):
