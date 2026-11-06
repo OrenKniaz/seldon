@@ -1,6 +1,6 @@
 // Trusted adapter: scenario data never becomes JavaScript or launch options.
 'use strict'; const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'); const {pathToFileURL, fileURLToPath} = require('node:url');
-const preview = process.argv[2] === '--preview'; const cfg = preview ? {tools: {playwright: process.argv[3], chromium: process.argv[4]}, root: path.resolve(process.argv[5] || '.'), seconds: 30, remaining: 30} :
+const preview = process.argv[2] === '--preview'; const cfg = preview ? {tools: {playwright: process.argv[3], chromium: process.argv[4], evidence: process.argv[7]}, root: path.resolve(process.argv[5] || '.'), binding: JSON.parse(process.argv[6] || '{}'), seconds: 30, remaining: 30} :
   JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); const {journey: j, tools, root, binding = {}} = cfg;
 const end = Date.now() + cfg.remaining * 1000; const remaining = () => { const ms = Math.min(cfg.seconds * 1000, end - Date.now());
   if (ms <= 0) throw Error('Web scenario timeout'); return ms; };
@@ -8,7 +8,7 @@ async function openBrowser() {
   let browser;
   for (const browserMode of tools.browserMode === 'single-process' ? ['single-process'] : ['normal', 'single-process']) {
     try {
-      browser = await require(tools.playwright).chromium.launch({executablePath: tools.chromium, headless: !preview, chromiumSandbox: true, timeout: remaining(), args: browserMode === 'normal' ? [] : ['--single-process']});
+      browser = await require(tools.playwright).chromium.launch({executablePath: tools.chromium, headless: true, chromiumSandbox: true, timeout: remaining(), args: browserMode === 'normal' ? [] : ['--single-process']});
       const context = await browser.newContext({viewport: j?.viewport, reducedMotion: j?.reducedMotion, offline: !binding.server, serviceWorkers: 'block', acceptDownloads: false});
       const page = await context.newPage(); await page.goto('about:blank', {timeout: remaining()});
       return {browser, context, page, browserMode};
@@ -36,7 +36,7 @@ async function startServer() {
   const socket = net.createServer(); await new Promise((resolve, reject) => { socket.once('error', reject); socket.listen(0, '127.0.0.1', resolve); });
   const port = socket.address().port; await new Promise(resolve => socket.close(resolve)); origin = `http://127.0.0.1:${port}`;
   const command = binding.server.argv.map(s => s.replaceAll('{port}', String(port)).replaceAll('{host}', '127.0.0.1'));
-  const logPath = path.join(root, '.server.log'), log = fs.openSync(logPath, 'w'); let launchError;
+  const logPath = path.join(preview ? tools.evidence : root, '.server.log'), log = fs.openSync(logPath, 'w'); let launchError;
   try { server = spawn(command[0], command.slice(1), {cwd: root, env: {...process.env, SELDON_PORT: String(port), SELDON_HOST: '127.0.0.1'}, windowsHide: true, stdio: ['ignore', log, log]}); }
   finally { fs.closeSync(log); }
   server.on('error', e => { launchError = e.message; });
@@ -67,9 +67,9 @@ async function stopServer() {
     const opened = cfg.http ? {} : await openBrowser();
     ({browser, browserMode} = opened); const {context, page} = opened;
     if (preview) {
-      await page.goto(pathToFileURL(path.join(root, 'index.html')).href);
-      process.stdout.write(JSON.stringify({browserMode}) + '\n'); await new Promise(resolve => browser.on('disconnected', resolve));
-      browser = null; return;
+      await page.goto(origin ? new URL(binding.entry || '/', origin).href : pathToFileURL(path.join(root, 'index.html')).href);
+      process.stdout.write(JSON.stringify({browserMode, userAgent: await page.evaluate(() => navigator.userAgent), url: page.url(), server: serverEvidence}) + '\n');
+      return;
     }
     toolchain.chromium = browser?.version(); const requests = [], errors = [], steps = [], artifacts = [];
     const checks = {noHorizontalOverflow: true, consoleErrors: 0, externalRequests: 0, textContrastAA: null, headingStructure: null, reducedMotionRespected: null};

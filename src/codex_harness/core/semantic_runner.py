@@ -12,7 +12,7 @@ import threading
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired, call
+from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.record_io import write_record_json
@@ -475,14 +475,16 @@ def run(
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--preview"]:
         tools = web_toolchain(None, False)
-        cmd = [tools[k]["path"] for k in ("node", "adapter")]
-        cmd += [
-            "--preview",
-            str(Path(tools["playwright"]["path"]).parent),
-            tools["chromium"]["path"],
-            sys.argv[2] if len(sys.argv) > 2 else ".",
-        ]
-        raise SystemExit(call(cmd))
+        selection = Path(sys.argv[2] if len(sys.argv) > 2 else ".").resolve()
+        binding = json.loads(selection.read_text(encoding="utf-8"))["targets"][sys.argv[3]] if selection.is_file() else {}
+        root = selection.parent if binding else selection
+        if "server" in binding:
+            binding["server"]["argv"] = argv(binding["server"]["argv"], root)
+        with tempfile.TemporaryDirectory(prefix="seldon-preview-") as scratch:
+            preview = run_audit_process([tools[k]["path"] for k in ("node", "adapter")] + ["--preview",
+                str(Path(tools["playwright"]["path"]).parent), tools["chromium"]["path"], str(root), json.dumps(binding), scratch], cwd=root, capture_output=False)
+            print(json.dumps(dict(cleanup=getattr(preview, "audit_control", None))))
+            raise SystemExit(preview.returncode)
     if sys.argv[1:2] == ["--worker"]:
         try:
             s, targets, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))

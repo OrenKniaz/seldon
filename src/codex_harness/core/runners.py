@@ -64,20 +64,19 @@ def execution_sources(root, trace):
     from codex_harness.core.semantic_schema import path
 
     root, sources = Path(root).resolve(), []
-    roots = sorted({r for n in (trace or {}).get("nodes", []) if n["kind"] == "test"
-                    for r in n["fields"].get("execution", {}).get("testRoots", [])})
+    nodes = (trace or {}).get("nodes", [])
+    executions = [n["fields"]["execution"] for n in nodes if n["kind"] == "test" and "execution" in n["fields"]]
+    roots = sorted({path(root, r).relative_to(root).as_posix() for e in executions for r in e["testRoots"]})
     names = sorted({f.relative_to(root).as_posix() for r in roots
                     for f in ([path(root, r)] if not path(root, r).is_dir() else path(root, r).rglob("*"))
-                    if not f.is_dir() and not any(p in SOURCE_IGNORED for p in f.relative_to(root).parts)})
+                    if f.is_file() and not any(p in SOURCE_IGNORED for p in f.relative_to(root).parts)})
+    missing = sorted(r for r in roots if not any(n == r or n.startswith(r + "/") for n in names))
     hashes = file_hashes(root, names)
     for name, digest in hashes.items():
-        raw = b""
-        if digest:
-            with (root / name).open("rb") as stream: raw = stream.read(16384)
-        body = raw.decode("utf-8", errors="replace")
-        sources.append(dict(path=name, sha256=digest, body=body,
-                            omitted=bool(digest and (root / name).stat().st_size > 16384)))
-    return dict(roots=roots, contentHash=_digest(dict(roots=roots, files=hashes)), files=sources)
+        with (root / name).open("rb") as stream:
+            sources.append(dict(path=name, sha256=digest, body=stream.read(16384).decode("utf-8", errors="replace"),
+                                omitted=(root / name).stat().st_size > 16384))
+    return dict(roots=roots, contentHash=_digest(dict(roots=roots, files=hashes)), files=sources, missing=missing)
 
 
 def execution_witnesses(integrated):

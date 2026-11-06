@@ -41,11 +41,15 @@ def _digest(value):
 
 
 def _execution_identity(plan):
-    from codex_harness.core import runners
-    from codex_harness.core.dispatch import _semantic_identity
+    from codex_harness.core import runners, semantic_runner, semantic_schema
 
-    return dict(_semantic_identity(plan), executionAdapter=file_hashes(
-        Path(__file__).parent, [Path(__file__).name, Path(runners.__file__).name]))
+    return dict(planRevision=plan.plan_revision, contractsRevision=plan.requirement_files_revision,
+        scenarioBinding=_digest(dict(plan.semantic)),
+        **({"webToolchain": semantic_runner.web_toolchain(None, False)}
+           if any(t.get("kind") == "web" for t in plan.semantic["targets"].values()) else {}),
+        runner=file_hashes(Path(__file__).parent, [Path(m).name for m in (
+            semantic_runner.__file__, semantic_schema.__file__, "semantic_web.cjs")]),
+        executionAdapter=file_hashes(Path(__file__).parent, [Path(__file__).name, Path(runners.__file__).name]))
 
 
 def _evidence_digest(proof):
@@ -101,13 +105,15 @@ def _semantic_validation(root, plan, record, phase):
     from codex_harness.core.dispatch import _git
     from codex_harness.core.runners import executable_scenarios, execution_sources
 
+    sources = execution_sources(root, plan.trace)
+    if sources["missing"]:
+        return dict(state="incomplete", reason="incomplete: declared " + ", ".join(sources["missing"]) + " missing from candidate")
     identity = _execution_identity(plan)
     observed_files = observation_files(root)
     document = executable_scenarios(plan.trace, plan.semantic["scenarios"])
     requirements = {r["id"] for r in record.get("requirementRefs", [])}
     document["scenarios"] = [s for s in document["scenarios"] if not requirements or
         requirements.intersection(r.split("@", 1)[0] for r in s["requirementRefs"])]
-    sources = execution_sources(root, plan.trace)
     tests = [dict(id=s["id"], requirementRefs=s["requirementRefs"],
                   contractRefs=s["contractRefs"], testRef=s.get("testRef"),
                   rationale=s.get("rationale")) for s in document["scenarios"]]
@@ -225,7 +231,7 @@ def retained(workspace, job_id):
         bead=bead_id,
         candidateCommit=semantic["candidateCommit"],
         candidateTree=semantic["candidateTree"],
-        verifier=d._semantic_identity(plan),
+        verifier=_execution_identity(plan),
     )
 
 

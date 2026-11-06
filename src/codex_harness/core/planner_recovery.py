@@ -228,6 +228,7 @@ def inspect(workspace, job_id):
             "reused",
         }
     ]
+    proof["faultOutcomes"] = {key: run["beads"][key]["status"] for key in proof["faultBeads"]}
     from codex_harness.core.planner_candidate import retained
 
     try:

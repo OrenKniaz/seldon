@@ -30,7 +30,7 @@ from codex_harness.core.memory_promotion import (
     promote_lesson,
 )
 from codex_harness.core.package_provenance import adapter_provenance
-from codex_harness.core.planner_candidate import _semantic_validation
+from codex_harness.core.planner_candidate import _execution_identity, _semantic_validation
 from codex_harness.core.provider_launch import get_adapter
 from codex_harness.core.record_io import read_record_json, write_record_json
 from codex_harness.core.runners import resolve_runner, validate_proof
@@ -1707,27 +1707,6 @@ def _integration_candidate(record: dict, bead: dict, repo: Path) -> tuple[str, P
     return state["workerCommit"], root, state
 
 
-def _semantic_identity(plan):
-    from codex_harness.core import semantic_runner, semantic_schema
-
-    return {
-        "planRevision": plan.plan_revision,
-        **(
-            {"webToolchain": semantic_runner.web_toolchain(None, False)}
-            if any(t.get("kind") == "web" for t in plan.semantic["targets"].values())
-            else {}
-        ),
-        "scenarioBinding": hashlib.sha256(
-            json.dumps(dict(plan.semantic), sort_keys=True).encode()
-        ).hexdigest(),
-        "contractsRevision": plan.requirement_files_revision,
-        "runner": {
-            Path(m).name: _file_sha256(m)
-            for m in (semantic_runner.__file__, semantic_schema.__file__, Path(semantic_runner.__file__).with_name("semantic_web.cjs"))
-        },
-    }
-
-
 def _integrate_bead(
     record: dict,
     bead: dict,
@@ -1787,7 +1766,7 @@ def _integrate_bead(
             prior = read_record_json(receipt)
             semantic = prior["semantic"]
             expected = {
-                **_semantic_identity(current_plan),
+                **_execution_identity(current_plan),
                 "candidateCommit": integration_commit,
                 "candidateTree": record["candidate"]["tree"],
             }
@@ -1802,6 +1781,9 @@ def _integrate_bead(
             semantic = _semantic_validation(
                 validation_root, current_plan, record, bead["semanticPhase"]
             )
+        if semantic["state"] == "incomplete":
+            record["status"] = semantic["reason"]
+            return
         validation = {"passed": semantic["passed"]}
         record["integrated"] = {
             "beadCommit": bead_commit,
@@ -1930,6 +1912,7 @@ def run_plan(
     execution_job: str | Path | None = None,
     setup: dict | None = None,
     intent_nodes: list[dict] | None = None,
+    worker_outcomes: dict | None = None,
 ) -> dict:
     """Run a validated work graph; only integrated passes release dependents.
 
@@ -2303,7 +2286,7 @@ def run_plan(
             proof = current["integrated"]["semantic"]
             original = read_record_json(Path(current["integrated"]["receiptPath"]))
             if original != current["integrated"] or any(
-                proof.get(k) != v for k, v in _semantic_identity(plan).items()
+                proof.get(k) != v for k, v in _execution_identity(plan).items()
             ):
                 current["status"] = "rejected: stale semantic receipt"
                 return False
@@ -2394,6 +2377,7 @@ def run_plan(
                         proof_level=manifest.get("proofLevel"),
                         setup=setup,
                         intent_nodes=intent_nodes,
+                        previous_outcome=(worker_outcomes or {}).get(bead_id),
                     )
                     current["attempt"] = {
                         "cwd": str(worktree),

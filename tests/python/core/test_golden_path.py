@@ -92,7 +92,7 @@ def judge_executions(workspace, patcher, *, contracts_gap=None, pending_executio
 
     def judged(root, plan, record, phase):
         proof = observe(root, plan, record, phase)
-        if pending_execution:
+        if pending_execution or proof["state"] == "incomplete":
             return proof
         with_server = PlannerServer(workspace)
         try:
@@ -298,9 +298,9 @@ def execution_judgment_golden(workspace):
                  execution=dict(argv=[sys.executable, '-B', 'baseline.sensor'], testRoots=['baseline.sensor'],
                                 rationale='Preserve existing baseline readback')),
             node('T_NEW', 'test', ['R_NEW'], module='verify.unfamiliar', level='semantic',
-                 execution=dict(argv=[sys.executable, '-B', 'verify.unfamiliar'], testRoots=['verify.unfamiliar', 'helperlib'],
+                 execution=dict(argv=[sys.executable, '-B', 'verify.unfamiliar', 'channels.dat'], testRoots=['verify.unfamiliar', 'helperlib'],
                                 rationale='Observe both channels from the candidate data path')),
-            node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat', 'verify.unfamiliar', 'helperlib/__init__.py'], dependsOn=[],
+            node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['verify.unfamiliar', 'helperlib/__init__.py'], dependsOn=[],
                  lessons=[], semanticPhase='contracts'),
             node('B', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['channels.dat', 'helperlib/__init__.py'], dependsOn=['C'],
                  lessons=[], semanticPhase='build'),
@@ -309,7 +309,6 @@ def execution_judgment_golden(workspace):
         template.mkdir(exist_ok=True)
         product = workspace / 'candidate'
         product.mkdir()
-        (product / 'channels.dat').write_text('missing')
         (product / 'baseline.sensor').write_text(
             "print('SELDON-STUB is a diagnostic string, baseline remains GREEN')\n")
         (product / 'helperlib').mkdir()
@@ -345,7 +344,7 @@ def execution_judgment_golden(workspace):
             "from pathlib import Path\nfrom helperlib import read_channels\nimport sys\n"
             "assert Path('payload.binary').stat().st_size == 262145\n"
             "assert len(list(Path('.').glob('asset-*.opaque'))) == 130\n"
-            "actual = read_channels()\n"
+            "actual = read_channels() if Path(sys.argv[1]).is_file() else 'absent'\n"
             "print('observed channels:', actual)\n"
             "if actual != 'ready:42,84':\n"
             "    print('missing behavior: both channel values', file=sys.stderr)\n"
@@ -356,6 +355,9 @@ def execution_judgment_golden(workspace):
         rows = {r['id']: r for r in red['results']}
         assert rows['T_BASE']['state'] == 'PASS'  # Diagnostic prose never decides a semantic gap.
         assert rows['T_NEW']['actions']['execute']['exit'] == 2
+        # P1: argv may name a product file owned by a later Build. Earlier
+        # Contracts pre-created it, masking false incomplete and copied GREEN.
+        assert 'observed channels: absent' in rows['T_NEW']['actions']['execute']['stdout']
         assert 'missing behavior:' in rows['T_NEW']['actions']['execute']['stderr']
         assert all(r['cleanup']['quiescenceVerified'] for r in red['results'])
         request = retain(red)
@@ -367,6 +369,7 @@ def execution_judgment_golden(workspace):
         git('add', '.')
         git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker implementation')
         green = _semantic_validation(product, plan, {'attempt': {'baseCommit': red['candidateCommit']}}, 'build')
+        assert green['red']['observedState'] == 'RED'
         assert green['observedState'] == 'PASS' and green['state'] == 'pending-judgment'
         assert not green['passed'] and green['judgmentStatus'] == 'pending-judgment'
         assert all(r['state'] == 'PASS' for r in green['results'])
@@ -1570,8 +1573,27 @@ with TemporaryDirectory(dir=root) as scratch:
                         job["status"] not in {"completed", "failed"} and time.time() < deadline
                     ):
                         job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
+                    # r7: an omitted declared test crashed fallback RED in git restore.
+                    # Earlier journeys always supplied the whole worker bundle.
+                    incomplete = "incomplete: declared verify_http.py missing from candidate"
+                    failed = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
+                    assert job["status"] == "failed" and failed["beads"]["B"]["status"] == incomplete, job
+                    assert failed["beads"]["B"]["integrated"] is None
+                    assert failed["semanticContracts"]["state"] == "RED" and "semanticValidation" not in failed
+                    assert "error" not in job["terminal"]
+                    recovered = call("harness_recovery", mode="resolve", job_id=job["jobId"],
+                        choice="readmit", reason="Supply the exact declared worker input")
+                    assert recovered["choice"] == "readmit" and recovered["proof"]["faultOutcomes"] == {"B": incomplete}
+                    assert recovered["proof"]["controllerAndChildren"]["quiescenceVerified"]
+                    job = call("harness_worker_start", **options)
+                    assert job["jobId"] == recovered["successor"]
+                    while job["status"] not in {"completed", "failed"} and time.time() < deadline:
+                        job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 assert job["status"] == "completed", job
                 run = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
+                assert "Previous worker outcome; repair before returning: " + incomplete in run["beads"]["B"]["prompt"]
+                assert run["semanticContracts"]["state"] == "RED" and run["semanticValidation"]["state"] == "PASS"
+                assert all(f["sha256"] for f in run["semanticValidation"]["testSources"]["files"])
                 assert run["delivery"]["root"] == str(workspace.resolve()), run
             else:
                 # Independent real failures A, B, then A+B must not pool their
@@ -2046,6 +2068,8 @@ def provider_host(mode, workspace, surface, job_id=None):
         prompt = sys.stdin.read()
         phase = "contracts" if prompt.startswith("semantic-v1 contracts;") else "build"
         sources = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))[phase]
+        if phase == "build" and "Previous worker outcome; repair before returning:" not in prompt:
+            sources["verify_http.py"] = None
         scripted_worker(prompt, Path.cwd(), sources)
         _, output, stderr = protocol("codex", text="Scripted worker completed the requested files")
         print(output)
@@ -2154,7 +2178,7 @@ def test_golden_path(tmp_path, request, surface):
         # exercised server launch, HTTP persistence, readiness or teardown.
         vision = captured_run["nodes"][0]["fields"]
         vision["targets"]["served"] = dict(kind="web", entry="index.html",
-            server=dict(argv=[sys.executable, "-B", "serve.py"], readyPath="/", readyWithin=5))
+            server=dict(argv=[sys.executable, "-B", "-c", "import subprocess,sys; subprocess.Popen([sys.executable,'-B','serve.py']).wait()"], readyPath="/", readyWithin=5))
         journey = vision["scenarios"]["scenarios"][0]["actions"][0]["web"]
         journey["target"] = "served"
         scenario = vision["scenarios"]["scenarios"][0]
@@ -2684,25 +2708,38 @@ def test_golden_path(tmp_path, request, surface):
                     assert probe.connect_ex(("127.0.0.1", served[0]["server"]["port"])) != 0
                 # Execute the packet's actual shell command: a quoted Windows executable
                 # without PowerShell's & looks plausible but never opens the preview.
-                from codex_harness.core.audit_process import run_audit_process
-
                 prompt = retained["beads"]["B"]["prompt"]
-                command = next(c for c in prompt.split("`") if "--preview ." in c)
+                commands = [c for c in prompt.split("`") if "--preview " in c]
+                assert any("--preview ." in c for c in commands), prompt
+                command = next(c for c in commands if "--preview SCENARIOS.json 'served'" in c)
+                # Static previews never started a server: its log must not become
+                # an unowned worker change, and its protected binding lives here.
+                worker_root = Path(retained["beads"]["B"]["attempt"]["cwd"])
+                before_preview = subprocess.check_output(["git", "status", "--porcelain"], cwd=worker_root)
                 preview_started = time.time()
+                preview = subprocess.Popen(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                    cwd=worker_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 try:
-                    preview = run_audit_process(
-                        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                        cwd=tmp_path,
-                        timeout=20,
-                    )
-                    output, cleanup = preview.stdout, preview.audit_control
-                except subprocess.TimeoutExpired as error:
-                    output, cleanup = error.output, error.audit_control
-                observed = json.loads(output)
-                assert observed.get("state") != "ERROR", observed
+                    # P2: headless preview must finish and reap its launcher/child
+                    # server without an outer Job or any desktop window control.
+                    output, errors = preview.communicate(timeout=35)
+                    assert preview.returncode == 0, errors
+                    observed, completion = [json.loads(line) for line in output.splitlines()]
+                    assert observed.get("state") != "ERROR", observed
+                    assert observed["url"].startswith("http://127.0.0.1:") and observed["server"]["ready"], observed
+                    assert "HeadlessChrome/" in observed["userAgent"], observed
+                    cleanup = completion["cleanup"]
+                finally:
+                    if preview.poll() is None:
+                        preview.communicate(timeout=135)  # The preview's own bounded owner ends it.
                 assert observed["browserMode"] in {"normal", "single-process"}
+                assert cleanup["backend"] == "windows-job" and cleanup["membershipVerifiedBeforePayload"]
                 assert cleanup["quiescenceVerified"]
                 assert cleanup["activeProcessesAfterTeardown"] == 0
+                with socket.socket() as probe:
+                    assert probe.connect_ex(("127.0.0.1", observed["server"]["port"])) != 0
+                assert subprocess.check_output(["git", "status", "--porcelain"], cwd=worker_root) == before_preview
                 print(f"golden preview: seconds={time.time() - preview_started:.2f}", flush=True)
                 print(
                     f"golden web: scenarios={len(proof)}; journeys={len(actions)}; "

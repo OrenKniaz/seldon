@@ -16,7 +16,7 @@ import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
-from codex_harness.core import dispatch
+from codex_harness.core import approvals, dispatch
 from codex_harness.core.graph import load_plan
 from codex_harness.core.intake import _model
 from codex_harness.core.managed_paths import directory, short
@@ -457,6 +457,9 @@ def execute_worker_job(workspace, job_id):
             spine = store.spine()
             setup = spine.node(spine.ids("vision")[0])["fields"].get("setup", {})
             intent_nodes = store.locked_acceptance_spine().to_dict()["nodes"]
+            from codex_harness.core.planner_recovery import RESOLVED
+            worker_outcomes = next((r["proof"].get("faultOutcomes", {}) for r in approvals.records(store, RESOLVED)
+                                    if r.get("successor") == job_id), {})
         workers = _workers(manifest, request["options"]["workers"])
         run = dispatch.run_plan(
             plan,
@@ -469,6 +472,7 @@ def execute_worker_job(workspace, job_id):
             execution_job=directory,
             setup=setup,
             intent_nodes=intent_nodes,
+            worker_outcomes=worker_outcomes,
         )
         from codex_harness.core.planner_candidate import deliver, judgments_for, revalidate
 

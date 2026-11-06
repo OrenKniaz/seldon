@@ -435,6 +435,7 @@ def build_packet(
     proof_level: str | None = None,
     setup: dict | None = None,
     intent_nodes: list[dict] | None = None,
+    previous_outcome: str | None = None,
 ) -> str:
     """Supply ownership, full served spec, current files, interfaces and exact proof.
 
@@ -525,17 +526,18 @@ def build_packet(
             "scenario data, contracts and launch bindings; report observed results. "
             "Keep all test modules, helpers and fixtures in declared execution.testRoots; the controller observes RED/GREEN."
         )
-        if any(t.get("kind") == "web" for t in plan.semantic["targets"].values()):
-            instruction += (
-                f" Offline preview and keyboard check (served flows use Seldon's declared server) with "
-                f'`& "{sys.executable}" -B -m codex_harness.core.semantic_runner --preview .`; '
-                "close the browser when done. Seldon owns served UI/API observations; no OS/browser permission changes."
-            )
+        for name, target in plan.semantic["targets"].items():
+            if target.get("kind") == "web":
+                selection = "SCENARIOS.json '" + name.replace("'", "''") + "'" if "server" in target else "."
+                instruction += (f" Headless {'served' if 'server' in target else 'offline file://'} preview observation with "
+                    f'`& "{sys.executable}" -B -m codex_harness.core.semantic_runner --preview {selection}`; '
+                    "observation completes automatically. No OS/browser permission changes.")
         view_paragraphs = {}
         packet = "\n\n".join(
             sections := [
                 f"semantic-v1 {phase}; bead {bead.id}; plan {plan.plan_revision}.",
                 instruction,
+                *(["Previous worker outcome; repair before returning: " + previous_outcome] if previous_outcome else []),
                 *([intent] if intent else []),
                 "Change ONLY: " + ", ".join(bead.owned_files),
                 "Never edit: " + ", ".join(plan.requirement_files),
