@@ -254,7 +254,7 @@ def execution_judgment_golden(workspace):
     """
     from codex_harness.core.mcp_planner import PlannerServer
     from codex_harness.core.graph import load_plan
-    from codex_harness.core.planner_candidate import _semantic_validation, assess_execution
+    from codex_harness.core.planner_candidate import _semantic_validation, assess_execution, _evidence_digest
     from codex_harness.core.runners import execution_witnesses
     from codex_harness.core.worker_packet import build_packet
     from tests.python.core.mcp_planner_support import workspace_wire
@@ -336,7 +336,7 @@ def execution_judgment_golden(workspace):
 
         worker('C', {'verify.unfamiliar': "raise RuntimeError('verifier startup failed')\n"})
         broken = _semantic_validation(product, plan, {}, 'contracts')
-        assert broken['observedState'] == 'RED' and broken['state'] == 'pending-judgment'
+        assert broken['observedState'] == 'FAIL' and broken['state'] == 'pending-judgment'
         request = retain(broken)
         gap = judge(request, broken, 'negative', ['Verifier fails during startup before reading channels'])
         rejected = assess_execution(broken, gap)
@@ -362,6 +362,12 @@ def execution_judgment_golden(workspace):
         assert 'observed channels: absent' in rows['T_NEW']['actions']['execute']['stdout']
         assert 'missing behavior:' in rows['T_NEW']['actions']['execute']['stderr']
         assert all(r['cleanup']['quiescenceVerified'] for r in red['results'])
+        # Persisted receipt loss must not become process-quiescence credit from a
+        # positive semantic reply. Existing real executions retained every receipt.
+        uncertain = json.loads(json.dumps(red))
+        uncertain['results'][0].pop('cleanup')
+        uncertain['evidenceBinding'] = _evidence_digest(uncertain)
+        assert not assess_execution(uncertain, judge(retain(uncertain), uncertain, 'positive'))['admitted']
         request = retain(red)
         assert not assess_execution(red, call('harness_judgment', judgment_id=request['id'],
                                              candidate=red['candidate']))['admitted']
@@ -371,7 +377,7 @@ def execution_judgment_golden(workspace):
         git('add', '.')
         git('-c', 'user.name=golden', '-c', 'user.email=golden@local', 'commit', '-qm', 'worker implementation')
         green = _semantic_validation(product, plan, {'attempt': {'baseCommit': red['candidateCommit']}}, 'build')
-        assert green['red']['observedState'] == 'RED'
+        assert green['red']['observedState'] == 'FAIL'
         assert green['observedState'] == 'PASS' and green['state'] == 'pending-judgment'
         assert not green['passed'] and green['judgmentStatus'] == 'pending-judgment'
         assert all(r['state'] == 'PASS' for r in green['results'])
@@ -1246,7 +1252,7 @@ with TemporaryDirectory(dir=root) as scratch:
         options = dict(
             expected_revision=manifest["planRevision"],
             max_parallel=1 if semantic else 2,
-            timeout=60 if semantic else 30,
+            timeout=25 if semantic else 15,
             workers=[
                 dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium")
                 for b in (("B",) if semantic else ("A", "B"))
@@ -1685,9 +1691,31 @@ with TemporaryDirectory(dir=root) as scratch:
                     process_patch.setattr(subprocess, "Popen", launch)
                     job = call("harness_worker_start", **options)
                     deadline = time.time() + 180
-                    while (
-                        job["status"] not in {"completed", "failed"} and time.time() < deadline
-                    ):
+                    while job["status"] not in {"completed", "failed"} and time.time() < deadline:
+                        job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
+                    # r9: evidence silence killed active thinking. Earlier workers
+                    # returned immediately, so neither activity nor deadlines competed.
+                    expired = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
+                    assert expired["beads"]["C"]["status"] == "contracts-red", job
+                    live = json.loads((workspace / ".codex-harness/live-provider.json").read_text())
+                    assert live["outputSeconds"] >= 3 and live["cpuSeconds"] >= 3
+                    contract_attempt = Path(expired["beads"]["C"]["evidenceDir"]) / "attempt"
+                    assert "thinking" in (contract_attempt / "stderr.txt").read_text()
+                    silent_proof = call("harness_recovery", mode="inspect", job_id=job["jobId"])
+                    silent_attempt = Path(expired["beads"]["B"]["evidenceDir"]) / "attempt"
+                    stopped = json.loads((silent_attempt / "result.json").read_text())
+                    assert job["status"] == "failed" and stopped["cleanup"]["stopReason"] == "worker-stalled"
+                    assert stopped["cleanup"]["quiescenceVerified"] and stopped["cleanup"]["activeProcessesAfterTeardown"] == 0
+                    # This exercises the canonical per-provider owner, replacing
+                    # the former fake-worker child.wait fault in the CLI journey.
+                    silent = json.loads((workspace / ".codex-harness/silent-provider.json").read_text())
+                    assert time.time() - silent["started"] < options["timeout"], silent_proof
+                    recovered = call("harness_recovery", mode="resolve", job_id=job["jobId"],
+                        choice="readmit", reason="Readmit the genuinely silent provider within the same B")
+                    assert recovered["choice"] == "readmit"
+                    job = call("harness_worker_start", **options)
+                    assert job["jobId"] == recovered["successor"]
+                    while job["status"] not in {"completed", "failed"} and time.time() < deadline:
                         job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                     # r7: an omitted declared test crashed fallback RED in git restore.
                     # Earlier journeys always supplied the whole worker bundle.
@@ -1724,11 +1752,45 @@ with TemporaryDirectory(dir=root) as scratch:
                             "B": {"server.py": product}}
                 def start_fault(faults):
                     (workspace / "scripted-provider.json").write_text(
-                        json.dumps(dict(products=products, fail=list(faults))), encoding="utf-8")
+                        json.dumps(dict(products=products, fail=list(faults), deadlinePair=tuple(faults) == ("A",),
+                                        cancelBead=tuple(faults) == ("B",))), encoding="utf-8")
                     job = call("harness_worker_start", **options)
                     deadline = time.monotonic() + 180
+                    released = cancelled = False
                     while job["status"] not in {"completed", "failed"} and time.monotonic() < deadline:
                         job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
+                        if not job.get("run"):
+                            continue
+                        observed = json.loads(Path(job["run"]["recordPath"]).read_text())
+                        if tuple(faults) == ("A",) and not released:
+                            if not all(observed["beads"][b].get("evidenceDir") for b in ("A", "B")):
+                                continue
+                            a = Path(observed["beads"]["A"]["evidenceDir"]) / "attempt/result.json"
+                            b = Path(observed["beads"]["B"]["evidenceDir"]) / "attempt"
+                            if a.exists() and (workspace / ".codex-harness/sibling-started").exists():
+                                ended = json.loads(a.read_text())
+                                assert ended["failure"]["type"] == "TimeoutExpired"
+                                assert ended["cleanup"]["quiescenceVerified"] and ended["cleanup"]["activeProcessesAfterTeardown"] == 0
+                                assert ended["cleanup"]["activeProcessesBeforeTeardown"] >= 3
+                                assert (workspace / ".codex-harness/deadline-child").exists()
+                                assert json.loads((b / "request.json").read_text())["processObservedAt"] < ended["finishedAt"]
+                                before = (b / "stderr.txt").stat().st_size
+                                until = time.monotonic() + 2
+                                while (b / "stderr.txt").stat().st_size == before and time.monotonic() < until:
+                                    time.sleep(.05)
+                                assert not (b / "result.json").exists() and (b / "stderr.txt").stat().st_size > before
+                                (workspace / ".codex-harness/sibling-release").touch()
+                                released = True
+                        if tuple(faults) == ("B",) and not cancelled and (workspace / ".codex-harness/cancel-provider").exists():
+                            from codex_harness.core.attempt_control import request_cancel
+                            request_cancel(Path(job["run"]["recordPath"]).parents[1], "B")
+                            cancelled = True
+                    if tuple(faults) == ("A",):
+                        assert released and observed["beads"]["B"]["integrated"]["validation"]["passed"]
+                    if tuple(faults) == ("B",):
+                        assert cancelled
+                        control = json.loads((Path(observed["beads"]["B"]["evidenceDir"]) / "attempt/result.json").read_text())
+                        assert control["cancellation"]["status"] == "cancelled" and control["cleanup"]["activeProcessesAfterTeardown"] == 0
                     return job
                 with pytest.MonkeyPatch.context() as process_patch:
                     process_patch.setattr(subprocess, "Popen", launch)
@@ -1749,7 +1811,9 @@ with TemporaryDirectory(dir=root) as scratch:
                     job = start_fault(())
                 assert job["status"] == "completed", job
                 run = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
-            assert run["status"] == (dispatch.STATUS_VALIDATED if semantic else dispatch.STATUS_MOCK_ONLY), run
+            # Main now declares the concurrent HTTP integration proof; STALL1's
+            # real scripted workers must preserve that stronger result as well.
+            assert run["status"] == dispatch.STATUS_VALIDATED, run
             if semantic:
                 # Catch loss of native job/controller/snapshot/attempt authority when quota
                 # code is deleted. Earlier fake_workers bypassed all those launch checks.
@@ -1758,6 +1822,10 @@ with TemporaryDirectory(dir=root) as scratch:
                     original = json.loads((attempt / "request.json").read_text())
                     result = json.loads((attempt / "result.json").read_text())
                     assert original["processId"] == result["processId"] > 0
+                    # Portable fallback used to skip on_launch and omit cleanup;
+                    # consumer-only doubles missed lost provenance and AttributeError.
+                    assert result["cleanup"]["payloadPid"] == original["processId"]
+                    assert result["cleanup"]["quiescenceVerified"] and result["cleanup"]["activeProcessesAfterTeardown"] == 0
                     assert original["processProvenanceDigest"] == result["processProvenanceDigest"]
                     assert (attempt / "process-provenance.json").is_file()
                     assert result["exitCode"] == 0 and result["cleanup"]["controllerProcessExited"]
@@ -1788,6 +1856,21 @@ with TemporaryDirectory(dir=root) as scratch:
                         ],
                         expect={"exit": 0, "stderr": "OK"},
                     )
+                call("harness_accept_scenarios", scenarios=scenarios)
+                # A forced stop must not pass just because exit 19 was expected.
+                # Ordinary exit-0 acceptance never exercised this credit boundary.
+                from codex_harness.core.acceptance import run_scenarios
+                stopped_marker = Path(run["repo"]) / ".acceptance-interrupted"
+                interruption = json.loads(json.dumps(scenarios))
+                interruption[0].update(steps=[subprocess.list2cmdline([sys.executable, "-B", "-c",
+                    "import sys,time; from pathlib import Path; Path(sys.argv[1]).write_text('started'); time.sleep(600)",
+                    "{repo}/.acceptance-interrupted"])], expect={"exit": 19})
+                call("harness_accept_scenarios", scenarios=interruption)
+                stopped = run_scenarios(run["repo"], store.acceptance_scenarios(), should_stop=stopped_marker.exists)
+                assert not stopped[0]["passed"], stopped
+                step = stopped[0]["steps"][0]
+                assert step["cleanup"]["stopReason"] == "acceptance-stopped" and step["cleanup"]["activeProcessesAfterTeardown"] == 0
+                stopped_marker.unlink()
                 call("harness_accept_scenarios", scenarios=scenarios)
             call("harness_advance", to_phase="accept")
             if not semantic:
@@ -2112,6 +2195,13 @@ from pathlib import Path
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 class App(SimpleHTTPRequestHandler):
     def do_GET(self):
+        dbpath = Path('scenario.sqlite3').resolve()
+        import sqlite3
+        with sqlite3.connect(dbpath) as db: db.execute('create table if not exists preview (value text)')
+        if self.path in ('/overconsume', '/broken'):
+            self.send_response(409 if self.path == '/overconsume' else 500); self.end_headers(); self.wfile.write(b'{}'); return
+        if self.path == '/preview-db':
+            self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(dict(path=str(dbpath), exists=dbpath.is_file())).encode()); return
         if self.path == '/api/state':
             data = Path('state.json').read_bytes() if Path('state.json').exists() else b'{"saved":false}'
             self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(data)
@@ -2151,6 +2241,9 @@ def provider_host(mode, workspace, surface, job_id=None):
     filename = "index.html" if surface == "web" else "hashslip.py"
     actual_popen = subprocess.Popen
     actual_audit = audit_process.run_audit_process
+    actual_review = roundtable._run
+    if surface == "shelflife":
+        dispatch.run_audit_process = lambda *args, **options: actual_audit(*args, **options, stall_seconds=2)
     actual_run = dispatch.run_plan
     actual_write = dispatch._write_record
 
@@ -2196,8 +2289,6 @@ def provider_host(mode, workspace, surface, job_id=None):
             (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
         else:
             (workspace / "valid-contracts-attempted").write_text("attempted", encoding="utf-8")
-        if surface == "web":
-            scripted_worker(packet(root, "C"), root, {"serve.py": served_product()})
         scripted_worker(packet(root, "C"), root, {filename:
             "<!doctype html><title>HashSlip</title><h1>HashSlip</h1>"
             if surface == "web"
@@ -2214,7 +2305,7 @@ def provider_host(mode, workspace, surface, job_id=None):
                 "import subprocess, sys\nfrom pathlib import Path\nfrom receipt_helper import payload, check_receipt\n"
                 "command = Path(__file__).resolve().parents[1] / 'hashslip.py'\n"
                 "data = payload()\n"
-                "assert command.is_file(), 'missing receipt command'\n"
+                "import hashslip  # Tests-first: the product module is absent on baseline.\n"
                 "run = subprocess.run([sys.executable, '-B', str(command)], input=data, capture_output=True, timeout=5)\n"
                 "check_receipt(data, run)\n",
                 "checks/receipt_helper.py":
@@ -2228,35 +2319,30 @@ def provider_host(mode, workspace, surface, job_id=None):
                 (workspace / "contracts-attempted").write_text("attempted", encoding="utf-8")
                 return scripted_worker(packet(root, "B"), root, {filename: "raise RuntimeError('receipt startup failed')\n"})
             (workspace / "valid-contracts-attempted").write_text("attempted", encoding="utf-8")
-        if surface == "cli" and not (workspace / "stall-attempted").exists():
-            # A real descendant hangs mid-Build with uncommitted poisoned writes.
-            # The Job owner must reap it; an exited fake cannot prove recovery.
-            (workspace / "stall-attempted").write_text(str(root), encoding="utf-8")
-            child = actual_popen(
-                [
-                    sys.executable,
-                    "-B",
-                    "-c",
-                    "from pathlib import Path; import time; "
-                    "Path('hashslip.py').write_text('POISON'); "
-                    "Path('abandoned.txt').write_text('never merge'); time.sleep(600)",
-                ],
-                cwd=root,
-            )
-            child.wait(timeout=600)
         scripted_worker(packet(root, "B"), root, {filename:
             (ROOT / "tests/fixtures/efficiency" / filename).read_text(encoding="utf-8")})
         if surface == "web":
             with (root / filename).open("a", encoding="utf-8") as out:
                 out.write("<style>h1{background:linear-gradient(white,#fff)}</style>"
-                    "<input id='note' aria-label='Note'><button id='save' onclick=\"fetch('/api/state',{method:'POST',body:JSON.stringify({note:document.querySelector('#note').value})}).then(()=>this.textContent='Saved')\">Save</button>")
+                    "<input id='note' aria-label='Note'><button id='save' onclick=\"fetch('/api/state',{method:'POST',body:JSON.stringify({note:document.querySelector('#note').value})}).then(()=>this.textContent='Saved')\">Save</button>"
+                    "<button id='overconsume' onclick=\"fetch('/overconsume').then(()=>this.textContent='Rejected')\">Overconsume</button>"
+                    "<button id='happy' onclick=\"fetch('/overconsume').then(()=>this.textContent='Happy')\">Happy path</button>"
+                    "<button id='broken' onclick=\"fetch('/broken').then(()=>this.textContent='Broken')\">Break</button>"
+                    "<button id='failed-happy' onclick=\"fetch('/broken').then(()=>this.textContent='Failed happy')\">Another happy path</button>")
             scripted_worker(packet(root, "B"), root, {"serve.py": served_product()})
 
-    if surface == "shelflife":
+    if surface in {"shelflife", "parallel-http"}:
         from codex_harness.core.provider_launch import ProviderNormalLaunch
 
         class ScriptedWorker:
             def provider_normal_command(self, **arguments):
+                if (surface == "parallel-http" and "Your job: implement bead B." in arguments["prompt"]
+                        and json.loads((workspace / "scripted-provider.json").read_text())["deadlinePair"]):
+                    until = time.monotonic() + 30
+                    while not (workspace / ".codex-harness/deadline-child").exists() and time.monotonic() < until:
+                        time.sleep(.05)
+                    assert (workspace / ".codex-harness/deadline-child").exists()
+                    time.sleep(4)  # B's independently approved deadline begins after A's.
                 return ProviderNormalLaunch(cli="codex", command=tuple(command("reply", str(workspace))),
                     protections=("Scripted local provider; no actual provider acceptance",), stdin_text=arguments["prompt"])
 
@@ -2264,21 +2350,11 @@ def provider_host(mode, workspace, surface, job_id=None):
 
     def workers(plan, **options):
         if surface == "parallel-http":
-            payload = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))
-            def worker(bead):
-                def execute(root):
-                    if bead in payload["fail"]:
-                        crashed = actual_audit([sys.executable, "-B", "-c", "raise SystemExit(7)"],
-                                               cwd=root, timeout=5)
-                        assert crashed.returncode == 7 and crashed.audit_control["quiescenceVerified"]
-                        raise subprocess.CalledProcessError(crashed.returncode, crashed.args)
-                    scripted_worker(packet(root, bead), root, payload["products"][bead])
-                return execute
-            return actual_run(plan, **options, fake_workers={b: worker(b) for b in ("A", "B")})
+            return actual_run(plan, **options)
         workers = {"B": build} if surface == "cli" else {"C": contracts, "B": build}
         return actual_run(plan, **options, **({} if surface == "shelflife" else dict(fake_workers=workers)))
 
-    def review(launch, *_):
+    def review(launch, *args, **options):
         if "## Read-only candidate evidence" in launch.stdin_text:
             tier = "same-model" if surface == "cli" else "cross-provider"
             assert f"## Review tier: {tier}" in launch.stdin_text
@@ -2298,7 +2374,7 @@ def provider_host(mode, workspace, surface, job_id=None):
             (workspace / "review-output-sent").write_text("sent")
             payload = json.loads((ROOT / "tests/fixtures/efficiency/run26.json").read_text("utf-8"))
             text = json.dumps([payload["headingFinding"]])
-        return tuple(
+        response = tuple(
             value.replace(
                 "source-only", "gpt-6.1-sol" if launch.cli == "codex" else "claude-sonnet-5-5"
             ).replace("Some(High)", "Some(Medium)" if surface == "web" else "Some(Medium)")
@@ -2308,15 +2384,70 @@ def provider_host(mode, workspace, surface, job_id=None):
                 verdict="positive", rationale="Independent plan assessment: required behaviors are covered; trace note is advisory"))
         )
 
+        # One real review launch protects the shared owner; other unchanged
+        # semantic replies reuse their existing double instead of repeating it.
+        observed_review = workspace / ".codex-harness/review-job-observed"
+        if observed_review.exists():
+            return response
+        from dataclasses import replace
+        body = "import sys; sys.stdout.buffer.write(" + repr(response[1].encode("utf-8")) + "); sys.stderr.buffer.write(" + repr(response[2].encode("utf-8")) + ")"
+        actual = actual_review(replace(launch, command=(sys.executable, "-B", "-c", body)), *args, **options)
+        observed_review.touch()
+        return actual
+
     subprocess.Popen = launch
     roundtable._run = review
     dispatch.run_plan = workers
     if mode == "reply":
         prompt = sys.stdin.read()
         phase = "contracts" if prompt.startswith("semantic-v1 contracts;") else "build"
-        sources = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))[phase]
-        if phase == "build" and "Previous worker outcome; repair before returning:" not in prompt:
-            sources["verify_http.py"] = None
+        payload = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))
+        if surface == "parallel-http":
+            bead = next(b for b in ("A", "B") if f"Your job: implement bead {b}." in prompt)
+            if payload["deadlinePair"]:
+                if bead == "A":
+                    import signal
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    child = actual_popen([sys.executable, "-B", "-c",
+                        "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(600)"])
+                    (workspace / ".codex-harness/deadline-child").write_text(str(child.pid))
+                    while True:
+                        print("thinking despite deadline", file=sys.stderr, flush=True)
+                        time.sleep(.1)
+                (workspace / ".codex-harness/sibling-started").touch()
+                while not (workspace / ".codex-harness/sibling-release").exists():
+                    print("sibling active", file=sys.stderr, flush=True)
+                    time.sleep(.1)
+            if payload["cancelBead"] and bead == "B":
+                (workspace / ".codex-harness/cancel-provider").touch()
+                while True:
+                    print("awaiting cancellation", file=sys.stderr, flush=True)
+                    time.sleep(.1)
+            if bead in payload["fail"]:
+                raise SystemExit(7)
+            sources = payload["products"][bead]
+        else:
+            sources = payload[phase]
+        live = workspace / ".codex-harness/live-provider.json"
+        if surface == "shelflife" and phase == "contracts" and not live.exists():
+            # Accelerated 120s window = 2s: output-only and then CPU-only work,
+            # each longer than the silence window, with no evidence JSON writes.
+            start = time.monotonic()
+            while time.monotonic() - start < 3:
+                print("thinking", file=sys.stderr, flush=True)
+                time.sleep(.2)
+            output_seconds = time.monotonic() - start
+            start = time.monotonic()
+            while time.monotonic() - start < 3:
+                hashlib.sha256(b"reasoning" * 1024).digest()
+            live.write_text(json.dumps(dict(outputSeconds=output_seconds,
+                                           cpuSeconds=time.monotonic() - start)))
+        if surface == "shelflife" and phase == "build":
+            if not (workspace / ".codex-harness/silent-provider.json").exists():
+                (workspace / ".codex-harness/silent-provider.json").write_text(json.dumps(dict(started=time.time())))
+                time.sleep(600)
+            if "incomplete: declared verify_http.py missing from candidate" not in prompt:
+                sources["verify_http.py"] = None
         scripted_worker(prompt, Path.cwd(), sources)
         _, output, stderr = protocol("codex", text="Scripted worker completed the requested files")
         print(output)
@@ -2335,9 +2466,6 @@ def provider_host(mode, workspace, surface, job_id=None):
         sys.argv = [sys.argv[0], "--workspace", str(workspace)]
         runpy.run_module("codex_harness.core.seldon_mcp", run_name="__main__")
     elif mode == "controller":
-        # Accelerate the production no-progress clock, preserving B's scope.
-        if surface == "cli":
-            planner_recovery.STALL_SECONDS = 15
         audit_process.run_audit_process = controller_payload
         raise SystemExit(planner_recovery.monitor(workspace, job_id))
     else:
@@ -2431,6 +2559,8 @@ def test_golden_path(tmp_path, request, surface):
             server=dict(argv=[sys.executable, "-B", "-c", "import subprocess,sys; subprocess.Popen([sys.executable,'-B','serve.py']).wait()"], readyPath="/", readyWithin=5))
         journey = vision["scenarios"]["scenarios"][0]["actions"][0]["web"]
         journey["target"] = "served"
+        # r9: a deliberate negative path was counted as a console error. Existing
+        # served journeys made only successful requests and never created preview DBs.
         scenario = vision["scenarios"]["scenarios"][0]
         scenario["actions"].append(dict(id="api", http=dict(target="served", method="GET", path="/api/state", statusEquals=200, jsonEquals=dict(saved=True, note="Tea"))))
         scenario["observe"].append(dict(action="api"))
@@ -2440,6 +2570,9 @@ def test_golden_path(tmp_path, request, surface):
             dict(op="click", locator=dict(selector="#save")),
             dict(op="assertVisible", locator=dict(text="Saved")),
             dict(op="request", request=dict(method="GET", path="/api/state", statusEquals=200, jsonEquals=dict(saved=True, note="Tea"))),
+            dict(id="overconsume", op="click", locator=dict(selector="#overconsume"), expectedErrors=[dict(method="GET", path="/overconsume", statusEquals=409)]),
+            dict(op="assertVisible", locator=dict(text="Rejected")),
+            dict(op="request", request=dict(method="GET", path="/preview-db", statusEquals=200)),
         ])
         for n in captured_run["nodes"]:
             if n["kind"] == "bead":
@@ -2856,6 +2989,8 @@ def test_golden_path(tmp_path, request, surface):
                 assert job["status"] == saved["status"] == "pending-judgment"
                 assert saved["beads"]["C"]["status"] == "awaiting judgment"
                 assert saved["beads"]["B"]["attempt"] is None
+                assert saved["semanticContracts"]["observedState"] == "ERROR"
+                assert any("can't open file" in a.get("reason", "") for r in saved["semanticContracts"]["results"] for a in r.get("actions", {}).values())
                 assert "awaiting judgment" in saved["beads"]["B"]["status"]
                 roots = saved["beads"]["C"]["integrated"]["root"]
                 judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
@@ -2903,30 +3038,6 @@ def test_golden_path(tmp_path, request, surface):
                 assert job["jobId"] == resolved["successor"] != original
                 while job["status"] not in ("completed", "failed", "pending-judgment") and time.time() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
-                assert job["status"] == "failed", job
-                stalled = job["jobId"]
-                proof = call("harness_recovery", mode="inspect", job_id=stalled)
-                assert proof["verdict"] == "VERIFIED-QUIESCENT", proof
-                print("RECOVERY-1 inspect proof:", json.dumps(proof, sort_keys=True))
-                print("RECOVERY-1 job record:", json.dumps(job, sort_keys=True))
-                assert proof["controllerAndChildren"]["stopReason"] == "worker-stalled"
-                assert proof["controllerAndChildren"]["activeProcessesAfterTeardown"] == 0
-                poisoned = Path((tmp_path / "stall-attempted").read_text(encoding="utf-8"))
-                assert (poisoned / "hashslip.py").read_text() == "POISON"
-                assert not (tmp_path / "abandoned.txt").exists()
-                resolved = call(
-                    "harness_recovery",
-                    mode="resolve",
-                    job_id=stalled,
-                    choice="readmit",
-                    reason="End stalled Build and retry within the same B",
-                )
-                assert resolved["quarantine"] is True
-                job = call("harness_worker_start", **options)
-                assert job["jobId"] == resolved["successor"] != stalled
-                while job["status"] not in ("completed", "failed", "pending-judgment") and time.time() < deadline:
-                    job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
-                assert not (tmp_path / "abandoned.txt").exists()
                 probing = False
             assert job["status"] == "completed", job
             if surface == "web":
@@ -2935,10 +3046,10 @@ def test_golden_path(tmp_path, request, surface):
                 retained = json.loads(Path(job["run"]["recordPath"]).read_text(encoding="utf-8"))
                 assert set(retained["beads"]) == {"B"}
                 red = retained["semanticValidation"]["red"]
-                assert red["observedState"] == "RED", red
+                assert red["observedState"] == "FAIL", red
                 assert any(r["id"] == "T_RECEIPT" and r["state"] == "FAIL" for r in red["results"])
                 observed = next(r for r in red["results"] if r["id"] == "T_RECEIPT")["actions"]["execute"]["stderr"]
-                assert "AssertionError: missing receipt command" in observed and "ModuleNotFoundError" not in observed
+                assert "ModuleNotFoundError: No module named 'hashslip'" in observed
                 assert "retired fixture still present" not in observed
                 assert not (tmp_path / "checks/retired.json").exists()
                 assert all(r["cleanup"]["quiescenceVerified"] for r in red["results"])
@@ -2962,6 +3073,9 @@ def test_golden_path(tmp_path, request, surface):
                 assert api["server"]["stopped"] and not api.get("browserMode")
                 assert served[0]["server"]["ready"] and served[0]["server"]["stopped"]
                 assert served[0]["http"][0]["response"]["json"] == {"saved": True, "note": "Tea"}
+                assert served[0]["checks"]["consoleErrors"] == 0
+                assert served[0]["responses"] == [dict(step="overconsume", url=served[0]["server"]["origin"] + "/overconsume", status=409, expected=True)]
+                assert served[0]["http"][1]["response"]["json"]["exists"] is True
                 assert any(a["url"].startswith("file://") for a in actions)
                 assert all(r["cleanup"]["quiescenceVerified"] and r["cleanup"]["activeProcessesAfterTeardown"] == 0 for r in proof)
                 import socket
@@ -2976,7 +3090,28 @@ def test_golden_path(tmp_path, request, surface):
                 # Static previews never started a server: its log must not become
                 # an unowned worker change, and its protected binding lives here.
                 worker_root = Path(retained["beads"]["B"]["attempt"]["cwd"])
+                # Round 2: happy/negative steps share endpoints and error statuses.
+                # Journey-wide declarations hid happy-path failures; the old probe
+                # covered only a different, undeclared endpoint's 500.
+                from copy import deepcopy
+                negative = deepcopy(vision["scenarios"])
+                negative["scenarios"] = negative["scenarios"][:1]
+                negative["scenarios"][0]["actions"] = negative["scenarios"][0]["actions"][:1]
+                negative["scenarios"][0]["observe"] = negative["scenarios"][0]["observe"][:1]
+                negative["scenarios"][0]["actions"][0]["web"]["steps"].extend([
+                    dict(id="happy409", op="click", locator=dict(selector="#happy")),
+                    dict(op="assertVisible", locator=dict(text="Happy")),
+                    dict(id="negative500", op="click", locator=dict(selector="#broken"), expectedErrors=[dict(method="GET", path="/broken", statusEquals=500)]),
+                    dict(op="assertVisible", locator=dict(text="Broken")),
+                    dict(id="happy500", op="click", locator=dict(selector="#failed-happy")),
+                    dict(op="assertVisible", locator=dict(text="Failed happy"))])
+                failed = observe(negative, worker_root, vision["targets"], "validation")[0]
+                assert failed["state"] == "FAIL" and failed["cleanup"]["quiescenceVerified"], failed
+                assert [(r["step"], r["status"], r["expected"]) for a in failed["actions"].values() for r in a["responses"]] == [
+                    ("overconsume", 409, True), ("happy409", 409, False), ("negative500", 500, True), ("happy500", 500, False)]
                 before_preview = subprocess.check_output(["git", "status", "--porcelain"], cwd=worker_root)
+                from codex_harness.core.planner_candidate import observation_files
+                before_files = observation_files(worker_root)
                 preview_started = time.time()
                 preview = subprocess.Popen(
                     ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
@@ -2986,8 +3121,9 @@ def test_golden_path(tmp_path, request, surface):
                     # server without an outer Job or any desktop window control.
                     output, errors = preview.communicate(timeout=35)
                     assert preview.returncode == 0, errors
-                    observed, completion = [json.loads(line) for line in output.splitlines()]
-                    assert observed.get("state") != "ERROR", observed
+                    completion = json.loads(output)
+                    assert completion["state"] == "pending-judgment", completion
+                    observed = completion["actions"]["preview"]
                     assert observed["url"].startswith("http://127.0.0.1:") and observed["server"]["ready"], observed
                     assert "HeadlessChrome/" in observed["userAgent"], observed
                     cleanup = completion["cleanup"]
@@ -2998,9 +3134,12 @@ def test_golden_path(tmp_path, request, surface):
                 assert cleanup["backend"] == "windows-job" and cleanup["membershipVerifiedBeforePayload"]
                 assert cleanup["quiescenceVerified"]
                 assert cleanup["activeProcessesAfterTeardown"] == 0
+                assert Path(observed["server"]["cwd"]) != worker_root
+                assert not Path(observed["server"]["cwd"]).exists()
                 with socket.socket() as probe:
                     assert probe.connect_ex(("127.0.0.1", observed["server"]["port"])) != 0
                 assert subprocess.check_output(["git", "status", "--porcelain"], cwd=worker_root) == before_preview
+                assert observation_files(worker_root) == before_files
                 print(f"golden preview: seconds={time.time() - preview_started:.2f}", flush=True)
                 print(
                     f"golden web: scenarios={len(proof)}; journeys={len(actions)}; "

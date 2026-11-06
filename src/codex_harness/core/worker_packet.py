@@ -531,7 +531,7 @@ def build_packet(
                 selection = "SCENARIOS.json '" + name.replace("'", "''") + "'" if "server" in target else "."
                 instruction += (f" Headless {'served' if 'server' in target else 'offline file://'} preview observation with "
                     f'`& "{sys.executable}" -B -m codex_harness.core.semantic_runner --preview {selection}`; '
-                    "observation completes automatically. No OS/browser permission changes.")
+                    "observation runs in a disposable candidate snapshot and cleans up automatically. No OS/browser permission changes.")
         view_paragraphs = {}
         packet = "\n\n".join(
             sections := [

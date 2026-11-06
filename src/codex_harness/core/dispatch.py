@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryFile
 
 from codex_harness.core import attempt_control, attempt_provenance, efficiency, graph, worker_packet
+from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.mail import Mailbox
 from codex_harness.core.managed_paths import directory, run_directory, short
 from codex_harness.core.memory_promotion import (
@@ -774,132 +775,63 @@ def _run_provider(
     _write_record(attempt_dir / "request.json", request)
 
     attempt_provenance.verify_attempt(execution_job or request.get("executionJob"), request, attempt_dir, timeout=timeout)
-    try:
-        with (
-            events_path.open("wb") as events_file,
-            stderr_path.open("wb") as stderr_file,
-            TemporaryFile() as prompt_file,
-        ):
-            if launch.stdin_text is not None:
-                # A seeked binary file preserves exact UTF-8 packet bytes without
-                # a blocking pipe writer when a child exits early or never reads.
-                prompt_file.write(launch.stdin_text.encode("utf-8"))
-                prompt_file.seek(0)
-            process = subprocess.Popen(
-                launch.command,
-                cwd=cwd,
-                env=effective_environment,
-                stdin=prompt_file if launch.stdin_text is not None else subprocess.DEVNULL,
-                stdout=events_file,
-                stderr=stderr_file,
-            )
-    except OSError as error:
-        result = {
-            **request,
-            "processId": None,
-            "status": "launch-failed",
-            "exitCode": None,
-            "finishedAt": _now(),
-            "eventsSha256": None,
-            "changedPaths": None,
-            "failure": {"type": type(error).__name__, "message": str(error)},
-            "cleanup": {"status": "NOT_STARTED", "errors": []},
-            "outputCollectionError": None,
-            "changeObservationError": None,
-            "outputComplete": False,
-            "didRunProvider": False,
-            "isMocked": False,
-            "didRunIntegratedValidation": False,
-            "isLiveProductProof": False,
-        }
-        return _save_attempt_result(attempt_dir, request, requirement_requests, result, None, None)
-    timed_out = False
-    cancellation = None
-    failure = None
-    cleanup = {"status": "NOT_REQUESTED", "errors": []}
-    publication_path = attempt_dir / "request.json"
-    failed_request_publication = False
-    request["processId"] = process.pid
-    request["processObservedAt"] = _now()
-    try:
-        # Every post-spawn operation remains inside ownership of the live child.
-        publication_path = attempt_dir / attempt_provenance.FILENAME
+    cancellation = failure = None
+    cleanup = {}
+    code = None
+    publication_path = attempt_dir / attempt_provenance.FILENAME
+    failed_request_publication = timed_out = False
+
+    def publish(pid):
+        nonlocal publication_path
+        request.update(processId=pid, processObservedAt=_now())
         if request["command"] != list(launch.command) or request["launch"] != launch.to_payload():
-            raise ValueError("actual Popen command/launch differs from request")
-        original = attempt_provenance.publish(
-            attempt_dir,
-            request,
-            process_id=process.pid,
-            process_observed_at=request["processObservedAt"],
-        )
+            raise ValueError("actual owned command/launch differs from request")
+        original = attempt_provenance.publish(attempt_dir, request, process_id=pid,
+                                             process_observed_at=request["processObservedAt"])
         request["processProvenanceDigest"] = original["digest"]
         publication_path = attempt_dir / "request.json"
         _write_record(publication_path, request)
         for requirement, planned in requirement_requests.items():
-            directory = attempt_dir / requirement
-            planned["processId"] = process.pid
-            planned["processObservedAt"] = request["processObservedAt"]
-            planned["processProvenanceDigest"] = original["digest"]
-            publication_path = directory / "request.json"
+            planned.update(processId=pid, processObservedAt=request["processObservedAt"],
+                           processProvenanceDigest=original["digest"])
+            publication_path = attempt_dir / requirement / "request.json"
             _write_record(publication_path, planned)
         publication_path = None
-        deadline = time.monotonic() + timeout
-        while process.poll() is None:
-            cancellation = attempt_control.consume_cancel(
-                process, attempt_dir, request, cleanup=cleanup
-            )
-            if cancellation and "cleanup" in cancellation:
-                cleanup = cancellation["cleanup"]
-            if cancellation and cancellation["status"] == "cancelled":
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(launch.command, timeout)
-            try:
-                process.wait(timeout=min(0.2, remaining))
-            except subprocess.TimeoutExpired:
-                pass
-        if cancellation is None:
-            cancellation = attempt_control.consume_cancel(
-                process, attempt_dir, request, cleanup=cleanup
-            )
+
+    def stop_when():
+        nonlocal cancellation
+        if request.get("processId"):
+            cancellation = attempt_control.consume_cancel(attempt_dir, request)
+        return "cancelled" if cancellation and cancellation["status"] == "requested" else None
+
+    try:
+        with events_path.open("wb") as output, stderr_path.open("wb") as errors, TemporaryFile() as prompt:
+            if launch.stdin_text is not None:
+                prompt.write(launch.stdin_text.encode("utf-8"))
+                prompt.seek(0)
+            completed = run_audit_process(launch.command, cwd=cwd, env=effective_environment,
+                stdin=prompt if launch.stdin_text is not None else subprocess.DEVNULL,
+                stdout=output, stderr=errors, capture_output=False, timeout=timeout,
+                on_launch=publish, stop_when=stop_when)
+            cleanup = completed.audit_control
+            code = completed.returncode
+            if cleanup.get("stopReason") == "worker-stalled":
+                failure = dict(type="AttemptStalled", message="Provider activity stopped within the idle window")
     except subprocess.TimeoutExpired as error:
         timed_out = True
-        failure = {"type": type(error).__name__, "timeoutSeconds": error.timeout}
-        cleanup["status"] = "UNVERIFIED"
-        try:
-            if sys.platform == "win32":
-                killed = subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    check=False,
-                    capture_output=True,
-                    timeout=15,
-                )
-                cleanup["commandExitCode"] = killed.returncode
-                if killed.returncode != 0:
-                    cleanup["errors"].append(
-                        {
-                            "type": "CleanupCommandFailed",
-                            "exitCode": killed.returncode,
-                            "message": killed.stderr.decode(errors="replace"),
-                        }
-                    )
-            else:
-                process.kill()
-            process.wait(timeout=15)
-        except (OSError, subprocess.SubprocessError) as cleanup_error:
-            cleanup["errors"].append(
-                {"type": type(cleanup_error).__name__, "message": str(cleanup_error)}
-            )
+        failure = dict(type=type(error).__name__, timeoutSeconds=error.timeout)
+        cleanup = getattr(error, "audit_control", {})
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
-        failure = {"type": type(error).__name__, "message": str(error)}
-        if publication_path is not None:
+        cleanup = getattr(error, "audit_control", {})
+        failure = dict(type=type(error).__name__, message=str(error))
+        failed_request_publication = publication_path is not None and request.get("processId") is not None
+        if failed_request_publication:
             failure.update(stage="post-spawn-publication", path=str(publication_path))
-            failed_request_publication = True
-        else:
-            failure["stage"] = "attempt-control"
-        attempt_control.stop_owned(process, cleanup)
-    cleanup["controllerProcessExited"] = process.poll() is not None
+    verified = cleanup.get("quiescenceVerified") is True
+    cleanup.update(status="VERIFIED" if verified else "UNVERIFIED", errors=[] if verified else ([failure] if failure else []),
+                   controllerProcessExited=verified, descendantsStopped=verified)
+    if request.get("processId"):
+        cancellation = attempt_control.consume_cancel(attempt_dir, request, control=cleanup, exited=True)
     streams = {}
     output_errors = []
     for name, path in (("stdout", events_path), ("stderr", stderr_path)):
@@ -926,7 +858,7 @@ def _run_provider(
         else "observation-failed"
         if failure or output_error or change_error
         else "exited",
-        "exitCode": process.returncode,
+        "exitCode": code,
         "finishedAt": _now(),
         "eventsSha256": hashlib.sha256(stdout).hexdigest() if stdout is not None else None,
         "changedPaths": changed,
@@ -938,7 +870,7 @@ def _run_provider(
         "outputComplete": failure is None
         and output_error is None
         and not (cancellation and cancellation["status"] == "cancelled"),
-        "didRunProvider": True,
+        "didRunProvider": True if request.get("processId") else False if cleanup.get("payloadReleased") is False else None,
         "isMocked": False,
         "didRunIntegratedValidation": False,
         "isLiveProductProof": False,

@@ -18,9 +18,10 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
 
+from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core import review_instructions
 from codex_harness.core.approvals import require_approval, require_reviewers
 from codex_harness.core.plan_quality import quality_report, render_quality_card
@@ -473,21 +474,14 @@ def coverage(selected):
 
 
 def _run(launch, cwd: Path, timeout: int, *, raw=False):
-    completed = subprocess.run(
-        launch.command,
-        cwd=cwd,
-        env={**os.environ, **launch.environment},
-        **(
-            {"stdin": subprocess.DEVNULL}
-            if launch.stdin_text is None
-            else {"input": launch.stdin_text.encode("utf-8") if raw else launch.stdin_text}
-        ),
-        capture_output=True,
-        **({} if raw else {"text": True, "encoding": "utf-8"}),
-        timeout=timeout,
-        check=False,
-    )
-    return completed.returncode, completed.stdout, completed.stderr
+    with TemporaryFile() as prompt:
+        if launch.stdin_text is not None:
+            prompt.write(launch.stdin_text.encode("utf-8"))
+            prompt.seek(0)
+        completed = run_audit_process(launch.command, cwd=cwd, env={**os.environ, **launch.environment},
+                                      stdin=prompt, text=False, timeout=timeout)
+    return (completed.returncode, completed.stdout if raw else completed.stdout.decode("utf-8"),
+            completed.stderr if raw else completed.stderr.decode("utf-8"))
 
 
 def _diagnostic(store, result, record, launch, output, stderr) -> None:

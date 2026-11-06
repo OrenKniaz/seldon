@@ -16,7 +16,7 @@ from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.record_io import write_record_json
-from codex_harness.core.semantic_schema import LIMIT, argv, content, path, validate
+from codex_harness.core.semantic_schema import LIMIT, WEB, argv, content, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
 MODULE = "codex_harness.core.semantic_runner"
@@ -454,8 +454,6 @@ def run(
                 results.append(result)
                 if progress_path is not None:
                     write_record_json(progress_path, dict(scenario=s["id"], completed=len(results)))
-                if result["state"] == "ERROR":
-                    break
     except ERRORS as error:
         results.append(
             dict(
@@ -474,18 +472,13 @@ def run(
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--preview"]:
-        tools = web_toolchain(None, False)
         selection = Path(sys.argv[2] if len(sys.argv) > 2 else ".").resolve()
-        binding = json.loads(selection.read_text(encoding="utf-8"))["targets"][sys.argv[3]] if selection.is_file() else {}
-        root = selection.parent if binding else selection
-        if "server" in binding:
-            binding["server"]["argv"] = argv(binding["server"]["argv"], root)
-        with tempfile.TemporaryDirectory(prefix="seldon-preview-") as scratch:
-            preview = run_audit_process([tools[k]["path"] for k in ("node", "adapter")] + ["--preview",
-                str(Path(tools["playwright"]["path"]).parent), tools["chromium"]["path"], str(root), json.dumps(binding), scratch], cwd=root, capture_output=False)
-            print(json.dumps(dict(cleanup=getattr(preview, "audit_control", None))))
-            raise SystemExit(preview.returncode)
-    if sys.argv[1:2] == ["--worker"]:
+        targets = json.loads(selection.read_text(encoding="utf-8"))["targets"] if selection.is_file() else {"preview": dict(kind="web", entry="index.html")}
+        journey = dict(target=sys.argv[3] if selection.is_file() else "preview", operation="preview", viewport=dict(width=1280, height=720), reducedMotion="no-preference", steps=[dict(id="preview", op="open")])
+        scenario = dict(id="preview", requirementRefs=["preview"], contractRefs=[], setup={}, actions=[dict(id="preview", web=journey)], observe=[dict(action="preview", **{k: 0 if k in ("consoleErrors", "externalRequests") else True for k in WEB})], verdict="all")
+        with tempfile.TemporaryDirectory(prefix="seldon-preview-") as evidence:
+            result = run(dict(schema="seldon/scenarios-v1", scenarios=[scenario]), selection.parent if selection.is_file() else selection, targets, "validation", evidence_dir=evidence, run_seconds=30)[0]
+    elif sys.argv[1:2] == ["--worker"]:
         try:
             s, targets, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
             result = execute(

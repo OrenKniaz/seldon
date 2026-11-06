@@ -1,7 +1,6 @@
 // Trusted adapter: scenario data never becomes JavaScript or launch options.
 'use strict'; const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'); const {pathToFileURL, fileURLToPath} = require('node:url');
-const preview = process.argv[2] === '--preview'; const cfg = preview ? {tools: {playwright: process.argv[3], chromium: process.argv[4], evidence: process.argv[7]}, root: path.resolve(process.argv[5] || '.'), binding: JSON.parse(process.argv[6] || '{}'), seconds: 30, remaining: 30} :
-  JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); const {journey: j, tools, root, binding = {}} = cfg;
+const cfg = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); const {journey: j, tools, root, binding = {}} = cfg;
 const end = Date.now() + cfg.remaining * 1000; const remaining = () => { const ms = Math.min(cfg.seconds * 1000, end - Date.now());
   if (ms <= 0) throw Error('Web scenario timeout'); return ms; };
 async function openBrowser() {
@@ -36,11 +35,11 @@ async function startServer() {
   const socket = net.createServer(); await new Promise((resolve, reject) => { socket.once('error', reject); socket.listen(0, '127.0.0.1', resolve); });
   const port = socket.address().port; await new Promise(resolve => socket.close(resolve)); origin = `http://127.0.0.1:${port}`;
   const command = binding.server.argv.map(s => s.replaceAll('{port}', String(port)).replaceAll('{host}', '127.0.0.1'));
-  const logPath = path.join(preview ? tools.evidence : root, '.server.log'), log = fs.openSync(logPath, 'w'); let launchError;
+  const logPath = path.join(root, '.server.log'), log = fs.openSync(logPath, 'w'); let launchError;
   try { server = spawn(command[0], command.slice(1), {cwd: root, env: {...process.env, SELDON_PORT: String(port), SELDON_HOST: '127.0.0.1'}, windowsHide: true, stdio: ['ignore', log, log]}); }
   finally { fs.closeSync(log); }
   server.on('error', e => { launchError = e.message; });
-  serverEvidence = {command, port, origin, pid: server.pid, ready: false, stopped: false};
+  serverEvidence = {command, cwd: root, port, origin, pid: server.pid, ready: false, stopped: false};
   const until = Math.min(end, Date.now() + binding.server.readyWithin * 1000);
   while (Date.now() < until && server.exitCode === null && !launchError) {
     try { const r = await request({path: binding.server.readyPath}, Math.min(250, until - Date.now()), true);
@@ -66,18 +65,18 @@ async function stopServer() {
     if (binding.server) await startServer();
     const opened = cfg.http ? {} : await openBrowser();
     ({browser, browserMode} = opened); const {context, page} = opened;
-    if (preview) {
-      await page.goto(origin ? new URL(binding.entry || '/', origin).href : pathToFileURL(path.join(root, 'index.html')).href);
-      process.stdout.write(JSON.stringify({browserMode, userAgent: await page.evaluate(() => navigator.userAgent), url: page.url(), server: serverEvidence}) + '\n');
-      return;
-    }
-    toolchain.chromium = browser?.version(); const requests = [], errors = [], steps = [], artifacts = [];
+    toolchain.chromium = browser?.version(); const requests = [], errors = [], responses = [], steps = [], artifacts = [];
+    let activeStep; const causes = new WeakMap(), matches = (r, e) => r.url() === new URL(e.path, origin).href && r.request().method() === e.method.toUpperCase() && r.status() === e.statusEquals;
     const checks = {noHorizontalOverflow: true, consoleErrors: 0, externalRequests: 0, textContrastAA: null, headingStructure: null, reducedMotionRespected: null};
     const allowed = url => { if (origin) return new URL(url.replace(/^ws/, 'http')).origin === origin; try { const f = fileURLToPath(url), rel = path.relative(root, f);
       return !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.split(path.sep).some(p => p.startsWith('.')) && fs.statSync(f).isFile(); } catch { return false; } };
     if (context) { context.on('request', r => { if (!allowed(r.url())) requests.push(r.url().slice(0, 160)); });
     await context.routeWebSocket('**/*', ws => { if (origin && allowed(ws.url())) ws.connectToServer(); else { requests.push(ws.url().slice(0, 160)); ws.close(); } });
-    page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text().slice(0, 160)); });
+    page.on('request', r => causes.set(r, activeStep));
+    page.on('response', r => { if (r.status() >= 400) { const owner = causes.get(r.request()), index = owner?.expectedErrors.findIndex(e => matches(r, e)) ?? -1;
+      if (index >= 0) owner.expectedErrors.splice(index, 1); responses.push({step: owner?.id, url: r.url(), status: r.status(), expected: index >= 0}); } });
+    page.on('requestfailed', r => errors.push({message: r.failure()?.errorText, url: r.url()}));
+    page.on('console', msg => { if (msg.type() === 'error') errors.push({message: msg.text().slice(0, 160), url: msg.location().url}); });
     page.on('pageerror', err => errors.push(err.message.slice(0, 160)));
     page.on('popup', p => p.close()); await context.route('**/*', r => allowed(r.request().url()) &&
       (!r.request().isNavigationRequest() || r.request().frame() === page.mainFrame()) ? r.continue() : r.abort());
@@ -86,6 +85,8 @@ async function stopServer() {
       spec.selector ? page.locator('css=' + spec.selector) : page.getByRole(spec.role, {name: spec.name, exact: true});
     const http = [];
     for (const step of (cfg.http ? [{op: 'request', request: cfg.http}] : j.steps)) {
+      activeStep = {id: step.id, expectedErrors: [...(step.expectedErrors || [])]};
+      const expected = (step.expectedErrors || []).map(e => page.waitForResponse(r => causes.get(r.request()) === activeStep && matches(r, e), {timeout: remaining()}));
       page?.setDefaultTimeout(remaining()); page?.setDefaultNavigationTimeout(remaining()); let passed = true;
       if (step.op === 'request') {
         const observed = await request(step.request); http.push(observed);
@@ -108,6 +109,7 @@ async function stopServer() {
         else if (count === 1 && await loc.isVisible()) await loc.click({timeout: remaining()});
         else passed = false;
       }
+      await Promise.all(expected); activeStep = null;
       steps.push({check: step.op, passed, actual: passed, reason: passed ? 'rendered state matched' : 'rendered state mismatch'}); if (page) checks.noHorizontalOverflow &&= await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= innerWidth);
       if (!passed) break;
     }
@@ -122,9 +124,10 @@ async function stopServer() {
         artifacts.push({path: file, sha256, viewport: j.viewport, reducedMotion: j.reducedMotion, fullPage});
       } catch (e) { artifacts.push({missing: true, reason: e.message.slice(0, 160), fullPage}); }
     }
-    checks.consoleErrors = errors.length; checks.externalRequests = requests.length;
+    const unexpected = [...responses.filter(r => !r.expected), ...errors.filter(e => !e.message?.startsWith('Failed to load resource: the server responded with a status of ') || !responses.some(r => r.url === e.url))];
+    checks.consoleErrors = unexpected.length; checks.externalRequests = requests.length;
     result = {state: 'OBSERVED', browserMode, checks: cfg.http ? {} : checks, steps, artifacts, rendered,
-      toolchain, url: page?.url(), http, server: serverEvidence, errors: errors.slice(0, 4), requests: requests.slice(0, 4)};
+      toolchain, url: page?.url(), userAgent: page ? await page.evaluate(() => navigator.userAgent) : null, http, server: serverEvidence, responses, errors: unexpected.slice(0, 4), requests: requests.slice(0, 4)};
   } catch (error) {
     result = {state: 'ERROR', reason: error.message.slice(0, 1500), browserMode: error.browserMode ?? browserMode, toolchain, server: serverEvidence};
   } finally { try { if (browser) await browser.close(); } finally { await stopServer(); } }

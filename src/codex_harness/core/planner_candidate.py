@@ -67,7 +67,7 @@ def assess_execution(proof, judgment=None):
         result.pop(key, None)
     contracts = proof["phase"] == "contracts"
     observed = proof["observedState"]
-    result["state"] = observed if observed in {"ERROR", "FAIL"} else "pending-judgment"
+    result["state"] = observed if not contracts and observed in {"ERROR", "FAIL"} else "pending-judgment"
     meaning = (judgment or {}).get("meaning", {})
     bound = bool(judgment and judgment.get("candidate") == proof["candidate"]
                  and judgment.get("current") and meaning.get("check") == "execution"
@@ -84,19 +84,16 @@ def assess_execution(proof, judgment=None):
         for observation in ([proof] if contracts else [proof["red"], proof]):
             observed, rows = observation["observedState"], observation["results"]
             is_red = observation["phase"] == "contracts"
-            if observed == "pending-judgment" and rows and all(
-                not r.get("unperformed") and r.get("actions") for r in rows
-            ):
+            if is_red and any(r["state"] in {"FAIL", "ERROR"} and r.get("actions") for r in rows):
+                observed = "RED"  # Meaning, including startup errors, belongs to the bound judge.
+            elif observed == "pending-judgment" and rows and all(r.get("actions") and not r.get("unperformed") for r in rows):
                 missing = [o["check"] for r in rows for o in r.get("observations", []) if o["passed"] is None]
                 answers = meaning.get("qualitativeChecks", {})
                 if missing and isinstance(answers, dict) and all(answers.get(k) is True for k in missing):
-                    observed = "RED" if is_red and any(r["state"] == "FAIL" for r in rows) else "PASS"
-            if observed != ("RED" if is_red else "PASS"):
-                if is_red and observed != "pending-judgment":
-                    result["state"] = "ERROR" if observed == "ERROR" else "FAIL"
-                break
-        else:
-            result.update(state=observed, admitted=True, passed=not contracts)
+                    observed = "PASS"
+            if observed != ("RED" if is_red else "PASS") or not all(r.get("unperformed") or (r.get("cleanup", {}).get("quiescenceVerified") and r["cleanup"].get("activeProcessesAfterTeardown") == 0) for r in rows):
+                return dict(result, state="FAIL" if is_red and observed != "pending-judgment" else result["state"])
+        result.update(state=observed, admitted=True, passed=not contracts)
     return result
 
 
@@ -140,8 +137,6 @@ def _semantic_validation(root, plan, record, phase):
     states = [r["state"] for r in results]
     complete = [r["id"] for r in results] == [t["id"] for t in tests] and bool(tests)
     observed = ("ERROR" if not complete or "ERROR" in states else
-                "pending-judgment" if phase == "contracts" and "pending-judgment" in states else
-                "RED" if phase == "contracts" and "FAIL" in states else
                 "FAIL" if "FAIL" in states else
                 "pending-judgment" if "pending-judgment" in states else "PASS")
     proof = dict(
@@ -400,7 +395,7 @@ def record_judgment(store, *, repo, check, judgment_id=None, passed=None, statem
                 humanIdentityVerified=False))
             event_id = store.connection.execute("SELECT max(id) FROM events").fetchone()[0]
         judgment = store.prepare_judgment(question=(
-            f"Assess {check}: meaningful tests, correct failure reason and identified stub/mock gaps. "
+            f"Assess {check}: meaningful tests, whether observed baseline failures are missing/incorrect product behavior or broken test infrastructure, and stub/mock gaps. "
             f"Return meaning.check={check!r}, meaning.evidenceBinding={evidence_binding!r}; "
             "for execution positive credit also requires meaningful:true and "
             "correctFailureReason:true for the bound RED and noStubMockGaps:true for Validation. "

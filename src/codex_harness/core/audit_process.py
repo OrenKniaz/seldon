@@ -1,7 +1,7 @@
 """Captured audit commands; Windows uses a held Job before releasing the payload.
 
 This contains normal CreateProcess descendants, not arbitrary hostile OS activity.
-Other platforms retain their existing subprocess behavior without containment claims.
+POSIX commands run in a private session/process group with verified group teardown.
 """
 
 import ctypes
@@ -11,6 +11,8 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
+from tempfile import TemporaryFile
 
 _BOOTSTRAP = r"""
 import json, msvcrt, os, subprocess, sys
@@ -34,7 +36,8 @@ try:
         config['args'], cwd=config['cwd'], env=config['env'],
         stdin=subprocess.DEVNULL if stdin_devnull else 0,
         stdout=sys.stdout, stderr=sys.stderr,
-        creationflags=subprocess.CREATE_NO_WINDOW)
+        shell=config['shell'], creationflags=subprocess.CREATE_NO_WINDOW)
+    send({'kind': 'launched', 'pid': child.pid})
     code = child.wait()
     send({'kind': 'complete', 'returncode': code})
 except BaseException as error:
@@ -155,7 +158,7 @@ class _WindowsJob:
         if not member.value:
             raise OSError("Audit bootstrap Job membership unverified; payload not released")
 
-    def active(self):
+    def active(self, *, activity=False):
         value = self.accounting_type()
         self._call(
             "QueryInformationJobObject",
@@ -165,22 +168,26 @@ class _WindowsJob:
             ctypes.sizeof(value),
             None,
         )
-        return value.active
+        return (value.total, value.times[0], value.times[1]) if activity else value.active
 
     def finish(self, process, control):
+        control["teardownStarted"] = True
         active = self.active()
         control["activeProcessesBeforeTeardown"] = active
         if active:
             self._call("TerminateJobObject", self.handle, 19)
         if self.api.WaitForSingleObject(int(process._handle), 5000) != 0:
             raise OSError("Audit bootstrap handle wait did not complete")
+        self.quiescence(control)
+        process.wait(timeout=1)
+
+    def quiescence(self, control):
         deadline = time.monotonic() + 5
         while (active := self.active()) and time.monotonic() < deadline:
             time.sleep(0.01)
         control["activeProcessesAfterTeardown"] = active
         if active:
             raise OSError("Audit Job still has active processes; quiescence unverified")
-        process.wait(timeout=1)
         control["quiescenceVerified"] = True
 
     def read(self, fd, output):
@@ -199,6 +206,124 @@ class _WindowsJob:
         return False
 
 
+def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdin,
+                          stop_when, stall_seconds, stdout, stderr, shell, on_launch):
+    import signal
+
+    control = dict(backend="posix-process-group", membershipVerifiedBeforePayload=False,
+                   payloadReleased=False, quiescenceVerified=False,
+                   activeProcessesAfterTeardown=None)
+    process = None
+    with ExitStack() as files:
+        if capture_output:
+            stdout, stderr = files.enter_context(TemporaryFile()), files.enter_context(TemporaryFile())
+        if sys.platform == "darwin":
+            class Usage(ctypes.Structure):
+                # Apple's rusage_info_v0: UUID, user/system time, eight other uint64 fields.
+                _fields_ = [("uuid", ctypes.c_ubyte * 16), ("user", ctypes.c_uint64),
+                            ("system", ctypes.c_uint64), ("other", ctypes.c_uint64 * 8)]
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+            libproc.proc_pid_rusage.restype = ctypes.c_int
+
+        def cpu(pid):
+            try:
+                if sys.platform.startswith("linux"):
+                    with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
+                        fields = stat.read().rsplit(")", 1)[1].split()
+                    return int(fields[11]) + int(fields[12])  # utime/stime kernel ticks.
+                if sys.platform == "darwin":
+                    usage = Usage()
+                    if libproc.proc_pid_rusage(pid, 0, ctypes.byref(usage)):
+                        code = ctypes.get_errno()
+                        raise OSError(code, os.strerror(code))
+                    return usage.user + usage.system
+                raise OSError("Audit CPU observation requires Linux or macOS")
+            except OSError as error:
+                if error.errno not in {2, 3}:  # Member exited during the snapshot.
+                    raise
+                return None
+
+        def members():
+            # ps supplies membership only; its rounded CPU time misses quiet work.
+            rows = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,stat="],
+                capture_output=True, text=True, timeout=1, check=True).stdout.splitlines()
+            return tuple(int(pid) for pid, pgid, state in map(str.split, rows)
+                         if pgid == str(process.pid) and not state.startswith("Z"))
+
+        def exited():
+            # Observe zombie state without reaping: the child pins PID/PGID through teardown.
+            return process.pid not in members()
+
+        try:
+            try:
+                deadline = time.monotonic() + timeout
+                process = subprocess.Popen(args, cwd=cwd, env=env, stdin=stdin,
+                    stdout=stdout, stderr=stderr, shell=shell, start_new_session=True)
+                control.update(membershipVerifiedBeforePayload=True, payloadReleased=True,
+                               payloadPid=process.pid)
+                if process.stdin is not None:
+                    process.stdin.close()
+                if on_launch:
+                    on_launch(process.pid)
+                last_progress, next_check, previous = time.monotonic(), 0, None
+                while not exited() and time.monotonic() < deadline:
+                    if stop_when and (reason := stop_when()):
+                        control["stopReason"] = reason
+                        break
+                    now = time.monotonic()
+                    if stall_seconds is not None and now >= next_check:
+                        next_check = now + 0.2
+                        observed = (tuple((pid, cpu(pid)) for pid in members()), tuple(
+                            (os.fstat(f.fileno()).st_size, os.fstat(f.fileno()).st_mtime_ns)
+                            for f in (stdout, stderr) if f is not None and hasattr(f, "fileno")))
+                        if observed != previous:
+                            previous, last_progress = observed, now
+                        if now - last_progress >= stall_seconds:
+                            control["stopReason"] = "worker-stalled"
+                            break
+                    time.sleep(0.01)
+                timed_out = not exited() and time.monotonic() >= deadline
+            finally:
+                if process is not None:
+                    control["teardownStarted"] = True
+                    try:
+                        control["activeProcessesBeforeTeardown"] = len(members())
+                    finally:  # Observation failures must still stop the owned group.
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)  # Leader still pins PGID; no denied retry.
+                        except ProcessLookupError:
+                            pass
+                        drain_deadline = time.monotonic() + 5
+                        # Unreaped zombies retain identity but cannot execute or own live descendants.
+                        while members() and time.monotonic() < drain_deadline:
+                            time.sleep(0.01)
+                        if members():
+                            raise OSError("Audit process group still has live members; quiescence unverified")
+                        process.wait(timeout=5)  # No group lookup or signal may follow this reap.
+                        control.update(activeProcessesAfterTeardown=0, quiescenceVerified=True)
+            output = []
+            for stream in (stdout, stderr):
+                value = None
+                if capture_output:
+                    stream.seek(0)
+                    value = stream.read()
+                    if text:
+                        encoding = "utf-8" if sys.flags.utf8_mode else locale.getencoding()
+                        value = value.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+                output.append(value)
+            if timed_out:
+                raise subprocess.TimeoutExpired(args, timeout, output=output[0], stderr=output[1])
+            code = 19 if control.get("stopReason") else process.returncode
+            control["payloadReturnCode"] = code
+            result = subprocess.CompletedProcess(args, code, *output)
+            result.audit_control = control
+            return result
+        except BaseException as error:
+            error.audit_control = control
+            raise
+
+
 def run_audit_process(
     args,
     *,
@@ -209,21 +334,20 @@ def run_audit_process(
     env=None,
     stdin=subprocess.DEVNULL,
     stop_when=None,
+    stall_seconds=120,
+    stdout=None,
+    stderr=None,
+    shell=False,
+    on_launch=None,
 ):
     """Run a noninteractive audit; preserve any explicitly supplied stdin file or pipe."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
     if stdin is None:
         stdin = subprocess.DEVNULL
     if sys.platform != "win32":
-        return subprocess.run(
-            args,
-            cwd=cwd,
-            capture_output=capture_output,
-            text=text,
-            timeout=timeout,
-            env=env,
-            stdin=stdin,
-        )
+        return _run_portable_process(args, cwd=cwd, capture_output=capture_output, text=text,
+            timeout=timeout, env=env, stdin=stdin, stop_when=stop_when,
+            stall_seconds=stall_seconds, stdout=stdout, stderr=stderr, shell=shell, on_launch=on_launch)
     if sys.implementation.name != "cpython":
         raise OSError("Windows audit containment requires CPython")
     import msvcrt
@@ -271,8 +395,8 @@ def run_audit_process(
                 ],
                 cwd=os.path.dirname(image),
                 stdin=stdin,
-                stdout=subprocess.PIPE if capture_output else None,
-                stderr=subprocess.PIPE if capture_output else None,
+                stdout=subprocess.PIPE if capture_output else stdout,
+                stderr=subprocess.PIPE if capture_output else stderr,
                 startupinfo=startup,
                 close_fds=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
@@ -304,7 +428,13 @@ def run_audit_process(
             while b"\n" in buffers["status"]:
                 line, _, remainder = buffers["status"].partition(b"\n")
                 buffers["status"][:] = remainder
-                records.append(json.loads(line))
+                record = json.loads(line)
+                if record["kind"] == "launched":
+                    control["payloadPid"] = record["pid"]
+                    if on_launch:
+                        on_launch(record["pid"])
+                else:
+                    records.append(record)
 
         ready_started = time.monotonic()
         # Native captured-input witness: 15.172s to READY; three times, rounded up.
@@ -315,7 +445,7 @@ def run_audit_process(
         if not records or records.pop(0) != {"kind": "ready"}:
             raise OSError("Audit trusted bootstrap did not reach its private gate")
         config = json.dumps(
-            {"args": args, "cwd": os.fspath(cwd), "env": dict(os.environ if env is None else env)}
+            {"args": args, "cwd": os.fspath(cwd), "env": dict(os.environ if env is None else env), "shell": shell}
         ).encode("utf-8")
         with os.fdopen(gate_write, "wb") as gate:
             fds.remove(gate_write)
@@ -323,11 +453,23 @@ def run_audit_process(
             gate.write(config)
         control["payloadReleased"] = True
         deadline = time.monotonic() + timeout
+        last_progress, next_check, previous = time.monotonic(), 0, None
         while not records and "status" in channels and time.monotonic() < deadline:
             pump()
             if not records and stop_when and (reason := stop_when()):
                 control["stopReason"] = reason
                 break
+            now = time.monotonic()
+            if not records and stall_seconds is not None and now >= next_check:
+                next_check = now + 0.2
+                observed = (job.active(activity=True), len(buffers["stdout"]), len(buffers["stderr"]),
+                            tuple((os.fstat(f.fileno()).st_size, os.fstat(f.fileno()).st_mtime_ns)
+                                  for f in (stdout, stderr) if f is not None))
+                if observed != previous:
+                    previous, last_progress = observed, now
+                if now - last_progress >= stall_seconds:
+                    control["stopReason"] = "worker-stalled"
+                    break
             time.sleep(0.005)
         timed_out = not records and time.monotonic() >= deadline
         record = records[0] if records else None
@@ -378,6 +520,12 @@ def run_audit_process(
         native_failed = bool(getattr(error, "audit_native_failure", None))
         if native_failed:
             control["nativeFailureOperation"] = error.audit_native_failure
+        if process is not None and control["payloadReleased"] is True and not native_failed and not control.get("teardownStarted"):
+            try:
+                job.finish(process, control)
+            except OSError as teardown_error:
+                native_failed = bool(getattr(teardown_error, "audit_native_failure", None))
+                control["teardownError"] = str(teardown_error)
         if gate_transfer_started and not control["payloadReleased"]:
             control["payloadReleased"] = None  # Partial gate delivery cannot attest non-execution.
         if process is not None and control["payloadReleased"] is False:
@@ -385,36 +533,23 @@ def run_audit_process(
                 os.close(gate_write)
                 fds.remove(gate_write)
             try:
-                process.wait(timeout=5)  # Gate EOF; never release or use an alternative kill.
-                bootstrap_exited = True
+                try:
+                    process.wait(timeout=5)  # Gate EOF; never release or use an alternative kill.
+                    bootstrap_exited = True
+                except subprocess.TimeoutExpired:
+                    pass
                 if control["membershipVerifiedBeforePayload"] and not native_failed:
                     unreleased_job_pending = True
-                    try:
-                        deadline = time.monotonic() + 5
-                        active = job.active()
-                        while active and time.monotonic() < deadline:
-                            time.sleep(0.01)
-                            active = job.active()
-                        control["activeProcessesAfterTeardown"] = active
-                        if not active:
-                            control["quiescenceVerified"] = True
-                            unreleased_job_pending = False
-                    except OSError as teardown_error:
-                        native_failed = bool(getattr(teardown_error, "audit_native_failure", None))
-                        if native_failed:
-                            control["nativeFailureOperation"] = teardown_error.audit_native_failure
-                        control["unreleasedTeardownWarning"] = str(teardown_error)[:256]
-            except subprocess.TimeoutExpired:
-                if control["membershipVerifiedBeforePayload"] and not native_failed:
-                    unreleased_job_pending = True
-                    try:
+                    if bootstrap_exited:
+                        job.quiescence(control)
+                    else:
                         job.finish(process, control)
-                        unreleased_job_pending = False
-                    except OSError as teardown_error:
-                        native_failed = bool(getattr(teardown_error, "audit_native_failure", None))
-                        if native_failed:
-                            control["nativeFailureOperation"] = teardown_error.audit_native_failure
-                        control["unreleasedTeardownWarning"] = str(teardown_error)[:256]
+                    unreleased_job_pending = False
+            except OSError as teardown_error:
+                native_failed = bool(getattr(teardown_error, "audit_native_failure", None))
+                if native_failed:
+                    control["nativeFailureOperation"] = teardown_error.audit_native_failure
+                control["unreleasedTeardownWarning"] = str(teardown_error)[:256]
         error.audit_control = control
         raise
     finally:

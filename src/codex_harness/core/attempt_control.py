@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -65,28 +64,8 @@ def request_cancel(run_dir, bead, *, started_at=None, reason="operator cancellat
     return cancellation
 
 
-def stop_owned(process, cleanup: dict) -> None:
-    """Attempt one stop on the live handle, retaining refusal without fallback."""
-    if cleanup.get("stopMethod"):
-        return
-    cleanup.update(
-        status="UNVERIFIED",
-        stopMethod="owned-Popen.kill",
-        controllerProcessExited=process.poll() is not None,
-        descendantsStopped=None,
-    )
-    if cleanup["controllerProcessExited"]:
-        return
-    try:
-        process.kill()
-        process.wait(timeout=5)
-    except (OSError, subprocess.SubprocessError, NotImplementedError) as error:
-        cleanup["errors"].append({"type": type(error).__name__, "message": str(error)})
-    cleanup["controllerProcessExited"] = process.poll() is not None
-
-
-def consume_cancel(process, directory, request, *, cleanup=None) -> dict | None:
-    """One stop method on this controller's Popen; no PID discovery or fallback."""
+def consume_cancel(directory, request, *, control=None, exited=False) -> dict | None:
+    """Validate a bound request; only the Job receipt can attest cancellation."""
     directory = Path(directory)
     observation = _inside(directory / "cancel-observation.json", directory)
     if observation.exists():
@@ -108,21 +87,7 @@ def consume_cancel(process, directory, request, *, cleanup=None) -> dict | None:
             ):
                 raise ValueError("cancel-observation-invalid-request")
             target(saved_request["target"])
-        if "cleanup" in saved or status == "cancelled":
-            saved_cleanup = saved.get("cleanup")
-            if (
-                not isinstance(saved_cleanup, dict)
-                or saved_cleanup.get("status") != "UNVERIFIED"
-                or saved_cleanup.get("stopMethod") != "owned-Popen.kill"
-                or saved_cleanup.get("descendantsStopped") is not None
-                or not isinstance(saved_cleanup.get("controllerProcessExited"), bool)
-                or not isinstance(saved_cleanup.get("errors"), list)
-            ):
-                raise ValueError("cancel-observation-invalid-cleanup")
-        if saved.get("status") == "cancelled" and (
-            saved.get("request", {}).get("target") != target(request)
-            or process.pid != request["processId"]
-        ):
+        if status == "cancelled" and saved.get("request", {}).get("target") != target(request):
             return {"status": "rejected-stale-observation", "observedAt": _now()}
         return saved
     try:
@@ -136,19 +101,14 @@ def consume_cancel(process, directory, request, *, cleanup=None) -> dict | None:
         _write(observation, result)
         return result
     result = {"request": cancellation, "observedAt": _now(), "status": "rejected-stale"}
-    if not matches or process.pid != request["processId"]:
+    if not matches:
         _write(observation, result)
         return result
-    if process.poll() is not None:
-        result.update(status="not-applied", reason="completed-before-cancel")
-    else:
-        result["status"] = "cancelled"
-        if cleanup is None:
-            cleanup = {"status": "NOT_REQUESTED", "errors": []}
-        result["cleanup"] = cleanup
-        # The caller keeps this same dict even if observation publication fails.
-        stop_owned(process, cleanup)
-        if process.returncode == 0 and not cleanup["errors"]:
-            result.update(status="not-applied", reason="normal-exit-won-race")
+    if not exited:
+        return {**result, "status": "requested"}
+    verified = control and control.get("quiescenceVerified") is True
+    result.update(status="cancelled" if verified and control.get("stopReason") == "cancelled" else "not-applied",
+                  reason="Owned Job stopped" if verified else "Completion won or cleanup is unverified",
+                  cleanup=control or {})
     _write(observation, result)
     return result

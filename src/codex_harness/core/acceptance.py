@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
@@ -15,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory, TemporaryFile
 from uuid import uuid4
 
+from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import review_instructions, roundtable
 from codex_harness.core import spine as plan_spine
@@ -243,43 +243,6 @@ def _matches(actual: dict, expect: dict) -> bool:
     return True
 
 
-def _cleanup_timed_out_process(process, scenario_deadline=None) -> str:
-    """Bound tree termination and owned-parent reaping by one cleanup deadline."""
-    deadline = time.monotonic() + 1.7
-    if scenario_deadline is not None:
-        deadline = min(deadline, scenario_deadline)
-    issues = []
-    try:
-        if os.name == "nt":
-            killed = subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                capture_output=True,
-                timeout=min(1.2, max(0, deadline - time.monotonic())),
-                check=False,
-            )
-            if killed.returncode:
-                issues.append(
-                    f"Process tree cleanup uncertain: taskkill exited {killed.returncode}."
-                )
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    except (OSError, subprocess.TimeoutExpired) as error:
-        issues.append(f"Process tree cleanup uncertain: {error}.")
-    # A tree-kill result alone does not establish that the owned parent exited.
-    try:
-        if process.poll() is None:
-            process.kill()
-        process.communicate(timeout=min(1.7, max(0, deadline - time.monotonic())))
-    except (OSError, subprocess.TimeoutExpired) as error:
-        issues.append(f"Process cleanup incomplete: {error}.")
-    if process.returncode is None:
-        issues.append("Owned process exit was not observed; cleanup remains uncertain.")
-    return "\n".join(issues)
-
-
 def run_scenarios(
     repo,
     scenarios,
@@ -363,8 +326,6 @@ def run_scenarios(
             if on_result:
                 on_result(copy.deepcopy(result))
             continue
-        # A killed Windows process tree can hold the work dir briefly after
-        # taskkill returns; leftover temp files must not fail the scenario.
         with TemporaryDirectory(
             prefix="harness-acceptance-", ignore_cleanup_errors=True
         ) as directory:
@@ -430,26 +391,19 @@ def run_scenarios(
                 # Files avoid pipe backpressure and inherited-pipe waits. Only bounded
                 # output is read into memory, even when the command is very noisy.
                 with TemporaryFile() as stdout, TemporaryFile() as stderr:
-                    process = subprocess.Popen(
-                        command,
-                        stdin=subprocess.DEVNULL,
-                        shell=True,
-                        cwd=cwd,
-                        env=process_env,
-                        stdout=stdout,
-                        stderr=stderr,
-                        **(
-                            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-                            if os.name == "nt"
-                            else {"start_new_session": True}
-                        ),
-                    )
                     wait_limit = min(60, max(0, deadline - time.monotonic() - 1.7))
+                    code, control = None, {}
                     try:
-                        process.communicate(timeout=wait_limit)
-                    except subprocess.TimeoutExpired:
-                        timed_out = True
-                        cleanup_uncertainty = _cleanup_timed_out_process(process, deadline)
+                        completed = run_audit_process(command, cwd=cwd, env=process_env, shell=True,
+                            capture_output=False, stdout=stdout, stderr=stderr, timeout=wait_limit,
+                            stop_when=lambda: "acceptance-stopped" if should_stop and should_stop() else None)
+                        code, control = completed.returncode, completed.audit_control
+                    except (OSError, subprocess.SubprocessError) as error:
+                        timed_out = isinstance(error, subprocess.TimeoutExpired)
+                        control = getattr(error, "audit_control", {})
+                        cleanup_uncertainty = str(error) if not control.get("quiescenceVerified") else ""
+                    if control.get("quiescenceVerified") is not True:
+                        cleanup_uncertainty = cleanup_uncertainty or "Owned Job cleanup unverified"
                     record = {
                         "command": command,
                         "stdout": _bounded_output(stdout),
@@ -460,14 +414,17 @@ def run_scenarios(
                             if timed_out
                             else "",
                         ),
-                        "exit": None if timed_out else process.returncode,
+                        "exit": code,
+                        "cleanup": control,
                         "timedOut": timed_out,
                         "timeoutSeconds": wait_limit,
                     }
                     if cleanup_uncertainty:
                         record["cleanupUncertainty"] = cleanup_uncertainty
                         halt = "Prior child cleanup uncertain; no additional children admitted"
-                    record["passed"] = not timed_out and _matches(record, expect)
+                    record["passed"] = (control.get("quiescenceVerified") is True
+                                        and not control.get("stopReason") and not timed_out
+                                        and _matches(record, expect))
                 result["steps"].append(record)
                 if not record["passed"]:
                     break

@@ -178,10 +178,19 @@ def web_journey(v, targets, *, draft=False, label="vision.fields.scenarios.scena
     if v["reducedMotion"] not in ("reduce", "no-preference"):
         raise ValueError("Declare a reducedMotion preference")
     steps = array(v["steps"])
-    if not steps or steps[0] != {"op": "open"}:
+    if not steps or not isinstance(steps[0], dict) or steps[0].get("op") != "open":
         raise ValueError("Journey must start with open")
+    step_ids = set()
     for index, step in enumerate(steps):
-        fields(step, ("op", "locator", "key", "fragment", "request", "value"), ("op",), f"{label}.steps[{index}]")
+        fields(step, ("op", "locator", "key", "fragment", "request", "value", "id", "expectedErrors"), ("op",), f"{label}.steps[{index}]")
+        if "id" in step or "expectedErrors" in step:
+            if not isinstance(step.get("id"), str) or not step["id"].strip() or step["id"] in step_ids:
+                raise ValueError("Expected errors belong to one step with a unique nonblank id")
+            step_ids.add(step["id"])
+        for response in array(step.get("expectedErrors", [])):
+            fields(response, ("method", "path", "statusEquals"), ("method", "path", "statusEquals"))
+            http_request(response)
+        step = {k: v for k, v in step.items() if k not in {"id", "expectedErrors"}}
         if step["op"] == "request":
             fields(step, ("op", "request"), ("op", "request"))
             http_request(step["request"])

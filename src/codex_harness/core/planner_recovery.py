@@ -18,7 +18,6 @@ from codex_harness.core.record_io import (
 )
 
 RESOLVED = "worker-recovery-resolved"
-STALL_SECONDS = 120
 
 
 def end_attempt(workspace, job_id):
@@ -359,26 +358,6 @@ def monitor(workspace, job_id):
         "raise SystemExit(1 if result['status'] == 'failed' else 0)\n"
     )
     command = [sys.executable, "-P", "-B", "-c", payload, str(workspace), job_id]
-    last_progress = next_check = time.monotonic()
-    previous = None
-
-    def stop_when():
-        nonlocal last_progress, next_check, previous
-        now = time.monotonic()
-        if now < next_check:
-            return None
-        next_check = now + 0.2
-        if (directory / "stop.json").exists():
-            return "recovery-requested"
-        # Worker events and verification results count as progress; status reads do not.
-        paths = directory.glob("runs/*/evidence/**/*.json*")
-        observed = [(str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in sorted(paths)]
-        if observed != previous:
-            previous, last_progress = observed, now
-        if now - last_progress >= min(STALL_SECONDS, request["options"]["timeout"]):
-            return "worker-stalled"
-        return None
-
     try:
         result = run_audit_process(
             command,
@@ -386,7 +365,8 @@ def monitor(workspace, job_id):
             capture_output=False,
             timeout=request["options"]["timeout"] * (len(request["options"]["workers"]) + 1) + 600,
             env={**os.environ, **dict.fromkeys(("TEMP", "TMP", "TMPDIR"), str(temp))},
-            stop_when=stop_when,
+            stop_when=lambda: "recovery-requested" if (directory / "stop.json").exists() else None,
+            stall_seconds=None,  # Each provider owns its idle/deadline clock; this is the batch supervisor.
         )
         control = getattr(result, "audit_control", {})
         code = result.returncode
