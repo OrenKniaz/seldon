@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from uuid import uuid4
 
-from codex_harness.core import intake, waves
+from codex_harness.core import intake, waves, worker_packet_budget
 from codex_harness.core.graph import load_plan
 from codex_harness.core.planner_schema import Judgment, judgment_example, judgment_response
 from codex_harness.core.reviewer_evidence import finding_records, native_reviewer, review_binding
@@ -2720,7 +2720,7 @@ class PlanStore:
         )
         if (
             roundtable.estimated_tokens(packet)
-            > roundtable.PROVIDER_TOKEN_BUDGETS[reviewer["provider"]]
+            > worker_packet_budget.PROVIDER_TOKEN_BUDGETS[reviewer["provider"]]
         ):
             raise ValueError("execution-complete-packet-too-large")
         executable = context["reviewerExecutable"]["path"]

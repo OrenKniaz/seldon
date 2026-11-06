@@ -31,6 +31,7 @@ from codex_harness.core.reviewer_evidence import finding_records, review_tier
 from codex_harness.core.spine import Spine
 from codex_harness.core.spine_diagrams import bead_dag
 from codex_harness.core.spine_render import render_markdown
+from codex_harness.core.worker_packet_budget import PROVIDER_TOKEN_BUDGETS
 
 _REVIEWERS = (
     {"name": "codex-reviewer", "provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
@@ -38,7 +39,6 @@ _REVIEWERS = (
 )
 _SEVERITIES = ("blocker", "major", "minor", "note")
 _FIELDS = {"node_id", "severity", "finding", "suggestion"}
-PROVIDER_TOKEN_BUDGETS = {"claude": 150_000, "codex": 200_000, "copilot": 100_000}
 INCLUDED_HEADER = (
     "## Packet contents\n\n"
     "Included: vision, decisions, global constraints, requirements, tests, beads, "

@@ -10,6 +10,8 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
+import venv
 from pathlib import Path
 
 import pytest
@@ -20,6 +22,80 @@ if __name__ == "__main__":
 
 ROOT = Path(__file__).resolve().parents[3]
 pytestmark = pytest.mark.fast
+
+
+def cold_start_golden(workspace):
+    """Replay ShelfLife r10 through installed entry points in fresh -I interpreters.
+
+    The provider host preimports dispatch, hiding the approvals/roundtable cycle.
+    Build/install this candidate, exercise every console entry plus module callers,
+    then observe init persistence, its registered MCP handshake and owned removal.
+    """
+    started = time.monotonic()
+    workspace.mkdir()
+    env = {**os.environ, "TEMP": str(workspace), "TMP": str(workspace),
+           "UV_CACHE_DIR": str(workspace / "cache"), "UV_PYTHON_DOWNLOADS": "never"}
+
+    def run(argv, input=""):
+        result = subprocess.run(argv, input=input, capture_output=True, text=True,
+                                encoding="utf-8", cwd=workspace, env=env, timeout=60)
+        assert result.returncode == 0, (argv, result.stdout, result.stderr)
+        return result.stdout
+
+    run([shutil.which("uv"), "build", str(ROOT), "--wheel", "--out-dir", str(workspace)])
+    venv.EnvBuilder(with_pip=False).create(workspace / "installed")
+    python = workspace / "installed" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    run([shutil.which("uv"), "pip", "install", "--python", str(python), "--no-deps",
+         str(next(workspace.glob("*.whl")))])
+    project = workspace / "project"
+    project.mkdir()
+    (project / "AGENTS.md").write_text("Preserve project instructions.\n", encoding="utf-8")
+    baseline = {p.relative_to(project): p.read_bytes() for p in project.rglob("*") if p.is_file()}
+    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))["project"]["scripts"]
+    installed = json.loads(run([str(python), "-I", "-B", "-c",
+        "import json; from importlib.metadata import distribution; "
+        "print(json.dumps({e.name:e.value for e in distribution('seldon').entry_points "
+        "if e.group == 'console_scripts'}))"]))
+    assert installed == scripts
+    initialize = json.dumps(dict(jsonrpc="2.0", id=1, method="initialize", params=dict(
+        protocolVersion="2025-06-18", capabilities={}, clientInfo=dict(name="cold-golden", version="1"))))
+
+    def handshake(argv):
+        response = json.loads(run(argv, initialize + "\n"))
+        assert response["id"] == 1 and response["result"]["serverInfo"], response
+        assert response["result"]["protocolVersion"] == "2025-06-18"
+
+    for name in installed:
+        # Match generated console wrappers while forcing Python isolation, with no
+        # application imports before the requested entry point is loaded.
+        argv = [str(python), "-I", "-B", "-c",
+            "import sys; from importlib.metadata import distribution; name = sys.argv.pop(1); "
+            "sys.exit(next(e for e in distribution('seldon').entry_points "
+            "if e.group == 'console_scripts' and e.name == name).load()())", name]
+        if name == "seldon-mcp":
+            handshake([*argv, "--workspace", str(project)])
+        else:
+            assert "usage:" in run([*argv, "--help"])
+    for module in ("seldon_cli", "plan_cli"):
+        assert "usage:" in run([str(python), "-I", "-B", "-m", "codex_harness.core." + module, "--help"])
+    for module in ("seldon_mcp", "mcp_planner"):
+        handshake([str(python), "-I", "-B", "-m", "codex_harness.core." + module,
+                   "--workspace", str(project)])
+    cli = [str(python), "-I", "-B", "-m", "codex_harness.core.seldon_cli", "init", str(project)]
+    run([*cli, "--host", "codex", "--approval-mode", "prompt", "--yes"])
+    config = tomllib.loads((project / ".codex/config.toml").read_text("utf-8"))["mcp_servers"]["seldon"]
+    assert Path(config["command"]).resolve() == python.resolve()
+    assert config["default_tools_approval_mode"] == "prompt"
+    handshake([config["command"], *config["args"]])
+    assert (project / "SELDON.md").is_file() and (project / ".codex-harness/.seldon-init").is_file()
+    run([*cli, "--check"])
+    run([*cli, "--remove", "--yes"])
+    assert not (project / "SELDON.md").exists() and not (project / ".codex-harness/.seldon-init").exists()
+    retained = tomllib.loads((project / ".codex/config.toml").read_text("utf-8"))["mcp_servers"]["seldon"]
+    assert not {"command", "args", "env"} & retained.keys()
+    assert retained["default_tools_approval_mode"] == "prompt"
+    assert all((project / p).read_bytes() == data for p, data in baseline.items())
+    print(f"golden cold startup: {len(installed)} installed entries; init/check/handshake/remove; seconds={time.monotonic() - started:.2f}")
 
 
 
@@ -2510,6 +2586,7 @@ def test_golden_path(tmp_path, request, surface):
     An unapproved worker model instead yields one reusable subject-diff card.
     """
     if surface == "cli":
+        cold_start_golden(tmp_path.parent / (tmp_path.name + "-cold-start"))
         planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
         judgment_contract_golden(tmp_path.parent / (tmp_path.name + "-judgment-contract"))
         execution_judgment_golden(tmp_path.parent / (tmp_path.name + "-execution-judgment"))

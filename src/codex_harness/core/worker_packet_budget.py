@@ -1,10 +1,6 @@
 """Provider-derived packet limits and lossless generated-view compaction."""
 
-from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
-
-# Reserve 75% of context for provider instructions, reasoning, tools and output.
-# Three characters/token is a conservative prose estimate, not token accounting.
-MAX_CHARACTERS = max(PROVIDER_TOKEN_BUDGETS.values()) * 3 // 4
+PROVIDER_TOKEN_BUDGETS = {"claude": 150_000, "codex": 200_000, "copilot": 100_000}
 
 
 def check_packet(packet, sections, limit):

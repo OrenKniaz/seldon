@@ -31,7 +31,7 @@ from codex_harness.core.planner_refusal_events import record_refusals, refusal_s
 from codex_harness.core.planner_refusals import TEACHING, compact_refusal
 from codex_harness.core.planner_schema import node_error_help, schema_help, validate_input as _validate
 from codex_harness.core.preflight import diagnostic_status, preflight_report, render_preflight
-from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
+from codex_harness.core.worker_packet_budget import PROVIDER_TOKEN_BUDGETS
 from codex_harness.core.spine import ALLOWED_PARENTS
 from codex_harness.core.spine_diagrams import diagram
 

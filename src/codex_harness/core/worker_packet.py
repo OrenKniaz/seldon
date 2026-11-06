@@ -13,10 +13,9 @@ from pathlib import Path
 from codex_harness.core.graph import Bead, Plan, test_dir
 from codex_harness.core.planner_vision import SECTIONS, design_references, readable, taste_fields
 from codex_harness.core.proof_imports import protected_helpers, python_import_paths
-from codex_harness.core.roundtable import PROVIDER_TOKEN_BUDGETS
 from codex_harness.core.runners import resolve_runner
 from codex_harness.core.test_audit import PROSPECTIVE_WARNING
-from codex_harness.core.worker_packet_budget import MAX_CHARACTERS, check_packet, compact_view
+from codex_harness.core.worker_packet_budget import PROVIDER_TOKEN_BUDGETS, check_packet, compact_view
 
 PROOF_FILE_BYTES = 12_000
 PROOF_TOTAL_BYTES = 24_000
@@ -443,7 +442,8 @@ def build_packet(
     exceed the cap, refuse launch instead of silently dropping accepted scope.
     """
     repo = Path(repo)
-    max_characters = min(MAX_CHARACTERS, PROVIDER_TOKEN_BUDGETS[provider] * 3 // 4)
+    # Reserve 75% of context; three characters/token is a conservative estimate.
+    max_characters = PROVIDER_TOKEN_BUDGETS[provider] * 3 // 4
     if isinstance(bead, Bead):
         manifest_path = plan.root / "sample.json"
         manifest = (

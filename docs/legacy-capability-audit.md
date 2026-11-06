@@ -1,5 +1,32 @@
 # Legacy capability audit for the local Seldon extraction
 
+HOT1 (C14/C20/C24/C26, I6/I9): TRIAGE DESIGN — shared provider context
+data belonged to roundtable orchestration, closing the approvals → planner_jobs
+→ dispatch → worker_packet → roundtable cycle during ShelfLife r10 init.
+Siblings: every installed console entry, seldon_cli, seldon_mcp, mcp_planner
+and plan_cli cold starts. Owner: the existing dependency-free worker_packet_budget
+module now owns PROVIDER_TOKEN_BUDGETS; all data consumers import that owner.
+The redundant maximum-of-all-providers clamp is deleted; each provider's packet
+limit is unchanged. No local-import workaround or judgment/consent change.
+This supersedes STAGE-INT5's deferred BUG classification for this import cycle;
+its retained observation and previous import-order workaround remain history.
+The existing fast golden builds/installs the candidate wheel under lane scratch,
+starts all six installed entries and the four named modules in fresh -I Python,
+then observes init persistence, registered stdio initialization, check and removal
+while preserving existing project instructions and retained permission policy.
+Prior provider-host preimports hid the regression. Observed RED: 1 failed/5.29s
+on the cold installed p entry with the circular ImportError. The first repaired
+run reached removal in 11.65s, then exposed a fixture expectation that incorrectly
+required deleting retained policy; only that expectation was corrected.
+Focused golden: 2 passed/629.06s (cold-start segment 11.05s); this exceeds the
+600s fast target and establishes no timing credit. Owner: shared golden runtime;
+exit: the final complete gate passes within 600s without reducing behavioral coverage.
+PlanStore reads the leaf through its existing module import, preserving its size ratchet.
+Case count remains 19 (golden 2); no unit test or new test file. Final gate
+results, runtime, patch and hash are in ../stage-hot1-report.md. Exit: cold installed
+init/check/MCP/removal and the complete gate GREEN. No actual-provider, host-app,
+ladder or full-vision acceptance is established by this scripted suite.
+
 STAGE-2B candidate (C8/C18/C20, I4-I6; DV8 OPEN): DESIGN — quota and
 launch authorization shared an owner. Siblings: worker starts, plan/acceptance
 review starts, execution assessments and readiness reviews. The candidate deletes
