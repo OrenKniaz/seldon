@@ -1,8 +1,9 @@
-# SELDON CHARTER v1.0 — the hard goal
+# SELDON CHARTER v1.2 — the hard goal
 
-> **Status: RATIFIED v1.1 by Oren, 2026-11-04 ("I ratify"). Binding; supersedes v1.0 (ratified the same day).** `AGENTS.md` line 1 points here; every brief cites C#/I#.
+> **Status: RATIFIED v1.2 by Oren, 2026-11-07 ("yes I ratify v1.2"). Binding; supersedes v1.1 (2026-11-04) and v1.0.** v1.2 adds: Seldon calls the LLM (C1, C20, I10) and the LLM-or-code design rule (§6). `AGENTS.md` line 1 points here; every brief cites C#/I#.
 > **Only Oren changes this document.** CC/DOT may propose edits with reasons. North Stars, plans, specs, spikes and briefs sit *below* it, must trace to it, and never replace it.
-> Sources: Oren's statements (March → 11-04) and his 67 answers (`SELDON-CHARTER-ANSWERS-2026-11-04.md`), North Stars v3/v4, ASTRA-DESIGN-1/2.
+> Sources: Oren's statements (March → 11-07) and his 67 answers (`SELDON-CHARTER-ANSWERS-2026-11-04.md`), North Stars v3/v4, ASTRA-DESIGN-1/2.
+> **Core idea reference (Oren, 11-07):** [GenAI-Final-Project](https://github.com/OrenKniaz/GenAI-Final-Project), whose code loop `run_turn` makes each decision one structured-output LLM call with enum choices, with facts from the intake form, SQL and retrieval. That is the shape of Seldon's loop.
 
 ## 0. Why this exists
 North Stars v1→v4 were each rewritten around the latest direction change, and each rewrite silently lost parts of the core. The 10-27 semantic-v1 spike cut test nodes, parallel beads and waves "temporarily"; it became the main path and nobody restored the cuts. **CC approved those limits and missed the regression.** This charter is **additive and stable**. New direction is added here, or registered as a time-boxed Deviation (§8). A core piece is never dropped implicitly.
@@ -20,7 +21,7 @@ Seldon is the user's **cofounder, friend and competitor**: it improves the dream
 ## 2. Core pieces — all required (C1–C26)
 | # | Core piece | Means | Verify by |
 |---|---|---|---|
-| C1 | **Seldon drives the loop** | A deterministic loop (plan → build → observe → judge → repair/replan → next) calls planner, judge and worker LLMs where semantics are needed. The LLM is not the scheduler. | runs advance with no planner-choreographed transitions |
+| C1 | **Seldon drives the loop; Seldon calls the LLM** | A deterministic loop (plan → build → observe → judge → repair/replan → next) **calls** planner, judge and worker LLMs where semantics are needed, as headless provider calls (Codex `exec --output-schema`, Claude Code `-p --json-schema`, Copilot CLI) on the user's own subscription, each bound to one question with an enforced output schema. The LLM is never the scheduler and never the caller of Seldon's transitions. | every semantic decision is a Seldon-initiated call with a schema-valid record; zero planner-choreographed transitions |
 | C2 | **Determinism first** | Whatever can be a tool, function, class, schema or store is one, not LLM reasoning. | no LLM call does a function's job |
 | C3 | **The LLM owns semantics** | It creates and judges meaning: intent, quality, test meaningfulness, "is this the dream". | every semantic decision has a recorded verdict |
 | C4 | **Structured LLM output** | Typed records with IDs and links, plus a free-text rationale (the WHY). Never open text as the store. The store is whatever is most efficient in time and tokens. Malformed structure: 2 exact-fix retries, then judge/steer. | outputs are schema-valid records |
@@ -39,7 +40,7 @@ Seldon is the user's **cofounder, friend and competitor**: it improves the dream
 | C17 | **Waves** | The planner splits waves (tools assist); the user may dictate ("10 waves, first…"). After each wave: integrate → resync with the vision → check in with the user → plan the next wave from what was built. | wave N+1 beads cite wave N results |
 | C18 | **Recovery, never stuck** | Crashes/stalls/transport loss: 2 automatic recoveries of a bead, then steer. | fault twins reach the end |
 | C19 | **Memory, mail, worktrees** | Project memory + lessons across projects, with provenance. Memory is advisory: it informs but never overrides the plan/trace, and any memory that influences a decision is cited. A small cross-provider user-settings record (provider pins, quality bar); no general user memory (providers own that). Structured mail between agents (blocker/question/discovery/handoff), recorded in the trace. Headless workers in isolated worktrees with file ownership; Seldon integrates. | memory items cite their source |
-| C20 | **Wrap providers, thin core** | Codex, Claude Code, GitHub Copilot. **Absolute:** never re-implement provider sandbox, chat, permissions or security. Seldon is not a security product. Windows first. The user stays in the provider app; the cockpit is a **read-only** view (trace, progress, demo) that shouldn't need opening much. | no host re-implementation |
+| C20 | **Wrap providers, thin core** | Codex, Claude Code, GitHub Copilot. **Absolute:** never re-implement provider sandbox, chat, permissions or security. Seldon is not a security product. Windows first. The user stays in the provider app; the cockpit is a **read-only** view (trace, progress, demo) that shouldn't need opening much. The chat agent in the provider app is Seldon's **front door**: it relays the user's words and shows state, questions and results. It never supplies structure, picks gates or drives transitions. | no host re-implementation |
 | C21 | **The user's dream charter** | The Vision Lock IS the user's charter. Any narrowing during the build is a visible deviation the user approves, so the user's project can't drift either. | narrowing → a user-visible deviation |
 | C22 | **Open-loop work** | Besides building a known answer (closed loop), Seldon runs open-loop dreams: tune/search toward a metric (e.g., audio/DSP tuning, ANC, algorithm quality) with a defined metric, recorded progress per iteration, and explicit stop conditions agreed at Vision Lock. | open-loop runs report metric history and stop for a stated reason |
 | C23 | **Continuity, never lose the thread** | Every loop leaves a trusted baton: decisions, assumptions, open questions, current state, next safe action and why. Any restart, context compaction or agent replacement resumes from canonical state with the same direction. | a killed/restarted run resumes at the right step with the same reasoning |
@@ -56,6 +57,7 @@ Seldon is the user's **cofounder, friend and competitor**: it improves the dream
 - **I6 One owner per truth.** Each fact is decided in one place; views and gates read it and never recompute it.
 - **I7 Product-neutral.** No assumption of CLI, Python, static web, a language, or N beads.
 - **I8 Every refusal teaches.** It names the one concrete fix.
+- **I10 Questions, not tools.** Each LLM call answers exactly one typed question chosen by the loop: a small schema (enum choices where the answer is a choice), a few-shot example, and the facts it needs supplied by code (setup, store, retrieval), never asked of the LLM. Structure (setup, reviewers, providers, gate order, IDs) comes from kickoff, defaults or the store. Invalid answer → C4's two exact-fix retries, then judge/steer.
 - **I9 Thin and deleting.** One shared rule beats a special case. Every blocker gets `TRIAGE: BUG|DESIGN — why — sibling cases`; DESIGN = fix the shared rule, never patch. No god files.
 
 ## 4. The journey (the size router collapses steps for small dreams)
@@ -65,7 +67,7 @@ Align (size routed) → Expand → **A: understanding + Vision Lock** → Resear
 Re-implementing provider sandbox/chat/permissions/security · being a security product · budgets in v1 · unit tests · planner-written code · fixed ceremony counts as rules (counts are defaults) · general user memory · a cockpit with decisions.
 
 ## 6. Seldon's own development (dev process, not product)
-Retros and the improvement pipeline (amendments to Seldon itself, lessons from its own runs) are dev-process tools for Oren while building Seldon, not end-user features. Planning friction, time and cost are measured here as dev metrics, never as product machinery. Proof = the ladder L0→L3 (no promotion with blockers) + the ShelfLife fight vs plain Codex + Oren's own real project. Semantic tests only (golden/E2E/ladder). Budgets and efficiency metrics are measured here, not in the product. Legacy mode: harvest its good parts (graph, waves, concurrency) into the one model, then delete it. The reset plan is re-derived from this charter and approved by Oren.
+Retros and the improvement pipeline (amendments to Seldon itself, lessons from its own runs) are dev-process tools for Oren while building Seldon, not end-user features. Planning friction, time and cost are measured here as dev metrics, never as product machinery. Proof = the ladder L0→L3 (no promotion with blockers) + the ShelfLife fight vs plain Codex + Oren's own real project. Semantic tests only (golden/E2E/ladder). Budgets and efficiency metrics are measured here, not in the product. Legacy mode: harvest its good parts (graph, waves, concurrency) into the one model, then delete it. The reset plan is re-derived from this charter and approved by Oren. **Design-point rule (v1.2):** every design point records LLM-or-CODE with one-line pros/cons. Default: code = structure, LLM = meaning. Simplest design first: deletion beats new machinery, and a tangle means ask why.
 
 ## 7. How everyone uses this
 - **Briefs** cite the C#/I# they serve.
