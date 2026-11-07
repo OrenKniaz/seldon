@@ -2,115 +2,19 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from uuid import uuid4
 
-from codex_harness.core import acceptance_recovery as recovery, review_findings, review_instructions, review_packets, review_provider, review_rounds, spine as plan_spine
+from codex_harness.core import acceptance_recovery as recovery, review_instructions, review_packets, review_provider, run_loop
+from codex_harness.core.acceptance_evidence import candidate_evidence
 from codex_harness.core.acceptance_runs import current_run
-from codex_harness.core.approvals import catalog_status, fingerprint
-from codex_harness.core.execution_assessments import selected_execution_support
+from codex_harness.core.approvals import catalog_status
 from codex_harness.core.plan_store import PlanStoreError
-from codex_harness.core.planner_candidate import judgments_for
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
 from codex_harness.core.spine_render import render_markdown
 
 QUESTION = "Does this product achieve the locked vision for a real first-time user? List gaps."
-
-def _candidate_evidence(store, repo, run, *, execution_assessment_ids=None):
-    """Read explicit manifest-owned source only; never follow imports or scan the repo."""
-    template = store.workspace / "template"
-    manifest = compile_manifest(store.spine(), template if template.is_dir() else None)
-    owners = {}
-    for bead_id, bead in manifest["beads"].items():
-        for name in bead["ownedFiles"]:
-            owners.setdefault(name, []).append(bead_id)
-    implementation = []
-    source_suffixes = set(
-        ".py .js .mjs .cjs .ts .tsx .jsx .go .rs .c .h .cpp .hpp .cs .java .kt "
-        ".swift .rb .php .sh .ps1 .sql .html .css .vue .svelte".split()
-    )
-    for name in sorted(owners):
-        relative = PurePosixPath(name.replace("\\", "/"))
-        record = {"path": name, "owners": sorted(owners[name])}
-        if (
-            any(part.startswith(".") for part in relative.parts)
-            or relative.suffix.lower() not in source_suffixes
-        ):
-            record["status"] = "not-source; contents not read"
-        elif (Path(repo) / relative).is_dir():
-            record["status"] = "directory; contents not read"
-        else:
-            sources = requirement_file_sources(repo, [name])
-            if not sources:
-                record["status"] = "missing"
-            else:
-                raw = next(iter(sources.values())).read_bytes()
-                record["sha256"] = hashlib.sha256(raw).hexdigest()
-                try:
-                    record.update(status="included", source=raw.decode("utf-8"))
-                except UnicodeDecodeError:
-                    record["status"] = "non-UTF-8 source; body not included"
-        implementation.append(record)
-
-    def finding_evidence(rows):
-        closed = [row for row in rows if row["state"] == "closed"]
-        return {
-            "active": [row for row in rows if row["state"] != "closed"],
-            "closed": [
-                {
-                    "id": row["id"],
-                    "status": row["status"],
-                    "sha256": fingerprint(row),
-                }
-                for row in closed
-            ],
-            "closedCounts": {
-                status: sum(row["status"] == status for row in closed)
-                for status in ("resolved", "rejected")
-            },
-            "closedHashAlgorithm": "sha256-json-sort_keys-ensure_ascii_false-compact-utf8",
-        }
-
-    result = {
-        "runId": run["id"],
-        "manifestRevision": manifest["planRevision"],
-        "productRevision": run["revision"],
-        "revisionAlgorithm": run.get("revisionAlgorithm"),
-        "implementation": implementation,
-        "scenarioOwners": plan_spine.scenario_nodes(store.spine()),
-        "requiredEvidence": [
-            dict(
-                scenarioId=row["id"],
-                candidateRevision=run["revision"],
-                resultRef=f"scenarioResults.results[{index}]",
-            )
-            for index, row in enumerate(run["results"])
-        ],
-        "planningFindings": finding_evidence(review_findings.findings(store, expand=True)),
-        "acceptanceFindings": finding_evidence(store.acceptance_findings()),
-        "openClarifications": [
-            {
-                "id": row["id"],
-                "question": row["question"],
-                "node_ids": json.loads(row["node_ids_json"]),
-                "status": row["status"],
-            }
-            for row in store._open("clarifications")
-        ],
-    }
-    if run.get("webToolchain"):
-
-        result["requiredJudgments"] = {
-            "visualQuality": "Observe the actual page against the locked quality bar and Done"
-        }
-        result["judgments"] = judgments_for(store, repo)
-    if execution_assessment_ids is not None:
-        result["executionSupport"] = selected_execution_support(
-            store, execution_assessment_ids, repo=repo
-        )
-    return result
 
 def _prepare_acceptance_review(
     store, repo, reviewers, token_budgets, *, execution_assessment_ids=None
@@ -127,7 +31,7 @@ def _prepare_acceptance_review(
         else {}
     )
     original_identity = recovery.identities(store, repo, run, **support_args)
-    evidence = _candidate_evidence(store, repo, run, **support_args)
+    evidence = candidate_evidence(store, repo, run, **support_args)
     included_header = (
         f"## Review tier: {review_provider.review_tier(selected)}; "
         f"catalog: {catalog_status(store)}\n\n"
@@ -144,19 +48,22 @@ def _prepare_acceptance_review(
     scenarios = store.acceptance_scenarios()
     planned_view, packet_run = scenarios, run
     included_header += review_instructions.instructions()
-    context_data = dict(lockedVision=spine.node(spine.ids("vision")[0]), scenarioResults=packet_run)
+    context_data = dict(
+        lockedVision=spine.node(spine.ids("vision")[0]),
+        scenarioResults=packet_run,
+        renderedDocs=render_markdown(store.spine()),
+    )
+    template = store.workspace / "template"
+    context_data["protectedSources"] = {
+        name: path.read_text(encoding="utf-8")
+        for name, path in requirement_file_sources(
+            template, compile_manifest(spine, template)["requirementFiles"]
+        ).items()
+        if name not in context_data["renderedDocs"]
+    } if template.is_dir() else {}
     context = QUESTION + "\n" + json.dumps(context_data, ensure_ascii=False)
     scenario_section = review_packets._scenario_section(planned_view)
-    packet = (
-        included_header
-        + QUESTION
-        + "\nReview only this packet. "
-        + json.dumps(
-            dict(context_data, renderedDocs=render_markdown(store.spine())), ensure_ascii=False
-        )
-        + "\n"
-        + scenario_section
-    )
+    packet = included_header + "Review only this packet.\n" + context + "\n" + scenario_section
     if (store.workspace / "template").is_dir():
         packet += "\n" + review_packets._test_bodies(store)
     dossiers = {
@@ -232,7 +139,7 @@ def _commit_acceptance_review(store, repo, run, result, pending, attempt, *, res
             != attempt.header["identities"]
         ):
             raise PlanStoreError("acceptance-revision-changed", "Rerun acceptance review")
-        if resumed or support is not None:
+        if resumed or support is not None or not attempt.header["isMocked"]:
             attempt.validate(repo, run)
         # Source members are append-only; current judgments alone supply effective state.
         result["findingHashes"] = {
@@ -328,7 +235,7 @@ def _execute_acceptance_review(
         executable = executables[provider]
         record = dict(reviewer)
         parts = []
-        for shard_record, items in review_rounds._review_dossier(
+        for shard_record, items in run_loop.review_dossier(
             store,
             result,
             reviewer,

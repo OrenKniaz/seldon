@@ -1,114 +1,74 @@
 # Planner guide
 
-Turn the full agreed vision into working product with real proof. The structured plan is
-truth; trace vision → requirements → scenarios/contracts → beads → code → tests.
-Read [handoff declarations](handoff-contract.md), [verification runners](../architecture/verification-runners.md)
-and the [resume contract](resume-plan.md) only when the current step needs them.
+CHARTER: serves C1-C4/C8/C16/C18/C20/C23/C25; DV5 remains open pending authorized real-run proof.
 
-**Start and recover.** Read `harness_plan_status` / `p status`, follow `Next:`, then use
-command `--help` or `harness_schema`. Refusals include the reason and exact recovery route.
-Status never changes plan truth. Missing data and
-unavailable telemetry stay unknown. Do not inspect Seldon source to discover contracts.
-Use `p` with explicit `--workspace DIR`; global `--json` returns `{text,status,data,next,isError}`.
-Node/decision inputs also accept `--machine-json`. Success exits 0; refusals exit 2.
-`p nodes --kind K` lists IDs; `p show ID --body --test NAME` inspects named protected tests.
+The planner has three mutation tools: `harness_plan_start`, `harness_loop_answer`,
+and `harness_steer`. The run controller owns continuation. Read-only schema, status,
+node, packet, judgment, review, wave and mail inspection remain available.
 
-**Workspace.** MCP is bound to its startup workspace. Check `workspaceBinding`; except
-schema/preflight/status, supply independently known absolute `expected_workspace`.
-A mismatch refuses before store/provider access. Assertions do not authenticate the host;
-never copy an unexpected server path to bypass a hold. `p preflight --provider codex`
-observes installed tools and paths without launching providers or clearing planning gates.
+Start with `harness_plan_start(name, idea)` in the intended project. Every mutating
+wire request must include the independently known absolute `expected_workspace`.
+The server never retargets; the caller assertion does not authenticate host context.
+`harness_plan_status` reads the canonical `run` baton without advancing anything.
+Reattach an existing authorized run with `harness_plan_start`; paused/stopped runs
+remain paused/stopped. No worker polling, recovery command or resume tool is exposed.
 
-**Semantic-v1 is the default for new plans.** Start with
-`p start --plan-mode semantic-v1 --idea "..." --name "..."` or `harness_plan_start`.
-Existing modes are immutable. The planner writes semantics; workers write code.
-Put closed `seldon/scenarios-v1` data in `V1.fields.scenarios` and explicit entry/argv
-bindings in `V1.fields.targets`. Every requirement needs a scenario; design nodes hold
-complete interface contracts. Use schema-declared actions/observations; setup is data only.
-Declare exactly two beads: `semanticPhase:"contracts"`, then `semanticPhase:"build"`
-depending on Contracts. Each references all requirements/contracts and owns the CLI entries.
-Omit test nodes and `proofModule`. Compile freezes scenarios/contracts as protected inputs.
-Contracts produces stubs: exit 3 and stderr `SELDON-STUB <operation>` for every operation.
-The controller must observe every scenario FAIL with its marker before Build; launch/import
-errors earn ERROR. Final Validation requires every scenario PASS without markers.
-Use `max_parallel=1`; HTTP, GUI and multiple/parallel Build beads are unsupported here.
-`harness_worker_status` exposes `run.semanticContracts` and `run.semanticValidation`.
-RED history, source tests and scenario passes alone do not establish full-vision acceptance.
+The returned baton contains the run ID, canonical phase/revision, controller state,
+control generation, pending question or user request, retained effect, next action
+and reason. The CLI and cockpit read this same authority. CLI commands are
+`p --workspace DIR start`, `answer`, `steer`, `status`, `schema`, `nodes`, `show`, `mail`.
+`run_plan` enters the same CLI. JSON values can be passed inline or as `@FILE`.
 
-**Three decisions.** Default to chat; use native forms only when the user requests them.
-Prepare a displayed request, wait for a separate actual reply, then record its literal words.
-Never invent consent or turn silence, a cancellation or an earlier refusal into approval.
+Answer only the current question with `harness_loop_answer(request_id, answer, source)`.
+It supplies the actual `answerSchema`, identities, candidate/evidence binding and context:
 
-- **A: understanding and Vision Lock.** At Align, prepare users, first moment, scope,
-  expansion accept/reject/defer choices, quality and Done. `harness_understanding_card`
-  creates combined `align+vision-lock` consent when complete. Approval covers both gates;
-  advance through Expand and Vision Lock without another question.
-- **B: plan and execution.** Compile first; propose exact reviewer tuples from the catalog.
-  B includes plan review and formal acceptance: two distinct reviewers, cross-provider when
-  both are available; two from the same provider when only one exists. B names scheduled
-  starts and a finite repair reserve within the cumulative ceiling. Prepare
-  `harness_prepare_chat_confirmation gate=plan-execution` with `reviewer_node_id` and exact
-  `execution={expected_revision,workers,call_cap,max_parallel,timeout}`. Display plan, waves,
-  files, reviewer/worker provider-model-effort tuples, review and worker caps and timeouts.
-  Approval covers reviews, repairs, publication, execution, validation and quiescent same-work
-  recovery. Failed/uncertain starts consume caps. Changed scope, limits or tuples get one diff.
-- **C: owner acceptance.** Run product scenarios, complete current acceptance review and
-  resolve findings within B. Ask whether delivery meets the locked vision; record actual
-  owner words through `harness_accept`. C names the delivered repository and reviewed product
-  run. Permission to run scenarios is not acceptance.
+- Author meaning: `draft`, `ready`, `research`, `ask_user`, with canonical content and rationale.
+- Assess a bound subject: the existing 1j positive/negative/inconclusive/unsupported contract.
+- Choose direction: continue/repair/replan/research/ask_user/pause/stop, with rationale/content.
+- Interpret retained user words: the 1j user-decision contract for the exact displayed subject.
 
-For chat, use `harness_prepare_chat_confirmation` and `harness_record_chat_confirmation`:
-`gate,request_id,expected_revision,quoted_message,quote_sha256,actor_label`. Responses are
-`Approve`, `No`, `Cancel`, or `Changes: <text>`. Hash the exact UTF-8 quote. Caller-mediated
-provenance leaves source, recency and identity unverified. Recording launches nothing;
-advance or start matching workers separately. Negatives, conditions, stale/replayed replies
-and mismatched scope grant nothing. A qualified reply records changes-requested and returns
-a fresh card for the changed decision. Recovery refusals do not automatically re-ask.
+Canonical content includes nodes, reviewer selection/catalog/policy, scenarios, finding
+resolutions, clarifications, assumptions and structured mail. `harness_schema kind=K`
+returns node examples. Product fields/research/rationale are domain-open; schemas constrain
+shape and links. Workers write all code/tests. Planner source-edit routes are removed.
+Compilation, review preparation, publication, dispatch, observation and assessment
+preparation are internal controller steps. Do not supply phase/compile/start instructions.
+Malformed answers get two exact fixes through the same 1j owner, then steering.
+Inconclusive/unsupported meaning stays pending without holding a process or reservation.
 
-**Author and review.** Read `p schema --kind K` / `harness_schema kind=K` at first use.
-Nodes have `id,kind,title,text,parents,fields`; preserve IDs and accepted intent.
-`p node --json @nodes.jsonl` / `harness_upsert_nodes nodes=[...]` writes mixed batches
-atomically. After a completed write with unavailable status, inspect rather than replay.
-Work features → requirements/scenarios → contracts → beads; record material decisions,
-unknowns and research choices. Done uses `done_feels_like`; `done_means` preserves extra detail.
-Compile, inspect packets, review expansion/integrity/spine, resolve findings, audit and publish.
-All open non-readiness findings block. Resolve with evidence, defer gaps with reasons, reject
-only disproven findings. `p readiness --beads B1,B2 --reviewer @reviewer.json` is advisory.
-`p impact --since REV` identifies affected work. Recompile after plan/protected-file edits;
-stale evidence earns no credit. Coverage is planned until proved on the actual candidate.
+Explicit planning/judge/reviewer invocation permission is separate from product-plan B.
+Only exact authorized role/provider/model/effort tuples can launch; offerings and draft
+selections grant no permission. Native host policy remains in force. With authorized
+planner/judge role tuples, the controller calls provider-normal semantic invocations;
+MCP does not initiate host-model completions. Without a role grant, the prerequisite
+or outstanding typed question remains visible to the native chat.
 
-**Execution and acceptance.** Start exact published worker tuples within consent limits;
-reattach existing jobs without relaunch. Unknown ownership or cleanup holds new work.
-`harness_accept_run repo=DIR subject=product|oracle` returns an `attemptId`; poll that same
-`harness_accept_status id=ID`, never resubmit to poll. Queued work and historical captured
-PASS do not grant current acceptance. Product acceptance needs accepted dispatch evidence,
-current passing scenarios, review and owner acceptance. Status never executes work.
-`harness_accept_review repo=DIR` reuses B's acceptance reviewers without another question;
-actual independence, access and candidate evidence are still checked at launch.
-Use `accept-scenarios --derive` to prepare drafts; fill executable steps and expectations.
+A locks understanding and vision. The plan is reviewed before B. B approves the plan,
+workers and execution envelope; same-scope changes reuse existing authorization only
+with the existing bound semantic judgment. There are no product call/review budgets.
+C requires current integrated validation, delivery, review and actual owner words after
+walkthrough/try-it guidance. Source goldens and fake-provider replies are not real-run acceptance.
 
-Explicit `acceptance` spine nodes allow parents acceptance vision/feature. Read
-`p schema --kind acceptance` / `harness_schema kind=acceptance`; save its example as
-acceptance.json, then `p node --json @acceptance.json` / `harness_upsert_node node=<node>`.
-These are drafts, not automatic executable coverage or proof.
+For a displayed `userRequest`, retain the actual separate reply with `harness_steer`:
+`direction="continue", rationale, user_words={request_id,expected_revision,quoted_message,
+quote_sha256,actor_label}`. The hash binds exact UTF-8 bytes. This remains caller-mediated;
+source, recency and human identity are unverified. Only its bound 1j interpretation
+can approve the subject. Decline suspends the action; changes return to planning;
+unclear meaning remains pending. Silence and transport loss never approve or cancel.
+For negotiated native elicitation, use `harness_steer native_confirmation=true`;
+the durable subject survives reconnect with a fresh wire ID and distinct native provenance.
 
-Only actual owner words use `--by user`; proxy acceptance stays labeled as proxy.
-See [proof accounting](proof-accounting.md).
+`harness_steer` also carries unsolicited direction and actual user pause/stop/control.
+An interrupt commits its generation before cleanup; late owners cannot integrate,
+deliver or gain credit. Pause blocks admissions; explicit `resume=true` reconciles
+before continuation. Stop revokes continuation. Dead/expired owners release logical
+ownership independently of verified process quiescence; uncertain namespaces stay
+quarantined. Wake reconciliation consumes receipts before dispatch and never resets
+deadlines or the per-bead recovery lineage. After two automatic recoveries, the
+controller asks for planner direction. Genuine permission denials are not retried.
 
-**Legacy plans.** Choose `plan_mode=legacy` explicitly. The
-[worked CLI example](planner-legacy-example.md) retains the protected-test workflow.
-Provide executable protected tests and importable failing stubs under `template` before
-compile/review; workers own implementation, not protected proofs. Tests declare module/level;
-beads declare disjoint owned files, dependencies, proof module and lessons. Pin cross-bead
-interfaces in consumer proofs. `audit --oracle oracle` proves satisfiability; prospective
-audit proves collection/red stubs only and requires explicit prospective publication.
-For asynchronous `harness_audit`, poll the same `harness_audit_status` attempt.
-Native `harness_record_confirmation gate=align` and
-`harness_record_confirmation gate=vision-lock` need initialized MCP with client `elicitation` capability.
-Review full displayed revisions: conditions block credit; decline, cancellation and stale
-responses grant nothing. CLI quotes return `plan-confirmation-origin-unavailable`.
-Reviewer proposals use `harness_reviewer_choice`, then the complete B card through
-`harness_prepare_chat_confirmation gate=plan-execution`. The separate reviewer-confirmation
-tool is retired; offered models do not prove access.
-Use only authorized actual providers/models/effort and existing capacity; never enlarge
-budgets or retry uncertain work implicitly. Injected/mock reviews cannot authorize publication.
+Semantic-v1 retains its current execution limits pending later restoration stages.
+Evidence stays truthful: awaiting, failed, stale, integrated and validated live are
+separate. Browser-unavailable means web UNVERIFIED; CC's normal host browser gate
+owns web proof. No desktop/window control or user-browser automation is permitted.
+The existing stdio JSON-RPC transport is retained; MCP SDK adoption is deferred to 2c-SDK.

@@ -11,8 +11,60 @@ import os
 import subprocess
 import sys
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from tempfile import TemporaryFile
+
+
+def process_observation(pid):
+    """Observe only a named owned process; creation identity prevents PID reuse."""
+    if os.name != "nt":
+        try:
+            fields = __import__("pathlib").Path(f"/proc/{pid}/stat").read_text().split()
+            return dict(running=fields[2] != "Z", identity=fields[21])
+        except FileNotFoundError:
+            return dict(running=False, identity=None)
+        except OSError:
+            return dict(running=None, identity=None)
+    from ctypes import wintypes as w
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    kernel.OpenProcess.restype = w.HANDLE
+    kernel.GetExitCodeProcess.argtypes = [w.HANDLE, ctypes.POINTER(w.DWORD)]
+    kernel.GetProcessTimes.argtypes = [
+        w.HANDLE,
+        ctypes.POINTER(w.FILETIME),
+        ctypes.POINTER(w.FILETIME),
+        ctypes.POINTER(w.FILETIME),
+        ctypes.POINTER(w.FILETIME),
+    ]
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return dict(running=False if ctypes.get_last_error() == 87 else None, identity=None)
+    try:
+        created, exited, kern, user, code = (
+            w.FILETIME(),
+            w.FILETIME(),
+            w.FILETIME(),
+            w.FILETIME(),
+            w.DWORD(),
+        )
+        if not kernel.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kern),
+            ctypes.byref(user),
+        ) or not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return dict(running=None, identity=None)
+        return dict(
+            running=code.value == 259,
+            identity=str((created.dwHighDateTime << 32) | created.dwLowDateTime),
+        )
+    finally:
+        kernel.CloseHandle(handle)
+
 
 _BOOTSTRAP = r"""
 import json, msvcrt, os, subprocess, sys
@@ -206,22 +258,52 @@ class _WindowsJob:
         return False
 
 
-def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdin,
-                          stop_when, stdout, stderr, shell, on_launch):
+def _run_portable_process(
+    args,
+    *,
+    cwd,
+    capture_output,
+    text,
+    timeout,
+    env,
+    stdin,
+    stop_when,
+    stdout,
+    stderr,
+    shell,
+    on_launch,
+    launch_guard,
+):
     import signal
 
-    control = dict(backend="posix-process-group", membershipVerifiedBeforePayload=False,
-                   payloadReleased=False, quiescenceVerified=False,
-                   activeProcessesAfterTeardown=None)
+    control = dict(
+        backend="posix-process-group",
+        membershipVerifiedBeforePayload=False,
+        payloadReleased=False,
+        quiescenceVerified=False,
+        activeProcessesAfterTeardown=None,
+    )
     process = None
     with ExitStack() as files:
         if capture_output:
-            stdout, stderr = files.enter_context(TemporaryFile()), files.enter_context(TemporaryFile())
+            stdout, stderr = (
+                files.enter_context(TemporaryFile()),
+                files.enter_context(TemporaryFile()),
+            )
+
         def members():
-            rows = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,stat="],
-                capture_output=True, text=True, timeout=1, check=True).stdout.splitlines()
-            return tuple(int(pid) for pid, pgid, state in map(str.split, rows)
-                         if pgid == str(process.pid) and not state.startswith("Z"))
+            rows = subprocess.run(
+                ["ps", "-e", "-o", "pid=,pgid=,stat="],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=True,
+            ).stdout.splitlines()
+            return tuple(
+                int(pid)
+                for pid, pgid, state in map(str.split, rows)
+                if pgid == str(process.pid) and not state.startswith("Z")
+            )
 
         def exited():
             # Observe zombie state without reaping: the child pins PID/PGID through teardown.
@@ -230,10 +312,22 @@ def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdi
         try:
             try:
                 deadline = time.monotonic() + timeout
-                process = subprocess.Popen(args, cwd=cwd, env=env, stdin=stdin,
-                    stdout=stdout, stderr=stderr, shell=shell, start_new_session=True)
-                control.update(membershipVerifiedBeforePayload=True, payloadReleased=True,
-                               payloadPid=process.pid)
+                with launch_guard() if launch_guard else nullcontext():
+                    process = subprocess.Popen(
+                        args,
+                        cwd=cwd,
+                        env=env,
+                        stdin=stdin,
+                        stdout=stdout,
+                        stderr=stderr,
+                        shell=shell,
+                        start_new_session=True,
+                    )
+                control.update(
+                    membershipVerifiedBeforePayload=True,
+                    payloadReleased=True,
+                    payloadPid=process.pid,
+                )
                 if process.stdin is not None:
                     process.stdin.close()
                 if on_launch:
@@ -251,7 +345,9 @@ def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdi
                         control["activeProcessesBeforeTeardown"] = len(members())
                     finally:  # Observation failures must still stop the owned group.
                         try:
-                            os.killpg(process.pid, signal.SIGKILL)  # Leader still pins PGID; no denied retry.
+                            os.killpg(
+                                process.pid, signal.SIGKILL
+                            )  # Leader still pins PGID; no denied retry.
                         except ProcessLookupError:
                             pass
                         drain_deadline = time.monotonic() + 5
@@ -259,7 +355,9 @@ def _run_portable_process(args, *, cwd, capture_output, text, timeout, env, stdi
                         while members() and time.monotonic() < drain_deadline:
                             time.sleep(0.01)
                         if members():
-                            raise OSError("Audit process group still has live members; quiescence unverified")
+                            raise OSError(
+                                "Audit process group still has live members; quiescence unverified"
+                            )
                         process.wait(timeout=5)  # No group lookup or signal may follow this reap.
                         control.update(activeProcessesAfterTeardown=0, quiescenceVerified=True)
             output = []
@@ -298,15 +396,28 @@ def run_audit_process(
     stderr=None,
     shell=False,
     on_launch=None,
+    launch_guard=None,
 ):
     """Collect closed output after exit/cancellation/deadline, never infer exit from silence."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
     if stdin is None:
         stdin = subprocess.DEVNULL
     if sys.platform != "win32":
-        return _run_portable_process(args, cwd=cwd, capture_output=capture_output, text=text,
-            timeout=timeout, env=env, stdin=stdin, stop_when=stop_when,
-            stdout=stdout, stderr=stderr, shell=shell, on_launch=on_launch)
+        return _run_portable_process(
+            args,
+            cwd=cwd,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            env=env,
+            stdin=stdin,
+            stop_when=stop_when,
+            stdout=stdout,
+            stderr=stderr,
+            shell=shell,
+            on_launch=on_launch,
+            launch_guard=launch_guard,
+        )
     if sys.implementation.name != "cpython":
         raise OSError("Windows audit containment requires CPython")
     import msvcrt
@@ -404,12 +515,18 @@ def run_audit_process(
         if not records or records.pop(0) != {"kind": "ready"}:
             raise OSError("Audit trusted bootstrap did not reach its private gate")
         config = json.dumps(
-            {"args": args, "cwd": os.fspath(cwd), "env": dict(os.environ if env is None else env), "shell": shell}
+            {
+                "args": args,
+                "cwd": os.fspath(cwd),
+                "env": dict(os.environ if env is None else env),
+                "shell": shell,
+            }
         ).encode("utf-8")
-        with os.fdopen(gate_write, "wb") as gate:
-            fds.remove(gate_write)
-            gate_transfer_started = True
-            gate.write(config)
+        with launch_guard() if launch_guard else nullcontext():
+            with os.fdopen(gate_write, "wb") as gate:
+                fds.remove(gate_write)
+                gate_transfer_started = True
+                gate.write(config)
         control["payloadReleased"] = True
         deadline = time.monotonic() + timeout
         while not records and "status" in channels and time.monotonic() < deadline:
@@ -467,7 +584,12 @@ def run_audit_process(
         native_failed = bool(getattr(error, "audit_native_failure", None))
         if native_failed:
             control["nativeFailureOperation"] = error.audit_native_failure
-        if process is not None and control["payloadReleased"] is True and not native_failed and not control.get("teardownStarted"):
+        if (
+            process is not None
+            and control["payloadReleased"] is True
+            and not native_failed
+            and not control.get("teardownStarted")
+        ):
             try:
                 job.finish(process, control)
             except OSError as teardown_error:

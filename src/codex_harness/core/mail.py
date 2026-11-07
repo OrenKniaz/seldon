@@ -63,6 +63,31 @@ class Mailbox:
         """Atomically deliver a dispatcher event once, including across resume/crash."""
         return self._send("event-" + hashlib.sha256(event_key.encode()).hexdigest(), **message)
 
+    @staticmethod
+    def deliver_run_requests(store, run_id):
+        """Deliver retained messages once; the controller interprets refusals."""
+        from codex_harness.core import approvals
+
+        settled = {
+            r["sourceEventId"]
+            for kind in ("run-mail-delivered", "run-mail-failed")
+            for r in approvals.records(store, kind)
+        }
+        for row in store.connection.execute(
+            "SELECT id,payload_json FROM events WHERE kind='run-mail-requested' ORDER BY id"
+        ).fetchall():
+            if row["id"] in settled:
+                continue
+            try:
+                identifier = Mailbox(store.workspace).send_event(
+                    f"{run_id}:{row['id']}", **json.loads(row["payload_json"])
+                )
+            except ValueError as error:
+                store._event("run-mail-failed", dict(sourceEventId=row["id"], reason=str(error)))
+                yield str(error)
+            else:
+                store._event("run-mail-delivered", dict(sourceEventId=row["id"], mailId=identifier))
+
     def _send(
         self,
         message_id,

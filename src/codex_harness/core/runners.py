@@ -59,7 +59,7 @@ def executable_scenarios(trace, document):
 
 def execution_sources(root, trace):
     """Hash the complete declared bundle; bounded bodies are judge context only."""
-    from codex_harness.core.planner_candidate import _digest, file_hashes
+    from codex_harness.core.candidate_observations import _digest, file_hashes
     from codex_harness.core.semantic_runner import SOURCE_IGNORED
     from codex_harness.core.semantic_schema import path
 

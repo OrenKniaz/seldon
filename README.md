@@ -2,7 +2,7 @@
 
 Seldon wraps supported coding providers through durable planning, review, parallel work, serial integration and evidence. This local extraction keeps the Python package `codex_harness.core`.
 
-Planner work follows [North Star v4](docs/NORTH-STAR.md) and the [planner charter](docs/PLANNER-CHARTER-AND-DRIFT-GUARD.md). They supersede conflicting planner sections of [North Star v3](<docs/architecture/October 12 Source of truth/harness-north-star-v3.md>) while retaining its broader product frame. Existing runtime paths stay in place until the scoped migration is measured. Source tests, mocks and clean imports establish bounded implementation evidence; they do not establish actual-worker success or full-vision completion. [Retained obligations](docs/legacy-capability-audit.md) explicitly record remaining capability gaps.
+The ratified [CHARTER.md](CHARTER.md) is binding and outranks historical North Stars and plans. Source goldens, mocks and clean imports establish bounded implementation evidence; they do not establish actual-provider success or full-vision completion. [Retained obligations](docs/legacy-capability-audit.md) record remaining gaps.
 
 ## Retained open obligations
 
@@ -23,7 +23,7 @@ Installed project activation: `seldon init --host all --dry-run`, then
 [project-local setup guide](docs/operator/project-init.md) for check/remove,
 preservation rules and experimental host support status.
 
-From an installed package, `p` and `plan_cli` run the planner, `run_plan` runs dispatch, and `status_server` serves the view-only cockpit. Equivalent module targets are `python -m codex_harness.core.plan_cli`, `python -m codex_harness.core.dispatch_cli`, and `python -m codex_harness.core.status_server`. For source use, put this repository's `src` directory on `PYTHONPATH`. Provider launches use the user's existing configuration and authentication; this extraction changes neither.
+`p`, `plan_cli` and `run_plan` enter the same durable run controller; `status_server` serves the read-only cockpit. Module targets are `python -m codex_harness.core.plan_cli` and `python -m codex_harness.core.status_server`. For source use, put this repository's `src` directory on `PYTHONPATH`. Provider launches retain the user's configuration, authentication and host protections.
 
 Start with the [planner guide](docs/operator/planner-guide.md), [handoff contract](docs/operator/handoff-contract.md) and [verification runners](docs/architecture/verification-runners.md). The runtime uses the Python standard library. Development tooling versions are pinned in `pyproject.toml`; the Windows source gate uses the existing prepared interpreter without installing packages.
 
@@ -31,7 +31,7 @@ Start with the [planner guide](docs/operator/planner-guide.md), [handoff contrac
 
 The user-approved October 19 release rule uses changed owning tests, all new regressions, a finite reviewed smoke set, an actual offline wheel build and the complete Ruff check/format scopes before private publication. Bind actual collection, completion, command results and independent meaningful review to the exact candidate. Use fresh isolated roots and preserve explicit Windows privilege skips. The target is ten minutes, measured; never omit or weaken checks to meet it.
 
-Run the complete `python -B -m pytest tests/python/core -q` suite asynchronously after publication against that published candidate. Its completion does not block publication. Preserve every failure/skip and track failures as repairs in the owning ledger. A fast-gate pass must never be presented as a full-suite pass or product acceptance.
+The authorized lane gate is `bash ../golden-gate.sh . stage-2c`: golden/approval journeys and the retained structural guards only, at most 19 cases and ten minutes. No unit tests. Browser-unavailable is web UNVERIFIED; CC's unsandboxed normal-browser gate is the web proof authority. A source gate does not establish actual-provider or product acceptance.
 
 [PROVENANCE.md](PROVENANCE.md) and [extraction-manifest.json](extraction-manifest.json) identify the exact source objects and exclusions. Committed fixture reference code and sample planning/publication snapshots are static test inputs, never evidence of Seldon completion. Historical demo documents retain their source-era artifact paths; those runtime artifacts are not included here. Packaging/install behavior has not been certified by the source-only import/entry tests.
 

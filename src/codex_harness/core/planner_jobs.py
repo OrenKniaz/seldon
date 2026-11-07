@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,8 +58,10 @@ def _directory(workspace, job_id):
 
 
 def execution_inputs(store):
-    payload = dict(nodes={n["id"]: n for n in store.spine().to_dict()["nodes"]},
-                   files=file_inputs(store.workspace / "template"))
+    payload = dict(
+        nodes={n["id"]: n for n in store.spine().to_dict()["nodes"]},
+        files=file_inputs(store.workspace / "template"),
+    )
     return dict(payload, digest=_digest(payload))
 
 
@@ -76,7 +77,9 @@ def file_inputs(template):
         if path.is_file():
             raw = path.read_bytes()
             result[path.relative_to(template).as_posix()] = dict(
-                sha256=hashlib.sha256(raw).hexdigest(), content=raw.decode("utf-8", errors="backslashreplace"))
+                sha256=hashlib.sha256(raw).hexdigest(),
+                content=raw.decode("utf-8", errors="backslashreplace"),
+            )
         elif not path.is_dir():
             raise ValueError("worker-job-template-file-invalid")
     return result
@@ -96,13 +99,11 @@ def snapshot_plan(template, path, manifest, files):
 
 
 def _publication(store, expected_revision):
-    status = store.status()
-    if status["published_revision"] != expected_revision or not expected_revision:
+    meta = store._meta()
+    if meta["published_revision"] != expected_revision or not expected_revision:
         raise ValueError("worker-job-current-publication-required")
-    if (
-        status["phase"] not in {"publish", "execute"}
-        or status["pending_gate"] is not None
-        or not store.publication_current(store.manifest_revision())
+    if meta["phase"] not in {"publish", "execute"} or not store.publication_current(
+        store.manifest_revision()
     ):
         raise ValueError("worker-job-publication-stale-or-gated")
     manifest = store.published_manifest(expected_revision)
@@ -170,13 +171,23 @@ def verify_job(directory, record=None):
     scope = request.get("executionScope")
     if not isinstance(scope, dict):
         raise ValueError("provider-call-native-scope-required")
-    started = read_record_json(_inside(directory, directory / "started.json"))
-    if (
-        started.get("requestDigest") != request["requestDigest"]
-        or started.get("pid") != os.getpid()
-    ):
-        raise ValueError("provider-call-owned-controller-required")
     with open_plan_store_readonly(workspace) as store:
+        from codex_harness.core.run_loop import cursor
+        from codex_harness.core.run_ownership import ensure_effect
+
+        run = cursor(store)
+        ensure_effect(store, run["generation"])
+        effect = run["effect"]
+        segment = segment_directory(workspace, request["jobId"], effect["id"])
+        started = read_record_json(segment / "started.json")
+        admitted = read_record_json(segment / "request.json")
+        if (
+            started.get("requestDigest") != request["requestDigest"]
+            or started.get("pid") != os.getpid()
+            or admitted["generation"] != run["generation"]
+            or effect.get("jobId") != request["jobId"]
+        ):
+            raise ValueError("provider-call-owned-segment-required")
         if not admitted_execution(
             store, request.get("executionRequestId"), scope, request["jobId"]
         ):
@@ -206,7 +217,25 @@ def verify_job(directory, record=None):
 
 
 def start_worker_job(
-    store, expected_revision, workers, *, max_parallel=2, timeout=900
+    store, expected_revision, workers, *, max_parallel=2, timeout=900, segment_id=None
+):
+    """Admission and exact controller ownership share the canonical transaction."""
+    from codex_harness.core.run_ownership import ensure_effect
+
+    with store._transaction():
+        ensure_effect(store)
+        return _admit_worker_job(
+            store,
+            expected_revision,
+            workers,
+            max_parallel=max_parallel,
+            timeout=timeout,
+            segment_id=segment_id,
+        )
+
+
+def _admit_worker_job(
+    store, expected_revision, workers, *, max_parallel=2, timeout=900, segment_id=None
 ):
     """Admit once under B; recovery alone assigns successor attempts."""
     if type(max_parallel) is not int or max_parallel < 1:
@@ -287,43 +316,20 @@ def start_worker_job(
             "executionScope": scope,
             "executionProvenance": execution_provenance,
         }
+        predecessor = next(
+            (
+                row
+                for row in approvals.records(store, "worker-recovery-resolved")
+                if row.get("successor") == job_id
+            ),
+            None,
+        )
+        if predecessor and predecessor["proof"].get("revalidation", {}).get("runPath"):
+            prior = read_record_json(Path(predecessor["proof"]["revalidation"]["runPath"]))
+            request["previousDelivery"] = prior.get("delivery", {})
         request["requestDigest"] = _digest(request)
         write_record_json_once(directory / "request.json", request)
-        command = [
-            sys.executable,
-            "-P",
-            "-B",
-            "-m",
-            "codex_harness.core.planner_jobs",
-            "--workspace",
-            str(store.workspace.resolve()),
-            "--job-id",
-            job_id,
-        ]
-        flags = (
-            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
-            if os.name == "nt"
-            else {"start_new_session": True}
-        )
-        with (directory / "stdout.txt").open("xb") as stdout:
-            with (directory / "stderr.txt").open("xb") as stderr:
-                child = subprocess.Popen(
-                    command,
-                    cwd=store.workspace,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stdout,
-                    stderr=stderr,
-                    # A product package must not replace this controller before
-                    # its publication guards run. -P removes implicit cwd; pin
-                    # only this child's import path, keeping all other provider
-                    # account/configuration environment settings unchanged.
-                    env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
-                    **flags,
-                )
-        write_record_json_once(
-            directory / "launch.json",
-            {"requestDigest": request["requestDigest"], "pid": child.pid, "at": _now()},
-        )
+        return start_segment(store, job_id, segment_id, None)
     except Exception as error:
         # If Popen succeeded but writing launch failed, a child may be running.
         # Record an admission error, never a false terminal outcome or relaunch.
@@ -335,26 +341,8 @@ def start_worker_job(
     return worker_job_status(store.workspace, job_id)
 
 
-def worker_job_status(workspace, job_id, *, wait_seconds=0):
+def worker_job_status(workspace, job_id):
     """Read durable observations; recovery verdicts supersede lost terminal records."""
-    if type(wait_seconds) not in (int, float) or not 0 <= wait_seconds <= 600:
-        raise ValueError("wait_seconds must be between 0 and 600")
-    if wait_seconds:
-        deadline = time.monotonic() + wait_seconds
-        current = worker_job_status(workspace, job_id)
-        while "terminal" not in current and current["status"] not in {
-            "failed",
-            "pending-judgment",
-            "readmitted",
-            "abandoned",
-            "steering-required",
-        }:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(1, remaining))
-            current = worker_job_status(workspace, job_id)
-        return current
     directory = _directory(workspace, job_id)
     if not directory.is_dir():
         raise ValueError("worker-job-not-found")
@@ -425,8 +413,14 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
                 if key in run
             },
             "beads": {
-                key: {**{field: bead.get(field) for field in ("status", "provider", "model", "effort", "guard")},
-                      "candidateRoot": (bead.get("integrated") or {}).get("root") or (bead.get("attempt") or {}).get("cwd")}
+                key: {
+                    **{
+                        field: bead.get(field)
+                        for field in ("status", "provider", "model", "effort", "guard")
+                    },
+                    "candidateRoot": (bead.get("integrated") or {}).get("root")
+                    or (bead.get("attempt") or {}).get("cwd"),
+                }
                 for key, bead in run["beads"].items()
             },
         }
@@ -438,79 +432,275 @@ def worker_job_status(workspace, job_id, *, wait_seconds=0):
     if result["status"] != "completed" or result.get("terminal", {}).get(
         "dispatchStatus", ""
     ).startswith("plan-failed"):
-        result["reason"] = ("Awaiting judgment; inspect the bound candidate before revalidation."
-                            if result["status"] == "pending-judgment" else "Worker started; completion and current liveness remain unproven." if result["status"] == "running" else "Failed or stalled work: harness_recovery can readmit within B.")
+        result["reason"] = (
+            "Awaiting judgment; inspect the bound candidate before revalidation."
+            if result["status"] == "pending-judgment"
+            else "Worker started; completion and current liveness remain unproven."
+            if result["status"] == "running"
+            else "The run loop reconciles failed or stalled work within current B."
+        )
     from codex_harness.core.planner_recovery import worker_status
 
     return worker_status(workspace, result)
 
 
 def dispatch_job(store, directory, request, resume_run_dir=None):
-    workers = _workers(read_record_json(directory / "plan/sample.json"), request["options"]["workers"])
+    workers = _workers(
+        read_record_json(directory / "plan/sample.json"), request["options"]["workers"]
+    )
     spine = store.spine()
     from codex_harness.core.planner_recovery import RESOLVED
-    run = dispatch.run_plan(directory / "plan", work_root=directory / "runs", resume_run_dir=resume_run_dir,
+
+    run = dispatch.run_plan(
+        directory / "plan",
+        work_root=directory / "runs",
+        resume_run_dir=resume_run_dir,
         provider_for={w["bead"]: w["provider"] for w in workers},
         model_for={w["bead"]: w["model"] for w in workers},
         effort_for={w["bead"]: w["effort"] for w in workers},
-        max_parallel=request["options"]["maxParallel"], timeout=request["options"]["timeout"],
-        execution_job=directory, setup=spine.node(spine.ids("vision")[0])["fields"].get("setup", {}),
+        max_parallel=request["options"]["maxParallel"],
+        timeout=request["options"]["timeout"],
+        execution_job=directory,
+        setup=spine.node(spine.ids("vision")[0])["fields"].get("setup", {}),
         intent_nodes=store.locked_acceptance_spine().to_dict()["nodes"],
-        worker_outcomes=next((r["proof"].get("faultOutcomes", {}) for r in approvals.records(store, RESOLVED)
-                              if r.get("successor") == request["jobId"]), {}))
-    from codex_harness.core.planner_candidate import deliver
+        worker_outcomes=next(
+            (
+                {
+                    key: value
+                    + "; "
+                    + r["reason"]
+                    + "; "
+                    + json.dumps(r["proof"].get("repairObservation"))
+                    for key, value in r["proof"].get("faultOutcomes", {}).items()
+                }
+                for r in approvals.records(store, RESOLVED)
+                if r.get("successor") == request["jobId"]
+            ),
+            {},
+        ),
+    )
+    from codex_harness.core.candidate_delivery import deliver
+
     deliver(store.workspace, request, run, request["publicationRevision"])
     return run
 
 
-def execute_worker_job(workspace, job_id):
-    """Owned background entry point, at most once; use the ordinary dispatcher."""
-    directory = _directory(workspace, job_id)
+def segment_directory(workspace, job_id, segment_id):
+    if not isinstance(segment_id, str) or not re.fullmatch(r"[0-9a-f]{32}", segment_id):
+        raise ValueError("worker-segment-id-invalid")
+    return _inside(workspace, _directory(workspace, job_id) / "segments" / segment_id)
+
+
+def latest_segment(store, job_id):
+    """Recovery observes the latest admitted segment, never an earlier exit."""
+    from codex_harness.core.run_loop import EVENT
+
+    row = store.connection.execute(
+        "SELECT payload_json FROM events WHERE kind=? "
+        "AND json_extract(payload_json,'$.effect.kind')='build' "
+        "AND json_extract(payload_json,'$.effect.jobId')=? ORDER BY id DESC LIMIT 1",
+        (EVENT, job_id),
+    ).fetchone()
+    if row:
+        effect = json.loads(row[0])["effect"]
+        segment = effect.get("segmentId", effect["id"])
+        return (
+            segment_directory(store.workspace, job_id, segment)
+            if segment
+            else _directory(store.workspace, job_id)
+        )
+    return _directory(store.workspace, job_id)
+
+
+def owned_segment(directory):
+    """Resolve a fresh bounded owner without changing the original admission."""
+    from codex_harness.core.plan_store import open_plan_store_readonly
+    from codex_harness.core.run_loop import cursor
+    from codex_harness.core.run_ownership import ensure_effect
+
+    directory = Path(directory).resolve()
+    workspace = directory.parent.parent.parent
     request = _request(directory)
-    # Exclusive marker precedes all dispatch work. A duplicate child must stop.
-    write_record_json_once(
-        directory / "started.json",
-        {"requestDigest": request["requestDigest"], "at": _now(), "pid": os.getpid()},
-    )
-    terminal = {"requestDigest": request["requestDigest"], "status": "failed"}
-    try:
-        plan = directory / "plan"
-        manifest = read_record_json(_inside(directory, plan / "sample.json"))
+    with open_plan_store_readonly(workspace) as store:
+        run = cursor(store)
+        ensure_effect(store, run["generation"])
+        effect = run["effect"]
+        path = segment_directory(workspace, request["jobId"], effect["id"])
+        started, segment = (
+            read_record_json(path / "started.json"),
+            read_record_json(path / "request.json"),
+        )
         if (
-            _digest(manifest) != request["manifestDigest"]
-            or _files(plan / "template") != request["templateFiles"]
+            effect.get("jobId") != request["jobId"]
+            or segment["generation"] != run["generation"]
+            or started.get("pid") != os.getpid()
+            or started.get("requestDigest") != request["requestDigest"]
         ):
-            raise ValueError("worker-job-snapshot-identity-mismatch")
-        database = _inside(workspace, Path(workspace) / ".codex-harness" / "plan.sqlite3")
-        if not database.is_file():
-            raise ValueError("worker-job-plan-store-missing")
+            raise ValueError("provider-call-owned-segment-required")
+        return path
+
+
+def start_segment(store, job_id, segment_id, resume_run_dir):
+    """A new finite owner for retained work; admission identity precedes Popen."""
+    from codex_harness.core.run_loop import cursor, save
+    from codex_harness.core.run_ownership import ensure_effect
+    from codex_harness.core.audit_process import process_observation
+
+    run = cursor(store)
+    ensure_effect(store, run["generation"])
+    segment_id = segment_id or run["effect"]["id"]
+    path = segment_directory(store.workspace, job_id, segment_id)
+    if path.exists():
+        return dict(jobId=job_id, segmentId=segment_id)
+    path.mkdir(parents=True)
+    with store._transaction():
+        run = cursor(store)
+        ensure_effect(store, run["generation"])
+        run["jobId"] = job_id
+        run["effect"].update(jobId=job_id, segmentId=segment_id)
+        save(store, run)
+    request = dict(
+        jobId=job_id,
+        segmentId=segment_id,
+        generation=run["generation"],
+        deadlineAt=run["effect"]["deadlineAt"],
+        resumeRun=resume_run_dir,
+    )
+    write_record_json_once(path / "request.json", request)
+    command = [
+        sys.executable,
+        "-P",
+        "-B",
+        "-m",
+        "codex_harness.core.planner_jobs",
+        "--workspace",
+        str(store.workspace),
+        "--job-id",
+        job_id,
+        "--segment",
+        segment_id,
+    ]
+    flags = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+        if os.name == "nt"
+        else {"start_new_session": True}
+    )
+    with store._transaction():
+        ensure_effect(store, run["generation"], segment_id)
+        with (path / "stdout.txt").open("xb") as stdout, (path / "stderr.txt").open("xb") as stderr:
+            child = subprocess.Popen(
+                command,
+                cwd=store.workspace,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+                **flags,
+            )
+        write_record_json_once(
+            path / "launch.json",
+            dict(
+                pid=child.pid,
+                at=_now(),
+                processIdentity=process_observation(child.pid).get("identity"),
+            ),
+        )
+    return dict(jobId=job_id, segmentId=segment_id)
+
+
+def verified_segment_exit(request, segment_id, terminal, receipt):
+    control = receipt.get("control", {})
+    return (
+        all(
+            r.get("requestDigest") == request["requestDigest"]
+            and (segment_id is None or r.get("segmentId") == segment_id)
+            for r in (terminal, receipt)
+        )
+        and control.get("backend") == "windows-job"
+        and control.get("membershipVerifiedBeforePayload") is True
+        and control.get("quiescenceVerified") is True
+        and control.get("activeProcessesAfterTeardown") == 0
+    )
+
+
+def segment_status(store, effect):
+    from codex_harness.core.audit_process import process_observation
+
+    workspace, job_id = store.workspace, effect["jobId"]
+    segment_id = effect.get("segmentId", effect["id"])
+    path = (
+        segment_directory(workspace, job_id, segment_id)
+        if segment_id
+        else _directory(workspace, job_id)
+    )
+    result = {}
+    for name in ("terminal", "quiescence", "launch"):
+        if (path / (name + ".json")).exists():
+            result[name] = read_record_json(path / (name + ".json"))
+    if launch := result.get("launch"):
+        observed = process_observation(launch["pid"])
+        result["launched"] = bool(
+            launch.get("processIdentity")
+            and observed.get("identity") == launch["processIdentity"]
+            and observed.get("running")
+        )
+        result["deadOwner"] = observed.get("running") is False
+    result["verifiedExit"] = verified_segment_exit(
+        _request(_directory(workspace, job_id)),
+        segment_id,
+        result.get("terminal", {}),
+        result.get("quiescence", {}),
+    )
+    return result
+
+
+def execute_worker_job(workspace, job_id, segment_id):
+    """One bounded dispatch segment ends before any semantic question is asked."""
+    from codex_harness.core.run_ownership import ensure_effect
+
+    directory = _directory(workspace, job_id)
+    path = segment_directory(workspace, job_id, segment_id)
+    request, segment = _request(directory), read_record_json(path / "request.json")
+    write_record_json_once(
+        path / "started.json",
+        dict(requestDigest=request["requestDigest"], at=_now(), pid=os.getpid()),
+    )
+    # Keep the original admission marker for attempt provenance, without making
+    # that original PID the continuation owner.
+    if not (directory / "started.json").exists():
+        write_record_json_once(
+            directory / "started.json",
+            dict(requestDigest=request["requestDigest"], at=_now(), pid=os.getpid()),
+        )
+    terminal = dict(requestDigest=request["requestDigest"], segmentId=segment_id, status="failed")
+    try:
         with open_plan_store(workspace) as store:
-            if _publication(store, request["publicationRevision"])[0] != manifest:
-                raise ValueError("worker-job-publication-changed-before-launch")
-            run = dispatch_job(store, directory, request)
-        from codex_harness.core.planner_candidate import execution_assessment_request, judgments_for, revalidate
-
-        deadline = time.monotonic() + request["options"]["timeout"]
-        handled = set()
-        while run["status"] == "pending-judgment" and time.monotonic() < deadline:
-            with open_plan_store(workspace) as store:
-                pending = next(b for b in run["beads"].values() if b["status"] == "awaiting judgment")
-                verdict = judgments_for(store, pending["integrated"]["root"]).get(execution_assessment_request(pending["integrated"]["semantic"])["check"], {})
-                if (verdict.get("positiveCredit") or verdict.get("concreteGap")) and verdict["id"] not in handled:
-                    handled.add(verdict["id"])
-                    revalidate(store, job_id, "worker-judgment-continuation")
-                    run = read_record_json(Path(run["repo"]).parent / "evidence/run.json")
-            if run["status"] == "pending-judgment":
-                time.sleep(0.2)
-
-        terminal.update(runId=run["runId"], dispatchStatus=run["status"])
-        terminal["status"] = ("pending-judgment" if run["status"] == "pending-judgment" else
-                              "failed" if run["status"].startswith("plan-failed") else "completed")
+            ensure_effect(store, segment["generation"])
+            store._run_generation = segment["generation"]
+            manifest = read_record_json(directory / "plan/sample.json")
+            if (
+                _digest(manifest) != request["manifestDigest"]
+                or _files(directory / "plan/template") != request["templateFiles"]
+            ):
+                raise ValueError("worker-job-snapshot-identity-mismatch")
+            run = dispatch_job(store, directory, request, segment["resumeRun"])
+        terminal.update(
+            runId=run["runId"],
+            dispatchStatus=run["status"],
+            status="pending-judgment"
+            if run["status"] == "pending-judgment"
+            else "failed"
+            if run["status"].startswith("plan-failed")
+            else "completed",
+        )
     except Exception as error:
-        terminal["error"] = {"type": type(error).__name__, "message": str(error),
-                             "traceback": "".join(traceback.format_exception(error, limit=-6))[-4096:]}
+        terminal["error"] = dict(
+            type=type(error).__name__,
+            message=str(error),
+            traceback="".join(traceback.format_exception(error, limit=-6))[-4096:],
+        )
     terminal["at"] = _now()
-    write_record_json_once(directory / "terminal.json", terminal)
+    write_record_json_once(path / "terminal.json", terminal)
     return terminal
 
 
@@ -518,10 +708,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--job-id", required=True)
+    parser.add_argument("--segment", required=True)
     args = parser.parse_args(argv)
     from codex_harness.core.planner_recovery import monitor
 
-    return monitor(args.workspace, args.job_id)
+    return monitor(args.workspace, args.job_id, args.segment)
 
 
 if __name__ == "__main__":

@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from codex_harness.core import spine as plan_spine
+from codex_harness.core import spine as plan_spine, candidate_delivery
 from codex_harness.core.acceptance_revision import _hash, _integrated_revision_v1, _metadata_remaining, integrated_revision
 from codex_harness.core.acceptance_scenarios import derive_scenarios, run_scenarios
 from codex_harness.core.plan_store import PlanStoreError, _now
-from codex_harness.core.planner_candidate import current_job_run, delivered_candidate, judgments_for
+from codex_harness.core.planner_candidate import current_job_run, judgments_for
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.semantic_runner import web_toolchain
 
@@ -23,8 +23,7 @@ def acceptance_inputs(store, repo, *, subject=None) -> dict:
     if subject not in ("product", "oracle"):
         raise PlanStoreError(
             "acceptance-subject-required",
-            "Specify the acceptance subject. Next: harness_accept_run repo=<integrated-repo> "
-            "subject=product OR harness_accept_run repo=<reference-repo> subject=oracle",
+            "Specify product or oracle as the acceptance subject; the run loop owns admission.",
         )
     spine = store.locked_acceptance_spine()
     spine = plan_spine.Spine(store._data()) if spine.semantic else spine
@@ -59,7 +58,7 @@ def capture_acceptance(inputs, *, deadline=None, should_stop=None) -> dict:
     if subject == "product":
         dispatch_record = product.parent / "evidence" / "run.json"
         if dispatch_record.is_file():
-            from codex_harness.core.dispatch import STATUS_MOCK_ONLY
+            from codex_harness.core.dispatch_shared import STATUS_MOCK_ONLY
             run = read_record_json(dispatch_record)
             _metadata_remaining(deadline, should_stop)
             dispatch_digest = _hash(run)
@@ -271,7 +270,7 @@ def require_c_evidence(store, run):
         _refuse("acceptance-scenarios-required")
     if store.spine().semantic:
         try:
-            delivered_candidate(store, run["repo"])
+            candidate_delivery.delivered_candidate(store, run["repo"])
             if run.get("webToolchain") and not judgments_for(store, run["repo"]).get(
                 "visualQuality", {}
             ).get("passed"):
@@ -313,30 +312,8 @@ INVALID_MESSAGES = {
 }
 
 def acceptance_next(reason, repo=None) -> str:
-    if reason == "acceptance-execution-pending":
-        return (
-            "harness_accept_status id=<attemptId>; inspect the admitted attempt; "
-            "never replay uncertain work."
-        )
-    if reason in ("revision-algorithm-upgraded", "legacy-unbound"):
-        return f"harness_accept_rebind repo={json.dumps(repo or '<integrated-repo>')}"
-    if reason == "vision-unlocked":
-        return "harness_record_confirmation gate=vision-lock"
-    if reason == "scenarios-changed":
-        return (
-            "Review and save the current scenarios with harness_accept_scenarios, "
-            "then harness_accept_run repo=<integrated-repo> subject=product."
-        )
-    if reason == "plan-clarifications-open":
-        return "Answer the open questions with harness_answer before acceptance."
-    if reason == "acceptance-review-required":
-        return "harness_accept_review repo=<integrated-repo>"
-    if reason == "acceptance-approval-required":
-        return "harness_accept statement=<actual-words> by=<user-or-proxy:name>"
-    return (
-        "harness_accept_run repo=<integrated-repo> subject=product; "
-        "obtain a fresh acceptance review and approval."
-    )
+    return "Read the durable run baton; answer its bound question or use harness_steer with recorded direction."
+
 
 def _refuse(reason, repo=None):
     raise PlanStoreError(
@@ -348,27 +325,12 @@ def acceptance_run_prerequisite(store):
     run = _latest_run(store)
     candidate = current_job_run(store)[0] if run and store.spine().semantic else dict(complete=True)
     if not candidate["complete"]:
-        return dict(kind="acceptance_run_required", state="pending-judgment", reason="retained-candidate-required", mcpTool="harness_recovery", arguments=candidate["recoveryArguments"], message=candidate["next"])
-    repo = run["repo"] if run else "<integrated-repo>"
+        return dict(kind="acceptance_run_required", state="pending-judgment", reason="retained-candidate-required", message=candidate["next"])
     reason = run_invalid_reason(store, run) or (
         "acceptance-product-required" if run and run_subject(run) != "product" else None)
-    if reason is None:
-        return None
-    tool = ("harness_accept_rebind" if reason in {"revision-algorithm-upgraded", "legacy-unbound"}
-            else "harness_accept_status" if reason == "acceptance-execution-pending"
-            else "harness_accept_run")
-    arguments = dict(repo=repo, **({"subject": "product"} if tool == "harness_accept_run" else {}))
-    message = acceptance_next(reason, repo)
-    if reason == "scenarios-changed":
-        tool, arguments = "harness_accept_scenarios", {}
-    elif reason == "vision-unlocked":
-        tool, arguments = "harness_record_confirmation", dict(gate="vision-lock")
-    if tool == "harness_accept_status":
-        attempt = store.connection.execute("SELECT id FROM acceptance_attempts ORDER BY rowid DESC LIMIT 1").fetchone()
-        arguments = dict(id=attempt["id"])
-        message = "harness_accept_status id=" + attempt["id"] + "; inspect the admitted owner; never replay uncertain work."
     return dict(kind="acceptance_run_required", state="pending-judgment", reason=reason,
-                mcpTool=tool, arguments=arguments, message=message)
+                message=acceptance_next(reason)) if reason else None
+
 
 def rebind_acceptance(store, repo, env=None) -> dict:
     """Migrate execution evidence only; reviews and C require current judgments."""

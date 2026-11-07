@@ -40,12 +40,3 @@ def render_quality_card(report):
     lines = [report["summary"]]
     lines.extend(f"{check['question']}: {check['status']}. {check['advice']}" for check in report["checks"])
     return "\n".join(lines) + "\n"
-
-
-def _roundtable(store):
-    """Canonical status reads the same reviewer verdicts as publication."""
-    prerequisite = store.review_prerequisite(store.manifest_revision())
-    reviews, complete = prerequisite["reviews"], prerequisite["complete"]
-    return ("pass" if complete else "warn", dict(roundId=reviews[0]["round_id"] if reviews else None,
-        successfulReviewIds=[r["id"] for r in reviews]),
-        "" if complete else "Obtain the selected reviewers' explicit bound verdicts; unresolved meaning stays pending.")

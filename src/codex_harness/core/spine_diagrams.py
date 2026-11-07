@@ -130,10 +130,6 @@ def _flow(spine: Spine, kind: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def feature_map(spine: Spine) -> str:
-    return _flow(spine, "feature-map")
-
-
 def user_journey(spine: Spine) -> str:
     # Mermaid requires a score; 3 is a neutral display default, not plan evidence.
     lines = ["journey", f"  title {_escape(spine.name)}"]
@@ -153,61 +149,11 @@ def user_journey(spine: Spine) -> str:
     return "\n".join(lines) + "\n"
 
 
-def decision_map(spine: Spine) -> str:
-    return _flow(spine, "decision-map")
-
-
 def bead_dag(spine: Spine) -> str:
     return _flow(spine, "bead-dag")
-
-
-def trace_view(spine: Spine) -> str:
-    return _flow(spine, "trace")
 
 
 def diagram(spine: Spine, kind: str) -> str:
     if kind not in _KINDS:
         raise ValueError(f"Unknown diagram kind: {kind}")
     return user_journey(spine) if kind == "user-journey" else _flow(spine, kind)
-
-
-def text_fallback(spine: Spine, kind: str) -> str:
-    """List each node once, with its outgoing links indented beneath it."""
-    nodes, edges = _projection(spine, kind)
-    lines = [f"{kind}: {spine.name}"]
-
-    def label(key: str) -> str:
-        return " ".join(_label(nodes[key]).splitlines())
-
-    if kind == "user-journey":
-        if not spine.ids("story"):
-            for key in spine.ids("vision"):
-                fields = spine.node(key)["fields"]
-                lines.extend(
-                    f"  {field}: {fields[field]}"
-                    for field in ("first_user_moment", "scope_in")
-                    if fields.get(field)
-                )
-        for feature, stories in _journey_groups(spine):
-            lines.append("  " + (label(feature) if feature else "Ungrouped stories"))
-            lines.extend(f"    {label(key)}" for key in stories)
-    else:
-        gaps = {gap["id"]: [] for gap in spine.coverage_gaps()} if kind == "trace" else {}
-        if kind == "trace":
-            for gap in spine.coverage_gaps():
-                gaps[gap["id"]].append(gap["gap"])
-        groups = _layers(nodes, edges) if kind == "bead-dag" else [list(nodes)]
-        for group in groups:
-            parallel = kind == "bead-dag" and len(group) > 1
-            if parallel:
-                lines.append("  can run in parallel")
-            indent = "    " if parallel else "  "
-            for key in group:
-                suffix = " [gap: " + ", ".join(gaps[key]) + "]" if key in gaps else ""
-                lines.append(indent + label(key) + suffix)
-                lines.extend(
-                    indent + "  -> " + label(child) for parent, child in edges if parent == key
-                )
-    if not nodes and not (kind == "user-journey" and spine.ids("vision")):
-        lines.append("  No planned nodes yet")
-    return "\n".join(lines) + "\n"

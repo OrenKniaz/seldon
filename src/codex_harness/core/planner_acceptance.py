@@ -74,17 +74,21 @@ class AcceptanceOwner:
             quiescence="UNVERIFIED",
             ownershipReleased=state not in {"queued", "running", "unknown-interrupted"},
             resultScope="Captured snapshot; canonical freshness checks own current validity",
-            next="harness_recovery mode=resolve job_id=acceptance:"
-            + attempt_id
-            + " choice=abandon reason=<release uncertain owner>"
+            next="harness_steer: provide direction after inspecting retained acceptance evidence"
             if state == "unknown-interrupted"
             else None,
         )
 
     def start(self, store, repo, *, subject):
+        self.control_generation = getattr(store, "_run_generation", None)
+        self.control_effect_id = getattr(store, "_run_effect_id", None)
         if self.thread is not None and self.thread.is_alive():
             return self.status(store, self.active)
         with store._transaction():
+            from codex_harness.core.run_loop import cursor
+            from codex_harness.core.run_ownership import ensure_effect, attach_attempt
+
+            ensure_effect(store, self.control_generation, self.control_effect_id)
             row = store.connection.execute(
                 "SELECT id FROM acceptance_attempts WHERE state IN ('queued','running','unknown-interrupted')"
             ).fetchone()
@@ -107,6 +111,20 @@ class AcceptanceOwner:
                     previous["id"] if previous else None,
                 ),
             )
+            attach_attempt(store, "acceptance:" + attempt_id)
+            control = cursor(store)
+            deadline = (
+                min(
+                    datetime.now(UTC) + timedelta(seconds=captured["maxExecutionSeconds"]),
+                    datetime.fromisoformat(control["effect"]["deadlineAt"]),
+                )
+                if control and control.get("effect")
+                else datetime.now(UTC) + timedelta(seconds=captured["maxExecutionSeconds"])
+            )
+            store.connection.execute(
+                "UPDATE acceptance_attempts SET deadline_at=? WHERE id=?",
+                (deadline.isoformat(), attempt_id),
+            )
             store._event("acceptance-admitted", dict(attemptId=attempt_id, inputDigest=key))
         self.stop_file = store.workspace / ".codex-harness" / f"acceptance-stop-{attempt_id}"
         self.prepared = (attempt_id, captured)
@@ -119,15 +137,22 @@ class AcceptanceOwner:
         attempt_id, captured = self.prepared
         self.prepared = None
         started = datetime.now(UTC)
-        deadline = time.monotonic() + captured["maxExecutionSeconds"]
+        admitted_deadline = store.connection.execute(
+            "SELECT deadline_at FROM acceptance_attempts WHERE id=?", (attempt_id,)
+        ).fetchone()[0]
+        remaining = max(0, (datetime.fromisoformat(admitted_deadline) - started).total_seconds())
+        deadline = time.monotonic() + remaining
         self.deadline, self.active = deadline, attempt_id
         with store._transaction():
+            from codex_harness.core.run_ownership import ensure_effect
+
+            ensure_effect(store, self.control_generation, self.control_effect_id)
             changed = store.connection.execute(
                 "UPDATE acceptance_attempts SET state='running',started_at=?,deadline_at=? "
                 "WHERE id=? AND owner=? AND state='queued'",
                 (
                     started.isoformat(),
-                    (started + timedelta(seconds=captured["maxExecutionSeconds"])).isoformat(),
+                    admitted_deadline,
                     attempt_id,
                     self.instance,
                 ),
@@ -211,6 +236,9 @@ class AcceptanceOwner:
             attempt_id, captured, kind, value = self.messages.get_nowait()
             acknowledged = None
             with store._transaction():
+                from codex_harness.core.run_ownership import ensure_effect
+
+                ensure_effect(store, self.control_generation, self.control_effect_id)
                 row = store.connection.execute(
                     "SELECT * FROM acceptance_attempts WHERE id=? AND owner=? AND state='running'",
                     (attempt_id, self.instance),
@@ -288,67 +316,65 @@ class AcceptanceOwner:
                     )
 
 
-def job_status(self, arguments):
-    """Read captured job history without running whole-plan freshness/projection."""
+def run_capture(store, repo):
+    """Return one finite capture observation; run_loop decides its disposition."""
+    from codex_harness.core.run_ownership import ensure_effect
+
+    owner = AcceptanceOwner()
+    admitted = owner.start(store, repo, subject="product")
+    owner.dispatch_after_flush(store)
     try:
-        from codex_harness.core import planner_views as views
-        from codex_harness.core.mcp_planner import TOOLS as self_tools
-        from codex_harness.core.mcp_planner import _validate
+        observed = owner.status(store, admitted["attemptId"])
+        while observed["state"] in {"queued", "running"}:
+            ensure_effect(store)
+            owner.drain(store)
+            observed = owner.status(store, admitted["attemptId"])
+            if observed["state"] in {"queued", "running"}:
+                owner.changed.wait(0.05)
+                owner.changed.clear()
+        return observed
+    finally:
+        owner.close(store)
 
-        tool = next(t for t in self_tools if t["name"] == "harness_accept_status")
-        _validate(arguments, tool["inputSchema"])
-        from codex_harness.core.planner_review import _owners, status_reply
 
-        wait = arguments.get("wait_seconds", 0)
-        if type(wait) not in (int, float) or not 0 <= wait <= 60:
-            raise ValueError("wait_seconds must be between 0 and 60")
-        end = time.monotonic() + wait
-        while wait:
-            self.acceptance.changed.clear()
-            self.acceptance.drain(self._store())
-            owner = _owners.get(arguments["id"])
-            if isinstance(owner, threading.Thread):
-                owner.join(max(0, end - time.monotonic()))
-                break
-            from codex_harness.core.planner_review import status as review_status
+def completed_observation(store, effect):
+    """Read exact completed capture/review originals; continuation belongs to run_loop."""
+    from codex_harness.core import acceptance, acceptance_recovery, approvals
 
-            observed = review_status(self._store(), arguments["id"]) or self.acceptance.status(
-                self._store(), arguments["id"]
-            )
-            if observed["state"] not in {"queued", "running"} or time.monotonic() >= end:
-                break
-            self.acceptance.changed.wait(max(0, end - time.monotonic()))
-        if reply := status_reply(self, arguments["id"]):
-            return reply
-        data = self.acceptance.status(self._store(), arguments["id"])
-        self.result_data = data
-        result = data["result"]
-        failed = data["state"] in {"failed", "stale", "unknown-interrupted", "abandoned"} or bool(
-            result and not result["passed"]
-        )
-        body = (
-            views.acceptance_run_card(result) if result else views.data_card("Acceptance job", data)
-        )
-        next_step = data.get("next") or "harness_accept_status id=" + data["attemptId"]
-        if data["state"] == "abandoned":
-            next_step = (
-                "Inspect quarantined evidence; a new explicit harness_accept_run is required"
-            )
-        if result and not failed:
-            next_step = (
-                "harness_accept_run repo=<integrated-repo> subject=product"
-                if data["subject"] == "oracle"
-                else "harness_accept_review repo=<integrated-repo>"
-            )
-        body += "\nCaptured snapshot only; current proof/review/approval checks actual freshness."
-    except Exception as error:
-        data, failed = None, True
-        body = f"{getattr(error, 'code', type(error).__name__)}: {error}"
-        next_step = "Inspect the admitted attempt ID and workspace; do not resubmit work."
-    return {
-        "isError": failed,
-        "jobOnly": True,
-        "planStatusIncluded": False,
-        **({"structuredContent": data} if data is not None else {}),
-        "content": [{"type": "text", "text": body + "\nNext: " + next_step}],
-    }
+    approvals.require_approval(store, "B")
+    captured = [
+        identifier.split(":", 1)[1]
+        for identifier in effect.get("attemptIds", [])
+        if identifier.startswith("acceptance:")
+    ]
+    if len(captured) != 1:
+        return None
+    row = store.connection.execute(
+        "SELECT state,result_json FROM acceptance_attempts WHERE id=?", captured
+    ).fetchone()
+    if row is None or row["state"] != "completed" or not row["result_json"]:
+        return None
+    result = json.loads(row["result_json"])
+    if result != acceptance.current_run(store):
+        return None
+    all_reviews = [
+        identifier.split(":", 1)[1]
+        for identifier in effect.get("attemptIds", [])
+        if identifier.startswith("review:")
+    ]
+    reviews = [
+        identifier
+        for identifier in all_reviews
+        if not acceptance_recovery._events(store, acceptance_recovery.ABANDONED, identifier)
+    ]
+    if len(reviews) > 1 or all_reviews and not reviews:
+        return None
+    if reviews:
+        attempt = acceptance_recovery.ReviewAttempt.load(store, reviews[0])
+        admitted = store.connection.execute(
+            "SELECT 1 FROM acceptance_reviews WHERE id=?", (attempt.id,)
+        ).fetchone()
+        attempt.validate(result["repo"], result, admitted=bool(admitted))
+    return dict(state="completed", result=result, attemptId=captured[0]), reviews[
+        0
+    ] if reviews else None

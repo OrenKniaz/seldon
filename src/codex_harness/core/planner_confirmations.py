@@ -12,10 +12,6 @@ REQUEST = "confirmation-requested"
 RESPONSE = "confirmation-responded"
 CHAT = "chat-confirmation"
 NATIVE = "mcp-client-elicitation"
-CHAT_REVIEW_SCOPE = {
-    "reviewer_node_id": {"type": "string", "minLength": 1},
-}
-CHAT_SCOPE = ("execution", *CHAT_REVIEW_SCOPE)
 
 
 def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, actor_label):
@@ -96,32 +92,28 @@ def prepare_confirmation(
     gate,
     *,
     _chat=False,
-    _expected_request_id=None,
     execution=None,
     reviewer_node_id=None,
+    role_tuples=None,
 ):
-    if gate not in {"align", "vision-lock", "align+vision-lock", "plan-execution"}:
+    if gate not in {"align", "vision-lock", "align+vision-lock", "plan-execution", "invocations"}:
         raise PlanStoreError("plan-gate-invalid", str(gate))
     semantic = Spine(store._data()).semantic
-    if semantic and gate != "plan-execution":
+    if semantic and gate not in {"plan-execution", "invocations"}:
         gate = "align+vision-lock"
     with store._transaction():
-        if _expected_request_id is not None:
-            latest = next((r for r in records(store, REQUEST) if r["gate"] == gate), None)
-            if latest is None or latest["request_id"] != _expected_request_id:
-                raise ValueError("confirmation-request-superseded")
         phase = store.phase()
         if (
             not semantic
-            and gate != "plan-execution"
+            and gate not in {"plan-execution", "invocations"}
             and phase != {"align+vision-lock": "align"}.get(gate, gate)
         ):
             if gate not in {"vision-lock", "align+vision-lock"} or PHASES.index(
                 phase
             ) < PHASES.index("vision-lock"):
                 raise PlanStoreError("plan-confirmation-gate-mismatch", f"Current phase is {phase}")
-        kind = "B" if gate == "plan-execution" else "A"
-        action = {}
+        kind = "P" if gate == "invocations" else "B" if gate == "plan-execution" else "A"
+        action = dict(roleTuples=role_tuples) if role_tuples is not None else {}
         if kind == "B":
             action, missing = planning_prerequisites(
                 store, execution, reviewer_node_id=reviewer_node_id
@@ -130,7 +122,7 @@ def prepare_confirmation(
                 raise PlanStoreError(
                     "plan-b-prerequisites-missing", "Missing B prerequisites: " + "; ".join(missing)
                 )
-        else:
+        elif kind == "A":
             from codex_harness.core.planner_vision import expansion_status
 
             vision = Spine(store._data()).node(Spine(store._data()).ids("vision")[0])
@@ -147,14 +139,20 @@ def prepare_confirmation(
             channel=CHAT if _chat else NATIVE,
             choices=approvals.CHOICES,
         )
+        from codex_harness.core.run_loop import cursor
+
+        run = cursor(store)
+        request["controlGeneration"] = run["generation"] if run else None
         request["judgment"] = approvals.expansion_assessment(store) if kind == "A" else None
         consumed = {r["request_id"] for r in records(store, RESPONSE)}
         latest = approvals.latest_request(store, kind)
         if (
-            (_chat or kind == "B")
-            and latest
+            latest
             and latest["request_id"] not in consumed
-            and all(latest.get(k) == request[k] for k in ("fingerprint", "gate", "channel"))
+            and all(
+                latest.get(k) == request[k]
+                for k in ("fingerprint", "gate", "channel", "controlGeneration")
+            )
         ):
             return dict(latest, judgment=request["judgment"])
         store._event(REQUEST, request)
@@ -165,17 +163,50 @@ def prepare_chat_confirmation(store, gate, **scope):
     return prepare_confirmation(store, gate, _chat=True, **scope)
 
 
-def complete_confirmation(store, request_id, action, content=None):
-    return _complete_confirmation(store, request_id, action, content)
-
-
 def resume_confirmation(store, request_id, gate):
-    saved = next((r for r in records(store, "confirmation-pending-judgment")
-                  if r["request_id"] == request_id), None)
+    saved = next(
+        (
+            r
+            for r in records(store, "confirmation-pending-judgment")
+            if r["request_id"] == request_id
+        ),
+        None,
+    )
     if saved is None or saved["gate"] != gate:
         raise ValueError("confirmation-pending-response-required")
-    return _complete_confirmation(store, request_id, saved["action"], saved["content"],
-                                  chat=saved.get("chat"), expected_gate=gate)
+    return complete_confirmation(
+        store,
+        request_id,
+        saved["action"],
+        saved["content"],
+        chat=saved.get("chat"),
+        expected_gate=gate,
+    )
+
+
+def reattach_pending_words(store, request_id):
+    """Transfer control after current HOW credit; original subject/words stay sealed."""
+    from codex_harness.core.run_loop import cursor
+
+    with store._transaction():
+        request = next(r for r in records(store, REQUEST) if r["request_id"] == request_id)
+        current = approvals.scope_assessment(
+            store, before=request["subject"]["scope"], prepare=True
+        )
+        if not current.get("positiveCredit") or current["meaning"].get("impact") != "HOW":
+            return None
+        request = dict(request, controlGeneration=cursor(store)["generation"])
+        store._event(REQUEST, request)
+        store._event(
+            "confirmation-owner-reattached",
+            dict(
+                request_id=request_id,
+                judgmentId=current["id"],
+                generation=cursor(store)["generation"],
+            ),
+        )
+        outcome = resume_confirmation(store, request_id, request["gate"])
+        return (request, outcome) if outcome["state"] in {"pending-judgment", "approved"} else None
 
 
 def apply_judgment(store, judgment):
@@ -202,18 +233,29 @@ def complete_chat_confirmation(
     action, content, evidence = _chat_evidence(
         request_id, expected_revision, quoted_message, quote_sha256, actor_label
     )
-    return _complete_confirmation(
+    return complete_confirmation(
         store, request_id, action, content, chat=evidence, expected_gate=gate
     )
 
 
-def _complete_confirmation(
+def complete_confirmation(
     store, request_id, action, content=None, *, chat=None, expected_gate=None
 ):
     with store._transaction():
         request = next((r for r in records(store, REQUEST) if r["request_id"] == request_id), None)
         if request is None:
             raise PlanStoreError("plan-confirmation-request-unknown", str(request_id))
+        from codex_harness.core.run_loop import cursor
+
+        run = cursor(store)
+        if run and (
+            run["state"] in {"PAUSED", "STOPPED", "DONE"}
+            or request.get("controlGeneration") != run["generation"]
+        ):
+            raise PlanStoreError(
+                "confirmation-control-superseded",
+                "Read the current baton after explicit resume; use its fresh bound confirmation",
+            )
         channel = CHAT if chat is not None else NATIVE
         if request.get("channel", NATIVE) != channel:
             raise PlanStoreError("plan-confirmation-channel-mismatch", request_id)
@@ -276,5 +318,7 @@ def _complete_confirmation(
             outcome["scope"] = request["proposedAction"]["execution"]
         if chat is not None:
             outcome["chat"] = chat
-        store._event("confirmation-pending-judgment" if state == "pending-judgment" else RESPONSE, outcome)
+        store._event(
+            "confirmation-pending-judgment" if state == "pending-judgment" else RESPONSE, outcome
+        )
         return outcome

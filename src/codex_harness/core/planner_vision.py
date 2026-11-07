@@ -176,10 +176,3 @@ def vision_projection(vision: dict) -> dict:
         if key not in used
     )
     return {"title": vision["title"], "sections": sections}
-
-
-def render_vision(projection: dict) -> str:
-    return "\n\n".join(
-        [projection["title"]]
-        + [f"{section['label']}:\n{section['text']}" for section in projection["sections"]]
-    )

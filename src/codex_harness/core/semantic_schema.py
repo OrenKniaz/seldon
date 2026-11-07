@@ -270,7 +270,7 @@ def content(f):
 
 
 def validate(document, product, targets, *, require_entries=True, draft=False, planning=False):
-    from codex_harness.core.planner_candidate import RESERVED_ROOTS
+    from codex_harness.core.candidate_delivery import RESERVED_ROOTS
     from codex_harness.core.semantic_runner import launch
     import sys
     if len(json.dumps([document, targets], allow_nan=False).encode()) > 65536:

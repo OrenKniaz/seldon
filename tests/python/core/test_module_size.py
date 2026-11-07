@@ -6,23 +6,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CORE = "src/codex_harness/core"
-TOTAL_CEILING = 34692
+TOTAL_CEILING = 32449
 CEILINGS = {
     "src/codex_harness/core/acceptance.py": 14,
-    "src/codex_harness/core/acceptance_reviews.py": 363,
+    "src/codex_harness/core/acceptance_reviews.py": 270,
     "src/codex_harness/core/acceptance_revision.py": 164,
-    "src/codex_harness/core/acceptance_runs.py": 403,
+    "src/codex_harness/core/acceptance_runs.py": 365,
     "src/codex_harness/core/acceptance_scenarios.py": 279,
     "src/codex_harness/core/acceptance_views.py": 102,
-    "src/codex_harness/core/dispatch.py": 2482,
-    "src/codex_harness/core/execution_assessments.py": 740,
-    "src/codex_harness/core/mcp_planner.py": 2857,
-    "src/codex_harness/core/plan_store.py": 3319,
-    "src/codex_harness/core/planner_views.py": 1575,
+    "src/codex_harness/core/dispatch.py": 836,
+    "src/codex_harness/core/execution_assessments.py": 558,
+    "src/codex_harness/core/mcp_planner.py": 298,
+    "src/codex_harness/core/plan_store.py": 835,
+    "src/codex_harness/core/planner_views.py": 118,
     "src/codex_harness/core/review_findings.py": 99,
     "src/codex_harness/core/review_packets.py": 378,
-    "src/codex_harness/core/review_provider.py": 358,
-    "src/codex_harness/core/review_rounds.py": 454,
+    "src/codex_harness/core/review_provider.py": 348,
+    "src/codex_harness/core/review_rounds.py": 395,
     "src/codex_harness/core/roundtable.py": 15,
 }
 

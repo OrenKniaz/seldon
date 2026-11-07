@@ -11,4 +11,4 @@ from codex_harness.core.acceptance_runs import (
 )
 from codex_harness.core.acceptance_scenarios import derive_scenarios, run_scenarios
 from codex_harness.core.acceptance_views import acceptance_status
-from codex_harness.core.execution_assessments import prepare_execution_assessment, selected_execution_support
+from codex_harness.core.execution_assessments import selected_execution_support

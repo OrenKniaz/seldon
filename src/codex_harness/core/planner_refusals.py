@@ -5,7 +5,10 @@ import re
 
 TEACHING = (
     "Never read, search or execute Seldon's implementation or runtime files. "
-    "If stuck, call harness_plan_status or ask the user."
+    "Start/reattach with harness_plan_start, answer only the outstanding typed question "
+    "with harness_loop_answer, and use harness_steer for direction or actual user control/words. "
+    "The run loop owns compilation, review before B, publication, dispatch and recovery. "
+    "Read harness_plan_status for its durable baton; no planner choreography or worker polling."
 )
 
 # Codes observed in runs 15–23 and UX journeys, grouped by their owning rule.
@@ -46,7 +49,7 @@ RULES = [
         ),
         "The reviewer choice cannot be used as submitted.",
         "Supplied catalogs must match; without discovery propose exact tuples as catalog: "
-        "unverified. Actual reviewer tuples still require B.",
+        "unverified. Exact reviewer invocations require separate invocation permission; B follows review.",
         None,
     ),
     (
@@ -204,10 +207,3 @@ def refusal_code(text, values):
     if inner and inner[1] in MESSAGES:
         return inner[1]
     return coded[1] if coded else "tool-input-or-operation-error"
-
-
-def compact_refusal(name, reply, workspace, status, data):
-    if name == "harness_worker_status" and refusal_hold(data or {}):
-        reply["content"][0]["text"] = refusal_text(
-            reply["content"][0]["text"], workspace, {"status": status, "data": data}
-        )

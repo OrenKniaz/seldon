@@ -376,20 +376,3 @@ class AuditOwner:
                     (self.instance,),
                 ).fetchall():
                     release_attempt(store, "audit:" + row["id"], "Owner closed; audit cleanup UNKNOWN")
-
-
-def audit_synchronously(store):
-    owner = AuditOwner()
-    try:
-        attempt = owner.start(store)
-        if owner.prepared is None:
-            return attempt
-        owner.dispatch_after_flush(store)
-        if owner.thread is not None:
-            owner.thread.join(timeout=900)
-            if owner.thread.is_alive():
-                owner.close(store)
-        owner.drain(store)
-        return store.audit_attempt(attempt["attemptId"], owner.instance)
-    finally:
-        owner.close(store)

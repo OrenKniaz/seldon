@@ -36,14 +36,6 @@ def review_tier(reviewers):
             else "same-provider" if len({r["provider"] for r in reviewers}) == 1 else "cross-provider")
 
 
-def single_provider_notice(result):
-    provider = result["reviewers"][0]["provider"]
-    return (
-        f"Review tier: {review_tier(result['reviewers'])}; {len(result['reviewers'])} "
-        f"{provider} reviewers. Cross-subscription is preferred, never required."
-    )
-
-
 def review_binding(store, member_ids=(), *, convergence=False, run_id=None):
     """One live binding for review authority; views never infer its credit."""
     def observed(key, read):

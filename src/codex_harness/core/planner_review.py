@@ -3,9 +3,7 @@
 import json
 import sqlite3
 import threading
-import time
 from pathlib import Path
-from uuid import uuid4
 
 from codex_harness.core import acceptance_recovery as recovery
 from codex_harness.core import approvals, roundtable
@@ -94,7 +92,10 @@ def status(store, attempt_id):
 
     if resolved := disposition(store, "review:" + attempt_id):
         result.update(
-            state="abandoned", result=None, ownershipReleased=True, quiescenceVerified=False,
+            state="abandoned",
+            result=None,
+            ownershipReleased=True,
+            quiescenceVerified=False,
             recovery=resolved,
             next="Review quarantined; inspect retained evidence before a new explicit admission",
         )
@@ -103,114 +104,24 @@ def status(store, attempt_id):
         result.update(
             outcome="UNKNOWN",
             reason="Owner not observed; paid starts/liveness UNKNOWN. No automatic replay.",
-            next=(
-                "Release the interrupted original without claiming process exit: "
-                f"harness_recovery mode=resolve job_id=review:{attempt_id} "
-                "choice=abandon reason=<stop with spent claim retained> stops without retry."
-            ),
+            next="harness_steer: provide direction after inspecting retained review evidence",
         )
     return result
 
 
 def ensure_active(store, attempt_id):
     from codex_harness.core.planner_recovery import disposition
+    from codex_harness.core.run_ownership import ensure_effect
+
+    ensure_effect(store)
 
     if disposition(store, "review:" + attempt_id):
         raise PlanStoreError("acceptance-review-disposed", "Late owner cannot launch or publish")
 
 
-def status_reply(server, attempt_id):
-    store = server._store()
-    data = status(store, attempt_id)
-    if data is None:
-        return None
-    from codex_harness.core import planner_views as views
-
-    body = views.data_card("Review attempt", data)
-    if data.get("approval"):
-        body += "\n" + data["approval"]["card"]
-    if data.get("failure"):
-        body += "\n" + views.review_card(data["failure"])
-    if data.get("result"):
-        body += "\n" + views.review_card(data["result"])
-    failed = data["state"] in {"failed", "unknown-interrupted", "abandoned"}
-    next_step = data.get("next", "harness_accept_status id=" + attempt_id)
-    if data["state"] in {"completed", "failed"}:
-        server.result_data = data.get("result") or data.get("approval") or data.get("failure")
-        next_step = server._next(
-            "harness_accept_review", data["arguments"], server._status(), failed
-        )
-    return dict(
-        isError=failed,
-        jobOnly=True,
-        planStatusIncluded=False,
-        structuredContent=data,
-        content=[
-            dict(
-                type="text",
-                text=body + "\nNext: " + next_step,
-            )
-        ],
-    )
-
-
-def finish_cli(server, reply):
-    """Keep the existing blocking CLI contract while MCP admission stays prompt."""
-    data = reply.get("structuredContent", {})
-    if reply["isError"] or data.get("kind") != "review":
-        return reply
-    server.reviews.dispatch_after_flush(server.store)
-    while data["state"] in {"queued", "running"}:
-        time.sleep(0.05)
-        reply = server.call_tool("harness_accept_status", {"id": data["attemptId"]})
-        data = reply["structuredContent"]
-    if data.get("result") is not None:
-        reply["structuredContent"] = data["result"]
-    return reply
-
-
 class ReviewOwner:
     def __init__(self):
         self.prepared = None
-
-    def start(self, store, **arguments):
-        from codex_harness.core.planner_recovery import disposition
-
-        if arguments.get("resume"):
-            attempt_id = arguments["resume"]
-            if observed := status(store, attempt_id):
-                return observed  # Never resume an async owner through the synchronous importer.
-            return review(store, **arguments)  # Historical completed-receipt import; no launch.
-        support = arguments.get("execution_assessment_ids")
-        if support is not None:
-            if arguments.get("reviewers") is None:
-                raise ValueError(
-                    "Execution support requires explicitly authorized ordinary reviewers"
-                )
-            from codex_harness.core.acceptance import selected_execution_support
-
-            selected_execution_support(store, support, repo=arguments["repo"])
-        with store._transaction():
-            previous = next(iter(entries(store)), None)
-            if previous:
-                observed = status(store, previous["attemptId"])
-                resolved = disposition(store, "review:" + previous["attemptId"])
-                if not resolved and observed["state"] in {"queued", "running", "unknown-interrupted"}:
-                    return observed
-            attempt_id = uuid4().hex
-            entry = dict(
-                attemptId=attempt_id,
-                repo=str(Path(arguments["repo"]).resolve()),
-                arguments=arguments,
-                planRevision=store._revision(),
-                runId=latest_run_id(store),
-                result=None,
-                error=None,
-            )
-            store._event(ADMITTED, entry)
-            _owners[attempt_id] = self
-            self.prepared = (store.workspace, entry)
-        return status(store, attempt_id)
 
     def dispatch_after_flush(self, store):
         if self.prepared is None:
@@ -240,7 +151,18 @@ class ReviewOwner:
                     except Exception as error:
                         headers = recovery._events(worker, recovery.STARTED, attempt_id)
                         returned = recovery._events(worker, recovery.COMPLETED, attempt_id)
-                        known = not headers or len(returned) == len(headers[0][1]["slots"])
+                        registered = recovery._events(worker, recovery.REGISTERED, attempt_id)
+                        known = not headers or (
+                            {r["slot"] for _, r in returned}
+                            == {r["id"] for r in headers[0][1]["slots"]}
+                            and (
+                                not registered
+                                and all(r.get("schema") == 1 for _, r in returned)
+                                or all(r.get("schema") == 2 for _, r in returned)
+                                and {r["id"] for _, r in registered}
+                                == {r.get("launchId") for _, r in returned}
+                            )
+                        )
                         update = dict(
                             state="failed" if known else "unknown-interrupted",
                             result=None,
@@ -263,10 +185,6 @@ class ReviewOwner:
             _owners.pop(attempt_id, None)
             raise
 
-    def close(self):
-        if self.prepared:
-            _owners.pop(self.prepared[1]["attemptId"], None)
-            self.prepared = None
         # A flushed worker uses its own connection and completes independently.
 
 
@@ -354,6 +272,6 @@ def review(
     except sqlite3.Error as error:
         raise PlanStoreError(
             "acceptance-review-interrupted",
-            f"Attempt {attempt.id}: {error}. Preserve originals; use accept-review --resume "
-            f"{attempt.id} --repo {Path(repo).resolve()} to recover only completed evidence.",
+            f"Attempt {attempt.id}: {error}. Preserve original receipts; harness_steer supplies recorded "
+            "direction to the run loop, which owns recovery and further admission.",
         ) from error

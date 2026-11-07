@@ -1,14 +1,13 @@
 """Bounded worker recovery through the existing process owner, within B."""
 
-import json
 import os
 import sys
 import time
-from uuid import uuid4
 
 from codex_harness.core import approvals
 from codex_harness.core import planner_jobs as jobs
 from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
+from codex_harness.core.plan_types import _now
 from codex_harness.core.planner_execution import _canonical_store
 from codex_harness.core.record_io import (
     _record_guard,
@@ -24,9 +23,11 @@ def end_attempt(workspace, job_id):
     """Ask the held Job owner to stop; a lost owner quarantines the old namespace."""
     directory = jobs._directory(workspace, job_id)
     request = jobs._request(directory)
+    with open_plan_store_readonly(workspace) as store:
+        segment = jobs.latest_segment(store, job_id)
     write_record_json(directory / "stop.json", {"requestDigest": request["requestDigest"]})
     deadline = time.monotonic() + 12
-    while not (directory / "quiescence.json").exists() and time.monotonic() < deadline:
+    while not (segment / "quiescence.json").exists() and time.monotonic() < deadline:
         time.sleep(0.1)
     proof = inspect(workspace, job_id)
     path = directory / "recovery-verdict.json"
@@ -52,23 +53,6 @@ def recovery_verdict(directory, request):
     return record
 
 
-TOOL = dict(
-    name="harness_recovery",
-    description="Inspect workers or review:/audit:/acceptance:<attemptId>; release quarantines uncertain owners without claiming process exit.",
-    inputSchema=dict(
-        type="object",
-        properties={
-            "mode": {"type": "string", "enum": ["inspect", "resolve"]},
-            "job_id": {"type": "string"},
-            "choice": {"type": "string", "enum": ["abandon", "readmit", "revalidate"]},
-            "reason": {"type": "string"},
-        },
-        required=["mode", "job_id"],
-        additionalProperties=False,
-    ),
-)
-
-
 def disposition(store, job_id):
     return next((r for r in approvals.records(store, RESOLVED) if r["jobId"] == job_id), None)
 
@@ -80,9 +64,21 @@ def attempt_proof(store, job_id):
         from codex_harness.core.planner_review import status
 
         attempt = status(store, identifier)
-    elif kind in {"audit", "acceptance"}:
+        if attempt is None:
+            from codex_harness.core.acceptance_recovery import STARTED
+
+            header = next(
+                (r for r in approvals.records(store, STARTED) if r["attemptId"] == identifier), None
+            )
+            if header:
+                completed = store.connection.execute(
+                    "SELECT 1 FROM acceptance_reviews WHERE id=?", (identifier,)
+                ).fetchone()
+                attempt = dict(id=identifier, state="completed" if completed else "running")
+    elif kind in {"audit", "acceptance", "plan-review"}:
+        table = "review" if kind == "plan-review" else kind
         row = store.connection.execute(
-            f"SELECT id,state,error FROM {kind}_attempts WHERE id=?", (identifier,)
+            f"SELECT id,state,error FROM {table}_attempts WHERE id=?", (identifier,)
         ).fetchone()
         attempt = dict(row) if row else None
     else:
@@ -118,8 +114,9 @@ def release_attempt(store, job_id, reason):
     else:
         if kind == "acceptance":
             (store.workspace / ".codex-harness" / f"acceptance-stop-{identifier}").touch()
+        table = "review" if kind == "plan-review" else kind
         store.connection.execute(
-            f"UPDATE {kind}_attempts SET state='abandoned',error=? WHERE id=?",
+            f"UPDATE {table}_attempts SET state='abandoned',error=? WHERE id=?",
             (reason, identifier),
         )
     resolved = dict(
@@ -144,7 +141,7 @@ def worker_status(workspace, result):
         if recovery_verdict(directory, jobs._request(directory)):
             result.update(
                 status="failed",
-                reason="Worker ended; readmit within the same B via harness_recovery.",
+                reason="Worker ended; the run loop owns readmission within the same B.",
             )
     if resolved:
         state = {
@@ -187,17 +184,15 @@ def inspect(workspace, job_id):
             return attempt_proof(store, job_id)
     directory = jobs._directory(workspace, job_id)
     request = jobs._request(directory)
-    receipt_path = jobs._inside(directory, directory / "quiescence.json")
+    with open_plan_store_readonly(workspace) as store:
+        segment = jobs.latest_segment(store, job_id)
+    receipt_path = jobs._inside(directory, segment / "quiescence.json")
     receipt = read_record_json(receipt_path) if receipt_path.is_file() else {}
     control = receipt.get("control", {})
-    verified = (
-        request.get("containment") == "windows-job-monitor-v1"
-        and receipt.get("requestDigest") == request["requestDigest"]
-        and control.get("backend") == "windows-job"
-        and control.get("membershipVerifiedBeforePayload") is True
-        and control.get("quiescenceVerified") is True
-        and control.get("activeProcessesAfterTeardown") == 0
-    )
+    terminal_path = segment / "terminal.json"
+    terminal = read_record_json(terminal_path) if terminal_path.is_file() else {}
+    verified = jobs.verified_segment_exit(request, segment.name, terminal, receipt)
+
     verdict = recovery_verdict(directory, request)
     proof = dict(
         jobId=job_id,
@@ -227,7 +222,61 @@ def inspect(workspace, job_id):
             "reused",
         }
     ]
+    with open_plan_store_readonly(workspace) as store:
+        repair = next(
+            (r for r in approvals.records(store, "run-repair-required") if r["jobId"] == job_id),
+            None,
+        )
+    manifest = read_record_json(directory / "plan/sample.json")
+    if repair:
+        proof["faultBeads"] = sorted(
+            set(proof["faultBeads"])
+            | {
+                key
+                for key, bead in manifest["beads"].items()
+                if bead.get("semanticPhase") == "build"
+            }
+        )
+        proof["repairObservation"] = repair
     proof["faultOutcomes"] = {key: run["beads"][key]["status"] for key in proof["faultBeads"]}
+    manifest = read_record_json(directory / "plan/sample.json")
+    # Canonical lineage follows unchanged work across publication revisions.
+    # Derive identities from the original admission, never a mutable retry counter.
+    with open_plan_store_readonly(workspace) as store:
+        authority = next(
+            (
+                r
+                for r in approvals.records(store, approvals.EVENT)
+                if r["id"] == request["executionRequestId"]
+            ),
+            None,
+        )
+    if authority is None:
+        raise ValueError(
+            "Recovery requires the original bound B record; retain evidence and inspect the admission"
+        )
+    accepted = authority["subject"]["scope"]["nodes"]
+    admitted = request["executionScope"]["inputs"]["nodes"]
+    proof["faultWork"] = {}
+    for key in proof["faultBeads"]:
+        node = accepted[key] if key in accepted else admitted[key]
+        todo, upstream = list(node["parents"]), {}
+        while todo:
+            identifier = todo.pop()
+            if identifier in upstream:
+                continue
+            item = accepted[identifier] if identifier in accepted else admitted[identifier]
+            if item["kind"] != "vision":
+                upstream[identifier] = item
+                todo.extend(item["parents"])
+        proof["faultWork"][key] = jobs._digest(
+            dict(
+                bead=key,
+                phase=manifest["beads"][key].get("semanticPhase"),
+                ownedFiles=node["fields"]["ownedFiles"],
+                obligations=upstream,
+            )
+        )
     from codex_harness.core.planner_candidate import retained
 
     try:
@@ -243,8 +292,11 @@ def inspect(workspace, job_id):
     )
     with open_plan_store_readonly(workspace) as store:
         proof["disposition"] = disposition(store, job_id)
+        from codex_harness.core.planner_candidate import current_job_run
+
+        refresh_required = not current_job_run(store)[0]["complete"]
     if resolved := proof["disposition"]:
-        retryable = resolved.get("validation", {}).get("state") in {
+        retryable = refresh_required or resolved.get("validation", {}).get("state") in {
             "FAIL",
             "ERROR",
             "pending-judgment",
@@ -254,31 +306,49 @@ def inspect(workspace, job_id):
     return proof
 
 
-def resolve(store, job_id, choice, reason):
+def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
     """Same-work recovery ends or quarantines the old attempt under current B."""
     _canonical_store(store)
     if (
-        choice not in {"abandon", "readmit", "revalidate"}
+        choice not in {"abandon", "readmit", "revalidate", "steer"}
         or not isinstance(reason, str)
         or not reason.strip()
     ):
         raise ValueError("recovery-choice-and-reason-required")
     with store._transaction():
+        if choice == "revalidate":
+            from codex_harness.core.run_ownership import ensure_effect
+
+            ensure_effect(store)
         if ":" in job_id:
             if choice != "abandon":
                 raise ValueError("uncertain-attempt-requires-abandon: no automatic replay")
             return release_attempt(store, job_id, reason)
-        if choice != "abandon":
+        if choice in {"readmit", "revalidate"}:
             approvals.require_approval(store, "B")
-        if choice in {"readmit", "abandon"} and not disposition(store, job_id):
+        if choice in {"readmit", "abandon", "steer"} and not disposition(store, job_id):
             end_attempt(store.workspace, job_id)
         proof = inspect(store.workspace, job_id)
         previous = proof["disposition"]
         steered = previous and previous["choice"] == "steer" and choice == "readmit"
         if steered:
-            judgment = store.judgment(previous["judgment"]["id"], candidate=proof["requestDigest"])
-            if not judgment["positiveCredit"] or judgment["meaning"].get("action") != "readmit":
-                raise ValueError("recovery-steering-pending: submit the bound 1j direction first")
+            judgment = store.judgment(direction_judgment_id) if direction_judgment_id else {}
+            captured = next(
+                (
+                    r["payload"]
+                    for r in judgment.get("sourceRefs", [])
+                    if r["kind"] == "loop-question"
+                ),
+                {},
+            )
+            if (
+                not judgment.get("positiveCredit")
+                or judgment["meaning"].get("option") not in {"continue", "repair", "replan"}
+                or captured.get("context", {}).get("jobId") != job_id
+            ):
+                raise ValueError(
+                    "recovery-steering-pending: answer the run loop's bound direction question"
+                )
         if proof["disposition"] and not (
             steered or choice == "revalidate" and "revalidate" in proof["options"]
         ):
@@ -294,15 +364,18 @@ def resolve(store, job_id, choice, reason):
                 raise ValueError(proof["revalidation"]["reason"])
         # Derive the bound from the existing successor chain, never a competing
         # retry counter. The third fault requests semantics through 1j.
-        cursor = jobs._request(jobs._directory(store.workspace, job_id))["publicationRevision"]
-        recoveries = dict.fromkeys(proof["faultBeads"] or [None], 0)
-        while cursor != job_id:
-            prior = disposition(store, cursor)
-            if not prior or prior["choice"] != "readmit":
-                raise ValueError("recovery-job-not-in-publication-chain")
-            for bead in recoveries.keys() & set(prior["proof"].get("faultBeads", []) or [None]):
-                recoveries[bead] += 1
-            cursor = prior["successor"]
+        prior_recoveries = {
+            r["jobId"]: r
+            for r in reversed(approvals.records(store, RESOLVED))
+            if r["choice"] == "readmit" and not r.get("steeringJudgmentId")
+        }
+        recoveries = {
+            work: sum(
+                work in prior["proof"].get("faultWork", {}).values()
+                for prior in prior_recoveries.values()
+            )
+            for work in proof["faultWork"].values()
+        }
         if choice == "readmit" and any(count >= 2 for count in recoveries.values()) and not steered:
             choice = "steer"
         resolved = dict(
@@ -311,6 +384,8 @@ def resolve(store, job_id, choice, reason):
             reason=reason,
             proof=proof,
             quarantine=choice != "revalidate",
+            ownershipReleased=choice != "revalidate",
+            quiescenceVerified=proof["verdict"] == "VERIFIED-QUIESCENT",
             successor=jobs._digest(dict(jobId=job_id, proof=proof["proofDigest"], choice=choice))
             if choice == "readmit"
             else None,
@@ -318,85 +393,78 @@ def resolve(store, job_id, choice, reason):
         if steered:
             resolved["steeringJudgmentId"] = judgment["id"]
         if choice == "steer":
-            store._event("worker-recovery-exhausted", dict(jobId=job_id, proof=proof))
-            event_id = store.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-            resolved["judgment"] = store.prepare_judgment(
-                question="Two automatic bead recoveries failed. What is the next safe direction within the accepted vision? Record steering; scope changes require the user.",
-                subject_ids=store.spine().ids("vision"),
-                source_event_ids=[event_id],
-                candidate=proof["requestDigest"],
-            )
-        store._event(RESOLVED, resolved)
-    if choice == "revalidate":
-        from codex_harness.core.planner_candidate import revalidate
-
-        try:
-            resolved["validation"] = revalidate(store, job_id, uuid4().hex)
-        except (ValueError, OSError, jobs.subprocess.SubprocessError) as error:
-            resolved["validation"] = dict(
-                state="ERROR", results=[dict(reason=str(error))], delivery=None
+            store._event(
+                "worker-recovery-steering-required",
+                dict(
+                    jobId=job_id,
+                    proof=proof,
+                    automaticRecoveriesExhausted=any(count >= 2 for count in recoveries.values()),
+                ),
             )
         store._event(RESOLVED, resolved)
     return resolved
 
 
-def monitor(workspace, job_id):
-    """Existing Job owner gates the controller and covers its ordinary descendants."""
+def record_validation(store, resolved, validation):
+    from codex_harness.core.run_ownership import ensure_effect
+
+    with store._transaction():
+        ensure_effect(store)
+        resolved["validation"] = validation
+        store._event(RESOLVED, resolved)
+
+
+def monitor(workspace, job_id, segment_id):
+    """Existing bounded Job owner; the run loop alone consumes its terminal event."""
+    from datetime import UTC, datetime
     from codex_harness.core.audit_process import run_audit_process
+    from codex_harness.core.run_loop import run_loop
 
     directory = jobs._directory(workspace, job_id)
-    request = jobs._request(directory)
+    path = jobs.segment_directory(workspace, job_id, segment_id)
+    request, segment = jobs._request(directory), read_record_json(path / "request.json")
     if request.get("containment") != "windows-job-monitor-v1":
         raise ValueError("recovery-legacy-job-cannot-acquire-retrospective-containment")
-    write_record_json_once(directory / "monitor.json", {"requestDigest": request["requestDigest"]})
-    temp = directory / "temp"
+    temp = path / "temp"
     temp.mkdir()
     payload = (
-        "import sys\n"
-        "from codex_harness.core.planner_jobs import execute_worker_job\n"
-        "result = execute_worker_job(sys.argv[1], sys.argv[2])\n"
+        "import sys\nfrom codex_harness.core.planner_jobs import execute_worker_job\n"
+        "result = execute_worker_job(sys.argv[1], sys.argv[2], sys.argv[3])\n"
         "raise SystemExit(1 if result['status'] == 'failed' else 0)\n"
     )
-    command = [sys.executable, "-P", "-B", "-c", payload, str(workspace), job_id]
+    command = [sys.executable, "-P", "-B", "-c", payload, str(workspace), job_id, segment_id]
+    remaining = max(
+        0.01, (datetime.fromisoformat(segment["deadlineAt"]) - datetime.now(UTC)).total_seconds()
+    )
     try:
         result = run_audit_process(
             command,
             cwd=workspace,
             capture_output=False,
-            timeout=request["options"]["timeout"] * (len(request["options"]["workers"]) + 1) + 600,
+            timeout=remaining,
             env={**os.environ, **dict.fromkeys(("TEMP", "TMP", "TMPDIR"), str(temp))},
             stop_when=lambda: "recovery-requested" if (directory / "stop.json").exists() else None,
         )
-        control = getattr(result, "audit_control", {})
-        code = result.returncode
+        control, code = getattr(result, "audit_control", {}), result.returncode
     except (OSError, jobs.subprocess.SubprocessError) as error:
-        control = {**getattr(error, "audit_control", {}), "error": str(error)}
-        code = 1
-    write_record_json_once(
-        directory / "quiescence.json",
-        {"requestDigest": request["requestDigest"], "control": control},
-    )
-    if control.get("stopReason") or not control.get("quiescenceVerified"):
-        end_attempt(workspace, job_id)
-    return code
-
-
-def reply(workspace, arguments):
-    """Bypass status/drain/close paths, including invalid inspection calls."""
-    try:
-        args = dict(arguments)
-        mode = args.pop("mode")
-        if mode == "inspect" and set(args) == {"job_id"}:
-            data = inspect(workspace, **args)
-        elif mode == "resolve" and set(args) == {"job_id", "choice", "reason"}:
-            with open_plan_store(workspace) as store:
-                data = resolve(store, **args)
-        else:
-            raise ValueError("recovery-requires-inspect-or-resolve-with-job-choice-reason")
-        return dict(
-            isError=False,
-            structuredContent=data,
-            content=[dict(type="text", text=data.get("card", json.dumps(data)))],
+        control, code = {**getattr(error, "audit_control", {}), "error": str(error)}, 1
+    receipt = dict(requestDigest=request["requestDigest"], segmentId=segment_id, control=control)
+    write_record_json_once(path / "quiescence.json", receipt)
+    write_record_json(directory / "quiescence.json", receipt)
+    if not (path / "terminal.json").exists():
+        write_record_json_once(
+            path / "terminal.json",
+            dict(
+                status="failed",
+                reason="Payload exited without a terminal observation",
+                exitCode=code,
+                requestDigest=request["requestDigest"],
+                segmentId=segment_id,
+                at=_now(),
+            ),
         )
-    except (ValueError, OSError, KeyError) as error:
-        return dict(isError=True, content=[dict(type="text", text=str(error))])
+    if (path / "terminal.json").exists():
+        write_record_json(directory / "terminal.json", read_record_json(path / "terminal.json"))
+    with open_plan_store(workspace) as store:
+        run_loop(store)
+    return code

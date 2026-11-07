@@ -3,8 +3,6 @@
 from pathlib import Path
 
 from codex_harness.core import approvals, planner_jobs as jobs
-from codex_harness.core.plan_quality import quality_report
-from codex_harness.core.planner_views import review_resolution_state
 from codex_harness.core.spine import Spine
 
 ADMITTED = "worker-job-admitted"
@@ -39,19 +37,18 @@ def execution_scope(
         raise ValueError("Parallel Build unsupported in semantic-v1; use max_parallel=1")
     selected = jobs._workers(manifest, workers)
     if type(max_parallel) is not int or max_parallel < 1 or not jobs._valid_timeout(timeout):
-        raise ValueError("worker-execution-limits-invalid: use positive max_parallel and a finite positive timeout")
+        raise ValueError(
+            "worker-execution-limits-invalid: use positive max_parallel and a finite positive timeout"
+        )
     if not _candidate:
-        status = store.status()
-        resolution = review_resolution_state(store, status)
-        check = next(c for c in quality_report(store)["checks"] if c["id"] == "roundtable")
+        revision = store.manifest_revision()
         if (
-            (status["vision_lock_stale"] if "vision_lock_stale" in status else False)
-            or status["open_clarifications"]
-            or resolution.get("findingDispositionPrerequisite", {}).get("complete") is not True
+            store._meta()["vision_lock_stale"]
+            or store._open("clarifications")
+            or store.finding_state()["dispositionPrerequisite"]["complete"] is not True
             or (
-                (not semantic and resolution["audit"]["current"] is not True)
-                or resolution["review"]["current"] is not True
-                or check["status"] not in {"pass", "warn"}
+                (not semantic and not store.passing_audit(revision))
+                or not store.review_prerequisite(revision)["complete"]
             )
         ):
             raise ValueError("worker-execution-canonical-prerequisite")
@@ -93,5 +90,11 @@ def admit_execution(store, scope, job_id):
 
 
 def admitted_execution(store, request_id, scope, job_id):
-    return next((r for r in approvals.records(store, ADMITTED)
-                 if r["id"] == request_id and r["jobId"] == job_id and r["scope"] == scope), None)
+    return next(
+        (
+            r
+            for r in approvals.records(store, ADMITTED)
+            if r["id"] == request_id and r["jobId"] == job_id and r["scope"] == scope
+        ),
+        None,
+    )

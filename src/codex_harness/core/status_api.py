@@ -7,13 +7,28 @@ from pathlib import Path
 
 from codex_harness.core import planner_jobs
 from codex_harness.core.plan_store import open_plan_store_readonly
-from codex_harness.core.planner_consent_views import status_next
-from codex_harness.core.planner_guidance import planning_turn
 from codex_harness.core.planner_vision import vision_projection
 from codex_harness.core.record_io import read_record_json
 from codex_harness.core.spine import SpineError
 
 UNAVAILABLE = "unavailable"
+
+
+def run_baton(store):
+    """A projection of the recorded cursor, never a second continuation decision."""
+    from codex_harness.core.run_loop import cursor
+
+    run = cursor(store)
+    if run is None:
+        return None
+    return dict(
+        run,
+        decisions=store.list_nodes("decision"),
+        assumptions=[dict(r) for r in store.connection.execute("SELECT * FROM assumptions")],
+        questions=[dict(r) for r in store.connection.execute("SELECT * FROM clarifications")],
+        acceptedVision=store._meta()["vision_locked_revision"],
+        publishedRevision=store._meta()["published_revision"],
+    )
 
 
 def plan_status(store):
@@ -28,14 +43,25 @@ def plan_status(store):
             "SELECT kind,payload_json "
             "FROM events WHERE (kind IN ('node-upserted','node-removed','spine-imported','protected-test-revised','wave-refinement-applied') OR json_type(payload_json,'$.nodeRevisions') IS NOT NULL) "
             "AND id > (SELECT id FROM events WHERE kind='confirmation-requested' "
-            "AND json_extract(payload_json,'$.request_id')=?) ORDER BY 1", (consent["request_id"],))
+            "AND json_extract(payload_json,'$.request_id')=?) ORDER BY 1",
+            (consent["request_id"],),
+        )
         previous = consent["subject"]["scope"].get("files", {})
         files = planner_jobs.execution_inputs(store)["files"]
-        updates = {path for path in previous.keys() | files.keys() if previous.get(path) != files.get(path)}
+        updates = {
+            path for path in previous.keys() | files.keys() if previous.get(path) != files.get(path)
+        }
         for kind, raw in changes:
             payload = json.loads(raw)
-            updates.update(payload.get("editedNodeIds", [payload.get("id", payload.get("nodeId", kind))]))
-            for key in ("affectedBeads", "affectedTests", "affectedWaves", "impactedRequirementIds"):
+            updates.update(
+                payload.get("editedNodeIds", [payload.get("id", payload.get("nodeId", kind))])
+            )
+            for key in (
+                "affectedBeads",
+                "affectedTests",
+                "affectedWaves",
+                "impactedRequirementIds",
+            ):
                 updates.update(payload.get("impact", {}).get(key, []))
         result["continuedPlanChanges"] = sorted(updates)
     visions = spine.ids("vision")
@@ -43,9 +69,7 @@ def plan_status(store):
         vision = spine.node(visions[0])
         result["visionProjection"] = vision_projection(vision)
         result["setup"] = vision["fields"].get("setup", {})
-        if result["phase"] in {"features", "requirements", "plan"}:
-            result["planningTurn"] = planning_turn(spine)
-    result["next"] = status_next(result, store=store)
+    result["next"] = (result.get("run") or {}).get("nextAction", "Start the durable run")
     return result
 
 

@@ -291,7 +291,7 @@ def read_and_compare(
 
 def bind_run(directory, plan_dir, run_dir, *, resume=False, retry_options=None):
     from codex_harness.core import planner_jobs as jobs
-    from codex_harness.core.dispatch import (
+    from codex_harness.core.dispatch_shared import (
         STATUS_MOCK_ONLY,
         STATUS_VALIDATED,
         STATUS_VALIDATED_NO_INTEGRATION,
@@ -300,26 +300,27 @@ def bind_run(directory, plan_dir, run_dir, *, resume=False, retry_options=None):
     directory = Path(directory).resolve()
     request = jobs.verify_job(directory)
     run_dir, plan_dir = Path(run_dir).resolve(), Path(plan_dir).resolve()
-    if (
-        plan_dir != directory / "plan"
-        or run_dir.parent != directory / "runs"
-    ):
+    if plan_dir != directory / "plan" or run_dir.parent != directory / "runs":
         raise ValueError("provider-call-fixed-job-run-required")
     jobs._inside(directory, run_dir)
     if resume:
         original = read_record_json(jobs._inside(directory, directory / "dispatch-run.json"))
-        if original != {
-            "requestDigest": request["requestDigest"],
-            "runDir": str(run_dir),
-            "pid": os.getpid(),
-        }:
-            raise ValueError("provider-call-original-resume-required")
+        if original.get("requestDigest") != request["requestDigest"] or original.get(
+            "runDir"
+        ) != str(run_dir):
+            raise ValueError("provider-call-retained-run-required")
         with open_record_read(jobs._inside(directory, run_dir / "evidence/run.json")) as stream:
             raw = stream.read()
         previous = json.loads(raw.decode("utf-8"))
         status = previous.get("status")
         terminal = isinstance(status, str) and (
-            status in {STATUS_MOCK_ONLY, STATUS_VALIDATED, STATUS_VALIDATED_NO_INTEGRATION, "pending-build"}
+            status
+            in {
+                STATUS_MOCK_ONLY,
+                STATUS_VALIDATED,
+                STATUS_VALIDATED_NO_INTEGRATION,
+                "pending-build",
+            }
             or (status.startswith("plan-failed: ") and bool(status[len("plan-failed: ") :].strip()))
         )
         try:
@@ -340,6 +341,10 @@ def bind_run(directory, plan_dir, run_dir, *, resume=False, retry_options=None):
                 "retryOptions": retry_options or {},
             },
         )
+        write_record_json_once(
+            jobs.owned_segment(directory) / "dispatch-run.json",
+            dict(requestDigest=request["requestDigest"], runDir=str(run_dir), pid=os.getpid()),
+        )
         return
     write_record_json_once(
         directory / "dispatch-run.json",
@@ -348,6 +353,10 @@ def bind_run(directory, plan_dir, run_dir, *, resume=False, retry_options=None):
             "runDir": str(run_dir),
             "pid": os.getpid(),
         },
+    )
+    write_record_json_once(
+        jobs.owned_segment(directory) / "dispatch-run.json",
+        dict(requestDigest=request["requestDigest"], runDir=str(run_dir), pid=os.getpid()),
     )
 
 
@@ -360,7 +369,7 @@ def verify_attempt(directory, record, attempt_dir, *, timeout=None):
         not jobs._valid_timeout(timeout) or timeout != request["options"]["timeout"]
     ):
         raise ValueError("provider-call-timeout-scope-mismatch")
-    original = read_record_json(jobs._inside(directory, directory / "dispatch-run.json"))
+    original = read_record_json(jobs.owned_segment(directory) / "dispatch-run.json")
     attempt_dir = Path(attempt_dir).resolve()
     run_dir = jobs._inside(directory, Path(original["runDir"]))
     if (

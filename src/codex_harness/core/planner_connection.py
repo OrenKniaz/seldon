@@ -120,11 +120,4 @@ def workspace_refusal(self, request_id, binding, code, name=None):
             ],
         },
     }
-    if name == "harness_advance":
-        result = response["result"]
-        result["structuredContent"].update(currentPhase="unknown", nextPhase="unknown")
-        result["content"][0]["text"] = (
-            "Current phase unknown; next legal phase: unknown (workspace binding refused).\n"
-            + result["content"][0]["text"]
-        )
     return connection_reply(response, self.workspace)

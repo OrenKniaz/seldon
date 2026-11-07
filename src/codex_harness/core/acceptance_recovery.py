@@ -18,10 +18,10 @@ from uuid import uuid4
 from codex_harness.core import roundtable
 from codex_harness.core.plan_store import PlanStoreError
 from codex_harness.core.spine import Spine, compile_manifest, requirement_file_sources
-from codex_harness.core.spine_render import render_markdown
 
 STARTED = "acceptance-review-started"
 COMPLETED = "acceptance-review-completed"
+REGISTERED = "acceptance-review-launch-registered"
 ABANDONED = "acceptance-review-unrecoverable"
 _ID = re.compile(r"[0-9a-f]{32}\Z")
 _SESSION = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
@@ -169,7 +169,6 @@ def _coverage(store, selected, dossiers, evidence):
     """Eligibility only: do not repair or silently broaden the ordinary packet."""
     required = []
     protected = {}
-    documents = render_markdown(store.spine())
     template = store.workspace / "template"
     if template.is_dir():
         manifest = compile_manifest(Spine(store._data()), template)
@@ -206,22 +205,24 @@ def _coverage(store, selected, dossiers, evidence):
                 )
                 if any(block in packet for block in blocks for packet in packets):
                     continue
-            elif documents.get(name) == body:
-                # Only the producer's structured renderedDocs section counts.
-                included = False
-                for packet in packets:
-                    for line in packet.splitlines():
-                        if not line.startswith("{"):
-                            continue
-                        try:
-                            view = json.loads(line)
-                        except ValueError:
-                            continue
-                        rendered = view.get("renderedDocs") if isinstance(view, dict) else None
-                        if isinstance(rendered, dict) and rendered.get(name) == body:
-                            included = True
-                if included:
-                    continue
+            # Only the producer's structured source sections count.
+            included = False
+            for packet in packets:
+                for line in packet.splitlines():
+                    if not line.startswith("{"):
+                        continue
+                    try:
+                        view = json.loads(line)
+                    except ValueError:
+                        continue
+                    rendered = (
+                        {**view.get("renderedDocs", {}), **view.get("protectedSources", {})}
+                        if isinstance(view, dict) else None
+                    )
+                    if isinstance(rendered, dict) and rendered.get(name) == body:
+                        included = True
+            if included:
+                continue
             return f"Protected body missing from packet: {name}"
     return None
 
@@ -312,10 +313,6 @@ def runtime_identity(provider, reviewer, output, stderr):
         not isinstance(effort, str) or effort.casefold() != reviewer["effort"].casefold()
     ):
         raise ValueError("Unknown or mismatched observed reasoning effort")
-    # Extra recovery eligibility, using the ordinary final-text and finding validators.
-    final_text = roundtable._response(output, provider)
-    if not isinstance(json.loads(final_text), list):
-        raise ValueError("Recovery requires a final JSON array without surrounding prose")
     return {"provider": provider, "session": session, "model": reviewer["model"], "effort": effort}
 
 
@@ -325,7 +322,6 @@ class ReviewAttempt:
         self.id = header["attemptId"]
         self.root = _directory(store, self.id)
         self.abandoned = False
-        self.next_slot = {}
 
     @classmethod
     def start(
@@ -405,58 +401,113 @@ class ReviewAttempt:
                 raise ValueError("Duplicate review registration")
             store._event(STARTED, header)
             event_id = store.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+            from codex_harness.core.run_ownership import attach_attempt
+            attach_attempt(store, "review:" + attempt)
         return cls(store, header, event_id)
 
     def capture(self, reviewer, shard, launch, executable, response):
+        """Register before invocation (response=None), then seal every actual return."""
         if self.abandoned:
             return
         from codex_harness.core.planner_review import ensure_active
 
         try:
-            slots = [slot for slot in self.header["slots"] if slot["reviewer"] == reviewer]
-            position = self.next_slot.get(reviewer["name"], 0)
-            if position >= len(slots) or slots[position]["shard"] != {
-                k: v for k, v in shard.items() if k != "packet"
-            }:
-                raise ValueError("Return does not match one registered review slot")
-            slot = slots[position]
-            if (
-                _launch_identity(launch, executable) != slot["launch"]
-                or seal(shard["packet"].encode("utf-8")) != slot["packet"]
-            ):
-                raise ValueError("Actual review launch differs from its registration")
-            code, output = response[:2]
-            stderr = response[2] if len(response) > 2 else ""
-            try:
-                runtime = runtime_identity(reviewer["provider"], reviewer, output, stderr)
-            except (ValueError, TypeError, KeyError, AttributeError):
-                runtime = None  # Unknown stays explicit without changing ordinary review.
-            payload = {
-                "schema": 1,
-                "attemptId": self.id,
-                "headerHash": digest(self.header),
-                "slot": slot["id"],
-                "launch": slot["launch"],
-                "exitCode": code,
-                "isMocked": self.header["isMocked"],
-                "didRunProvider": not self.header["isMocked"],
-                "runtime": runtime,
-                "stdout": _write(self.root, slot["id"] + ".stdout", output.encode("utf-8")),
-                "stderr": _write(self.root, slot["id"] + ".stderr", stderr.encode("utf-8")),
-            }
             with self.store._transaction():
                 ensure_active(self.store, self.id)
                 if _events(self.store, STARTED, self.id) != [(self.event_id, self.header)]:
                     raise ValueError("Review registration changed or is ambiguous")
-                if any(
-                    row["slot"] == slot["id"] for _, row in _events(self.store, COMPLETED, self.id)
-                ):
+                slots = [
+                    slot
+                    for slot in self.header["slots"]
+                    if slot["reviewer"] == reviewer
+                    and slot["shard"] == {k: v for k, v in shard.items() if k != "packet"}
+                ]
+                if len(slots) != 1 or seal(shard["packet"].encode("utf-8")) != slots[0]["packet"]:
+                    raise ValueError("Launch does not match one registered review slot")
+                slot, actual = slots[0], _launch_identity(launch, executable)
+                registered = [
+                    (key, row)
+                    for key, row in _events(self.store, REGISTERED, self.id)
+                    if row["slot"] == slot["id"]
+                ]
+                returns = _events(self.store, COMPLETED, self.id)
+                if response is None:
+                    judgment = self.store.review_judgment(reviewer, shard, prepare=False)
+                    previous = registered[-1][1] if registered else None
+                    returned = [
+                        (key, row)
+                        for key, row in returns
+                        if previous and row["launchId"] == previous["id"]
+                    ]
+                    if previous:
+                        if (
+                            len(returned) != 1
+                            or judgment["disposition"] != "exact-fix"
+                            or judgment["id"] != previous["judgmentId"]
+                            or judgment["binding"] != previous["binding"]
+                            or judgment["fixesIssued"] != previous["fixesIssued"] + 1
+                            or any(actual[k] != slot["launch"][k] for k in ("argv", "executable"))
+                        ):
+                            raise ValueError("Retry requires the same judgment's next exact fix")
+                    elif actual != slot["launch"]:
+                        raise ValueError("Actual review launch differs from its registration")
+                    identifier = uuid4().hex
+                    self.store._event(
+                        REGISTERED,
+                        dict(
+                            id=identifier,
+                            attemptId=self.id,
+                            headerHash=digest(self.header),
+                            slot=slot["id"],
+                            launch=actual,
+                            stdin=_write(
+                                self.root,
+                                identifier + ".stdin",
+                                (launch.stdin_text or "").encode("utf-8"),
+                            ),
+                            judgmentId=judgment["id"],
+                            binding=judgment["binding"],
+                            fixesIssued=judgment["fixesIssued"],
+                            previousReturn=returned[0][0] if returned else None,
+                        ),
+                    )
+                    return
+                if not registered or actual != registered[-1][1]["launch"]:
+                    raise ValueError("Actual review return differs from its registered launch")
+                registration_id, registration = registered[-1]
+                if any(row["launchId"] == registration["id"] for _, row in returns):
                     raise ValueError("Duplicate review completion")
-                self.store._event(COMPLETED, payload)
-            self.next_slot[reviewer["name"]] = position + 1
+                code, output = response[:2]
+                stderr = response[2] if len(response) > 2 else ""
+                try:
+                    runtime = runtime_identity(reviewer["provider"], reviewer, output, stderr)
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    runtime = None  # Retain unknown paid returns without granting eligibility.
+                self.store._event(
+                    COMPLETED,
+                    dict(
+                        schema=2,
+                        attemptId=self.id,
+                        headerHash=digest(self.header),
+                        slot=slot["id"],
+                        launch=actual,
+                        launchId=registration["id"],
+                        registrationEventId=registration_id,
+                        exitCode=code,
+                        isMocked=self.header["isMocked"],
+                        didRunProvider=not self.header["isMocked"],
+                        runtime=runtime,
+                        stdout=_write(
+                            self.root, registration["id"] + ".stdout", output.encode("utf-8")
+                        ),
+                        stderr=_write(
+                            self.root, registration["id"] + ".stderr", stderr.encode("utf-8")
+                        ),
+                    ),
+                )
         except Exception as error:
             raise CaptureFailure(
-                f"Attempt {self.id}: could not seal original review completion: {error}"
+                f"Attempt {self.id}: could not seal original review launch/return: {error}"
             ) from error
 
     def abandon(self):
@@ -540,47 +591,106 @@ class ReviewAttempt:
             raise ValueError("review-originals-quarantined")
         header = self.header
         completions = _events(self.store, COMPLETED, self.id)
+        registrations = _events(self.store, REGISTERED, self.id)
         slots = header["slots"]
-        if len(completions) != len(slots) or len({row["slot"] for _, row in completions}) != len(
-            slots
+        schemas = {row.get("schema") for _, row in completions}
+        if schemas not in ({1}, {2}):
+            raise ValueError("Unsupported review receipts; obtain a fresh acceptance review")
+        historical = schemas == {1}
+        if (
+            len(completions) != (len(slots) if historical else len(registrations))
+            or {row["slot"] for _, row in completions} != {slot["id"] for slot in slots}
+            or not historical
+            and {row["launchId"] for _, row in completions}
+            != {row["id"] for _, row in registrations}
         ):
-            raise ValueError("Incomplete or duplicate original review completions")
+            raise ValueError("Incomplete or duplicate original review launches/returns")
         records, sessions = [], set()
         for slot in slots:
-            matches = [(key, row) for key, row in completions if row["slot"] == slot["id"]]
-            if len(matches) != 1:
-                raise ValueError("Missing original review slot")
-            event_id, row = matches[0]
-            if (
-                row.get("schema") != 1
-                or row["headerHash"] != digest(header)
-                or row["launch"] != slot["launch"]
-                or not slot["launch"]["executable"]
-                or row["isMocked"] is not False
-                or row.get("didRunProvider") is not True
-                or row.get("runtime") is None
-                or type(row["exitCode"]) is not int
-                or row["exitCode"] != 0
-            ):
-                raise ValueError("Unknown, mocked or failed native completion")
+            previous, previous_return = None, None
+            launches = (
+                [(None, None)]
+                if historical
+                else [(key, row) for key, row in registrations if row["slot"] == slot["id"]]
+            )
+            for registration_id, registration in launches:
+                matches = (
+                    [(key, row) for key, row in completions if row["slot"] == slot["id"]]
+                    if historical
+                    else [
+                        (key, row)
+                        for key, row in completions
+                        if row["launchId"] == registration["id"]
+                    ]
+                )
+                if len(matches) != 1:
+                    raise ValueError("Missing original registered launch return")
+                event_id, row = matches[0]
+                expected_launch, prefix = slot["launch"], slot["id"]
+                if not historical:
+                    if (
+                        registration["headerHash"] != digest(header)
+                        or registration["previousReturn"] != previous_return
+                        or registration_id >= event_id
+                        or previous_return is not None
+                        and previous_return >= registration_id
+                        or (
+                            registration["launch"] != slot["launch"]
+                            if previous is None
+                            else any(
+                                registration["launch"][k] != slot["launch"][k]
+                                for k in ("argv", "executable")
+                            )
+                            or registration["judgmentId"] != previous["judgmentId"]
+                            or registration["binding"] != previous["binding"]
+                            or registration["fixesIssued"] != previous["fixesIssued"] + 1
+                        )
+                        or row["registrationEventId"] != registration_id
+                    ):
+                        raise ValueError("Mismatched registered native completion lineage")
+                    expected_launch, prefix = registration["launch"], registration["id"]
+                    stdin = _read(self.root, prefix + ".stdin", registration["stdin"])
+                    if seal(stdin.encode("utf-8")) != expected_launch["stdin"]:
+                        raise ValueError("Registered stdin differs from the actual launch")
+                if (
+                    row["headerHash"] != digest(header)
+                    or row["slot"] != slot["id"]
+                    or row["launch"] != expected_launch
+                    or not row["launch"]["executable"]
+                    or row["isMocked"] is not False
+                    or row.get("didRunProvider") is not True
+                    or row.get("runtime") is None
+                    or type(row["exitCode"]) is not int
+                    or row["exitCode"] != 0
+                ):
+                    raise ValueError("Unknown, mismatched or failed registered native completion")
+                output = _read(self.root, prefix + ".stdout", row["stdout"])
+                stderr = _read(self.root, prefix + ".stderr", row["stderr"])
+                identity = runtime_identity(
+                    slot["reviewer"]["provider"], slot["reviewer"], output, stderr
+                )
+                session = (identity["provider"], identity["session"])
+                if identity != row["runtime"] or session in sessions:
+                    raise ValueError("Changed or duplicate native review session")
+                sessions.add(session)
+                previous, previous_return = registration, event_id
             packet = _read(self.root, slot["id"] + ".packet", slot["packet"])
-            output = _read(self.root, slot["id"] + ".stdout", row["stdout"])
-            stderr = _read(self.root, slot["id"] + ".stderr", row["stderr"])
-            identity = runtime_identity(
-                slot["reviewer"]["provider"], slot["reviewer"], output, stderr
-            )
-            if identity != row["runtime"]:
-                raise ValueError("Observed runtime differs from the sealed completion")
-            session = (identity["provider"], identity["session"])
-            if session in sessions:
-                raise ValueError("Duplicate native review session")
-            sessions.add(session)
             shard = {**slot["shard"], "packet": packet}
-            record, items = roundtable._parse_review_return(
-                self.store, slot["reviewer"], shard, (row["exitCode"], output, stderr), mocked=False
-            )
+            try:
+                record, items = roundtable._parse_review_return(
+                    self.store,
+                    slot["reviewer"],
+                    shard,
+                    (row["exitCode"], output, stderr),
+                    mocked=False,
+                )
+            except (ValueError, KeyError, TypeError) as error:
+                raise ValueError(
+                    "Retained reply is incompatible with current 1j; "
+                    "obtain a fresh acceptance review"
+                ) from error
             if record["invalid"] or not record["packetBound"]:
-                raise ValueError("Invalid or tool-expanded original review output")
+                raise ValueError("Invalid original review output; obtain a fresh acceptance review")
             records.append((slot["reviewer"], record, items, event_id))
         # A session's registration cannot be migrated/relabelled into another attempt.
         for _, other in _events(self.store, COMPLETED):
@@ -593,10 +703,21 @@ class ReviewAttempt:
             slot = match[0]
             if other["isMocked"] or not other.get("didRunProvider") or other.get("runtime") is None:
                 continue
-            if (
-                other["headerHash"] != digest(other_attempt.header)
-                or other["launch"] != slot["launch"]
-            ):
+            if other.get("schema") == 1:
+                registered = other["launch"] == slot["launch"]
+            elif other.get("schema") == 2:
+                registered = any(
+                    key == other["registrationEventId"]
+                    and row["id"] == other["launchId"]
+                    and row["slot"] == slot["id"]
+                    and row["launch"] == other["launch"]
+                    for key, row in _events(self.store, REGISTERED, other_attempt.id)
+                )
+            else:
+                raise ValueError(
+                    "Unknown historical receipt format; obtain a fresh acceptance review"
+                )
+            if other["headerHash"] != digest(other_attempt.header) or not registered:
                 raise ValueError("Conflicting original completion registration")
             # Damaging an older file never releases its privately sealed session.
             identity = other["runtime"]
@@ -626,7 +747,9 @@ def attempt_summaries(store):
             "id": item["attemptId"],
             "runId": item["run"]["id"],
             "plannedSlots": len(item["slots"]),
-            "completedSlots": sum(row["attemptId"] == item["attemptId"] for _, row in completed),
+            "completedSlots": len(
+                {row["slot"] for _, row in completed if row["attemptId"] == item["attemptId"]}
+            ),
             "isMocked": item["isMocked"],
             "abandoned": item["attemptId"] in abandoned,
             "admitted": item["attemptId"] in admitted,

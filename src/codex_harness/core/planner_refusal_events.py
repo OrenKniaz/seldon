@@ -3,19 +3,6 @@ import sqlite3
 from functools import wraps
 
 from codex_harness.core.plan_store import open_plan_store
-from codex_harness.core.planner_refusals import refusal_hold
-
-
-def refusal_status(status, store):
-    return {
-        **status,
-        "refusals_by_code": dict(
-            store.connection.execute(
-                "SELECT json_extract(payload_json, '$.code'), count(*) FROM events WHERE "
-                "kind='planner-refusal' GROUP BY 1 ORDER BY 1"
-            )
-        ),
-    }
 
 
 def record_refusals(method):
@@ -31,24 +18,9 @@ def record_refusals(method):
             tool = (
                 request.get("params", {}).get("name", "unknown-tool")
                 if request.get("method") == "tools/call"
-                else pending.get("tool_name", "harness_record_confirmation")
+                else pending.get("tool_name", "harness_steer")
             )
-            arguments = request.get("params", {}).get("arguments", {})
-            if (
-                tool == "harness_recovery"
-                and isinstance(arguments, dict)
-                and arguments.get("mode") == "inspect"
-            ):
-                continue
-            if not result.get("isError") and (
-                tool in ("harness_prepare_chat_confirmation", "harness_plan_status")
-                or not refusal_hold(
-                    {
-                        "data": result.get("structuredContent", {}),
-                        "result": self.result_data if tool == "harness_worker_status" else {},
-                    }
-                )
-            ):
+            if not result.get("isError"):
                 continue
             recording = result.setdefault("structuredContent", {}).setdefault(
                 "refusalRecording", {"state": "unavailable"}

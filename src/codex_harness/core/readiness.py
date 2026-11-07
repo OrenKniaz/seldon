@@ -346,26 +346,3 @@ def readiness_review(
         status=readiness_status(store, revision, run=run, include_beads=beads or ())["status"],
         **stages,
     )
-
-
-def render_readiness(result: dict) -> str:
-    lines = [
-        f"Worker readiness (advisory): {result['status']}; planned calls: {result['plannedCalls']}"
-    ]
-    lines.append(f"{result['pendingProducerCount']} beads pending producers")
-    for row in result["pendingProducers"]:
-        lines.append(
-            f"{row['beadId']}: pending-producers; producers: {', '.join(row['producerIds'])}"
-        )
-    for row in result["reviews"]:
-        lines.append(
-            f"{row['beadId']} / {row['reviewer']['name']}: ready={row['ready']}, "
-            f"canVerify={row['canVerify']}; packetBound={row['packetBound']}; "
-            f"outOfPacketTools={row['outOfPacketTools']}"
-        )
-        if row["error"]:
-            lines.append("Error: " + row["error"])
-            access = row.get("accessObservation", {})
-            if access.get("outcome") == "failure":
-                lines.append(f"Access failure: {access['failureCategory']}. {access['nextAction']}")
-    return "\n".join(lines)

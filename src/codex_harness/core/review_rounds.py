@@ -1,55 +1,31 @@
 """Planning review invocation, retained diagnostics and round convergence."""
+
 from __future__ import annotations
 
+from codex_harness.core.review_admission import _table, _admit_review
 import json
 import math
 import re
 import subprocess
 import time
-from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core import review_packets, review_provider
-from codex_harness.core.approvals import require_approval, require_reviewers
+from codex_harness.core.approvals import require_approval, require_reviewers, require_invocation
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PlanStore, PlanStoreError, _now
 from codex_harness.core.review_findings import _parse_review_return
 from codex_harness.core.review_packets import bind_review_dossiers
 from codex_harness.core.review_provider import _launch_review, coverage, packet_binding
 from codex_harness.core.reviewer_evidence import finding_records
-from codex_harness.core.worker_packet_budget import PROVIDER_TOKEN_BUDGETS
 
-def _table(store: PlanStore) -> None:
-    store.connection.execute(
-        "CREATE TABLE IF NOT EXISTS review_runs ("
-        "id TEXT PRIMARY KEY, round_id TEXT NOT NULL, plan_revision TEXT NOT NULL, "
-        "reviewer TEXT NOT NULL, provider TEXT NOT NULL, model TEXT, exit_code INTEGER, "
-        "findings INTEGER NOT NULL, invalid INTEGER NOT NULL, "
-        "started_at TEXT NOT NULL, finished_at TEXT NOT NULL)"
-    )
-    for table in ("review_runs",):
-        columns = {row[1] for row in store.connection.execute(f"PRAGMA table_info({table})")}
-        for name, kind in (("packetBound", "INTEGER"), ("outOfPacketTools", "TEXT")):
-            if name not in columns:
-                store.connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
-    columns = {row[1] for row in store.connection.execute("PRAGMA table_info(review_runs)")}
-    for name, kind in (
-        ("isMocked", "INTEGER"),
-        ("didRunProvider", "INTEGER"),
-        ("shards", "INTEGER"),
-        ("shardDetails", "TEXT"),
-        ("truncatedNodes", "TEXT"),
-        ("reshardedFrom", "TEXT"),
-        ("nodesDigest", "TEXT"),
-    ):
-        if name not in columns:
-            store.connection.execute(f"ALTER TABLE review_runs ADD COLUMN {name} {kind}")
 
 def _event(store: PlanStore, kind: str, payload: dict) -> None:
     if callable(getattr(store, "_event", None)):
         store._event(kind, payload)
+
 
 def _diagnostic(store, result, record, launch, output, stderr) -> None:
     """Persist the exact failure without environment values or the stdin packet."""
@@ -79,6 +55,7 @@ def _diagnostic(store, result, record, launch, output, stderr) -> None:
     record["artifactPath"] = str(path)
     record["stderrPreview"] = "\n".join(stderr.splitlines()[-10:])
 
+
 def _review_shard(
     store, result, reviewer, shard, *, executable, runner, timeout, capture=None, before_launch=None
 ):
@@ -95,7 +72,7 @@ def _review_shard(
     try:
         if "\n## Bound review requests\n" not in shard["packet"]:
             bind_review_dossiers(store, {reviewer["provider"]: [shard]}, [reviewer])
-        judgment = store.review_judgment(reviewer, shard)
+        store.review_judgment(reviewer, shard)
         launch = _launch_review(reviewer, shard["packet"], executable)
         directory = TemporaryDirectory(prefix="harness-roundtable-")
         if before_launch is not None or runner is None:
@@ -103,21 +80,63 @@ def _review_shard(
             if before_launch is not None:
                 before_launch()
             if runner is None:
-                require_approval(store, "B", dict(reviewer=reviewer))
+                require_invocation(store, "reviewer", reviewer)
             checking_launch = False
         attempted = True
-        while True:
-            response = (runner if runner is not None else review_provider._run)(launch, Path(directory.name), timeout)
-            record["didRunProvider"] = runner is None
+
+        def invoke(current):
+            nonlocal launch, output, stderr
+            launch = current
+            options = {}
+            if runner is None and getattr(store, "_run_generation", None) is not None:
+                from codex_harness.core.run_ownership import effect_binding, effect_guard
+
+                binding = effect_binding(store)
+                stop = store.path.parent / ("effect-stop-" + binding["effectId"])
+                options = dict(
+                    launch_guard=lambda: effect_guard(binding),
+                    stop_when=lambda: "user-control" if stop.exists() else None,
+                )
+            remaining = timeout
+            if getattr(store, "_run_generation", None) is not None:
+                from codex_harness.core.run_loop import cursor
+                from datetime import UTC, datetime
+
+                remaining = min(
+                    timeout,
+                    max(
+                        0.01,
+                        (
+                            datetime.fromisoformat(cursor(store)["effect"]["deadlineAt"])
+                            - datetime.now(UTC)
+                        ).total_seconds(),
+                    ),
+                )
+            response = (runner if runner is not None else review_provider._run)(
+                current, Path(directory.name), remaining, **options
+            )
             record["exitCode"], output = response[:2]
             stderr = response[2] if len(response) > 2 else ""
-            record, items = _parse_review_return(store, reviewer, shard, response, mocked=runner is not None)
-            if record.get("disposition") != "exact-fix" or capture is not None:
-                break
-            judgment = store.judgment(record["judgmentId"])
-            launch = replace(launch, stdin_text=launch.stdin_text + "\nExact fix required: " + judgment["error"])
-        if capture is not None:
-            capture(reviewer, shard, launch, executable, response)
+            return response
+
+        from codex_harness.core.run_loop import review_response
+
+        launch, response, record, items = review_response(
+            store,
+            launch,
+            invoke,
+            lambda response: _parse_review_return(
+                store, reviewer, shard, response, mocked=runner is not None
+            ),
+            capture=(
+                lambda current, response: capture(reviewer, shard, current, executable, response)
+            )
+            if capture is not None
+            else None,
+        )
+        record["didRunProvider"] = runner is None
+        record["exitCode"], output = response[:2]
+        stderr = response[2] if len(response) > 2 else ""
         if record["invalid"]:
             _diagnostic(store, result, record, launch, output, stderr)
     except (OSError, subprocess.TimeoutExpired, ValueError) as error:
@@ -182,6 +201,7 @@ def _review_shard(
         _diagnostic(store, result, record, launch, output, stderr or str(error))
     finally:
         from codex_harness.core.reviewer_access import observe_access
+
         record["launchSelection"] = {
             "provider": reviewer["provider"],
             "model": reviewer.get("model"),
@@ -208,105 +228,6 @@ def _review_shard(
                         time.sleep(0.05 * (attempt + 1))
     return record, items
 
-def _review_dossier(
-    store,
-    result,
-    reviewer,
-    record,
-    *,
-    executable,
-    runner,
-    timeout,
-    token_budget=None,
-    shards=None,
-    stop_on_invalid=False,
-    capture=None,
-    abandon=None,
-    before_launch=None,
-    **packet_options,
-):
-    """Replace overflowed dossiers once; the request owner retains obligations."""
-    provider = reviewer["provider"]
-    if provider not in PROVIDER_TOKEN_BUDGETS:
-        raise ValueError(
-            f"Unknown provider {provider!r}; use one of: {', '.join(PROVIDER_TOKEN_BUDGETS)}"
-        )
-    budget = PROVIDER_TOKEN_BUDGETS[provider] if token_budget is None else token_budget
-    if shards is None:
-        shards = review_packets.packet_shards(store, provider, token_budget=budget, **packet_options)
-    for attempt in range(2):
-        completed = []
-        record["shards"] = len(shards)
-        record["shardDetails"] = []
-        record["truncatedNodes"] = sorted(
-            {key for shard in shards for key in shard["truncatedNodes"]}
-        )
-        for shard in shards:
-            shard_record, items = _review_shard(
-                store,
-                result,
-                reviewer,
-                shard,
-                executable=executable,
-                runner=runner,
-                timeout=timeout,
-                capture=capture,
-                **({"before_launch": before_launch} if before_launch is not None else {}),
-            )
-            record["shardDetails"].append(shard_record)
-            completed.append((shard_record, items))
-            if shard_record.get("primaryError", {}).get("promptTooLong"):
-                break
-            if stop_on_invalid and shard_record["invalid"]:
-                yield from completed
-                return
-        else:
-            yield from completed
-            return
-        if attempt == 1:
-            yield from completed
-            return
-        record["reshardedFrom"] = {
-            "budget": budget,
-            "shards": len(shards),
-            "shardDetails": record["shardDetails"],
-            "reason": shard_record["primaryError"]["reason"],
-        }
-        if abandon is not None:
-            abandon()
-            capture = None
-            abandon = None
-        budget = max(1, budget // 2)
-        record["reshardedFrom"]["newBudget"] = budget
-        try:
-            shards = review_packets.packet_shards(store, provider, token_budget=budget, **packet_options)
-        except ValueError as error:
-            # A header that cannot fit must not hide the actual provider failure.
-            record["reshardedFrom"]["reshardError"] = str(error)
-            yield from completed
-            return
-        prior = record["reshardedFrom"]["shardDetails"][0]
-        for shard in shards:
-            shard["reviewRoundId"] = prior["reviewRoundId"]
-        bind_review_dossiers(store, {provider: shards}, [reviewer],
-            candidate_run={"id": prior["acceptanceRunId"]} if prior["acceptanceRunId"] else None)
-        record["reshardedFrom"]["newShardCount"] = len(shards)
-
-def _admit_review(store, reviewer, run_id, revision, *, mocked=False):
-    with store._transaction():
-        if store.manifest_revision() != revision:
-            raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
-        if not mocked:
-            require_approval(store, "B", dict(reviewer=reviewer))
-        _table(store)
-        store.connection.execute(
-            "CREATE TABLE IF NOT EXISTS review_attempts (id TEXT PRIMARY KEY, "
-            "plan_revision TEXT, reviewer TEXT, provider TEXT)"
-        )
-        store.connection.execute(
-            "INSERT OR IGNORE INTO review_attempts VALUES (?, ?, ?, ?)",
-            (run_id, revision, reviewer["name"], reviewer["provider"]),
-        )
 
 def run_roundtable(
     store: PlanStore,
@@ -333,7 +254,11 @@ def run_roundtable(
         )
     report = quality_report(store)
     selected = (
-        require_approval(store, "B")["subject"]["reviewers"]
+        [
+            dict(r)
+            for r in require_approval(store, "P")["subject"]["roleTuples"]
+            if r["role"] == "reviewer"
+        ]
         if reviewers is None
         else list(reviewers)
     )
@@ -366,7 +291,9 @@ def run_roundtable(
 
         result["reviewers"].append(record)
         provider = reviewer["provider"]
-        for shard_record, items in _review_dossier(
+        from codex_harness.core.run_loop import review_dossier
+
+        for shard_record, items in review_dossier(
             store,
             result,
             reviewer,
@@ -377,7 +304,9 @@ def run_roundtable(
             token_budget=(token_budgets or {}).get(provider),
             report=report,
             shards=dossiers[provider],
-            before_launch=lambda: _admit_review(store, reviewer, run_id, revision, mocked=runner is not None),
+            before_launch=lambda: _admit_review(
+                store, reviewer, run_id, revision, mocked=runner is not None
+            ),
         ):
             if shard_record["invalid"] and not record["rejected"]:
                 record["exitCode"] = shard_record["exitCode"]
@@ -396,8 +325,12 @@ def run_roundtable(
         record["didRunProvider"] = bool(record["shardDetails"]) and all(
             shard["didRunProvider"] for shard in record["shardDetails"]
         )
-        record["findings"] = sum(row.get("round_id") == result["roundId"] and row["reviewer"] == reviewer["name"]
-                                 and row["provider"] == provider for row in finding_records(store))
+        record["findings"] = sum(
+            row.get("round_id") == result["roundId"]
+            and row["reviewer"] == reviewer["name"]
+            and row["provider"] == provider
+            for row in finding_records(store)
+        )
         record["invalid"] = len(record["rejected"])
         result["findings"] += record["findings"]
         result["invalid"] += record["invalid"]
@@ -425,6 +358,9 @@ def run_roundtable(
             )
         )
     with store._transaction():
+        from codex_harness.core.run_ownership import ensure_effect
+
+        ensure_effect(store)
         if store.manifest_revision() != revision:
             raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
         _table(store)
@@ -438,6 +374,9 @@ def run_roundtable(
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(*run, snapshot) for run in runs],
         )
+        store.connection.executemany(
+            "UPDATE review_attempts SET state='completed' WHERE id=?", [(run[0],) for run in runs]
+        )
         result["clusters"] = store.cluster_review_findings(result["roundId"])
         result["packetBound"] = all(item["packetBound"] for item in result["reviewers"])
         result["outOfPacketTools"] = sorted(
@@ -448,7 +387,9 @@ def run_roundtable(
             item["didRunProvider"] for item in result["reviewers"]
         )
         result["successfulReviews"] = store.successful_reviews(revision)
-        result["crossSubscription"] = len({row["provider"] for row in result["successfulReviews"]}) > 1
+        result["crossSubscription"] = (
+            len({row["provider"] for row in result["successfulReviews"]}) > 1
+        )
         result["convergence"] = store.review_convergence(prepare=True)
         _event(store, "roundtable-completed", result)
     return result

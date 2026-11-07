@@ -1,6 +1,7 @@
 """Provider launch protocol and observed review response evidence."""
 from __future__ import annotations
 
+from codex_harness.core.provider_process import _run as _run
 import hashlib
 import json
 import os
@@ -8,9 +9,7 @@ import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
-from tempfile import TemporaryFile
 
-from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.reviewer_evidence import review_tier
 
 _REVIEWERS = (
@@ -50,15 +49,6 @@ def coverage(selected):
         else {}
     )
 
-def _run(launch, cwd: Path, timeout: int, *, raw=False):
-    with TemporaryFile() as prompt:
-        if launch.stdin_text is not None:
-            prompt.write(launch.stdin_text.encode("utf-8"))
-            prompt.seek(0)
-        completed = run_audit_process(launch.command, cwd=cwd, env={**os.environ, **launch.environment},
-                                      stdin=prompt, text=False, timeout=timeout)
-    return (completed.returncode, completed.stdout if raw else completed.stdout.decode("utf-8"),
-            completed.stderr if raw else completed.stderr.decode("utf-8"))
 
 def _launch_review(reviewer, packet, executable, *, instructions=None):
     from codex_harness.core.provider_launch import get_adapter

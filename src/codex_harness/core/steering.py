@@ -204,39 +204,3 @@ def steering_report(
             "total": len(findings),
         },
     }
-
-
-def has_blockers(report: dict) -> bool:
-    return any(item["severity"] == "blocker" for item in report["findings"])
-
-
-def render_steering_card(report: dict) -> str:
-    findings = report["findings"]
-    counts = {
-        severity: sum(item["severity"] == severity for item in findings) for severity in _SEVERITIES
-    }
-    lines = [
-        "clean"
-        if not findings
-        else f"steering needed: {counts['blocker']} blockers, {counts['major']} major"
-    ]
-    for severity in _SEVERITIES:
-        group = sorted(
-            (item for item in findings if item["severity"] == severity),
-            key=lambda item: (
-                item["path"] or "",
-                item["line"] or 0,
-                item["code"],
-                item["bead"] or "",
-                item["detail"],
-                item["requirementIds"],
-            ),
-        )
-        if group:
-            lines.extend(["", f"{severity} ({len(group)})"])
-            for item in group:
-                location = item["path"] or ", ".join(item["requirementIds"]) or "plan"
-                if item["line"] is not None:
-                    location += f":{item['line']}"
-                lines.append(f"- {item['code']} [{location}]: {item['detail']}")
-    return "\n".join(lines)

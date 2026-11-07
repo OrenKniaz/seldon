@@ -1,4 +1,5 @@
 """Execution-assessment selection, original capture and current support binding."""
+
 from __future__ import annotations
 
 import json
@@ -7,14 +8,23 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from codex_harness.core.execution_origins import read_execution_finding_origins
 from codex_harness.core import review_provider
 from codex_harness.core.acceptance_runs import current_run, run_subject
 from codex_harness.core.approvals import require_approval
-from codex_harness.core.review_provider import _assessment_file, _assessment_hash, _execution_session, _launch_review, _response
+from codex_harness.core.review_provider import (
+    _assessment_file,
+    _assessment_hash,
+    _execution_session,
+    _launch_review,
+    _response,
+)
+
 
 def _execution_context(store, request):
-    from codex_harness.core import dispatch
+    from codex_harness.core import dispatch_attempts as dispatch
     from codex_harness.core.acceptance_recovery import _executable_identity
+
     members = request["members"]
     if (
         not isinstance(members, list)
@@ -30,11 +40,7 @@ def _execution_context(store, request):
     if store.manifest_revision() != request["expected_manifest_revision"]:
         raise ValueError("execution-manifest-stale")
     run = current_run(store)
-    if (
-        not run
-        or run["id"] != request["expected_product_run_id"]
-        or run_subject(run) != "product"
-    ):
+    if not run or run["id"] != request["expected_product_run_id"] or run_subject(run) != "product":
         raise ValueError("execution-current-product-run-required")
     if store._meta()["published_revision"] != request[
         "worker_job_id"
@@ -52,6 +58,7 @@ def _execution_context(store, request):
         evidence["request"], evidence["stdout"], evidence["stderr"], author=True
     )
     from codex_harness.core.runners import execution_witnesses
+
     tests = {row["id"]: row["observation"] for row in execution_witnesses(evidence["integrated"])}
     files = {}
     selected_witnesses = []
@@ -84,9 +91,7 @@ def _execution_context(store, request):
             source_hash = observation.get("source", {}).get("sha256")
             if source_file:
                 files[source_file] = _assessment_file(Path(run["repo"]), source_file)
-                if (
-                    source_hash and source_hash != files[source_file]["sha256"]
-                ):
+                if source_hash and source_hash != files[source_file]["sha256"]:
                     raise ValueError("execution-witness-source-hash-changed")
             selected_witnesses.append(
                 dict(
@@ -112,6 +117,7 @@ def _execution_context(store, request):
         raise ValueError("execution-reviewer-executable-unavailable")
     # A bounded attempt deadline never infers reviewer authority from worker grants.
     import math
+
     if (
         type(request["timeout"]) not in (int, float)
         or not math.isfinite(request["timeout"])
@@ -138,6 +144,7 @@ def _execution_context(store, request):
         policy=store.plan_review_policy_state(store.manifest_revision()),
     )
 
+
 def _execution_events(store, kind, registration_id=None):
     rows = [
         (row[0], json.loads(row[1]))
@@ -151,6 +158,7 @@ def _execution_events(store, kind, registration_id=None):
         if registration_id is None or row.get("registrationId") == registration_id
     ]
 
+
 def _execution_header(store, registration_id):
     rows = [
         (key, row)
@@ -160,6 +168,7 @@ def _execution_header(store, registration_id):
     if len(rows) != 1 or rows[0][1].get("schema") != 1:
         raise ValueError("execution-registration-missing-or-ambiguous")
     return rows[0][1]
+
 
 def _execution_reservations(store):
     rows = _execution_events(store, "execution-assessment-reserved")
@@ -189,16 +198,20 @@ def _execution_reservations(store):
             raise ValueError("execution-stage-unlisted-or-mixed-provenance")
     return rows
 
+
 def _execution_directory(store, registration_id):
     from codex_harness.core import acceptance_recovery as recovery
+
     if not isinstance(registration_id, str) or not re.fullmatch(r"[0-9a-f]{32}", registration_id):
         raise ValueError("execution-registration-id-invalid")
     root = store.path.parent / "reviews" / "execution-assessments" / registration_id
     return recovery._safe(root, root)
 
+
 def _execution_terminal_original(store, header):
     """A consumed label alone cannot clear an uncertain overlapping attempt."""
     from codex_harness.core import acceptance_recovery as recovery
+
     key = header["registrationId"]
     captures = _execution_events(store, "execution-assessment-captured", key)
     consumed = _execution_events(store, "execution-assessment-consumed", key)
@@ -242,8 +255,10 @@ def _execution_terminal_original(store, header):
     except (OSError, ValueError, KeyError, TypeError):
         return False
 
+
 def _execution_capture(store, header, launch, executable, response):
     from codex_harness.core import acceptance_recovery as recovery
+
     if recovery._launch_identity(launch, executable) != header["launch"]:
         raise ValueError("execution-actual-launch-mismatch")
     code, output, stderr = response
@@ -273,8 +288,10 @@ def _execution_capture(store, header, launch, executable, response):
             raise ValueError("execution-return-registration-changed-or-duplicate")
         store._event("execution-assessment-captured", payload)
 
+
 def _execution_parse(store, header):
     from codex_harness.core import acceptance_recovery as recovery
+
     rows = _execution_events(store, "execution-assessment-captured", header["registrationId"])
     if len(rows) != 1:
         raise ValueError("execution-capture-missing-or-ambiguous")
@@ -380,6 +397,7 @@ def _execution_parse(store, header):
         members=members, reviewerObservation=observation, captureHash=_assessment_hash(capture)
     )
 
+
 def assess_execution_findings(store, **request):
     """Complete controlled Python entry; no external receipt/eligibility importer."""
     try:
@@ -391,6 +409,7 @@ def assess_execution_findings(store, **request):
     if header.get("reused"):
         return store.execution_assessment_state()
     from codex_harness.core import acceptance_recovery as recovery
+
     reviewer = request["reviewer"]
     executable = header["context"]["reviewerExecutable"]["path"]
     launch = None
@@ -443,14 +462,18 @@ def assess_execution_findings(store, **request):
         return store.execution_assessment_state()
     return store.commit_execution_assessment(header["registrationId"])
 
+
 def _admit_execution_assessment(store, header):
     from codex_harness.core import acceptance_recovery as recovery
+
     request, context = header["request"], header["context"]
     with store._transaction():
         if _execution_context(store, request) != context:
             raise ValueError("execution-selection-raced-before-reservation")
-        if any(old["request"] == request and old["context"] == context
-               for _, old in _execution_events(store, "execution-assessment-reserved")):
+        if any(
+            old["request"] == request and old["context"] == context
+            for _, old in _execution_events(store, "execution-assessment-reserved")
+        ):
             return False
         require_approval(store, "B", dict(reviewer=request["reviewer"]))
         root = _execution_directory(store, header["registrationId"])
@@ -459,125 +482,8 @@ def _admit_execution_assessment(store, header):
         store._event("execution-assessment-reserved", header)
     return True
 
-def prepare_execution_assessment(store, selection):
-    """Read existing canonical selectors; never reserve or invent reviewer authority."""
-    from codex_harness.core import dispatch
-    if not isinstance(selection, dict) or set(selection) - {"finding_ids", "bead_id"}:
-        raise ValueError("execution-prepare-selection-invalid")
-    ids, bead = selection.get("finding_ids"), selection.get("bead_id")
-    if ids is not None and (
-        not isinstance(ids, list)
-        or not ids
-        or any(not isinstance(x, str) or not x for x in ids)
-        or len(set(ids)) != len(ids)
-    ):
-        raise ValueError("execution-prepare-members-invalid")
-    if bead is not None and (not isinstance(bead, str) or not bead):
-        raise ValueError("execution-prepare-bead-invalid")
-    revision = store.manifest_revision()
-    job = store._meta()["published_revision"]
-    manifest = store.published_manifest(job) if job else None
-    findings = store.acceptance_findings()
-    result = dict(
-        schema="seldon/execution-assessment-preparation-v1",
-        state="selection_required",
-        closureEligible=False,
-        didRunProvider=False,
-        choices=dict(findings=findings, beads=list((manifest or {}).get("beads", {}))),
-        expectedManifestRevision=revision,
-        workerJobId=job,
-        requiredChoices=[
-            "Select actual finding_ids and bead_id; no member/bead is chosen automatically",
-            (
-                "Supply explicitly authorized reviewer "
-                "name/provider/model/effort and positive finite original "
-                "limits"
-            ),
-            (
-                "Select implicated artifactPaths and relevant witnessIds "
-                "from actual observations; structural eligibility is not "
-                "semantic proof"
-            ),
-        ],
-    )
-    if ids is None or bead is None:
-        return result
-    try:
-        run = current_run(store)
-        if not run or run_subject(run) != "product":
-            raise ValueError("execution-current-product-run-required")
-        if (
-            bead not in result["choices"]["beads"]
-            or not job
-            or not store.publication_current(revision)
-        ):
-            raise ValueError("execution-current-publication-bead-required")
-        origins = read_execution_finding_origins(store, ids)
-        evidence = dispatch.read_completed_execution_evidence(
-            store.workspace, job, bead, expected_repo=run["repo"], expected_publication_revision=job
-        )
-        author = review_provider._execution_session(
-            evidence["request"], evidence["stdout"], evidence["stderr"], author=True
-        )
-        requirements = {row["id"] for row in evidence["integrated"]["requirementRefs"]}
-        if any(
-            row["finding"]["node_id"] not in requirements
-            or row["sourceRun"]["planRevision"] != run["planRevision"]
-            for row in origins
-        ):
-            raise ValueError("execution-finding-not-current-owned-requirement")
-        from codex_harness.core.runners import execution_witnesses
-        artifacts = [
-            dict(path=name, **review_provider._assessment_file(Path(run["repo"]), name))
-            for name in evidence["ownedFiles"]
-        ]
-        witnesses = execution_witnesses(evidence["integrated"])
-        # Process, browser and state observations are structurally admitted here.
-        # Their relevance is an LLM question, not a Python import/coverage rule.
-        # dispatch verified the canonical originals and candidate before this read.
-        # The shared roundtable context must consume the same witness collector.
-        # This preparation grants no row closure or full-dream acceptance credit.
-        result["evidenceBinding"] = dict(
-            workerJobId=evidence["jobId"],
-            beadId=evidence["beadId"],
-            runId=evidence["runId"],
-            publicationRevision=evidence["publicationRevision"],
-            candidateCommit=evidence["candidateCommit"],
-            candidateTree=evidence["candidateTree"],
-            artifactHashes={a["path"]: a for a in artifacts},
-            observationHashes={w["id"]: w["sha256"] for w in witnesses},
-        )
-        result["judgmentStatus"] = "pending-judgment"
-        result["relevanceDecided"] = False
-        result["next"] = (
-            "Select observations and artifacts for a bound relevance judgment; "
-            "source language and owned-call coverage grant no semantic credit."
-        )
-        if not witnesses:
-            result.update(state="pending-judgment", witnesses=[], artifacts=artifacts)
-            return result
-        result.update(
-            state="draft_requires_explicit_choices",
-            repo=run["repo"],
-            productRunId=run["id"],
-            origins=[row["finding"] for row in origins],
-            authorObservation=author,
-            artifacts=artifacts,
-            witnesses=witnesses,
-            requestTemplate=dict(
-                members=[dict(memberId=key, artifactPaths=[], witnessIds=[]) for key in ids],
-                worker_job_id=job,
-                bead_id=bead,
-                expected_manifest_revision=revision,
-                expected_product_run_id=run["id"],
-                reviewer=None,
-                timeout=None,
-            ),
-            executable=False,
-        )
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        result.update(state="held", holdReasons=[str(error)])
-    return result
+
+
 
 def selected_execution_support(store, registration_ids, *, repo=None):
     """Reconstruct exact current selected support; references cannot certify themselves."""
@@ -650,91 +556,3 @@ def selected_execution_support(store, registration_ids, *, repo=None):
             "Sealed evidence input only; no verified closure or native final acceptance authority"
         ),
     )
-
-def read_execution_finding_origins(store, finding_ids):
-    """Select sealed historical AF originals, without today's candidate validation.
-
-    This does not admit/recover a review or relax final acceptance. Historical
-    product identity is preserved separately from the current fulfillment run.
-    """
-    from codex_harness.core import acceptance_recovery as recovery
-    if not finding_ids or len(set(finding_ids)) != len(finding_ids):
-        raise ValueError("execution-origin-members-invalid")
-    findings = {item["id"]: item for item in store.acceptance_findings()}
-    reviews = [
-        json.loads(row[0])
-        for row in store.connection.execute(
-            "SELECT result_json FROM acceptance_reviews ORDER BY rowid"
-        )
-    ]
-    selected = []
-    for key in finding_ids:
-        finding = findings.get(key)
-        owners = [review for review in reviews if key in review.get("findingIds", [])]
-        if (
-            not finding
-            or not key.startswith("AF-")
-            or finding.get("stage") != "acceptance"
-            or len(owners) != 1
-        ):
-            raise ValueError("execution-genuine-admitted-af-required")
-        review = owners[0]
-        attempt = recovery.ReviewAttempt.load(store, review["attemptId"])
-        header = attempt.header
-        admitted = recovery._events(store, "acceptance-reviewed", attempt.id)
-        source = store.connection.execute(
-            "SELECT result_json FROM acceptance_runs WHERE id=?", (finding["runId"],)
-        ).fetchone()
-        if (
-            source is None
-            or json.loads(source[0]) != header["run"]
-            or header["workspace"] != str(store.workspace.resolve())
-            or header["repo"] != header["run"]["repo"]
-            or header["isMocked"] is not False
-            or header["ineligible"]
-            or run_subject(header["run"]) != "product"
-            or review.get("runId") != finding["runId"]
-            or review.get("isMocked") is not False
-            or recovery._events(store, recovery.ABANDONED, attempt.id)
-            or len(admitted) != 1
-            or admitted[0][1] != review
-            or any(review.get(name) != value for name, value in attempt.references().items())
-        ):
-            raise ValueError("execution-af-historical-admission-mismatch")
-        if any(
-            member not in findings
-            or recovery.digest(
-                {
-                    name: value
-                    for name, value in findings[member].items()
-                    if name not in {"status", "resolution", "state", "judgmentIds", "cluster_id"}
-                }
-            )
-            != review["findingHashes"].get(member)
-            for member in review["findingIds"]
-        ):
-            raise ValueError("execution-af-original-finding-changed")
-        parts = attempt.read_returns()
-        parsed_findings = [(owner, item) for owner, _, items, _ in parts for item in items]
-        completions = dict(recovery._events(store, recovery.COMPLETED, attempt.id))
-        originals = [
-            dict(slot=slot, completion=completions[event_id])
-            for slot, (_, _, _, event_id) in zip(header["slots"], parts, strict=True)
-        ]
-        if not any(
-            reviewer["name"] == finding["reviewer"]
-            and reviewer["provider"] == finding["provider"]
-            and all(finding.get(name) == item.get(name) for name in review_provider._FIELDS)
-            for reviewer, item in parsed_findings
-        ):
-            raise ValueError("execution-af-not-in-original-output")
-        selected.append(
-            dict(
-                finding=finding,
-                sourceRun=header["run"],
-                review=review,
-                registration=header,
-                originals=originals,
-            )
-        )
-    return selected

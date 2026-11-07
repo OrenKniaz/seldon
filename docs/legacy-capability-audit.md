@@ -1,5 +1,66 @@
 # Legacy capability audit for the local Seldon extraction
 
+STAGE-2C R6 supersedes R5's cold-build mechanism and diagnoses the host web refusal (C8/C14/C20/C23/C26; DV5 OPEN).
+TRIAGE: DESIGN — observer/preview support must not mutate the accepted product namespace. The host web flow had already accepted C, then web_evidence_golden wrote tools/keep-node-open.cjs into the delivered workspace; the fresh cockpit correctly rejected that changed whole-product revision. The preview hook now belongs to existing .codex-harness metadata, with one shared producer also exercised by CLI before actual HTTP /api/status readback. Post-C interruption/wake subjourneys likewise use basetemp sibling workspaces; the single cockpit parity/no-write check runs after all observer activities. Siblings: CLI/web/HTTP status, preview evidence, recovery diagnostics, C and ZIP readback. No product hashing, repository binding, source ignore set, approval, delivery or read-only status rule is weakened; production code is unchanged.
+The handwritten wheel builder is deleted. The base uv build ROOT --wheel and uv pip install --no-deps sequence again exercises the declared Hatchling backend in a basetemp venv, with a workspace-local cache and Python downloads disabled. Only an actual Hatchling dependency-fetch failure is expected UNVERIFIED-in-sandbox under CC's explicit instruction; every other failure remains blocking. All real installed-entry/module/MCP/init/check/remove assertions remain, and the cold check stays last so the non-browser server/acceptance journey is exercised independently of that infrastructure result. Full Chromium and backend-fetch proof remain host-owned when unavailable in the sandbox.
+
+STAGE-2C R5 supersedes R4's gate-allocation diagnosis and cold-build claim (C1/C14/C18/C23/C26; DV5 OPEN).
+TRIAGE: DESIGN — current-state readers must select current canonical records rather than repeatedly replay history; siblings: controller effect guards, reconnect waits, worker segment/status observation. R4 added 20ms HTTP status polling (base: bounded one-second observation), repeatedly copying the store during the 125s live stream pause. Cursor reads also decoded every historical cursor, and cursor-only write transactions repeated the semantic scope scan while holding the writer lock. Owners now read the newest matching event through indexed SQL, retain the base observation cadence and scan changed semantic nodes at the transaction hook; controller activation and consent/execution consumers still explicitly prepare/check file-only drift. The finite SQLite wait remains a contention bound, with the actual eight-second writer/reconnect journey retained; no sleep, process timeout or gate cap is raised.
+TRIAGE: DESIGN — native completion identity must be produced from the admitted launch tuple on every surface. The scripted Claude producer omitted reasoning effort; the unchanged canonical native validator correctly refused it. Shared telemetry now carries exact model/effort, including non-CLI review callers; the CLI receipt-recovery journey exercises actual registered Codex/Claude originals through admission and C. Cold startup builds the declared candidate wheel with the gate interpreter's standard library and installs offline only into its basetemp venv; no cached build backend or external build interpreter is used. Runtime disposition is recorded in the R5 report after the focused journey and full gate.
+The first R5 full gate was CLI-green (18 passed) but took 615.19s, so it did not satisfy the 600s fast-gate ceiling. Profiling the unchanged full ShelfLife journey then passed in 430.33s and measured 29.74s in execution-scope construction, including 15.33s of redundant quality/status projection. Execution admission now reads the same canonical vision-lock, clarification, finding, audit and review facts directly; its duplicate pass/warn-only quality label is removed. Judgment continuation leaves originals validation in revalidate and reads the retained run path again only for pending Build. No compilation cache, timer change, coverage deletion or gate-scheduling change is introduced; unchanged compilation measured 3.32s and remains intact.
+
+STAGE-2C R4 supersedes the R3 runtime/setup disposition below (C1/C4/C8/C14/C16/C18/C23/C26; DV5 OPEN).
+BLOCKED — FAST-GATE-600 (TRIAGE: DESIGN): the binding CLI/approval gate uses -n4 while the CLI case launches two additional HTTP/ShelfLife journey trees. Final candidate 256e3a6d47393f481a65f359d9c619c4638c0e0312f3ffe94290dce1ed465016 passed the whole CLI alone in 445.15s (ShelfLife 436.08s), but full gate 2 produced 18 passed plus one teardown error in 669.09s, 676.17s overall; ShelfLife hit its 600s deadline. Retained events reach actual C at 596.24s and continue post-C stale-scope checks, with matching material-work counts and no stuck effect/deadlock identified. The slower progression spans planning, workers, verification, reviews and C; no hardware cause or isolated source optimization is established. Owner: CC gate scheduling/runtime allocation. Exit: an evidence-backed allocation preserving every case/assertion and the fixed runtime caps must produce a clean full CLI gate, followed by normal-Chromium host proof. No timer increase, coverage deletion, blind retry or unapproved gate edit is made; implementation stops pending that named design decision.
+TRIAGE: DESIGN — canonical authority governs admission and settlement; presentation gates and completed worker segments cannot substitute for the durable controller.
+Publication reads canonical revision/phase gates. Fresh verifier observations use the existing finite judgment-continuation owner, bind its generation before observation, and record actual recovery results through guarded writers. Pure finding dispositions preserve completed continuation; delivery checks both retained and delivered bytes. Native normal/recovered acceptance shares sealed packet/session validation, with every declared protected source included.
+Golden migrations retain real offline candidate-wheel installation in the basetemp venv, actual installed launchers/module/MCP/init/check/remove, empty mock claims, exact worker-written bytes, and the canonical original Contracts RED receipt plus fresh Build reuse. Receipt recovery closes one actual review note through author/1j without repeating the acceptance run or paid review slots. Obsolete unused preparation/history menus are deleted.
+Focused CLI12 passed in 431.05s, including HTTP/ShelfLife, native stream/cleanup/retry and delivery refresh journeys. The first full gate produced 18 passed plus one teardown error in 571.23s (589.32s overall): concurrent monitor/interactive activation met a roughly 6.2s canonical writer reservation and exhausted SQLite's implicit 5s wait. The PlanStore connection now has a bounded 30s native wait; an actual 8s competing-writer golden protects original-call completion without application retries. Candidate receipt/run writers use their current canonical transaction and exact effect guard checks. CLI13 passed with that regression in 445.15s; the required clean full gate remains blocked as above. Exact patch/review details are recorded in ../stage-2c-report.md. No actual-provider or normal-Chromium product acceptance is claimed.
+NONBLOCKING INHERITED DESIGN — run-first acceptance versus new-publication finding closure: a HOW amendment with retained acceptance obligations can require current acceptance evidence while publication requires their closure. The all-obligation publication check and semantic current-candidate prerequisite both exist in ab8b85a; this conditional cycle was source-reviewed, not triggered by the restored journey. Owner: canonical stage-aware repair admission; disposition: retained follow-up, no weakened publication/B/C gate or invented revalidation bypass. Exit: a golden HOW/new-publication journey retaining real acceptance obligations must create current evidence before their bound disposition, then reach C without paid replay. Ordinary NEXT run-first ordering remains unchanged.
+
+STAGE-2C R3 supersedes the source-approval disposition below (C8/C14/C16/C18/C23/C26; DV5 OPEN):
+CC rejected patch 54b2a58c for controller-owned retries and deleted golden behavior.
+RULE1 owner run_loop now consumes canonical exact-fix dispositions iteratively;
+siblings: author/judge replies, P/A/B/C interpretation, review resharding, recovery
+and acceptance repair. RULE2 restores base semantic journeys at canonical producers
+and the three-command planner surface, including real installed-entry cold startup.
+Disposition: source candidate only; exact bound execution gaps feed recovery and
+acceptance retries register every actual launch/return before final 1j credit.
+Completed raw semantic replies and captured/sealed/admitted acceptance originals
+resume through existing consumers before quarantine, with no paid replay.
+Committed plan rounds use the same normal/recovered disposition owner. Raw
+semantic eligibility is recorded under the original finite generation/deadline;
+late returns remain diagnostics and cannot gain credit after restart.
+Historical receipt formats retain seals and session reservations; new credit
+still requires current canonical 1j/source/candidate/approval bindings.
+Static syntax/import/API checks pass; R3 gate BLOCKED, not run.
+The denied R3 scratch creation has not been retried. The shared gate interpreter
+has no installed Seldon console entry; no installation or substitute is attempted.
+Exit: provision gate prerequisites, one R3 full gate and exact-patch independent
+review, then CC normal-Chromium host proof; web unverified in sandbox and DV5 OPEN.
+STAGE-2C supersedes the setup disposition below (C1/C16/C18/C20/C23; DV5 OPEN):
+CC deferred SDK adoption to 2c-SDK; no setup/install retry is authorized or made.
+The current source candidate replaces distributed continuation with one durable
+run_loop and three planner commands, retaining stdio JSON-RPC. Owner: run_loop;
+siblings: review-before-B, bounded judgment continuation, controls and recovery.
+Disposition: last gate 16 passed / 2 failed in 177.24s; A changes routing and the
+dead-review fault trigger corrected afterwards, not rerun under the two-run cap.
+Retained CLI A-to-Z/ZIP/C and active control/retry checks passed within that run;
+this is partial evidence, not a fresh full pass. Web unverified in sandbox.
+Exit: CC host full gate and exact-patch authority review, then an
+independently authorized real-provider replay; source doubles do not close DV5.
+
+STAGE-2C setup blocker (C1/C16/C20/C23; DV5 remains OPEN): no implementation
+or product proof. Lane setup invoked uv with its default cache, outside the
+authorized scratch root; both venv creation and SDK installation reported
+Access is denied opening AppData/Local/uv/cache/sdists-v9/.git. No lane venv
+was created. Both setup commands were submitted in one shell invocation;
+the install still ran after venv creation failed. Owner: lane setup.
+Disposition: no further setup attempt after observing denial; source/tests
+remain unchanged. Exit:
+explicitly authorized fresh setup with every cache/temp path under
+C:/seldon/tests/stage-2c and the MCP SDK installed only in the lane venv,
+then implement the unchanged Astra 2c brief and run its golden/host gates.
+
 STAGE-DELIV1 (C8/C15/C18/C23/C26, I6/I8/I9): TRIAGE DESIGN — publication
 identity was incorrectly used to rediscover the retained candidate. ShelfLife r12
 status03.err in fight-1 receipts/20261106T130810-2b2035 is the observed blocker.
