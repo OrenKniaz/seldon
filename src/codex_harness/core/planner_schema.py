@@ -608,7 +608,7 @@ def schema_help(tools, *, tool=None, kind=None, include_teaching=False, semantic
         tool=selected,
         inputSchema=deepcopy(contract["inputSchema"]),
         tools=[t["name"] for t in tools],
-        authority="The outstanding question supplies requestId, revision/candidate binding and answerSchema. Only the controller schedules effects.",
+        authority=contract["description"],
         semantics="Canonical content and rationale remain domain-open. Workers author code/tests. Actual user words keep native/chat provenance; no model authenticates a human.",
     )
     if kind is not None:

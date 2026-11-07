@@ -2667,6 +2667,111 @@ def planning_surface_golden(workspace):
         client.close()
 
 
+def approval_order_golden(workspace):
+    """C8/C23: r16's display -> judge -> reconnect/read -> chat reply reaches A.
+
+    The tidy client knows undocumented field names. Replay the real planner's
+    guesses, then consume the public schema, catching a schema that cannot teach
+    how to retain the user's still-current decision. No new user consent is asked.
+    """
+    from tests.python.core.mcp_planner_support import LoopClient
+
+    from codex_harness.core.plan_store import open_plan_store_readonly
+
+    client = LoopClient(workspace)
+    try:
+        content = plan_content()
+        client.call(
+            "harness_plan_start", name="R16 approval order", idea=content["nodes"][0]["text"]
+        )
+        client.answer(
+            dict(option="draft", rationale="Prepare expansion before consent", content=content)
+        )
+        client.answer(
+            dict(option="ready", rationale="Present the complete scope for A", content={})
+        )
+        displayed = client.current["userRequest"]
+        client.answer(judge_reply(client.current["question"]))
+        client.reconnect()
+        client.call("harness_schema", tool="harness_steer")
+        # Exact r16 user_words shapes, with this run's displayed identities.
+        request_id, revision, digest = (
+            displayed["request_id"],
+            displayed["plan_revision"],
+            displayed["fingerprint"],
+        )
+        for guessed in (
+            dict(text="yes", source="chat", request_id=request_id, fingerprint=digest),
+            dict(
+                text="yes",
+                source="chat",
+                request_id=request_id,
+                plan_revision=revision,
+                fingerprint=digest,
+            ),
+            dict(
+                text="yes",
+                source="chat",
+                requestId=request_id,
+                revision=revision,
+                subjectFingerprint=digest,
+            ),
+            dict(
+                text="yes",
+                source="chat",
+                request_id=request_id,
+                revision=revision,
+                fingerprint=digest,
+            ),
+            dict(
+                text="yes",
+                source="chat",
+                request_id=request_id,
+                displayed_revision=revision,
+                fingerprint=digest,
+            ),
+            dict(
+                text="yes",
+                source="chat",
+                request_id=request_id,
+                subject_fingerprint=digest,
+                plan_revision=revision,
+            ),
+        ):
+            client.call(
+                "harness_steer",
+                direction="continue",
+                rationale="Retain actual chat yes",
+                user_words=guessed,
+                error=True,
+            )
+            client.call("harness_plan_status")
+        guide = client.call("harness_schema", tool="harness_steer")
+        values = dict(
+            request_id=request_id,
+            expected_revision=revision,
+            quoted_message="yes",
+            quote_sha256=hashlib.sha256(b"yes").hexdigest(),
+            actor_label="user",
+        )
+        contract = guide["inputSchema"]["properties"]["user_words"]
+        client.call(
+            "harness_steer",
+            direction="continue",
+            rationale="Retain the original chat yes using the published contract",
+            user_words={key: values[key] for key in contract.get("required", [])},
+        )
+        client.reconnect()
+        client.answer(judge_reply(client.current["question"]))
+        with open_plan_store_readonly(workspace) as store:
+            approval = approvals.current(store, "A")
+            assert approval["state"] == "approved" and approval["words"] == "yes"
+            assert approval["request_id"] == request_id
+        assert client.current["phase"] == "plan"
+    finally:
+        client.close()
+
+
 def cockpit_golden(tmp_path, run_path, final_status, surface):
     """C20/C26: canonical accepted state reaches HTTP and the read-only cockpit.
 
@@ -4242,6 +4347,7 @@ def test_golden_path(tmp_path, request, surface):
         fixture_ownership_golden(tmp_path / "fixture-ownership")
         request.getfixturevalue("http_journeys")
         planning_surface_golden(tmp_path / "planning-surface")
+        approval_order_golden(tmp_path / "approval-order")
         automatic_retry_golden(tmp_path / "automatic-retries")
         single_build_golden(tmp_path / "single-build")
         receipt_gaps_golden(tmp_path / "receipt-gaps")

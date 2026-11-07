@@ -15,11 +15,7 @@ NATIVE = "mcp-client-elicitation"
 
 
 def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, actor_label):
-    if (
-        not isinstance(quoted_message, str)
-        or not isinstance(actor_label, str)
-        or not actor_label.strip()
-    ):
+    if not all(isinstance(value, str) and value.strip() for value in (quoted_message, actor_label)):
         raise ValueError("chat-confirmation-quote-and-actor-required")
     expected = hashlib.sha256(quoted_message.encode("utf-8")).hexdigest()
     if not isinstance(quote_sha256, str) or quote_sha256.strip().lower() != expected:
@@ -27,10 +23,6 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
             "chat-confirmation-quote-hash-mismatch: quote_sha256 must be the hex SHA-256 of "
             "quoted_message's exact UTF-8 bytes (no added newline)"
         )
-    if not quoted_message.strip():
-        raise ValueError("chat-confirmation-choice-required")
-    # Neutral transport envelope. Only the bound judgment interprets these words.
-    action, content = "accept", dict(approve=True, statement=quoted_message, conditions="")
     evidence = dict(
         request_id=request_id,
         revision=expected_revision,
@@ -41,7 +33,7 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
         source_claim="latest-external-chat-message",
         source_verified=False,
     )
-    return action, content, evidence
+    return "accept", dict(approve=True, statement=quoted_message, conditions=""), evidence
 
 
 def planning_prerequisites(

@@ -22,12 +22,11 @@ def _object(properties: dict, required=None) -> dict:
 
 
 def _tool(name: str, description: str, properties: dict, required=None) -> dict:
-    tool = {
+    return {
         "name": name,
         "description": description,
         "inputSchema": _object(properties, required),
     }
-    return tool
 
 
 TOOLS = [
@@ -50,7 +49,8 @@ TOOLS = [
     ),
     _tool(
         "harness_steer",
-        "Record unsolicited semantic direction, actual user words/control or structured mail. Never grants consent by inference.",
+        "Record direction/mail/user words; never infer consent. request_id/expected_revision copy "
+        "userRequest.request_id/plan_revision. Hash quoted_message's exact UTF-8 (no newline).",
         {
             "direction": {
                 "type": "string",
@@ -58,7 +58,15 @@ TOOLS = [
             },
             "rationale": STRING,
             "content": {"type": "object"},
-            "user_words": {"type": "object"},
+            "user_words": _object(
+                {
+                    "request_id": STRING,
+                    "expected_revision": STRING,
+                    "quoted_message": STRING,
+                    "quote_sha256": STRING,
+                    "actor_label": STRING,
+                }
+            ),
             "resume": {"type": "boolean"},
             "native_confirmation": {"type": "boolean"},
         },

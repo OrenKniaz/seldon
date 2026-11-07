@@ -1,5 +1,15 @@
 # Legacy capability audit for the local Seldon extraction
 
+FIX16 (C8/C14/C23, I6/I8): TRIAGE DESIGN — the public user_words contract hid
+the confirmation consumer's required fields. ShelfLife r16 turn03 item_4/6/8/11/13/17
+retained request d2013e563a294ade8246183837cb5d12, revision 2ffcf501 and fingerprint
+daddd951; no subject drift occurred. Owner: planner_tools publishes the exact typed
+chat contract for A/B/C, invocation/research/check-in and steering; author/judgment
+questions retain their existing bound schemas. Reconnect reads the same question.
+Disposition: bounded source repair; golden replays the six guesses then uses the
+public contract to record the original yes and reach plan. Real-provider replay
+and normal-Chromium host proof remain unperformed; CLI gate recorded in ../stage-fix16-report.md.
+
 STAGE-2C R6 supersedes R5's cold-build mechanism and diagnoses the host web refusal (C8/C14/C20/C23/C26; DV5 OPEN).
 TRIAGE: DESIGN — observer/preview support must not mutate the accepted product namespace. The host web flow had already accepted C, then web_evidence_golden wrote tools/keep-node-open.cjs into the delivered workspace; the fresh cockpit correctly rejected that changed whole-product revision. The preview hook now belongs to existing .codex-harness metadata, with one shared producer also exercised by CLI before actual HTTP /api/status readback. Post-C interruption/wake subjourneys likewise use basetemp sibling workspaces; the single cockpit parity/no-write check runs after all observer activities. Siblings: CLI/web/HTTP status, preview evidence, recovery diagnostics, C and ZIP readback. No product hashing, repository binding, source ignore set, approval, delivery or read-only status rule is weakened; production code is unchanged.
 The handwritten wheel builder is deleted. The base uv build ROOT --wheel and uv pip install --no-deps sequence again exercises the declared Hatchling backend in a basetemp venv, with a workspace-local cache and Python downloads disabled. Only an actual Hatchling dependency-fetch failure is expected UNVERIFIED-in-sandbox under CC's explicit instruction; every other failure remains blocking. All real installed-entry/module/MCP/init/check/remove assertions remain, and the cold check stays last so the non-browser server/acceptance journey is exercised independently of that infrastructure result. Full Chromium and backend-fetch proof remain host-owned when unavailable in the sandbox.
