@@ -2,8 +2,6 @@
 
 import base64
 import json
-import os
-import sys
 from pathlib import Path
 
 LIMIT = 16384
@@ -131,14 +129,14 @@ def validate_trace_fields(node, nodes):
             text(value)
     if kind == "test" and "execution" in f:
         execution = f["execution"]
-        fields(execution, ("argv", "rationale", "testRoots"), ("argv", "rationale", "testRoots"), f"{node['id']}.fields.execution")
-        if any(not isinstance(execution[k], list) or not execution[k] for k in ("argv", "testRoots")):
-            raise ValueError("Declare execution argv and complete testRoots (modules, helpers and fixtures)")
+        fields(execution, ("entry", "module", "runtime", "argv", "rationale", "testRoots"), ("argv", "rationale", "testRoots"), f"{node['id']}.fields.execution")
+        if not isinstance(execution["testRoots"], list) or not execution["testRoots"]:
+            raise ValueError("Declare a candidate entry/runtime/argv and complete testRoots (modules, helpers and fixtures)")
         from codex_harness.core.graph import _file_path, _string
         for root in execution["testRoots"]:
             _file_path(_string(root))
-        for value in execution["argv"]:
-            text(value)
+        from codex_harness.core.semantic_runner import launch
+        launch({k: v for k, v in execution.items() if k not in ("rationale", "testRoots")}, Path.cwd(), position=f"{node['id']}.execution")
         text(execution["rationale"])
 
 
@@ -241,14 +239,20 @@ def fields(value, allowed, required=(), label="fields"):
         )
 
 
-def path(root, name):
+def path(root, name, data=None):
+    reference = name
+    if isinstance(name, str) and name.startswith("{data}/"):
+        root, name = data or root, name[7:]
     if type(name) is not str or not name or "\\" in name or ":" in name:
-        raise ValueError("Use a relative sandbox path")
-    if name.startswith("/") or any(p.endswith((".", " ")) for p in name.split("/")):
-        raise ValueError("Use canonical sandbox paths without trailing dots/spaces or traversal")
-    resolved = (Path(root) / name).resolve()
+        raise ValueError(f"Path {reference!r}: use a relative sandbox path without backslashes or drive prefixes")
+    if name.startswith("/") or any(p.endswith((".", " ")) for p in name.split("/") if p != "." or root != data):
+        raise ValueError(f"Path {reference!r}: use canonical sandbox paths without trailing dots/spaces or traversal")
+    raw = Path(root).absolute() / name
+    if any(p.is_symlink() or p.is_junction() for p in (raw, *raw.parents)):
+        raise ValueError(f"Path {reference!r}: linked ancestors are forbidden; use an unlinked confined path")
+    resolved = raw.resolve()
     if not resolved.is_relative_to(Path(root).resolve()):
-        raise ValueError("Path resolves outside the product sandbox")
+        raise ValueError(f"Path {reference!r}: resolves outside the sandbox; use a confined relative path")
     return resolved
 
 
@@ -265,38 +269,10 @@ def content(f):
     return f["utf8"].encode() if "utf8" in f else base64.b64decode(f["base64"], validate=True)
 
 
-def argv(values, root, cwd=None):
-    result = []
-    for value in array(values, 64):
-        if type(value) is str:
-            if "\x00" in value:
-                raise ValueError("Literal argv cannot contain NUL")
-            result.append(value)
-        else:
-            fields(value, ("path", "relative"), ("path",))
-            if "relative" in value and value["relative"] is not True:
-                raise ValueError("relative must be true when present")
-            resolved = path(root, value["path"])
-            result.append(
-                os.path.relpath(resolved, root if cwd is None else cwd).replace("\\", "/")
-                if value.get("relative")
-                else str(resolved)
-            )
-    return result
-
-
-def target_entry(binding):
-    if "entry" in binding:
-        return binding["entry"]
-    module = binding["module"]
-    if type(module) is not str or not all(part.isidentifier() for part in module.split(".")):
-        raise ValueError("Module must name a dotted Python package")
-    if module.split(".")[0] in sys.stdlib_module_names:
-        raise ValueError("Module targets must not name standard-library packages")
-    return module.replace(".", "/") + "/__main__.py"
-
-
 def validate(document, product, targets, *, require_entries=True, draft=False, planning=False):
+    from codex_harness.core.planner_candidate import RESERVED_ROOTS
+    from codex_harness.core.semantic_runner import launch
+    import sys
     if len(json.dumps([document, targets], allow_nan=False).encode()) > 65536:
         raise ValueError("Input exceeds 64KiB")
     if type(targets) is not dict:
@@ -327,26 +303,14 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
         s.pop("evidenceTier", None)
         s.pop("validationMessage", None)
         fields(s["setup"], ("dirs", "files", "snapshots"), label=f"{label}.setup")
-        for directory in array(s["setup"].get("dirs", [])):
-            resolved = path(product, directory)
-            if (
-                directory != "data" and not directory.startswith("data/")
-            ) or resolved.suffix.lower() == ".py":
-                raise ValueError("Setup creates only data/ directories, not Python source paths")
-        snapshots = set()
         for f in array(s["setup"].get("files", [])):
             fields(f, ("path", "utf8", "base64"), ("path",), f"{label}.setup.files")
-            if path(product, f["path"]).suffix.lower() == ".py":
-                raise ValueError("Setup is data-only; Python source is unsupported")
-            if any(b.get("kind") == "web" for b in targets.values()):
-                if path(product, f["path"]).suffix.lower() != ".json":
-                    raise ValueError(
-                        "Web setup writes only finite JSON data, never browser content"
-                    )
-                json.dumps(json.loads(content(f)), allow_nan=False)
-            if not f["path"].startswith("data/"):
-                raise ValueError("Setup writes only data/ fixtures")
             content(f)
+        for name in [*array(s["setup"].get("dirs", [])), *(f["path"] for f in s["setup"].get("files", []))]:
+            if not isinstance(name, str) or not name.startswith("{data}/") or any(p.casefold() in RESERVED_ROOTS for p in Path(name[7:]).parts[:1]):
+                raise ValueError(f"Setup path {name!r}: write only to run-owned DATA using {{data}}/relative-path, never product or reserved roots")
+            path(product, name)
+        snapshots = set()
         for f in array(s["setup"].get("snapshots", [])):
             fields(f, ("id", "path"), ("id", "path"), f"{label}.setup.snapshots")
             path(product, f["path"])
@@ -376,34 +340,22 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                     else:
                         http_request(v, target=True)
                     binding = targets.get(v["target"], {})
-                    if kind == "web" and not planning and "server" not in binding and ("entry" not in binding or not path(product, binding["entry"]).is_file()):
-                        raise ValueError("Browser observation entry is unavailable")
+                    if kind == "web" and "server" not in binding:
+                        launch(dict(entry=binding.get("entry"), argv=[]), product, position="document")
                     if kind == "http" or "server" in binding:
                         if "server" not in binding:
                             raise ValueError("HTTP observation requires target.server with argv, readyPath, readyWithin")
                         server = binding["server"]
-                        fields(server, ("argv", "readyPath", "readyWithin"), ("argv", "readyPath", "readyWithin"))
-                        if not argv(server["argv"], product):
-                            raise ValueError("Declare worker server.argv; SELDON_HOST/SELDON_PORT or {host}/{port} bind loopback")
+                        launch({k: v for k, v in server.items() if k not in ("readyPath", "readyWithin")}, product, position="server")
                         http_request(dict(method="GET", path=server["readyPath"], statusEquals=200))
                         if type(server["readyWithin"]) not in (int, float) or not 0 < server["readyWithin"] <= 10:
                             raise ValueError("Declare server.readyWithin in (0,10] seconds")
                     (web_actions if kind == "web" else http_actions).add(a["id"])
                     actions.add(a["id"])
                     continue
-                if "cwd" in a:
-                    cwd = path(product, a["cwd"])
-                    created = [path(product, d) for d in s["setup"].get("dirs", [])]
-                    created += [
-                        path(product, f["path"]).parent for f in s["setup"].get("files", [])
-                    ]
-                    if not any(cwd == p or cwd in p.parents for p in created):
-                        raise ValueError("Action cwd must be a directory created by setup")
                 actions.add(a["id"])
                 if "process" in a:
-                    fields(a["process"], ("argv",), ("argv",), f"{label}.actions.process")
-                    if not argv(a["process"]["argv"], product):
-                        raise ValueError("Worker executable requires a nonempty argv")
+                    launch(a["process"], product, position="process", cwd=a.get("cwd"))
                     continue
                 v = a["cli"]
                 fields(v, ("target", "operation", "argv", "stdin"), ("target", "operation", "argv"), f"{label}.actions.cli")
@@ -424,13 +376,8 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
                     raise ValueError("Action references an unknown target")
                 if not planning:
                     binding = targets[v["target"]]
-                    fields(binding, ("entry", "module", "argv"), ("argv",), f"vision.fields.targets.{v['target']}")
-                    if len(set(binding) & {"entry", "module"}) != 1:
-                        raise ValueError("Python CLI adapter requires one entry or module; use process.argv for other tools")
-                    path(product, target_entry(binding))
-                    argv(binding["argv"], product)
+                    launch(dict(binding, runtime=sys.executable), product, extra=v["argv"], cwd=a.get("cwd"))
                 operation(v)
-                argv(v["argv"], product, path(product, a["cwd"]) if "cwd" in a else product)
             if not actions or not array(s["observe"]):
                 raise ValueError("Declare product actions and finite observations")
             for o in s["observe"]:
@@ -482,7 +429,7 @@ def validate(document, product, targets, *, require_entries=True, draft=False, p
         except ValueError as error:
             s["evidenceTier"] = "scenario: unvalidated"
             s["validationMessage"] = str(error) + (
-                "; pending judgment. Supply worker-authored execution.argv for this test "
+                "; pending judgment. Supply worker-authored execution entry/runtime/argv for this test "
                 "or an observation adapter; no product failure or proof credit is inferred."
             )
     return scenarios

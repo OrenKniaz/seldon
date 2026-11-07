@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from codex_harness.core import intake, waves, worker_packet_budget
 from codex_harness.core.graph import load_plan
-from codex_harness.core.planner_schema import Judgment, judgment_example, judgment_response
+from codex_harness.core.planner_schema import Judgment, judgment_example, judgment_refs, judgment_response
 from codex_harness.core.reviewer_evidence import finding_records, native_reviewer, review_binding
 from codex_harness.core.spine import (
     SCHEMA,
@@ -254,10 +254,7 @@ class PlanStore:
         with nullcontext() if self.connection.in_transaction else self._transaction():
             spine = self.spine()
 
-            def refs(ids):
-                return [dict(id=key, revision=spine.revision(key), node=spine.node(key))
-                        for key in sorted(set(ids))]
-            subjects, evidence = refs(subject_ids), refs(evidence_ids or [])
+            subjects, evidence = judgment_refs(spine, subject_ids), judgment_refs(spine, evidence_ids or [])
             sources = []
             for key in sorted(set(source_event_ids or [])):
                 row = self.connection.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone()

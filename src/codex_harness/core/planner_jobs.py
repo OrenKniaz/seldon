@@ -488,14 +488,14 @@ def execute_worker_job(workspace, job_id):
             if _publication(store, request["publicationRevision"])[0] != manifest:
                 raise ValueError("worker-job-publication-changed-before-launch")
             run = dispatch_job(store, directory, request)
-        from codex_harness.core.planner_candidate import judgments_for, revalidate
+        from codex_harness.core.planner_candidate import execution_assessment_request, judgments_for, revalidate
 
         deadline = time.monotonic() + request["options"]["timeout"]
         handled = set()
         while run["status"] == "pending-judgment" and time.monotonic() < deadline:
             with open_plan_store(workspace) as store:
                 pending = next(b for b in run["beads"].values() if b["status"] == "awaiting judgment")
-                verdict = judgments_for(store, pending["integrated"]["root"]).get("execution", {})
+                verdict = judgments_for(store, pending["integrated"]["root"]).get(execution_assessment_request(pending["integrated"]["semantic"])["check"], {})
                 if (verdict.get("positiveCredit") or verdict.get("concreteGap")) and verdict["id"] not in handled:
                     handled.add(verdict["id"])
                     revalidate(store, job_id, "worker-judgment-continuation")

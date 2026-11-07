@@ -186,7 +186,7 @@ def judge_executions(workspace, patcher, *, contracts_gap=None, pending_executio
             prepared = call("harness_prepare_judgment", question="Assess meaningfulness, correct RED and stub/mock gaps",
                 subject_ids=with_server.store.spine().ids(), source_event_ids=[event], candidate=proof["candidate"])
             gaps = contracts_gap() if contracts_gap else []
-            meaning = dict(check="execution", evidenceBinding=proof["evidenceBinding"], meaningful=True,
+            meaning = dict(check="execution", evidenceBinding=proof["evidenceBinding"], phase=proof["phase"], meaningful=True,
                 correctFailureReason=True, noStubMockGaps=True,
                 qualitativeChecks={o["check"]: True for p in [proof, proof.get("red") or proof] for r in p["results"]
                                    for o in r.get("observations", []) if o["passed"] is None})
@@ -200,10 +200,32 @@ def judge_executions(workspace, patcher, *, contracts_gap=None, pending_executio
 
 def judge_candidate(call, observation):
     """Replace legacy static candidate verdicts with the public bound 1j request."""
+    identity_regression = observation.pop("identity_regression", False)
     observation = {k: v for k, v in observation.items() if k != "judgment_id"}
     prepared = call("harness_accept_assess", judgment=observation)
     packet = prepared["sourceRefs"][0]["payload"]
-    scripted_judgment(call, prepared, dict(check=packet["check"], evidenceBinding=packet["evidenceBinding"],
+    if identity_regression:
+        # R14: handwritten 'execution' replies hid the accepted-but-ignored
+        # contracts label. Public prepare/submit/read must teach both identities.
+        unknown = call("harness_accept_assess", judgment=dict(repo=observation["repo"], check="contracts", judgment_id=prepared["id"]), allow_error=True)
+        assert unknown["isError"] and packet["check"] in str(unknown) and packet["evidenceBinding"] in str(unknown), unknown
+        for change in ({"check": "contracts"}, {"evidenceBinding": "wrong-observation-digest"}):
+            wrong = dict(check=packet["check"], evidenceBinding=packet["evidenceBinding"], phase=packet["phase"])
+            wrong.update(change)
+            rejected = scripted_judgment(call, prepared, wrong)
+            assert rejected["disposition"] == "exact-fix" and not rejected["current"]["positiveCredit"], rejected
+            assert packet["check"] in rejected["error"] and packet["evidenceBinding"] in rejected["error"], rejected
+        missing = call("harness_prepare_judgment", question="Assess candidate", subject_ids=["V1"],
+                       evidence_ids=[packet["evidenceBinding"]], allow_error=True)
+        assert missing["isError"] and packet["evidenceBinding"] in str(missing)
+        assert "evidence-record" in str(missing) and "harness_accept_assess" in str(missing), missing
+    if observation["check"] != "execution":
+        # CC's real web gate reached this distinct semantic request. Execution-only
+        # fixtures missed both its preparation refusal and cross-phase credit.
+        rejected = scripted_judgment(call, prepared, dict(prepared["responseExample"]["meaning"], phase="wrong-phase"))
+        assert rejected["disposition"] == "exact-fix" and not rejected["current"]["positiveCredit"], rejected
+        assert packet["check"] in rejected["error"] and packet["phase"] in rejected["error"], rejected
+    scripted_judgment(call, prepared, dict(check=packet["check"], evidenceBinding=packet["evidenceBinding"], phase=packet["phase"],
         meaningful=True, correctFailureReason=True, noStubMockGaps=True,
         qualitativeChecks={o["check"]: True for p in [packet["proof"], packet["proof"].get("red") or packet["proof"]] for r in p["results"]
                            for o in r.get("observations", []) if o["passed"] is None}))
@@ -320,6 +342,154 @@ def planning_intent_golden(workspace):
         server.close()
 
 
+def fixture_ownership_golden(product):
+    """Protect external fixture ownership through real CSV -> SQLite -> HTTP.
+
+    Earlier setup overwrote snapshot code or supplied neutral-extension source;
+    suffix and argv membership checks then rejected legitimate importer data.
+    """
+    from copy import deepcopy
+    from codex_harness.core.planner_candidate import observation_files
+
+    product.mkdir()
+    (product / "index.html").write_text("<h1>Shelf items</h1>", encoding="utf-8")
+    (product / "app.py").write_text("raise RuntimeError('candidate source must remain unchanged')\n", encoding="utf-8")
+    (product / "importer.py").write_text(
+        "import csv,sqlite3,sys\nfrom pathlib import Path\n"
+        "assert Path(sys.argv[4]).read_text(encoding='utf-8') == '<h1>Shelf items</h1>'\n"
+        "rows=list(csv.DictReader(Path(sys.argv[1]).open()))\n"
+        "with sqlite3.connect(sys.argv[3]) as db:\n"
+        " db.execute('create table items (name text,quantity integer)')\n"
+        " db.executemany('insert into items values (?,?)',[(r['name'],int(r['quantity'])) for r in rows])\n"
+        "print('imported',len(rows))\n", encoding="utf-8")
+    (product / "server.py").write_text(
+        "import json,os,sqlite3,sys\nfrom http.server import SimpleHTTPRequestHandler,ThreadingHTTPServer\n"
+        "class Handler(SimpleHTTPRequestHandler):\n"
+        " def do_GET(self):\n"
+        "  if self.path!='/items': return super().do_GET()\n"
+        "  with sqlite3.connect(sys.argv[1]) as db: rows=db.execute('select name,quantity from items').fetchall()\n"
+        "  body=json.dumps(rows).encode(); self.send_response(200); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)\n"
+        "ThreadingHTTPServer(('127.0.0.1',int(os.environ['SELDON_PORT'])),Handler).serve_forever()\n", encoding="utf-8")
+    (product / "receipt_module").mkdir()
+    (product / "receipt_module/__init__.py").write_text("", encoding="utf-8")
+    (product / "receipt_module/__main__.py").write_text("from . import loader\n", encoding="utf-8")
+    (product / "receipt_module/loader.py").write_text("import importer\n", encoding="utf-8")
+    spec = dict(targets={"web": dict(kind="web", entry="index.html", server=dict(
+        entry="server.py", runtime=sys.executable, argv=[{"input": "{data}/pantry.sqlite3"}], readyPath="/items", readyWithin=5))},
+        scenarios=dict(schema="seldon/scenarios-v1", scenarios=[dict(id="fixtures", requirementRefs=["R1"], contractRefs=[],
+            setup=dict(dirs=["{data}/fixtures"], files=[dict(path="{data}/fixtures/items.csv", utf8="name,quantity\nTea,2\n"),
+                dict(path="{data}/blob.bin", base64="AAEC")]),
+            actions=[dict(id="import", cwd="receipt_module", process=dict(entry="importer.py", runtime=sys.executable, argv=[{"input": "{data}/fixtures/items.csv"}, "--db", {"input": "{data}/pantry.sqlite3"}, {"path": "index.html", "relative": True}])),
+                dict(id="read", http=dict(target="web", method="GET", path="/items", statusEquals=200, jsonEquals=[["Tea", 2]])),
+                dict(id="not-served", http=dict(target="web", method="GET", path="/DATA/fixtures/items.csv", statusEquals=404))],
+            observe=[dict(action="import", exitEquals=0, stdoutEquals="imported 1\n"), dict(action="read"), dict(action="not-served"),
+                dict(path="{data}/blob.bin", fileBytesEquals="\u0000\u0001\u0002")], verdict="all")]))
+
+    # Public canonical writer -> persisted scenario -> actual preview consumer.
+    # CC's web gate exposed a writer failure that direct runner fixtures missed.
+    from codex_harness.core.mcp_planner import PlannerServer
+    from tests.python.core.mcp_planner_support import workspace_wire
+    from tests.python.core.semantic_wiring_support import node
+    plan_root = product.parent / "fixture-plan"
+    plan_root.mkdir()
+    server = PlannerServer(plan_root)
+    try:
+        def call(tool, **args):
+            result = workspace_wire(server, tool, expected_workspace=str(plan_root), **args)
+            assert not result["isError"], result
+            return result["structuredContent"]
+        call("harness_plan_start", idea="Import CSV and display shelf items over HTTP", name="external-data", plan_mode="semantic-v1")
+        vision = server.store.spine().node("V1")
+        vision["fields"].update(targets=spec["targets"], scenarios=spec["scenarios"])
+        call("harness_upsert_nodes", nodes=[node("F1", "feature", ["V1"]), node("R1", "requirement", ["F1"]), vision])
+        stored = server.store.spine().node("V1")["fields"]
+        spec = dict(targets=stored["targets"], scenarios=stored["scenarios"])
+    finally:
+        server.close()
+
+    def preview(document):
+        (product / "SCENARIOS.json").write_text(json.dumps(document), encoding="utf-8")
+        before = observation_files(product)
+        result = subprocess.run([sys.executable, "-B", "-m", "codex_harness.core.semantic_runner", "--preview", "SCENARIOS.json", "fixtures"],
+            cwd=product, capture_output=True, text=True, timeout=45, check=True)
+        assert observation_files(product) == before  # Every candidate byte, not only app.py.
+        return json.loads(result.stdout)
+
+    # Separate storage alone let fixture bytes become the Python entry. Earlier
+    # coverage checked writes, never the code origin consumed by the launch owner.
+    invalid = deepcopy(spec)
+    invalid["targets"]["fixture"] = dict(entry="{data}/app.py", argv=[])
+    scenario = invalid["scenarios"]["scenarios"][0]
+    scenario["setup"] = dict(files=[dict(path="{data}/app.py", utf8="print('fixture-code')\n")])
+    scenario["actions"] = [dict(id="exec", cli=dict(target="fixture", operation="run", argv=[]))]
+    scenario["observe"] = [dict(action="exec", stdoutEquals="fixture-code\n")]
+    refusal = preview(invalid)
+    assert refusal["state"] != "PASS" and "entry" in str(refusal) and "candidate" in str(refusal), refusal
+
+    # A missing candidate module must never fall back to installed pytest code.
+    invalid["targets"]["fixture"] = dict(module="pytest", argv=["--version"])
+    refusal = preview(invalid)
+    assert refusal["state"] != "PASS" and "module" in str(refusal) and "candidate" in str(refusal), refusal
+
+    for position in ("cwd", "PYTHONPATH", "directory", "process-entry"):
+        invalid = deepcopy(spec)
+        scenario = invalid["scenarios"]["scenarios"][0]
+        if position == "cwd":
+            scenario["actions"][0]["cwd"] = "{data}"
+        elif position == "PYTHONPATH":
+            scenario["actions"][0]["process"]["env"] = dict(PYTHONPATH="{data}")
+        elif position == "process-entry":
+            scenario["actions"][0]["process"]["entry"] = "{data}/app.py"
+        else:
+            invalid["targets"]["web"]["server"] = dict(argv=[sys.executable, "-m", "http.server", "--directory", "{data}"], readyPath="/", readyWithin=5)
+        refusal = preview(invalid)
+        assert refusal["state"] != "PASS" and "candidate" in str(refusal), refusal
+        assert ("cwd" if position == "cwd" else "env" if position == "PYTHONPATH" else "entry") in str(refusal), refusal
+        assert not refusal.get("cleanup", {}).get("childLaunched"), refusal
+
+    result = preview(spec)
+    assert result["state"] == "PASS", result
+    csv = Path(result["actions"]["import"]["command"][2])
+    data = csv.parent.parent
+    snapshot = Path(result["actions"]["read"]["server"]["cwd"])
+    assert Path(result["actions"]["import"]["cwd"]) == snapshot / "receipt_module"
+    assert data.name == "DATA" and data.parent == snapshot.parent and not data.is_relative_to(snapshot)
+    assert not data.is_relative_to(product) and not data.exists() and not snapshot.exists()
+    assert result["actions"]["read"]["http"][0]["response"]["json"] == [["Tea", 2]]
+    assert result["cleanup"]["quiescenceVerified"] and result["cleanup"]["activeProcessesAfterTeardown"] == 0
+    assert (product / ".codex-harness/evidence/preview").is_dir() and not (product / "fixtures").exists()
+    bound_module = deepcopy(spec)
+    bound_module["targets"]["module-importer"] = dict(module="receipt_module", argv=[])
+    action = bound_module["scenarios"]["scenarios"][0]["actions"][0]
+    action["cli"] = dict(target="module-importer", operation="import", argv=action.pop("process")["argv"])
+    assert preview(bound_module)["state"] == "PASS"
+    # Types do not establish ownership: even code-looking bytes are inert DATA.
+    inert = deepcopy(spec)
+    inert["scenarios"]["scenarios"][0]["setup"]["files"].append(dict(path="{data}/notes.py", utf8="inert fixture bytes"))
+    inert["scenarios"]["scenarios"][0]["observe"].append(dict(path="{data}/notes.py", fileBytesEquals="inert fixture bytes"))
+    assert preview(inert)["state"] == "PASS"
+    for name in ("app.py", "fixtures/app.txt", ".codex/config.toml", "{data}/.codex/config.toml", "{data}/../app.py", "{data}/"):
+        invalid = deepcopy(spec)
+        invalid["scenarios"]["scenarios"][0]["setup"] = dict(files=[dict(path=name, utf8="print('fixture-code')\n")])
+        refusal = preview(invalid)
+        assert refusal["state"] == "ERROR" and name in refusal["reason"], refusal
+        assert "DATA" in refusal["reason"] or "reserved" in refusal["reason"] or "sandbox" in refusal["reason"], refusal
+        assert not refusal["cleanup"]["childLaunched"], refusal
+    # Keep the confirmed real-junction regression, before any output write.
+    outside = product.parent / "junction-target"
+    outside.mkdir()
+    linked = product / ".codex-harness"
+    assert linked.resolve().is_relative_to(product.resolve()) and not linked.is_junction() and not linked.is_symlink()
+    shutil.rmtree(linked)
+    subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(linked), str(outside)], check=True, capture_output=True)
+    try:
+        refusal = preview(spec)
+        assert refusal["state"] == "ERROR" and ".codex-harness" in refusal["reason"] and "link" in refusal["reason"], refusal
+        assert list(outside.iterdir()) == [] and not refusal["cleanup"]["childLaunched"], refusal
+    finally:
+        linked.rmdir()
+
+
 def execution_judgment_golden(workspace):
     """Protect compiled worker tests -> real observations -> stored, bound 1j verdicts.
 
@@ -361,7 +531,7 @@ def execution_judgment_golden(workspace):
             source_event_ids=[event_id], candidate=proof['candidate'])
 
     def judge(prepared, proof, verdict, gaps=()):
-        meaning = dict(check='execution', evidenceBinding=proof['evidenceBinding'],
+        meaning = dict(check='execution', evidenceBinding=proof['evidenceBinding'], phase=proof['phase'],
                        meaningful=True, correctFailureReason=True, noStubMockGaps=True)
         return scripted_judgment(call, prepared, meaning, verdict, list(gaps))["current"]
 
@@ -373,10 +543,10 @@ def execution_judgment_golden(workspace):
             node('R_BASE', 'requirement', ['F'], behavior='Preserve baseline readback'),
             node('R_NEW', 'requirement', ['F'], behavior='Read both channels'),
             node('T_BASE', 'test', ['R_BASE'], module='baseline.sensor', level='semantic',
-                 execution=dict(argv=[sys.executable, '-B', 'baseline.sensor'], testRoots=['baseline.sensor'],
+                 execution=dict(entry='baseline.sensor', runtime=sys.executable, argv=[], testRoots=['baseline.sensor'],
                                 rationale='Preserve existing baseline readback')),
             node('T_NEW', 'test', ['R_NEW'], module='verify.unfamiliar', level='semantic',
-                 execution=dict(argv=[sys.executable, '-B', 'verify.unfamiliar', 'channels.dat'], testRoots=['verify.unfamiliar', 'helperlib'],
+                 execution=dict(entry='verify.unfamiliar', runtime=sys.executable, argv=['channels.dat'], testRoots=['verify.unfamiliar', 'helperlib'],
                                 rationale='Observe both channels from the candidate data path')),
             node('C', 'bead', ['T_BASE', 'T_NEW'], ownedFiles=['verify.unfamiliar', 'helperlib/__init__.py'], dependsOn=[],
                  lessons=[], semanticPhase='contracts'),
@@ -693,7 +863,7 @@ def trace_contract_golden(workspace):
                     nodes.extend([node(architecture, "architecture", [r]), node(design, "design", [architecture]), node(contract, "contract", [design])])
                     parent = contract
                 nodes.extend([
-                    node(t, "test", [parent], module="sensor/readback", level="semantic", execution={"argv": ["opaque-simulator", "--measure"], "testRoots": ["sensor"], "rationale": "Measure retained sensor behavior"}),
+                    node(t, "test", [parent], module="sensor/readback", level="semantic", execution={"entry": "sensor/readback", "argv": ["--measure"], "testRoots": ["sensor"], "rationale": "Measure retained sensor behavior"}),
                     node(b, "bead", [t], ownedFiles=["sensor" + suffix + ".bin"], dependsOn=[], lessons=[], **({"semanticPhase": "build"} if mode == "semantic-v1" else {"proofModule": "sensor/readback"})),
                     node(c, "code", [b], path="sensor" + suffix + ".bin"),
                 ])
@@ -969,10 +1139,10 @@ class ConcurrentHTTP(unittest.TestCase):
                         "requirementRefs": ["R4"],
                         "contractRefs": ["G1"],
                         "setup": {
-                            "dirs": ["data"],
+                            "dirs": [],
                             "files": [
                                 {
-                                    "path": "data/mixed.csv",
+                                    "path": "{data}/mixed.csv",
                                     "utf8": (
                                         "name,quantity,unit,expires\n"
                                         "Rice,2,kg,2030-01-10\n"
@@ -994,9 +1164,9 @@ class ConcurrentHTTP(unittest.TestCase):
                                     "target": "importer",
                                     "operation": "import-mixed",
                                     "argv": [
-                                        {"path": "data/mixed.csv"},
+                                        {"input": "{data}/mixed.csv"},
                                         "--db",
-                                        {"path": "data/pantry.sqlite3"},
+                                        {"input": "{data}/pantry.sqlite3"},
                                     ],
                                 },
                             }
@@ -1015,7 +1185,7 @@ class ConcurrentHTTP(unittest.TestCase):
                         "id": "S_IMPORT_UNREADABLE",
                         "requirementRefs": ["R4"],
                         "contractRefs": ["G1"],
-                        "setup": {"dirs": ["data"]},
+                        "setup": {"dirs": []},
                         "actions": [
                             {
                                 "id": "unreadable",
@@ -1023,9 +1193,9 @@ class ConcurrentHTTP(unittest.TestCase):
                                     "target": "importer",
                                     "operation": "import-unreadable",
                                     "argv": [
-                                        {"path": "data/missing.csv"},
+                                        {"input": "{data}/missing.csv"},
                                         "--db",
-                                        {"path": "data/pantry.sqlite3"},
+                                        {"input": "{data}/pantry.sqlite3"},
                                     ],
                                 },
                             }
@@ -1061,7 +1231,7 @@ class ConcurrentHTTP(unittest.TestCase):
                     module="verify_http.py",
                     level="semantic",
                     execution={
-                        "argv": [sys.executable, "-B", "verify_http.py", "data/pantry.sqlite3"],
+                        "entry": "verify_http.py", "runtime": sys.executable, "argv": ["data/pantry.sqlite3"],
                         "testRoots": ["verify_http.py"],
                         "rationale": "Planned importer/SQLite/HTTP readback verifier supplied and run later in this journey",
                     },
@@ -1538,7 +1708,7 @@ with TemporaryDirectory(dir=root) as scratch:
                 # twice. Frozen-plan journeys never consumed a repaired test/command.
                 preliminary = store.spine().node("T_HTTP")
                 preliminary["text"] += " Assert imported rows survive SQLite and HTTP server restart."
-                preliminary["fields"]["execution"]["argv"] = [sys.executable, "-B", "verify_http.py"]
+                preliminary["fields"]["execution"]["argv"] = []
                 call("harness_upsert_node", node=preliminary)
                 # R7: one approved build becomes test-only contracts -> build,
                 # preserving scope, allowed tuple, concurrency and deadline.
@@ -2035,7 +2205,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     edited_test = json.loads(json.dumps(original_test))
                     edited_test["text"] += " Observe current verifier " + filename + (" with product readback" if len(roots) > 1 else "")
                     edited_test["fields"]["execution"]["testRoots"] = roots
-                    edited_test["fields"]["execution"]["argv"] = [filename if a == "verify_http.py" else a for a in edited_test["fields"]["execution"]["argv"]]
+                    edited_test["fields"]["execution"]["entry"] = filename
                     call("harness_upsert_node", node=edited_test)
                     if filename != "verify_http.py":
                         renamed = store.spine().node("V1")
@@ -2631,7 +2801,9 @@ def provider_host(mode, workspace, surface, job_id=None):
                     "<button id='read-seed' onclick=\"fetch('/seed').then(r=>r.json()).then(d=>document.querySelector('#seeded').textContent=d.note)\">Read seeded note</button><p id='seeded'></p>"
                     "<form method='post' action='/submit'><input type='hidden' name='note' value='Posted'><button id='post-redirect'>Submit form</button></form>"
                     "<button id='failed-happy' onclick=\"fetch('/broken').then(()=>this.textContent='Failed happy')\">Another happy path</button>")
-            scripted_worker(packet(root, "B"), root, {"serve.py": served_product()})
+            scripted_worker(packet(root, "B"), root, {"serve.py": served_product(),
+                "serve_wrapper.py": "import subprocess,sys; subprocess.Popen([sys.executable,'-B','serve.py']).wait()\n",
+                "seed_check.py": "import csv,json,sys; from pathlib import Path; assert list(csv.DictReader(Path(sys.argv[1]).open())) == [{'name':'Tea','quantity':'2'}]; print(json.loads(Path('seed.json').read_text())['note'])\n"})
 
     if surface in {"shelflife", "parallel-http"}:
         from codex_harness.core.provider_launch import ProviderNormalLaunch
@@ -2888,6 +3060,7 @@ def test_golden_path(tmp_path, request, surface):
     and C; a missing owner keeps historical acceptance reads pending, never crashing.
     """
     if surface == "cli":
+        fixture_ownership_golden(tmp_path / "fixture-ownership")
         request.getfixturevalue("http_journeys")
         cold_start_golden(tmp_path.parent / (tmp_path.name + "-cold-start"))
         planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
@@ -2901,9 +3074,10 @@ def test_golden_path(tmp_path, request, surface):
         api = dict(target="service", method="GET", path="/", statusEquals=200)
         timeout_spec = dict(schema="seldon/scenarios-v1", scenarios=[dict(id="timeout", requirementRefs=["R1"],
             contractRefs=[], setup={}, actions=[dict(id="api", http=api)], observe=[dict(action="api")], verdict="all")])
+        (timeout_product / "wait.py").write_text("import time; time.sleep(60)\n", encoding="utf-8")
         before = time.monotonic()
         timed = observe(timeout_spec, timeout_product, {"service": dict(server=dict(
-            argv=[sys.executable, "-B", "-c", "import time; time.sleep(60)"], readyPath="/", readyWithin=.25))}, "validation",
+            entry="wait.py", runtime=sys.executable, argv=[], readyPath="/", readyWithin=.25))}, "validation",
             web_config=dict(chromium="missing-browser", playwright="missing-playwright"))[0]
         assert timed["state"] == "ERROR" and "readiness timeout" in timed["reason"], timed
         assert time.monotonic() - before < 15
@@ -2945,7 +3119,7 @@ def test_golden_path(tmp_path, request, surface):
         # exercised server launch, HTTP persistence, readiness or teardown.
         vision = captured_run["nodes"][0]["fields"]
         vision["targets"]["served"] = dict(kind="web", entry="index.html",
-            server=dict(argv=[sys.executable, "-B", "-c", "import subprocess,sys; subprocess.Popen([sys.executable,'-B','serve.py']).wait()"], readyPath="/", readyWithin=5))
+            server=dict(entry="serve_wrapper.py", runtime=sys.executable, argv=[], readyPath="/", readyWithin=5))
         journey = vision["scenarios"]["scenarios"][0]["actions"][0]["web"]
         journey["target"] = "served"
         # Review P2: preview must preserve cross-target API/CLI prerequisites and
@@ -2954,8 +3128,9 @@ def test_golden_path(tmp_path, request, surface):
         # r9: a deliberate negative path was counted as a console error. Existing
         # served journeys made only successful requests and never created preview DBs.
         scenario = vision["scenarios"]["scenarios"][0]
+        scenario["setup"] = dict(dirs=["{data}/fixtures"], files=[dict(path="{data}/fixtures/items.csv", utf8="name,quantity\nTea,2\n")])
         scenario["actions"].insert(0, dict(id="seed", http=dict(target="seed-service", method="POST", path="/seed", json=dict(note="Seeded"), statusEquals=200)))
-        scenario["actions"].insert(1, dict(id="seed-check", process=dict(argv=[sys.executable, "-B", "-c", "import json; from pathlib import Path; print(json.loads(Path('seed.json').read_text())['note'])"])))
+        scenario["actions"].insert(1, dict(id="seed-check", process=dict(entry="seed_check.py", runtime=sys.executable, argv=[{"input": "{data}/fixtures/items.csv"}])))
         scenario["observe"].extend([dict(action="seed"), dict(action="seed-check", exitEquals=0, stdoutEquals="Seeded\n"), dict(path="seed.json", fileJsonEquals=dict(saved=True, note="Seeded"))])
         journey["steps"][1:1] = [dict(op="click", locator=dict(selector="#read-seed")), dict(op="assertVisible", locator=dict(text="Seeded"))]
         # R3: a native form redirect completes without an exposed response body.
@@ -2992,7 +3167,7 @@ def test_golden_path(tmp_path, request, surface):
         scenario["observe"][-1] = dict(path="state.json", fileAbsent=True)
         for n in captured_run["nodes"]:
             if n["kind"] == "bead":
-                n["fields"]["ownedFiles"].append("serve.py")
+                n["fields"]["ownedFiles"].extend(["serve.py", "serve_wrapper.py", "seed_check.py"])
     shutil.copy2(sys.executable, codex)
     shutil.copy2(sys.executable, tools / ("claude.exe" if os.name == "nt" else "claude"))
     # Keep OS/git/node tools while excluding the host's provider installations/bundles.
@@ -3237,7 +3412,7 @@ def test_golden_path(tmp_path, request, surface):
                 nodes.append(dict(id="T_RECEIPT", kind="test", title="Binary receipt", text="Verify exact bytes through the real CLI",
                     parents=["G1"], fields=dict(module="checks/verify_hashslip.py", level="semantic",
                         execution={**schema_nodes["test"]["fields"]["execution"],
-                            "argv": [sys.executable, "-B", "checks/verify_hashslip.py"], "testRoots": ["checks"]})))
+                            "entry": "checks/verify_hashslip.py", "argv": [], "testRoots": ["checks"]})))
                 bead = next(n for n in nodes if n["id"] == "B")
                 bead["parents"] = ["T_RECEIPT"]
                 bead["fields"].update(dependsOn=[], ownedFiles=["hashslip.py", "checks/verify_hashslip.py", "checks/receipt_helper.py", "checks/input.json", "checks/retired.json"])
@@ -3461,7 +3636,7 @@ def test_golden_path(tmp_path, request, surface):
                 assert job["status"] == "pending-judgment", job
                 assert not (Path(job["evidenceDir"]) / "dispatch-run.json").exists()
                 judge_candidate(lambda tool, **args: call(tool, _probe=True, **args),
-                    dict(repo=job["run"]["beads"]["B"]["candidateRoot"], check="execution"))
+                    dict(repo=job["run"]["beads"]["B"]["candidateRoot"], check="execution", identity_regression=True))
                 while job["status"] not in {"completed", "failed"} and time.time() < deadline:
                     job = call("harness_worker_status", job_id=job["jobId"], wait_seconds=1)
                 probing = False
@@ -3481,6 +3656,11 @@ def test_golden_path(tmp_path, request, surface):
                 assert all(r["cleanup"]["quiescenceVerified"] for r in red["results"])
                 assert retained["semanticValidation"]["testSources"] == red["testSources"]
                 assert retained["semanticValidation"]["judgmentId"]
+                # S6 must invoke the absolute candidate entry from another owned
+                # directory; root-only receipt checks missed the cwd regression.
+                invocation = next(r for r in retained["semanticValidation"]["results"] if r["id"] == "S6")["actions"]["run"]
+                entry, caller = Path(invocation["command"][1]), Path(invocation["cwd"])
+                assert entry.is_absolute() and caller == entry.parent / "checks"
             assert job["run"]["semanticValidation"]["state"] == "PASS", job
             if surface == "web":
                 # Protect mode provenance and preview guidance through canonical dispatch;
@@ -3583,7 +3763,7 @@ def test_golden_path(tmp_path, request, surface):
                     import struct
                     for artifact in observed["artifacts"]:
                         png = Path(artifact["path"])
-                        assert png.is_relative_to(worker_root.parent / "evidence") and not png.is_relative_to(worker_root)
+                        assert png.is_relative_to(worker_root / ".codex-harness/evidence/preview")
                         data = png.read_bytes()
                         assert hashlib.sha256(data).hexdigest() == artifact["sha256"]
                         assert struct.unpack('>I', data[16:20])[0] == 375
@@ -3615,11 +3795,16 @@ def test_golden_path(tmp_path, request, surface):
                     [sys.executable, "-B", str(tmp_path / filename), "--help"], cwd=tmp_path,
                     timeout=10,
                 ).startswith(b"usage:")
-            if surface == "web":
-                before_judgment = call("harness_plan_status", _probe=True)
-                judgment = dict(captured_run["judgments"][-1], repo=str(tmp_path))
-                judge_candidate(lambda tool, **args: call(tool, _probe=True, **args), judgment)
-                assert call("harness_plan_status", _probe=True)["plan_revision"] == before_judgment["plan_revision"]
+            before_judgment = call("harness_plan_status", _probe=True)
+            # Scripted semantic request on CLI; web retains actual rendered evidence.
+            judgment = dict(captured_run["judgments"][-1], repo=str(tmp_path)) if surface == "web" else dict(repo=str(tmp_path), check="visualQuality")
+            quality = judge_candidate(lambda tool, **args: call(tool, _probe=True, **args), judgment)
+            from codex_harness.core.acceptance_runs import acceptance_inputs
+            from codex_harness.core.plan_store import open_plan_store
+            with open_plan_store(tmp_path) as store:
+                consumed = acceptance_inputs(store, tmp_path, subject="product")["judgments"]["visualQuality"]
+            assert consumed["id"] == quality["id"] and consumed["positiveCredit"], consumed
+            assert call("harness_plan_status", _probe=True)["plan_revision"] == before_judgment["plan_revision"]
             call("harness_advance", to_phase="accept")
             deadline = time.time() + 300
             # Complete the bound verdict before capturing acceptance inputs. Replacing

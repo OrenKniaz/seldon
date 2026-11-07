@@ -298,15 +298,11 @@
               "contractRefs": [
                 "G1"
               ],
-              "setup": {
-                "dirs": [
-                  "data/caller"
-                ]
-              },
+              "setup": {},
               "actions": [
                 {
                   "id": "run",
-                  "cwd": "data/caller",
+                  "cwd": "checks",
                   "cli": {
                     "target": "app",
                     "operation": "receipt",
@@ -554,7 +550,7 @@
       "id": "R4",
       "kind": "requirement",
       "title": "Standalone standard-library script",
-      "text": "Deliver only root hashslip.py, callable by absolute path from another cwd, no installation, third-party packages, runtime files or network. S6 executes from a setup-created caller directory to catch cwd dependency missed at project root. Handover absolute path, invocation and honest checks. Side-effect/dependency constraints also require worker source review, not inferred solely from receipt scenarios.",
+      "text": "Deliver only root hashslip.py, callable by absolute path from another cwd, no installation, third-party packages, runtime files or network. S6 executes from the candidate-owned checks directory to catch cwd dependency missed at project root. Handover absolute path, invocation and honest checks. Side-effect/dependency constraints also require worker source review, not inferred solely from receipt scenarios.",
       "parents": [
         "F1"
       ],

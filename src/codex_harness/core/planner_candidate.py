@@ -60,6 +60,10 @@ def _evidence_digest(proof):
     return _digest({k: v for k, v in proof.items() if k not in assessment})
 
 
+def execution_assessment_request(proof, check="execution"):
+    return dict(check=check, evidenceBinding=proof["evidenceBinding"], phase=proof["phase"])
+
+
 def assess_execution(proof, judgment=None):
     """Consume shared current judgment credit; process failures remain observations."""
     if _evidence_digest(proof) != proof["evidenceBinding"]:
@@ -72,8 +76,8 @@ def assess_execution(proof, judgment=None):
     result["state"] = observed if not contracts and observed in {"ERROR", "FAIL"} else "pending-judgment"
     meaning = (judgment or {}).get("meaning", {})
     bound = bool(judgment and judgment.get("candidate") == proof["candidate"]
-                 and judgment.get("current") and meaning.get("check") == "execution"
-                 and meaning.get("evidenceBinding") == proof["evidenceBinding"])
+                 and judgment.get("current") and all(meaning.get(k) == v
+                     for k, v in execution_assessment_request(proof).items()))
     if not bound:
         return result
     result["judgmentId"] = judgment["id"]
@@ -138,6 +142,7 @@ def _semantic_validation(root, plan, record, phase):
                 _git(root, "worktree", "remove", "--force", str(baseline))
     results = semantic_runner.run(document, root, plan.semantic["targets"],
         "contracts" if phase == "contracts" else "validation",
+        evidence_dir=Path(record["evidenceDir"]) / "semantic" if record.get("evidenceDir") else None,
         progress_path=Path(record["evidenceDir"]) / "semantic-progress.json" if record.get("evidenceDir") else None)
     if observation_files(root) != observed_files:
         raise ValueError("Validation candidate bytes changed during observation")
@@ -153,7 +158,7 @@ def _semantic_validation(root, plan, record, phase):
         candidate=_digest(dict(files=observed_files, **identity)),
         linkedRed=_digest(red) if red else None, red=red, results=results, testSources=sources, tests=tests)
     proof["evidenceBinding"] = _evidence_digest(proof)
-    return assess_execution(proof, record.get("judgments", {}).get("execution"))
+    return assess_execution(proof, record.get("judgments", {}).get(execution_assessment_request(proof)["check"]))
 
 
 def retained(workspace, job_id):
@@ -314,7 +319,7 @@ def delivered_candidate(store, repo):
     return delivery
 
 
-def judgment_binding(store, repo):
+def judgment_observation(store, repo):
     """Candidate identity includes worker tests, trace, product bytes and observation tools."""
     from codex_harness.core import dispatch as d
     from codex_harness.core.planner_jobs import load_plan
@@ -329,7 +334,7 @@ def judgment_binding(store, repo):
             raise ValueError("judgment: integrated candidate changed; select unchanged observations")
         root = Path(candidate["candidateRoot"])
     plan = load_plan(Path(candidate["verificationPlan"]))
-    return dict(files=observation_files(root), **_execution_identity(plan))
+    return dict(files=observation_files(root), **_execution_identity(plan)), run["beads"][candidate["bead"]]["integrated"]["semantic"]
 
 
 def judgments_for(store, repo):
@@ -337,7 +342,8 @@ def judgments_for(store, repo):
     from codex_harness.core.approvals import records
 
     try:
-        candidate = _digest(judgment_binding(store, repo))
+        binding, proof = judgment_observation(store, repo)
+        candidate = _digest(binding)
     except ValueError:
         return {}  # Unavailable observations grant no credit; C/judgment explains the prerequisite.
     result, seen = {}, set()
@@ -349,8 +355,8 @@ def judgments_for(store, repo):
         seen.add(row["check"])
         judgment = store.judgment(row["judgmentId"], candidate=candidate)
         meaning = judgment["meaning"]
-        if (judgment["current"] and meaning.get("check") == row["check"]
-                and meaning.get("evidenceBinding") == row["evidenceBinding"]):
+        if (judgment["current"] and all(meaning.get(k) == row.get(k) == v
+                for k, v in execution_assessment_request(proof, row["check"]).items())):
             result.setdefault(row["check"], dict({key: judgment[key] for key in (
                 "id", "binding", "candidate", "status", "current", "positiveCredit", "concreteGap",
                 "verdict", "rationale", "meaning", "gaps", "source", "sourceVerified")},
@@ -361,44 +367,34 @@ def judgments_for(store, repo):
 
 def record_judgment(store, *, repo, check, judgment_id=None, passed=None, statement=None, by=None):
     """Prepare or attach the one 1j judgment. Caller observations alone grant no credit."""
-    if not isinstance(check, str) or not check.strip():
-        raise ValueError("judgment: name the assessment check")
-    root = Path(repo).resolve()
-    binding = judgment_binding(store, root)
+    binding, proof = judgment_observation(store, repo)
     candidate = _digest(binding)
     spine = store.spine()
     subjects = sorted({*spine.ids("test"), *spine.ids("requirement"), *spine.ids("vision")})
-    retained_candidate, run = current_job_run(store, required=True)
-    proof = run["beads"][retained_candidate["bead"]]["integrated"]["semantic"]
     if proof["candidate"] != candidate:
         raise ValueError("judgment: select the unchanged observed candidate")
-    evidence_binding = proof["evidenceBinding"] if check == "execution" else _digest(
-        dict(candidate=candidate, check=check, results=proof["results"]))
+    if not isinstance(check, str) or not check.strip():
+        raise ValueError("judgment: name the semantic check to prepare")
+    request = execution_assessment_request(proof, check)
     if judgment_id is None:
         with store._transaction():
-            store._event("candidate-observation", dict(check=check, candidate=candidate,
-                evidenceBinding=evidence_binding, proof=proof,
+            store._event("candidate-observation", dict(**request, candidate=candidate, proof=proof,
                 callerObservation=dict(passed=passed, statement=statement, by=by),
                 humanIdentityVerified=False))
             event_id = store.connection.execute("SELECT max(id) FROM events").fetchone()[0]
         judgment = store.prepare_judgment(question=(
-            f"Assess {check}: meaningful tests, whether observed baseline failures are missing/incorrect product behavior or broken test infrastructure, and stub/mock gaps. "
-            f"Return meaning.check={check!r}, meaning.evidenceBinding={evidence_binding!r}; "
-            "for execution positive credit also requires meaningful:true and "
-            "correctFailureReason:true for the bound RED and noStubMockGaps:true for Validation. "
-            "Uncertain assessments stay inconclusive/unsupported; negative verdicts name gaps."),
+            f"Assess {check} in {request['phase']}: meaningful tests, whether observed baseline failures are missing/incorrect product behavior or broken test infrastructure, and stub/mock gaps. "
+            "Execution positive credit requires meaningful:true, correctFailureReason:true for the bound RED and noStubMockGaps:true for Validation."),
             subject_ids=subjects, source_event_ids=[event_id], candidate=candidate)
     else:
         judgment = store.judgment(judgment_id, candidate=candidate)
         packets = [r["payload"] for r in judgment["sourceRefs"] if r["kind"] == "candidate-observation"]
         if (not judgment["current"] or not any(
-            p.get("candidate") == candidate and p.get("check") == check
-            and p.get("evidenceBinding") == evidence_binding for p in packets)
+            p.get("candidate") == candidate and all(p.get(k) == v for k, v in request.items()) for p in packets)
             or {r["id"] for r in judgment["subjectRefs"]} != set(subjects)):
-            raise ValueError("judgment: bind the current candidate observation and subjects")
+            raise ValueError(f"judgment: expected prepared request(s) {[{k: p[k] for k in request} for p in packets]!r}; use their exact check and current observed repo/subjects")
     with store._transaction():
-        store._event("candidate-judgment", dict(check=check, candidate=candidate,
-            evidenceBinding=evidence_binding, judgmentId=judgment["id"]))
+        store._event("candidate-judgment", dict(**request, candidate=candidate, judgmentId=judgment["id"]))
     return store.judgment(judgment["id"], candidate=candidate)
 
 
@@ -465,7 +461,7 @@ def revalidate(store, job_id, request_id):
         original.update(root=str(root), integrationCommit=proof["candidateCommit"], receiptPath=str(receipt))
         run["verificationPlan"] = str(plan_path)
     else:
-        proof = assess_execution(proof, judgments_for(store, root).get("execution"))
+        proof = assess_execution(proof, judgments_for(store, root).get(execution_assessment_request(proof)["check"]))
     original.update(semantic=proof, validation=dict(passed=proof["passed"]))
     bead["candidate"].update(commit=proof["candidateCommit"], tree=proof["candidateTree"])
     d._write_record(receipt, original)

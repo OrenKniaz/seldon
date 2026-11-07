@@ -102,7 +102,7 @@ def run_scenarios(
             document,
             repo,
             targets,
-            "validation",
+            "validation", evidence_dir=repo.parent / "evidence" / "acceptance",
             run_seconds=min(120, _metadata_remaining(run_deadline, should_stop) - 1.7),
             judgments=judgments,
             should_stop=should_stop,

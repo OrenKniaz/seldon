@@ -16,7 +16,7 @@ from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.record_io import write_record_json
-from codex_harness.core.semantic_schema import LIMIT, argv, content, path, validate
+from codex_harness.core.semantic_schema import LIMIT, array, content, fields, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
 MODULE = "codex_harness.core.semantic_runner"
@@ -25,6 +25,50 @@ SOURCE_IGNORED = {".git", ".codex-harness", "__pycache__", ".pytest_cache", ".ru
 
 class ObservationUnavailable(ValueError):
     """A capture bound omits evidence; it is not a product verdict."""
+
+
+def launch(binding, root, data=None, *, position="launch", extra=None, cwd=None):
+    """Construct entry-first launches; DATA has only explicitly declared input roles."""
+    def source(name, slot):
+        if not isinstance(name, str) or "{data}" in name:
+            raise ValueError(f"{position}.{slot} {name!r}: code/import/document roots must be candidate-owned; DATA is input only")
+        return str(path(root, name))
+    cwd = Path(source(cwd, "cwd")) if cwd not in (None, ".") else Path(root)
+    if data is not None and not cwd.is_dir():
+        raise ValueError(f"{position}.cwd {str(cwd)!r}: use an existing confined candidate-owned directory, never DATA")
+    if "env" in binding:
+        raise ValueError(f"{position}.env {binding['env']!r}: import roots must be candidate-owned; declare DATA as input argv values")
+    fields(binding, ("entry", "module", "runtime", "argv"), ("argv",), position)
+    if len(set(binding) & {"entry", "module"}) != 1:
+        raise ValueError(f"{position}.entry: declare one candidate-owned entry/module; opaque interpreter argv cannot establish execution origin")
+    module = binding.get("module")
+    if module is not None and (not isinstance(module, str) or not all(p.isidentifier() for p in module.split(".")) or module.split(".")[0] in sys.stdlib_module_names):
+        raise ValueError(f"{position}.module {module!r}: use a candidate-owned dotted module, never a runtime/standard-library entry")
+    entry = source(module.replace(".", "/") + "/__main__.py" if module else binding["entry"], "entry")
+    if module and data is not None and (not Path(entry).is_file() or any(
+        not path(root, "/".join(module.split(".")[:i]) + "/__init__.py").is_file() for i in range(1, len(module.split(".")) + 1))):
+        raise ValueError(f"{position}.module {module!r}: bind candidate package __init__.py and __main__.py; use entry for a source file, never installed-module fallback")
+    runtime = binding.get("runtime")
+    if runtime is not None and (not isinstance(runtime, str) or "{data}" in runtime or not Path(runtime).is_absolute() or data is not None and Path(runtime).is_relative_to(data)):
+        raise ValueError(f"{position}.runtime {runtime!r}: use an installed runtime executable without arguments; source belongs in candidate entry")
+    command = ([sys.executable, "-B", "-m", binding["module"]] if "module" in binding else
+               [runtime, entry] if runtime else [entry])
+    for index, value in enumerate([*array(binding["argv"], 64), *array(extra if extra is not None else [], 64)]):
+        slot = f"argv[{index}]"
+        if isinstance(value, dict):
+            if set(value) == {"input"}:
+                name = value["input"]
+                if not isinstance(name, str) or not name.startswith("{data}/"):
+                    raise ValueError(f"{position}.{slot} {name!r}: DATA input requires {{input: '{{data}}/relative-path'}}")
+                value = str(path(root, name, data))
+            else:
+                fields(value, ("path", "relative"), ("path",), f"{position}.{slot}")
+                resolved = source(value["path"], slot)
+                value = os.path.relpath(resolved, cwd).replace("\\", "/") if value.get("relative") is True else resolved
+        elif not isinstance(value, str) or "{data}" in value or "\x00" in value:
+            raise ValueError(f"{position}.{slot} {value!r}: DATA substitution only in declared input values; code roots must be candidate-owned")
+        command.append(value)
+    return command, cwd
 
 
 def web_toolchain(config, evidence, *, browser=True):
@@ -59,10 +103,7 @@ def web_toolchain(config, evidence, *, browser=True):
         raise ValueError("Web tool requires Playwright 1.59.1")
     if evidence is False:
         return identities
-    locations.update(
-        identity=identities,
-        evidence=str(Path(evidence or tempfile.mkdtemp(prefix="seldon-web-evidence-")).resolve()),
-    )
+    locations.update(identity=identities, evidence=str(Path(evidence).resolve()))
     Path(locations["evidence"]).mkdir(parents=True, exist_ok=True)
     return locations
 
@@ -93,11 +134,8 @@ def read(file, limit=LIMIT):
 
 
 def capture(cmd, root, cwd=None, payload=None, *, browser=False, hold_open=False):
-    env = dict(os.environ)
-    env.update(dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH".split(), str(root)))
-    if cmd[1:3] == ["-B", "-m"]:
-        env["PYTHONSAFEPATH"] = "1"
-    env.update((k, os.environ[k]) for k in ("SYSTEMROOT", "WINDIR") if k in os.environ)
+    env = {k: os.environ[k] for k in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT") if k in os.environ}
+    env.update(dict.fromkeys("HOME USERPROFILE TEMP TMP PYTHONPATH NODE_PATH".split(), str(root)))
     if browser:
         env["DEBUG"] = "pw:browser"
     started = time.monotonic()
@@ -156,17 +194,17 @@ def equal(a, b):
     return a == b
 
 
-def execute(s, root, targets, seconds, deadline, web=None, judgments=None, stop_file=None):
+def execute(s, root, data, targets, seconds, deadline, web=None, judgments=None, stop_file=None):
     snapshots, results = {}, {}
     for directory in s["setup"].get("dirs", []):
-        path(root, directory).mkdir(parents=True, exist_ok=True)
+        path(root, directory, data).mkdir(parents=True, exist_ok=True)
     for f in s["setup"].get("files", []):
-        file = path(root, f["path"])
+        file = path(root, f["path"], data)
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_bytes(content(f))
     for f in s["setup"].get("snapshots", []):
         try:
-            snapshots[f["id"]] = read(path(root, f["path"]))
+            snapshots[f["id"]] = read(path(root, f["path"], data))
         except ObservationUnavailable:
             snapshots[f["id"]] = None
 
@@ -192,8 +230,11 @@ def execute(s, root, targets, seconds, deadline, web=None, judgments=None, stop_
             if "web" in a or "http" in a:
                 v = a.get("web", a.get("http"))
                 binding = dict(targets[v["target"]])
-                if "server" in binding:
-                    binding["server"] = dict(binding["server"], argv=argv(binding["server"]["argv"], root))
+                if "server" not in binding:
+                    launch(dict(entry=binding.get("entry"), argv=[]), root, data, position="document")
+                else:
+                    server = binding["server"]
+                    binding["server"] = dict(server, argv=launch({k: v for k, v in server.items() if k not in ("readyPath", "readyWithin")}, root, data, position="server")[0])
                 request = root / ".web-request.json"
                 request.write_text(
                     json.dumps(
@@ -226,17 +267,13 @@ def execute(s, root, targets, seconds, deadline, web=None, judgments=None, stop_
                     )
                 results[a["id"]] = result
                 continue
-            cwd = path(root, a["cwd"]) if "cwd" in a else root
             if "process" in a:
                 v = a["process"]
-                command = argv(v["argv"], root, cwd)
+                command, cwd = launch(v, root, data, position="process", cwd=a.get("cwd"))
             else:
                 v = a["cli"]
                 binding = targets[v["target"]]
-                args = argv(binding["argv"], root) + argv(v["argv"], root, cwd)
-                launch = (["-m", binding["module"]] if "module" in binding
-                          else [str(path(root, binding["entry"]))])
-                command = [sys.executable, "-B", *launch, *args]
+                command, cwd = launch(dict(binding, runtime=sys.executable), root, data, extra=v["argv"], cwd=a.get("cwd"))
             hold_open = v.get("stdin", {}).get("holdOpen", False)
             payload = content(v["stdin"]) if "stdin" in v and not hold_open else None
             action.update(
@@ -292,13 +329,13 @@ def execute(s, root, targets, seconds, deadline, web=None, judgments=None, stop_
             elif key == "stderrContains":
                 value, expected = expected in actual["stderr"], True
             elif key == "fileAbsent":
-                value = not path(root, o["path"]).exists()
+                value = not path(root, o["path"], data).exists()
             else:
                 try:
                     raw = (
                         actual["stdout"]
                         if key == "stdoutJsonEquals"
-                        else read(path(root, o["path"]))
+                        else read(path(root, o["path"], data))
                     )
                 except FileNotFoundError:
                     observations.append(
@@ -392,7 +429,7 @@ def run(
         ):
             raise ValueError("Use positive ordered action/scenario/run budgets <=120s")
         deadline = time.monotonic() + run_seconds
-        web = web_toolchain(web_config, evidence_dir, browser=any("web" in a for s in scenarios for a in s["actions"])) if is_web else None
+        web = web_toolchain(web_config, path(product, ".codex-harness/evidence/preview") if evidence_dir is None else path(Path(evidence_dir).parent, Path(evidence_dir).name), browser=any("web" in a for s in scenarios for a in s["actions"])) if is_web else None
         for s in scenarios:
             if should_stop and should_stop():
                 raise ValueError("Acceptance owner stopped; no new scenario child")
@@ -404,9 +441,11 @@ def run(
                                     reason=s.get("validationMessage", "Worker executable needed")))
                 continue
             with ExitStack() as stack:
-                temp = tempfile.mkdtemp(prefix="seldon-semantic-")
-                root = Path(temp)
-                stack.callback(_cleanup, root, cleanup)
+                temp = tempfile.mkdtemp(prefix="seldon-semantic-", dir=path(Path(tempfile.gettempdir()).parent, Path(tempfile.gettempdir()).name))
+                root, data = Path(temp) / "product", Path(temp) / "DATA"
+                stack.callback(_cleanup, Path(temp), cleanup)
+                root.mkdir()
+                data.mkdir()
                 for base, dirs, files in os.walk(product, followlinks=False):
                     dirs[:] = [name for name in dirs if name not in SOURCE_IGNORED]
                     files = [name for name in files if name not in SOURCE_IGNORED]
@@ -427,7 +466,7 @@ def run(
                 config.write_text(
                     json.dumps(
                         [
-                            s,
+                            [s, str(data)],
                             targets,
                             action_seconds,
                             end,
@@ -477,16 +516,16 @@ def run(
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--preview"]:
-        selection = Path(sys.argv[2] if len(sys.argv) > 2 else ".").resolve()
+        selection = Path(sys.argv[2] if len(sys.argv) > 2 else ".").absolute()
         spec = json.loads((selection if selection.is_file() else selection / "SCENARIOS.json").read_text(encoding="utf-8"))
         spec["scenarios"]["scenarios"] = [s for s in spec["scenarios"]["scenarios"] if len(sys.argv) <= 3 or sys.argv[3] == s["id"] or any(a.get("web", a.get("http", {})).get("target") == sys.argv[3] for a in s["actions"])]
-        result = run(spec["scenarios"], selection.parent if selection.is_file() else selection, spec["targets"], "validation", evidence_dir=(selection.parent if selection.is_file() else selection).parent / "evidence" / "preview")
+        result = run(spec["scenarios"], selection.parent if selection.is_file() else selection, spec["targets"], "validation")
         result = result[0] if len(result) == 1 else result
     elif sys.argv[1:2] == ["--worker"]:
         try:
-            s, targets, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+            (s, data), targets, seconds, deadline, web, judgments, stop_file = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
             result = execute(
-                s, Path.cwd(), targets, seconds, deadline, web, judgments, stop_file
+                s, Path.cwd(), Path(data), targets, seconds, deadline, web, judgments, stop_file
             )
         except ERRORS as error:
             result = dict(state="ERROR", reason=str(error) or type(error).__name__)

@@ -44,7 +44,7 @@ def executable_scenarios(trace, document):
             rationale=execution["rationale"], requirementRefs=requirements,
             contractRefs=[f"{k}@{spine.revision(k)}" for k in spine.ancestors(key)
                           if spine.node(k)["kind"] in {"architecture", "design", "contract"}],
-            setup={}, actions=[dict(id="execute", process=dict(argv=execution["argv"]))],
+            setup={}, actions=[dict(id="execute", process={k: v for k, v in execution.items() if k not in ("rationale", "testRoots")})],
             observe=[dict(action="execute", exitEquals=0)], verdict="all",
         ))
     # Replace only compiler placeholders; authored observations remain independent evidence.

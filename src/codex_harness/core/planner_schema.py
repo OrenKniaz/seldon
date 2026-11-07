@@ -2,6 +2,7 @@
 
 import ast
 import hashlib
+import sys
 from copy import deepcopy
 from typing import Literal, NotRequired, TypedDict
 
@@ -48,6 +49,13 @@ JUDGMENT_RESPONSE_SCHEMA = {
 }
 
 
+def judgment_refs(spine, ids):
+    missing = set(ids) - set(spine.ids())
+    if missing:
+        raise ValueError(f"Missing subject/evidence-record IDs {sorted(missing)!r}; evidence_ids uses trace result IDs, not observation digests. For candidate assessment use harness_accept_assess judgment={{repo:<observed repo>,check:execution}}")
+    return [dict(id=key, revision=spine.revision(key), node=spine.node(key)) for key in sorted(set(ids))]
+
+
 def judgment_example(record):
     """A checked shape, never an assessment or approval of the bound evidence."""
     import json
@@ -63,6 +71,9 @@ def judgment_example(record):
         "scope-intent": dict(impact="WHAT"),
         "planning-size": dict(size="small", process="Focused review of consequence and recovery", overrideAccepted=False),
     }.get(record["question"], {})
+    packet = next((r["payload"] for r in record["sourceRefs"] if r["kind"] == "candidate-observation"), None)
+    if packet:
+        meaning = {k: packet[k] for k in ("check", "evidenceBinding", "phase")}
     example = dict(judgmentId=record["id"], binding=record["binding"], verdict="inconclusive",
                    rationale="Example only; assess the bound evidence before answering", meaning=meaning, gaps=[])
     judgment_response(json.dumps(dict(example, verdict="positive")), record)
@@ -90,6 +101,11 @@ def judgment_response(response, record):
     validate_input(parsed, JUDGMENT_RESPONSE_SCHEMA, "response")
     if parsed["judgmentId"] != record["id"] or parsed["binding"] != record["binding"]:
         raise ValueError("Copy judgmentId and binding exactly from the prepared judgment")
+    for ref in record["sourceRefs"]:
+        if ref["kind"] == "candidate-observation":
+            expected = {k: ref["payload"][k] for k in ("check", "evidenceBinding", "phase")}
+            if any(parsed["meaning"].get(k) != v for k, v in expected.items()):
+                raise ValueError(f"Candidate assessment requires meaning {expected!r}; copy these exact identities from the prepared request")
     if parsed["verdict"] == "negative" and not parsed["gaps"]:
         raise ValueError("A negative verdict needs at least one concrete gap in gaps")
     if parsed["verdict"] == "positive" and parsed["gaps"]:
@@ -174,7 +190,7 @@ FIELD_RULES = {
         "vision authoring needs neither."
     ),
     "test": "fields.module: opaque nonblank worker test selector; fields.level: semantic or e2e. "
-    "Optional execution={argv:[nonblank strings],rationale:nonblank}; graph records intent, never runs it.",
+    "Optional execution={entry:candidate path,runtime:absolute executable,argv:[literal|{path:candidate}|{input:DATA}],testRoots:[paths],rationale:nonblank}; cwd/import/document roots stay candidate-owned.",
     "feature": "Optional baseline={source,behavior,rationale,codeRefs,testRefs,resultRefs}; "
     "all three reference arrays are nonempty revision-bound existing graph nodes.",
     "result": "evidence={itemRef:{id,revision},candidate,source:{reference,realProvider:boolean,"
@@ -396,11 +412,11 @@ def node_example(kind, semantic=False):
         if kind == "vision":
             vision["fields"].update(targets={"parser": {"entry": "hello.py", "argv": []}}, scenarios={
                 "schema": "seldon/scenarios-v1", "scenarios": [dict(id="S1", requirementRefs=["R1"],
-                    contractRefs=[], setup=dict(dirs=["data"], files=[dict(path="data/input.json", utf8="{")],
-                        snapshots=[dict(id="before", path="data/input.json")]),
+                    contractRefs=[], setup=dict(dirs=[], files=[dict(path="{data}/input.json", utf8="{")],
+                        snapshots=[dict(id="before", path="{data}/input.json")]),
                     actions=[dict(id="reject", cli=dict(target="parser", operation="reject malformed input",
-                        argv=[{"path": "data/input.json"}]))],
-                    observe=[dict(action="reject", exitEquals=1), dict(path="data/input.json", bytesUnchangedFrom="before")],
+                        argv=[{"input": "{data}/input.json"}]))],
+                    observe=[dict(action="reject", exitEquals=1), dict(path="{data}/input.json", bytesUnchangedFrom="before")],
                     verdict="all")]})
     feature = _node("feature", "F1", ["V1"])
     requirement = _node(
@@ -431,7 +447,7 @@ def node_example(kind, semantic=False):
         ),
         "test": (
             [vision, feature, requirement],
-            _node("test", "T1", ["R1"], {"module": "test_parser", "level": "semantic", "execution": dict(argv=["python", "test_parser.py"], testRoots=["test_parser.py"], rationale="Observe parser rejection and unchanged data")}),
+            _node("test", "T1", ["R1"], {"module": "test_parser", "level": "semantic", "execution": dict(entry="test_parser.py", runtime=sys.executable, argv=[], testRoots=["test_parser.py"], rationale="Observe parser rejection and unchanged data")}),
         ),
     }
     if kind in examples:
