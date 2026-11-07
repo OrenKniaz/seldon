@@ -2724,7 +2724,7 @@ def reviewer_order_golden(workspace):
 
     # Real canonical base producer, not a hand-written cursor or a copied proof.
     base = workspace / "base"
-    archived = subprocess.check_output(["git", "archive", "98c2cbc1f0a8319a3df7253d0c26bb874f120c8e", "src"], cwd=ROOT)
+    archived = subprocess.check_output(["git", "archive", "754be3b88041dabcce29cfff07dd888010744fc7", "src"], cwd=ROOT)
     with tarfile.open(fileobj=io.BytesIO(archived)) as snapshot:
         snapshot.extractall(base, filter="data")
     # P3: genuine old semantic questions retain their identity/binding and accept
