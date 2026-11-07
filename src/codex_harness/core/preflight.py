@@ -30,23 +30,11 @@ def _path_status(path: Path, *, directory: bool) -> dict:
 
 def preflight_report(
     workspace: str | Path,
-    providers=None,
     *,
     executable_for=None,
-    execution=None,
-    catalog=None,
-    reviewer_node=None,
 ) -> dict:
     """Observe executables and canonical planning prerequisites without executing them."""
-    if providers is None:
-        providers = list(SUPPORTED_PROVIDERS)
-    if (
-        not isinstance(providers, list)
-        or not providers
-        or any(not isinstance(name, str) or not name.strip() for name in providers)
-    ):
-        raise ValueError("preflight-providers-invalid: expected a nonempty provider list")
-    names = list(dict.fromkeys(name.strip().lower() for name in providers))
+    names = SUPPORTED_PROVIDERS
     adapters = {name: get_adapter(name) for name in names}
     workspace = Path(workspace).resolve()
     observations = []
@@ -72,23 +60,14 @@ def preflight_report(
             }
         )
     from codex_harness.core.plan_store import open_plan_store_readonly
-    from codex_harness.core.planner_confirmations import planning_prerequisites
-    from codex_harness.core.planner_review import selection_inputs
-    from codex_harness.core.planner_schema import schema_help
-    from codex_harness.core.planner_tools import TOOLS
+    from codex_harness.core.run_loop import cursor
 
-    missing = (
-        "harness_plan_start reviewer-selection-required-before-B "
-        "execution.expected_revision execution.workers"
-    ).split()
-    revision = "unknown"
+    missing, revision = ["Start the durable run"], "unknown"
     if (workspace / ".codex-harness/plan.sqlite3").is_file():
         with open_plan_store_readonly(workspace) as store:
             revision = store._revision()
-            _, reviewer_node, catalog = selection_inputs(store, catalog=catalog, node=reviewer_node)
-            _, missing = planning_prerequisites(
-                store, execution, catalog=catalog, reviewer_node=reviewer_node
-            )
+            run = cursor(store)
+            missing = [run["reason"]] if run and (run.get("question") or run.get("userRequest")) else []
     return {
         "schema": "seldon-preflight-v1",
         "workspace": _path_status(workspace, directory=True),
@@ -99,8 +78,7 @@ def preflight_report(
         "providers": observations,
         "planningPrerequisites": missing,
         "planRevision": revision,
-        "reviewerContract": schema_help(TOOLS, tool="harness_loop_answer"),
-        "catalog": "unverified" if catalog is None else "recorded",
+        "catalog": "unverified",
         "unknown": {"planValidity": "unknown", "network": "unknown", "workerSuccess": "not-proven"},
         "executionReadiness": "not-proven",
         "didRunProvider": False,

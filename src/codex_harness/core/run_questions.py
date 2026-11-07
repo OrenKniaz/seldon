@@ -2,7 +2,6 @@
 
 import json
 from copy import deepcopy
-from uuid import uuid4
 
 from codex_harness.core.planner_schema import JUDGMENT_RESPONSE_SCHEMA
 from codex_harness.core.run_content import CONTENT_SCHEMA
@@ -47,7 +46,7 @@ def question(store, family, purpose, *, judgment=None, context=None):
             additionalProperties=False,
         )
     return dict(
-        requestId=uuid4().hex,
+        requestId=judgment["id"] if judgment else None,
         family=family,
         role="planner" if family in {"author", "direction"} else "judge",
         purpose=purpose,
@@ -57,7 +56,6 @@ def question(store, family, purpose, *, judgment=None, context=None):
         evidenceRefs=judgment["evidenceRefs"] if judgment else [],
         sourceRefs=judgment["sourceRefs"] if judgment else [],
         answerSchema=schema,
-        judgment=judgment,
         context=context or {},
         rationale="Meaning is pending; shape and continuation belong to the controller.",
     )
@@ -83,7 +81,6 @@ def ask_question(store, run, family, purpose, *, judgment=None, context=None):
             + ([run["userDecisionEventId"]] if run.get("userDecisionEventId") else []),
         )
         pending = question(store, family, purpose, judgment=judgment, context=context)
-    pending["requestId"] = judgment["id"]
     run.update(
         question=pending,
         nextAction="Answer the outstanding typed question",

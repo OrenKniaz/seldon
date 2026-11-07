@@ -36,9 +36,6 @@ TOOLS = [
         {
             "name": STRING,
             "idea": STRING,
-            "setup": {"type": "object"},
-            "plan_mode": {"type": "string", "enum": ["semantic-v1", "legacy"]},
-            "role_tuples": {"type": "array", "items": {"type": "object"}},
         },
         ["name", "idea"],
     ),
@@ -93,10 +90,6 @@ TOOLS = [
         "harness_preflight",
         "Read-only prerequisites; never launches providers or claims execution readiness.",
         {
-            "providers": {"type": "array", "items": STRING, "minItems": 1},
-            "execution": {"type": "object"},
-            "catalog": {"type": "object"},
-            "reviewer_node": {"type": "object"},
         },
         [],
     ),

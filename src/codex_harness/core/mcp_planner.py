@@ -9,7 +9,7 @@ from pathlib import Path
 from codex_harness.core import planner_views as views, run_loop
 from codex_harness.core import planner_confirmations as confirmations
 from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
-from codex_harness.core.planner_inspection import packet_view, validate_setup
+from codex_harness.core.planner_inspection import packet_view
 from codex_harness.core.planner_inspection import show_node
 from codex_harness.core.planner_connection import connection_reply
 from codex_harness.core.planner_schema import schema_help, validate_input
@@ -144,7 +144,7 @@ class PlannerServer(PlannerTransport):
                 )
             validate_input(arguments, tool["inputSchema"])
             data = self._dispatch(name, arguments)
-            if name in {"harness_loop_answer", "harness_steer"}:
+            if name in {"harness_loop_answer", "harness_steer"} and not data.get("answerOutcome"):
                 data = run_loop.wait_for_question(self._store())
             reply = dict(
                 isError=False,
@@ -165,32 +165,19 @@ class PlannerServer(PlannerTransport):
 
     def _dispatch(self, name, args):
         if name == "harness_plan_start":
-            validate_setup(args.get("setup", {}), self.workspace)
             if self.store is None:
                 self.store = open_plan_store(self.workspace, args["name"])
+            from codex_harness.core.run_setup import kickoff, validate
+            setup = kickoff(self.workspace) if run_loop.cursor(self.store) is None else None
+            if setup is not None:
+                validate(self.store, setup)
             if not self.store._data()["nodes"]:
-                self.store.upsert_node(
-                    dict(
-                        id="V1",
-                        kind="vision",
-                        title=args["name"],
-                        text=args["idea"],
-                        parents=[],
-                        fields=dict(
-                            **(
-                                {"planMode": "semantic-v1"}
-                                if args.get("plan_mode") != "legacy"
-                                else {}
-                            ),
-                            **({"setup": args["setup"]} if "setup" in args else {}),
-                        ),
-                    )
-                )
-            elif "plan_mode" in args and self.store.spine().semantic != (
-                args["plan_mode"] == "semantic-v1"
-            ):
-                raise ValueError("planMode is immutable; no conversion of existing plans")
-            return run_loop.start(self.store, role_tuples=args.get("role_tuples"))
+                fields = {} if setup["planMode"] == "legacy" else dict(planMode="semantic-v1")
+                if setup["project"]:
+                    fields["setup"] = setup["project"]
+                self.store.upsert_node(dict(id="V1", kind="vision", title=args["name"],
+                    text=args["idea"], parents=[], fields=fields))
+            return run_loop.start(self.store, setup=setup)
         if name == "harness_loop_answer":
             return run_loop.answer(self._store(), **args)
         if name == "harness_steer":
@@ -275,6 +262,7 @@ class PlannerServer(PlannerTransport):
         return self._native_question(request_id, prepared)
 
     def _confirmation_reply(self, data, *, error=False, reason=None):
+        run_loop.initialize(self._store())
         with self._store()._transaction():
             run = run_loop.cursor(self.store)
             if data["state"] != "pending":

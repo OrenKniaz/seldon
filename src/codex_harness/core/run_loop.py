@@ -15,7 +15,8 @@ from codex_harness.core.mail import Mailbox
 from codex_harness.core.plan_types import PlanStoreError, _now
 from codex_harness.core.run_ownership import ensure_effect
 from codex_harness.core.status_api import run_baton
-from codex_harness.core.run_content import apply_content, apply_options
+from codex_harness.core.run_content import apply_content, apply_answer
+from codex_harness.core.run_setup import initialize
 from codex_harness.core.run_questions import ask_question, decode_answer
 
 EVENT = "run-loop-cursor"
@@ -30,6 +31,8 @@ def cursor(store):
 
 
 def save(store, run):
+    if run.get("question"):
+        run["question"].pop("judgment", None)  # Display-only enrichment, including retained cursors.
     run.update(revision=store._revision(), phase=store.phase(), observedAt=_now())
     store._event(EVENT, run)
 
@@ -103,31 +106,19 @@ def _pending(store, run):
     return False
 
 
-def start(store, *, role_tuples=None):
-    with store._transaction():
-        if cursor(store) is None:
-            run = dict(
-                runId=uuid4().hex,
-                state="PLAN",
-                step="understanding",
-                generation=0,
-                question=None,
-                userRequest=None,
-                effect=None,
-                jobId=None,
-                workers=None,
-                max_parallel=1,
-                timeout=900,
-                roleTuples=role_tuples or [],
-                nextAction="Author understanding and expansion",
-                reason="New dream",
-            )
-            save(store, run)
+def start(store, *, setup=None):
+    if cursor(store) is None and setup is None:
+        from codex_harness.core import run_setup
+        setup = run_setup.kickoff(store.workspace)
+        run_setup.validate(store, setup)
+    initialize(store, setup=setup)
     return run_loop(store)
 
 
 def answer(store, *, request_id, answer, source):
-    _record_answer(store, request_id=request_id, answer=answer, source=source)
+    initialize(store)
+    if outcome := _record_answer(store, request_id=request_id, answer=answer, source=source):
+        return dict(run_baton(store), answerOutcome=outcome)
     return run_loop(store)
 
 
@@ -141,14 +132,13 @@ def _record_answer(store, *, request_id, answer, source):
             or pending["requestId"] != request_id
             or run["state"] in TERMINAL | {"PAUSED"}
         ):
-            raise PlanStoreError(
-                "loop-answer-stale", "Read the current baton; answer only its outstanding requestId"
-            )
-        if pending["revision"] != store._revision():
-            raise PlanStoreError(
-                "loop-answer-stale",
-                "Subject changed; steer with the new evidence to obtain a fresh bound request",
-            )
+            return dict(state="superseded", requestId=request_id,
+                        message="Request superseded or consumed; re-ask using the current baton's outstanding requestId")
+        retained = store._judgment_record(pending["requestId"])
+        if pending["revision"] != store._revision() or retained["disposition"] in {"steer", "complete"}:
+            _steering(store, run, "Retained request superseded or consumed; re-ask against current evidence")
+            save(store, run)
+            return dict(state="superseded", requestId=request_id, message=run["reason"])
         if run.get("semanticHeld") and pending["family"] != "direction":
             raise PlanStoreError(
                 "semantic-new-evidence-required",
@@ -156,7 +146,7 @@ def _record_answer(store, *, request_id, answer, source):
             )
         planner_answer = pending["family"] in {"author", "direction"}
         if planner_answer:
-            record = pending["judgment"]
+            record = retained
             wrapped = dict(
                 judgmentId=record["id"],
                 binding=record["binding"],
@@ -170,15 +160,14 @@ def _record_answer(store, *, request_id, answer, source):
         else:
             wrapped = answer
         result = store.submit_judgment(
-            judgment_id=pending["judgment"]["id"],
+            judgment_id=pending["requestId"],
             response=wrapped if isinstance(wrapped, str) else json.dumps(wrapped),
             source=source,
-            apply_meaning=(lambda meaning: apply_content(store, meaning["content"]))
+            apply_meaning=(lambda meaning: apply_answer(store, pending, meaning))
             if planner_answer
             else None,
         )
         result = store.judgment(result["id"], candidate=pending["candidate"])
-        run["question"]["judgment"] = result
         if result["disposition"] in {"exact-fix", "steer"}:
             if result["disposition"] == "steer":
                 _steering(store, run, result["error"])
@@ -192,6 +181,9 @@ def _record_answer(store, *, request_id, answer, source):
             )
             save(store, run)
             return
+        if (run.get("userRequest") or {}).get("gate") == "invocations" and pending["family"] != "user-interpretation":
+            # An attached caller supplied meaning; its proposed provider call is no longer needed.
+            run["userRequest"] = None
         run.update(question=None, semanticHeld=False)
         if not planner_answer:
             outcome = confirmations.apply_judgment(store, result)
@@ -225,7 +217,6 @@ def _record_answer(store, *, request_id, answer, source):
             elif run["state"] == "JUDGE":
                 run["state"] = "NEXT"
         else:
-            apply_options(run, answer["content"])
             store._event(
                 "run-semantic-answer",
                 dict(
@@ -296,7 +287,7 @@ def _interrupt(store, run, *, advance_generation=True):
     if (pending := run.get("question")) and not (
         run.get("freshConsent") and pending["purpose"] == "scope-intent"
     ):
-        record = store._judgment_record(pending["judgment"]["id"])
+        record = store._judgment_record(pending["requestId"])
         record.update(
             supersededBy="control:" + str(run["generation"])
             if advance_generation
@@ -312,6 +303,8 @@ def _interrupt(store, run, *, advance_generation=True):
 def steer(store, *, direction, rationale, content=None, user_words=None, resume=False):
     """An interrupt commits before cleanup; no launch can use the previous generation."""
     content = content or {}
+    if direction not in {"pause", "stop"} or content or user_words is not None:
+        initialize(store)
     with store._transaction():
         run = cursor(store)
         if run is None or run["state"] in TERMINAL:
@@ -426,7 +419,7 @@ def steer(store, *, direction, rationale, content=None, user_words=None, resume=
                 "Unsolicited direction or actual user control",
                 context=dict(jobId=run.get("jobId")),
             )
-            pending = run["question"]["judgment"]
+            pending = store._judgment_record(run["question"]["requestId"])
             meaning = dict(option=direction, rationale=rationale, content=content)
             accepted = store.submit_judgment(
                 judgment_id=pending["id"],
@@ -443,11 +436,8 @@ def steer(store, *, direction, rationale, content=None, user_words=None, resume=
                 source="caller:unsolicited-direction",
                 apply_meaning=lambda meaning: apply_content(store, meaning["content"]),
             )
-            if accepted["disposition"] != "complete":
-                run["question"]["judgment"] = accepted
-            else:
+            if accepted["disposition"] == "complete":
                 run["question"] = None
-                apply_options(run, content)
                 _direction(
                     store, run, direction, content, rationale, direction_judgment_id=accepted["id"]
                 )
@@ -520,7 +510,7 @@ def _direction(store, run, direction, content, rationale, *, direction_judgment_
         if content.keys() - {"mail"}:
             run.update(state="PLAN", step="trace")
         else:
-            run["state"] = "NEXT" if run.get("jobId") else "PLAN"
+            run["state"] = "NEXT" if run.get("jobId") else "REVIEW" if run["step"] == "plan-review" else "PLAN"
 
 
 def _release(store, run, effect, reason):
@@ -752,6 +742,9 @@ def _recover(store, run, effect, reason, *, observation=None):
 
 
 def run_loop(store):
+    run = cursor(store)
+    if run and run["state"] not in TERMINAL | {"PAUSED"}:
+        initialize(store)
     while True:
         _step(store)
         if not _automatic_question(store):
@@ -834,54 +827,44 @@ def _step(store):
                     delivery_review_selection,
                 )
 
+                from codex_harness.core.run_setup import select_reviewers, workers
+                select_reviewers(store, run)
                 _, node, _ = selection_inputs(store)
-                if not run.get("workers"):
-                    run.update(state="PLAN", step="trace")
-                    ask_question(
-                        store,
-                        run,
-                        "author",
-                        "Choose exact worker tuples for the canonical bead graph",
-                    )
-                elif node is None:
-                    ask_question(
-                        store, run, "author", "Select exact reviewers and their role tuples"
-                    )
+                run["workers"] = workers(store, run)
+                reviewers = delivery_review_selection(node["fields"])[0]
+                try:
+                    approvals.require_reviewers(store, reviewers)
+                except PlanStoreError:
+                    run["afterPermission"] = "REVIEW"
+                    roles = list((approvals.current(store, "P") or {}).get("subject", {}).get("roleTuples", []))
+                    for reviewer in reviewers:
+                        role = dict(role="reviewer", **reviewer)
+                        if role not in roles:
+                            roles.append(role)
+                    _user(store, run, "invocations", role_tuples=roles)
                 else:
-                    reviewers = delivery_review_selection(node["fields"])[0]
-                    try:
-                        approvals.require_reviewers(store, reviewers)
-                    except PlanStoreError:
-                        run["afterPermission"] = "REVIEW"
-                        roles = list(run["roleTuples"])
-                        for reviewer in reviewers:
-                            role = dict(role="reviewer", **reviewer)
-                            if role not in roles:
-                                roles.append(role)
-                        _user(store, run, "invocations", role_tuples=roles)
-                    else:
-                        store.prepare_review_reuse()
-                        if _pending(store, run):
-                            save(store, run)
-                            break
-                        if store.review_prerequisite(store.manifest_revision())["complete"]:
-                            execution = dict(
-                                expected_revision=store.manifest_revision(),
-                                workers=run["workers"],
-                                max_parallel=run["max_parallel"],
-                                timeout=run["timeout"],
-                            )
-                            from codex_harness.core.planner_execution import execution_scope
+                    store.prepare_review_reuse()
+                    if _pending(store, run):
+                        save(store, run)
+                        break
+                    if store.review_prerequisite(store.manifest_revision())["complete"]:
+                        execution = dict(
+                            expected_revision=store.manifest_revision(),
+                            workers=run["workers"],
+                            max_parallel=run["max_parallel"],
+                            timeout=run["timeout"],
+                        )
+                        from codex_harness.core.planner_execution import execution_scope
 
-                            scope = execution_scope(store, **execution, _candidate=True)
-                            try:
-                                approvals.require_approval(store, "B", dict(execution=scope))
-                            except PlanStoreError:
-                                _user(store, run, "plan-execution", execution=execution)
-                            else:
-                                run.update(state="BUILD", step="execution", resumeRun=None)
+                        scope = execution_scope(store, **execution, _candidate=True)
+                        try:
+                            approvals.require_approval(store, "B", dict(execution=scope))
+                        except PlanStoreError:
+                            _user(store, run, "plan-execution", execution=execution)
                         else:
-                            effect_kind = "review"
+                            run.update(state="BUILD", step="execution", resumeRun=None)
+                    else:
+                        effect_kind = "review"
             elif state == "BUILD":
                 if not run.get("resumeRun"):
                     store.advance_to("publish", by="run-loop")
@@ -1384,35 +1367,33 @@ def _execute_effect(store, run, kind):
 
 def _automatic_question(store):
     """Invoke authorized semantic roles; MCP itself never initiates host completions."""
-    run = cursor(store)
-    pending = run.get("question")
-    if not pending or run.get("semanticHeld") or run["state"] in TERMINAL | {"PAUSED"}:
-        return False
-    selected = next((r for r in run["roleTuples"] if r["role"] == pending["role"]), None)
-    if selected is None:
-        return False
-    try:
-        approvals.require_invocation(store, pending["role"], selected)
-    except PlanStoreError:
-        if run.get("userRequest"):
-            return False
-        with store._transaction():
-            run = cursor(store)
-            run["afterPermission"] = run["state"]
-            _user(store, run, "invocations", role_tuples=run["roleTuples"])
-            save(store, run)
-        return False
     from codex_harness.core.run_invocations import invoke
     from codex_harness.core.audit_process import process_observation
 
     with store._transaction():
         run = cursor(store)
-        if (
-            run.get("effect")
-            or not run.get("question")
-            or run["question"]["requestId"] != pending["requestId"]
-        ):
+        pending = run.get("question")
+        if (not pending or run.get("effect") or run.get("semanticHeld")
+                or run["state"] in TERMINAL | {"PAUSED"}):
             return False
+        if (pending["revision"] != store._revision()
+                or store._judgment_record(pending["requestId"])["disposition"] in {"steer", "complete"}):
+            _record_answer(store, request_id=pending["requestId"], answer=None, source="run-loop:retained")
+            return True
+        selected = next((r for r in run["roleTuples"] if r["role"] == pending["role"]), None)
+        if selected is None:
+            raise ValueError(f"setup.roleTuples: missing required {pending['role']} role; resolve kickoff before continuing")
+        try:
+            approvals.require_invocation(store, pending["role"], selected)
+        except PlanStoreError:
+            if not run.get("userRequest"):
+                run["afterPermission"] = run["state"]
+                _user(store, run, "invocations", role_tuples=run["roleTuples"])
+                run.update(state=run["afterPermission"], question=pending,
+                           nextAction="Answer the outstanding meaning or authorize its code-selected provider")
+                save(store, run)
+            return False
+        pending = dict(pending, judgment=store.judgment(pending["requestId"], candidate=pending["candidate"]))
         identifier = uuid4().hex
         run["effect"] = dict(
             id=identifier,

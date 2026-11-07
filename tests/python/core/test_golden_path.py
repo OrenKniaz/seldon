@@ -564,9 +564,13 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 replace(launch, command=(sys.executable, "-B", "-c", body)), *args, **options
             )
             if pending["purpose"] == "trace" and (workspace / "semantic-late-output").exists():
-                # The real child already exited zero and its owned cleanup ran.
-                # A delayed adapter return must not extend the original lease.
-                time.sleep(6)
+                # FIX17: lease structure is kickoff-owned. Fault the existing
+                # clock after real zero exit/cleanup; never supply a proof result.
+                from datetime import UTC
+                from codex_harness.core import run_invocations, run_ownership
+                run_ownership.datetime = AwakeClock
+                (workspace / "clock-shift").write_text(str(float(args[1]) + 1))
+                run_invocations._now = lambda: AwakeClock.now(UTC).isoformat()
             return actual_return
         if mode == "server" and surface == "cli" and (workspace / "inject-review-crash").exists():
             # A real provider wait survives a lost client until its process owner
@@ -2551,6 +2555,25 @@ def planning_surface_golden(workspace):
             idea="Retain unfamiliar product intent",
         )
         before = client.call("harness_show_node", id="V1")
+        # FIX17: meaningful omissions name their fields at the outstanding question;
+        # code-owned policy inspection creates neither a selector nor another gate.
+        pending_id = client.current["question"]["requestId"]
+        policy = client.call("harness_review_policy")
+        assert not policy["policy"]["active"]
+        assert client.call("harness_plan_status")["run"]["question"]["requestId"] == pending_id
+        client.answer(dict(option="ready", rationale="Captured premature r17 readiness", content={}))
+        correction = client.current["question"]["judgment"]
+        assert correction["disposition"] == "exact-fix" and not correction["positiveCredit"]
+        assert "vision.fields" in correction["error"] and "expansion.mode" in correction["error"]
+        # Missing keys in a meaning writer used to escape 1j as operation-error;
+        # invalid node-schema tests do not exercise the clarification-answer writer.
+        client.answer(dict(option="draft", rationale="Return to retained meaning", content={}))
+        client.answer(dict(option="draft", rationale="Captured missing clarification identity",
+                           content=dict(answers=[dict(answer="Retain the actual user meaning")])) )
+        correction = client.current["question"]["judgment"]
+        assert correction["disposition"] == "exact-fix" and "content.id: required field" in correction["error"]
+        assert client.call("harness_show_node", id="V1")["fields"] == before["fields"]
+        client.answer(dict(option="draft", rationale="Continue from intact canonical meaning", content={}))
         schema_nodes = {}
         for kind in ("vision", "test", "bead"):
             guide = client.call("harness_schema", tool="harness_loop_answer", kind=kind)
@@ -2605,6 +2628,7 @@ def planning_surface_golden(workspace):
         for fixture in ("ux5-turn7-upsert.json", "f3-turn11-vision.json"):
             captured = json.loads((ROOT / "tests/fixtures" / fixture).read_text("utf-8"))
             node = captured["node"] if "node" in captured else captured
+            node["fields"].pop("setup", None)  # FIX17: kickoff owns project setup.
             client.answer(
                 dict(
                     option="draft",
@@ -2641,28 +2665,236 @@ def planning_surface_golden(workspace):
             name in str(unknown)
             for name in ("harness_plan_start", "harness_loop_answer", "harness_steer")
         ), unknown
-        captured = json.loads((ROOT / "tests/fixtures/efficiency/run26.json").read_text("utf-8"))
-        preflight = client.call(
-            "harness_preflight",
-            providers=["codex", "claude"],
-            execution={},
-            reviewer_node=next(
-                row["arguments"]["node"]
-                for row in captured["refusals"]
-                if row["tool"] == "harness_reviewer_choice"
-            ),
-        )
+        # FIX17 deletes prospective reviewer/worker inputs: preflight reads the baton.
+        preflight = client.call("harness_preflight")
         issues = "; ".join(preflight["planningPrerequisites"])
-        assert all(
-            part in issues
-            for part in (
-                "execution.expected_revision",
-                "execution.workers",
-                "reviewer-effort-invalid",
-            )
-        ), issues
+        assert issues == client.current["reason"] and not preflight["didRunProvider"]
         assert "reviewer-catalog" not in issues and preflight["catalog"] == "unverified"
-        assert all(row["executable"]["status"] == "available" for row in preflight["providers"])
+        assert all(row["executable"]["status"] == "available" for row in preflight["providers"] if row["provider"] in {"codex", "claude"})
+    finally:
+        client.close()
+
+
+def reviewer_order_golden(workspace):
+    """C1/C2/C8/C11/C23: the actual pre-FIX17 producer's r17 order resumes to B.
+
+    Fresh/preselected fixtures miss old cursors without kickoff fields, the
+    retired tuple question and planner project-setup overwrite. Run both real
+    stdio versions, then consume the persisted old cursor in the current loop.
+    """
+    import io
+    import tarfile
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core.audit_process import run_audit_process
+
+    workspace.mkdir()
+    operator = workspace / "operator"
+    bad_roles = [dict(name="reviewer", provider="codex", model="gpt-6.1-sol", effort="medium")]
+    command = [sys.executable, "-B", "-m", "codex_harness.core.plan_cli", "--workspace", str(operator),
+               "start", "--name", "Operator setup", "--idea", "Retain the exact brief", "--role-tuples"]
+    invalid = run_audit_process([*command, json.dumps(bad_roles)], cwd=ROOT, timeout=20)
+    assert invalid.returncode == 2 and "setup.roleTuples" in invalid.stdout
+    assert invalid.audit_control["quiescenceVerified"]
+    (operator / ".codex-harness/setup.json").write_text(json.dumps(dict(project=dict(gitName="Operator profile"))), encoding="utf-8")
+    repaired = run_audit_process([*command, "[]"], cwd=ROOT, timeout=20)
+    assert repaired.returncode == 0 and repaired.audit_control["quiescenceVerified"]
+    assert json.loads(repaired.stdout)["question"]["purpose"] == "understanding"
+    configured = LoopClient(operator, kickoff={})
+    try:
+        configured.call("harness_plan_status")
+        shown = configured.call("harness_show_node", id="V1")
+        vision = {k: shown[k] for k in ("id", "kind", "title", "text", "parents", "fields")}
+        vision["fields"]["setup"] = dict(gitName="Planner overwrite")
+        configured.answer(dict(option="draft", rationale="Meaning cannot replace operator setup", content=dict(nodes=[vision])))
+        assert configured.call("harness_show_node", id="V1")["fields"]["setup"] == dict(gitName="Operator profile")
+    finally:
+        configured.close()
+
+    pinned = dict(role="planner", name="pinned-planner", provider="claude", model="claude-opus-4-6", effort="high")
+    defaulted = LoopClient(workspace / "role-defaults", kickoff=dict(roleTuples=[pinned]))
+    try:
+        defaulted.call("harness_plan_start", name="Pinned planner tier", idea="Retain the operator's model tier")
+        selected = defaulted.current["setup"]
+        assert {r["role"] for r in selected["roleTuples"]} == {"planner", "judge"}
+        assert all(all(r[k] == pinned[k] for k in ("provider", "model", "effort"))
+                   for r in [*selected["roleTuples"], *selected["reviewers"]])
+        assert defaulted.current["userRequest"]["gate"] == "invocations"
+    finally:
+        defaulted.close()
+
+    # Real canonical base producer, not a hand-written cursor or a copied proof.
+    base = workspace / "base"
+    archived = subprocess.check_output(["git", "archive", "98c2cbc1f0a8319a3df7253d0c26bb874f120c8e", "src"], cwd=ROOT)
+    with tarfile.open(fileobj=io.BytesIO(archived)) as snapshot:
+        snapshot.extractall(base, filter="data")
+    # P3: genuine old semantic questions retain their identity/binding and accept
+    # meaning after adoption. The structural-wait twin below cannot prove this.
+    semantic = workspace / "retained-meaning"
+    old = LoopClient(semantic, kickoff={}, source_root=base)
+    try:
+        old.call("harness_plan_start", name="Retain semantic question", idea="Original understanding")
+        held = old.current["question"]
+        assert held["context"]
+    finally:
+        old.close()
+    resumed = LoopClient(semantic, kickoff={})
+    try:
+        resumed.call("harness_plan_start", name="Reattach meaning", idea="Retain original binding")
+        pending = resumed.current["question"]
+        assert (pending["requestId"], pending["binding"], pending["revision"]) == (
+            held["requestId"], held["binding"], held["revision"])
+        node = resumed.call("harness_show_node", id="V1")
+        node = {k: node[k] for k in ("id", "kind", "title", "text", "parents", "fields")}
+        node["text"] = "Meaning accepted through the retained semantic question"
+        resumed.answer(dict(option="draft", rationale="Retain semantic ownership across adoption", content=dict(nodes=[node])))
+        assert resumed.call("harness_show_node", id="V1")["text"] == node["text"]
+    finally:
+        resumed.close()
+
+    # C18/C23 fault twins: a second canonical writer wins just before provider
+    # admission acquires its transaction. Ordinary serial reattachment misses
+    # the cached-question restore that resurrected consumed requests on host.
+    from contextlib import contextmanager
+    from unittest.mock import patch
+    from codex_harness.core import run_loop
+    from codex_harness.core.plan_store import open_plan_store
+
+    with open_plan_store(semantic) as owner, open_plan_store(semantic) as peer:
+        draft = dict(option="draft", rationale="Retain meaning without changing scope", content={})
+        for control in (False, True):
+            before = run_loop.cursor(owner)["question"]
+            run_loop._record_answer(owner, request_id=before["requestId"], answer=draft, source="golden:attached")
+            outstanding = run_loop.cursor(owner)["question"]
+            transaction = owner._transaction
+            armed = True
+
+            @contextmanager
+            def admit_after_other_writer():
+                nonlocal armed
+                if armed:
+                    armed = False
+                    if control:
+                        run_loop.steer(peer, direction="pause", rationale="User pauses before provider admission")
+                    else:
+                        run_loop._record_answer(peer, request_id=outstanding["requestId"], answer=draft, source="golden:winning-answer")
+                with transaction():
+                    yield
+
+            with patch.object(owner, "_transaction", admit_after_other_writer):
+                run_loop._automatic_question(owner)
+            late = run_loop.answer(owner, request_id=outstanding["requestId"],
+                answer=dict(option="stop", rationale="Late reply must never control the run", content={}), source="golden:late")
+            assert late["answerOutcome"]["state"] == "superseded" and "re-ask" in late["answerOutcome"]["message"]
+            if control:
+                assert late["state"] == "PAUSED" and not late["question"] and not late["effect"]
+                resumed_run = run_loop.steer(owner, direction="continue", rationale="User explicitly resumes", resume=True)
+                assert resumed_run["question"]["requestId"] != outstanding["requestId"]
+            else:
+                assert late["state"] == "PLAN" and late["question"]["requestId"] != outstanding["requestId"]
+                accepted = run_loop.answer(owner, request_id=late["question"]["requestId"], answer=draft, source="golden:fresh")
+                assert accepted["state"] == "PLAN" and not accepted.get("answerOutcome")
+
+        # A retained 1j response may outlive the cursor that advertised it. The
+        # controller re-asks instead of submitting a second response or replaying
+        # the retained meaning as new control (the host ShelfLife failure).
+        pending = run_loop.cursor(owner)["question"]
+        record = owner.judgment(pending["requestId"], candidate=pending["candidate"])
+        owner.submit_judgment(judgment_id=record["id"], response=json.dumps(dict(
+            judgmentId=record["id"], binding=record["binding"], verdict="positive",
+            rationale="Retained completed meaning", meaning=draft, gaps=[])), source="golden:retained-producer")
+        # H3: canonical completion is visible before any answer/continuation
+        # repairs the cursor; serial reply-only twins missed stale presentation.
+        from codex_harness.core.status_api import run_baton, plan_status
+        assert run_baton(owner)["question"] is None
+        assert plan_status(owner)["run"]["question"] is None
+        assert "re-ask" in run_baton(owner)["nextAction"]
+        refreshed = run_loop.answer(owner, request_id=pending["requestId"], answer=draft, source="golden:late-after-retention")
+        assert refreshed["answerOutcome"]["state"] == "superseded"
+        assert refreshed["state"] == "STEER" and refreshed["question"]["requestId"] != pending["requestId"]
+        assert not refreshed["effect"]
+        assert plan_status(owner)["run"]["question"]["requestId"] == refreshed["question"]["requestId"]
+        # Changed evidence supersedes an advertised request by the same rule.
+        pending = refreshed["question"]
+        vision = owner.spine().node("V1")
+        vision["text"] += " Retain newly recorded evidence."
+        owner.upsert_node(vision)
+        changed = run_loop.answer(owner, request_id=pending["requestId"], answer=draft, source="golden:old-evidence")
+        assert changed["answerOutcome"]["state"] == "superseded" and changed["state"] == "STEER"
+        assert changed["question"]["requestId"] != pending["requestId"] and not changed["effect"]
+
+    project = workspace / "project"
+    settings = dict(timeout=180, project=dict(gitName="Pinned operator"))
+    client = LoopClient(project, kickoff=settings, source_root=base)
+    content = plan_content()
+    try:
+        client.call("harness_plan_start", name="R17 structural gate deletion", idea=content["nodes"][0]["text"])
+        client.answer(dict(option="draft", rationale="Retain the full product meaning", content=content))
+        client.answer(dict(option="ready", rationale="Present expansion and understanding", content={}))
+        client.answer(judge_reply(client.current["question"]))
+        client.reconnect()
+        client.words("yes")
+        client.answer(judge_reply(client.current["question"]))
+        assert client.current["question"]["purpose"] == "trace"
+        client.answer(dict(option="ready", rationale="The recorded plan leads to the full dream", content={}))
+        client.call("harness_schema", tool="harness_loop_answer")
+        client.call("harness_preflight", providers=["codex"])
+        flat = dict(provider="codex", model="gpt-6.1-sol", effort="medium")
+        client.answer(dict(option="ready", rationale="Captured r17 worker arguments", content=dict(
+            workers=[dict(id=b, **flat) for b in ("B", "C")])))
+        assert client.current["question"]["purpose"] == "Select exact reviewers and their role tuples"
+        client.answer(dict(option="ready", rationale="Captured r17 flat reviewer guess", content=dict(reviewers=flat)))
+        assert "Expected decision node" in client.current["question"]["judgment"]["error"]
+        guessed = dict(id="DR1", kind="decision", title="Exact ShelfLife review selection", text="Use the exact configured model", parents=["V1"],
+            fields=dict(schema="dot-reviewer-selection-v1", catalogId=None, catalogDigest=None, confirmation=None,
+            recommendation="One independent reviewer per stage is proportionate", assurance="Independence unverified",
+            reviewers=[dict(name="reviewer", **flat)], stages=["plan", "acceptance"]))
+        client.answer(dict(option="ready", rationale="Captured r17 decision guess", content=dict(reviewers=guessed)))
+        assert "choiceId" in client.current["question"]["judgment"]["error"]
+        catalog = dict(schema="dot-reviewer-catalog-v1", id="RC-d976ffab-c233-410c-b3a5-19c87182e0b2", observedAt="2026-11-07T12:57:58Z",
+            providers=[dict(provider="codex", executable=str(project / "tools/codex.exe"), executableDigest=None, version=None,
+            installed=True, authentication="unknown", discovery="unknown", source=None, reason="Requested tuple; access unverified",
+            choices=[dict(model=flat["model"], effort=dict(kind="named", value="medium"), availability="offered", reviewPathSupported=True,
+                          reason="Supplied requested offering; no provider execution claimed")])])
+        client.answer(dict(option="draft", rationale="Captured r17 catalog draft", content=dict(catalog=catalog)))
+        client.call("harness_loop_answer", request_id=client.current["question"]["requestId"], source="r17:captured-shape",
+            answer=dict(option="ready", rationale="Captured r17 missing role", content=dict(roleTuples=[dict(name="reviewer", **flat)])), error=True)
+        client.call("harness_plan_status")
+        client.answer(dict(option="ready", rationale="Captured r17 role-only correction", content=dict(
+            roleTuples=[dict(role="plan-review", **flat), dict(role="delivery-review", **flat)])))
+        # Retain r17's actual repair/trace/selector/discovery detour as well.
+        client.call("harness_steer", direction="repair", rationale="Retain the user's recorded A approval and exact gpt-6.1-sol medium choice. Reviewer-selection public contract is blocking: content.reviewers requires decision node with selection schema/catalogId/catalogDigest/reviewers including choiceId/stages/assurance/recommendation/confirmation, but harness_schema exposes only generic decision fields and content schema. Catalog was recorded through supported draft and preflight confirms recorded, without exposing normalized digest/choiceId. Exact roleTuples have been recorded, yet controller repeats Select exact reviewers. Prior malformed role tuple produced operation-error 'role' after storing it; corrected tuples were subsequently recorded. Needed owner repair: expose actionable reviewer selection and normalized catalog through public tools, then resume same run. Do not bypass gates, fabricate catalog identities/confirmation or launch product workers.")
+        assert client.current["question"]["purpose"] == "trace"
+        client.answer({'option': 'ready', 'rationale': 'Continue the same approved scope. The graph already links V1 through F1-F3/R1-R3 to T1-T3 and B1, with G1-G3 designs and AC1-AC3 integration acceptance. Exact worker and reviewer model choices remain gpt-6.1-sol medium.', 'content': {}})
+        assert client.current["question"]["purpose"] == "Select exact reviewers and their role tuples"
+        client.answer({'option': 'ready', 'rationale': 'Assign the exact model/effort to the plan and acceptance roles using stage names; preserve the existing single worker.', 'content': {'roleTuples': [{'role': 'plan', 'provider': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'medium'}, {'role': 'acceptance', 'provider': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'medium'}]}})
+        client.call("harness_schema", kind="discovery", include_teaching=True)
+        client.answer({'option': 'draft', 'rationale': 'Record the observed operator blocker without asserting an unproven root cause or bypassing the approved planning boundary.', 'content': {'nodes': [{'id': 'DISC1', 'kind': 'discovery', 'title': 'Reviewer selection repeats without actionable public guidance', 'text': 'Observed in the same ShelfLife run after recorded Align/Vision approval: ready answers with exact gpt-6.1-sol medium role tuples return another Select exact reviewers and their role tuples question, context empty and judgment error null. Original roles plan-review/delivery-review and follow-up plan/acceptance did not advance. content.reviewers expects a decision node and catalog-bound nested contract, but harness_schema kind decision exposes only generic fields. Catalog identifiers may be involved; sole root cause is unproven, superseding the earlier categorical catalog-blocker diagnosis. Owner: Seldon public controller/schema. Disposition: blocks plan review/publication/worker dispatch; product source unchanged. Exit test: public tools expose an actionable exact reviewer selection and same run advances to real review using gpt-6.1-sol medium, preserving recorded scope approval.', 'parents': ['V1'], 'fields': {'source': 'Current conversation tool receipts: harness_loop_answer reviewer selection, harness_schema decision, harness_plan_status'}}]}})
+        client.call("harness_plan_status")
+        client.answer(dict(option="ready", rationale="Captured r17 final role-only attempt", content=dict(
+            roleTuples=[dict(role="roundtable", **flat), dict(role="acceptance", **flat)])))
+        assert client.current["state"] == "REVIEW" and "setup" not in client.current
+    finally:
+        client.close()
+
+    client = LoopClient(project, kickoff=settings)
+    try:
+        client.call("harness_plan_status")
+        assert "setup" not in client.current
+        client.call("harness_steer", direction="continue", rationale="Continue the retained r17 meaning")
+        assert client.current["userRequest"]["gate"] == "invocations"
+        assert not client.current.get("question")
+        # Later file edits and semantic node replacements cannot retarget kickoff.
+        (project / ".codex-harness/setup.json").write_text(json.dumps(dict(worker=dict(
+            provider="codex", model="gpt-6.1-terra", effort="high"))), encoding="utf-8")
+        client.reconnect()
+        assert client.current["setup"]["project"] == settings["project"]
+        client.words("Authorize these exact code-selected reviewers")
+        client.answer(judge_reply(client.current["question"]))
+        assert client.current["userRequest"]["gate"] == "plan-execution"
+        status = client.call("harness_plan_status")
+        assert status["run"]["state"] == status["continuation"]["state"] == "WAIT_USER"
+        assert {r["model"] for r in client.current["userRequest"]["subject"]["reviewers"]} == {"gpt-6.1-sol"}
+        assert {w["bead"] for w in client.current["workers"]} == {"B", "C"}
     finally:
         client.close()
 
@@ -2893,25 +3125,18 @@ def automatic_retry_golden(workspace):
     (workspace / "semantic-retry-script.json").write_text(
         json.dumps({"understanding": 2, "vision-expansion": 2, "trace": 3}), encoding="utf-8"
     )
-    roles = [
-        dict(
-            role=role,
-            name=role + "-fixture",
-            provider="codex",
-            model="gpt-6.1-sol",
-            effort="medium",
-        )
-        for role in ("planner", "judge")
-    ]
-    client = LoopClient(workspace)
+    client = LoopClient(workspace, kickoff=kickoff_content())
     try:
         client.call(
             "harness_plan_start",
             name="Automatic exact fixes",
             idea="Retain the binary receipt dream",
-            role_tuples=roles,
         )
         assert client.current["userRequest"]["gate"] == "invocations"
+        # P1: missing kickoff roles resolve before freeze and drive actual native calls.
+        selected = client.current["setup"]["roleTuples"]
+        assert {r["role"] for r in selected} == {"planner", "judge"}
+        assert client.current["userRequest"]["subject"]["roleTuples"] == selected
         client.words("Authorize only these displayed planner and judge tuples")
         # The requested grant cannot authorize its own interpreting model. Its
         # actual bound words receive the external scripted judge reply once.
@@ -3027,9 +3252,10 @@ def automatic_retry_golden(workspace):
             request_id=closed["id"],
             answer=judge_reply(dict(judgment=closed)),
             source="golden:late-fourth-reply",
-            error=True,
         )
-        assert "loop-answer-stale" in str(rejected) and "outstanding requestId" in str(rejected), (
+        # FIX17 retained-request rule: late replies return the current baton,
+        # never revive a consumed request or expose a store exception.
+        assert rejected["answerOutcome"]["state"] == "superseded" and "outstanding requestId" in str(rejected), (
             rejected
         )
         # The same 1j owner must continue an invalid unsolicited direction too.
@@ -3111,10 +3337,9 @@ def automatic_retry_golden(workspace):
         (workspace / "semantic-late-output").touch()
         answers_before = client.tool_names["harness_loop_answer"]
         client.send_steer(
-            direction="continue",
-            rationale="Actual user resumes with a five-second semantic invocation lease",
+            direction="replan",
+            rationale="Actual user requests semantic replanning under the frozen invocation lease",
             resume=True,
-            content=dict(timeout=5),
         )
         late_marker = workspace / ".codex-harness/semantic-late-complete.json"
         deadline = time.monotonic() + 30
@@ -3219,13 +3444,9 @@ def receipt_gaps_golden(workspace):
     content = plan_content()
     # CLI recovery must traverse the same native Claude registration consumer as
     # browser acceptance; Codex-only receipts hid absent observed effort fields.
-    second_reviewer = content["reviewers"]["fields"]["reviewers"][1]
-    second_reviewer.update(provider="claude", model="claude-sonnet-5-5")
-    content["reviewers"]["text"] = (
-        "Retain exact Codex and Claude medium-effort reviewer tuples; workers remain Codex. "
-        "Access and independent runtime identity require the actual registered replies."
-    )
-    client = LoopClient(workspace)
+    settings = kickoff_content()
+    settings["reviewers"][1].update(provider="claude", model="claude-sonnet-5-5")
+    client = LoopClient(workspace, kickoff=settings)
 
     def wait_for(name):
         marker = workspace / ".codex-harness" / (name + ".json")
@@ -3273,7 +3494,7 @@ def receipt_gaps_golden(workspace):
                 )
             ]
             assert [row["id"] for row in plan_rows] == planned["reviewRunIds"]
-            assert len(plan_rows) == len(content["reviewers"]["fields"]["reviewers"])
+            assert len(plan_rows) == len(settings["reviewers"])
             assert all(row["invalid"] == 0 and row["didRunProvider"] for row in plan_rows)
             completed_plan = [
                 row
@@ -3648,7 +3869,6 @@ def single_build_golden(workspace):
     content = plan_content()
     content["nodes"] = [node for node in content["nodes"] if node["id"] != "C"]
     next(node for node in content["nodes"] if node["id"] == "B")["fields"]["dependsOn"] = []
-    content["workers"] = [worker for worker in content["workers"] if worker["bead"] == "B"]
     client = LoopClient(workspace)
     try:
         client.call(
@@ -3884,26 +4104,23 @@ def plan_content(surface="cli"):
         contracts = next(n for n in nodes if n["id"] == "C")
         contracts["parents"] = ["T_RECEIPT"]
         contracts["fields"]["ownedFiles"] = list(build["fields"]["ownedFiles"])
-    choice = (
-        json.loads((ROOT / "tests/fixtures/efficiency/jsonkeys-reviewers.json").read_text("utf-8"))[
-            "choice"
-        ]
-        if surface == "cli"
-        else captured["choice"]
-    )
-    choice["fields"].update(catalogId=None, catalogDigest=None)
-    choice["fields"]["recommendation"]["choiceIds"] = []
-    for reviewer in choice["fields"]["reviewers"]:
-        reviewer["choiceId"] = None
-    return dict(
-        nodes=nodes,
-        reviewers=choice,
-        workers=[
-            dict(bead=b, provider="codex", model="gpt-6.1-sol", effort="medium") for b in ("C", "B")
-        ],
-        max_parallel=1,
-        timeout=180,
-    )
+    for n in nodes:
+        # FIX17 DELETE-structure: provider pins/project setup are operator kickoff data.
+        if n["kind"] == "bead":
+            for key in ("provider", "model", "effort"):
+                n["fields"].pop(key, None)
+        elif n["kind"] == "vision":
+            n["fields"].pop("setup", None)
+    return dict(nodes=nodes)
+
+
+def kickoff_content(surface="cli"):
+    """Operator-owned fixture preferences, consumed by the real kickoff reader."""
+    fixture = "jsonkeys-reviewers.json" if surface == "cli" else "ux6.json"
+    record = json.loads((ROOT / "tests/fixtures/efficiency" / fixture).read_text("utf-8"))
+    choice = record["choice"]
+    return dict(timeout=180, reviewers=[dict(name=r["name"], provider=r["provider"], model=r["model"],
+        effort=r["effort"]["value"]) for r in choice["fields"]["reviewers"]])
 
 
 def judge_reply(pending, *, decision="approve", verdict="positive", gaps=()):
@@ -3988,14 +4205,7 @@ def advance_meaning(client, content, *, stop_at=None):
         elif run.get("userRequest"):
             if run["userRequest"]["gate"] == "plan-execution":
                 card = run["userRequest"]
-                choice = content["reviewers"]
-                expected = [
-                    {
-                        key: row[key] if key != "effort" else row[key]["value"]
-                        for key in ("name", "provider", "model", "effort")
-                    }
-                    for row in choice["fields"]["reviewers"]
-                ]
+                expected = client.setup["reviewers"]
                 assert card["subject"]["reviewers"] == expected
                 from codex_harness.core.reviewer_evidence import review_tier
 
@@ -4021,7 +4231,7 @@ def advance_meaning(client, content, *, stop_at=None):
                     label not in card["card"]
                     for label in ("reviewAllowance", "callCap", "up to 10 reviews")
                 )
-                catalog = "recorded" if choice["fields"].get("catalogId") else "unverified"
+                catalog = "unverified"
                 assert card["catalog"] == catalog and "catalog: " + catalog in card["card"]
             if run["userRequest"]["gate"] == "C":
                 assert (
@@ -4345,8 +4555,9 @@ def test_golden_path(tmp_path, request, surface):
     ledger_start = len(LoopClient.instances)
     if surface == "cli":
         fixture_ownership_golden(tmp_path / "fixture-ownership")
-        request.getfixturevalue("http_journeys")
         planning_surface_golden(tmp_path / "planning-surface")
+        reviewer_order_golden(tmp_path / "reviewer-order")
+        request.getfixturevalue("http_journeys")
         approval_order_golden(tmp_path / "approval-order")
         automatic_retry_golden(tmp_path / "automatic-retries")
         single_build_golden(tmp_path / "single-build")

@@ -201,9 +201,11 @@ class PlanJudgments:
                         self.connection.execute("SAVEPOINT judgment_payload")
                         try:
                             apply_meaning(parsed["meaning"])
-                        except BaseException:
+                        except BaseException as error:
                             self.connection.execute("ROLLBACK TO judgment_payload")
                             self.connection.execute("RELEASE judgment_payload")
+                            if isinstance(error, KeyError):
+                                raise ValueError(f"content.{error.args[0]}: required field") from error
                             raise
                         self.connection.execute("RELEASE judgment_payload")
                 except (ValueError, TypeError) as error:

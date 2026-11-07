@@ -40,7 +40,6 @@ def planning_prerequisites(
     store, execution=None, *, reviewer_node_id=None, catalog=None, reviewer_node=None
 ):
     """One read-only B preflight; collect independent failures before any paid start."""
-    from codex_harness.core.intake import validate_selection
     from codex_harness.core.planner_execution import execution_scope
     from codex_harness.core.planner_review import delivery_review_selection, selection_inputs
 
@@ -65,13 +64,6 @@ def planning_prerequisites(
     if node is None:
         missing.append("reviewer-selection-required-before-B: propose exact delivery reviewers")
     else:
-        sessions = selected.get(
-            "authorSessions", {"implementationSessionIds": [], "reviewerSessionIds": {}}
-        )
-        try:
-            validate_selection(catalog, node["fields"], sessions)
-        except (ValueError, KeyError, TypeError) as error:
-            missing.append(str(error))
         try:
             delivery_review_selection(node["fields"])
         except (ValueError, KeyError, TypeError) as error:

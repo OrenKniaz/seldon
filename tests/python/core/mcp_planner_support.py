@@ -58,10 +58,16 @@ class LoopClient:
 
     instances = []
 
-    def __init__(self, workspace, surface="cli", *, native=False):
+    def __init__(self, workspace, surface="cli", *, native=False, kickoff=None, source_root=None):
         self.workspace, self.surface = Path(workspace), surface
         self.native = native
         self.workspace.mkdir(parents=True, exist_ok=True)
+        from tests.python.core.test_golden_path import kickoff_content
+        self.setup = kickoff_content(surface) if kickoff is None else kickoff
+        settings = self.workspace / ".codex-harness/setup.json"
+        if not settings.is_file():
+            settings.parent.mkdir(exist_ok=True)
+            settings.write_text(json.dumps(self.setup), encoding="utf-8")
         self.current, self.serial = {}, 0
         self.calls = Counter(dict.fromkeys(CHARTER_PHASES, 0))
         self.judge_calls = Counter(dict.fromkeys(CHARTER_PHASES, 0))
@@ -92,7 +98,7 @@ class LoopClient:
             )
         self.env = {
             **os.environ,
-            "PYTHONPATH": os.pathsep.join([str(root / "src"), str(root)]),
+            "PYTHONPATH": os.pathsep.join([str((Path(source_root) if source_root else root) / "src"), str(root)]),
             "PATH": os.pathsep.join(paths),
             "LOCALAPPDATA": str(tools),
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -150,7 +156,7 @@ class LoopClient:
         request = self.current.get("userRequest") or {}
         if pending.get("family") == "author" and pending.get("purpose") == "trace":
             return CHARTER_PHASES[1]
-        if request.get("gate") in {"invocations", "plan-execution"}:
+        if request.get("gate") == "plan-execution" or (request.get("gate") == "invocations" and not pending):
             return CHARTER_PHASES[2]
         return PHASE_GROUP[self.current.get("phase", "align")]
 

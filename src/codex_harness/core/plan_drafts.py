@@ -177,34 +177,12 @@ class PlanDrafts:
                 ),
             }
 
-    def record_reviewer_selection(
-        self, node: dict, expected_spine_revision: str, *, author_sessions=None
-    ) -> dict:
-        """Optional author_sessions is the producer shape, retained in the selection event."""
+    def record_reviewer_selection(self, node: dict, expected_spine_revision: str) -> dict:
+        """Record code-selected tuples; P/B and native receipts own permission/credit."""
         with self._transaction():
             before = self._draft_preimage(expected_spine_revision)
             node = self._draft_node(node, "decision", "dot-reviewer-selection-v1")
-            observation = self._latest_draft_event("reviewer-catalog-recorded")
-            sessions = (
-                author_sessions
-                if author_sessions is not None
-                else {"implementationSessionIds": [], "reviewerSessionIds": {}}
-            )
-            assurance = intake.validate_selection(
-                observation["catalog"] if observation else None, node["fields"], sessions
-            )
-            node["fields"] = assurance["selection"]
-            result = self._save_draft_nodes(
-                before,
-                [node],
-                "reviewer-selection-recorded",
-                {"nodeId": node["id"], "authorSessions": sessions},
-            )
-            return {
-                **result,
-                **assurance,
-                "nextAction": "Resolve unmet assurance before existing review gates",
-            }
+            return self._save_draft_nodes(before, [node], "reviewer-selection-recorded", {"nodeId": node["id"]})
 
     def record_wave_map(
         self,
@@ -713,18 +691,6 @@ class PlanDrafts:
                         node["id"]
                     ] == spine.revision(node["id"])
                     item = {"node": node, "state": "draft" if current else "stale"}
-                    if current and field == "reviewerSelection":
-                        catalog = self._latest_draft_event("reviewer-catalog-recorded")
-                        try:
-                            item.update(
-                                intake.validate_selection(
-                                    catalog["catalog"] if catalog else None,
-                                    node["fields"],
-                                    event["authorSessions"],
-                                )
-                            )
-                        except ValueError as error:
-                            item.update(state="stale", unmetRequirements=[str(error)])
                     result[field] = item
             event = self._latest_draft_event("wave-map-recorded")
             if event is None:

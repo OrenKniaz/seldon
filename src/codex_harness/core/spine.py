@@ -70,7 +70,7 @@ def bead_rules(semantic=False):
         "Required fields (arrays contain nonblank strings): "
         + _canonical({k: example for k, (example, _) in bead_contract(semantic).items()})
         + ". ownedFiles is nonempty; dependsOn/lessons are unique existing bead/decision IDs. "
-        "Dependencies are acyclic. Optional provider is nonblank; capabilityRefs are unique "
+        "Dependencies are acyclic. Provider/model choice belongs to kickoff; capabilityRefs are unique "
         "lowercase dotted identifiers, requested/unverified, never permissions. "
         + (
             "DV2 permits one build bead and an optional contracts supplier until Stage 3a."
@@ -226,11 +226,6 @@ class Spine:
         valid = (
             all(check(fields.get(key)) for key, (_, check) in bead_contract(self.semantic).items())
             and (not self.semantic or "proofModule" not in fields)
-            and (
-                "provider" not in fields
-                or isinstance(fields["provider"], str)
-                and bool(fields["provider"].strip())
-            )
         )
         if valid:
             for key, kind in (("dependsOn", "bead"), ("lessons", "decision")):
@@ -656,8 +651,6 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         for key in ("proofModule", "semanticPhase", "capabilityRefs"):
             if key in fields:
                 bead[key] = fields[key]
-        if "provider" in fields:
-            bead["suggestedProvider"] = fields["provider"]
         beads[node_id] = bead
     manifest = {
         "schema": "codex-harness/provider-sample-v1", "sample": spine.name,

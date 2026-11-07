@@ -291,6 +291,7 @@ def http_golden(workspace, semantic=False):
 
         pending = run.get("question")
         assert pending, run
+        pending = dict(pending, judgment=store.judgment(pending["requestId"], candidate=pending["candidate"]))
         if pending["family"] in {"author", "direction"}:
             content = {}
             if pending["purpose"] == "finding-dispositions":
@@ -348,15 +349,13 @@ def http_golden(workspace, semantic=False):
 
         run = run_loop.cursor(store)
         if run is None:
-            run_loop.start(store)
-            # Attach canonical A/B and worker meaning through the public owner;
-            # never manufacture a cursor or standalone worker launch.
-            run = run_loop.steer(
-                store,
-                direction="continue",
-                rationale="Run the accepted HTTP plan with its recorded worker tuples",
-                content={k: options[k] for k in ("workers", "max_parallel", "timeout")},
-            )
+            # FIX17: operator fixture configures structure before the controller starts.
+            from codex_harness.core.planner_review import selection_inputs, delivery_review_selection
+            selected = delivery_review_selection(selection_inputs(store)[1]["fields"])[0]
+            worker = {k: options["workers"][0][k] for k in ("provider", "model", "effort")}
+            (workspace / ".codex-harness/setup.json").write_text(json.dumps(dict(worker=worker,
+                reviewers=selected, max_parallel=options["max_parallel"], timeout=options["timeout"])), encoding="utf-8")
+            run = run_loop.start(store)
         for _ in range(30):
             if run.get("effect"):
                 assert run["effect"]["kind"] == "build", run

@@ -272,7 +272,7 @@ FIELD_RULES = {
         "Use PRODUCT-BRIEF.md only when that is the existing source; invent no path. Preserve "
         "the complete brief/provenance and derive every requirement/scenario from it. This "
         "teaching never migrates, truncates, rewrites or narrows existing/locked visions. "
-        "Optional setup strings: projectFolder, gitName, gitEmail, githubLogin, repoUrl. "
+        "Project setup and provider choices belong to operator kickoff, not planner content. "
         "Never read credentials or git config except --get user.name or --get user.email. "
         "Understanding fields/aliases: vision, users, first_user_moment/firstUserMoment, "
         "scope_in/scopeIn, scope_out/scopeOut, quality_bar/qualityBar/quality, "

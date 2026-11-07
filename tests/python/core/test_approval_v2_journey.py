@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from tests.python.core.mcp_planner_support import LoopClient
-from tests.python.core.test_golden_path import advance_meaning, judge_reply, plan_content
+from tests.python.core.test_golden_path import advance_meaning, judge_reply, plan_content, kickoff_content
 
 from codex_harness.core import approvals
 from codex_harness.core.plan_store import open_plan_store_readonly
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.fast
     "journey",
     [
         "clarification",
-        "renew-reviewers",
+        "frozen-kickoff",
         "decline-a",
         "change-a",
         "stale-a",
@@ -46,15 +46,16 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey):
     answers once, so it misses these interrupted and changed-subject boundaries.
     """
     content = plan_content()
-    if journey == "renew-reviewers":
-        content["timeout"] = 300
+    settings = kickoff_content()
+    if journey == "frozen-kickoff":
+        settings["timeout"] = 300
     (tmp_path / "validation-observed").touch()
     # Main golden owns wrong-reason worker repair. These authority twins select
     # the ordinary provider reply and still observe real Contracts RED/Build GREEN.
     (tmp_path / "contracts-attempted").touch()
     (tmp_path / "template/checks").mkdir(parents=True)
     (tmp_path / "template/checks/retired.json").write_text("[1]\n")
-    client = LoopClient(tmp_path, native=journey == "reconnect-a")
+    client = LoopClient(tmp_path, native=journey == "reconnect-a", kickoff=settings)
 
     def at_gate(gate):
         return lambda run: bool(
@@ -113,11 +114,11 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey):
             "C"
             if journey in {"reconnect-c", "refused-c"}
             else "plan-execution"
-            if journey.endswith("-b") or journey in {"renew-reviewers", "missing-b", "delivery"}
+            if journey.endswith("-b") or journey in {"frozen-kickoff", "missing-b", "delivery"}
             else "align+vision-lock"
         )
 
-        if journey == "renew-reviewers":
+        if journey == "frozen-kickoff":
             # Run 22 authors subordinate trace after A. Adding targets/scenarios
             # must temporarily stale A, then preserve its actual-word authority
             # when the canonical intent judge finds no change to the dream.
@@ -214,12 +215,13 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey):
             client.reconnect()
             refused = client.call(
                 "harness_loop_answer",
-                error=True,
                 request_id=pending["requestId"],
                 answer=value,
                 source="old-bound-B-interpretation",
             )
-            assert "outstanding requestId" in refused["content"][0]["text"]
+            # FIX17: superseded replies return the current baton; authority checks below remain.
+            assert refused["answerOutcome"]["state"] == "superseded"
+            assert "outstanding requestId" in refused["answerOutcome"]["message"]
             scope_answer("HOW")
             advance_meaning(
                 client,
@@ -293,149 +295,48 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey):
             with open_plan_store_readonly(tmp_path) as store:
                 assert approvals.current(store, "A") is None
             request = arrive(kind)
-        if journey == "renew-reviewers":
-            # A draft catalog/selection cannot authorize a replacement tuple.
-            # The old assertion called require_invocation directly and never
-            # consumed renewed permission in a real review invocation.
+        if journey == "frozen-kickoff":
+            # FIX17 DELETE-structure: planner timeout/model/catalog renewal is
+            # retired. Prove frozen operator pins plus real scope-only B renewal.
             with open_plan_store_readonly(tmp_path) as store:
                 permitted = approvals.current(store, "P")["subject"]["roleTuples"]
                 assert permitted and approvals.current(store, "B") is None
-                old_reviews = store.successful_reviews(store.manifest_revision())
-                assert old_reviews
+                assert store.successful_reviews(store.manifest_revision())
             old_b = request
+            frozen_workers = old_b["subject"]["execution"]["workers"]
             approve()
             assert client.current["question"]["purpose"] == "execution"
             assert not (tmp_path / "build-entered").exists()
-            # The retained timeout-only refusal catches admission beyond the
-            # approved deadline; tuple/scope changes cannot isolate that bug.
-            client.call(
-                "harness_steer",
-                direction="continue",
-                rationale="Propose a higher deadline without granting new B",
-                content=dict(timeout=301),
-            )
-            higher_deadline = arrive(kind)
-            assert [(d["field"], d["before"], d["after"]) for d in higher_deadline["diff"]] == [
-                ("execution.timeout", 300, 301)
-            ]
-            assert higher_deadline["request_id"] != old_b["request_id"]
-            worker_union = [
-                dict(provider="codex", model="gpt-6.1-sol", effort="medium"),
-                dict(provider="codex", model="gpt-6.1-terra", effort="medium"),
-            ]
-            # A new worker model expands the existing envelope. Replacing it
-            # would silently revoke the old approved tuple; the deadline-only
-            # card and the later combined scope card miss that isolated change.
-            client.call(
-                "harness_steer",
-                direction="continue",
-                rationale="Propose a worker model while retaining the approved deadline",
-                content=dict(
-                    timeout=300,
-                    workers=[dict(w, model="gpt-6.1-terra") for w in content["workers"]],
-                ),
-            )
-            worker_change = arrive(kind)
-            assert [(d["field"], d["before"], d["after"]) for d in worker_change["diff"]] == [
-                ("execution.workers", worker_union[:1], worker_union)
-            ]
-            assert worker_change["card"].count("Your decision: B.") == 1
-            assert (
-                client.call("harness_plan_status")["run"]["userRequest"]["request_id"]
-                == worker_change["request_id"]
-            )
-            with open_plan_store_readonly(tmp_path) as store:
-                granted = approvals.current(store, "B")
-                assert granted["request_id"] == old_b["request_id"]
-                assert granted["subject"]["execution"]["timeout"] == 300
-                assert granted["subject"]["execution"]["workers"] == worker_union[:1]
-            assert not (tmp_path / "build-entered").exists()
-            choice = deepcopy(content["reviewers"])
-            catalog = json.loads(
-                (
-                    Path(__file__).resolve().parents[3]
-                    / "tests/fixtures/efficiency/jsonkeys-reviewers.json"
-                ).read_text()
-            )["catalog"]
-            catalog["id"] = "RC-00000000-0000-0000-0000-000000000002"
-            catalog.pop("digest", None)
-            provider = catalog["providers"][0]
-            provider["executable"] = str(tmp_path / "tools/codex.exe")
-            for offered in provider["choices"]:
-                offered.update(model="gpt-6.1-terra", availability="offered")
-                offered.pop("choiceId", None)
-            client.call(
-                "harness_steer",
-                direction="replan",
-                rationale="Record the replacement offering; this grants no invocation permission",
-                content=dict(catalog=catalog, workers=content["workers"]),
-            )
-            with open_plan_store_readonly(tmp_path) as store:
-                recorded = next(iter(approvals.records(store, "reviewer-catalog-recorded")))[
-                    "catalog"
-                ]
-                assert recorded["id"] == catalog["id"]
-                assert approvals.current(store, "P")["subject"]["roleTuples"] == permitted
-            offered = recorded["providers"][0]["choices"][0]
-            choice["fields"].update(catalogId=recorded["id"], catalogDigest=recorded["digest"])
-            for reviewer in choice["fields"]["reviewers"]:
-                reviewer.update({key: offered[key] for key in ("choiceId", "model", "effort")})
-            choice["fields"]["recommendation"]["choiceIds"] = [offered["choiceId"]]
+            changed = deepcopy(settings)
+            changed.update(timeout=301, worker=dict(provider="codex", model="gpt-6.1-terra", effort="high"))
+            changed["reviewers"] = [dict(r, model="gpt-6.1-terra") for r in settings["reviewers"]]
+            (tmp_path / ".codex-harness/setup.json").write_text(json.dumps(changed), encoding="utf-8")
+            pending_execution = client.current["question"]["requestId"]
+            client.reconnect()
+            assert client.current["question"]["requestId"] == pending_execution
+            assert client.current["setup"]["timeout"] == 300
             requirement = next(n for n in content["nodes"] if n["id"] == "R1")
             requirement["text"] = requirement["text"].replace(
-                "Success exit 0, stderr empty.",
-                "The success exit status is outside this requirement.",
-            )
-            content["workers"] = [dict(w, model="gpt-6.1-terra") for w in content["workers"]]
-            client.call(
-                "harness_steer",
-                direction="replan",
-                rationale="User proposes changed scope, workers and exact delivery reviewers",
-                content=dict(nodes=[requirement], reviewers=choice, workers=content["workers"]),
-            )
+                "Success exit 0, stderr empty.", "The success exit status is outside this requirement.")
+            client.call("harness_steer", direction="replan", rationale="User proposes changed meaning under frozen kickoff",
+                        content=dict(nodes=[requirement]))
             scope_answer("WHAT")
-            permission = arrive("invocations")
-            proposed = permission["subject"]["roleTuples"]
-            renewed_reviewers = [
-                r for r in proposed if r["role"] == "reviewer" and r["model"] == "gpt-6.1-terra"
-            ]
-            assert {r["name"] for r in renewed_reviewers} == {
-                r["name"] for r in choice["fields"]["reviewers"]
-            }
-            assert all(r not in permitted for r in renewed_reviewers)
+            request = arrive(kind)
+            assert request["request_id"] != old_b["request_id"]
+            assert {d["field"] for d in request["diff"]} >= {"scope.nodes.R1.text", "scope.digest"}
+            assert not {"reviewers", "execution.workers", "execution.timeout"} & {d["field"] for d in request["diff"]}
+            assert "Changes from your previous decision" in request["card"]
+            assert request["subject"]["execution"]["workers"] == frozen_workers
+            assert request["subject"]["execution"]["timeout"] == 300
             with open_plan_store_readonly(tmp_path) as store:
                 assert approvals.current(store, "P")["subject"]["roleTuples"] == permitted
                 assert approvals.current(store, "B")["request_id"] == old_b["request_id"]
-                assert store.successful_reviews(store.manifest_revision()) == []
-            assert not (tmp_path / "build-entered").exists()
-            approve()
-            request = arrive(kind)
-            assert {d["field"] for d in request["diff"]} >= {
-                "reviewers",
-                "execution.workers",
-                "scope.nodes.R1.text",
-                "scope.digest",
-            }
-            assert "Changes from your previous decision" in request["card"]
-            assert (
-                client.call("harness_plan_status")["run"]["userRequest"]["request_id"]
-                == request["request_id"]
-            )
-            with open_plan_store_readonly(tmp_path) as store:
-                assert approvals.current(store, "P")["subject"]["roleTuples"] == proposed
                 reviews = store.successful_reviews(store.manifest_revision())
                 assert reviews
-                # launchSelection is the ordinary review consumer's retained
-                # observation, produced after the exact P grant, never a spy.
-                assert all(
-                    shard["launchSelection"]["model"] == "gpt-6.1-terra"
-                    and shard["didRunProvider"]
-                    and not shard["isMocked"]
-                    and shard["exitCode"] == 0
-                    and not shard["invalid"]
-                    for review in reviews
-                    for shard in json.loads(review["shardDetails"])
-                )
+                assert all(shard["launchSelection"]["model"] == settings["reviewers"][0]["model"]
+                           and shard["didRunProvider"] and not shard["isMocked"] and shard["exitCode"] == 0
+                           and not shard["invalid"] for review in reviews for shard in json.loads(review["shardDetails"]))
+            assert not (tmp_path / "build-entered").exists()
         if journey == "missing-b":
             for retired in (
                 "harness_advance",
@@ -483,20 +384,21 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey):
             pending = client.current["question"]
             value = judge_reply(pending)
             client.answer(value)
-        if journey == "renew-reviewers":
+        if journey == "frozen-kickoff":
             with open_plan_store_readonly(tmp_path) as store:
                 granted = approvals.current(store, "B")
                 assert granted["request_id"] == request["request_id"]
-                assert granted["subject"]["execution"]["workers"] == worker_union
+                assert granted["subject"]["execution"]["workers"] == frozen_workers
         if journey in {"replay-a", "replay-b"}:
             refused = client.call(
                 "harness_loop_answer",
-                error=True,
                 request_id=pending["requestId"],
                 answer=value,
                 source="replayed-wire-response",
             )
-            assert "outstanding requestId" in refused["content"][0]["text"]
+            # FIX17: superseded replies return the current baton; authority checks below remain.
+            assert refused["answerOutcome"]["state"] == "superseded"
+            assert "outstanding requestId" in refused["answerOutcome"]["message"]
             with open_plan_store_readonly(tmp_path) as store:
                 saved = [
                     r
@@ -571,12 +473,13 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey):
             )
             refused = client.call(
                 "harness_loop_answer",
-                error=True,
                 request_id=pending["requestId"],
                 answer=value,
                 source="superseded-scope-interpretation",
             )
-            assert "outstanding requestId" in refused["content"][0]["text"]
+            # FIX17: superseded replies return the current baton; authority checks below remain.
+            assert refused["answerOutcome"]["state"] == "superseded"
+            assert "outstanding requestId" in refused["answerOutcome"]["message"]
             scope_answer("WHAT")
             with open_plan_store_readonly(tmp_path) as store:
                 assert approvals.current(store, "B") is None

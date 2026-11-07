@@ -21,6 +21,14 @@ def run_baton(store):
     run = cursor(store)
     if run is None:
         return None
+    if pending := run.get("question"):
+        judgment = store.judgment(pending["requestId"], candidate=pending["candidate"])
+        run["question"] = dict(pending, judgment=judgment) if (
+            judgment["current"] and judgment["disposition"] not in {"steer", "complete"}
+            and pending["revision"] == store._revision()
+        ) else None
+        if run["question"] is None:
+            run.update(nextAction="Continue to re-ask against current evidence", reason="Retained request is closed or superseded")
     return dict(
         run,
         decisions=store.list_nodes("decision"),

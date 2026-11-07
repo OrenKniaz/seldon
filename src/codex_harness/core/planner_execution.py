@@ -19,6 +19,13 @@ def _canonical_store(store):
         raise ValueError("worker-execution-canonical-store-required")
 
 
+def execution_limits(semantic, max_parallel, timeout):
+    if semantic and max_parallel != 1:
+        raise ValueError("Parallel Build unsupported in semantic-v1; use max_parallel=1")
+    if type(max_parallel) is not int or max_parallel < 1 or not jobs._valid_timeout(timeout):
+        raise ValueError("worker-execution-limits-invalid: use positive max_parallel and a finite positive timeout")
+
+
 def execution_scope(
     store, expected_revision, workers, *, max_parallel=2, timeout=900, _candidate=False
 ):
@@ -33,13 +40,8 @@ def execution_scope(
     else:
         manifest, template = jobs._publication(store, expected_revision)
     semantic = manifest.get("planMode") == "semantic-v1"
-    if semantic and max_parallel != 1:
-        raise ValueError("Parallel Build unsupported in semantic-v1; use max_parallel=1")
+    execution_limits(semantic, max_parallel, timeout)
     selected = jobs._workers(manifest, workers)
-    if type(max_parallel) is not int or max_parallel < 1 or not jobs._valid_timeout(timeout):
-        raise ValueError(
-            "worker-execution-limits-invalid: use positive max_parallel and a finite positive timeout"
-        )
     if not _candidate:
         revision = store.manifest_revision()
         if (
