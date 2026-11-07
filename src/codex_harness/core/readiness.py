@@ -159,6 +159,8 @@ def readiness_status(store, revision, *, run=None, include_beads=()) -> dict:
     evidence["openFindingIds"] = [item["id"] for item in findings if item["state"] == "open"]
     if "open" in states:
         status, advice = "fail", "Resolve open readiness findings and rerun readiness."
+    elif "pending" in states:
+        status, advice = "not-yet", "Judge pending readiness findings and rerun readiness."
     elif any(item["status"] == "deferred" for item in findings):
         status, advice = "warn", "Deferred readiness blockers remain known gaps."
     elif all(row["ready"] and row["canVerify"] for row in rows):

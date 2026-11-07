@@ -53,7 +53,7 @@ def acceptance_status(store) -> dict:
             id=s["id"],
             title=s["title"],
             steps=s["steps"],
-            lastResult=("pass" if results[s["id"]]["passed"] else "fail")
+            lastResult=({True: "pass", False: "fail", None: "pending-judgment"}[results[s["id"]]["passed"]])
             if s["id"] in results
             else "not-run (stale)"
             if previous_run

@@ -42,9 +42,8 @@ def _execution_context(store, request):
     run = current_run(store)
     if not run or run["id"] != request["expected_product_run_id"] or run_subject(run) != "product":
         raise ValueError("execution-current-product-run-required")
-    if store._meta()["published_revision"] != request[
-        "worker_job_id"
-    ] or not store.publication_current(request["expected_manifest_revision"]):
+    publication = store._meta()["published_revision"]
+    if not publication or not store.publication_current(request["expected_manifest_revision"]):
         raise ValueError("execution-publication-stale")
     origins = read_execution_finding_origins(store, [row["memberId"] for row in members])
     evidence = dispatch.read_completed_execution_evidence(
@@ -52,7 +51,7 @@ def _execution_context(store, request):
         request["worker_job_id"],
         request["bead_id"],
         expected_repo=run["repo"],
-        expected_publication_revision=request["worker_job_id"],
+        expected_publication_revision=publication,
     )
     author = _execution_session(
         evidence["request"], evidence["stdout"], evidence["stderr"], author=True

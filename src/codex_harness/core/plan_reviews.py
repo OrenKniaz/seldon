@@ -165,8 +165,78 @@ class PlanReviews:
             )
         ]
 
+    def _review_credit_rows(self, revision, *, carry=False):
+        """Select the latest reservation before eligibility; never fall back to an older pass."""
+        tables = {
+            row[0]
+            for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        runs = (
+            [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM review_runs WHERE (plan_revision=? OR ?) "
+                    "ORDER BY finished_at DESC, rowid DESC",
+                    (revision, carry),
+                )
+            ]
+            if "review_runs" in tables
+            else []
+        )
+        attempts = (
+            [
+                dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM review_attempts WHERE (plan_revision=? OR ?) ORDER BY rowid DESC",
+                    (revision, carry),
+                )
+            ]
+            if "review_attempts" in tables
+            else []
+        )
+        identities = {(r["reviewer"], r["provider"]) for r in runs + attempts}
+        result = {}
+        for identity in identities:
+            matches = [r for r in runs if (r["reviewer"], r["provider"]) == identity]
+            reserved = [r for r in attempts if (r["reviewer"], r["provider"]) == identity]
+            reservation = reserved[0] if reserved else None
+            run = (
+                next((r for r in matches if r["id"] == reservation["id"]), None)
+                if reservation
+                else next(iter(matches), None)
+            )
+            success = bool(
+                run
+                and run["exit_code"] == 0
+                and run["invalid"] == 0
+                and run.get("isMocked") == 0
+                and run.get("didRunProvider") == 1
+                and run.get("packetBound") == 1
+                and native_reviewer(
+                    dict(
+                        provider=run["provider"],
+                        shards=run.get("shards"),
+                        shardDetails=json.loads(run.get("shardDetails") or "[]"),
+                    ),
+                    self,
+                    current=run["plan_revision"] == revision,
+                )
+            )
+            result[identity] = dict(
+                run=run,
+                success=success,
+                latestReviewId=run["id"] if run else None,
+                latestAttemptId=reservation["id"] if reservation else None,
+                attemptOrdering="reservation-rowid" if reserved else "legacy-completion-fallback",
+                ambiguousAttemptOrder=False,
+                incompleteAttempt=bool(
+                    reservation and not run and reservation.get("state") != "abandoned"
+                ),
+            )
+        return result
+
     def plan_review_policy_state(self, revision: str) -> dict:
-        """One derived prospective gate projection; legacy history keeps its old credit.
+        """One derived prospective gate projection over shared reservation-ordered credit.
 
         No general observed-separation, clause-witness or targeted-assessment
         producer exists here. Author references cannot fill those gaps.
@@ -204,43 +274,10 @@ class PlanReviews:
         if policy["manifestRevision"] != revision:
             result["reasons"] = ["review-policy-revision-stale"]
             return result
-        runs_exist = self.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_runs'"
-        ).fetchone()
-        runs = (
-            [
-                dict(row)
-                for row in self.connection.execute(
-                    "SELECT * FROM review_runs WHERE plan_revision=? "
-                    "ORDER BY finished_at DESC, rowid DESC",
-                    (revision,),
-                )
-            ]
-            if runs_exist
-            else []
-        )
-        attempts_exist = self.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_attempts'"
-        ).fetchone()
-        attempts = (
-            [
-                dict(row)
-                for row in self.connection.execute(
-                    "SELECT rowid AS reservation_order, * FROM review_attempts "
-                    "WHERE plan_revision=? ORDER BY rowid DESC",
-                    (revision,),
-                )
-            ]
-            if attempts_exist
-            else []
-        )
-        run_ids = {row["id"] for row in runs}
-        incomplete = [
-            row for row in attempts if row["id"] not in run_ids and row.get("state") != "abandoned"
-        ]
+        credits = self._review_credit_rows(revision)
         declared = {(slot["name"], slot["provider"]) for slot in policy["slots"]}
         undeclared = sorted(
-            {(row["reviewer"], row["provider"]) for row in runs + incomplete} - declared
+            {identity for identity, row in credits.items() if row["run"] or row["incompleteAttempt"]} - declared
         )
         if undeclared:
             result["reasons"].append("review-policy-undeclared-attempt")
@@ -248,63 +285,18 @@ class PlanReviews:
                 dict(name=name, provider=provider) for name, provider in undeclared
             ]
         for slot in policy["slots"]:
-            matches = [
-                row
-                for row in runs
-                if (row["reviewer"], row["provider"]) == (slot["name"], slot["provider"])
-            ]
-            pending = any(
-                (row["reviewer"], row["provider"]) == (slot["name"], slot["provider"])
-                for row in incomplete
-            )
-            reserved = [
-                row
-                for row in attempts
-                if (row["reviewer"], row["provider"]) == (slot["name"], slot["provider"])
-            ]
-            reserved_ids = {row["id"] for row in reserved}
-            # Reservations commit before launch; completion timestamps cannot order
-            # overlapping attempts. Any unresolved reservation still holds, even
-            # when an apparently newer attempt passed. Mixed provenance cannot
-            # establish ordering and also holds instead of inventing a winner.
-            ambiguous = bool(reserved and any(row["id"] not in reserved_ids for row in matches))
-            run = (
-                next((row for row in matches if row["id"] == reserved[0]["id"]), None)
-                if reserved
-                else matches[0]
-                if matches
-                else None
-            )
-            success = bool(
-                run
-                and not pending
-                and not ambiguous
-                and run["exit_code"] == 0
-                and run["invalid"] == 0
-                and run.get("isMocked") == 0
-                and run.get("didRunProvider") == 1
-                and run.get("packetBound") == 1
-                and native_reviewer(
-                    dict(
-                        provider=run["provider"],
-                        shards=run.get("shards"),
-                        shardDetails=json.loads(run.get("shardDetails") or "[]"),
-                    ),
-                    self,
-                )
-            )
+            credit = credits.get((slot["name"], slot["provider"]), {})
+            success = credit.get("success", False)
             observation = dict(
                 **slot,
                 state="passed" if success else "unverified-or-failed",
-                latestReviewId=run["id"] if run else None,
-                latestAttemptId=reserved[0]["id"] if reserved else None,
-                attemptOrdering="reservation-rowid" if reserved else "legacy-completion-fallback",
-                ambiguousAttemptOrder=ambiguous,
-                incompleteAttempt=pending,
+                **{key: credit.get(key) for key in ("latestReviewId", "latestAttemptId", "attemptOrdering")},
+                ambiguousAttemptOrder=credit.get("ambiguousAttemptOrder", False),
+                incompleteAttempt=credit.get("incompleteAttempt", False),
             )
             result["slots"].append(observation)
             if success:
-                result["successfulReviewIds"].append(run["id"])
+                result["successfulReviewIds"].append(credit["latestReviewId"])
             else:
                 result["requiredFailures" if slot["required"] else "optionalFailures"].append(
                     slot["name"]
@@ -425,7 +417,7 @@ class PlanReviews:
         )
 
     def successful_reviews(self, revision: str) -> list[dict]:
-        """Latest explicitly real successful run per provider; unknown history is excluded."""
+        """Credit only the latest reservation, with native identity and explicit judged reuse."""
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(review_runs)")}
         if (
             not {
@@ -453,16 +445,12 @@ class PlanReviews:
             and revision == self.manifest_revision()
         )
         snapshot = self.review_nodes_digest() if carry else None
-        latest, seen = {}, set()
-        for row in self.connection.execute(
-            "SELECT * FROM review_runs WHERE (plan_revision=? OR ?) ORDER BY finished_at DESC, rowid DESC",
-            (revision, bool(carry)),
-        ):
-            row = dict(row)
-            if policy["active"] and row["id"] not in policy["successfulReviewIds"]:
+        latest = {}
+        for credit in self._review_credit_rows(revision, carry=carry).values():
+            row = credit["run"]
+            if not credit["success"]:
                 continue
-            identity = (row["provider"], row["reviewer"])
-            if identity in seen:
+            if policy["active"] and row["id"] not in policy["successfulReviewIds"]:
                 continue
             details = json.loads(row.get("shardDetails") or "[]")
             profiles = [
@@ -473,12 +461,6 @@ class PlanReviews:
             ]
             profiles = [reviewer_tuple(profile) for profile in profiles if profile]
             if not profiles or any(profile not in allowed for profile in profiles):
-                continue
-            if not native_reviewer(
-                dict(provider=row["provider"], shards=row.get("shards"), shardDetails=details),
-                self,
-                current=row["plan_revision"] == revision,
-            ):
                 continue
             if row["plan_revision"] != revision:
                 if not row.get("nodesDigest"):
@@ -555,26 +537,16 @@ class PlanReviews:
             not self.spine().semantic
             or not self.connection.execute("PRAGMA table_info(review_runs)").fetchone()
         ):
-            return
-        seen = set()
-        for row in self.connection.execute("SELECT * FROM review_runs ORDER BY rowid DESC"):
-            row = dict(row)
-            key = row["provider"], row["reviewer"]
-            if key in seen:
+            return []
+        reuse = []
+        for credit in self._review_credit_rows(self.manifest_revision(), carry=True).values():
+            row = credit["run"]
+            if not credit["success"]:
                 continue
-            seen.add(key)
             if row["plan_revision"] == self.manifest_revision() or not row.get("nodesDigest"):
                 continue
-            if native_reviewer(
-                dict(
-                    provider=row["provider"],
-                    shards=row["shards"],
-                    shardDetails=json.loads(row["shardDetails"]),
-                ),
-                self,
-                current=False,
-            ):
-                self.review_reuse(row, self.review_nodes_digest(), prepare=True)
+            reuse.append(self.review_reuse(row, self.review_nodes_digest(), prepare=True))
+        return reuse
 
     def completed_review(self, effect):
         """Read the exact completed round recorded by this effect's admissions."""

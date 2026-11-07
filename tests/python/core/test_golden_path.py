@@ -50,6 +50,67 @@ def scripted_worker(packet, root, files):
             (root / name).write_text(source, encoding="utf-8")
 
 
+def review_replacement_golden(store, reviewer):
+    """C11/I6: reserve -> return -> credit, including inverted completion order.
+
+    An old pass must not survive a pending/failed replacement; an older slow
+    completion must not replace the newest reservation. Serial successes miss both.
+    Only provider replies are scripted; admission, persistence and credit are real.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from tests.python.core.acceptance_recovery_support import protocol
+    from codex_harness.core import roundtable, review_provider
+    from codex_harness.core.plan_store import open_plan_store
+
+    entered, release = threading.Event(), threading.Event()
+    fail_new = True
+
+    def reply(launch, *_, **__):
+        if threading.current_thread().name.startswith("slow-review"):
+            entered.set()
+            assert release.wait(30), "Slow review fixture was not released"
+        elif fail_new:
+            return 1, "", "Scripted replacement provider failed"
+        return protocol(launch.cli, model=reviewer["model"], effort=reviewer["effort"],
+                        text=scripted_review_reply(launch, [], verdict="positive",
+                                                  rationale="The unchanged plan covers the dream"))
+
+    def slow_review():
+        with open_plan_store(store.workspace) as owner:
+            return roundtable.run_roundtable(owner, reviewers=[reviewer], timeout=5)
+
+    def credit():
+        return [r for r in store.successful_reviews(store.manifest_revision())
+                if (r["reviewer"], r["provider"]) == (reviewer["name"], reviewer["provider"])]
+
+    # Migration twin: keep the actual native review original from a history
+    # predating reservations. Fresh reviews must still use ordinary admission.
+    historical = credit()[0]
+    with store._transaction():
+        store.connection.execute("DELETE FROM review_attempts WHERE id=?", (historical["id"],))
+
+    with pytest.MonkeyPatch.context() as patch, ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="slow-review"
+    ) as pool:
+        patch.setattr(review_provider, "_run", reply)
+        future = pool.submit(slow_review)
+        try:
+            assert entered.wait(15), "Review never reached its admitted provider call"
+            assert not credit(), "An unfinished replacement retained older review credit"
+            roundtable.run_roundtable(store, reviewers=[reviewer], timeout=5)
+            assert not credit(), "A failed replacement retained older review credit"
+            fail_new = False
+            latest = roundtable.run_roundtable(store, reviewers=[reviewer], timeout=5)
+            expected = credit()
+            assert len(expected) == 1, "An older reservation or legacy row overrode the latest pass"
+        finally:
+            release.set()
+        future.result(timeout=15)
+        assert [r["id"] for r in credit()] == [r["id"] for r in expected]
+        latest["convergence"] = store.review_convergence(prepare=True)
+    return latest
+
+
 def served_product():
     """Worker reply: a real server and UI write, with disk-backed API readback."""
     return """import os, json
@@ -1158,6 +1219,12 @@ def planning_intent_golden(workspace):
                 reason="Map existing readback before changing calibration",
             ),
             operatingEnvelope=dict(channels=[1, 2]),
+            targets=dict(readback=dict(entry="readback.py", runtime=sys.executable, argv=[])),
+            scenarios=dict(schema="seldon/scenarios-v1", scenarios=[dict(
+                id="readback", requirementRefs=["R_UP"], contractRefs=[], setup={},
+                actions=[dict(id="read", cli=dict(target="readback", operation="read", argv=[]))],
+                observe=[dict(action="read", stdoutContains="channel")], verdict="all",
+            )]),
         )
         store.upsert_node(node=vision)
         store.upsert_node(node=node("R_UP", "requirement", ["EX"], expansionRefs=["UP1"]))
@@ -1179,6 +1246,18 @@ def planning_intent_golden(workspace):
         reload()
         assert store.status()["approval"]["granted"]
         locked = store.locked_acceptance_spine().node("V1")
+        # C26/I2: truncated real output stays pending through receipt -> status.
+        # Ordinary short successful output never caught null being displayed as fail.
+        from codex_harness.core.acceptance_runs import run_acceptance
+        from codex_harness.core.acceptance_views import acceptance_status
+
+        product = workspace / "readback-product"
+        product.mkdir()
+        (product / "readback.py").write_text("print('channel' * 10000)\n", encoding="utf-8")
+        observed = run_acceptance(store, product, subject="oracle")
+        assert observed["state"] == "pending-judgment", observed
+        scenario = next(s for s in acceptance_status(store)["scenarios"] if s["id"] == "readback")
+        assert scenario["lastResult"] == "pending-judgment", scenario
         assert locked["fields"]["openLoop"]["provenance"] == "fixture:owner-metric"
         from codex_harness.core.planner_vision import expansion_status
 
@@ -4349,6 +4428,14 @@ def controller_interruptions(workspace):
             rationale="Actual user explicitly resumes",
             resume=True,
         )
+        # A transient STEER may precede automatic recovery. Wait for the actual
+        # exhausted-recovery question, not an instantaneous intermediate cursor.
+        deadline = time.monotonic() + 45
+        while not (client.current.get("question") and
+                   "Two automatic recoveries exhausted" in client.current["question"]["purpose"]):
+            assert time.monotonic() < deadline, client.current
+            time.sleep(0.05)
+            client.call("harness_plan_status")
         assert client.current["state"] == "STEER" and not client.current["effect"], client.current
         with open_plan_store_readonly(workspace) as store:
             recoveries = [
@@ -4359,6 +4446,7 @@ def controller_interruptions(workspace):
             assert len(recoveries) == 2
             faults = list(approvals.records(store, "worker-recovery-steering-required"))
             assert faults[0]["automaticRecoveriesExhausted"]
+        print("golden recovery: exhausted-recovery question observed; automatic readmissions=2", flush=True)
         # An unrelated downstream amendment cannot buy two more retries for C.
         build = next(n for n in content["nodes"] if n["id"] == "B")
         build["title"] += " (clearer handoff)"

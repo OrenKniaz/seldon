@@ -640,22 +640,7 @@ class PlanAcceptance:
             if not judgment["positiveCredit"]:
                 return dict(dispositions=0, state="pending-judgment", judgment=judgment, owner=None)
             approved = judgment["meaning"].get("memberDispositions", {})
-            reuse = [
-                self.review_reuse(dict(row), self.review_nodes_digest(), prepare=True)
-                for row in self.connection.execute(
-                    "SELECT * FROM review_runs WHERE nodesDigest IS NOT NULL AND plan_revision!=?",
-                    (self.manifest_revision(),),
-                )
-                if native_reviewer(
-                    dict(
-                        provider=row["provider"],
-                        shards=row["shards"],
-                        shardDetails=json.loads(row["shardDetails"]),
-                    ),
-                    self,
-                    current=False,
-                )
-            ]
+            reuse = self.prepare_review_reuse()
             return dict(
                 dispositions=sum(
                     approved.get(item["id"]) == item["status"] for item in dispositions

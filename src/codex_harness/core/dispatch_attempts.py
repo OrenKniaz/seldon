@@ -457,7 +457,7 @@ def read_completed_execution_evidence(
 
     status = planner_jobs.worker_job_status(workspace, worker_job_id)
     if (
-        worker_job_id != expected_publication_revision
+        status["publicationRevision"] != expected_publication_revision
         or status["status"] != "completed"
         or "run" not in status
         or status["terminal"].get("runId") != status["run"]["runId"]

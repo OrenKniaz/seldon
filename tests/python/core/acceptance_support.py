@@ -1179,6 +1179,27 @@ with TemporaryDirectory(dir=root) as scratch:
             readiness = review_readiness(reviewers=selected_reviewers, beads=["B"])
             assert readiness["invalid"] == 0
             if not semantic:
+                # I2/I6: contradictory ready flags cannot erase a real pending finding.
+                # The old happy packet had no blocker to carry through the finding owner.
+                def pending_readiness(launch, *_, **__):
+                    return protocol(launch.cli, text=json.dumps(dict(
+                        ready=True, canVerify=True, questions=[], blockers=[dict(
+                            kind="missing-context", detail="Readback ownership needs judgment", nodeIds=["B"],
+                        )],
+                    )))
+
+                with pytest.MonkeyPatch.context() as pending:
+                    pending.setattr(roundtable, "_run", pending_readiness)
+                    held_readiness = review_readiness(reviewers=selected_reviewers, beads=["B"])
+                assert held_readiness["status"] == "not-yet", held_readiness
+                members = [key for row in held_readiness["reviews"] for key in row["findingIds"]]
+                judged = resolve_findings(findings=[dict(
+                    id=key, status="resolved", resolution="The current packet assigns readback to B",
+                ) for key in members])
+                scripted_judgment(store, judged["judgment"],
+                                  dict(memberDispositions={key: "resolved" for key in members}))
+                readiness = review_readiness(reviewers=selected_reviewers, beads=["B"])
+                assert readiness["status"] == "pass", readiness
                 interrupted = admit_audit(mode="prospective")
                 server.audits.close(store)  # Supported owner cleanup before dispatch.
                 released = audit_status(id=interrupted["attemptId"])
@@ -1617,6 +1638,11 @@ with TemporaryDirectory(dir=root) as scratch:
                 )
             # Preserve recorded scope after deleting quota totals: raw SQLite integers
             # previously rendered as unknown; review results alone missed this status consumer.
+            from tests.python.core.test_golden_path import review_replacement_golden
+
+            reviewed = review_replacement_golden(store, selected_reviewers[0])
+            if not semantic and reviewed.get("convergence"):
+                scripted_judgment(store, reviewed["convergence"], dict(action="ready"))
             visible = observe(lambda: read_status(full=True))
             assert not visible["isError"]
             recorded_reviews = store.successful_reviews(store.manifest_revision())
@@ -2471,6 +2497,9 @@ with TemporaryDirectory(dir=root) as scratch:
                     reason="Retry retained delivery after reconciling the changed dependency",
                 )
                 assert refreshed["validation"]["state"] == "PASS", refreshed
+                # C18/I6: retained revalidation still owns the job. Earlier recovery
+                # asserted delivery but never read the contradictory public ownership.
+                assert jobs.worker_job_status(workspace, job["jobId"])["ownershipReleased"] is False
                 run = json.loads(Path(job["run"]["recordPath"]).read_text())
                 assert file_hashes(Path(run["repo"]), product_hashes) == product_hashes
                 assert (workspace / "verify_renamed.py").is_file() and not (
@@ -2743,6 +2772,13 @@ with TemporaryDirectory(dir=root) as scratch:
                 # A negative verdict with no presentation findings still creates
                 # concrete obligations. The next positive packet must carry them.
                 items = []
+                if not semantic and reviewer["name"] == selected_reviewers[0]["name"]:
+                    # One named concern also exercises genuine AF -> worker support;
+                    # the other reviewer retains the negative-without-findings twin.
+                    items = [dict(node_id="R", severity="major",
+                        finding="HTTP readback needs candidate-bound assessment",
+                        suggestion="Assess the real server response witness",
+                        classification="defect-in-plan", scope_reason="The accepted HTTP behavior")]
                 return protocol(
                     launch.cli,
                     model=reviewer["model"],
@@ -2790,9 +2826,37 @@ with TemporaryDirectory(dir=root) as scratch:
             )
             assert set(retried_review["receiptEventIds"]) == {key for key, _ in accepted_returns}
             review_history_ids.update(row["id"] for row in acceptance_members)
-            assert len(acceptance_members) == 2 and all(
+            # TD#5 adds one named R concern; both original negative-gap members remain.
+            assert len(acceptance_members) == (2 if semantic else 3) and all(
                 row["state"] == "open" for row in acceptance_members
             )
+            if not semantic:
+                # Real admitted AF -> recovered worker originals -> assessment packet.
+                # Reading originals alone misses the assessment's second ID equality.
+                from codex_harness.core.runners import execution_witnesses
+                from codex_harness.core.dispatch_attempts import read_completed_execution_evidence
+
+                assert job["jobId"] != job["publicationRevision"], job
+                with pytest.raises(ValueError, match="execution-current-terminal-job-required"):
+                    read_completed_execution_evidence(
+                        workspace, job["jobId"], "B", expected_repo=run["repo"],
+                        expected_publication_revision="0" * 64,
+                    )
+                member = next(row for row in acceptance_members if row["node_id"] in {
+                    ref["id"] for ref in run["beads"]["B"]["requirementRefs"]
+                })
+                header = store.register_execution_assessment(
+                    members=[dict(memberId=member["id"], artifactPaths=["server.py"],
+                                  witnessIds=[w["id"] for w in execution_witnesses(run["beads"]["B"]["integrated"])])],
+                    worker_job_id=job["jobId"], bead_id="B",
+                    expected_manifest_revision=store.manifest_revision(),
+                    expected_product_run_id=retried_review["runId"],
+                    reviewer=selected_reviewers[0], timeout=5,
+                )
+                assert header["context"]["execution"]["jobId"] == job["jobId"]
+                assert header["context"]["execution"]["candidateCommit"] == subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=run["repo"], text=True,
+                ).strip()
             dispositions = [
                 dict(
                     id=row["id"],

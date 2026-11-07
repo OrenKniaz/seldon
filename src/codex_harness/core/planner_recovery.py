@@ -161,7 +161,7 @@ def worker_status(workspace, result):
                 if validation
                 else "revalidating"
             )
-        result.update(status=state, recovery=resolved, ownershipReleased=True)
+        result.update(status=state, recovery=resolved, ownershipReleased=resolved["ownershipReleased"])
         if resolved["choice"] == "revalidate":
             result["reason"] = "Inspect recovery.validation for retained revalidation and delivery."
     return result
