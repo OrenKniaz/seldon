@@ -701,6 +701,10 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                     + "\n"
                 )
         if "\n## Run question\n" in prompt:
+            if (workspace / "semantic-host-refusal").exists():
+                from dataclasses import replace
+                return actual_review(replace(launch, command=(sys.executable, "-B", "-c",
+                    "import sys; sys.stderr.write('Provider host denied this call: enable access in the host'); sys.exit(77)")), *args, **options)
             from codex_harness.core.plan_store import open_plan_store_readonly
             from codex_harness.core.status_api import run_baton
             with open_plan_store_readonly(workspace) as store:
@@ -814,7 +818,7 @@ if provider=="codex": print(json.dumps(dict(type="turn.completed")),flush=True)
         if mode == "server" and surface == "cli" and (workspace / "inject-review-crash").exists():
             # A real provider wait survives a lost client until its process owner
             # is killed. Recovery must not reuse that abandoned review's evidence.
-            (workspace / ".codex-harness" / "review-crash-started").write_text(
+            (workspace / ".codex-harness" / "review-crash-started.ready").write_text(
                 "started", encoding="utf-8"
             )
             actual_audit(
@@ -2756,6 +2760,8 @@ def planning_surface_golden(workspace):
     Old chat-authored schemas concealed omitted dialogue and caller-owned IDs.
     Brief deletion exception: generic content/schema-teaching and six guessed
     approval envelopes are replaced by typed failures and opaque subject tokens.
+    The host-refusal twin catches hidden provider diagnostics; successful calls
+    and worker-denial recovery do not exercise a refused planner bootstrap.
     """
     from tests.python.core.mcp_planner_support import LoopClient
     from codex_harness.core.plan_store import open_plan_store_readonly
@@ -2767,8 +2773,7 @@ def planning_surface_golden(workspace):
         client.call("harness_loop_answer", request_id="invented", answer={}, source="chat", error=True)
         content = plan_content()
         client.call("harness_plan_start", name="Unicode intent", idea="Build a receipt for caf\u00e9 \u4e2d\u6587 and exact binary input.")
-        assert client.current["userRequest"]["gate"] == "invocations"
-        client.words("Authorize these displayed invocation tuples")
+        assert client.current["userRequest"] is None
         assert client.current["question"]["purpose"] == "understanding"
         assert "caf\u00e9 \u4e2d\u6587" in str(client.offered["packet"]["facts"]["dialogue"])
         with open_plan_store_readonly(workspace) as store:
@@ -2805,6 +2810,108 @@ def planning_surface_golden(workspace):
     finally:
         client.close()
 
+    refused = workspace / "host-refusal"
+    refused.mkdir()
+    (refused / "semantic-host-refusal").touch()
+    client = LoopClient(refused, native=False)
+    try:
+        client.call("harness_plan_start", name="Host owns permissions", idea="Build the complete binary receipt dream")
+        assert client.current["semanticHeld"] and client.current["effect"] is None
+        assert client.current["userRequest"] is None
+        assert "Provider host denied this call: enable access in the host" in client.current["reason"]
+        with open_plan_store_readonly(refused) as store:
+            assert not approvals.records(store, approvals.EVENT)
+    finally:
+        client.close()
+
+
+@timed
+def retired_permission_golden(workspace):
+    """C8/C20/C23: a base-produced reviewer P wait resumes without another P card.
+
+    Fresh-run journeys never load the retired consumer's persisted wait. Run the
+    base producer through A and native reviewer P, then reconnect the candidate;
+    the old elicitation/reply must not gain credit or replace the bound B card.
+    """
+    import io
+    from zipfile import ZipFile
+    from tests.python.core.mcp_planner_support import LoopClient
+
+    base = workspace.parent / (workspace.name + "-base")
+    with ZipFile(io.BytesIO(subprocess.check_output(["git", "archive", "--format=zip", "c7219cb5933970f4837c5068c682cadd26762a51", "src"], cwd=ROOT))) as archive:
+        archive.extractall(base)
+    client = LoopClient(workspace, source_root=base)
+    try:
+        content = plan_content()
+        client.call("harness_plan_start", name="Retire base reviewer P", idea=content["nodes"][0]["text"])
+        client._chat_send("/authorize", client.current["userRequest"]["request_id"])
+        client.progress()
+        advance_meaning(client, content, stop_at=lambda run:
+            (run.get("userRequest") or {}).get("gate") == "invocations" and not run.get("question"))
+        old_offer = client.native_offer()
+        client.call("harness_plan_status")
+        old_request = client.current["userRequest"]["request_id"]
+        assert client.current["state"] == "WAIT_USER" and client.current["question"] is None
+        assert client.current["userRequest"]["subject"]["kind"] == "P"
+        client.env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
+        client.reconnect()
+        assert (client.current.get("userRequest") or {}).get("gate") != "invocations"
+        client.progress(timeout=30)
+        advance_meaning(client, content, stop_at=lambda run:
+            (run.get("userRequest") or {}).get("gate") == "plan-execution" and not run.get("question"))
+        card = client.current["userRequest"]
+        assert card["subject"]["kind"] == "B" and card["subject"]["reviewers"] == client.setup["reviewers"]
+        client.native_response(old_offer, retain_reply=False)
+        assert client.rpc("ping", {}) == {}
+        refused = client.call("harness_chat", text="yes", reply_to=old_request, error=True)
+        assert refused["structuredContent"]["refusal"]["code"] == "user-subject-stale"
+        assert client.call("harness_plan_status")["run"]["userRequest"]["request_id"] == card["request_id"]
+    finally:
+        client.close()
+
+
+@timed
+def missing_kickoff_golden(workspace):
+    """C20/C23/I6/I10: lost kickoff authority refuses reconnect without launches.
+
+    Recovery used to adopt changed settings as invocation authority. Ordinary
+    reconnect journeys retain setup, so they cannot catch that escalation or a
+    startup exception disappearing into a background thread instead of chat.
+    """
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core import run_loop
+    from codex_harness.core.plan_store import open_plan_store
+
+    workspace.mkdir()
+    (workspace / "receipt-gaps").touch()  # Existing real provider-boundary launch log.
+    client = LoopClient(workspace, native=False)
+    try:
+        content = plan_content()
+        client.call("harness_plan_start", name="Retained kickoff", idea=content["nodes"][0]["text"])
+        advance_meaning(client, content, stop_at=lambda run:
+            (run.get("userRequest") or {}).get("gate") == "align+vision-lock" and not run.get("question"))
+        with open_plan_store(workspace) as store:
+            retained = run_loop.cursor(store)
+            retained.pop("setup")  # Persistence-loss fault, after a real canonical kickoff.
+            with store._transaction():
+                run_loop.save(store, retained)
+        changed = kickoff_content()
+        changed["roleTuples"] = [dict(role="planner", name="changed", provider="copilot", model="gpt-6.1-terra", effort="high")]
+        (workspace / ".codex-harness/setup.json").write_text(json.dumps(changed), encoding="utf-8")
+        launches = workspace / ".codex-harness/scripted-review-invocations.jsonl"
+        before = launches.read_bytes()
+        client.reconnect()
+        notice = client.take_reply(None, timeout=10)
+        refusal = notice["params"]["data"]["refusal"]
+        assert refusal["code"] == "frozen-kickoff-missing"
+        assert "frozen kickoff" in refusal["reason"] and "new run" in refusal["nextAction"]
+        refused = client.call("harness_chat", text="Continue the retained dream", error=True)
+        assert refused["structuredContent"]["refusal"]["code"] == refusal["code"]
+        assert "new run" in refused["structuredContent"]["refusal"]["nextAction"]
+        assert launches.read_bytes() == before, "Missing kickoff must not launch any provider"
+    finally:
+        client.close()
+
 
 @timed
 def reviewer_order_golden(workspace):
@@ -2812,7 +2919,9 @@ def reviewer_order_golden(workspace):
 
     Old chat-authored tuples concealed r17's two configuration owners and
     Codex-only fixtures missed the Copilot/Claude semantic launch adapters. This
-    traverses real kickoff->permission->model->selection, with no catalog negotiation.
+    traverses real kickoff->model->selection, with no catalog negotiation.
+    Resume at A must refresh its reply token's control generation; active-worker
+    pause coverage misses a refreshed decision rejected as already superseded.
     """
     from tests.python.core.mcp_planner_support import LoopClient
     from codex_harness.core.plan_store import open_plan_store_readonly
@@ -2845,17 +2954,8 @@ def reviewer_order_golden(workspace):
         content = plan_content()
         client.call("harness_plan_start", name="Frozen roles", idea=content["nodes"][0]["text"])
         frozen = client.current["setup"]
-        client.call("harness_chat",text="/authorize",error=True)
-        with open_plan_store_readonly(workspace) as store:
-            assert approvals.current(store,"P") is None
-        client.call("harness_chat",text="/pause")
-        assert client.current["state"] == "PAUSED"
-        client.call("harness_chat",text="/resume")
-        assert client.current["userRequest"]["gate"] == "invocations"
-        (workspace / ".codex-harness/setup.json").write_text('{"worker":{"provider":"copilot","model":"changed","effort":"low"}}',encoding="utf-8")
-        client.reconnect()
-        assert client.current["setup"] == frozen
-        client.words()
+        assert client.current["question"]["purpose"] == "understanding"
+        assert client.current["userRequest"] is None
         repository = client.offered["packet"]["facts"]["repository"]
         assert {r["path"] for r in repository["files"]} >= {"existing.py","test_existing.py"}
         assert "retained brownfield behavior" in str(repository)
@@ -2867,17 +2967,22 @@ def reviewer_order_golden(workspace):
 
         client.answer(dict(option="ready", rationale="Use the pinned high tier", content=content))
         advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "align+vision-lock" and not r.get("question"))
+        client.call("harness_chat",text="/pause")
+        assert client.current["state"] == "PAUSED"
+        client.call("harness_chat",text="/resume")
+        assert client.current["userRequest"]["gate"] == "align+vision-lock"
+        (workspace / ".codex-harness/setup.json").write_text('{"worker":{"provider":"copilot","model":"changed","effort":"low"}}',encoding="utf-8")
+        client.reconnect()
+        assert client.current["setup"] == frozen
         client.words()
         assert client.current["question"]["role"] == "mechanical"
         assert client.offered["packet"]["facts"]["setup"] == frozen
         client.answer(judge_reply(client.current["question"]))
-        advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "invocations" and not r.get("question"))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         with open_plan_store_readonly(workspace) as store:
             from codex_harness.core.planner_review import selection_inputs, delivery_review_selection
             _, selection, _ = selection_inputs(store)
             assert delivery_review_selection(selection["fields"])[0] == frozen["reviewers"]
-        client.words()
-        advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         assert client.current["userRequest"]["gate"] == "plan-execution"
         assert (workspace / ".codex-harness/copilot-review-count").read_text() == "3"
     finally:
@@ -2900,7 +3005,6 @@ def approval_order_golden(workspace):
     try:
         content = plan_content()
         client.call("harness_plan_start", name="Bound approval", idea=content["nodes"][0]["text"])
-        client.words()
         client.answer(dict(option="ready", rationale="Present the full vision", content=content))
         advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "align+vision-lock" and not r.get("question"))
         displayed = client.current["userRequest"]
@@ -3038,9 +3142,11 @@ def r18_authoring_golden(workspace):
                                 dict(path="checks/input.json",bytesUnchangedFrom="input-baseline",fileAbsent=False)])
     def begin(root):
         client = LoopClient(root)
-        client.call("harness_plan_start", name="R18 replay", idea=content["nodes"][0]["text"])
-        with open_plan_store(root) as store:
+        with open_plan_store(root, root.name) as store:
+            store.upsert_node(dict(id="V1", kind="vision", title=root.name,
+                text=content["nodes"][0]["text"], parents=[], fields=dict(planMode="semantic-v1")))
             store.upsert_node(dict(id="UNRELATED_OPERATOR_NOTE",kind="decision",title="Unrelated retained note",text="Unrelated telemetry "*1000,parents=["V1"],fields={}))
+        client.call("harness_plan_start", name="R18 replay", idea=content["nodes"][0]["text"])
         advance_meaning(client, content, stop_at=lambda r: (r.get("question") or {}).get("purpose") == "trace")
         assert "UNRELATED_OPERATOR_NOTE" not in json.dumps(client.offered["packet"])
         return client
@@ -3123,8 +3229,6 @@ def automatic_retry_golden(workspace):
     try:
         client.call("harness_plan_start", name="Exact fixes", idea="Build the complete binary receipt dream")
         assert {r["role"] for r in client.current["setup"]["roleTuples"]} == {"planner", "judge", "mechanical"}
-        offer = client.native_offer()
-        client.native_response(offer, retain_reply=False)
         retained = wait("semantic-raw-complete")
         client.reconnect()
         # Activation consumes verified originals without asking chat to supply meaning.
@@ -3256,12 +3360,9 @@ def receipt_gaps_golden(workspace):
             client,
             content,
             stop_at=lambda run: bool(
-                run.get("userRequest")
-                and run["userRequest"]["gate"] == "invocations"
-                and not run.get("question")
+                (run.get("effect") or {}).get("kind") == "review"
             ),
         )
-        client.words("Authorize these displayed reviewer tuples for the actual plan review")
         planned = wait_for("plan-review-complete")
         with open_plan_store_readonly(workspace) as store:
             plan_rows = [
@@ -3985,9 +4086,6 @@ def advance_meaning(client, content, *, stop_at=None):
             return run
         if run["state"] in {"DONE", "PAUSED", "STOPPED"}:
             return run
-        if (run.get("userRequest") or {}).get("gate") == "invocations":
-            client.words("Authorize these exact displayed invocation tuples")
-            continue
         if pending := run.get("question"):
             assert pending["requestId"] not in answered, run
             answered.add(pending["requestId"])
@@ -4044,7 +4142,7 @@ def advance_meaning(client, content, *, stop_at=None):
                     run["userRequest"]["guide"]
                     and Path(run["userRequest"]["delivery"]["archive"]).is_file()
                 )
-            client.words()
+            client.words("yes" if run["userRequest"]["gate"] == "align+vision-lock" else "Yes, approve the displayed subject.")
         else:
             pytest.fail(
                 "Controller returned without an outstanding question, user decision or terminal result: "
@@ -4547,14 +4645,10 @@ def dead_review_wake(workspace):
             client,
             content,
             stop_at=lambda r: bool(
-                r.get("userRequest")
-                and r["userRequest"]["gate"] == "invocations"
-                and not r.get("question")
+                (r.get("effect") or {}).get("kind") == "review"
             ),
         )
-        offer = client.native_offer()
-        client.native_response(offer, retain_reply=False)
-        marker = workspace / ".codex-harness/review-crash-started"
+        marker = workspace / ".codex-harness/review-crash-started.ready"
         deadline = time.monotonic() + 30
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -4677,6 +4771,8 @@ def test_golden_path(tmp_path, request, surface):
     if surface == "cli":
         fixture_ownership_golden(tmp_path / "fixture-ownership")
         planning_surface_golden(tmp_path / "planning-surface")
+        missing_kickoff_golden(tmp_path / "missing-kickoff")
+        retired_permission_golden(tmp_path / "retired-permission")
         reviewer_order_golden(tmp_path / "reviewer-order")
         approval_order_golden(tmp_path / "approval-order")
         r18_authoring_golden(tmp_path / "r18-replay")
@@ -4889,7 +4985,9 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
         second = client.current["question"]
         execution_questions.append(second["requestId"])
         assert fixture_judgment_example(second["judgment"])["responseExample"]["meaning"]["phase"] == "validation", (
-            client.current
+            json.dumps({label: dict(requestId=q["requestId"], judgmentId=q["judgment"]["id"],
+                evidenceBinding=fixture_judgment_example(q["judgment"])["responseExample"]["meaning"]["evidenceBinding"])
+                for label, q in (("answered", first), ("current", second))}, indent=2)
         )
         assert (
             fixture_judgment_example(second["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
@@ -4999,11 +5097,10 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
             )
             assert {r["subject"]["kind"] for r in approvals.records(store, approvals.EVENT)} == {
                 "A",
-                "P",
                 "B",
             }
             assert all(
-                r["channel"] == ("mcp-client-elicitation" if r["subject"]["kind"] == "P" else "chat-confirmation")
+                r["channel"] == "chat-confirmation"
                 for r in approvals.records(store, approvals.EVENT)
             )
             if surface == "cli":
@@ -5038,7 +5135,7 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
         # the bound raw completion/restart assertions and distinct questions above.
         assert client.tool_names["harness_chat"] >= 4
         assert not {"harness_loop_answer","harness_plan_start","harness_steer"} & client.tool_names.keys()
-        assert [gate for gate in client.decision_gates if gate != "invocations"] == [
+        assert client.decision_gates == [
             "align+vision-lock",
             "plan-execution",
             "C",

@@ -9,8 +9,9 @@ from codex_harness.core.run_context import packet as fresh_packet
 
 def invoke(store, selected, pending, timeout, binding):
     from codex_harness.core.run_ownership import effect_guard, ensure_effect
+    from codex_harness.core.run_setup import require_invocation
 
-    approvals.require_invocation(store, pending["role"], selected)
+    require_invocation(store, pending["role"], selected)
     executable = review_provider._executable(selected["provider"], None)
     packet = (
         "Return only structured semantics for the supplied answerSchema. "
@@ -54,7 +55,7 @@ def invoke(store, selected, pending, timeout, binding):
         )
     if code:
         raise ValueError(
-            f"Semantic invocation exited {code}; inspect retained provider result before direction"
+            f"Semantic invocation exited {code}: {stderr.strip() or output.strip()}; inspect the retained provider result before direction"
         )
     return output
 

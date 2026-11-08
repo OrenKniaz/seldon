@@ -11,7 +11,8 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core import roundtable
-from codex_harness.core.approvals import require_approval, require_reviewers
+from codex_harness.core.approvals import require_approval
+from codex_harness.core.run_setup import require_invocation
 from codex_harness.core.plan_store import PlanStoreError
 
 QUESTION = (
@@ -211,7 +212,8 @@ def readiness_review(
     if len(set(identities)) != len(identities):
         raise ValueError("Duplicate readiness reviewer")
     if runner is None:
-        require_reviewers(store, reviewers)
+        for reviewer in reviewers:
+            require_invocation(store, "reviewer", reviewer)
     calls = len(selected) * len(reviewers)
     revision = store.manifest_revision()
     if revision is None:

@@ -150,7 +150,7 @@ class PlannerServer(PlannerTransport):
                 )
             validate_input(arguments, tool["inputSchema"])
             data = self._dispatch(name, arguments)
-            if name == "harness_chat" and not data.get("nativePermissionRequired"):
+            if name == "harness_chat":
                 data = run_loop.wait_for_question(self._store())
             reply = dict(
                 isError=False,
@@ -228,7 +228,7 @@ class PlannerServer(PlannerTransport):
         )
         if not self._elicitation or not self._initialized:
             raise ValueError(
-                "Native elicitation unavailable; invocation permission remains pending; reconnect with a native confirmation host"
+                "Native elicitation unavailable; reply to the displayed decision in your own words"
             )
         if self._pending_confirmation is not None:
             raise ValueError("Native confirmation already pending")
@@ -236,7 +236,6 @@ class PlannerServer(PlannerTransport):
         if not request or request["gate"] not in {
             "align+vision-lock",
             "plan-execution",
-            "invocations",
         }:
             raise ValueError("No native planning confirmation pending")
         if arguments.get("reply_to") not in (None, request["request_id"]):
@@ -246,7 +245,6 @@ class PlannerServer(PlannerTransport):
             self._store(),
             request["gate"],
             execution=proposed.get("execution"),
-            role_tuples=proposed.get("roleTuples"),
         )
         with self.store._transaction():
             run = run_loop.cursor(self.store)

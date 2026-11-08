@@ -12,8 +12,6 @@ from codex_harness.core.planner_vision import SECTIONS
 from codex_harness.core.reviewer_evidence import review_tier
 
 EFFECTS = {
-    "P": "Authorize only these exact planning, judge and reviewer provider/model invocations. "
-    "This is invocation permission, not Vision Lock A or product-plan B; host permissions still apply.",
     "A": "Your decision confirms understanding and locks this scope and these expansion decisions.",
     "B": "Your decision authorizes scoped work, workers, reviews, validation and quiescent same-work "
     "recovery and same-scope bead repartitioning inside this worker envelope. User provider/model restrictions apply to reviewers. "
@@ -49,14 +47,14 @@ def current(store, kind):
     """Only the latest decision counts; a refusal supersedes earlier consent."""
     saved = next((r for r in records(store, EVENT) if r["subject"]["kind"] == kind), None)
     request = latest_request(store, kind)
-    if kind != "P" and saved and request and request["request_id"] != saved["request_id"]:
+    if saved and request and request["request_id"] != saved["request_id"]:
         responded = {r["request_id"] for r in records(store, "confirmation-responded")}
         if request["request_id"] not in responded and any(
             r["request_id"] == request["request_id"]
             for r in records(store, "confirmation-pending-judgment")
         ):
             return dict(saved, state="pending-judgment")
-    if saved and saved["state"] == "approved" and not saved.get("judgment") and not (kind == "P" and saved.get("explicitPermission") is True):
+    if saved and saved["state"] == "approved" and not saved.get("judgment"):
         return dict(saved, state="pending-judgment")
     return saved
 
@@ -198,30 +196,6 @@ def subject(store, kind, proposed_action=None):
     if kind not in EFFECTS:
         raise ValueError("approval-kind-invalid")
     result = dict(version=2, workspace=str(store.workspace), kind=kind, effect=EFFECTS[kind])
-    if kind == "P":
-        prior = current(store, "P") or latest_request(store, "P") or {}
-        roles = (proposed_action or {}).get(
-            "roleTuples", prior.get("subject", {}).get("roleTuples")
-        )
-        if not isinstance(roles, list) or not roles:
-            raise PlanStoreError(
-                "invocation-tuples-required",
-                "Supply the exact planner/judge/reviewer role tuples before requesting permission",
-            )
-        from codex_harness.core.provider_launch import get_adapter
-
-        for role in roles:
-            if set(role) != {"role", "name", "provider", "model", "effort"} or role["role"] not in {
-                "planner",
-                "judge",
-                "mechanical",
-                "reviewer",
-            }:
-                raise ValueError("role tuple requires role, name, provider, model, effort")
-            get_adapter(role["provider"])
-            if any(not isinstance(v, str) or not v.strip() for v in role.values()):
-                raise ValueError("role tuple fields must be nonblank")
-        return dict(result, roleTuples=roles)
     if kind == "A":
         spine = store.spine()
         return {**result, "scope": intent(spine.node(spine.ids("vision")[0]))}
@@ -365,22 +339,6 @@ def require_approval(store, kind, proposed_action=None):
     raise error
 
 
-def require_reviewers(store, reviewers):
-    for reviewer in reviewers:
-        require_invocation(store, "reviewer", reviewer)
-
-
-def require_invocation(store, role, selected):
-    granted = require_approval(store, "P")
-    wanted = dict(role=role, **reviewer_tuple(selected))
-    if wanted not in granted["subject"]["roleTuples"]:
-        raise PlanStoreError(
-            "invocation-tuple-not-granted",
-            "Request invocation permission for the exact role/provider/model/effort; a draft choice grants none",
-        )
-    return granted
-
-
 def record_approval(
     store, request, *, words, actor, channel, affirmative, state, conditions="", source=None
 ):
@@ -404,9 +362,7 @@ def record_approval(
             and not (judgment.get("positiveCredit") or judgment.get("concreteGap"))
             else "stale"
         )
-    native_permission = (payload["kind"] == "P" and affirmative and not conditions and state == "accept"
-        and (channel == "mcp-client-elicitation" or channel == "chat-confirmation" and (source or {}).get("permissionCommand") == "/authorize"))
-    if state not in {"stale", "decline", "declined", "cancel", "pending-judgment"} and not native_permission:
+    if state not in {"stale", "decline", "declined", "cancel", "pending-judgment"}:
         if payload["kind"] == "A":
             judgment = expansion_assessment(store)
             if judgment["positiveCredit"] and request.get("deviation"):
@@ -454,7 +410,6 @@ def record_approval(
         state="approved" if affirmative and state == "accept" else state,
         request_id=request["request_id"],
         human_identity_verified=False,
-        explicitPermission=native_permission,
         judgment=judgment,
         deviation=request.get("deviation"),
     )

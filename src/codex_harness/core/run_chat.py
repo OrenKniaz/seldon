@@ -30,9 +30,9 @@ def chat(store, text, reply_to=None):
             store._event("chat-message", dict(id=uuid4().hex, role="user", text=text,
                          replyTo=None, provenance="external-chat", humanIdentityVerified=False))
         return run_loop.run_loop(store)
+    if text not in {"/pause", "/stop"}:
+        run_setup.frozen_setup(run)
     request = run.get("userRequest")
-    if text == "/authorize" and (not request or reply_to != request["request_id"]):
-        raise PlanStoreError("user-subject-stale", "Explicit permission requires the displayed invocation token")
     if text not in {"/pause", "/stop", "/resume"} and reply_to is not None and (not request or reply_to != request["request_id"]):
         raise PlanStoreError("user-subject-stale", "Reply to the current displayed subject token")
     message_id = uuid4().hex
@@ -51,19 +51,6 @@ def chat(store, text, reply_to=None):
             run_loop.save(store, run)
         return run_loop.run_loop(store)
     if request and reply_to is not None and run["state"] != "PAUSED" and not (run.get("semanticHeld") or (run.get("question") or {}).get("family") == "user-interpretation"):
-        if request["gate"] == "invocations" and text == "/authorize":
-            from codex_harness.core.planner_confirmations import permission_command
-            with store._transaction():
-                outcome = permission_command(store,request,text,message_id)
-                run = run_loop.cursor(store)
-                run_loop._decision(store,run,outcome)
-                run_loop.save(store,run)
-            return run_loop.run_loop(store)
-        if request["gate"] == "invocations":
-            # The first interpreter cannot authorize its own launch. The host's
-            # native response is the bootstrap; all later semantics use P.
-            return dict(run_baton(store), nativePermissionRequired=True,
-                        nextAction="Reply /authorize to the displayed invocation permission, or use native confirmation")
         words = dict(request_id=request["request_id"], expected_revision=request["plan_revision"],
                      quoted_message=text, quote_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
                      actor_label="proxy:external-chat", message_id=message_id)
@@ -101,9 +88,14 @@ def activate(workspace, notify, wake):
     def resume():
         with open_plan_store(workspace) as store:
             if run_loop.cursor(store):
-                run_loop.start(store)
-                state = run_loop.wait_for_question(store)
-                notify(dict(jsonrpc="2.0",method="notifications/message",params=dict(level="info",logger="seldon",data=state)))
+                try:
+                    run_loop.start(store)
+                    state = run_loop.wait_for_question(store)
+                except PlanStoreError as error:
+                    state = dict(refusal=dict(code=error.code, reason=str(error),
+                        nextAction=getattr(error, "nextAction", str(error))))
+                notify(dict(jsonrpc="2.0",method="notifications/message",params=dict(
+                    level="error" if "refusal" in state else "info",logger="seldon",data=state)))
         if callable(wake):
             wake()
     threading.Thread(target=resume,daemon=True).start()

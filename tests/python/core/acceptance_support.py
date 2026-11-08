@@ -373,11 +373,8 @@ def http_golden(workspace, semantic=False):
         return respond
 
     def answer_semantics(run):
-        from codex_harness.core import run_chat, run_loop
-        if (run.get("userRequest") or {}).get("gate") == "invocations":
-            run_chat.chat(store,"/authorize",reply_to=run["userRequest"]["request_id"])
-        else:
-            run_loop._automatic_question(store)
+        from codex_harness.core import run_loop
+        run_loop._automatic_question(store)
         return run_loop.run_loop(store)
 
     def read_execution(job_id):
@@ -394,14 +391,6 @@ def http_golden(workspace, semantic=False):
         from codex_harness.core import run_loop
 
         run = run_loop.cursor(store)
-        if run is None:
-            # FIX17: operator fixture configures structure before the controller starts.
-            from codex_harness.core.planner_review import selection_inputs, delivery_review_selection
-            selected = delivery_review_selection(selection_inputs(store)[1]["fields"])[0]
-            worker = {k: options["workers"][0][k] for k in ("provider", "model", "effort")}
-            (workspace / ".codex-harness/setup.json").write_text(json.dumps(dict(worker=worker,
-                reviewers=selected, max_parallel=options["max_parallel"], timeout=options["timeout"])), encoding="utf-8")
-            run = run_loop.start(store)
         deadline = time.monotonic()+30
         while time.monotonic() < deadline:
             if run.get("effect") and run["effect"]["kind"] == "semantic":
@@ -413,7 +402,7 @@ def http_golden(workspace, semantic=False):
                 selected = expected_job_id or run["jobId"]
                 expected_job_id = None
                 return execution_status(job_id=selected, wait_seconds=0)
-            if run.get("question") or (run.get("userRequest") or {}).get("gate") == "invocations":
+            if run.get("question"):
                 run = answer_semantics(run)
             else:
                 assert not run.get("userRequest"), run
@@ -504,8 +493,7 @@ def http_golden(workspace, semantic=False):
             scripted_judgment(store, judgment, dict(impact="HOW"), rationale=rationale)
 
     def yes(card):
-        if card["gate"] != "invocations":
-            decisions.append(card["gate"])
+        decisions.append(card["gate"])
         outcome = confirmations.complete_chat_confirmation(
             store,
             card["request_id"],
@@ -1178,12 +1166,14 @@ with TemporaryDirectory(dir=root) as scratch:
                 }
                 for r in choice["fields"]["reviewers"]
             ]
-            yes(
-                prepare_words(
-                    gate="invocations",
-                    role_tuples=[dict(role="reviewer", **r) for r in selected_reviewers],
-                )
-            )
+            # Invocation authority comes from the same frozen kickoff producer as chat.
+            from codex_harness.core import run_setup
+            worker = {k: options["workers"][0][k] for k in ("provider", "model", "effort")}
+            (workspace / ".codex-harness/setup.json").write_text(json.dumps(dict(worker=worker,
+                reviewers=selected_reviewers, max_parallel=options["max_parallel"], timeout=options["timeout"])), encoding="utf-8")
+            setup = run_setup.kickoff(workspace)
+            run_setup.validate(store, setup)
+            run_setup.initialize(store, setup=setup)
             refused = observe(lambda: review_readiness(reviewers=selected_reviewers, beads=["B"]))
             assert refused["isError"] and "plan-b-consent-required" in str(refused)
             yes(
@@ -1231,12 +1221,11 @@ with TemporaryDirectory(dir=root) as scratch:
                     before = len(provider_launches)
                     reply = observe(lambda: operation(reviewers=mixed, **arguments))
                     assert (
-                        reply["isError"] and reply["refusalCode"] == "invocation-tuple-not-granted"
+                        reply["isError"] and reply["refusalCode"] == "invocation-tuple-not-selected"
                     ), reply
                     text = "\n".join(c.get("text", "") for c in reply["content"])
                     assert (
-                        "exact role/provider/model/effort" in text
-                        and "draft choice grants none" in text
+                        "role/provider/model/effort chosen at kickoff" in text
                     )
                     return len(provider_launches) - before
 

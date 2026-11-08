@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from codex_harness.core.plan_store import PlanStore, PlanStoreError
-from codex_harness.core.approvals import require_invocation
+from codex_harness.core.run_setup import require_invocation
 
 
 def _table(store: PlanStore) -> None:

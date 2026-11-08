@@ -24,11 +24,22 @@ TERMINAL = {"STOPPED", "DONE"}
 CONTROL_STATES = {"pause": "PAUSED", "stop": "STOPPED", "repair": "PLAN", "replan": "PLAN"}
 
 
+def obsolete_permission(request):
+    return request.get("gate") == "invocations" or request.get("subject", {}).get("kind") == "P"
+
+
 def cursor(store):
     row = store.connection.execute(
         "SELECT payload_json FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (EVENT,)
     ).fetchone()
-    return json.loads(row[0]) if row else None
+    run = json.loads(row[0]) if row else None
+    if run and obsolete_permission(run.get("userRequest") or {}):
+        resume = run.pop("afterPermission", "REVIEW" if run["phase"] == "roundtable" else "PLAN")
+        if run["state"] == "WAIT_USER":
+            run["state"] = resume
+        run.update(userRequest=None, reason="Obsolete invocation permission retired",
+                   nextAction="Continue under the frozen kickoff provider/model choices")
+    return run
 
 
 def save(store, run):
@@ -172,9 +183,6 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
             )
             save(store, run)
             return
-        if (run.get("userRequest") or {}).get("gate") == "invocations" and pending["family"] != "user-interpretation":
-            # An attached caller supplied meaning; its proposed provider call is no longer needed.
-            run["userRequest"] = None
         run.update(question=None, semanticHeld=False)
         if not planner_answer:
             outcome = confirmations.apply_judgment(store, result)
@@ -270,9 +278,7 @@ def _decision(store, run, outcome):
         return
     gate = outcome["gate"]
     run["userRequest"] = None
-    if gate == "invocations":
-        run["state"] = run.pop("afterPermission", "PLAN")
-    elif gate == "plan-execution":
+    if gate == "plan-execution":
         run.update(state="BUILD", step="execution", pendingConsent=None, freshConsent=False)
     else:
         run.update(state="PLAN", step="trace")
@@ -374,7 +380,7 @@ def user_reply(store, user_words):
 
 
 def control(store,text,message_id):
-    """Literal controls and permission-return continuation have one loop owner."""
+    """Literal controls have one loop owner."""
     with store._transaction():
         run = cursor(store)
         if run["state"] not in TERMINAL:
@@ -388,9 +394,10 @@ def control(store,text,message_id):
             elif text == "/resume" and retained:
                 if retained["gate"] == "C":
                     _offer_c(store,run)
-                elif retained["gate"] in {"align+vision-lock","plan-execution","invocations"}:
+                elif retained["gate"] in {"align+vision-lock","plan-execution"}:
                     scope = retained.get("proposedAction",{})
-                    _user(store,run,retained["gate"], **{k:v for k,v in dict(execution=scope.get("execution"),role_tuples=scope.get("roleTuples")).items() if v is not None})
+                    save(store,run)  # Bind the refreshed decision to this control generation.
+                    _user(store,run,retained["gate"], **{k:v for k,v in dict(execution=scope.get("execution")).items() if v is not None})
                 else:
                     run.update(state="WAIT_USER",userRequest=retained)
             else:
@@ -762,49 +769,31 @@ def _step(store):
                         ),
                     )
             elif state == "REVIEW":
-                from codex_harness.core.planner_review import (
-                    selection_inputs,
-                    delivery_review_selection,
-                )
-
                 from codex_harness.core.run_setup import select_reviewers, workers
                 select_reviewers(store, run)
-                _, node, _ = selection_inputs(store)
                 run["workers"] = workers(store, run)
-                reviewers = delivery_review_selection(node["fields"])[0]
-                try:
-                    approvals.require_reviewers(store, reviewers)
-                except PlanStoreError:
-                    run["afterPermission"] = "REVIEW"
-                    roles = list((approvals.current(store, "P") or {}).get("subject", {}).get("roleTuples", []))
-                    for reviewer in reviewers:
-                        role = dict(role="reviewer", **reviewer)
-                        if role not in roles:
-                            roles.append(role)
-                    _user(store, run, "invocations", role_tuples=roles)
-                else:
-                    store.prepare_review_reuse()
-                    if _pending(store, run):
-                        save(store, run)
-                        break
-                    if store.review_prerequisite(store.manifest_revision())["complete"]:
-                        execution = dict(
-                            expected_revision=store.manifest_revision(),
-                            workers=run["workers"],
-                            max_parallel=run["max_parallel"],
-                            timeout=run["timeout"],
-                        )
-                        from codex_harness.core.planner_execution import execution_scope
+                store.prepare_review_reuse()
+                if _pending(store, run):
+                    save(store, run)
+                    break
+                if store.review_prerequisite(store.manifest_revision())["complete"]:
+                    execution = dict(
+                        expected_revision=store.manifest_revision(),
+                        workers=run["workers"],
+                        max_parallel=run["max_parallel"],
+                        timeout=run["timeout"],
+                    )
+                    from codex_harness.core.planner_execution import execution_scope
 
-                        scope = execution_scope(store, **execution, _candidate=True)
-                        try:
-                            approvals.require_approval(store, "B", dict(execution=scope))
-                        except PlanStoreError:
-                            _user(store, run, "plan-execution", execution=execution)
-                        else:
-                            run.update(state="BUILD", step="execution", resumeRun=None)
+                    scope = execution_scope(store, **execution, _candidate=True)
+                    try:
+                        approvals.require_approval(store, "B", dict(execution=scope))
+                    except PlanStoreError:
+                        _user(store, run, "plan-execution", execution=execution)
                     else:
-                        effect_kind = "review"
+                        run.update(state="BUILD", step="execution", resumeRun=None)
+                else:
+                    effect_kind = "review"
             elif state == "BUILD":
                 if not run.get("resumeRun"):
                     store.advance_to("publish", by="run-loop")
@@ -1319,16 +1308,6 @@ def _automatic_question(store):
         selected = next((r for r in run["setup"]["roleTuples"] if r["role"] == pending["role"]), None)
         if selected is None:
             raise ValueError(f"setup.roleTuples: missing required {pending['role']} role; resolve kickoff before continuing")
-        try:
-            approvals.require_invocation(store, pending["role"], selected)
-        except PlanStoreError:
-            if not run.get("userRequest"):
-                run["afterPermission"] = run["state"]
-                _user(store, run, "invocations", role_tuples=run["setup"]["roleTuples"])
-                run.update(state=run["afterPermission"], question=pending,
-                           nextAction="Answer the outstanding meaning or authorize its code-selected provider")
-                save(store, run)
-            return False
         pending = dict(pending, judgment=store.judgment(pending["requestId"], candidate=pending["candidate"]))
         identifier = uuid4().hex
         run["effect"] = dict(

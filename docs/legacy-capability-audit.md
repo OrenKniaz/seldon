@@ -1,5 +1,37 @@
 # Legacy capability audit for the local Seldon extraction
 
+NO-P (C1/C8/C20, I6/I10): TRIAGE DESIGN — duplicate invocation consent
+blocked the first planner call before A; siblings: judge/reviewer bootstrap,
+changed model selection, advertised own-words replies consumed as commands.
+Owner: run_setup freezes kickoff tuples; invocation/readiness/review consumers
+read those choices and leave permission outcomes to the provider host. P's card,
+kind, native bootstrap, /authorize and approval readers are deleted. A/B/C stay
+semantic; actual host errors release their effect and expose the diagnostic.
+This supersedes the invocation-permission portions of older entries below;
+their other findings and evidence limitations retain their dispositions.
+The golden refusal twin covers planner-host denial without granting approval;
+the existing mixed-roster journey protects zero launches for unselected tuples.
+Moving the former P pause/reconnect twin to A exposed request generation 1 vs
+cursor generation 2 after resume. run_loop.control now saves the new generation
+before preparing the refreshed decision; the same kickoff journey passes it.
+Round 2 P2 supersedes the retained-run authority claim above: missing setup was
+reconstructed from mutable settings/defaults by adopt or role completion. Both
+paths are deleted. run_setup refuses missing frozen kickoff; run_chat delivers
+the actionable startup refusal. The reconnect-loss journey observes the refusal
+and zero new provider launches; ordinary frozen-kickoff recovery still reaches C.
+Round 3 P2 supersedes the retained-P continuation claim: base reviewer P could
+remain WAIT_USER after its consumer was deleted. The loop cursor now retires
+obsolete P requests using the recorded return state; stale confirmation readers
+share that rule and never restore P consent. A base-produced native reviewer-P
+wait reconnects through the candidate to B with frozen reviewers and no new P card.
+The golden observer now waits past active RPC snapshots after an answer; exact-fix
+offers still use request/effect matching. Repeated-phase failures print full IDs
+and evidence bindings. Browser execution remains UNVERIFIED in this sandbox.
+Disposition: source candidate; final gate/result in ../../stage-noP-report.md.
+Exit: CLI golden reaches C with A as its first decision; normal-host browser and
+actual-provider replay remain outside this lane. Literal python -I ignores
+PYTHONPATH; isolated source imports require an explicit source-path bootstrap.
+
 RECOV1 (C18/C23/C25, I6/I9): TRIAGE DESIGN — recovery lost work identity before
 an attempt existed; siblings: prelaunch failure, dead controller, interrupted launch.
 Owner: planner_jobs binds work at admission and publishes segment outcomes with launch

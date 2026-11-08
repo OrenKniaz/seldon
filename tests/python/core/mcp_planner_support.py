@@ -352,7 +352,7 @@ class LoopClient:
         request = self.current.get("userRequest") or {}
         if pending.get("family") == "author" and pending.get("purpose") == "trace":
             return CHARTER_PHASES[1]
-        if request.get("gate") == "plan-execution" or (request.get("gate") == "invocations" and not pending):
+        if request.get("gate") == "plan-execution":
             return CHARTER_PHASES[2]
         return PHASE_GROUP[self.current.get("phase", "align")]
 
@@ -443,6 +443,7 @@ class LoopClient:
 
     def progress(self, timeout=180):
         """Wait on the provider fixture's event or the real outstanding RPC."""
+        answered = self.last_offer if self.last_offer and Path(self.offered["answerFile"]).exists() else None
         deadline = time.monotonic() + timeout
         marker_root = self.workspace / ".codex-harness"
         while time.monotonic() < deadline:
@@ -464,13 +465,20 @@ class LoopClient:
                     self.active_call = None
                     assert not reply["result"]["isError"], reply
                     self.current = reply["result"]["structuredContent"]
+                    if answered and (self.current.get("effect") or not (
+                        self.current.get("semanticHeld") or self.current["state"] in {"DONE", "STOPPED", "PAUSED"}
+                        or self.current.get("userRequest") and not self.current.get("question")
+                    )):
+                        continue  # An RPC snapshot is not the next provider boundary.
                     return self.current
                 self.out_of_order[reply.get("id")] = reply
-            for fault in ("plan-review-complete", "acceptance-scenarios-complete", "acceptance-review-sealed", "acceptance-review-admitted", "execution-raw-complete"):
+            for fault in ("plan-review-complete", "acceptance-scenarios-complete", "acceptance-review-sealed", "acceptance-review-admitted", "execution-raw-complete", "semantic-raw-complete", "review-crash-started"):
                 if fault not in self.seen_faults and (marker_root / (fault + ".ready")).exists():
-                    self.seen_faults.add(fault)
                     status = self.rpc("tools/call", dict(name="harness_plan_status", arguments=dict(expected_workspace=str(self.workspace))))
                     self.current = status["structuredContent"]["run"]
+                    if answered and (self.current.get("effect") or {}).get("id") == answered[2]:
+                        continue
+                    self.seen_faults.add(fault)
                     return self.current
             ready = sorted(marker_root.glob("provider-offered-*.ready"),key=lambda p:p.stat().st_mtime_ns)
             for marker in reversed(ready):
@@ -592,7 +600,7 @@ class LoopClient:
     def words(self, text="Yes, approve the displayed subject."):
         request = self.current["userRequest"]
         self.decision_gates.append(request["gate"])
-        self._chat_send(("/confirm" if self.native else "/authorize") if request["gate"] == "invocations" else text, request["request_id"])
+        self._chat_send(text, request["request_id"])
         result = self.progress()
         if result.get("method") == "elicitation/create":
             self.native_tool_id = self.active_call

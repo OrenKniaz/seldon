@@ -13,7 +13,8 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core import review_packets, review_provider
-from codex_harness.core.approvals import require_approval, require_reviewers, require_invocation
+from codex_harness.core.approvals import require_approval
+from codex_harness.core.run_setup import require_invocation
 from codex_harness.core.plan_quality import quality_report
 from codex_harness.core.plan_store import PlanStore, PlanStoreError, _now
 from codex_harness.core.review_findings import _parse_review_return
@@ -250,15 +251,8 @@ def run_roundtable(
             "Review requires a compilable manifest: add validation and requirementFiles"
         )
     report = quality_report(store)
-    selected = (
-        [
-            dict(r)
-            for r in require_approval(store, "P")["subject"]["roleTuples"]
-            if r["role"] == "reviewer"
-        ]
-        if reviewers is None
-        else list(reviewers)
-    )
+    from codex_harness.core.run_loop import cursor
+    selected = list(cursor(store)["setup"]["reviewers"] if reviewers is None else reviewers)
     result = {
         "roundId": uuid4().hex,
         "planRevision": revision,
@@ -272,7 +266,8 @@ def run_roundtable(
     if len(identities) != len(set(identities)):
         raise ValueError("Duplicate reviewer in roundtable")
     if runner is None:
-        require_reviewers(store, selected)
+        for reviewer in selected:
+            require_invocation(store, "reviewer", reviewer)
     dossiers = {
         provider: review_packets.packet_shards(
             store, provider, report=report, token_budget=(token_budgets or {}).get(provider)

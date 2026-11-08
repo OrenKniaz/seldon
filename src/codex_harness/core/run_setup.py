@@ -1,4 +1,4 @@
-"""Operator kickoff preferences; code chooses structure, approvals grant permission."""
+"""Frozen kickoff choices own invocation authority; provider hosts own permissions."""
 
 from codex_harness.core.record_io import read_record_json
 
@@ -54,7 +54,6 @@ def resolve_roles(setup):
 
 def validate(store, setup):
     """Reject operator errors before freezing preferences; reuse the actual tuple owners."""
-    from codex_harness.core import approvals
     from codex_harness.core.provider_launch import get_adapter
     from codex_harness.core.intake import _model
     from codex_harness.core.planner_execution import execution_limits
@@ -67,11 +66,11 @@ def validate(store, setup):
         _model(selected.get("model"))
         _nonempty(selected.get("effort"), "setup.effort")
     roles = [*setup["roleTuples"], *[dict(role="reviewer", **r) for r in setup["reviewers"]]]
-    if roles:
-        try:
-            approvals.subject(store, "P", dict(roleTuples=roles))
-        except ValueError as error:
-            raise ValueError("setup.roleTuples/reviewers: " + str(error)) from error
+    for role in roles:
+        if (set(role) != {"role", "name", "provider", "model", "effort"}
+                or role["role"] not in {"planner", "judge", "mechanical", "reviewer"}
+                or any(not isinstance(v, str) or not v.strip() for v in role.values())):
+            raise ValueError("setup role tuple requires role, name, provider, model, effort with nonblank values")
     delivery_review_selection(dict(reviewers=setup["reviewers"], stages=["plan", "full-vision"]))
     if store._data()["nodes"]:
         setup["planMode"] = "semantic-v1" if store.spine().semantic else "legacy"
@@ -80,35 +79,38 @@ def validate(store, setup):
     execution_limits(setup["planMode"] == "semantic-v1", setup["max_parallel"], setup["timeout"])
 
 
-def adopt(store, run):
-    """Freeze retained authorized choices once; settings cannot revoke paid run facts."""
-    from uuid import uuid4
-    from codex_harness.core import approvals
-    from codex_harness.core.planner_review import selection_inputs, delivery_review_selection
+def frozen_setup(run):
+    """Retained authority is never reconstructed from current settings or defaults."""
+    from codex_harness.core.plan_types import PlanStoreError
 
-    setup = kickoff(store.workspace)
-    granted = approvals.current(store, "B")
-    if granted and granted["state"] == "approved":
-        execution = granted["subject"]["execution"]
-        setup.update(worker=execution["workers"][0], max_parallel=execution["maxParallel"], timeout=execution["timeout"],
-                     workers={w["bead"]: {k: w[k] for k in DEFAULT_WORKER} for w in (run.get("workers") or [])})
-    permission = approvals.current(store, "P")
-    if permission and permission["state"] == "approved":
-        setup["roleTuples"] = permission["subject"]["roleTuples"]
-        _, selected, _ = selection_inputs(store)
-        if selected:
-            reviewers = delivery_review_selection(selected["fields"])[0]
-            if all(dict(role="reviewer", **r) in setup["roleTuples"] for r in reviewers):
-                setup["reviewers"] = reviewers
-    validate(store, setup)
-    run.update(setup=setup, max_parallel=setup["max_parallel"],
-               timeout=setup["timeout"], reviewerNodeId="REVIEWERS_" + uuid4().hex)
+    setup = run.get("setup")
+    if not setup or not {"planner", "judge", "mechanical"} <= {r["role"] for r in setup.get("roleTuples", [])}:
+        error = PlanStoreError("frozen-kickoff-missing",
+            "This retained run is missing its frozen kickoff provider/model roles; current settings cannot restore invocation authority")
+        error.nextAction = "Start a new run in a new workspace and choose provider/model roles at kickoff"
+        raise error
+    return setup
+
+
+def require_invocation(store, role, selected):
+    """Only frozen kickoff tuples may be launched; no product consent gate."""
+    from codex_harness.core.approvals import reviewer_tuple
+    from codex_harness.core.plan_types import PlanStoreError
+    from codex_harness.core.run_loop import cursor
+
+    run = cursor(store)
+    if run is None:
+        raise PlanStoreError("kickoff-required", "Start the run with your dream to freeze provider/model choices")
+    setup = frozen_setup(run)
+    roles = setup["roleTuples"] if role != "reviewer" else [dict(role="reviewer", **r) for r in setup["reviewers"]]
+    if dict(role=role, **reviewer_tuple(selected)) not in roles:
+        raise PlanStoreError("invocation-tuple-not-selected", "Use the role/provider/model/effort chosen at kickoff")
 
 
 def initialize(store, *, setup=None):
     """Establish frozen kickoff once before any continuation can consume it."""
     from uuid import uuid4
-    from codex_harness.core.run_loop import cursor, save, _interrupt, TERMINAL
+    from codex_harness.core.run_loop import cursor, save
 
     with store._transaction():
         run = cursor(store)
@@ -134,16 +136,6 @@ def initialize(store, *, setup=None):
             )
             select_reviewers(store, run)
             save(store, run)
-        elif "setup" not in run:
-            adopt(store, run)
-            pending = run.get("question")
-            if (pending and pending["family"] == "author" and run["phase"] == "roundtable"
-                    and not pending.get("context") and run["state"] in {"PLAN", "REVIEW"}):
-                _interrupt(store, run)
-                run.update(state="REVIEW", step="plan-review")
-            save(store, run)
-        elif not {"planner", "judge", "mechanical"} <= {r["role"] for r in run["setup"]["roleTuples"]}:
-            validate(store, run["setup"])
-            run.pop("roleTuples", None)
-            save(store, run)
+        else:
+            frozen_setup(run)
     return run

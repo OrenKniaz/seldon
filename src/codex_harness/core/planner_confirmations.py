@@ -79,26 +79,25 @@ def prepare_confirmation(
     _chat=False,
     execution=None,
     reviewer_node_id=None,
-    role_tuples=None,
 ):
-    if gate not in {"align", "vision-lock", "align+vision-lock", "plan-execution", "invocations"}:
+    if gate not in {"align", "vision-lock", "align+vision-lock", "plan-execution"}:
         raise PlanStoreError("plan-gate-invalid", str(gate))
     semantic = Spine(store._data()).semantic
-    if semantic and gate not in {"plan-execution", "invocations"}:
+    if semantic and gate != "plan-execution":
         gate = "align+vision-lock"
     with store._transaction():
         phase = store.phase()
         if (
             not semantic
-            and gate not in {"plan-execution", "invocations"}
+            and gate != "plan-execution"
             and phase != {"align+vision-lock": "align"}.get(gate, gate)
         ):
             if gate not in {"vision-lock", "align+vision-lock"} or PHASES.index(
                 phase
             ) < PHASES.index("vision-lock"):
                 raise PlanStoreError("plan-confirmation-gate-mismatch", f"Current phase is {phase}")
-        kind = "P" if gate == "invocations" else "B" if gate == "plan-execution" else "A"
-        action = dict(roleTuples=role_tuples) if role_tuples is not None else {}
+        kind = "B" if gate == "plan-execution" else "A"
+        action = {}
         if kind == "B":
             action, missing = planning_prerequisites(
                 store, execution, reviewer_node_id=reviewer_node_id
@@ -200,6 +199,9 @@ def apply_judgment(store, judgment):
         return None
     seen = set()
     for saved in records(store, "confirmation-pending-judgment"):
+        from codex_harness.core.run_loop import obsolete_permission
+        if obsolete_permission(saved):
+            continue
         if saved["request_id"] in seen:
             continue
         seen.add(saved["request_id"])
@@ -223,16 +225,6 @@ def complete_chat_confirmation(
     )
 
 
-def permission_command(store, request, text, message_id):
-    """An exact, bound P command is structural consent, never interpreted approval."""
-    if request["gate"] != "invocations" or text != "/authorize":
-        raise ValueError("Use /authorize only for the displayed invocation permission")
-    action, content, evidence = _chat_evidence(request["request_id"], request["plan_revision"], text,
-        hashlib.sha256(text.encode("utf-8")).hexdigest(), "proxy:external-chat", message_id)
-    evidence["permissionCommand"] = text
-    return complete_confirmation(store, request["request_id"], action, content, chat=evidence, expected_gate="invocations")
-
-
 def complete_confirmation(
     store, request_id, action, content=None, *, chat=None, expected_gate=None
 ):
@@ -240,7 +232,11 @@ def complete_confirmation(
         request = next((r for r in records(store, REQUEST) if r["request_id"] == request_id), None)
         if request is None:
             raise PlanStoreError("plan-confirmation-request-unknown", str(request_id))
-        from codex_harness.core.run_loop import cursor
+        from codex_harness.core.run_loop import cursor, obsolete_permission
+
+        if obsolete_permission(request):
+            raise PlanStoreError("confirmation-control-superseded",
+                "Invocation permission is obsolete; follow the current baton under frozen kickoff choices")
 
         run = cursor(store)
         if run and (

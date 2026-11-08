@@ -28,8 +28,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey, r
     """Protect actual words and exact subjects through the canonical producer/consumer.
 
     C8/C11/C14/C18/C23: actual words and canonical subjects survive the complete
-    A/P/review/B/Contracts/Build/C journey, including reconnect after DONE.
-    Catch draft tuples becoming invocation permission, stale scope or replayed
+    A/review/B/Contracts/Build/C journey, including reconnect after DONE.
+    Catch changed setup replacing frozen role choices, stale scope or replayed
     answers gaining credit, negative decisions accidentally starting workers,
     and C surviving missing/changed delivered bytes. The golden supplies correct
     answers once, so it misses these interrupted and changed-subject boundaries.
@@ -117,8 +117,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey, r
         client.call(
             "harness_plan_start", name="Authority journey", idea=content["nodes"][0]["text"]
         )
-        if (client.current.get("userRequest") or {}).get("gate") == "invocations":
-            client.words()
+        assert client.current["userRequest"] is None
+        assert client.current["question"]["purpose"] == "understanding"
         if journey == "gate-chain":
             client.answer(
                 dict(
@@ -311,7 +311,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey, r
             # FIX17 DELETE-structure: planner timeout/model/catalog renewal is
             # retired. Prove frozen operator pins plus real scope-only B renewal.
             with open_plan_store_readonly(tmp_path) as store:
-                permitted = approvals.current(store, "P")["subject"]["roleTuples"]
+                permitted = client.current["setup"]
                 assert permitted and approvals.current(store, "B") is None
                 assert store.successful_reviews(store.manifest_revision())
             old_b = request
@@ -343,7 +343,7 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey, r
             assert request["subject"]["execution"]["workers"] == frozen_workers
             assert request["subject"]["execution"]["timeout"] == 300
             with open_plan_store_readonly(tmp_path) as store:
-                assert approvals.current(store, "P")["subject"]["roleTuples"] == permitted
+                assert client.current["setup"] == permitted
                 assert approvals.current(store, "B")["request_id"] == old_b["request_id"]
                 reviews = store.successful_reviews(store.manifest_revision())
                 assert reviews
@@ -571,14 +571,13 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey, r
                 len(store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchall()) == 1
             )
             records = approvals.records(store, approvals.EVENT)
-            assert {r["subject"]["kind"] for r in records} == {"A", "P", "B"}
+            assert {r["subject"]["kind"] for r in records} == {"A", "B"}
             assert all(not r["human_identity_verified"] for r in records)
             assert all(
                 r["channel"]
                 == (
                     "mcp-client-elicitation"
-                    if journey == "reconnect-a" and (r["subject"]["kind"] == "P"
-                    or r["subject"]["kind"] == "A" and r["state"] == "approved")
+                    if journey == "reconnect-a" and r["subject"]["kind"] == "A" and r["state"] == "approved"
                     else "chat-confirmation"
                 )
                 for r in records
