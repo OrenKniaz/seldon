@@ -7,13 +7,10 @@ import time
 from codex_harness.core import approvals
 from codex_harness.core import planner_jobs as jobs
 from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
-from codex_harness.core.plan_types import _now
 from codex_harness.core.planner_execution import _canonical_store
 from codex_harness.core.record_io import (
-    _record_guard,
     read_record_json,
     write_record_json,
-    write_record_json_once,
 )
 
 RESOLVED = "worker-recovery-resolved"
@@ -26,35 +23,28 @@ def end_attempt(workspace, job_id):
     with open_plan_store_readonly(workspace) as store:
         segment = jobs.latest_segment(store, job_id)
     write_record_json(directory / "stop.json", {"requestDigest": request["requestDigest"]})
+    if segment == directory or not (segment / "request.json").is_file():
+        return  # Admission never published; retain uncertainty, not root cleanup.
     deadline = time.monotonic() + 12
     while not (segment / "quiescence.json").exists() and time.monotonic() < deadline:
         time.sleep(0.1)
-    proof = inspect(workspace, job_id)
-    path = directory / "recovery-verdict.json"
-    with _record_guard(path):
-        if not path.exists():
-            write_record_json_once(
-                path,
-                dict(
-                    requestDigest=request["requestDigest"],
-                    verdict="VERIFIED-QUIESCENT"
-                    if proof["verdict"] == "VERIFIED-QUIESCENT"
-                    else "ABANDONED",
-                    quarantine=True,
-                ),
-            )
+    if not (segment / "quiescence.json").exists():
+        from codex_harness.core.audit_process import process_observation
 
-
-def recovery_verdict(directory, request):
-    path = directory / "recovery-verdict.json"
-    record = read_record_json(path) if path.exists() else {}
-    if record and record.get("requestDigest") != request["requestDigest"]:
-        raise ValueError("worker-recovery-verdict-identity-mismatch")
-    return record
+        launch = read_record_json(segment / "launch.json") if (segment / "launch.json").is_file() else {}
+        if launch and process_observation(launch["pid"]).get("running") is False:
+            jobs.finish_segment(directory, segment, {})
+        elif not launch:
+            jobs.finish_segment(directory, segment, {})
 
 
 def disposition(store, job_id):
-    return next((r for r in approvals.records(store, RESOLVED) if r["jobId"] == job_id), None)
+    resolved = next((r for r in approvals.records(store, RESOLVED) if r["jobId"] == job_id), None)
+    if resolved and resolved["choice"] == "revalidate":
+        path = jobs.latest_segment(store, job_id) / "quiescence.json"
+        outcome = read_record_json(path) if path.is_file() else {}
+        resolved["validation"] = outcome.get("terminal", {}).get("continuation", {}).get("result", {})
+    return resolved
 
 
 def attempt_proof(store, job_id):
@@ -136,13 +126,6 @@ def release_attempt(store, job_id, reason):
 def worker_status(workspace, result):
     with open_plan_store_readonly(workspace) as store:
         resolved = disposition(store, result["jobId"])
-    if not resolved:
-        directory = jobs._directory(workspace, result["jobId"])
-        if recovery_verdict(directory, jobs._request(directory)):
-            result.update(
-                status="failed",
-                reason="Worker ended; the run loop owns readmission within the same B.",
-            )
     if resolved:
         state = {
             "abandon": "abandoned",
@@ -151,16 +134,7 @@ def worker_status(workspace, result):
             "steer": "steering-required",
         }[resolved["choice"]]
         if resolved["choice"] == "revalidate":
-            validation = resolved.get("validation", {})
-            state = (
-                "completed"
-                if validation.get("state") == "PASS"
-                else validation["state"]
-                if validation.get("state") in {"pending-judgment", "pending-build"}
-                else "failed"
-                if validation
-                else "revalidating"
-            )
+            state = result["status"]
         result.update(status=state, recovery=resolved, ownershipReleased=resolved["ownershipReleased"])
         if resolved["choice"] == "revalidate":
             result["reason"] = "Inspect recovery.validation for retained revalidation and delivery."
@@ -189,16 +163,14 @@ def inspect(workspace, job_id):
     receipt_path = jobs._inside(directory, segment / "quiescence.json")
     receipt = read_record_json(receipt_path) if receipt_path.is_file() else {}
     control = receipt.get("control", {})
-    terminal_path = segment / "terminal.json"
-    terminal = read_record_json(terminal_path) if terminal_path.is_file() else {}
-    verified = jobs.verified_segment_exit(request, segment.name, terminal, receipt)
+    terminal = receipt.get("terminal", {})
+    verified = jobs.verified_segment_exit(request, segment.name, receipt)
 
-    verdict = recovery_verdict(directory, request)
     proof = dict(
         jobId=job_id,
         publicationRevision=request["publicationRevision"],
         requestDigest=request["requestDigest"],
-        verdict=verdict.get("verdict", "VERIFIED-QUIESCENT" if verified else "UNKNOWN"),
+        verdict="VERIFIED-QUIESCENT" if verified else "UNKNOWN",
         controllerAndChildren=control or {"liveness": "UNKNOWN"},
         ownedDirectories=[
             dict(
@@ -207,8 +179,7 @@ def inspect(workspace, job_id):
             )
         ],
     )
-    admitted = read_record_json(segment / "request.json")
-    outcomes = terminal.get("outcomes") or jobs.segment_outcomes(directory, admitted)
+    outcomes = terminal.get("outcomes", {})
     proof["faultBeads"] = [key for key, outcome in outcomes.items() if outcome["fault"]]
     with open_plan_store_readonly(workspace) as store:
         repair = next(
@@ -216,7 +187,7 @@ def inspect(workspace, job_id):
             None,
         )
     manifest = read_record_json(directory / "plan/sample.json")
-    if repair:
+    if repair and outcomes:
         proof["faultBeads"] = sorted(
             set(proof["faultBeads"])
             | {
@@ -368,15 +339,6 @@ def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
     return resolved
 
 
-def record_validation(store, resolved, validation):
-    from codex_harness.core.run_ownership import ensure_effect
-
-    with store._transaction():
-        ensure_effect(store)
-        resolved["validation"] = validation
-        store._event(RESOLVED, resolved)
-
-
 def monitor(workspace, job_id, segment_id):
     """Existing bounded Job owner; the run loop alone consumes its terminal event."""
     from datetime import UTC, datetime
@@ -411,25 +373,7 @@ def monitor(workspace, job_id, segment_id):
         control, code = getattr(result, "audit_control", {}), result.returncode
     except (OSError, jobs.subprocess.SubprocessError) as error:
         control, code = {**getattr(error, "audit_control", {}), "error": str(error)}, 1
-    receipt = dict(requestDigest=request["requestDigest"], segmentId=segment_id, control=control)
-    if not (path / "terminal.json").exists():
-        write_record_json_once(
-            path / "terminal.json",
-            dict(
-                status="failed",
-                reason="Payload exited without a terminal observation",
-                exitCode=code,
-                requestDigest=request["requestDigest"],
-                segmentId=segment_id,
-                at=_now(),
-                outcomes=jobs.segment_outcomes(directory, segment),
-            ),
-        )
-    # Quiescence releases recovery only after its canonical outcome is available.
-    write_record_json_once(path / "quiescence.json", receipt)
-    write_record_json(directory / "quiescence.json", receipt)
-    if (path / "terminal.json").exists():
-        write_record_json(directory / "terminal.json", read_record_json(path / "terminal.json"))
+    jobs.finish_segment(directory, path, control, code)
     with open_plan_store(workspace) as store:
         run_loop(store)
     return code

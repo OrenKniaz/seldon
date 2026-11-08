@@ -378,13 +378,7 @@ def http_golden(workspace, semantic=False):
         return run_loop.run_loop(store)
 
     def read_execution(job_id):
-        observed = jobs.worker_job_status(workspace, job_id)
-        # A segment's exit does not settle the controller's automatic next effect.
-        return (
-            dict(observed, status="pending-controller")
-            if observed["status"] == "completed"
-            else observed
-        )
+        return jobs.worker_job_status(workspace, job_id)
 
     def start_execution(**options):
         nonlocal expected_job_id
@@ -414,10 +408,6 @@ def http_golden(workspace, semantic=False):
 
         deadline = time.monotonic() + wait_seconds
 
-        def delivery_published(record):
-            delivery = record.get("delivery")
-            return delivery and delivery["candidateTree"] == record["semanticValidation"]["candidateTree"]
-
         def await_observation():
             # Match the original bounded status reader's one-second cadence.
             # Completion still requires the actual owner/cleanup receipts.
@@ -426,30 +416,14 @@ def http_golden(workspace, semantic=False):
         while True:
             observed = read_execution(job_id)
             run = run_loop.cursor(store)
-            segment = jobs.latest_segment(store, job_id)
-            terminal_path, cleanup_path = segment / "terminal.json", segment / "quiescence.json"
-            if terminal_path.is_file() and cleanup_path.is_file():
-                terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
-                cleanup = json.loads(cleanup_path.read_text(encoding="utf-8"))
-                assert jobs.verified_segment_exit(
-                    jobs._request(jobs._directory(workspace, job_id)),
-                    segment.name,
-                    terminal,
-                    cleanup,
-                )
-                observed["terminal"] = terminal
+            if terminal := observed.get("terminal"):
+                assert observed["verifiedExit"], observed
                 if terminal["status"] == "failed":
                     return dict(observed, status="failed")
                 record = json.loads(Path(observed["run"]["recordPath"]).read_text(encoding="utf-8"))
-                if record["status"] == STATUS_VALIDATED:
+                if observed["status"] == "completed":
                     if semantic:
                         assert record["semanticValidation"]["state"] == "PASS", record
-                        if not delivery_published(record):
-                            observed["status"] = "pending-delivery"
-                            if time.monotonic() >= deadline:
-                                return observed
-                            await_observation()
-                            continue
                         assert record["delivery"]["root"] == str(workspace.resolve()), record
                     settled = run_loop.run_loop(store)
                     # Completion can wake automatic acceptance. Its ordinary owner
@@ -472,13 +446,11 @@ def http_golden(workspace, semantic=False):
                         )
                         assert completed["status"] == STATUS_VALIDATED, completed
                         assert completed["semanticValidation"]["state"] == "PASS", completed
-                        if not delivery_published(completed):
-                            observed = dict(current, status="pending-delivery")
-                            break
+                        assert current["status"] == "completed", current
                         assert completed["delivery"]["root"] == str(workspace.resolve()), completed
                         return dict(current, status="completed", terminal=terminal)
                     run = answer_semantics(run)
-                if run.get("effect") and run["effect"]["id"] != segment.name:
+                if run.get("effect") and run["effect"]["id"] != terminal["segmentId"]:
                     return read_execution(job_id)
             if time.monotonic() >= deadline:
                 return observed
@@ -1950,18 +1922,18 @@ with TemporaryDirectory(dir=root) as scratch:
                     ]
                     assert len(contracts_segments) == 1, contracts_segments
                     contracts_segment = contracts_segments[0]
-                    contracts_terminal = json.loads(
-                        (contracts_segment / "terminal.json").read_text(encoding="utf-8")
+                    contracts_outcome = json.loads(
+                        (contracts_segment / "quiescence.json").read_text(encoding="utf-8")
                     )
-                    assert contracts_terminal["status"] == "pending-judgment"
+                    contracts_terminal = contracts_outcome["terminal"]
+                    # The owner already consumed Contracts and admitted Build;
+                    # its old provisional payload status is no longer selected.
+                    assert contracts_terminal["status"] == "pending-build", contracts_terminal
                     assert contracts_terminal["runId"] == expired["runId"]
                     assert jobs.verified_segment_exit(
                         jobs._request(job_root),
                         contracts_segment.name,
-                        contracts_terminal,
-                        json.loads(
-                            (contracts_segment / "quiescence.json").read_text(encoding="utf-8")
-                        ),
+                        contracts_outcome,
                     )
                     truncated_attempt = Path(expired["beads"]["B"]["evidenceDir"]) / "attempt"
                     stopped = json.loads((truncated_attempt / "result.json").read_text())
@@ -2043,6 +2015,11 @@ with TemporaryDirectory(dir=root) as scratch:
                 )
                 assert all(f["sha256"] for f in run["semanticValidation"]["testSources"]["files"])
                 assert run["delivery"]["root"] == str(workspace.resolve()), run
+                # TD#6: delivery and public terminal must agree after the real
+                # recovered semantic producer; earlier tests checked only run.json.
+                completed_job = jobs.worker_job_status(workspace, job["jobId"])
+                assert completed_job["status"] == "completed", completed_job
+                assert completed_job["terminal"]["continuation"]["result"]["state"] == "PASS", completed_job
             else:
                 # Independent real failures A, B, then A+B must not pool their
                 # allowances. Earlier serial C/B faults never exercised this union.
@@ -2136,10 +2113,8 @@ with TemporaryDirectory(dir=root) as scratch:
                             request_cancel(Path(job["run"]["recordPath"]).parents[1], "B")
                             cancelled = True
                     if tuple(faults) == ("A",):
-                        assert (
-                            released
-                            and observed["beads"]["B"]["integrated"]["validation"]["passed"]
-                        )
+                        assert released and job["terminal"]["outcomes"]["B"]["workStatus"] == "requirement-validated", job
+                        assert observed["beads"]["B"]["integrated"]["validation"]["passed"], job
                     if tuple(faults) == ("B",):
                         assert cancelled
                         control = json.loads(
@@ -2373,6 +2348,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     ("verify_renamed.py", baseline_verifier, ["verify_renamed.py"]),
                 ):
                     mark_phase("before verifier refresh " + filename)
+                    previous_outcome = jobs.worker_job_status(workspace, job["jobId"])
                     files = {
                         "verify_http.py": source if filename == "verify_http.py" else None,
                         filename: source,
@@ -2416,15 +2392,41 @@ with TemporaryDirectory(dir=root) as scratch:
                         assert "harness_chat" in remedy["next"]
                         inspected = recover(mode="inspect", job_id=job["jobId"])
                         assert inspected["revalidation"]["available"], inspected
-                    refreshed = recover(
-                        mode="resolve",
-                        job_id=job["jobId"],
-                        choice="revalidate",
-                        reason=(
-                            "Observe the unchanged product with the current verifier, "
-                            "without another build"
-                        ),
-                    )
+                    if filename == "verify_http.py":
+                        # P2/C18/C23: PASS -> refreshed pending selection -> death
+                        # before its outcome. Prior twins killed only after outcome.
+                        from tests.python.core.mcp_planner_support import LoopClient
+                        import signal
+
+                        assert previous_outcome["status"] == "completed", previous_outcome
+                        (workspace / "hold-revalidation").touch()
+                        fault = LoopClient(workspace, native=False)
+                        try:
+                            fault.call("harness_plan_start", name="Observe refreshed verifier", idea="Retain the accepted product")
+                            fault.answer(dict(option="continue", rationale="Observe the current verifier on retained product bytes", content={}))
+                            marker = workspace / ".codex-harness/revalidation-pending.json"
+                            interrupted = json.loads(marker.read_text())
+                            pending = jobs.worker_job_status(workspace, job["jobId"])
+                            assert pending["status"] == "pending" and pending["run"]["semanticValidation"]["state"] == "pending-judgment", pending
+                            pending_run = Path(pending["run"]["recordPath"]).read_bytes()
+                            os.kill(interrupted["ownerPid"], signal.SIGTERM)
+                            (workspace / "hold-revalidation").unlink()
+                            fault.reconnect()
+                            fault.call("harness_plan_start", name="Recover pending verification", idea="Consume the exact retained observation")
+                            restarted = jobs.worker_job_status(workspace, job["jobId"])
+                            assert restarted["status"] == "pending-judgment", restarted
+                            assert Path(restarted["run"]["recordPath"]).read_bytes() == pending_run
+                            assert fault.current["question"]["purpose"] == "execution", fault.current
+                            fault.answer(judge_reply(fault.current["question"], verdict="inconclusive"))
+                            refreshed = recovery.disposition(store, job["jobId"])
+                            assert sorted((workspace / ".codex-harness/worker-jobs").rglob("attempt/request.json")) == attempts
+                        finally:
+                            fault.close()
+                    else:
+                        refreshed = recover(
+                            mode="resolve", job_id=job["jobId"], choice="revalidate",
+                            reason="Observe the unchanged product with the current verifier, without another build",
+                        )
                     assert refreshed["validation"]["state"] == "pending-judgment", refreshed
                     observed_status = read_status(full=True)
                     assert observed_status["acceptance"]["candidatePrerequisite"]["complete"], (

@@ -334,6 +334,8 @@ def test_canonical_plan_contracts_red_build_validation_pass(tmp_path, journey, r
                 "Success exit 0, stderr empty.", "The success exit status is outside this requirement.")
             client.call("harness_steer", direction="replan", rationale="User proposes changed meaning under frozen kickoff",
                         content=dict(nodes=[requirement]))
+            # C23/I1: a retained execution verdict must not move the replan
+            # cursor to NEXT before this changed scope receives its own B.
             scope_answer("WHAT")
             request = arrive(kind)
             assert request["request_id"] != old_b["request_id"]

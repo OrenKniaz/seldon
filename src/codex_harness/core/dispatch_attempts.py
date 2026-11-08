@@ -484,8 +484,12 @@ def read_completed_execution_evidence(
         return json.loads(original(path, root))
 
     request_job = record(directory / "request.json", directory)
-    terminal = record(directory / "terminal.json", directory)
-    started = record(directory / "started.json", directory)
+    segment = directory / "segments" / status["terminal"]["segmentId"]
+    outcome = record(segment / "quiescence.json", directory)
+    if outcome != status["quiescence"]:
+        raise ValueError("execution-job-outcome-changed")
+    terminal = outcome["terminal"]
+    started = record(segment / "started.json", directory)
     if any(
         item.get("requestDigest") != request_job["requestDigest"] for item in (terminal, started)
     ):

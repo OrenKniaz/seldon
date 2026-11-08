@@ -21,7 +21,7 @@ from codex_harness.core.intake import _model
 from codex_harness.core.managed_paths import directory, short
 from codex_harness.core.plan_store import open_plan_store
 from codex_harness.core.provider_launch import get_adapter
-from codex_harness.core.record_io import read_record_json, write_record_json_once
+from codex_harness.core.record_io import read_record_json, write_record_json, write_record_json_once
 from codex_harness.core.spine import compile_manifest
 
 SCHEMA = "seldon/planner-worker-job-v1"
@@ -169,25 +169,8 @@ def verify_job(directory, record=None):
     if _directory(workspace, request["jobId"]) != directory:
         raise ValueError("provider-call-job-path-invalid")
     scope = request.get("executionScope")
-    if not isinstance(scope, dict):
-        raise ValueError("provider-call-native-scope-required")
     with open_plan_store_readonly(workspace) as store:
-        from codex_harness.core.run_loop import cursor
-        from codex_harness.core.run_ownership import ensure_effect
-
-        run = cursor(store)
-        ensure_effect(store, run["generation"])
-        effect = run["effect"]
-        segment = segment_directory(workspace, request["jobId"], effect["id"])
-        started = read_record_json(segment / "started.json")
-        admitted = read_record_json(segment / "request.json")
-        if (
-            started.get("requestDigest") != request["requestDigest"]
-            or started.get("pid") != os.getpid()
-            or admitted["generation"] != run["generation"]
-            or effect.get("jobId") != request["jobId"]
-        ):
-            raise ValueError("provider-call-owned-segment-required")
+        owned_segment(directory)
         if not admitted_execution(
             store, request.get("executionRequestId"), scope, request["jobId"]
         ):
@@ -219,130 +202,80 @@ def verify_job(directory, record=None):
 def start_worker_job(
     store, expected_revision, workers, *, max_parallel=2, timeout=900, segment_id=None
 ):
-    """Admission and exact controller ownership share the canonical transaction."""
+    """Publish root admission before admitting a separately committed segment."""
     from codex_harness.core.run_ownership import ensure_effect
+    from codex_harness.core.run_loop import cursor, save
+    from codex_harness.core.planner_recovery import admission_id
+    from codex_harness.core.planner_execution import (
+        admit_execution, admitted_execution, execution_scope, require_execution,
+    )
 
+    request = None
     with store._transaction():
         ensure_effect(store)
-        return _admit_worker_job(
-            store,
-            expected_revision,
-            workers,
-            max_parallel=max_parallel,
-            timeout=timeout,
-            segment_id=segment_id,
-        )
-
-
-def _admit_worker_job(
-    store, expected_revision, workers, *, max_parallel=2, timeout=900, segment_id=None
-):
-    """Admit once under B; recovery alone assigns successor attempts."""
-    if type(max_parallel) is not int or max_parallel < 1:
-        raise ValueError("worker-job-max-parallel-must-be-positive")
-    if not _valid_timeout(timeout):
-        raise ValueError("worker-job-timeout-must-be-positive")
-    from codex_harness.core.planner_recovery import admission_id
-
-    job_id = admission_id(store, expected_revision)
-    directory = _directory(store.workspace, job_id)
-
-    def reattach():
+        if type(max_parallel) is not int or max_parallel < 1:
+            raise ValueError("worker-job-max-parallel-must-be-positive")
+        if not _valid_timeout(timeout):
+            raise ValueError("worker-job-timeout-must-be-positive")
+        job_id = admission_id(store, expected_revision)
+        directory = _directory(store.workspace, job_id)
         if (directory / "request.json").is_file():
             previous = _request(directory)
             manifest = read_record_json(_inside(directory, directory / "plan/sample.json"))
-            selection = _workers(manifest, workers)
-            options = dict(
-                workers=selection,
-                maxParallel=max_parallel,
-                timeout=timeout,
-            )
+            options = dict(workers=_workers(manifest, workers), maxParallel=max_parallel, timeout=timeout)
             if previous["options"] != options:
                 raise ValueError("worker-job-publication-already-admitted-with-other-options")
-        return worker_job_status(store.workspace, job_id)
-
-    if directory.is_dir():
-        return reattach()
-    from codex_harness.core.planner_execution import (
-        admit_execution,
-        admitted_execution,
-        execution_scope,
-        require_execution,
-    )
-
-    manifest, template = _publication(store, expected_revision)
-    selection = _workers(manifest, workers)
-    scope = execution_scope(
-        store,
-        expected_revision,
-        selection,
-        max_parallel=max_parallel,
-        timeout=timeout,
-    )
-    require_execution(store, scope)
-    options = {
-        "workers": selection,
-        "maxParallel": max_parallel,
-        "timeout": timeout,
-    }
-    directory.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        directory.mkdir()
-    except FileExistsError:
-        # A concurrent writer may not have published the original yet. Never
-        # wait for it or seize its directory and launch another child.
-        return reattach()
-    try:
-        execution_id = admit_execution(store, scope, job_id)
-        execution_provenance = admitted_execution(store, execution_id, scope, job_id)["channel"]
-        before = _files(template)
-        if before != scope["templateFiles"]:
-            raise ValueError("worker-job-template-changed-before-snapshot")
-        plan = directory / "plan"
-        snapshot_plan(template, plan, manifest, before)
-        # Recheck after copying, before publishing an executable admission.
-        if _publication(store, expected_revision)[0] != manifest:
-            raise ValueError("worker-job-publication-changed-during-snapshot")
-        request = {
-            "schema": SCHEMA,
-            "jobId": job_id,
-            "containment": "windows-job-monitor-v1",
-            "publicationRevision": expected_revision,
-            "manifestDigest": _digest(manifest),
-            "templateFiles": before,
-            "options": options,
-            "admittedAt": _now(),
-            "executionRequestId": execution_id,
-            "executionScope": scope,
-            "executionProvenance": execution_provenance,
-        }
-        predecessor = next(
-            (
-                row
-                for row in approvals.records(store, "worker-recovery-resolved")
-                if row.get("successor") == job_id
-            ),
-            None,
-        )
-        if predecessor and predecessor["proof"].get("revalidation", {}).get("runPath"):
-            prior = read_record_json(Path(predecessor["proof"]["revalidation"]["runPath"]))
-            request["previousDelivery"] = prior.get("delivery", {})
-        request["requestDigest"] = _digest(request)
-        write_record_json_once(directory / "request.json", request)
-        return start_segment(store, job_id, segment_id, None)
-    except Exception as error:
-        # If Popen succeeded but writing launch failed, a child may be running.
-        # Record an admission error, never a false terminal outcome or relaunch.
-        write_record_json_once(
-            directory / "admission-error.json",
-            {"type": type(error).__name__, "message": str(error), "at": _now()},
-        )
-        raise
-    return worker_job_status(store.workspace, job_id)
+            segment = latest_segment(store, job_id, admitted=True)
+            if segment != directory:
+                run = cursor(store)
+                run["effect"]["segmentId"] = segment.name
+                save(store, run)
+                return worker_job_status(store.workspace, job_id)
+        else:
+            # No root request means no segment could have entered. Only this
+            # transaction's admission owner may discard its confined partial copy.
+            if directory.exists():
+                shutil.rmtree(directory)
+            manifest, template = _publication(store, expected_revision)
+            selection = _workers(manifest, workers)
+            scope = execution_scope(
+                store, expected_revision, selection, max_parallel=max_parallel, timeout=timeout,
+            )
+            require_execution(store, scope)
+            directory.mkdir(parents=True)
+            execution_id = admit_execution(store, scope, job_id)
+            execution_provenance = admitted_execution(store, execution_id, scope, job_id)["channel"]
+            before = _files(template)
+            if before != scope["templateFiles"]:
+                raise ValueError("worker-job-template-changed-before-snapshot")
+            snapshot_plan(template, directory / "plan", manifest, before)
+            if _publication(store, expected_revision)[0] != manifest:
+                raise ValueError("worker-job-publication-changed-during-snapshot")
+            request = dict(
+                schema=SCHEMA, jobId=job_id, containment="windows-job-monitor-v1",
+                publicationRevision=expected_revision, manifestDigest=_digest(manifest),
+                templateFiles=before,
+                options=dict(workers=selection, maxParallel=max_parallel, timeout=timeout),
+                admittedAt=_now(), executionRequestId=execution_id, executionScope=scope,
+                executionProvenance=execution_provenance,
+            )
+            predecessor = next(
+                (row for row in approvals.records(store, "worker-recovery-resolved")
+                 if row.get("successor") == job_id), None,
+            )
+            if predecessor and predecessor["proof"].get("revalidation", {}).get("runPath"):
+                prior = read_record_json(Path(predecessor["proof"]["revalidation"]["runPath"]))
+                request["previousDelivery"] = prior.get("delivery", {})
+            request["requestDigest"] = _digest(request)
+    if request is not None:
+        with store._transaction():
+            ensure_effect(store)
+            write_record_json_once(directory / "request.json", request)
+    return start_segment(store, job_id, segment_id, None)
 
 
 def worker_job_status(workspace, job_id):
-    """Read durable observations; recovery verdicts supersede lost terminal records."""
+    """Read the selected segment outcome; incomplete publication stays pending."""
     directory = _directory(workspace, job_id)
     if not directory.is_dir():
         raise ValueError("worker-job-not-found")
@@ -355,11 +288,8 @@ def worker_job_status(workspace, job_id):
         "harnessDeliveryProven": False,
         "evidenceDir": str(directory),
     }
-    error_path = _inside(directory, directory / "admission-error.json")
-    if error_path.is_file():
-        result["admissionError"] = read_record_json(error_path)
     if not (directory / "request.json").is_file():
-        return {**result, "reason": "Admission incomplete; do not relaunch"}
+        return {**result, "status": "pending", "reason": "Admission pending; the run loop re-admits unchanged work"}
     request = _request(directory)
     result["publicationRevision"] = request["publicationRevision"]
     result["options"] = request["options"]
@@ -381,20 +311,29 @@ def worker_job_status(workspace, job_id):
     )
     result["actorIdentityVerified"] = False
     result["capacityVerified"] = False
-    for name in ("started", "terminal"):
-        path = directory / f"{name}.json"
-        if not path.is_file():
-            continue
-        record = read_record_json(_inside(directory, path))
-        if record.get("requestDigest") != request["requestDigest"]:
-            raise ValueError("worker-job-outcome-identity-mismatch")
-        result[name] = record
-        result["status"] = record["status"] if name == "terminal" else "running"
+    from codex_harness.core.plan_store import open_plan_store_readonly
+
+    with open_plan_store_readonly(workspace) as store:
+        segment = latest_segment(store, job_id)
+        if segment == directory or not (segment / "request.json").is_file():
+            return dict(result, status="pending", reason="Segment admission pending")
+        observed = segment_status(store, dict(jobId=job_id, id=segment.name))
+        from codex_harness.core.run_loop import cursor
+
+        current = cursor(store)
+        effect = current.get("effect") or {}
+        pending = current.get("jobId") == job_id and effect.get("kind") == "judgment-continuation" and (
+            observed.get("terminal", {}).get("continuation", {}).get("effectId") != effect["id"]
+        )
+    result.update(observed)
+    result["status"] = "pending" if pending else observed.get("terminal", {}).get("status", "running" if observed.get("launch") else "pending")
     runs = directory / "runs"
     paths = list(runs.glob("*/evidence/run.json")) if runs.is_dir() else []
     if len(paths) == 1:
         path = _inside(directory, paths[0])
         run = read_record_json(path)
+        if run.get("control", {}).get("effectId") != observed.get("terminal", {}).get("continuation", {}).get("effectId", segment.name):
+            result["status"] = "pending"
         if (
             run.get("planRevision") != request["publicationRevision"]
             or Path(run.get("repo", "")).resolve() != (path.parent.parent / "repo").resolve()
@@ -425,13 +364,9 @@ def worker_job_status(workspace, job_id):
             },
         }
         result["didRunProvider"] = run["didExecuteRealProvider"]
-        if "terminal" not in result and run["status"] == "pending-judgment":
-            result["status"] = "pending-judgment"
     elif paths:
         raise ValueError("worker-job-dispatch-record-ambiguous")
-    if result["status"] != "completed" or result.get("terminal", {}).get(
-        "dispatchStatus", ""
-    ).startswith("plan-failed"):
+    if result["status"] != "completed":
         result["reason"] = (
             "Awaiting judgment; inspect the bound candidate before revalidation."
             if result["status"] == "pending-judgment"
@@ -482,11 +417,11 @@ def admitted_work(store, directory, request):
     return work
 
 
-def segment_outcomes(directory, segment):
+def segment_outcomes(directory, segment, *, effect_id=None):
     """Publish work and launch certainty even when dispatch has no attempt."""
     paths = list(directory.glob("runs/*/evidence/run.json"))
     run = read_record_json(_inside(directory, paths[0])) if len(paths) == 1 else {}
-    if (run.get("control") or {}).get("effectId") != segment["segmentId"]:
+    if (run.get("control") or {}).get("effectId") != (effect_id or segment["segmentId"]):
         run = {}
     entered = (directory / "segments" / segment["segmentId"] / "started.json").is_file()
     unobserved = "unknown launch" if entered else "not launched"
@@ -568,24 +503,21 @@ def segment_directory(workspace, job_id, segment_id):
     return _inside(workspace, _directory(workspace, job_id) / "segments" / segment_id)
 
 
-def latest_segment(store, job_id):
-    """Recovery observes the latest admitted segment, never an earlier exit."""
+def latest_segment(store, job_id, *, admitted=False):
+    """The committed build identity owns even an interrupted admission."""
     from codex_harness.core.run_loop import EVENT
 
     row = store.connection.execute(
         "SELECT payload_json FROM events WHERE kind=? "
         "AND json_extract(payload_json,'$.effect.kind')='build' "
-        "AND json_extract(payload_json,'$.effect.jobId')=? ORDER BY id DESC LIMIT 1",
-        (EVENT, job_id),
+        "AND json_extract(payload_json,'$.effect.jobId')=? "
+        "AND (?=0 OR json_extract(payload_json,'$.effect.segmentId') IS NOT NULL) "
+        "ORDER BY id DESC LIMIT 1",
+        (EVENT, job_id, int(admitted)),
     ).fetchone()
     if row:
         effect = json.loads(row[0])["effect"]
-        segment = effect.get("segmentId", effect["id"])
-        return (
-            segment_directory(store.workspace, job_id, segment)
-            if segment
-            else _directory(store.workspace, job_id)
-        )
+        return segment_directory(store.workspace, job_id, effect.get("segmentId") or effect["id"])
     return _directory(store.workspace, job_id)
 
 
@@ -627,15 +559,7 @@ def start_segment(store, job_id, segment_id, resume_run_dir):
     ensure_effect(store, run["generation"])
     segment_id = segment_id or run["effect"]["id"]
     path = segment_directory(store.workspace, job_id, segment_id)
-    if path.exists():
-        return dict(jobId=job_id, segmentId=segment_id)
     path.mkdir(parents=True)
-    with store._transaction():
-        run = cursor(store)
-        ensure_effect(store, run["generation"])
-        run["jobId"] = job_id
-        run["effect"].update(jobId=job_id, segmentId=segment_id)
-        save(store, run)
     request = dict(
         jobId=job_id,
         segmentId=segment_id,
@@ -645,6 +569,11 @@ def start_segment(store, job_id, segment_id, resume_run_dir):
         work=admitted_work(store, path.parent.parent, _request(path.parent.parent)),
     )
     write_record_json_once(path / "request.json", request)
+    with store._transaction():
+        ensure_effect(store, run["generation"])
+        run["jobId"] = job_id
+        run["effect"].update(jobId=job_id, segmentId=segment_id)
+        save(store, run)
     command = [
         sys.executable,
         "-P",
@@ -686,19 +615,65 @@ def start_segment(store, job_id, segment_id, resume_run_dir):
     return dict(jobId=job_id, segmentId=segment_id)
 
 
-def verified_segment_exit(request, segment_id, terminal, receipt):
+def verified_segment_exit(request, segment_id, receipt):
+    if not receipt:
+        return False
+    if any(
+        r.get("requestDigest") != request["requestDigest"] or r.get("segmentId") != segment_id
+        for r in (receipt, receipt["terminal"])
+    ):
+        raise ValueError("worker-job-outcome-identity-mismatch")
     control = receipt.get("control", {})
     return (
-        all(
-            r.get("requestDigest") == request["requestDigest"]
-            and (segment_id is None or r.get("segmentId") == segment_id)
-            for r in (terminal, receipt)
-        )
-        and control.get("backend") == "windows-job"
+        control.get("backend") == "windows-job"
         and control.get("membershipVerifiedBeforePayload") is True
         and control.get("quiescenceVerified") is True
         and control.get("activeProcessesAfterTeardown") == 0
     )
+
+
+def finish_segment(directory, path, control, code=1):
+    """The bounded owner publishes outcome and cleanup together, last."""
+    request, segment = _request(directory), read_record_json(path / "request.json")
+    terminal_path = path / "terminal.json"
+    terminal = read_record_json(terminal_path) if terminal_path.is_file() else dict(
+        status="failed", reason="Payload exited without a terminal observation",
+        exitCode=code, requestDigest=request["requestDigest"], segmentId=path.name,
+        at=_now(), outcomes=segment_outcomes(directory, segment),
+    )
+    outcome = dict(
+        requestDigest=request["requestDigest"], segmentId=path.name,
+        control=control, terminal=terminal,
+    )
+    if not verified_segment_exit(request, path.name, outcome):
+        terminal.update(status="failed", reason="Segment cleanup remains unverified")
+    try:
+        write_record_json_once(path / "quiescence.json", outcome)
+    except FileExistsError:
+        pass  # The bounded monitor published this segment's outcome first.
+
+
+def complete_continuation(store, result):
+    from codex_harness.core.run_loop import cursor
+    from codex_harness.core.run_ownership import ensure_effect
+
+    with store._transaction():
+        run = cursor(store)
+        ensure_effect(store)
+        path = latest_segment(store, run["jobId"]) / "quiescence.json"
+        outcome = read_record_json(path)
+        if result.get("proof"):
+            outcome["terminal"]["outcomes"] = segment_outcomes(
+                path.parent.parent.parent, read_record_json(path.parent / "request.json"),
+                effect_id=run["effect"]["id"],
+            )
+        outcome["terminal"].update(
+            status="completed" if result["state"] == "PASS" else
+            result["state"] if result["state"] in {"pending-build", "pending-judgment"} else "failed",
+            dispatchStatus=result["state"],
+            continuation=dict(effectId=run["effect"]["id"], result=result),
+        )
+        write_record_json(path, outcome)
 
 
 def segment_status(store, effect):
@@ -706,15 +681,13 @@ def segment_status(store, effect):
 
     workspace, job_id = store.workspace, effect["jobId"]
     segment_id = effect.get("segmentId", effect["id"])
-    path = (
-        segment_directory(workspace, job_id, segment_id)
-        if segment_id
-        else _directory(workspace, job_id)
-    )
+    path = segment_directory(workspace, job_id, segment_id)
     result = {}
-    for name in ("terminal", "quiescence", "launch"):
+    for name in ("quiescence", "launch"):
         if (path / (name + ".json")).exists():
             result[name] = read_record_json(path / (name + ".json"))
+    if outcome := result.get("quiescence"):
+        result["terminal"] = outcome["terminal"]
     if launch := result.get("launch"):
         observed = process_observation(launch["pid"])
         result["launched"] = bool(
@@ -723,10 +696,9 @@ def segment_status(store, effect):
             and observed.get("running")
         )
         result["deadOwner"] = observed.get("running") is False
-    result["verifiedExit"] = verified_segment_exit(
+    result["verifiedExit"] = bool(outcome) and verified_segment_exit(
         _request(_directory(workspace, job_id)),
         segment_id,
-        result.get("terminal", {}),
         result.get("quiescence", {}),
     )
     return result
@@ -734,8 +706,6 @@ def segment_status(store, effect):
 
 def execute_worker_job(workspace, job_id, segment_id):
     """One bounded dispatch segment ends before any semantic question is asked."""
-    from codex_harness.core.run_ownership import ensure_effect
-
     directory = _directory(workspace, job_id)
     path = segment_directory(workspace, job_id, segment_id)
     request, segment = _request(directory), read_record_json(path / "request.json")
@@ -743,24 +713,10 @@ def execute_worker_job(workspace, job_id, segment_id):
         path / "started.json",
         dict(requestDigest=request["requestDigest"], at=_now(), pid=os.getpid()),
     )
-    # Keep the original admission marker for attempt provenance, without making
-    # that original PID the continuation owner.
-    if not (directory / "started.json").exists():
-        write_record_json_once(
-            directory / "started.json",
-            dict(requestDigest=request["requestDigest"], at=_now(), pid=os.getpid()),
-        )
     terminal = dict(requestDigest=request["requestDigest"], segmentId=segment_id, status="failed")
     try:
         with open_plan_store(workspace) as store:
-            ensure_effect(store, segment["generation"])
             store._run_generation = segment["generation"]
-            manifest = read_record_json(directory / "plan/sample.json")
-            if (
-                _digest(manifest) != request["manifestDigest"]
-                or _files(directory / "plan/template") != request["templateFiles"]
-            ):
-                raise ValueError("worker-job-snapshot-identity-mismatch")
             run = dispatch_job(store, directory, request, segment["resumeRun"])
         terminal.update(
             runId=run["runId"],

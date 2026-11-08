@@ -20,9 +20,9 @@ RESERVED_ROOTS = {
 from codex_harness.core.candidate_observations import file_hashes
 
 
-def retain_candidate(workspace, request, run, publication=None):
-    """The completion writer registers one observation independently of root delivery."""
-    from codex_harness.core import dispatch_repository as d, planner_jobs as jobs
+def candidate_selection(workspace, request, run, publication=None):
+    """Build the selection that delivery publishes after its required artifacts."""
+    from codex_harness.core import planner_jobs as jobs
 
     proof = run.get("semanticValidation") or run.get("semanticContracts")
     if not proof:
@@ -54,7 +54,6 @@ def retain_candidate(workspace, request, run, publication=None):
             if (b.get("integrated") or {}).get("semantic")
         ],
     )
-    d._write_record(Path(workspace) / ".codex-harness/retained-candidate.json", candidate)
     return candidate
 
 
@@ -69,10 +68,13 @@ def deliver(workspace, request, run, publication=None):
         with _record_guard(directory / "stop.json"):
             if (directory / "stop.json").exists():
                 raise ValueError("delivery: quarantined attempt; readmit within B")
-            candidate = retain_candidate(workspace, request, run, publication)
+            candidate = candidate_selection(workspace, request, run, publication)
             if run.get("semanticValidation", {}).get("state") != "PASS" or run["status"].startswith(
                 "plan-failed"
             ):
+                if candidate:
+                    candidate["runDigest"] = jobs._digest(run)
+                    d._write_record(Path(workspace) / ".codex-harness/retained-candidate.json", candidate)
                 return
             repo = jobs._inside(directory, Path(run["repo"]))
             if (
@@ -144,6 +146,8 @@ def deliver(workspace, request, run, publication=None):
             )
 
             d._write_record(repo.parent / "evidence/run.json", run)
+            candidate["runDigest"] = jobs._digest(run)
+            d._write_record(Path(workspace) / ".codex-harness/retained-candidate.json", candidate)
             return run["delivery"]
 
 

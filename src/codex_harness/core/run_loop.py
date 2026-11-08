@@ -199,7 +199,7 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
                     )
                 else:
                     _decision(store, run, outcome)
-            elif pending["purpose"] == "execution":
+            elif pending["purpose"] == "execution" and run["state"] == "JUDGE":
                 run["state"] = "NEXT"
             elif result["concreteGap"]:
                 run.update(observation=result, repairRequired=True)
@@ -549,7 +549,7 @@ def _reconcile(store, run):
         from codex_harness.core import planner_jobs as jobs
 
         observed = jobs.segment_status(store, effect)
-        if observed.get("terminal") and observed.get("quiescence"):
+        if observed.get("terminal"):
             if not observed["verifiedExit"]:
                 _quarantine(store, run, effect, "Bounded segment cleanup is UNVERIFIED")
                 return False
@@ -558,7 +558,7 @@ def _reconcile(store, run):
                 return False
             run.update(effect=None, state="OBSERVE", observation=observed)
             return False
-        if expired or observed.get("deadOwner"):
+        if (expired or observed.get("deadOwner")) and (jobs.segment_directory(store.workspace, effect["jobId"], effect.get("segmentId") or effect["id"]) / "request.json").is_file():
             _recover(store, run, effect, "Dead or expired controller on activation")
             return False
         # Only a receipt from the existing owner can attest liveness. Unknown is
@@ -576,6 +576,11 @@ def _reconcile(store, run):
             and owner.get("identity") == effect["ownerIdentity"]
         ):
             return True
+        if (jobs.segment_directory(store.workspace, effect["jobId"], effect.get("segmentId") or effect["id"]) / "request.json").is_file():
+            _recover(store, run, effect, "Interrupted segment admission")
+        else:
+            run.update(generation=run["generation"] + 1, effect=None, state="BUILD")
+        return False
     else:
         from codex_harness.core.audit_process import process_observation
 
@@ -589,6 +594,12 @@ def _reconcile(store, run):
             return True
     if _consume_completed_effect(store, run, effect):
         return False
+    if effect["kind"] == "judgment-continuation":
+        from codex_harness.core.planner_recovery import inspect
+
+        if inspect(store.workspace, run["jobId"])["revalidation"]["available"]:
+            run.update(generation=run["generation"] + 1, effect=None, state="NEXT")
+            return False  # Reobserve retained bytes under current B; never stop the exited worker.
     _quarantine(store, run, effect, "Interrupted effect has no verified live owner")
     return False
 
@@ -598,6 +609,41 @@ def _reviewed(store, run, reviewed):
     ready = store.review_prerequisite(store.manifest_revision())["complete"]
     if not ready and not _pending(store, run):
         _steering(store, run, "Review did not establish current semantic readiness")
+
+
+def _continued(store, run, result):
+    from codex_harness.core import planner_candidate as candidate
+
+    run["effect"] = None
+    if result["state"] == "pending-build":
+        selected = candidate.retained(store.workspace, run["jobId"])
+        run.update(
+            state="BUILD", resumeRun=str(Path(selected["runPath"]).parent.parent)
+        )
+    elif result["state"] == "PASS":
+        run["step"] = "validation-complete"
+        _steering(
+            store, run, "Integrated GREEN: resync with the vision before acceptance"
+        )
+    elif result.get("proof") and not result["proof"].get("judgmentId"):
+        run.update(state="OBSERVE", repairRequired=False)
+    elif result["state"] == "ERROR":
+        _steering(store, run, "Retained observation refused: " + str(result["results"]))
+    elif result["state"] == "pending-judgment":
+        run.update(observation=result, repairRequired=True)
+        _steering(
+            store,
+            run,
+            "Execution meaning did not admit the observed proof; supply a repair or new evidence",
+        )
+    else:
+        _recover(
+            store,
+            run,
+            dict(jobId=run["jobId"]),
+            "Observed execution gap: " + json.dumps(result),
+            observation=result,
+        )
 
 
 def _consume_completed_effect(store, run, effect):
@@ -638,6 +684,21 @@ def _consume_completed_effect(store, run, effect):
             run.clear()
             run.update(cursor(store))
             return True
+        if effect["kind"] == "judgment-continuation":
+            from codex_harness.core import planner_jobs as jobs, planner_candidate as candidate
+
+            segment = jobs.latest_segment(store, run["jobId"])
+            observed = jobs.segment_status(store, dict(jobId=run["jobId"], id=segment.name))
+            completed = observed.get("terminal", {}).get("continuation", {})
+            if completed.get("effectId") != effect["id"]:
+                result = candidate.completed_revalidation(store, run["jobId"], effect)
+                if not observed["verifiedExit"] or result is None:
+                    return False
+                jobs.complete_continuation(store, result)
+                completed = dict(result=result)
+            run["generation"] += 1
+            _continued(store, run, completed["result"])
+            return True
         if effect["kind"] != "acceptance":
             return False
         from codex_harness.core.planner_acceptance import completed_observation
@@ -655,7 +716,7 @@ def _consume_completed_effect(store, run, effect):
             resumeReview=review,
         )
         return True
-    except (ValueError, OSError, StopIteration) as error:
+    except (ValueError, OSError, KeyError, StopIteration) as error:
         run["completionError"] = str(error)
         return False
 
@@ -942,7 +1003,6 @@ def _step(store):
                         if run.get("resumeRun")
                         else admission_id(store, run["publicationRevision"])
                     )
-                if effect_kind == "build":
                     run["repairRequired"] = False
                 run.update(
                     effect=effect,
@@ -1182,46 +1242,19 @@ def _execute_effect(store, run, kind):
 
             prior = recovery.disposition(store, run["jobId"]) or {}
             refresh = not candidate.current_job_run(store)[0]["complete"] or prior.get("choice") == "revalidate"
-            resolved = recovery.resolve(store, run["jobId"], "revalidate", run["reason"]) if refresh else None
+            if refresh:
+                recovery.resolve(store, run["jobId"], "revalidate", run["reason"])
             try:
                 result = candidate.revalidate(store, run["jobId"], identifier)
             except (ValueError, OSError, SubprocessError) as error:
                 result = dict(state="ERROR", results=[dict(reason=str(error))], delivery=None)
-            if resolved:
-                recovery.record_validation(store, resolved, result)
+            from codex_harness.core.planner_jobs import complete_continuation
+
+            complete_continuation(store, result)
             with store._transaction():
                 ensure_effect(store, generation)
                 run = cursor(store)
-                run["effect"] = None
-                if result["state"] == "pending-build":
-                    selected = candidate.retained(store.workspace, run["jobId"])
-                    run.update(
-                        state="BUILD", resumeRun=str(Path(selected["runPath"]).parent.parent)
-                    )
-                elif result["state"] == "PASS":
-                    run["step"] = "validation-complete"
-                    _steering(
-                        store, run, "Integrated GREEN: resync with the vision before acceptance"
-                    )
-                elif result.get("proof") and not result["proof"].get("judgmentId"):
-                    run.update(state="OBSERVE", repairRequired=False)
-                elif refresh and result["state"] == "ERROR":
-                    _steering(store, run, "Retained observation refused: " + str(result["results"]))
-                elif result["state"] == "pending-judgment":
-                    run.update(observation=result, repairRequired=True)
-                    _steering(
-                        store,
-                        run,
-                        "Execution meaning did not admit the observed proof; supply a repair or new evidence",
-                    )
-                else:
-                    _recover(
-                        store,
-                        run,
-                        dict(jobId=run["jobId"]),
-                        "Observed execution gap: " + json.dumps(result),
-                        observation=result,
-                    )
+                _continued(store, run, result)
                 save(store, run)
         else:
             from codex_harness.core.planner_acceptance import run_capture
@@ -1389,7 +1422,6 @@ def wait_for_question(store):
                 expired
                 or observed.get("deadOwner")
                 or observed.get("terminal")
-                and observed.get("quiescence")
             ):
                 run_loop(store)
         else:

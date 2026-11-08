@@ -274,6 +274,38 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
 
         run_invocations.invoke = hold_semantic_reply
 
+    continuation_save = run_loop.save
+
+    def hold_continuation(store, record):
+        effect = (run_loop.cursor(store) or {}).get("effect") or {}
+        if effect.get("kind") == "judgment-continuation" and not record.get("effect") and (workspace / "hold-continuation").exists():
+            name = "delivery-complete" if record.get("step") == "validation-complete" else "continuation-complete"
+            hold_receipt_once(name, dict(effectId=effect["id"]))
+        return continuation_save(store, record)
+
+    run_loop.save = hold_continuation
+
+    from codex_harness.core import planner_candidate
+    actual_deliver = planner_candidate.deliver
+
+    def hold_delivery(workspace, request, run, publication=None):
+        if (Path(workspace) / "hold-continuation").exists() and run.get("semanticValidation", {}).get("state") == "PASS":
+            hold_receipt_once("delivery-pending", dict(jobId=request["jobId"]))
+        return actual_deliver(workspace, request, run, publication)
+
+    planner_candidate.deliver = hold_delivery
+    actual_revalidate = planner_candidate.revalidate
+
+    def hold_candidate(store, job_id, request_id):
+        result = actual_revalidate(store, job_id, request_id)
+        if (workspace / "hold-continuation").exists() and result["state"] == "PASS":
+            hold_receipt_once("candidate-pending", dict(jobId=job_id))
+        if (workspace / "hold-revalidation").exists():
+            hold_receipt_once("revalidation-pending", dict(jobId=job_id))
+        return result
+
+    planner_candidate.revalidate = hold_candidate
+
     if receipt_boundaries:
         from codex_harness.core import acceptance_recovery
         from codex_harness.core.planner_acceptance import AcceptanceOwner
@@ -382,6 +414,20 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         os._exit(73)
 
     resume_fault = workspace / "resume-fault.json"
+    admission_write = planner_jobs.write_record_json_once
+
+    def hold_admission(path, request):
+        if path.name == "request.json" and request.get("schema") == planner_jobs.SCHEMA and (workspace / "hold-root-admission").exists():
+            hold_receipt_once("root-admission-pending", dict(jobId=request["jobId"]))
+        result = admission_write(path, request)
+        if path.name == "request.json" and request.get("schema") == planner_jobs.SCHEMA and (workspace / "hold-root-published").exists():
+            hold_receipt_once("root-published-pending", dict(jobId=request["jobId"]))
+        if path.name == "request.json" and "segmentId" in request and (workspace / "hold-admission").exists():
+            hold_receipt_once("admission-pending", dict(jobId=request["jobId"]))
+        return result
+
+    planner_jobs.write_record_json_once = hold_admission
+
     if mode == "worker" and (death and death["afterStarted"] or resume_fault.exists()):
         entry_write = planner_jobs.write_record_json_once
 
@@ -405,9 +451,11 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
     if mode == "controller":
         from codex_harness.core import planner_recovery
 
-        quiescence_write = planner_recovery.write_record_json_once
+        quiescence_write = planner_jobs.write_record_json_once
 
         def hold_quiescence(path, receipt):
+            if path.name == "quiescence.json" and (workspace / "hold-segment-publication").exists():
+                hold_receipt_once("segment-publication", dict(jobId=job_id))
             quiescence_write(path, receipt)
             if path.name == "quiescence.json" and (workspace / "quiescence-fault.json").exists():
                 import socket
@@ -417,6 +465,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                     boundary.sendall((job_id + "\n").encode())
                     assert boundary.recv(1) == b"!", "Quiescence publication was not acknowledged"
 
+        planner_jobs.write_record_json_once = hold_quiescence
         planner_recovery.write_record_json_once = hold_quiescence
 
     if mode == "worker" and denial_fault:
@@ -478,12 +527,17 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
 
     def launch(argv, **options):
         if "codex_harness.core.planner_jobs" in argv:
+            admitted_job = argv[argv.index("--job-id") + 1]
             argv = command(
                 "controller",
                 argv[argv.index("--workspace") + 1],
                 argv[argv.index("--job-id") + 1],
                 argv[argv.index("--segment") + 1],
             )
+            child = actual_popen(argv, **options)
+            if (workspace / "hold-popen").exists():
+                hold_receipt_once("popen-pending", dict(jobId=admitted_job))
+            return child
         return actual_popen(argv, **options)
 
     def controller_payload(argv, **options):
@@ -493,6 +547,14 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                     death_boundary("controller")  # No payload has been spawned.
                 threading.Thread(target=death_boundary, args=("controller",), daemon=True).start()
             project, job, segment = argv[-3:]
+            marker = workspace / ".codex-harness/popen-pending.json"
+            if (workspace / "hold-popen").exists():
+                deadline = time.monotonic() + options["timeout"]
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                if json.loads(marker.read_text())["jobId"] == job:
+                    while not (planner_jobs._directory(workspace, job) / "stop.json").exists() and time.monotonic() < deadline:
+                        time.sleep(.02)
             return actual_audit(command("worker", project, job, segment), **options)
         return actual_audit(argv, **options)
 
@@ -4273,6 +4335,59 @@ def advance_meaning(client, content, *, stop_at=None):
 
 
 @timed
+def admission_interruption(workspace, *, root=False, boundary="segment"):
+    """P1/C18/C23: death after request publication, before cursor binding.
+
+    The old hold/release twin missed restart selecting the job root and raising.
+    Require pending, then an ordinary settled readmission and completed C.
+    """
+    import signal
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core import planner_jobs as jobs, planner_recovery as recovery
+
+    workspace.mkdir()
+    (workspace / "validation-observed").touch()
+    hold_name, marker_name = (
+        ("hold-root-admission", "root-admission-pending") if root else
+        ("hold-root-published", "root-published-pending") if boundary == "root-published" else
+        ("hold-popen", "popen-pending") if boundary == "popen" else
+        ("hold-segment-publication", "segment-publication") if boundary == "terminal" else
+        ("hold-admission", "admission-pending")
+    )
+    hold = workspace / hold_name
+    hold.touch()
+    content = plan_content()
+    client = LoopClient(workspace)
+    try:
+        client.call("harness_plan_start", name="Interrupted admission", idea=content["nodes"][0]["text"])
+        marker = workspace / ".codex-harness" / (marker_name + ".json")
+        advance_meaning(client, content, stop_at=lambda r: marker.exists())
+        interrupted = json.loads(marker.read_text())
+        pending = jobs.worker_job_status(workspace, interrupted["jobId"])
+        assert pending["status"] == ("running" if boundary == "terminal" else "pending") and "terminal" not in pending, pending
+        os.kill(interrupted["ownerPid"], signal.SIGTERM)
+        if boundary != "popen":
+            hold.unlink()
+        client.reconnect()
+        client.call("harness_plan_start", name="Settle admission", idea="Continue from the bound segment")
+        if boundary in {"segment", "popen", "terminal"} and not root:
+            settled = recovery.inspect(workspace, interrupted["jobId"])["disposition"]
+            assert settled["choice"] == "readmit", settled
+            if boundary == "terminal":
+                assert not settled["quiescenceVerified"], settled
+            else:
+                assert set(settled["proof"]["processOutcomes"].values()) == {"not launched"}, settled
+        else:
+            assert client.current["jobId"] == interrupted["jobId"], client.current
+        assert not client.current.get("semanticHeld"), client.current
+        advance_meaning(client, content)
+        assert client.current["state"] == "DONE" and client.call("harness_plan_status")["acceptance"]["accepted"]
+        print(f"golden admission {marker_name}: death -> pending -> ordinary continuation -> C", flush=True)
+    finally:
+        client.close()
+
+
+@timed
 def controller_interruptions(workspace, twin):
     """C16/C18/C23: lost response/live work/pause/wake/stop at the wire boundary.
 
@@ -4462,7 +4577,7 @@ def controller_interruptions(workspace, twin):
         assert client.current["state"] == "STEER" and client.current["question"]["family"] == "direction", client.current
         with open_plan_store_readonly(workspace) as store:
             segment = planner_jobs.latest_segment(store, injected["jobId"])
-            outcome = json.loads((segment / "terminal.json").read_text())["outcomes"][fixture_id(workspace, "C")]
+            outcome = json.loads((segment / "quiescence.json").read_text())["terminal"]["outcomes"][fixture_id(workspace, "C")]
             assert outcome["workId"] == injected["work"] and outcome["fault"]
             assert "Acknowledged pre-attempt packet failure" in outcome["workStatus"]
             assert any(
@@ -4997,6 +5112,8 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
     if surface == "cli":
         (tmp_path / "template/checks").mkdir(parents=True)
         (tmp_path / "template/checks/retired.json").write_text("[1]\n")
+    if surface == "cli":
+        (tmp_path / "hold-segment-publication").touch()
     client = LoopClient(tmp_path, surface)
     try:
         client.call("harness_plan_start", name="Retained dream", idea=content["nodes"][0]["text"])
@@ -5005,7 +5122,19 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
         def execution(run):
             return bool(run.get("question") and run["question"]["purpose"] == "execution")
 
-        advance_meaning(client, content, stop_at=execution)
+        advance_meaning(client, content, stop_at=lambda r: execution(r) or (
+            tmp_path / ".codex-harness/segment-publication.ready").exists())
+        if surface == "cli":
+            # C18/C26: the real payload finished, but its owner has not published
+            # cleanup. Happy scheduling missed the false terminal status here.
+            from codex_harness.core import planner_jobs as jobs, planner_recovery
+            pending = jobs.worker_job_status(tmp_path, client.current["jobId"])
+            assert pending["status"] == "running" and "terminal" not in pending, pending
+            proof = planner_recovery.inspect(tmp_path, pending["jobId"])
+            assert proof["held"] and not proof["processOutcomes"], proof
+            (tmp_path / "hold-segment-publication").unlink()
+            (tmp_path / ".codex-harness/segment-publication.release").touch()
+            client.progress()
         first = client.current["question"]
         execution_questions.append(first["requestId"])
         assert fixture_judgment_example(first["judgment"])["responseExample"]["meaning"]["check"] == "execution"
@@ -5101,7 +5230,28 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
                     )
                 ), delivered
             first = retry
-        client.answer(judge_reply(client.current["question"]))
+        if surface == "cli":
+            # C18/C23: kill after the real continuation outcome, before its cursor
+            # settles. Raw semantic reply recovery never reached this later gap.
+            (tmp_path / "hold-continuation").touch()
+            client.send_answer(judge_reply(client.current["question"]))
+            client.progress()
+            marker = tmp_path / ".codex-harness/continuation-complete.json"
+            completed = json.loads(marker.read_text())
+            before_attempts = sorted(tmp_path.glob(".codex-harness/worker-jobs/**/attempt/request.json"))
+            import signal
+            os.kill(completed["ownerPid"], signal.SIGTERM)
+            (tmp_path / "hold-continuation").unlink()
+            client.reconnect()
+            client.call("harness_plan_start", name="Consume completed continuation", idea="Retain the exact terminal result")
+            assert not client.current.get("semanticHeld"), client.current
+            assert client.current.get("effect", {}).get("id") != completed["effectId"], client.current
+            # The existing next-phase assertions below prove this result was
+            # consumed; exactly one new build attempt may follow Contracts.
+            after_attempts = sorted(tmp_path.glob(".codex-harness/worker-jobs/**/attempt/request.json"))
+            assert set(before_attempts) <= set(after_attempts) and len(after_attempts) == len(before_attempts) + 1
+        else:
+            client.answer(judge_reply(client.current["question"]))
         assert execution(client.current), client.current
         second = client.current["question"]
         execution_questions.append(second["requestId"])
@@ -5118,7 +5268,7 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
         with open_plan_store_readonly(tmp_path) as store:
             observed_job = client.current["jobId"]
             segments = jobs._directory(tmp_path, observed_job) / "segments"
-            assert len(list(segments.glob("*/terminal.json"))) == 2
+            assert len(list(segments.glob("*/quiescence.json"))) == 2
             from codex_harness.core.planner_candidate import current_job_run
 
             _, observed_run = current_job_run(store, required=True)
@@ -5140,7 +5290,38 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
                 observed_run["semanticValidation"]["evidenceBinding"]
                 == fixture_judgment_example(second["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
             )
-        client.answer(judge_reply(second))
+        if surface == "cli":
+            (tmp_path / "hold-continuation").touch()
+            client.send_answer(judge_reply(second))
+            client.progress()
+            # C26/I6: validation alone grants no completed delivery. The old
+            # observer indexed delivery here while the ZIP did not yet exist.
+            pending = jobs.worker_job_status(tmp_path, client.current["jobId"])
+            assert pending["status"] == "pending" and not pending["run"].get("delivery"), pending
+            (tmp_path / ".codex-harness/delivery-pending.release").touch()
+            client.progress()
+            # C26/I6: files, ZIP and selection exist, but the owner has not
+            # published its outcome. Earlier coverage only read worker status.
+            with open_plan_store_readonly(tmp_path) as store:
+                selected, _ = current_job_run(store)
+                assert not selected["complete"], selected
+            (tmp_path / ".codex-harness/candidate-pending.release").touch()
+            client.progress()
+            completed = json.loads((tmp_path / ".codex-harness/delivery-complete.json").read_text())
+            delivered = jobs.worker_job_status(tmp_path, client.current["jobId"])
+            assert delivered["status"] == "completed" and Path(delivered["run"]["delivery"]["archive"]).is_file(), delivered
+            terminal = delivered["terminal"]["continuation"]
+            assert terminal["effectId"] == completed["effectId"] and terminal["result"]["state"] == "PASS", terminal
+            attempts = sorted(tmp_path.glob(".codex-harness/worker-jobs/**/attempt/request.json"))
+            os.kill(completed["ownerPid"], signal.SIGTERM)
+            (tmp_path / "hold-continuation").unlink()
+            client.reconnect()
+            client.call("harness_plan_start", name="Consume delivered continuation", idea="Continue from the completed product")
+            assert client.current["question"]["family"] == "direction" and "Integrated GREEN" in client.current["question"]["purpose"], client.current
+            assert jobs.worker_job_status(tmp_path, client.current["jobId"])["terminal"]["continuation"] == terminal
+            assert sorted(tmp_path.glob(".codex-harness/worker-jobs/**/attempt/request.json")) == attempts
+        else:
+            client.answer(judge_reply(second))
         advance_meaning(client, content)
         assert client.current["state"] == "DONE"
         status = client.call("harness_plan_status")
@@ -5211,7 +5392,7 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
                 preview_environment(tmp_path)
             assert run["semanticValidation"]["linkedRed"]
             job = jobs._directory(tmp_path, selected["jobId"])
-            assert len(list((job / "segments").glob("*/terminal.json"))) == 2
+            assert len(list((job / "segments").glob("*/quiescence.json"))) == 2
             assert sum(bool(bead.get("attempt")) for bead in run["beads"].values()) == 2
             assert (
                 len(store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchall()) == 1
@@ -5280,6 +5461,11 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
         )
         client.log.flush()
         if surface == "cli":
+            admission_interruption(tmp_path.parent / (tmp_path.name + "-admission-death"))
+            admission_interruption(tmp_path.parent / (tmp_path.name + "-root-admission-death"), root=True)
+            admission_interruption(tmp_path.parent / (tmp_path.name + "-root-published-death"), boundary="root-published")
+            admission_interruption(tmp_path.parent / (tmp_path.name + "-popen-death"), boundary="popen")
+            admission_interruption(tmp_path.parent / (tmp_path.name + "-terminal-death"), boundary="terminal")
             controller_interruptions(tmp_path.parent / (tmp_path.name + "-interruptions-1"), 1)
             for entered in (False, True):
                 controller_launch_interruption(

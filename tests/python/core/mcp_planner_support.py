@@ -472,10 +472,15 @@ class LoopClient:
                         continue  # An RPC snapshot is not the next provider boundary.
                     return self.current
                 self.out_of_order[reply.get("id")] = reply
-            for fault in ("plan-review-complete", "acceptance-scenarios-complete", "acceptance-review-sealed", "acceptance-review-admitted", "execution-raw-complete", "semantic-raw-complete", "review-crash-started"):
+            for fault in ("root-admission-pending", "root-published-pending", "popen-pending", "admission-pending", "revalidation-pending", "segment-publication", "continuation-complete", "delivery-pending", "candidate-pending", "delivery-complete", "plan-review-complete", "acceptance-scenarios-complete", "acceptance-review-sealed", "acceptance-review-admitted", "execution-raw-complete", "semantic-raw-complete", "review-crash-started"):
                 if fault not in self.seen_faults and (marker_root / (fault + ".ready")).exists():
-                    status = self.rpc("tools/call", dict(name="harness_plan_status", arguments=dict(expected_workspace=str(self.workspace))))
-                    self.current = status["structuredContent"]["run"]
+                    if fault in {"root-admission-pending", "root-published-pending", "popen-pending", "admission-pending", "revalidation-pending", "segment-publication", "continuation-complete", "delivery-pending", "candidate-pending", "delivery-complete"}:
+                        from codex_harness.core.plan_store import open_plan_store_readonly
+                        with open_plan_store_readonly(self.workspace) as store:
+                            self.current = store.status()["run"]
+                    else:
+                        status = self.rpc("tools/call", dict(name="harness_plan_status", arguments=dict(expected_workspace=str(self.workspace))))
+                        self.current = status["structuredContent"]["run"]
                     if answered and (self.current.get("effect") or {}).get("id") == answered[2]:
                         continue
                     self.seen_faults.add(fault)

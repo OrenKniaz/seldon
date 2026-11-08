@@ -26,25 +26,14 @@ def retained(workspace, job_id):
 
     with open_plan_store_readonly(workspace) as store:
         segment = jobs.latest_segment(store, job_id)
-    terminal, receipt = (
-        read_record_json(segment / name) if (segment / name).is_file() else {}
-        for name in ("terminal.json", "quiescence.json")
-    )
+    receipt = read_record_json(segment / "quiescence.json") if (segment / "quiescence.json").is_file() else {}
     if not jobs.verified_segment_exit(
-        request, None if segment == directory else segment.name, terminal, receipt
+        request, segment.name, receipt
     ):
         raise ValueError(
             "revalidate: retain the latest segment's bound terminal and verified cleanup before continuation"
         )
-    owner = Path(workspace) / ".codex-harness/retained-candidate.json"
-    candidate = read_record_json(owner) if owner.is_file() else {}
-    if candidate.get("jobId") == job_id:
-        path = jobs._inside(directory, Path(candidate["runPath"]))
-    else:  # Explicit pre-upgrade recovery reads the original dispatch owner.
-        dispatch = read_record_json(directory / "dispatch-run.json")
-        if dispatch["requestDigest"] != request["requestDigest"]:
-            raise ValueError("revalidate: dispatch identity mismatch; inspect original job")
-        path = jobs._inside(directory, Path(dispatch["runDir"]) / "evidence/run.json")
+    path = jobs._inside(directory, directory / "runs" / receipt["terminal"]["runId"] / "evidence/run.json")
     run = read_record_json(path)
     semantic = run.get("semanticValidation") or run.get("semanticContracts")
     if run["planRevision"] != request["publicationRevision"] or not semantic:
@@ -84,43 +73,57 @@ def retained(workspace, job_id):
     )
 
 
-def current_job_run(store, *, required=False):
-    """Views return pending; C/judgment require the completion-owned selection."""
+def _selected_run(store, candidate):
+    """Validate the selected originals once for views and interrupted owners."""
     from codex_harness.core.runners import execution_sources
     from codex_harness.core import planner_jobs as jobs
+    from codex_harness.core.candidate_delivery import candidate_selection
 
-    if not store.spine().semantic:
-        from codex_harness.core.run_loop import cursor
+    directory = jobs._directory(store.workspace, candidate["jobId"])
+    run = read_record_json(jobs._inside(directory, Path(candidate["runPath"])))
+    snapshot = Path(candidate["verificationPlan"]).parent
+    plan = jobs.load_plan(snapshot)
+    if (
+        plan.plan_revision != store.manifest_revision()
+        or execution_sources(snapshot / "template", plan.trace)["contentHash"]
+        != execution_sources(store.workspace / "template", plan.trace)["contentHash"]
+    ):
+        raise ValueError("verification inputs changed; revalidate the retained candidate")
+    expected = candidate_selection(store.workspace, jobs._request(directory), run, candidate["publicationRevision"])
+    if candidate != dict(expected, runDigest=jobs._digest(run)):
+        raise ValueError("candidate record is inconsistent; revalidate its explicit job")
+    return run
 
-        job_id = cursor(store)["jobId"]
-        observed = jobs.worker_job_status(store.workspace, job_id)["run"]
-        record = read_record_json(Path(observed["recordPath"]))
-        return dict(
-            complete=True,
-            jobId=job_id,
-            runPath=observed["recordPath"],
-            candidateRoot=record["repo"],
-        ), record
+
+def current_job_run(store, *, required=False):
+    """Views return pending; C/judgment require the completion-owned selection."""
+    from codex_harness.core import planner_jobs as jobs
+
     candidate = {}
     try:
+        if not store.spine().semantic:
+            from codex_harness.core.run_loop import cursor
+
+            job_id = cursor(store)["jobId"]
+            observed = jobs.worker_job_status(store.workspace, job_id)
+            if observed["status"] != "completed":
+                raise ValueError("selected job outcome is pending")
+            observed = observed["run"]
+            record = read_record_json(Path(observed["recordPath"]))
+            return dict(
+                complete=True,
+                jobId=job_id,
+                runPath=observed["recordPath"],
+                candidateRoot=record["repo"],
+            ), record
         candidate = read_record_json(store.workspace / ".codex-harness/retained-candidate.json")
+        run = _selected_run(store, candidate)
         directory = jobs._directory(store.workspace, candidate["jobId"])
-        run = read_record_json(jobs._inside(directory, Path(candidate["runPath"])))
-        snapshot = Path(candidate["verificationPlan"]).parent
-        plan = jobs.load_plan(snapshot)
-        if (
-            plan.plan_revision != store.manifest_revision()
-            or execution_sources(snapshot / "template", plan.trace)["contentHash"]
-            != execution_sources(store.workspace / "template", plan.trace)["contentHash"]
-        ):
-            raise ValueError("verification inputs changed; revalidate the retained candidate")
-        if (
-            run["runId"] != candidate["runId"]
-            or (run["beads"][candidate["bead"]].get("integrated") or {}).get("root")
-            != candidate["candidateRoot"]
-            or not isinstance(candidate["productHashes"], dict)
-        ):
-            raise ValueError("candidate record is inconsistent; revalidate its explicit job")
+        segment = jobs.latest_segment(store, candidate["jobId"])
+        observed = jobs.segment_status(store, dict(jobId=candidate["jobId"], id=segment.name))
+        terminal = observed.get("terminal", {})
+        if not observed["verifiedExit"] or run["control"]["effectId"] != terminal.get("continuation", {}).get("effectId", terminal.get("segmentId")):
+            raise ValueError("candidate outcome publication is pending")
         if (directory / "stop.json").exists():
             raise ValueError("candidate is quarantined; readmit its job within B")
     except (ValueError, OSError, KeyError, TypeError) as error:
@@ -436,12 +439,29 @@ def revalidate(store, job_id, request_id):
         ensure_effect(store, run["control"]["generation"], run["control"]["effectId"])
         d._write_record(path, run)
         ensure_effect(store, run["control"]["generation"], run["control"]["effectId"])
-    delivery = deliver(store.workspace, request, run, publication)
+    deliver(store.workspace, request, run, publication)
+    return revalidation_result(run, publication)
+
+
+def revalidation_result(run, publication):
+    """The same retained observation settles normal and interrupted owners."""
+    proof = run.get("semanticValidation") or run["semanticContracts"]
     return dict(
         state="pending-build" if run["status"] == "pending-build" else proof["state"],
-        results=proof["results"],
-        proof=proof,
-        delivery=delivery,
-        runId=run["runId"],
-        publicationRevision=publication,
+        results=proof["results"], proof=proof,
+        delivery=run.get("delivery") if proof["state"] == "PASS" else None,
+        runId=run["runId"], publicationRevision=publication,
     )
+
+
+def completed_revalidation(store, job_id, effect):
+    """Only the exact final selection can finish an interrupted publication."""
+    selected = read_record_json(store.workspace / ".codex-harness/retained-candidate.json")
+    run = _selected_run(store, selected)
+    if (
+        selected["jobId"] != job_id
+        or run.get("control", {}).get("effectId") != effect["id"]
+        or run["control"]["generation"] != effect["generation"]
+    ):
+        return None
+    return revalidation_result(run, selected["publicationRevision"])
