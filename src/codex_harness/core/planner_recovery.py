@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+from pathlib import Path
 
 from codex_harness.core import approvals
 from codex_harness.core import planner_jobs as jobs
@@ -39,7 +40,9 @@ def end_attempt(workspace, job_id):
 
 
 def disposition(store, job_id):
-    resolved = next((r for r in approvals.records(store, RESOLVED) if r["jobId"] == job_id), None)
+    segment = jobs.latest_segment(store, job_id).name if ":" not in job_id else None
+    resolved = next((r for r in approvals.records(store, RESOLVED) if r["jobId"] == job_id
+                     and r.get("segmentId", segment) == segment), None)
     if resolved and resolved["choice"] == "revalidate":
         path = jobs.latest_segment(store, job_id) / "quiescence.json"
         outcome = read_record_json(path) if path.is_file() else {}
@@ -148,11 +151,13 @@ def admission_id(store, publication):
             raise ValueError("recovery-abandoned-terminal: evidence and quarantine retained")
         if resolved["choice"] in {"revalidate", "steer"}:
             return job_id
+        if resolved.get("resumeRun"):
+            return job_id
         job_id = resolved["successor"]
     return job_id
 
 
-def inspect(workspace, job_id):
+def inspect(workspace, job_id, *, controller_observation=None):
     if ":" in job_id:
         with open_plan_store_readonly(workspace) as store:
             return attempt_proof(store, job_id)
@@ -172,13 +177,13 @@ def inspect(workspace, job_id):
         requestDigest=request["requestDigest"],
         verdict="VERIFIED-QUIESCENT" if verified else "UNKNOWN",
         controllerAndChildren=control or {"liveness": "UNKNOWN"},
-        ownedDirectories=[
-            dict(
-                path=str(directory),
-                state="quarantined" if (directory / "stop.json").exists() else "retained",
-            )
-        ],
+        processObservation=controller_observation,
+        ownedDirectories=[dict(path=str(directory),
+                               state="quarantined" if (directory / "stop.json").exists() else "retained")],
     )
+    segment_request = segment / "request.json"
+    if segment_request.is_file() and (resume := read_record_json(segment_request).get("resumeRun")):
+        proof["resumeRun"] = str(jobs._inside(directory, Path(resume)))
     outcomes = terminal.get("outcomes", {})
     proof["faultBeads"] = [key for key, outcome in outcomes.items() if outcome["fault"]]
     with open_plan_store_readonly(workspace) as store:
@@ -238,7 +243,7 @@ def inspect(workspace, job_id):
     return proof
 
 
-def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
+def resolve(store, job_id, choice, reason, *, direction_judgment_id=None, controller_observation=None):
     """Same-work recovery ends or quarantines the old attempt under current B."""
     _canonical_store(store)
     if (
@@ -260,7 +265,7 @@ def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
             approvals.require_approval(store, "B")
         if choice in {"readmit", "abandon", "steer"} and not disposition(store, job_id):
             end_attempt(store.workspace, job_id)
-        proof = inspect(store.workspace, job_id)
+        proof = inspect(store.workspace, job_id, controller_observation=controller_observation)
         previous = proof["disposition"]
         steered = previous and previous["choice"] == "steer" and choice == "readmit"
         if steered:
@@ -297,7 +302,7 @@ def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
         # Derive the bound from the existing successor chain, never a competing
         # retry counter. The third fault requests semantics through 1j.
         prior_recoveries = {
-            r["jobId"]: r
+            (r["jobId"], r.get("segmentId")): r
             for r in reversed(approvals.records(store, RESOLVED))
             if r["choice"] == "readmit" and not r.get("steeringJudgmentId")
         }
@@ -312,15 +317,34 @@ def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
             choice = "abandon"
         elif choice == "readmit" and not steered and any(c >= 2 for c in recoveries.values()):
             choice = "steer"
+        resume, segment = None, jobs.latest_segment(store, job_id)
+        if choice == "readmit" and proof.get("resumeRun") and not (segment / "started.json").exists():
+            from codex_harness.core.candidate_observations import _execution_identity, observation_files
+            try:
+                prior = read_record_json(Path(proof["resumeRun"]) / "evidence/run.json")
+                if prior["status"] == "pending-build":
+                    semantic = prior["semanticContracts"]
+                    integrated = next(b["integrated"] for b in prior["beads"].values()
+                                      if (b.get("integrated") or {}).get("semantic") == semantic)
+                    identity = _execution_identity(jobs.load_plan(segment.parent.parent / "plan"))
+                    if (store.judgment(semantic["judgmentId"], candidate=semantic["candidate"])["positiveCredit"]
+                        and all(semantic.get(k) == v for k, v in identity.items())
+                        and jobs._files(store.workspace / "template") == jobs._request(segment.parent.parent)["templateFiles"]
+                        and read_record_json(Path(integrated["receiptPath"])) == integrated
+                        and observation_files(Path(integrated["root"])) == semantic["observationFiles"]):
+                        resume = proof["resumeRun"]
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
+                pass  # Unusable originals are ineligible; ordinary fresh execution applies.
         resolved = dict(
             jobId=job_id,
+            segmentId=segment.name, resumeRun=resume,
             choice=choice,
             reason=reason,
             proof=proof,
             quarantine=choice != "revalidate",
             ownershipReleased=choice != "revalidate",
             quiescenceVerified=proof["verdict"] == "VERIFIED-QUIESCENT",
-            successor=jobs._digest(dict(jobId=job_id, proof=proof["proofDigest"], choice=choice))
+            successor=job_id if resume else jobs._digest(dict(jobId=job_id, proof=proof["proofDigest"], choice=choice))
             if choice == "readmit"
             else None,
         )
@@ -336,6 +360,8 @@ def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
                 ),
             )
         store._event(RESOLVED, resolved)
+        if resume:
+            (segment.parent.parent / "stop.json").unlink()
     return resolved
 
 

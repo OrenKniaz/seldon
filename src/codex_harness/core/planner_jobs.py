@@ -44,7 +44,7 @@ def _inside(workspace, path):
         or any(parent.is_symlink() for parent in path.parents if parent != root)
         or not path.resolve().is_relative_to(root)
     ):
-        raise ValueError("worker-job-path-outside-workspace")
+        raise ValueError(f"worker-job-path-outside-workspace: planner_jobs._inside refused path={str(path)!r}; root={str(root)!r}")
     return path.resolve()
 
 
@@ -422,35 +422,32 @@ def segment_outcomes(directory, segment, *, effect_id=None):
     paths = list(directory.glob("runs/*/evidence/run.json"))
     run = read_record_json(_inside(directory, paths[0])) if len(paths) == 1 else {}
     if (run.get("control") or {}).get("effectId") != (effect_id or segment["segmentId"]):
-        run = {}
+        retained = segment.get("resumeRun")
+        run = dict(beads={key: bead for key, bead in run.get("beads", {}).items()
+            if retained and Path(retained).resolve() == paths[0].parent.parent.resolve()
+            and (bead.get("integrated") or {}).get("semantic", {}).get("admitted")
+        })
     entered = (directory / "segments" / segment["segmentId"] / "started.json").is_file()
     unobserved = "unknown launch" if entered else "not launched"
     outcomes = {}
     for key, work in segment["work"].items():
         bead = run.get("beads", {}).get(key, {})
         work_status = bead.get("status", unobserved)
-        result_path = _inside(
-            directory, Path(bead.get("evidenceDir", directory)) / "attempt/result.json"
-        )
+        if work_status in {"contracts-red", "requirement-validated", dispatch.STATUS_MOCK_ONLY,
+            "already-satisfied", "reused",
+        }:
+            outcomes[key] = dict(workId=work, status=work_status, workStatus=work_status,
+                                 fault=False, permissionGuard={}, launchCertain=True)
+            continue  # Replacement controllers account only for unfinished work.
+        result_path = _inside(directory, Path(bead.get("evidenceDir", directory)) / "attempt/result.json")
         result = read_record_json(result_path) if result_path.is_file() else {}
         outcomes[key] = dict(
-            workId=work,
-            status=result.get(
-                "status", "not launched" if bead and not bead.get("attempt") else unobserved
-            ),
-            workStatus=work_status,
-            fault=not bead or (
-                bool(bead.get("attempt") or work_status.startswith("prelaunch failed:"))
-                and work_status not in {
-                    "contracts-red", "requirement-validated", dispatch.STATUS_MOCK_ONLY,
-                    "already-satisfied", "reused",
-                }
-            ),
-            permissionGuard=result.get("permissionGuard") or {},
+            workId=work, workStatus=work_status, permissionGuard=result.get("permissionGuard") or {},
+            status=result.get("status", "not launched" if bead and not bead.get("attempt") else unobserved),
+            fault=not bead or bool(
+                bead.get("attempt") or work_status.startswith("prelaunch failed:")),
             launchCertain=not entered or bool(bead) and (
-                not bead.get("attempt")
-                or bead.get("isMocked")
-                or type(result.get("didRunProvider")) is bool
+                not bead.get("attempt") or bead.get("isMocked") or type(result.get("didRunProvider")) is bool
             ),
         )
     return outcomes
@@ -690,6 +687,7 @@ def segment_status(store, effect):
         result["terminal"] = outcome["terminal"]
     if launch := result.get("launch"):
         observed = process_observation(launch["pid"])
+        result["processObservation"] = observed
         result["launched"] = bool(
             launch.get("processIdentity")
             and observed.get("identity") == launch["processIdentity"]

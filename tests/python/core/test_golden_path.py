@@ -409,7 +409,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         import socket
 
         with socket.create_connection(("127.0.0.1", death["port"])) as boundary:
-            boundary.sendall((json.dumps(dict(stage=stage, jobId=job_id)) + "\n").encode())
+            boundary.sendall((json.dumps(dict(stage=stage, jobId=job_id, segmentId=segment_id)) + "\n").encode())
             assert boundary.recv(1) == b"!", "Controller death was not acknowledged"
         os._exit(73)
 
@@ -4685,6 +4685,7 @@ def controller_interruptions(workspace, twin):
         if twin == 2:
             # C18/I6: a prior segment's receipts cannot certify the new launch.
             # Interrupt actual continuation entry, whether dispatch would resume or start fresh.
+            contracts_before = set(workspace.glob(".codex-harness/worker-jobs/*/runs/*/evidence/*/attempt/request.json"))
             (workspace / "resume-fault.json").write_text(json.dumps(dict(
                 port=barrier.getsockname()[1]
             )))
@@ -4692,7 +4693,7 @@ def controller_interruptions(workspace, twin):
             with barrier.accept()[0] as interrupted:
                 entry = json.loads(interrupted.makefile("rb").readline())
                 held_job = entry["jobId"]
-                repaired_work = entry["work"][fixture_id(workspace, "C")]
+                repaired_work = entry["work"][fixture_id(workspace, "B")]
                 (workspace / "resume-fault.json").unlink()
                 interrupted.sendall(b"!")
             segment = planner_jobs.segment_directory(workspace, held_job, entry["segmentId"])
@@ -4705,7 +4706,9 @@ def controller_interruptions(workspace, twin):
                 if resolved.get("jobId") == held_job:
                     assert pending["purpose"] == "Permission/uncertain launch held"
                     assert resolved["choice"] == "abandon"
-                    assert repaired_work in resolved["proof"]["faultWork"].values()
+                    assert resolved["proof"]["faultWork"] == {fixture_id(workspace, "B"): repaired_work}
+                    assert resolved["proof"]["processOutcomes"][fixture_id(workspace, "C")] == "contracts-red"
+                    assert set(workspace.glob(".codex-harness/worker-jobs/*/runs/*/evidence/*/attempt/request.json")) == contracts_before
                     assert set(resolved["proof"]["faultOutcomes"].values()) == {"unknown launch"}
                     assert resolved["proof"]["controllerAndChildren"]["quiescenceVerified"]
                     break
@@ -4743,87 +4746,136 @@ def controller_interruptions(workspace, twin):
         client.close()
 
 
-def controller_launch_interruption(workspace, after_started):
-    """C18/C23: a dead controller is replayable only before durable segment entry.
+def controller_launch_interruption(workspace, after_started, *, stale=False):
+    """C18/C23: replacement resumes unfinished work without semantic rewind.
 
     Existing packet faults run after entry and known dispatch failure; the denial
-    twin has a result. Neither covered controller death without either outcome.
+    twin has a result. Neither caught completed Contracts charged/rejudged after
+    pre-entry Build death, unusable evidence aborting ordinary rerun, or same-job
+    controller losses collapsing the two-recovery bound. Reach C after direction.
     """
     import socket
-    from datetime import UTC, datetime
-
     from tests.python.core.mcp_planner_support import LoopClient
-    from codex_harness.core import planner_jobs
     from codex_harness.core.plan_store import open_plan_store_readonly
 
     workspace.mkdir()
+    (workspace / "contracts-attempted").touch()
+    (workspace / "validation-observed").touch()
     content = plan_content()
     with socket.socket() as barrier:
         barrier.bind(("127.0.0.1", 0))
         barrier.listen()
         barrier.settimeout(180)
         fault = workspace / "controller-death.json"
-        fault.write_text(json.dumps(dict(port=barrier.getsockname()[1], afterStarted=after_started)))
         client = LoopClient(workspace)
         connections = {}
         try:
             client.call("harness_plan_start", name="Controller launch certainty", idea=content["nodes"][0]["text"])
-            advance_meaning(client, content, stop_at=lambda r: bool(
-                r.get("userRequest") and r["userRequest"]["gate"] == "plan-execution"
-                and not r.get("question")
-            ))
-            client.words()
+            if after_started:
+                advance_meaning(client, content, stop_at=lambda r: bool(
+                    r.get("userRequest") and r["userRequest"]["gate"] == "plan-execution"
+                    and not r.get("question")
+                ))
+                client.words()
+            else:
+                from codex_harness.core.planner_candidate import current_job_run
+
+                advance_meaning(client, content, stop_at=lambda r: bool(
+                    r.get("question") and r["question"]["purpose"] == "execution"
+                ))
+                with open_plan_store_readonly(workspace) as store:
+                    selected, original = current_job_run(store, required=True)
+                original_path = Path(selected["runPath"])
+                assert original["semanticContracts"]["phase"] == "contracts"
+            fault.write_text(json.dumps(dict(port=barrier.getsockname()[1], afterStarted=after_started)))
             reply = client.send_answer(judge_reply(client.current["question"]))
-            for _ in range(2 if after_started else 1):
-                try:
-                    connection, _ = barrier.accept()
-                except TimeoutError:
-                    client.call("harness_plan_status")
-                    pytest.fail("Controller death boundary not reached: " + json.dumps(dict(
-                        run=client.current, reached=list(connections),
-                        controllerLogs={str(p.relative_to(workspace)): p.read_text("utf-8", errors="replace")[-4096:]
-                                        for p in workspace.glob(".codex-harness/worker-jobs/*/segments/*/stderr.txt")},
-                    ), default=str))
-                connection.settimeout(180)
-                observed = json.loads(connection.makefile("rb").readline())
-                job = observed["jobId"]
-                connections[observed["stage"]] = connection
-            fault.unlink()
-            connections["controller"].sendall(b"!")
-            assert connections["controller"].recv(1) == b"", "Controller must actually exit before activation"
+            repeated = not (after_started or stale)
+            for loss in range(3 if repeated else 1):
+                for _ in range(2 if after_started else 1):
+                    try:
+                        connection, _ = barrier.accept()
+                    except TimeoutError:
+                        client.call("harness_plan_status")
+                        pytest.fail("Controller death boundary not reached: " + json.dumps(dict(
+                            run=client.current, reached=list(connections),
+                            controllerLogs={str(p.relative_to(workspace)): p.read_text("utf-8", errors="replace")[-4096:]
+                                            for p in workspace.glob(".codex-harness/worker-jobs/*/segments/*/stderr.txt")},
+                        ), default=str))
+                    connection.settimeout(180)
+                    observed = json.loads(connection.makefile("rb").readline())
+                    job = observed["jobId"]
+                    connections[observed["stage"]] = connection
+                if not repeated or loss == 2:
+                    fault.unlink()
+                connections["controller"].sendall(b"!")
+                assert connections["controller"].recv(1) == b"", "Controller must actually exit before activation"
+                connections["controller"].close()
             if after_started:
                 try:
                     assert connections["started"].recv(1) == b"", "Owned Job must stop the entered payload"
                 except ConnectionResetError:
                     pass  # Windows Job termination may reset the held payload's socket.
+            else:
+                original = json.loads(original_path.read_text())
+                original_proof = original["semanticContracts"]
+                assert original_proof["admitted"] and original_proof["judgmentId"]
+                if stale in {"receipt-missing", "receipt-malformed"}:
+                    receipt = Path(original["beads"][fixture_id(workspace, "C")]["integrated"]["receiptPath"])
+                    if stale == "receipt-missing":
+                        receipt.unlink()
+                    else:
+                        receipt.write_text("{broken original receipt", encoding="utf-8")
+                elif stale:
+                    root = Path(original["beads"][fixture_id(workspace, "C")]["integrated"]["root"])
+                    with (root / "hashslip.py").open("a") as changed:
+                        changed.write("\n# Retained observation bytes changed after judgment.\n")
             client.progress()
-            client.reconnect()
-            client.call("harness_plan_start", name="Reattach dead controller", idea="Retain admitted work")
             with open_plan_store_readonly(workspace) as store:
-                resolved, = [r for r in approvals.records(store, "worker-recovery-resolved") if r["jobId"] == job]
+                recoveries = list(reversed([r for r in approvals.records(store, "worker-recovery-resolved") if r["jobId"] == job]))
+            if repeated:
+                assert [r["choice"] for r in recoveries] == ["readmit", "readmit", "steer"], recoveries
+                assert len({r["segmentId"] for r in recoveries}) == 3
+                assert all(r["proof"]["faultBeads"] == [fixture_id(workspace, "B")] for r in recoveries)
+                assert "Two automatic recoveries exhausted" in client.current["question"]["purpose"]
+                client.answer(dict(option="continue", rationale="Continue unchanged admitted Build after bounded controller losses", content={}))
+            resolved = recoveries[0]
             assert resolved["choice"] == ("abandon" if after_started else "readmit"), resolved
             assert resolved["proof"]["held"] is after_started, resolved
-            assert set(resolved["proof"]["processOutcomes"].values()) == {
-                "unknown launch" if after_started else "not launched"
-            }, resolved
+            probe = resolved["proof"]["processObservation"]
+            assert probe["running"] is False and (
+                probe.get("openProcessError") == 87 or probe.get("exitCode") == 73
+            ), probe
             if after_started:
+                assert set(resolved["proof"]["processOutcomes"].values()) == {"unknown launch"}, resolved
                 assert not (workspace / "contracts-entered").exists(), "Revoked segment must not reach dispatch"
                 assert client.current["question"]["purpose"] == "Permission/uncertain launch held", client.current
                 assert not client.current["effect"]
             else:
-                # Prove the canonical successor actually executes, not merely a
-                # computed readmit disposition. Bound the wait by its admission.
-                while not (workspace / "contracts-entered").exists():
-                    client.call("harness_plan_status")
-                    with open_plan_store_readonly(workspace) as store:
-                        segment = planner_jobs.latest_segment(store, resolved["successor"])
-                        admitted = json.loads((segment / "request.json").read_text())
-                    assert datetime.now(UTC) < datetime.fromisoformat(admitted["deadlineAt"]), client.current
-                    assert not (client.current.get("question") or {}).get("purpose", "").startswith(
-                        "Permission/uncertain launch held"
-                    ), client.current
-                    time.sleep(0.05)
-            print(f"golden controller death afterStarted={after_started}: {resolved['choice']}; canonical successor/hold observed", flush=True)
+                assert resolved["proof"]["faultBeads"] == [fixture_id(workspace, "B")], resolved
+                assert resolved["proof"]["processOutcomes"][fixture_id(workspace, "B")] == "not launched"
+                pending = client.current["question"]
+                example = fixture_judgment_example(pending["judgment"])["responseExample"]["meaning"]
+                assert example["phase"] == ("contracts" if stale else "validation"), client.current
+                with open_plan_store_readonly(workspace) as store:
+                    resumed_selection, successor = current_job_run(store, required=True)
+                if stale:
+                    assert example["evidenceBinding"] != original_proof["evidenceBinding"]
+                    assert not successor["semanticContracts"].get("judgmentId")
+                else:
+                    assert successor["repo"] == original["repo"]
+                    assert client.current["jobId"] == job and resumed_selection["runPath"] == str(original_path)
+                    assert successor["semanticContracts"] == original_proof
+                    assert successor["beads"][fixture_id(workspace, "C")]["evidenceDir"] == original["beads"][fixture_id(workspace, "C")]["evidenceDir"]
+                advance_meaning(client, content)
+                assert client.current["state"] == "DONE", client.current
+                with open_plan_store_readonly(workspace) as store:
+                    observations = [r for r in approvals.records(store, "candidate-observation")
+                                    if r.get("check") == "execution" and r.get("phase") == "contracts"]
+                assert len(observations) == (2 if stale else 1), observations
+                attempts = [json.loads(p.read_text()) for p in workspace.glob(
+                    ".codex-harness/worker-jobs/*/runs/*/evidence/*/attempt/request.json")]
+                assert sum(a["bead"] == fixture_id(workspace, "C") for a in attempts) == (2 if stale else 1)
+            print(f"golden controller death afterStarted={after_started} stale={stale}: {resolved['choice']}; original credit/ordinary rerun and successor/hold observed", flush=True)
         finally:
             for connection in connections.values():
                 connection.close()
@@ -5019,6 +5071,14 @@ def http_journeys(tmp_path):
                 assert ready.wait(60), f"HTTP journey did not start: {name}"
                 if future.done():
                     future.result()
+            # Reuse this otherwise waiting parent slot; keep recovery cost out
+            # of the already long main CLI journey and preserve suite count.
+            for index, (entered, stale) in enumerate(((False, False), (False, "observation"),
+                    (False, "receipt-missing"), (False, "receipt-malformed"), (True, False))):
+                controller_launch_interruption(
+                    tmp_path.parent / (tmp_path.name + f"-controller-{index}"),
+                    entered, stale=stale,
+                )
             yield pending
             for future in pending:
                 future.result()
@@ -5505,10 +5565,6 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
             admission_interruption(tmp_path.parent / (tmp_path.name + "-popen-death"), boundary="popen")
             admission_interruption(tmp_path.parent / (tmp_path.name + "-terminal-death"), boundary="terminal")
             controller_interruptions(tmp_path.parent / (tmp_path.name + "-interruptions-1"), 1)
-            for entered in (False, True):
-                controller_launch_interruption(
-                    tmp_path.parent / (tmp_path.name + f"-controller-death-{entered}"), entered
-                )
             denial_interruption(tmp_path.parent / (tmp_path.name + "-denial-interruption"))
             dead_review_wake(tmp_path.parent / (tmp_path.name + "-wake"))
         all_calls = {
@@ -5533,7 +5589,8 @@ if __name__ == "__main__":
     if sys.argv[1] == "denial-twin":
         denial_interruption(Path(sys.argv[2]), Path(sys.argv[3]) if len(sys.argv) > 3 else None)
     elif sys.argv[1] == "controller-death-twin":
-        controller_launch_interruption(Path(sys.argv[2]), bool(int(sys.argv[3])))
+        controller_launch_interruption(Path(sys.argv[2]), bool(int(sys.argv[3])),
+                                       stale=sys.argv[4] if len(sys.argv) > 4 else False)
     elif sys.argv[1] == "recovery-twin":
         controller_interruptions(Path(sys.argv[2]), int(sys.argv[3]))
     elif sys.argv[1] == "http-golden":

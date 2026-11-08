@@ -40,7 +40,8 @@ def process_observation(pid):
     kernel.CloseHandle.argtypes = [w.HANDLE]
     handle = kernel.OpenProcess(0x1000, False, pid)
     if not handle:
-        return dict(running=False if ctypes.get_last_error() == 87 else None, identity=None)
+        error = ctypes.get_last_error()
+        return dict(running=False if error == 87 else None, identity=None, openProcessError=error)
     try:
         created, exited, kern, user, code = (
             w.FILETIME(),
@@ -56,10 +57,11 @@ def process_observation(pid):
             ctypes.byref(kern),
             ctypes.byref(user),
         ) or not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return dict(running=None, identity=None)
+            return dict(running=None, identity=None, queryError=ctypes.get_last_error())
         return dict(
             running=code.value == 259,
             identity=str((created.dwHighDateTime << 32) | created.dwLowDateTime),
+            exitCode=code.value,
         )
     finally:
         kernel.CloseHandle(handle)

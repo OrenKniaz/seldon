@@ -1,5 +1,64 @@
 # Legacy capability audit for the local Seldon extraction
 
+RESUME1 (C2/C18/C23, I6/I9): TRIAGE DESIGN — controller replacement discarded
+completed Contracts and charged it as unlaunched; siblings: repeated pre-entry
+Build losses and stale retained observations. Owner: planner_jobs handoff/outcomes;
+planner_recovery remains the sole disposition/allowance owner. Successor runs own
+their repository and attempts, retaining completed evidence and its original
+judgment only while current. Changed evidence takes ordinary fresh execution.
+The triggering process probe is retained in the recovery proof; historical
+controller-exit causality remains unknown. Disposition: NOT READY; the single
+resume1 gate is RED (../../stage-resume1-report.md). The forced pre-entry loss charged
+only Build and retained OpenProcess error 87; successor cloning then exited
+3221225477 (0xC0000005). Cause unknown; no retry. Owner: planner_jobs handoff.
+Ordinary recovery after partial handoff and current/stale continuation to C remain
+unproven. Exit: existing fault journeys reach C with one Contracts
+attempt/judgment after pre-entry Build death, fresh Contracts on changed evidence,
+and unchanged entered-without-outcome/denial holds and same-work recovery bound.
+The gate's recovery-twin-2 still expects completed Contracts in faultWork after
+Build entry. Owner: golden twin; replace that obsolete expectation with the
+unfinished Build identity while retaining unknown-launch HOLD assertions.
+Browser leg skipped on Chromium launch failure; owner: normal-host browser
+execution. Exit: normal Chromium journey reaches C; no settings change or retry here.
+This supersedes RECOV1's loss-of-progress behavior, not its safety rules or the
+historical incident diagnosis. Real-provider/full-vision acceptance remains unproven.
+
+RESUME1 Round 2 supersedes the clone/seeding implementation above: recovery owns
+a segment-bound handoff of the EXISTING admitted job/run/repository, only before
+payload entry and with current original Contracts evidence/judgment. The late
+payload must pass generation/segment ownership before any shared run/repo write;
+run/job confinement guards are unchanged. Root stop is released by recovery only
+for this recorded continuation. Segment identity preserves two automatic
+readmissions then steering; denial/entered-unknown HOLD and PUB1 remain intact.
+The obsolete twin now asserts Build-only charging, completed Contracts, and zero
+new attempts. Initial focus exposed an unrelated reconnect killing a waiting
+semantic owner; remove that disconnect. Independent review also caught the
+direction caller dropping resumeRun; it now consumes the recovery decision.
+Owner: planner_recovery/run_loop; source review PASS, focused/gate results follow
+in ../../stage-resume1-report.md. Exit: current and stale fault journeys reach C,
+same-job losses exhaust at two, and the entered/denial holds remain true.
+Round 2 gate: requested controller journeys and recovery-twin-2 PASS; overall
+10 passed/1 failed, browser skipped. Blocker: worker-job-path-outside-workspace
+while answering the hardcoded-receipt judge (single-build/stub); sibling: focused
+ShelfLife hit the same guard, then passed in the gate. Cause/attribution unknown.
+Owner: planner_jobs path confinement/caller; retain the guard and diagnose the
+actual rejected/resolved path before repair. Exit: both admitted paths complete
+without a refusal or guard weakening. Pure-timeout gate failures: zero; the
+scripted provider's later 170s answer timeout is secondary, not the primary failure.
+Normal Chromium remains UNVERIFIED on launch failure. No retry or second gate.
+
+RESUME1 Round 3 addresses reviewH P2: optional retained-artifact read/shape failures
+decline retention and use ordinary fresh execution; authority/fencing/publication
+remain outside the handler. Missing receipt was observed RED before repair;
+missing and malformed original receipts now rerun Contracts and reach C with new
+evidence/judgment. Existing stale twin extended, zero new pytest cases.
+planner_jobs._inside now names the owning guard, refused path and root in the
+message only; allowed paths are unchanged. Owner: planner_recovery / planner_jobs.
+Two isolated delivery attempts and their attribution are in ../../stage-resume1-report.md;
+no full gate is authorized in this round. Both isolated delivery runs PASS
+(563.21s / 363.00s), with zero recorded path-guard refusals in either run.
+The earlier refusal did not reproduce (0/2); its cause/attribution remains unresolved.
+
 NO-P (C1/C8/C20, I6/I10): TRIAGE DESIGN — duplicate invocation consent
 blocked the first planner call before A; siblings: judge/reviewer bootstrap,
 changed model selection, advertised own-words replies consumed as commands.

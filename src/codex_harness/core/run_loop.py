@@ -421,14 +421,14 @@ def _direction(store, run, direction, content, rationale, *, direction_judgment_
         if (recovery.disposition(store, run["jobId"]) or {}).get("choice") == "steer":
             run["recoveryDirection"] = direction_judgment_id
             if direction == "continue" and not content:
-                recovery.resolve(
+                resolved = recovery.resolve(
                     store,
                     run["jobId"],
                     "readmit",
                     rationale,
                     direction_judgment_id=direction_judgment_id,
                 )
-                run.update(resumeRun=None, state="BUILD")
+                run.update(resumeRun=resolved.get("resumeRun"), state="BUILD")
                 return
     run.update(reason=rationale, userRequest=None)
     if direction == "continue" and run.get("repairRequired") and not content.keys() - {"mail"}:
@@ -554,12 +554,12 @@ def _reconcile(store, run):
                 _quarantine(store, run, effect, "Bounded segment cleanup is UNVERIFIED")
                 return False
             if observed["terminal"]["status"] == "failed":
-                _recover(store, run, effect, "Bounded worker segment failed")
+                _recover(store, run, effect, "Bounded worker segment failed", observation=observed)
                 return False
             run.update(effect=None, state="OBSERVE", observation=observed)
             return False
         if (expired or observed.get("deadOwner")) and (jobs.segment_directory(store.workspace, effect["jobId"], effect.get("segmentId") or effect["id"]) / "request.json").is_file():
-            _recover(store, run, effect, "Dead or expired controller on activation")
+            _recover(store, run, effect, "Dead or expired controller on activation", observation=observed)
             return False
         # Only a receipt from the existing owner can attest liveness. Unknown is
         # quarantined; a PID or a missing terminal record never counts as live.
@@ -577,7 +577,7 @@ def _reconcile(store, run):
         ):
             return True
         if (jobs.segment_directory(store.workspace, effect["jobId"], effect.get("segmentId") or effect["id"]) / "request.json").is_file():
-            _recover(store, run, effect, "Interrupted segment admission")
+            _recover(store, run, effect, "Interrupted segment admission", observation=observed)
         else:
             run.update(generation=run["generation"] + 1, effect=None, state="BUILD")
         return False
@@ -735,10 +735,9 @@ def _recover(store, run, effect, reason, *, observation=None):
     run["generation"] += 1
     run["effect"] = None
     save(store, run)
-    resolved = recovery.resolve(store, effect["jobId"], "readmit", reason)
-    run.update(
-        effect=None, resumeRun=None, observation=dict(recovery=resolved, execution=observation)
-    )
+    resolved = recovery.resolve(store, effect["jobId"], "readmit", reason,
+                                controller_observation=(observation or {}).get("processObservation"))
+    run.update(effect=None, resumeRun=resolved.get("resumeRun"), observation=dict(recovery=resolved, execution=observation))
     if resolved["choice"] == "abandon":
         run["semanticHeld"] = True
     if resolved["choice"] == "readmit":
