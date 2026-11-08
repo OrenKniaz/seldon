@@ -3228,6 +3228,11 @@ def r18_authoring_golden(workspace):
     rebound, and accepted content from repair overreach; happy repair missed both.
     Round 3 protects sequential parent/path correction: a later refused execution
     section must remain editable, rather than exhausting a confined repair.
+    TRACE1 replays r22 omitted targets/scenarios, invented parents and path codeRefs.
+    Former full-envelope fixtures missed partial-answer membership loss. The same
+    journey must reach B with all declared members and only named repair edits.
+    Exact-fix messages must name the node/section; shortest union-branch errors
+    previously asked for a different fix despite rejecting the right bad value.
     REV1B protects retained brownfield ancestry: repair the moved parent, without
     rewriting baseline provenance. Detector-only field scopes missed that cause.
     """
@@ -3257,39 +3262,36 @@ def r18_authoring_golden(workspace):
     client = begin(workspace)
     try:
         raw = json.loads(provider_answer(workspace, client.current["question"], dict(option="ready",rationale="Author the accepted receipt plan",content=content)))
-        child = fixture_id(workspace,"R4")
-        test = next(r for r in raw["records"] if r["ref"] == fixture_id(workspace,"T_RECEIPT"))
-        original_roots = test["fields"]["execution"]["testRoots"]
-        test["fields"]["execution"]["testRoots"] = ["../outside"]
-        original_parents = test["parents"]
-        test["parents"] = [fixture_id(workspace,"B")]
-        next(r for r in raw["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["testRefs"] = ["V1"]
-        client.answer(json.dumps(raw))
-        # CC reviewH P2: former private empty-member/transition checks move to
-        # public B progression and unchanged-continuation holding.
-        # Captured r18: the former generic findings envelope cannot repair a graph.
-        client.answer(json.dumps(dict(option="repair",rationale="Report the graph defect",content=dict(findings=[dict(node_id=child,severity="blocker",finding="Invalid parent kind",suggestion="Correct the relationship",resolved=False)]))))
-        client.answer(json.dumps(raw))
-        packet = client.offered["packet"]
-        repaired = json.loads(json.dumps(raw))
-        assert "parents" in packet["facts"]["context"]["rejectedError"] and "cycle" in packet["facts"]["context"]["rejectedError"]
-        # Both parent kinds are legal, but the structural test/bead cycle is not.
-        test = next(r for r in repaired["records"] if r["ref"] == fixture_id(workspace,"T_RECEIPT"))
-        stop = next(r for r in repaired["records"] if r["ref"] == fixture_id(workspace,"STOP"))
+        def edit(answer, handle, section):
+            return next(e for e in answer["edits"] if e["ref"] == fixture_id(workspace,handle) and e["section"] == section)
+        def partial(*edits):
+            return json.dumps(dict(edits=list(edits),rationale="Correct only the named sections",reply="Retain every other member."))
+        roots = edit(raw,"T_RECEIPT","fields.execution")["value"]["testRoots"]
+        parents = edit(raw,"T_RECEIPT","parents")["value"]
+        # r22 94/102/110/187: even schema refusals retain the other edits.
+        # Each exact fix supplies only the refused section, never an envelope.
+        edit(raw,"T_RECEIPT","parents")["value"] = ["V1"]
+        edit(raw,"T_RECEIPT","fields.execution")["value"]["testRoots"] = ["../outside"]
+        path_ref = dict(ref=fixture_id(workspace,"T_RECEIPT"),section="fields.codeRefs",value=["server.py"])
+        client.answer(partial(*(e for e in raw["edits"] if e["section"] not in {"target","scenario"}), path_ref))
+        assert "parents" in client.offered["packet"]["exactFix"] and fixture_id(workspace,"T_RECEIPT") in client.offered["packet"]["exactFix"], "The exact fix must identify the refused node/section"
+        client.answer(partial(dict(ref=fixture_id(workspace,"T_RECEIPT"),section="parents",value=[fixture_id(workspace,"B")])))
+        assert "codeRefs" in client.offered["packet"]["exactFix"], "A filename refusal must explain the reference field to correct"
+        client.answer(partial({**path_ref,"value":[]}))
+        client.answer(partial(*(e for e in raw["edits"] if e["section"] in {"target","scenario"})))
+        assert "parents" in client.offered["packet"]["exactFix"] and "cycle" in client.offered["packet"]["exactFix"]
         with open_plan_store_readonly(workspace) as store:
             assert not store.spine().ids("test"), "A rejected structural cycle was persisted"
-        test["parents"] = original_parents
-        client.answer(json.dumps(repaired))
-        assert ".fields.testRefs" in client.offered["packet"]["exactFix"]
-        stop["fields"]["testRefs"] = [fixture_id(workspace,"T_RECEIPT")]
-        client.answer(json.dumps(repaired))
-        test["fields"]["execution"]["testRoots"] = original_roots
-        client.answer(json.dumps(repaired))
+        client.answer(partial(dict(ref=fixture_id(workspace,"T_RECEIPT"),section="parents",value=parents)))
+        client.answer(partial(dict(ref=fixture_id(workspace,"T_RECEIPT"),section="fields.execution.testRoots",value=roots)))
         advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution" and client.current["userRequest"]["card"], client.current
         client.reconnect()
         with open_plan_store(workspace) as store:
             spine = store.spine()
+            vf = spine.node(spine.ids("vision")[0])["fields"]
+            assert set(vf["targets"]) == {fixture_id(workspace,k) for k in content["nodes"][0]["fields"]["targets"]}
+            assert {s["id"] for s in vf["scenarios"]["scenarios"]} == {fixture_id(workspace,s["id"]) for s in content["nodes"][0]["fields"]["scenarios"]["scenarios"]}
             test_revision = spine.revision(fixture_id(workspace,"T_RECEIPT"))
             stop_revision = spine.revision(fixture_id(workspace,"STOP"))
             for origin, field, target in (("T_RECEIPT","stopConditionRefs","STOP"), ("STOP","testRefs","T_RECEIPT"),
@@ -3328,17 +3330,18 @@ def r18_authoring_golden(workspace):
         client.answer(json.dumps(duplicate))
         client.answer(json.dumps(outline))
         rejected = json.loads(provider_answer(workspace,client.current["question"],dict(option="ready",rationale="Recheck the proposed links",content=content)))
-        next(r for r in rejected["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["metricRefs"] = []
+        edit(rejected,"STOP","fields.metricRefs")["value"] = []
         for _ in range(3): client.answer(json.dumps(rejected))
         with open_plan_store_readonly(workspace) as store:
             preserved = store.spine().to_dict()
-        next(r for r in rejected["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["metricRefs"] = [fixture_id(workspace,"MEASURE")]
+        edit(rejected,"STOP","fields.metricRefs")["value"] = [fixture_id(workspace,"MEASURE")]
+        rejected["edits"] = [edit(rejected,"STOP","fields.metricRefs")]
         remove = json.loads(json.dumps(rejected)); remove["remove"] = ["UNRELATED_OPERATOR_NOTE"]
         client.answer(json.dumps(remove))
         with open_plan_store_readonly(workspace) as store:
             assert store.spine().to_dict() == preserved, "Repair deleted unrelated accepted content"
         altered = json.loads(json.dumps(rejected))
-        next(r for r in altered["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["condition"] = "Overwrite an unrelated accepted condition"
+        altered["edits"].append(dict(ref=fixture_id(workspace,"STOP"),section="fields.condition",value="Overwrite an unrelated accepted condition"))
         client.answer(json.dumps(altered))
         with open_plan_store_readonly(workspace) as store:
             assert store.spine().to_dict() == preserved, "Repair deleted or changed unrelated accepted content"
@@ -3388,12 +3391,12 @@ def r18_authoring_golden(workspace):
         client.answer(dict(option="replan", rationale="Preserve baseline provenance and accepted scope", content={}))
         advance_meaning(client, content, stop_at=lambda r: (r.get("question") or {}).get("purpose") == "trace")
         moved = json.loads(provider_answer(workspace, client.current["question"], dict(option="ready", rationale="Recheck ownership", content=content)))
-        row = next(r for r in moved["records"] if r["ref"] == requirement)
-        original_parents = row["parents"]
-        row["parents"] = ["BASE_OTHER"]
+        row = edit(moved,"R4","parents")
+        original_parents = row["value"]
+        row["value"] = ["BASE_OTHER"]
         for _ in range(3): client.answer(json.dumps(moved))
-        row["parents"] = original_parents
-        client.answer(json.dumps(moved))
+        row["value"] = original_parents
+        client.answer(partial(row))
         advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution", client.current
         with open_plan_store_readonly(workspace) as store:

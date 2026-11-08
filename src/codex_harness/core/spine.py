@@ -38,6 +38,7 @@ ALLOWED_PARENTS = {
     "baton": {"vision", "decision", "result", "iteration"},
 }
 ALLOWED_PARENTS["result"] = set(ALLOWED_PARENTS) - {"result"}
+SCENARIO_LINKS = {"requirementRefs": ("requirement",), "contractRefs": ("architecture", "design", "contract")}
 
 
 class SpineError(ValueError):
@@ -598,8 +599,7 @@ def semantic_spec(spine, product=None, *, draft=False):
         return document, targets, set()
     covered, gaps, messages = set(), [], []
     for scenario in document["scenarios"]:
-        for field, kinds in (("requirementRefs", ("requirement",)),
-                             ("contractRefs", ("architecture", "design", "contract"))):
+        for field, kinds in SCENARIO_LINKS.items():
             kind = kinds[0]
             for ref in scenario[field]:
                 key, pinned, revision = ref.partition("@")

@@ -55,7 +55,7 @@ ACTION_CHECK =         obj(**{k: nullable(v) for k, v in dict(
             noHorizontalOverflow=BOOL, consoleErrors=dict(type="integer"), externalRequests=dict(type="integer"),
             textContrastAA=BOOL, headingStructure=BOOL, reducedMotionRespected=BOOL).items()})
 SCENARIO = obj(
-    ref=TEXT, requirementRefs=array(), contractRefs=array(), testRef=nullable(TEXT), rationale=nullable(STRING),
+    requirementRefs=array(), contractRefs=array(), testRef=nullable(TEXT), rationale=nullable(STRING),
     setup=obj(dirs=array(), files=array(obj(path=TEXT, utf8=nullable(STRING), base64=nullable(STRING)))),
     actions=array(dict(anyOf=[
         obj(checks=array(ACTION_CHECK), cli=obj(target=TEXT, operation=TEXT, argv=ARGV,
@@ -68,7 +68,7 @@ SCENARIO = obj(
     observe=array(obj(path=TEXT, fileJsonEquals=nullable(obj(value=DATA)), fileBytesEquals=nullable(STRING), fileAbsent=nullable(BOOL), bytesUnchangedFrom=nullable(TEXT))),
 )
 
-TARGET = obj(ref=TEXT, kind=nullable(choice("web")), **LAUNCH["properties"],
+TARGET = obj(kind=nullable(choice("web")), **LAUNCH["properties"],
              server=nullable(obj(**LAUNCH["properties"], readyPath=TEXT, readyWithin=dict(type="number"))))
 
 # The trace writer remains a canonical structural boundary. Handles are local to
@@ -93,8 +93,6 @@ TRACE_FIELDS = {
     "baton": obj(**{**COMMON,"rationale":TEXT}, assumptions=array(),openQuestions=array(),currentState=TEXT,nextSafeAction=TEXT),
     "code": obj(**COMMON), "acceptance": obj(**COMMON),
 }
-TRACE = obj(records=array(obj()),
-            remove=array(), targets=array(TARGET), scenarios=array(SCENARIO), rationale=TEXT, reply=STRING)
 UNDERSTANDING = obj(
     understanding=TEXT, users=array(), firstUserMoment=TEXT, scopeIn=array(), scopeOut=array(),
     qualityBar=TEXT, doneFeelsLike=TEXT, assumptions=array(), openQuestions=array(),
@@ -127,7 +125,7 @@ QUESTIONS = {
     'direction': (STEERING, [dict(action='ask_user', amendments=[], question='May the accepted scope change?', reply='This discovery affects the agreed scope.', rationale='The observed gap requires a user scope decision')]),
     'understanding': (UNDERSTANDING, [dict(understanding='Compare measured performance with an agreed goal', users=['A person investigating a measurement'], firstUserMoment='Load a measurement and see its result', scopeIn=['Measure and compare'], scopeOut=['Unrequested changes'], qualityBar='Make uncertainty visible', doneFeelsLike='The person can reproduce and explain the result', assumptions=[], openQuestions=['Which measurement defines success?'], upgrades=[dict(proposal='Show uncertainty alongside the result', kind='micro', impact='Avoid misleading confidence', disposition='accept')], qualityCriteria=['Results are reproducible'], metrics=[], stopConditions=[], readiness='ask_user', question='Which measurement defines success?', reply='Let us agree on the success measurement before locking the vision.', rationale='The metric changes what we build')]),
     'finding-dispositions': (obj(dispositions=array(obj(memberRef=TEXT,disposition=choice("resolved","rejected","deferred"),resolution=TEXT)),rationale=TEXT,reply=STRING), [dict(dispositions=[], rationale='Await the current repair evidence before proposing closure', reply='The concern remains open.')]),
-    "trace": (dict(TRACE, **{"$defs":{"data":DATA_DEF}}), [dict(records=[],remove=[],targets=[],scenarios=[],rationale="Author the supplied plan handles",reply="The linked plan is ready.")]),
+    "trace": (dict(obj(edits=array(obj()), rationale=TEXT, reply=STRING), **{"$defs":{"data":DATA_DEF}}), [dict(edits=[],rationale="No sections changed; CODE retains all members. To change meaning, supply edits with the named ref, section and typed value; never copy unchanged sections. Leave codeRefs empty until a code node exists.",reply="The retained plan is ready.")]),
     "plan-outline": (OUTLINE, [dict(**{k:[] for k in OUTLINE["properties"] if k not in {"rationale","reply"}},rationale="Propose the complete plan in one batch",reply="I will link the proposed plan next.")]),
 }
 
@@ -149,15 +147,37 @@ def author_contract(store, purpose, context):
             schema["properties"][group]["items"]["properties"]["ref"] = nullable(choice(*refs)) if refs else dict(type="null")
         return schema
     supplied.update({n["id"]:n for n in context["nodes"]})
-    if context["nodes"]:
-        schema["properties"]["records"]["items"] = dict(anyOf=[
-            obj(ref=choice(*(n["id"] for n in context["nodes"] if n["kind"] == kind)), parents=array(choice(*supplied)), fields=fields)
-            for kind,fields in TRACE_FIELDS.items() if any(n["kind"] == kind for n in context["nodes"])])
-    else:
-        schema["properties"]["records"]["maxItems"] = 0
-    for field in ("targets", "scenarios"):
-        if context[field]:
-            schema["properties"][field]["items"]["properties"]["ref"] = choice(*(n["id"] for n in context[field]))
-        else:
-            schema["properties"][field]["maxItems"] = 0
+    from codex_harness.core.spine import ALLOWED_PARENTS, SCENARIO_LINKS
+    links = {**TRACE_LINKS, "dependsOn":{"bead"}, "lessons":{"decision"},
+             "sourceRef":{"discovery","research","result"}, "targetRefs":set(ALLOWED_PARENTS),
+             **SCENARIO_LINKS, "testRef":{"test"}}
+    handles = {k:[key for key,n in supplied.items() if n["kind"] in kinds] for k,kinds in links.items()}
+    handles.update(target=[n["id"] for n in context["targets"]], expansionRefs=[u["id"] for u in spine.node(spine.ids("vision")[0])["fields"].get("expansion",{}).get("upgrades",[])])
+    def constrain(value):
+        for key, child in value.get("properties", {}).items():
+            if key in handles:
+                refs = handles[key]
+                ref = (array(choice(*refs)) if refs else dict(type="array",items=TEXT,maxItems=0)) if key.endswith("Refs") or key in {"dependsOn","lessons"} else choice(*refs) if refs else dict(type="null")
+                child = nullable(ref) if "anyOf" in child else ref
+            value["properties"][key] = constrain(child)
+        if "items" in value: value["items"] = constrain(value["items"])
+        for child in value.get("anyOf",[]): constrain(child)
+        return value
+    edits = []
+    def sections(fields, prefix="fields"):
+        for k,v in fields.get("properties",{}).items():
+            yield prefix+"."+k, v
+            for branch in v.get("anyOf",[v]):
+                yield from sections(branch,prefix+"."+k)
+    for kind, fields in TRACE_FIELDS.items():
+        refs = [n["id"] for n in context["nodes"] if n["kind"] == kind]
+        if refs:
+            parents = [k for k,n in supplied.items() if n["kind"] in ALLOWED_PARENTS[kind]]
+            contracts = {"parents":array(choice(*parents)) if parents else dict(type="array",items=TEXT,maxItems=0),
+                        **dict(sections(constrain(deepcopy(fields))))}
+            edits.extend(dict(obj(ref=choice(*refs), section=choice(k), value=v), title=k) for k,v in contracts.items())
+    for group, section, contract in (("targets","target",TARGET), ("scenarios","scenario",SCENARIO)):
+        if context[group]:
+            edits.append(dict(obj(ref=choice(*(r["id"] for r in context[group])), section=choice(section), value=constrain(deepcopy(contract))), title=section))
+    schema["properties"]["edits"]["items"] = dict(anyOf=edits)
     return schema

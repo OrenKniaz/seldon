@@ -133,9 +133,10 @@ def validate_input(value, schema: dict, label="arguments", _root=None) -> None:
         return
     if "anyOf" in schema:
         failures = []
-        for branch in schema["anyOf"]:
+        branches = [b for b in schema["anyOf"] if not isinstance(value,dict) or all(k not in value or value[k] in p["enum"] for k,p in b.get("properties",{}).items() if "enum" in p)]
+        for branch in branches or schema["anyOf"]:
             try:
-                validate_input(value, branch, label, _root)
+                validate_input(value, branch, label + (f"[{value['ref']}]" if isinstance(value,dict) and "ref" in value else "") + ("."+branch["title"] if "title" in branch else ""), _root)
                 return
             except ValueError as error:
                 failures.append(str(error))

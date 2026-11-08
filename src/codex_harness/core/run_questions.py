@@ -13,12 +13,22 @@ def response(pending, raw, record, provider=None):
         from codex_harness.core.provider_response import _response
         raw = _response(raw, provider, structured=True)
     value = json_value(raw)
-    validate_input(value, pending["answerSchema"], "answer")
     family, purpose = pending["family"], pending["purpose"]
-    meaning = {k: v for k, v in value.items() if k not in {"verdict", "rationale", "gaps"}}
+    retain = purpose == "trace" and isinstance(value,dict) and isinstance(value.get("edits"),list) and all(isinstance(e,dict) and isinstance(e.get("ref"),str) and isinstance(e.get("section"),str) for e in value["edits"])
+    if retain:
+        scope = record.get("diagnostics") or pending["context"]
+        if family == "repair" and any(e["section"] not in scope["editableFields"].get(e["ref"],[]) for e in value["edits"]):
+            raise ValueError(f"Repair only the refused fields {scope['editableFields']}")
+        value["edits"] = list({(e["ref"],e["section"]):e for e in [*scope.get("rejectedEdits",[]),*value["edits"]]}.values())
+    try:
+        validate_input(value, pending["answerSchema"], "answer")
+    except ValueError as error:
+        if retain:
+            known = {(ref,b["properties"]["section"]["enum"][0]) for b in pending["answerSchema"]["properties"]["edits"]["items"].get("anyOf",[]) for ref in b["properties"]["ref"]["enum"]}
+            error.diagnostics = {**scope, "rejectedEdits":[e for e in value["edits"] if (e["ref"],e["section"]) in known]}
+        raise
+    meaning = value if family in {"author", "direction", "repair"} else {k: v for k, v in value.items() if k not in {"verdict", "rationale", "gaps"}}
     verdict = value.get("verdict", "positive")
-    if family in {"author", "direction", "repair"}:
-        meaning = value
     if family == "direction":
         meaning = dict(value)
         meaning["option"] = meaning.pop("action")
@@ -88,8 +98,6 @@ def ask_question(store, run, family, purpose, *, judgment=None, context=None):
     pending = dict(family=family,purpose=purpose,revision=store._revision(),context=context,
         role="mechanical" if family == "user-interpretation" or purpose == "planning-size" else "judge" if family == "assess" else "planner",
         answerSchema=author_contract(store,purpose,context) if family in {"author", "repair"} and purpose in {"trace","plan-outline"} else deepcopy(schema), examples=deepcopy(examples))
-    if family == "repair":
-        pending["answerSchema"]["properties"]["remove"]["maxItems"] = 0
     if purpose in {"finding-dispositions", "finding-disposition"}:
         props = pending["answerSchema"]["properties"]["dispositions"]["items"]["properties"]
         props["memberRef"] = dict(props["memberRef"], enum=[m["id"] for m in context["members"]])

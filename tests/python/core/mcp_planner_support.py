@@ -173,6 +173,22 @@ def provider_answer(workspace, pending, value):
                 if isinstance(v,list): return [translate(r) for r in v]
                 return {k:refs(x) if k in refkeys else translate(x) for k,x in v.items()} if isinstance(v,dict) else v
             answer = translate(answer)
+            if "edits" in pending["answerSchema"]["properties"]:
+                edits = [dict(ref=r["ref"], section=section, value=v) for r in answer["records"]
+                         for section,v in [("parents",r["parents"]), *(("fields."+k,v) for k,v in r["fields"].items())]]
+                edits.extend(dict(ref=r["ref"],section=section,value={k:v for k,v in r.items() if k != "ref"})
+                             for group,section in (("targets","target"),("scenarios","scenario")) for r in answer[group])
+                if family == "repair":
+                    scope = pending.get("judgment",{}).get("diagnostics") or pending["context"]
+                    confined = []
+                    for ref, sections in scope["editableFields"].items():
+                        for section in sections:
+                            source = next(e for e in edits if e["ref"] == ref and (section == e["section"] or section.startswith(e["section"]+".")))
+                            value = source["value"]
+                            for part in section[len(source["section"]):].strip(".").split(".") if section != source["section"] else []: value = value[part]
+                            confined.append(dict(ref=ref,section=section,value=value))
+                    edits = confined
+                answer = dict(edits=edits,rationale=answer["rationale"],reply=answer["reply"])
 
     elif family == "direction":
         plan_path = Path(workspace) / ".codex-harness/provider-plan.json"
