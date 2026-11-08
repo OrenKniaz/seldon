@@ -2,51 +2,13 @@
 
 import ast
 import hashlib
+import re
 from copy import deepcopy
-from typing import Literal, NotRequired, TypedDict
 
 
-class Judgment(TypedDict):
-    """One event-backed semantic record; evidence state and human authority are separate."""
-
-    id: str
-    question: str
-    subjectRefs: list[dict]
-    evidenceRefs: list[dict]
-    sourceRefs: list[dict]
-    dependencyRevisions: NotRequired[dict[str, str]]
-    candidate: str | None
-    binding: str
-    status: Literal["pending-judgment", "judged"]
-    verdict: Literal["positive", "negative", "inconclusive", "unsupported"] | None
-    rationale: str | None
-    meaning: dict
-    gaps: list[str]
-    fixesIssued: int
-    disposition: Literal["judge", "exact-fix", "steer", "complete"]
-    owner: None
-    source: str | None
-    sourceVerified: bool
-    supersededBy: NotRequired[str]
-    error: str | None
-
-
-JUDGMENT_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "judgmentId": {"type": "string", "minLength": 1},
-        "binding": {"type": "string", "minLength": 1},
-        "verdict": {
-            "type": "string",
-            "enum": ["positive", "negative", "inconclusive", "unsupported"],
-        },
-        "rationale": {"type": "string", "minLength": 1},
-        "meaning": {"type": "object"},
-        "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
-    },
-    "required": ["judgmentId", "binding", "verdict", "rationale", "meaning", "gaps"],
-    "additionalProperties": False,
-}
+from codex_harness.core.run_schemas import obj, TEXT, choice, array, DATA
+JUDGMENT_RESPONSE_SCHEMA = obj(judgmentId=TEXT, binding=TEXT, verdict=choice("positive", "negative", "inconclusive", "unsupported"),
+    rationale=TEXT, meaning=dict(type="object"), gaps=array())
 
 
 def judgment_refs(spine, ids):
@@ -126,56 +88,39 @@ def judgment_response(response, record):
 
 
 def validate_input(value, schema: dict, label="arguments", _root=None) -> None:
-    _root = schema if _root is None else _root
-    if "$ref" in schema:
-        schema = _root["$defs"][schema["$ref"].rsplit("/", 1)[1]]
-    if value is None and any(branch.get("type") == "null" for branch in schema.get("anyOf", [])):
-        return
-    if "anyOf" in schema:
-        failures = []
-        branches = [b for b in schema["anyOf"] if not isinstance(value,dict) or all(k not in value or value[k] in p["enum"] for k,p in b.get("properties",{}).items() if "enum" in p)]
-        for branch in branches or schema["anyOf"]:
-            try:
-                validate_input(value, branch, label + (f"[{value['ref']}]" if isinstance(value,dict) and "ref" in value else "") + ("."+branch["title"] if "title" in branch else ""), _root)
-                return
-            except ValueError as error:
-                failures.append(str(error))
-        raise ValueError(min(failures, key=len))
-    expected = schema["type"]
-    types = {
-        "string": isinstance(value, str),
-        "object": isinstance(value, dict),
-        "array": isinstance(value, list),
-        "boolean": type(value) is bool,
-        "integer": type(value) is int,
-        "number": type(value) in (int, float),
-        "null": value is None,
-    }
-    allowed = expected if isinstance(expected, list) else [expected]
-    if not any(types[kind] for kind in allowed):
-        raise ValueError(
-            f"{label} must be {expected}; allowed keys {sorted(schema.get('properties', {}))}"
-        )
-    if "enum" in schema and value not in schema["enum"]:
-        raise ValueError(f"{label} must be one of {schema['enum']}")
-    if isinstance(value, str) and schema.get("minLength") and not value.strip():
-        raise ValueError(f"{label} must be a nonempty string")
-    if isinstance(value, dict) and "properties" in schema:
-        missing = set(schema["required"]) - value.keys()
-        extra = value.keys() - schema["properties"].keys()
-        if missing or extra:
-            raise ValueError(
-                f"{label}: missing {sorted(missing)}, unexpected {sorted(extra)}; allowed keys {sorted(schema['properties'])}"
-            )
-        for key, item in value.items():
-            validate_input(item, schema["properties"][key], f"{label}.{key}", _root)
-    if isinstance(value, list):
-        if len(value) > schema.get("maxItems", len(value)):
-            raise ValueError(f"{label} exceeds its supplied item count")
-        if len(value) < schema.get("minItems", 0):
-            raise ValueError(f"{label} needs at least {schema['minItems']} item(s)")
-        for item in value:
-            validate_input(item, schema["items"], label, _root)
+    """Collect the shared schema boundary's violations, retaining their editable paths."""
+    root = schema if _root is None else _root
+    def violations(value, schema, label):
+        if "$ref" in schema: schema = root["$defs"][schema["$ref"].rsplit("/",1)[1]]
+        if "anyOf" in schema:
+            branches = [b for b in schema["anyOf"] if (value is None or b.get("type") != "null") and (not isinstance(value,dict) or all(k not in value or value[k] in p["enum"] for k,p in b.get("properties",{}).items() if "enum" in p))]
+            results = [violations(value,b,label) for b in branches or schema["anyOf"]]
+            return min(results, key=lambda r:sum(len(m) for _,m in r))
+        expected = schema["type"]
+        types = {"string":isinstance(value,str), "object":isinstance(value,dict), "array":isinstance(value,list),
+                 "boolean":type(value) is bool, "integer":type(value) is int, "number":type(value) in (int,float), "null":value is None}
+        if not any(types[k] for k in (expected if isinstance(expected,list) else [expected])):
+            return [(label,f"{label} must be {expected}")]
+        errors = []
+        if schema == DATA:
+            try: json_value(value)
+            except ValueError as error: errors.append((label,f"{label}: supply valid JSON literal data ({error})"))
+        if "enum" in schema and value not in schema["enum"]: errors.append((label,f"{label} must be one of {schema['enum']}"))
+        if isinstance(value,str) and (schema.get("minLength") and not value.strip() or "pattern" in schema and re.search(schema["pattern"],value) is None): errors.append((label,f"{label} must match {schema.get('pattern','nonblank text')}"))
+        if isinstance(value,dict) and "properties" in schema:
+            missing, extra = set(schema["required"])-value.keys(), value.keys()-schema["properties"].keys()
+            errors.extend((f"{label}.{k}",f"{label}.{k}: missing required property") for k in sorted(missing))
+            errors.extend((f"{label}.{k}",f"{label}.{k}: unexpected property") for k in sorted(extra))
+            for k in sorted(value.keys() & schema["properties"].keys()): errors.extend(violations(value[k],schema["properties"][k],f"{label}.{k}"))
+        if isinstance(value,list):
+            if len(value)>schema.get("maxItems",len(value)): errors.append((label,f"{label} exceeds its supplied item count"))
+            if len(value)<schema.get("minItems",0): errors.append((label,f"{label} needs at least {schema['minItems']} item(s)"))
+            for item in value if "items" in schema else []: errors.extend(violations(item,schema["items"],label))
+        return errors
+    if errors := violations(value,schema,label):
+        error = ValueError("; ".join(message for _,message in errors))
+        error.locations = [path for path,_ in errors]
+        raise error
 
 
 def inspect_node(
@@ -191,25 +136,19 @@ def inspect_node(
 
     if body and not test:
         raise ValueError("--body requires --test <name>")
-    nodes = {node["id"]: node for node in self.list_nodes()}
+    spine = self.spine()
+    nodes = {node["id"]: node for node in spine.to_dict()["nodes"]}
     if node_id not in nodes:
         raise ValueError(f"Unknown node: {node_id}; use harness_nodes for available IDs")
     node = nodes[node_id]
     result = {
         **node,
-        "children": sorted(key for key, child in nodes.items() if node_id in child["parents"]),
+        "children": spine.children(node_id),
         "testFiles": [],
     }
     if node["kind"] not in ("requirement", "test"):
         return result
-    linked = {node_id}
-    while True:
-        descendants = linked | {
-            key for key, child in nodes.items() if linked.intersection(child["parents"])
-        }
-        if descendants == linked:
-            break
-        linked = descendants
+    linked = {node_id, *spine.descendants(node_id)}
     modules = {nodes[key]["fields"]["module"] for key in linked if nodes[key]["kind"] == "test"}
     template = (self.workspace / "template").resolve()
     protected = set()

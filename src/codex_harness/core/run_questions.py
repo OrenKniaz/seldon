@@ -14,19 +14,26 @@ def response(pending, raw, record, provider=None):
         raw = _response(raw, provider, structured=True)
     value = json_value(raw)
     family, purpose = pending["family"], pending["purpose"]
-    retain = purpose == "trace" and isinstance(value,dict) and isinstance(value.get("edits"),list) and all(isinstance(e,dict) and isinstance(e.get("ref"),str) and isinstance(e.get("section"),str) for e in value["edits"])
+    retain = purpose == "trace" and isinstance(value,dict) and isinstance(value.get("edits"),dict)
     if retain:
         scope = record.get("diagnostics") or pending["context"]
-        if family == "repair" and any(e["section"] not in scope["editableFields"].get(e["ref"],[]) for e in value["edits"]):
+        known = pending["answerSchema"]["properties"]["edits"]["properties"]
+        retained = {**scope.get("rejectedEdits",{}), **{k:v for k,v in value["edits"].items() if k in known}}
+        if scope.get("editableFields") is not None and any(k not in known for k in value["edits"]):
             raise ValueError(f"Repair only the refused fields {scope['editableFields']}")
-        value["edits"] = list({(e["ref"],e["section"]):e for e in [*scope.get("rejectedEdits",[]),*value["edits"]]}.values())
+        value["edits"] = {**{k:v for k,v in retained.items() if k in known}, **value["edits"]}
     try:
         validate_input(value, pending["answerSchema"], "answer")
     except ValueError as error:
         if retain:
-            known = {(ref,b["properties"]["section"]["enum"][0]) for b in pending["answerSchema"]["properties"]["edits"]["items"].get("anyOf",[]) for ref in b["properties"]["ref"]["enum"]}
-            error.diagnostics = {**scope, "rejectedEdits":[e for e in value["edits"] if (e["ref"],e["section"]) in known]}
+            editable = {}
+            for key in known:
+                if any(path == "answer.edits."+key or path.startswith("answer.edits."+key+".") for path in error.locations):
+                    ref, section = key.rsplit(":",1)
+                    editable.setdefault(ref,[]).append(section)
+            error.diagnostics = {**scope, "kind":"graph", "editableFields":editable or scope.get("editableFields",{}), "rejectedEdits":retained}
         raise
+    if retain: value["edits"] = retained
     meaning = value if family in {"author", "direction", "repair"} else {k: v for k, v in value.items() if k not in {"verdict", "rationale", "gaps"}}
     verdict = value.get("verdict", "positive")
     if family == "direction":

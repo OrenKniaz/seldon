@@ -2,24 +2,16 @@
 
 from uuid import uuid4
 from codex_harness.core.planner_nodes import batch_nodes
-from codex_harness.core.semantic_schema import TRACE_LINKS
-from codex_harness.core.spine import SpineError, content_revision
+from codex_harness.core.semantic_schema import TRACE_LINKS, required_fields, REFERENCE_KINDS
+from codex_harness.core.planner_schema import json_value
+from codex_harness.core.spine import SpineError, content_revision, ALLOWED_PARENTS
 from codex_harness.core.plan_types import PlanStoreError
 
 
-def canonical(value, data=False):
-    """Decode literal application data and omit absent semantic fields once."""
-    if isinstance(value,list):
-        return [canonical(v,data) for v in value]
-    if not isinstance(value,dict):
-        return value
-    if data:
-        if len({r["key"] for r in value["entries"]}) != len(value["entries"]):
-            raise ValueError("JSON data entries must have unique keys")
-        return {r["key"]:canonical(r["value"],True) for r in value["entries"]}
-    return {k:{r["clause"]:r["coverage"] for r in v} if k == "clauseCoverage" and isinstance(v,list) else
-            canonical(v["value"],True) if k in {"json","jsonEquals","stdoutJsonEquals","fileJsonEquals"} else canonical(v)
-            for k,v in value.items() if v is not None and not (k == "expectedErrors" and not v)}
+def canonical(value):
+    return [canonical(v) for v in value] if isinstance(value,list) else {k:{r["clause"]:r["coverage"] for r in v} if k == "clauseCoverage" and isinstance(v,list) else
+            json_value(v["value"]) if k in {"json","jsonEquals","stdoutJsonEquals","fileJsonEquals"} else canonical(v)
+            for k,v in value.items() if v is not None and not (k == "expectedErrors" and not v)} if isinstance(value,dict) else value
 
 
 def apply_answer(store, pending, meaning):
@@ -32,6 +24,13 @@ def apply_answer(store, pending, meaning):
                                       **({"kind":group} if group not in {"targets","scenarios"} else {})) for row in rows]
         if any(len(rows) != len({r["id"] for r in rows}) for rows in outline.values()):
             raise ValueError("Use each supplied identity at most once")
+        kinds = {n["kind"] for n in store.list_nodes()} | {k for k,v in outline.items() if v}
+        missing = {r["id"]:sorted(ALLOWED_PARENTS[k]) for k,rows in outline.items() if k in ALLOWED_PARENTS and not ALLOWED_PARENTS[k] & kinds for r in rows}
+        supplied = {n["id"]:n for n in store.list_nodes()} | {r["id"]:r for k,rows in outline.items() if k in ALLOWED_PARENTS for r in rows}
+        from codex_harness.core.semantic_schema import eligible_refs
+        missing.update({r["id"]+".fields."+key:REFERENCE_KINDS[key] for k,rows in outline.items() if k in ALLOWED_PARENTS for r in rows
+            for key,c in required_fields(k,store.spine().semantic).items() if key in REFERENCE_KINDS and (c.get("minItems") or c["type"] != "array") and (k,key) != ("iteration","resultRefs") and not eligible_refs(supplied,key)})
+        if missing: raise ValueError(f"Outline needs eligible handles before trace authoring: {missing}; add the missing declarations")
         store._event("trace-outline",dict(requestId=pending["requestId"], nodes=[r for k,v in outline.items() if k not in {"targets","scenarios"} for r in v], targets=outline["targets"], scenarios=outline["scenarios"]))
         return
     if purpose == "understanding":
@@ -70,31 +69,17 @@ def apply_answer(store, pending, meaning):
         return
     drafts = {n["id"]:n for n in pending["context"]["nodes"]}
     spine = store.spine()
-    ids = set(spine.ids())
-    envelope = {
-        k: {f:spine.node(k)[f] if k in ids else [] if f == "parents" else {} for f in ("parents","fields")} for k in drafts}
-    for edit in meaning["edits"]:
-        key, section = edit["ref"], edit["section"]
-        parts, owner = section.split("."), envelope.setdefault(key,{})
-        for part in parts[:-1]: owner = owner.setdefault(part,{})
-        owner[parts[-1]] = edit["value"]
+    envelope = trace_envelope(spine, pending["context"], meaning["edits"])
     vision = spine.node(spine.ids("vision")[0])
-    existing = set(vision["fields"].get("targets",{})) | {s["id"] for s in vision["fields"].get("scenarios",{}).get("scenarios",[])}
-    missing = {k:["parents"] for k in drafts if not envelope[k]["parents"]}
-    missing.update({r["id"]:[section] for group,section in (("targets","target"),("scenarios","scenario"))
-                    for r in pending["context"][group] if section not in envelope.get(r["id"],{}) and r["id"] not in existing})
-    if missing:
-        error = PlanStoreError("trace-relationship-invalid", f"Supply the missing sections {missing}; CODE retains all other members")
-        error.diagnostics = dict(kind="graph", rejectedEdits=meaning["edits"], editableFields=missing)
-        raise error
-    nodes = [dict(drafts[k], parents=r["parents"], fields=canonical(r["fields"])) for k,r in envelope.items() if k in drafts]
+    nodes = [dict(drafts[k], parents=r["parents"], fields={**{key:[] for key,c in required_fields(drafts[k]["kind"],spine.semantic).items()
+        if key in REFERENCE_KINDS and c["type"] == "array" and not c.get("minItems")}, **canonical(r["fields"])}) for k,r in envelope.items() if k in drafts]
     revisions = {node["id"]: content_revision(node) for node in nodes}
     def bound(target):
         return dict(id=target, revision=revisions[target] if target in revisions else store.spine().revision(target))
-    def fields(value):
-        return {k: [bound(x) if isinstance(x,str) else x for x in v] if k in TRACE_LINKS or k == "targetRefs" else
+    def fields(value, historical=False):
+        return {k: [bound(x if isinstance(x,str) else x["id"]) if (not historical and k != "evidenceRefs") or isinstance(x,str) else x for x in v] if k in TRACE_LINKS or k == "targetRefs" else
                 bound(v) if k == "sourceRef" and isinstance(v,str) else
-                fields(v) if k == "baseline" else v for k,v in value.items()}
+                fields(v,True) if k == "baseline" else v for k,v in value.items()}
     for node in nodes:
         node["fields"] = fields(node["fields"])
     if nodes:
@@ -102,15 +87,10 @@ def apply_answer(store, pending, meaning):
             batch_nodes(store, nodes, lambda n: None)
         except SpineError as cause:
             editable = getattr(cause, "editable_fields", {})
-            defect = not any(editable.values())
-            if defect:
-                editable = getattr(cause, "refused_sections", {})
             if not any(editable.values()):
                 raise RuntimeError(f"CODE defect: structural refusal omitted its node/section: {cause}") from cause
-            message = f"CODE defect: missing editable scope; repair only {editable}. {cause}" if defect else str(cause)
-            error = PlanStoreError(cause.code, message)
-            error.diagnostics = dict(kind="graph", rejectedEdits=meaning["edits"],
-                                     editableFields=editable, repairScopeDefect=defect)
+            error = PlanStoreError(cause.code, str(cause))
+            error.diagnostics = dict(kind="graph", rejectedEdits=meaning["edits"], editableFields=editable)
             raise error from cause
     if any("target" in r or "scenario" in r for r in envelope.values()):
         targets = {k:canonical(r["target"]) for k,r in envelope.items() if "target" in r}
@@ -138,3 +118,15 @@ def apply_answer(store, pending, meaning):
             scenarios[s["id"]] = s
         vision["fields"].update(targets={**vision["fields"].get("targets",{}), **targets}, scenarios=dict(schema="seldon/scenarios-v1", scenarios=list(scenarios.values())))
         store.upsert_node(vision)
+
+
+def trace_envelope(spine, context, edits=None):
+    ids = set(spine.ids())
+    envelope = {n["id"]: {f:spine.node(n["id"])[f] if n["id"] in ids else [] if f == "parents" else {}
+                         for f in ("parents", "fields")} for n in context["nodes"]}
+    for key, value in (edits or {}).items():
+        ref, section = key.rsplit(":", 1)
+        parts, owner = section.split("."), envelope.setdefault(ref,{})
+        for part in parts[:-1]: owner = owner.setdefault(part,{})
+        owner[parts[-1]] = value
+    return envelope

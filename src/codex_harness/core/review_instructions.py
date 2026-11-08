@@ -20,10 +20,6 @@ RUNNER_GUARANTEES = (
 )
 
 
-def status(row):
-    return row["status"]
-
-
 def instructions(history=()):
     return RUNNER_GUARANTEES + (
         "Report only findings with concrete user/product impact; name that impact. "

@@ -25,14 +25,69 @@ TRACE_LINKS = {
 }
 
 
+def _strings(value):
+    return isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value)
+
+
+REFERENCE_KINDS = {**TRACE_LINKS, "dependsOn":{"bead"}, "lessons":{"decision"},
+                   "sourceRef":{"discovery", "research", "result"}, "targetRefs":None}
+
+
+def eligible_refs(nodes, field):
+    return [key for key,n in nodes.items() if REFERENCE_KINDS[field] is None or n["kind"] in REFERENCE_KINDS[field]]
+
+
+def required_fields(kind, semantic=False, nodes=None, fields=None):
+    """One consumer-owned completeness contract; schemas also read these fields."""
+    text = dict(type="string", pattern=r"\S")
+    strings = dict(type="array", items=text)
+    refs = dict(type="array", minItems=1)
+    contract = {
+        "test": dict(module=text, level=dict(type="string", enum=["semantic", "e2e"] if semantic else ["unit", "semantic", "e2e"])),
+        "bead": dict(ownedFiles={**strings, "minItems":1}, dependsOn=strings, lessons=strings,
+                     **({"semanticPhase":dict(type="string",enum=["contracts","build"])} if semantic else {"proofModule":text})),
+        "discovery": dict(source=text), "metric": dict(definition=text, unit=text),
+        "stop-condition": dict(metricRefs=refs, condition=text),
+        "iteration": {k:refs for k in ("metricRefs", "resultRefs", "stopConditionRefs")},
+        "amendment": dict(sourceRef=dict(type=["string", "object"]), targetRefs=refs,
+                          proposedChange=text, rationale=text, decisionRefs=dict(type="array")),
+        "baton": {**{k:text for k in ("currentState", "nextSafeAction", "rationale")},
+                  **{k:strings for k in ("assumptions", "openQuestions")}, "decisionRefs":dict(type="array")},
+    }.get(kind,{})
+    # Only iteration results await observation; other trace links remain mandatory.
+    if kind == "iteration" and nodes is not None and (not eligible_refs(nodes,"resultRefs") or fields is not None and "resultRefs" not in fields):
+        contract.pop("resultRefs")
+    return contract
+
+
+def outstanding_fields(node, semantic=False, nodes=None, authoring=False):
+    from codex_harness.core.planner_schema import validate_input
+    rules = required_fields(node["kind"],semantic,nodes,None if authoring else node["fields"])
+    try:
+        validate_input({k:v for k,v in node["fields"].items() if k in rules},dict(type="object",properties=rules,required=list(rules)),"fields")
+    except ValueError as error: return error.locations
+    return []
+
+
 def trace_refusal(node_id, message, *sections):
     error = ValueError(message)
-    error.refused_sections = {node_id: list(sections)}
     error.editable_fields = {node_id: list(sections)}
     return error
 
 
 def validate_trace_fields(node, nodes, previous=None):
+    errors = []
+    sections = [*TRACE_LINKS, "sourceRef", "targetRefs", "evidence", "execution.testRoots", "execution", "dependsOn", "lessons", "capabilityRefs", "proofModule"]
+    sections += ["baseline."+k for k in ("source", "behavior", "rationale", "codeRefs", "testRefs", "resultRefs")]
+    for section in sections:
+        try:
+            _validate_trace_field(node,nodes,previous,section)
+        except ValueError as error:
+            errors.append(error)
+    return errors
+
+
+def _validate_trace_field(node, nodes, previous, section):
     """Validate shape/identity, never product eligibility or semantic quality."""
     def refusal(message, *labels):
         return trace_refusal(node["id"], message, *("fields." + label for label in labels))
@@ -57,10 +112,9 @@ def validate_trace_fields(node, nodes, previous=None):
             seen.add(key)
 
     f, kind = node["fields"], node["kind"]
-    for key, kinds in TRACE_LINKS.items():
-        if key in f:
-            refs(f[key], kinds, key)
-    if "baseline" in f:
+    if section in TRACE_LINKS and section in f:
+        refs(f[section], TRACE_LINKS[section], section)
+    if "baseline" in f and section.startswith("baseline."):
         if kind != "feature":
             raise refusal("Existing-baseline provenance belongs to an ordinary feature", "baseline")
         baseline = f["baseline"]
@@ -69,20 +123,21 @@ def validate_trace_fields(node, nodes, previous=None):
             fields(baseline, required, required, f"{node['id']}.fields.baseline")
         except ValueError as error:
             raise refusal(str(error), "baseline") from error
-        for key in ("source", "behavior", "rationale"):
-            text(baseline[key], "baseline." + key)
-        for key in ("codeRefs", "testRefs", "resultRefs"):
-            refs(baseline[key], TRACE_LINKS[key], "baseline." + key)
+        key = section.removeprefix("baseline.")
+        if key in TRACE_LINKS:
+            refs(baseline[key], TRACE_LINKS[key], section)
             if not baseline[key]:
-                raise refusal(f"Baseline {key} must map observed existing behavior before changes", "baseline." + key)
-        for ref in baseline["resultRefs"]:
+                raise refusal(f"Baseline {key} must map observed existing behavior before changes", section)
+        else:
+            text(baseline[key], section)
+        for ref in baseline["resultRefs"] if section == "baseline.resultRefs" else []:
             evidence = nodes[ref["id"]]["fields"].get("evidence")
             if not isinstance(evidence, dict) or evidence.get("observation") is None:
                 prior = next((n for n in (previous or {}).get("nodes", []) if n["id"] == ref["id"]), {})
                 if prior.get("fields", {}).get("evidence", {}).get("observation") is not None:
                     raise trace_refusal(ref["id"], "Baseline evidence requires its retained observation; restore the result", "fields.evidence.observation", "fields.evidence.state")
                 raise refusal("Baseline resultRefs require observed evidence before change planning", "baseline.resultRefs")
-    if kind == "result":
+    if kind == "result" and section == "evidence":
         e = f.get("evidence")
         required = ("itemRef", "candidate", "source", "observation", "state")
         if not isinstance(e, dict) or any(key not in e for key in required):
@@ -115,51 +170,34 @@ def validate_trace_fields(node, nodes, previous=None):
         if state == "validated live" and (not source["realProvider"] or source["historical"]):
             raise refusal("Historical/fake-provider evidence cannot establish validated live", "evidence.state")
     elif kind == "amendment":
-        required = ("sourceRef", "targetRefs", "proposedChange", "rationale", "decisionRefs")
-        if any(key not in f for key in required):
-            raise refusal("Amendment requires discovery/source, target revisions, change, rationale and decisions", *[key for key in required if key not in f])
-        refs([f["sourceRef"]], {"discovery", "research", "result"}, "sourceRef")
-        refs(f["targetRefs"], label="targetRefs")
-        if not f["targetRefs"]:
-            raise refusal("Amendment must name its affected upstream item revisions", "targetRefs")
-        text(f["proposedChange"], "proposedChange")
-        text(f["rationale"], "rationale")
-    elif kind == "discovery":
-        text(f.get("source"), "source")
-    elif kind == "metric":
-        text(f.get("definition"), "definition")
-        text(f.get("unit"), "unit")
-    elif kind in ("stop-condition", "iteration"):
-        required = ("metricRefs",) if kind == "stop-condition" else ("metricRefs", "resultRefs", "stopConditionRefs")
-        if any(not f.get(key) for key in required):
-            missing = [key for key in required if not f.get(key)]
-            raise refusal(f"{node['id']}.fields: {kind} requires nonempty {missing}", *missing)
-        if kind == "stop-condition":
-            text(f.get("condition"), "condition")
-    elif kind == "baton":
-        for key in ("currentState", "nextSafeAction", "rationale"):
-            text(f.get(key), key)
-        for key in ("assumptions", "openQuestions", "decisionRefs"):
-            if key not in f or not isinstance(f[key], list):
-                raise refusal(f"Baton requires {key}", key)
-        for key in ("assumptions", "openQuestions"):
-            for value in f[key]: text(value, key)
-    if kind == "test" and "execution" in f:
-        execution, section = f["execution"], "execution"
+        if section == "sourceRef" and "sourceRef" in f: refs([f["sourceRef"]], REFERENCE_KINDS["sourceRef"], "sourceRef")
+        if section == "targetRefs" and "targetRefs" in f: refs(f["targetRefs"], label="targetRefs")
+    if kind == "bead":
+        if section in ("dependsOn","lessons"):
+            values = f[section]
+            if len(values) != len(set(values)) or not set(values) <= set(eligible_refs(nodes,section)):
+                raise refusal(f"{node['id']}.{section}: choose unique eligible {sorted(REFERENCE_KINDS[section])} handles",section)
+        if section == "capabilityRefs":
+            from codex_harness.core.graph import validate_capability_refs
+            try: validate_capability_refs(f.get(section,[]))
+            except ValueError as error: raise refusal(str(error),section) from error
+        if section == "proofModule" and section in f and any(n["kind"] == "vision" and n["fields"].get("planMode") == "semantic-v1" for n in nodes.values()):
+            raise refusal("Semantic beads use semanticPhase, not proofModule",section)
+    if kind == "test" and "execution" in f and section in {"execution", "execution.testRoots"}:
+        execution = f["execution"]
         try:
             fields(execution, ("entry", "module", "runtime", "argv", "rationale", "testRoots"), ("argv", "rationale", "testRoots"), f"{node['id']}.fields.execution")
-            section = "execution.testRoots"
-            if not isinstance(execution["testRoots"], list) or not execution["testRoots"]:
-                raise ValueError("Declare complete testRoots (modules, helpers and fixtures)")
-            from codex_harness.core.graph import _file_path, _string
-            for root in execution["testRoots"]:
-                _file_path(_string(root))
-            from codex_harness.core.semantic_runner import launch
-            section = "execution"
-            launch({k: v for k, v in execution.items() if k not in ("rationale", "testRoots")}, Path.cwd(), position=f"{node['id']}.fields.execution")
+            if section == "execution.testRoots":
+                if not isinstance(execution["testRoots"], list) or not execution["testRoots"]:
+                    raise ValueError("Declare complete testRoots (modules, helpers and fixtures)")
+                from codex_harness.core.graph import _file_path, _string
+                for root in execution["testRoots"]: _file_path(_string(root))
+            else:
+                from codex_harness.core.semantic_runner import launch
+                launch({k:v for k,v in execution.items() if k not in ("rationale", "testRoots")}, Path.cwd(), position=f"{node['id']}.fields.execution")
+                text(execution["rationale"], "execution.rationale")
         except ValueError as error:
             raise refusal(f"{node['id']}.fields.{section}: {error}", section) from error
-        text(execution["rationale"], "execution.rationale")
 
 
 def http_request(v, *, target=False):
@@ -211,27 +249,18 @@ def web_journey(v, targets, *, draft=False, label="vision.fields.scenarios.scena
             fields(response, ("method", "path", "statusEquals"), ("method", "path", "statusEquals"))
             http_request(response)
         step = {k: v for k, v in step.items() if k not in {"id", "expectedErrors"}}
-        if step["op"] == "request":
-            fields(step, ("op", "request"), ("op", "request"))
-            http_request(step["request"])
-            continue
-        if step["op"] == "fill":
-            fields(step, ("op", "locator", "value"), ("op", "locator", "value"))
-            if not isinstance(step["value"], str):
-                raise ValueError("Fill requires a string value")
+        if step["op"] == "fill" and not isinstance(step.get("value"), str):
+            raise ValueError("Fill requires a string value")
         op = step["op"]
         operand = {
-            "open": None,
-            "assertVisible": "locator",
-            "assertHidden": "locator",
-            "focus": "locator", "fill": "locator",
-            "click": "locator",
-            "key": "key",
-            "assertFocus": "locator",
-            "assertFragment": "fragment",
+            **dict.fromkeys(("assertVisible", "assertHidden", "focus", "fill", "click", "assertFocus"), "locator"),
+            "open": None, "key": "key", "assertFragment": "fragment", "request": "request",
         }
         if op not in operand or set(step) != {"op", *([operand[op]] if operand[op] else []), *(["value"] if op == "fill" else [])}:
             raise ValueError(f"Unknown web step or operands: {step!r}; use op/operand shapes {operand!r}")
+        if op == "request":
+            http_request(step["request"])
+            continue
         if op == "open" and index:
             raise ValueError("Open occurs once at the start")
         if "locator" in step:

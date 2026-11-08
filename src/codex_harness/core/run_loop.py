@@ -163,6 +163,8 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
         )
         result = store.judgment(result["id"], candidate=pending["candidate"])
         if result["disposition"] in {"exact-fix", "steer"}:
+            if result["disposition"] == "exact-fix" and pending["purpose"] == "trace" and result.get("diagnostics",{}).get("editableFields"):
+                ask_question(store,run,pending["family"],"trace",judgment=result,context={**pending["context"],**result["diagnostics"]})
             if result["disposition"] == "steer":
                 if pending["family"] in {"direction", "repair"}:
                     run.update(state="PAUSED", question=None, semanticHeld=True,

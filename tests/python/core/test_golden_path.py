@@ -2922,6 +2922,8 @@ def retired_permission_golden(workspace):
     Fresh-run journeys never load the retired consumer's persisted wait. Run the
     base producer through A and native reviewer P, then reconnect the candidate;
     the old elicitation/reply must not gain credit or replace the bound B card.
+    TRACE1B also resumes real prepatch trace/repair producers to B. Fresh questions
+    missed saved-envelope deadlock; an exact-fix wait must retain its allowance.
     """
     import io
     from zipfile import ZipFile
@@ -2958,6 +2960,56 @@ def retired_permission_golden(workspace):
         assert client.call("harness_plan_status")["run"]["userRequest"]["request_id"] == card["request_id"]
     finally:
         client.close()
+
+    for base, repair in (("97d059b",False), ("97d059b",True), ("2a833b6",False), ("2a833b6",True), ("2a833b6","malformed-data")):
+        trace_base = workspace.parent / (workspace.name + "-trace-base-" + base)
+        if not trace_base.exists():
+            with ZipFile(io.BytesIO(subprocess.check_output(["git","archive","--format=zip",base,"src"],cwd=ROOT))) as archive:
+                archive.extractall(trace_base)
+        root = workspace / (base + ("-malformed-data" if repair == "malformed-data" else "-old-repair" if repair else "-old-trace"))
+        client = LoopClient(root,source_root=trace_base)
+        try:
+            content = plan_content()
+            client.call("harness_plan_start",name="Retained trace",idea=content["nodes"][0]["text"])
+            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "trace")
+            if repair == "malformed-data":
+                rejected = json.loads(provider_answer(root,client.current["question"],dict(option="ready",rationale="Author the receipt plan",content=content)))
+                value = next(e["value"] for e in rejected["edits"] if e["section"] == "scenario" and any(c.get("stdoutJsonEquals") for a in e["value"]["actions"] for c in a["checks"]))
+                check = next(c for a in value["actions"] for c in a["checks"] if c.get("stdoutJsonEquals"))
+                bad_wrapper = json.loads(json.dumps(check)); bad_wrapper["stdoutJsonEquals"] = 1
+                next(a for a in value["actions"] if check in a["checks"])["checks"].append(bad_wrapper)
+                check["stdoutJsonEquals"]["value"] = dict(entries=1)
+                client.answer(json.dumps(rejected))
+            elif repair:
+                rejected = json.loads(provider_answer(root,client.current["question"],dict(option="ready",rationale="Author the receipt plan",content=content)))
+                if "records" in rejected:
+                    next(r for r in rejected["records"] if r["ref"] == fixture_id(root,"T_RECEIPT"))["parents"] = [fixture_id(root,"B")]
+                else:
+                    next(e for e in rejected["edits"] if e["ref"] == fixture_id(root,"T_RECEIPT") and e["section"] == "parents")["value"] = [fixture_id(root,"B")]
+                for _ in range(3): client.answer(json.dumps(rejected))
+                assert client.current["question"]["family"] == "repair"
+            else:
+                client.answer("{")
+            old = client.current["question"]
+            assert old["answerSchema"]["properties"].get("edits",{}).get("type") != "object"
+            client.env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"),str(ROOT)])
+            client.ignored_offers.add(client.last_offer)
+            client.reconnect()
+            client.progress(timeout=30)
+            current = client.current["question"]
+            assert current["requestId"] != old["requestId"] and current["answerSchema"]["properties"]["edits"]["type"] == "object"
+            assert current["judgment"]["fixesIssued"] == old["judgment"]["fixesIssued"], "Schema retirement reset the exact-fix allowance"
+            assert {n["id"] for n in current["context"]["nodes"]} == {n["id"] for n in old["context"]["nodes"]}
+            advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+            assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution", client.current
+            from codex_harness.core.plan_store import open_plan_store_readonly
+            with open_plan_store_readonly(root) as store:
+                scenarios = store.spine().node("V1")["fields"]["scenarios"]["scenarios"]
+                empty = dict(bytes=0,sha256=hashlib.sha256(b"").hexdigest(),label=None)
+                assert any(o.get("stdoutJsonEquals") == empty for row in scenarios for o in row["observe"]), "Retirement changed literal JSON meaning"
+
+        finally:
+            client.close()
 
 
 @timed
@@ -3235,14 +3287,31 @@ def r18_authoring_golden(workspace):
     previously asked for a different fix despite rejecting the right bad value.
     REV1B protects retained brownfield ancestry: repair the moved parent, without
     rewriting baseline provenance. Detector-only field scopes missed that cause.
+    TRACE1B round 2 requires all test module/level and target/scenario sections
+    together: a partial answer gets every gap and reaches B with one exact fix.
+    Previously complete fake answers hid the serial-obligation failure.
+    Round 3 preserves evidenceRefs history stamps during a stale-result replan;
+    unchanged/evidence-free fixtures missed append-only history rejection.
+    Round 3 protects real emission from optional properties and transports literal
+    JSON without recursive provider schemas; one sparse fix includes JSON gaps.
+    An initial no-result iteration reaches B before a real canonical observation.
+    Duplicate provenance/parents must not hide independent ancestry/root defects;
+    semantic authoring must refuse unit levels while retaining the sparse fix.
+    TRACE1B reuses an observed canonical result in a new iteration after replan;
+    initial-plan fixtures missed enums that excluded ordinary result nodes.
     """
     from tests.python.core.mcp_planner_support import LoopClient
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
     content = plan_content()
+    receipt = next(n for n in content["nodes"] if n["id"] == "T_RECEIPT")
+    for handle, title in (("T_INPUT", "Reject malformed input without saving"), ("T_RECOVERY", "Preserve receipt after a failed request")):
+        content["nodes"].append({**json.loads(json.dumps(receipt)), "id":handle, "title":title})
+
     content["nodes"].extend([
         dict(id="MEASURE", kind="metric", title="Receipt integrity", text="Measure correct receipts", parents=["V1"], fields=dict(definition="Correct receipt fraction", unit="fraction")),
         dict(id="STOP", kind="stop-condition", title="Receipt goal", text="Stop at complete integrity", parents=["V1"], fields=dict(metricRefs=["MEASURE"], condition="All receipts match", testRefs=["T_RECEIPT"])),
         dict(id="CHOICE", kind="decision", title="Verify bytes", text="Use a binary receipt", parents=["V1"], fields=dict(testRefs=["T_RECEIPT"])),
+        dict(id="AWAITING_ITERATION",kind="iteration",title="Initial receipt iteration",text="Measure the first receipt before any observation exists",parents=["MEASURE"],fields=dict(metricRefs=["MEASURE"],stopConditionRefs=["STOP"])),
     ])
     next(n for n in content["nodes"] if n["id"] == "T_RECEIPT")["fields"].update(stopConditionRefs=["STOP"], decisionRefs=["CHOICE"])
     scenario = content["nodes"][0]["fields"]["scenarios"]["scenarios"][5]
@@ -3256,42 +3325,60 @@ def r18_authoring_golden(workspace):
                 text=content["nodes"][0]["text"], parents=[], fields=dict(planMode="semantic-v1")))
             store.upsert_node(dict(id="UNRELATED_OPERATOR_NOTE",kind="decision",title="Unrelated retained note",text="Unrelated telemetry "*1000,parents=["V1"],fields={}))
         client.call("harness_plan_start", name="R18 replay", idea=content["nodes"][0]["text"])
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
+        outline = json.loads(provider_answer(root,client.current["question"],dict(option="ready",rationale="Declare the complete receipt plan",content=content)))
+        unavailable = json.loads(json.dumps(outline)); unavailable["metric"] = []
+        unavailable["amendment"].append(dict(ref=None,title="Unbound change proposal",text="Explain the receipt change"))
+        client.answer(json.dumps(unavailable))
+        assert all(k in client.offered["packet"]["exactFix"] for k in ("fields.metricRefs","fields.sourceRef")), client.offered["packet"]["exactFix"]
+        client.answer(json.dumps(outline))
         advance_meaning(client, content, stop_at=lambda r: (r.get("question") or {}).get("purpose") == "trace")
-        assert "UNRELATED_OPERATOR_NOTE" not in json.dumps(client.offered["packet"])
+        assert "Unrelated telemetry" not in json.dumps(client.offered["packet"])
         return client
     client = begin(workspace)
     try:
+        from codex_harness.core.review_provider import _launch_review
+        invalid = json.loads(json.dumps(client.current["question"]["answerSchema"]))
+        invalid["properties"]["edits"]["required"].pop()
+        invalid_path = workspace / "invalid-emission.json"
+        try: _launch_review(dict(provider="codex"),"",sys.executable,answer_schema=invalid,schema_path=invalid_path)
+        except ValueError as error: assert "CODE defect" in str(error) and not invalid_path.exists()
+        else: raise AssertionError("The emitter accepted a non-strict trace schema")
         raw = json.loads(provider_answer(workspace, client.current["question"], dict(option="ready",rationale="Author the accepted receipt plan",content=content)))
-        def edit(answer, handle, section):
-            return next(e for e in answer["edits"] if e["ref"] == fixture_id(workspace,handle) and e["section"] == section)
-        def partial(*edits):
-            return json.dumps(dict(edits=list(edits),rationale="Correct only the named sections",reply="Retain every other member."))
-        roots = edit(raw,"T_RECEIPT","fields.execution")["value"]["testRoots"]
-        parents = edit(raw,"T_RECEIPT","parents")["value"]
-        # r22 94/102/110/187: even schema refusals retain the other edits.
-        # Each exact fix supplies only the refused section, never an envelope.
-        edit(raw,"T_RECEIPT","parents")["value"] = ["V1"]
-        edit(raw,"T_RECEIPT","fields.execution")["value"]["testRoots"] = ["../outside"]
-        path_ref = dict(ref=fixture_id(workspace,"T_RECEIPT"),section="fields.codeRefs",value=["server.py"])
-        client.answer(partial(*(e for e in raw["edits"] if e["section"] not in {"target","scenario"}), path_ref))
-        assert "parents" in client.offered["packet"]["exactFix"] and fixture_id(workspace,"T_RECEIPT") in client.offered["packet"]["exactFix"], "The exact fix must identify the refused node/section"
-        client.answer(partial(dict(ref=fixture_id(workspace,"T_RECEIPT"),section="parents",value=[fixture_id(workspace,"B")])))
-        assert "codeRefs" in client.offered["packet"]["exactFix"], "A filename refusal must explain the reference field to correct"
-        client.answer(partial({**path_ref,"value":[]}))
-        client.answer(partial(*(e for e in raw["edits"] if e["section"] in {"target","scenario"})))
-        assert "parents" in client.offered["packet"]["exactFix"] and "cycle" in client.offered["packet"]["exactFix"]
-        with open_plan_store_readonly(workspace) as store:
-            assert not store.spine().ids("test"), "A rejected structural cycle was persisted"
-        client.answer(partial(dict(ref=fixture_id(workspace,"T_RECEIPT"),section="parents",value=parents)))
-        client.answer(partial(dict(ref=fixture_id(workspace,"T_RECEIPT"),section="fields.execution.testRoots",value=roots)))
+        def key(handle, section):
+            return fixture_id(workspace,handle)+":"+section
+        def partial(edits):
+            return json.dumps(dict(edits=edits,rationale="Correct only the named sections",reply="Retain every other member."))
+        # r23: every test's required fields and every executable section are
+        # missing together; a complete refusal permits one sparse exact fix.
+        if isinstance(raw["edits"],list): raw["edits"] = {e["ref"]+":"+e["section"]:e["value"] for e in raw["edits"]}
+        omitted = {k:v for k,v in raw["edits"].items() if k.endswith((":target",":scenario",":fields.module",":fields.level",":fields.ownedFiles",":fields.semanticPhase")) or k in {key("MEASURE","fields.unit"),key("STOP","fields.condition")}}
+        assert len({k.rsplit(":",1)[0] for k in omitted if k.endswith(":fields.module")}) > 2
+        required = client.current["question"]["answerSchema"]["properties"]["edits"].get("required",[])
+        assert set(omitted) <= set(required), "The advertised answer permits an incomplete trace"
+        request = client.current["question"]["requestId"]
+        bad = {k:v for k,v in raw["edits"].items() if k not in omitted}
+        omitted[key("T_RECEIPT","parents")] = bad[key("T_RECEIPT","parents")]
+        bad[key("T_RECEIPT","parents")] = ["V1"]
+        bad[key("T_RECOVERY","fields.level")] = "unit"
+        bad[key("T_RECEIPT","fields.codeRefs")] = ["server.py"]
+        literal_key = next(k for k,v in omitted.items() if k.endswith(":scenario") and any(o.get("fileJsonEquals") for o in v["observe"]))
+        bad[literal_key] = json.loads(json.dumps(omitted[literal_key]))
+        next(o for o in bad[literal_key]["observe"] if o.get("fileJsonEquals"))["fileJsonEquals"]["value"] = "{invalid JSON"
+        client.answer(partial(bad))
+        assert all(k in client.offered["packet"]["exactFix"] for k in omitted), client.offered["packet"]["exactFix"]
+        assert "codeRefs" in client.offered["packet"]["exactFix"]
+        client.answer(partial(omitted))
         advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution" and client.current["userRequest"]["card"], client.current
         client.reconnect()
         with open_plan_store(workspace) as store:
+            assert store._judgment_record(request)["fixesIssued"] == 1, "Complete corrections consumed more than one exact fix"
             spine = store.spine()
             vf = spine.node(spine.ids("vision")[0])["fields"]
             assert set(vf["targets"]) == {fixture_id(workspace,k) for k in content["nodes"][0]["fields"]["targets"]}
             assert {s["id"] for s in vf["scenarios"]["scenarios"]} == {fixture_id(workspace,s["id"]) for s in content["nodes"][0]["fields"]["scenarios"]["scenarios"]}
+            assert not spine.ids("result") and not spine.node(fixture_id(workspace,"AWAITING_ITERATION"))["fields"].get("resultRefs"), "Initial iteration invented evidence"
             test_revision = spine.revision(fixture_id(workspace,"T_RECEIPT"))
             stop_revision = spine.revision(fixture_id(workspace,"STOP"))
             for origin, field, target in (("T_RECEIPT","stopConditionRefs","STOP"), ("STOP","testRefs","T_RECEIPT"),
@@ -3301,9 +3388,16 @@ def r18_authoring_golden(workspace):
             store.upsert_node(dict(id="STOP_RESULT", kind="result", title="Retained stop verification", text="Observed the goal", parents=[fixture_id(workspace,"STOP")],
                 fields=dict(evidence=dict(itemRef=dict(id=fixture_id(workspace,"STOP"), revision=stop_revision), candidate="receipt-candidate",
                     source=dict(reference="fixture:stop-measurement", realProvider=False, historical=False), observation=dict(reference="fixture:stop-readback", outcome="passed"), state="integrated"))))
+            measure = fixture_id(workspace,"MEASURE")
+            store.upsert_node(dict(id="METRIC_RESULT",kind="result",title="Observed receipt metric",text="Measured the receipt fraction",parents=[measure],fields=dict(evidence=dict(itemRef=dict(id=measure,revision=store.spine().revision(measure)),candidate="receipt-candidate",source=dict(reference="fixture:metric",realProvider=False,historical=False),observation=dict(reference="fixture:metric-readback",outcome="passed"),state="integrated"))))
             verdict = scripted_judgment(store, question="Judge the retained stop goal", subject_ids=[fixture_id(workspace,"STOP")], meaning=dict(assessment="The observed receipt meets the goal"))["current"]
             assert verdict["positiveCredit"] and store.spine().evidence_states()[fixture_id(workspace,"STOP")]["state"] == "integrated"
+            history = dict(id="HISTORY",kind="decision",title="Retained receipt evidence history",text="Keep the original observed result stamp",parents=["V1"],fields=dict(evidenceRefs=[dict(id="STOP_RESULT",revision=store.spine().revision("STOP_RESULT"))]))
+            store.upsert_node(history)
+            content["nodes"].append({**history,"fields":dict(evidenceRefs=["STOP_RESULT"])})
+            assert store.judgment(verdict["id"])["positiveCredit"], "Unrelated history changed the stop's proof"
             imported = store.spine().to_dict()
+        next(n for n in content["nodes"] if n["id"] == "AWAITING_ITERATION")["fields"]["resultRefs"] = ["METRIC_RESULT"]
         # Fresh-store import has no transaction preimage: stale declared links
         # must still remove credit, rather than being rebound by the reader.
         next(n for n in imported["nodes"] if n["id"] == fixture_id(workspace,"T_RECEIPT"))["text"] += "; changed outside the retained binding"
@@ -3319,6 +3413,7 @@ def r18_authoring_golden(workspace):
         # Re-authoring existing identities must not collapse two proposed meanings
         # or duplicate one snapshot reused by independent file checks.
         next(n for n in content["nodes"] if n["id"] == "T_RECEIPT")["text"] += "; verify the complete byte sequence"
+        content["nodes"].append(dict(id="NEXT_STOP",kind="stop-condition",title="Replanned receipt goal",text="Keep the complete receipt goal after replan",parents=["V1"],fields=dict(metricRefs=["MEASURE"],condition="All receipts still match",testRefs=["T_RECEIPT"])))
         client.send_steer(rationale="Recheck the same complete plan after its relationship repair.")
         client.progress()
         client.answer(dict(option="replan",rationale="Retain the complete plan and verify its linked observations",content={}))
@@ -3330,18 +3425,18 @@ def r18_authoring_golden(workspace):
         client.answer(json.dumps(duplicate))
         client.answer(json.dumps(outline))
         rejected = json.loads(provider_answer(workspace,client.current["question"],dict(option="ready",rationale="Recheck the proposed links",content=content)))
-        edit(rejected,"STOP","fields.metricRefs")["value"] = []
+        rejected["edits"][key("NEXT_STOP","fields.metricRefs")] = []
         for _ in range(3): client.answer(json.dumps(rejected))
         with open_plan_store_readonly(workspace) as store:
             preserved = store.spine().to_dict()
-        edit(rejected,"STOP","fields.metricRefs")["value"] = [fixture_id(workspace,"MEASURE")]
-        rejected["edits"] = [edit(rejected,"STOP","fields.metricRefs")]
+        assert "fields.metricRefs" in client.current["question"]["context"]["rejectedError"]
+        rejected["edits"] = {key("NEXT_STOP","fields.metricRefs"):[fixture_id(workspace,"MEASURE")]}
         remove = json.loads(json.dumps(rejected)); remove["remove"] = ["UNRELATED_OPERATOR_NOTE"]
         client.answer(json.dumps(remove))
         with open_plan_store_readonly(workspace) as store:
             assert store.spine().to_dict() == preserved, "Repair deleted unrelated accepted content"
         altered = json.loads(json.dumps(rejected))
-        altered["edits"].append(dict(ref=fixture_id(workspace,"STOP"),section="fields.condition",value="Overwrite an unrelated accepted condition"))
+        altered["edits"][key("NEXT_STOP","fields.condition")] = "Overwrite an unrelated accepted condition"
         client.answer(json.dumps(altered))
         with open_plan_store_readonly(workspace) as store:
             assert store.spine().to_dict() == preserved, "Repair deleted or changed unrelated accepted content"
@@ -3371,6 +3466,8 @@ def r18_authoring_golden(workspace):
             assert store.spine().node("A_FRESH_RESULT")["fields"]["evidence"]["state"] == "integrated"
             assert scripted_judgment(store, question="Judge the repaired stop goal", subject_ids=[stop["id"]], meaning=dict(assessment="Fresh verification after repair"))["current"]["positiveCredit"]
 
+        content["nodes"].append(dict(id="ITERATION",kind="iteration",title="Receipt goal iteration",text="Evaluate the observed receipt goal",parents=["MEASURE"],
+            fields=dict(metricRefs=["MEASURE"],resultRefs=["A_FRESH_RESULT"],stopConditionRefs=["STOP"])))
         from tests.python.core.semantic_wiring_support import node
         with open_plan_store(workspace) as store:
             requirement = fixture_id(workspace, "R4")
@@ -3385,24 +3482,43 @@ def r18_authoring_golden(workspace):
                 codeRefs=[refs["BASE_CODE"]], testRefs=[refs["BASE_TEST"]], resultRefs=[dict(id="BASE_RESULT", revision=store.spine().revision("BASE_RESULT"))])
             feature["fields"]["baseline"] = baseline
             store.upsert_node(feature)
-            unrelated = {key: store.spine().node(key) for key in ("BASE_OTHER", "UNRELATED_OPERATOR_NOTE")}
+            unrelated = {key: store.spine().node(key) for key in ("BASE_OTHER", "UNRELATED_OPERATOR_NOTE", "HISTORY")}
         client.send_steer(rationale="Retain the baseline while revisiting requirement ownership.")
         client.progress()
-        client.answer(dict(option="replan", rationale="Preserve baseline provenance and accepted scope", content={}))
+        client.answer(dict(option="replan", rationale="Preserve baseline provenance and accepted scope", content=content))
         advance_meaning(client, content, stop_at=lambda r: (r.get("question") or {}).get("purpose") == "trace")
+        packet = client.offered["packet"]
         moved = json.loads(provider_answer(workspace, client.current["question"], dict(option="ready", rationale="Recheck ownership", content=content)))
-        row = edit(moved,"R4","parents")
-        original_parents = row["value"]
-        row["value"] = ["BASE_OTHER"]
-        for _ in range(3): client.answer(json.dumps(moved))
-        row["value"] = original_parents
-        client.answer(partial(row))
+        client.answer(json.dumps(moved))
         advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution", client.current
+        # Existing ancestry and execution defects are still refused together at
+        # their canonical batch owner; the strict question grants no unasked edits.
+        from codex_harness.core.planner_nodes import batch_nodes
+        from codex_harness.core.spine import SpineError
+        with open_plan_store(workspace) as store:
+            before = store.spine().to_dict()
+            changes = {n["id"]:n for n in json.loads(json.dumps(before))["nodes"]}
+            original_parents = changes[requirement]["parents"][:]
+            changes[requirement]["parents"] = ["BASE_OTHER"]
+            changes[feature["id"]]["fields"]["baseline"]["testRefs"] *= 2
+            test_ids = [fixture_id(workspace,h) for h in ("T_INPUT","T_RECOVERY")]
+            changes[test_ids[0]]["parents"] *= 2
+            for identity in test_ids: changes[identity]["fields"]["execution"]["testRoots"] = ["../outside"]
+            try: batch_nodes(store,list(changes.values()),lambda n:None)
+            except SpineError as error:
+                refused = error.editable_fields
+                assert refused[requirement] == ["parents"] and "fields.baseline.testRefs" in refused[feature["id"]]
+                assert all("fields.execution.testRoots" in refused[identity] for identity in test_ids) and "parents" in refused[test_ids[0]]
+            else: raise AssertionError("An invalid ancestry/execution batch was published")
+            assert store.spine().to_dict() == before, "A refused batch changed canonical state"
         with open_plan_store_readonly(workspace) as store:
+            assert dict(id="A_FRESH_RESULT",kind="result",title="New stop verification") in packet["facts"]["referenceInventory"]
             assert store.spine().node(feature["id"])["fields"]["baseline"] == baseline, "Repair rewrote retained baseline provenance"
             assert store.spine().node(requirement)["parents"] == original_parents
             assert all(store.spine().node(key) == value for key, value in unrelated.items()), "Ancestry repair changed unrelated accepted nodes"
+            result = store.spine().node(fixture_id(workspace,"ITERATION"))["fields"]["resultRefs"][0]
+            assert result == dict(id="A_FRESH_RESULT",revision=store.spine().revision("A_FRESH_RESULT")), "Replan lost the existing observed result"
 
     finally:
         client.close()
@@ -4644,7 +4760,29 @@ def controller_interruptions(workspace, twin):
                 content=dict(nodes=[build]),
             )
         )
-        advance_meaning(client, content, stop_at=lambda r: is_exhaustion(r) or (r.get("effect") or {}).get("kind") == "build")
+        # r6: the host lost this new publication's controller before dispatch,
+        # so its empty run hid the earlier failed attempts of unchanged work.
+        # Use the existing real controller boundary, never fabricated run data.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            if twin == 1:
+                fault = workspace / "controller-death.json"
+                fault.write_text(json.dumps(dict(port=barrier.getsockname()[1], afterStarted=False)))
+                def revoke_successor():
+                    with barrier.accept()[0] as controller:
+                        controller.settimeout(30)
+                        admitted = json.loads(controller.makefile("rb").readline())
+                        assert admitted["stage"] == "controller", admitted
+                        fault.unlink()
+                        controller.sendall(b"!")
+                        assert controller.recv(1) == b"", "Successor controller must exit before payload entry"
+                        return admitted
+                revoked = pool.submit(revoke_successor)
+            advance_meaning(client, content, stop_at=lambda r: is_exhaustion(r) or (r.get("effect") or {}).get("kind") == "build")
+            if twin == 1:
+                successor = revoked.result(timeout=30)
+                assert client.current["jobId"] == successor["jobId"]
+                assert "run" not in planner_jobs.worker_job_status(workspace, successor["jobId"])
         wait_exhaustion()
         with open_plan_store_readonly(workspace) as store:
             recoveries = [
@@ -4667,15 +4805,29 @@ def controller_interruptions(workspace, twin):
         facts = client.offered["packet"]["facts"]
         context = facts["context"]
         failed = str(context.get("job",{}).get("terminal",{}))
-        ready = "Injected worker failure" in failed and context.get("attempts") and context.get("priorDirections")
+        ready_terms = dict(startupFailure="Injected worker failure" in failed, attempts=bool(context.get("attempts")),
+                           priorDirections=bool(context.get("priorDirections")), contractsInGraph=any(n["id"] == fixture_id(workspace,"C") for n in facts["graph"]))
+        if twin == 1 and all(ready_terms.values()):
+            # C26: readiness alone misses relabeled current results or retagged history.
+            native = planner_jobs.worker_job_status(workspace, context["jobId"])["terminal"]
+            dossier = context["job"]["terminal"]
+            assert {k:v for k,v in dossier.items() if k != "retainedWorkObservations"} == native
+            work = native["outcomes"][fixture_id(workspace,"C")]["workId"]
+            history = next(h for h in dossier["retainedWorkObservations"] if h["workId"] == work)
+            assert history["historical"] and history["jobId"] != context["jobId"]
+            assert "Injected worker failure" in history["outcome"]["workStatus"]
+            with open_plan_store_readonly(workspace) as store:
+                original = json.loads(store.connection.execute("SELECT payload_json FROM events WHERE id=?", (history["eventId"],)).fetchone()[0])["context"]["job"]
+            assert (original["jobId"], original["terminal"]["segmentId"]) == (history["jobId"], history["segmentId"])
+            assert original["terminal"]["outcomes"][fixture_id(workspace,"C")] == history["outcome"]
         contract = next(n for n in content["nodes"] if n["id"] == "C")
-        if ready and any(n["id"] == fixture_id(workspace,"C") for n in facts["graph"]):
+        if all(ready_terms.values()):
             contract["text"] += " Use an isolated startup path after the failed shared startup"
             client.answer(dict(option="repair",rationale="The shared startup approach failed; isolate startup before exercising receipt behavior",content=dict(nodes=[contract])))
             advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "execution")
         else:
             client.answer(dict(option="pause",rationale="The failed approach cannot be established from the supplied facts",content={}))
-        assert client.current["question"]["purpose"] == "execution", client.current
+        assert (client.current.get("question") or {}).get("purpose") == "execution", dict(failedReadyTerms=[k for k,v in ready_terms.items() if not v], readyTerms=ready_terms, jobId=context.get("jobId"), contextKeys=list(context), state=client.current["state"], reason=client.current["reason"])
         pending = client.current["question"]
         wrong = json.loads(provider_answer(workspace,pending,judge_reply(pending)))
         wrong["check"] = "contracts"
@@ -4837,6 +4989,10 @@ def controller_launch_interruption(workspace, after_started, *, stale=False):
                 assert len({r["segmentId"] for r in recoveries}) == 3
                 assert all(r["proof"]["faultBeads"] == [fixture_id(workspace, "B")] for r in recoveries)
                 assert "Two automatic recoveries exhausted" in client.current["question"]["purpose"]
+                facts = client.offered["packet"]["facts"]
+                contracts = fixture_id(workspace, "C")
+                assert facts["context"]["affectedNodeIds"] == [fixture_id(workspace, "B")]
+                assert contracts in facts["context"]["attempts"] and any(n["id"] == contracts for n in facts["graph"]), facts
                 client.answer(dict(option="continue", rationale="Continue unchanged admitted Build after bounded controller losses", content={}))
             resolved = recoveries[0]
             assert resolved["choice"] == ("abandon" if after_started else "readmit"), resolved
@@ -4866,6 +5022,12 @@ def controller_launch_interruption(workspace, after_started, *, stale=False):
                     assert client.current["jobId"] == job and resumed_selection["runPath"] == str(original_path)
                     assert successor["semanticContracts"] == original_proof
                     assert successor["beads"][fixture_id(workspace, "C")]["evidenceDir"] == original["beads"][fixture_id(workspace, "C")]["evidenceDir"]
+                    if repeated:
+                        with open_plan_store_readonly(workspace) as store:
+                            from codex_harness.core import planner_jobs as jobs
+                            roots = {p.parent.name for p in (jobs._directory(workspace, job) / "segments").glob("*/request.json") if json.loads(p.read_text())["resumeRun"] is None}
+                            assert len(roots) == 1, roots
+                            assert_job_segments(store, job, roots | {jobs.latest_segment(store, job).name})
                 advance_meaning(client, content)
                 assert client.current["state"] == "DONE", client.current
                 with open_plan_store_readonly(workspace) as store:
@@ -5193,6 +5355,47 @@ def test_golden_path(tmp_path, request, surface):
     main_path_golden(tmp_path,surface,started=started,ledger_start=ledger_start)
 
 
+def assert_job_segments(store, job_id, expected):
+    """C18/C23: controller replacement may add only accounted, unentered work.
+
+    Fixed counts rejected safe handoff; dropping the count missed unexplained
+    controllers and Contracts reruns. Require native admission and recovery.
+    """
+    from codex_harness.core import planner_jobs as jobs
+    directory = jobs._directory(store.workspace, job_id)
+    root_request = jobs._request(directory)
+    segments = {p.parent.name: json.loads(p.read_text()) for p in (directory / "segments").glob("*/quiescence.json")}
+    assert segments.keys() == {p.name for p in (directory / "segments").iterdir() if p.is_dir()}
+    assert expected <= segments.keys(), (expected, segments.keys())
+    admitted = [r["effect"] for r in approvals.records(store, "run-loop-cursor") if (r.get("effect") or {}).get("jobId") == job_id]
+    recoveries = approvals.records(store, "worker-recovery-resolved")
+    for key, receipt in segments.items():
+        path = directory / "segments" / key
+        request = json.loads((path / "request.json").read_text())
+        assert request["jobId"] == job_id and request["segmentId"] == key
+        assert request["work"] == jobs.admitted_work(store, directory, root_request)
+        assert any(e.get("segmentId") == key and e["generation"] == request["generation"] for e in admitted), key
+        assert receipt["segmentId"] == receipt["terminal"]["segmentId"] == key
+        assert receipt["requestDigest"] == receipt["terminal"]["requestDigest"] == root_request["requestDigest"]
+        if key in expected:
+            assert (path / "started.json").is_file(), key
+            assert jobs.verified_segment_exit(root_request, key, receipt), key
+            continue
+        assert not (path / "started.json").exists(), ("Unexplained entered controller", key)
+        outcomes = receipt["terminal"]["outcomes"]
+        assert {k:o["workId"] for k,o in outcomes.items()} == request["work"]
+        assert all(o["launchCertain"] and (o["status"] == "not launched" or not o["fault"] and o["status"] in {"contracts-red", "reused", "requirement-validated", "already-satisfied"}) for o in outcomes.values()), outcomes
+        assert not (path / "launch.json").exists() or any(
+            r["jobId"] == job_id and r.get("segmentId") == key
+            and (r["proof"].get("processObservation") or {}).get("running") is False
+            for r in recoveries), ("Controller exit unproven", key)
+        assert any(r["jobId"] == job_id and r.get("segmentId") == key and r["choice"] == "readmit"
+                   and r["ownershipReleased"]
+                   and r["successor"] == job_id and r.get("resumeRun") == request["resumeRun"] and request["resumeRun"]
+                   and r["proof"]["processOutcomes"] == {k:o["status"] for k,o in outcomes.items()}
+                   for r in recoveries), ("Unexplained unentered segment", key)
+
+
 @timed
 def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
     """Real contracts failure, retained reply, repair, build, delivery and C.
@@ -5240,11 +5443,9 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
             from codex_harness.core import planner_jobs as jobs
 
             run = client.current
-            records = list(
-                (jobs._directory(tmp_path, run["jobId"]) / "segments").glob("*/quiescence.json")
-            )
-            assert len(records) == 1
-            cleanup = json.loads(records[0].read_text())["control"]
+            first_segment = jobs.latest_segment(store, run["jobId"])
+            assert_job_segments(store, run["jobId"], {first_segment.name})
+            cleanup = json.loads((first_segment / "quiescence.json").read_text())["control"]
             assert cleanup["quiescenceVerified"] and cleanup["activeProcessesAfterTeardown"] == 0
             assert not approvals.current(store, "B")["human_identity_verified"]
             from codex_harness.core.planner_candidate import current_job_run
@@ -5365,11 +5566,15 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
         assert second["candidate"] != first["candidate"]
         with open_plan_store_readonly(tmp_path) as store:
             observed_job = client.current["jobId"]
-            segments = jobs._directory(tmp_path, observed_job) / "segments"
-            assert len(list(segments.glob("*/quiescence.json"))) == 2
             from codex_harness.core.planner_candidate import current_job_run
 
             _, observed_run = current_job_run(store, required=True)
+            segments = jobs._directory(tmp_path, observed_job) / "segments"
+            contracts_segments = {p.parent.name for p in segments.glob("*/request.json") if json.loads(p.read_text())["resumeRun"] is None}
+            assert len(contracts_segments) == 1, contracts_segments
+            expected_segments = contracts_segments | {jobs.latest_segment(store, observed_job).name}
+            assert len(expected_segments) == 2, expected_segments
+            assert_job_segments(store, observed_job, expected_segments)
             assert observed_run["beads"][fixture_id(tmp_path, "B") ]["attempt"] is not None
             assert observed_run["status"] == "pending-judgment"
             assert observed_run["semanticContracts"]["state"] == "RED"
@@ -5489,9 +5694,9 @@ def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
             else:
                 preview_environment(tmp_path)
             assert run["semanticValidation"]["linkedRed"]
-            job = jobs._directory(tmp_path, selected["jobId"])
-            assert len(list((job / "segments").glob("*/quiescence.json"))) == 2
-            assert sum(bool(bead.get("attempt")) for bead in run["beads"].values()) == 2
+            assert selected["jobId"] == observed_job
+            assert_job_segments(store, selected["jobId"], expected_segments)
+            assert {key for key,bead in run["beads"].items() if bead.get("attempt")} == {fixture_id(tmp_path, "C"), fixture_id(tmp_path, "B")}
             assert (
                 len(store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchall()) == 1
             )

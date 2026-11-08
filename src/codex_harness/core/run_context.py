@@ -8,7 +8,7 @@ def direction_content(record):
 
 
 def recovery_context(store, run):
-    """Resolve recovery facts through the job/dispatch and judgment owners."""
+    """Retain observed attempts by admitted work, including unentered successors."""
     from pathlib import Path
     from codex_harness.core import planner_jobs as jobs, planner_recovery as recovery, approvals
     from codex_harness.core.record_io import read_record_json
@@ -26,10 +26,23 @@ def recovery_context(store, run):
         context["affectedNodeIds"] = context["affectedNodeIds"] or list(record["beads"])
         context["attempts"] = {key:[{**{k:v for k,v in bead.items() if k in {"status","blocker","workerReport","requirementRefs"}},
             "attempt":{k:v for k,v in (bead.get("attempt") or {}).items() if k in {"status","exitCode","startedAt","finishedAt","changedPaths","requirementRefs"}}}
-            for bead in [*record["beads"][key].get("superseded",[]),record["beads"][key]]] for key in context["affectedNodeIds"] if key in record["beads"]}
-    affected = set(context["affectedNodeIds"])
+            for bead in [*record["beads"][key].get("superseded",[]),record["beads"][key]]] for key in record["beads"]}
+    work = {key:o["workId"] for key,o in status.get("terminal",{}).get("outcomes",{}).items() if not any(r.get("attempt") for r in context.get("attempts",{}).get(key,[]))}
+    affected = set(context["affectedNodeIds"]) | context.get("attempts",{}).keys() | work.keys()
     directions = {}
     for r in approvals.records(store,"judgment-recorded"):
+        for ref in r["sourceRefs"] if work else []:
+            if ref["kind"] != "loop-question":
+                continue
+            prior = ref["payload"].get("context", {})
+            for key,outcome in prior.get("job",{}).get("terminal",{}).get("outcomes",{}).items():
+                rows = [row for row in prior.get("attempts",{}).get(key,[]) if not row.get("source")]
+                # Ignore previously enriched rows: retain the original observation once.
+                if work.get(key) == outcome["workId"] and any(row.get("attempt") for row in rows):
+                    source = dict(eventId=ref["id"], jobId=prior["job"]["jobId"], segmentId=prior["job"]["terminal"]["segmentId"], workId=work.pop(key), historical=True)
+                    context.setdefault("attempts",{})[key] = [dict(row,source=source) for row in rows] + context.get("attempts",{}).get(key,[])
+                    terminal = context["job"]["terminal"]
+                    context["job"]["terminal"] = dict(terminal, retainedWorkObservations=[*terminal.get("retainedWorkObservations",[]), dict(source,outcome=outcome)])
         if (r["question"] == "loop-direction" and r.get("meaning")
             and (r["meaning"].get("option") in {"repair","replan","research"} or r["meaning"].get("amendments"))
             and any(s["payload"].get("context",{}).get("jobId") == run["jobId"] or affected.intersection(s["payload"].get("context",{}).get("affectedNodeIds",[])) for s in r["sourceRefs"])):
@@ -60,7 +73,7 @@ def relevant_ids(store, family, purpose, context, judgment=None):
         }}
         keys.update(ref["id"] for key in list(keys) for ref in spine.node(key)["fields"].get("decisionRefs", []))
     elif family == "direction":
-        keys = set(context.get("affectedNodeIds", [])) & set(spine.ids())
+        keys = (set(context.get("affectedNodeIds", [])) | context.get("attempts", {}).keys()) & set(spine.ids())
     elif judgment:
         keys = {r["id"] for r in judgment["subjectRefs"] + judgment["evidenceRefs"]}
         observation = next((r["payload"] for r in judgment["sourceRefs"] if r["kind"] == "candidate-observation"), None)
@@ -143,7 +156,8 @@ def packet(store, pending):
     dialogue = [json.loads(r[0]) for r in store.connection.execute(
         "SELECT payload_json FROM events WHERE kind='chat-message' ORDER BY id DESC LIMIT 12")]
     selected = relevant_ids(store, pending["family"], pending["purpose"], pending.get("context", {}), record)
-    nodes = [store.spine().node(key) for key in selected]
+    spine = store.spine()
+    nodes = [spine.node(key) for key in selected]
     for source in sources:
         facts = source.get("facts", {})
         if "currentNodes" in facts:
@@ -161,6 +175,7 @@ def packet(store, pending):
             setup=run["setup"], vision=[n for n in nodes if n["kind"] == "vision"],
             acceptedVision=json.loads(store._meta()["locked_vision_json"]) if store._meta()["locked_vision_json"] else None,
             graph=[n for n in nodes if n["kind"] != "vision"],
+            referenceInventory=[{k:n[k] for k in ("id","kind","title")} for n in spine.to_dict()["nodes"] if n["id"] not in selected] if pending["purpose"] == "trace" else [],
             repository=repository_facts(store.workspace) if pending["family"] == "author" else None,
             dialogue=list(reversed(dialogue)), sources=sources,
             assumptions=[dict(r) for r in store.connection.execute("SELECT * FROM assumptions")],
@@ -179,7 +194,7 @@ def review_packet(reviewer, packet, *, exact_fix=None):
     packet, raw_requests = packet.split("\n## Bound review requests\n", 1)
     record = json.loads(raw_requests)[reviewer["name"]]
     acceptance = any(r["payload"].get("facts", {}).get("reviewBinding", {}).get("runId") for r in record["sourceRefs"])
-    answer_schema = question_spec("assess", "full-dream" if acceptance else "plan-review")[0]
+    answer_schema, examples = question_spec("assess", "full-dream" if acceptance else "plan-review")
     from codex_harness.core.run_questions import acceptance_inventory
     inventory = acceptance_inventory(record) if acceptance else {}
     schema_path = Path(gettempdir()) / ("seldon-review-schema-" + record["id"] + ".json")
@@ -188,6 +203,5 @@ def review_packet(reviewer, packet, *, exact_fix=None):
         answerSchema=answer_schema, **inventory,
         evidence=evidence_facts(record),
         exactFix=exact_fix or record["error"],
-        example=dict(verdict="inconclusive", rationale="Evidence does not establish the whole dream", gaps=[], findings=[], depth="Inspect the highest-consequence failure paths",
-            **(dict(featureAssessments=[],qualityAssessments=[],stubOrMissingGaps=[]) if acceptance else {}))), ensure_ascii=False)
+        example=examples[0]), ensure_ascii=False)
     return packet, answer_schema, schema_path

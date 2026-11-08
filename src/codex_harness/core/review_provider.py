@@ -21,7 +21,6 @@ _REVIEWERS = (
 _SEVERITIES = ("blocker", "major", "minor", "note")
 
 _FIELDS = {"node_id", "severity", "finding", "suggestion"}
-
 def _executable(provider: str, executable_for) -> str | None:
     if executable_for is None:
         if provider == "codex" and os.name == "nt" and os.environ.get("LOCALAPPDATA"):
@@ -53,13 +52,14 @@ def coverage(selected):
 
 def _launch_review(reviewer, packet, executable, *, instructions=None, answer_schema=None, schema_path=None, exact_fix=None):
     from codex_harness.core.provider_launch import get_adapter
+    from codex_harness.core.run_schemas import strict_schema
     if not executable:
         raise OSError(f"Reviewer executable unavailable: {reviewer['provider']}")
     if "\n## Bound review requests\n" in packet:
         from codex_harness.core.run_context import review_packet
         packet, answer_schema, schema_path = review_packet(reviewer, packet, exact_fix=exact_fix)
     if answer_schema is not None:
-        Path(schema_path).write_text(json.dumps(answer_schema, ensure_ascii=False), encoding="utf-8")
+        Path(schema_path).write_text(json.dumps(answer_schema := strict_schema(answer_schema), ensure_ascii=False), encoding="utf-8")
     launch = get_adapter(reviewer["provider"]).provider_normal_command(
         prompt=packet,
         prompt_via_stdin=True,

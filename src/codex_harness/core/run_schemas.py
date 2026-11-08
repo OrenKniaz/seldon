@@ -1,6 +1,6 @@
 """Question-specific output contracts. Control is closed; product meaning is open."""
 
-TEXT = dict(type="string", minLength=1)
+TEXT = dict(type="string", pattern=r"\S")
 STRING = dict(type="string")
 BOOL = dict(type="boolean")
 
@@ -18,7 +18,7 @@ def choice(*values):
 
 
 def nullable(schema):
-    return dict(anyOf=[schema, dict(type="null")])
+    return schema if any(b.get("type") == "null" for b in schema.get("anyOf",[])) else dict(anyOf=[*schema.get("anyOf",[schema]), dict(type="null")])
 
 
 GAP = obj(subjectRef=TEXT, evidenceRefs=array(), issue=TEXT)
@@ -35,11 +35,7 @@ AMENDMENT = obj(sourceRef=TEXT, targetRefs=array(), proposedChange=TEXT, rationa
 STEERING = obj(action=choice("continue", "repair", "replan", "research", "ask_user", "pause", "stop"),
                question=nullable(TEXT), amendments=array(AMENDMENT), rationale=TEXT, reply=STRING)
 
-# Only literal application data uses a recursive JSON value. Executable
-# interfaces (actions, launches, observations) have explicit contracts below.
-DATA = {"$ref": "#/$defs/data"}
-DATA_DEF = dict(anyOf=[STRING, dict(type="number"), BOOL, dict(type="null"),
-                      array(DATA), obj(entries=array(obj(key=STRING, value=DATA)))])
+DATA = dict(type="string", description="JSON-encoded literal application data")
 ARGV = array(dict(anyOf=[STRING, obj(path=TEXT), obj(input=TEXT)]))
 LAUNCH = obj(entry=nullable(TEXT), module=nullable(TEXT), runtime=nullable(TEXT), argv=ARGV)
 HTTP = obj(method=TEXT, path=TEXT, statusEquals=dict(type="integer"), json=nullable(obj(value=DATA)), jsonEquals=nullable(obj(value=DATA)))
@@ -71,27 +67,19 @@ SCENARIO = obj(
 TARGET = obj(kind=nullable(choice("web")), **LAUNCH["properties"],
              server=nullable(obj(**LAUNCH["properties"], readyPath=TEXT, readyWithin=dict(type="number"))))
 
-# The trace writer remains a canonical structural boundary. Handles are local to
-# one proposed slice; durable IDs are allocated by CODE, never chosen by a model.
-from codex_harness.core.semantic_schema import TRACE_LINKS
-COMMON = dict(expansionRefs=array(), rationale=nullable(STRING), **{k:nullable(array()) for k in TRACE_LINKS})
-EXECUTION = obj(entry=nullable(TEXT), module=nullable(TEXT), runtime=nullable(TEXT),
-                argv=ARGV,
-                testRoots=array(), rationale=TEXT)
+# CODE retains identity; questions expose only requested meaning.
+from codex_harness.core.semantic_schema import TRACE_LINKS, REFERENCE_KINDS, eligible_refs, required_fields, outstanding_fields
+COMMON = dict(expansionRefs=array(), rationale=nullable(STRING), **{k:array() for k in TRACE_LINKS})
+EXECUTION = obj(**LAUNCH["properties"], testRoots=array(), rationale=TEXT)
+from codex_harness.core.spine import ALLOWED_PARENTS
 TRACE_FIELDS = {
-    "feature": obj(**COMMON, baseline=nullable(obj(source=TEXT, behavior=TEXT, rationale=TEXT, codeRefs=array(), testRefs=array(), resultRefs=array()))), "story": obj(**COMMON), "requirement": obj(**COMMON),
-    "architecture": obj(**COMMON), "design": obj(**COMMON, clauseCoverage=array(obj(clause=TEXT, coverage=TEXT))), "contract": obj(**COMMON),
-    "decision": obj(**COMMON),
-    "test": obj(**COMMON, module=TEXT, level=choice("semantic", "e2e"), execution=nullable(EXECUTION)),
-    "bead": obj(**COMMON, ownedFiles=array(), dependsOn=array(), lessons=array(),
-                semanticPhase=choice("contracts", "build"), capabilityRefs=array()),
-    "discovery": obj(source=TEXT), "research": obj(**COMMON),
-    "metric": obj(definition=TEXT, unit=TEXT),
-    "stop-condition": obj(**{**COMMON,"metricRefs":array()}, condition=TEXT),
-    "amendment": obj(**{**COMMON,**AMENDMENT["properties"]}),
-    "iteration": obj(**{**COMMON,"metricRefs":array(),"resultRefs":array(),"stopConditionRefs":array()}),
-    "baton": obj(**{**COMMON,"rationale":TEXT}, assumptions=array(),openQuestions=array(),currentState=TEXT,nextSafeAction=TEXT),
-    "code": obj(**COMMON), "acceptance": obj(**COMMON),
+    kind: obj(**({} if kind in {"discovery", "metric"} else COMMON), **{
+        "feature": dict(baseline=nullable(obj(source=TEXT, behavior=TEXT, rationale=TEXT, codeRefs=array(), testRefs=array(), resultRefs=array()))),
+        "design": dict(clauseCoverage=array(obj(clause=TEXT, coverage=TEXT))),
+        "test": dict(execution=nullable(EXECUTION)),
+        "bead": dict(capabilityRefs=array()),
+    }.get(kind, {}))
+    for kind in ALLOWED_PARENTS if kind not in {"vision", "result"}
 }
 UNDERSTANDING = obj(
     understanding=TEXT, users=array(), firstUserMoment=TEXT, scopeIn=array(), scopeOut=array(),
@@ -125,7 +113,7 @@ QUESTIONS = {
     'direction': (STEERING, [dict(action='ask_user', amendments=[], question='May the accepted scope change?', reply='This discovery affects the agreed scope.', rationale='The observed gap requires a user scope decision')]),
     'understanding': (UNDERSTANDING, [dict(understanding='Compare measured performance with an agreed goal', users=['A person investigating a measurement'], firstUserMoment='Load a measurement and see its result', scopeIn=['Measure and compare'], scopeOut=['Unrequested changes'], qualityBar='Make uncertainty visible', doneFeelsLike='The person can reproduce and explain the result', assumptions=[], openQuestions=['Which measurement defines success?'], upgrades=[dict(proposal='Show uncertainty alongside the result', kind='micro', impact='Avoid misleading confidence', disposition='accept')], qualityCriteria=['Results are reproducible'], metrics=[], stopConditions=[], readiness='ask_user', question='Which measurement defines success?', reply='Let us agree on the success measurement before locking the vision.', rationale='The metric changes what we build')]),
     'finding-dispositions': (obj(dispositions=array(obj(memberRef=TEXT,disposition=choice("resolved","rejected","deferred"),resolution=TEXT)),rationale=TEXT,reply=STRING), [dict(dispositions=[], rationale='Await the current repair evidence before proposing closure', reply='The concern remains open.')]),
-    "trace": (dict(obj(edits=array(obj()), rationale=TEXT, reply=STRING), **{"$defs":{"data":DATA_DEF}}), [dict(edits=[],rationale="No sections changed; CODE retains all members. To change meaning, supply edits with the named ref, section and typed value; never copy unchanged sections. Leave codeRefs empty until a code node exists.",reply="The retained plan is ready.")]),
+    "trace": (obj(edits=obj(), rationale=TEXT, reply=STRING), [dict(edits={},rationale="No sections changed; CODE retains all members. Supply every required handle:section property with its typed value; never copy unchanged sections. Leave codeRefs empty until a code node exists.",reply="The retained plan is ready.")]),
     "plan-outline": (OUTLINE, [dict(**{k:[] for k in OUTLINE["properties"] if k not in {"rationale","reply"}},rationale="Propose the complete plan in one batch",reply="I will link the proposed plan next.")]),
 }
 
@@ -136,9 +124,8 @@ def question_spec(family,purpose):
 
 def author_contract(store, purpose, context):
     from copy import deepcopy
-    from codex_harness.core.run_context import relevant_ids
     spine = store.spine()
-    supplied = {key:spine.node(key) for key in relevant_ids(store,"author",purpose,context)}
+    supplied = {key:spine.node(key) for key in spine.ids()} | {n["id"]:n for n in context.get("nodes",[])}
     schema = deepcopy(question_spec("author",purpose)[0])
     if purpose == "plan-outline":
         vision = spine.node(spine.ids("vision")[0])["fields"]
@@ -146,38 +133,91 @@ def author_contract(store, purpose, context):
             refs = list(vision.get("targets",{})) if group == "targets" else [s["id"] for s in vision.get("scenarios",{}).get("scenarios",[])] if group == "scenarios" else [key for key,node in supplied.items() if node["kind"] == group]
             schema["properties"][group]["items"]["properties"]["ref"] = nullable(choice(*refs)) if refs else dict(type="null")
         return schema
-    supplied.update({n["id"]:n for n in context["nodes"]})
-    from codex_harness.core.spine import ALLOWED_PARENTS, SCENARIO_LINKS
-    links = {**TRACE_LINKS, "dependsOn":{"bead"}, "lessons":{"decision"},
-             "sourceRef":{"discovery","research","result"}, "targetRefs":set(ALLOWED_PARENTS),
-             **SCENARIO_LINKS, "testRef":{"test"}}
-    handles = {k:[key for key,n in supplied.items() if n["kind"] in kinds] for k,kinds in links.items()}
-    handles.update(target=[n["id"] for n in context["targets"]], expansionRefs=[u["id"] for u in spine.node(spine.ids("vision")[0])["fields"].get("expansion",{}).get("upgrades",[])])
+    from codex_harness.core.spine import SCENARIO_LINKS
+    handles = {k:eligible_refs(supplied,k) for k in REFERENCE_KINDS}
+    handles.update({k:[key for key,n in supplied.items() if n["kind"] in kinds] for k,kinds in {**SCENARIO_LINKS,"testRef":{"test"}}.items()})
+    vision = spine.node(spine.ids("vision")[0])["fields"]
+    handles.update(target=sorted(set(vision.get("targets",{})) | {n["id"] for n in context["targets"]}), expansionRefs=[u["id"] for u in vision.get("expansion",{}).get("upgrades",[])])
+    defs = {}
+    def reference(name, refs):
+        if not refs: return dict(type="null")
+        defs[name] = choice(*refs)
+        return {"$ref":"#/$defs/"+name}
     def constrain(value):
         for key, child in value.get("properties", {}).items():
             if key in handles:
-                refs = handles[key]
-                ref = (array(choice(*refs)) if refs else dict(type="array",items=TEXT,maxItems=0)) if key.endswith("Refs") or key in {"dependsOn","lessons"} else choice(*refs) if refs else dict(type="null")
-                child = nullable(ref) if "anyOf" in child else ref
+                ref = reference(key,handles[key])
+                if handles[key] and (key.endswith("Refs") or key in {"dependsOn","lessons"}):
+                    ref = dict(array(ref), **({"minItems":child["minItems"]} if "minItems" in child else {}))
+                child = nullable(ref) if "anyOf" in child and handles[key] else ref
             value["properties"][key] = constrain(child)
         if "items" in value: value["items"] = constrain(value["items"])
         for child in value.get("anyOf",[]): constrain(child)
         return value
-    edits = []
-    def sections(fields, prefix="fields"):
-        for k,v in fields.get("properties",{}).items():
-            yield prefix+"."+k, v
-            for branch in v.get("anyOf",[v]):
-                yield from sections(branch,prefix+"."+k)
-    for kind, fields in TRACE_FIELDS.items():
-        refs = [n["id"] for n in context["nodes"] if n["kind"] == kind]
-        if refs:
-            parents = [k for k,n in supplied.items() if n["kind"] in ALLOWED_PARENTS[kind]]
-            contracts = {"parents":array(choice(*parents)) if parents else dict(type="array",items=TEXT,maxItems=0),
-                        **dict(sections(constrain(deepcopy(fields))))}
-            edits.extend(dict(obj(ref=choice(*refs), section=choice(k), value=v), title=k) for k,v in contracts.items())
-    for group, section, contract in (("targets","target",TARGET), ("scenarios","scenario",SCENARIO)):
-        if context[group]:
-            edits.append(dict(obj(ref=choice(*(r["id"] for r in context[group])), section=choice(section), value=constrain(deepcopy(contract))), title=section))
-    schema["properties"]["edits"]["items"] = dict(anyOf=edits)
+    from codex_harness.core.run_content import trace_envelope, canonical
+    envelope = trace_envelope(spine,context,context.get("rejectedEdits"))
+    requested = context.get("editableFields")
+    edits = {}
+    for node in context["nodes"]:
+        ref, kind = node["id"], node["kind"]
+        fields = deepcopy(TRACE_FIELDS[kind]["properties"])
+        required = required_fields(kind,spine.semantic,supplied)
+        fields.update(required)
+        contracts = dict(parents=dict(array(reference("parents_"+kind,[k for k,n in supplied.items() if n["kind"] in ALLOWED_PARENTS[kind]])),minItems=1), fields=constrain(obj(**fields)))
+        row = envelope[ref]
+        sections = requested.get(ref,[]) if requested is not None else ([] if row["parents"] else ["parents"]) + outstanding_fields(dict(node, fields=canonical(row["fields"])), spine.semantic, supplied, authoring=True)
+        if "editableFields" not in context and ref not in spine.ids(): sections = ["parents",*("fields."+k for k in fields if k not in handles or handles[k] or k in required)]
+        for section in sections:
+            value = contracts[section.split(".")[0]]
+            for part in section.split(".")[1:]:
+                value = next(branch["properties"][part] for branch in value.get("anyOf",[value]) if part in branch.get("properties",{}))
+            edits[ref+":"+section] = value
+    for group,section,contract in (("targets","target",TARGET),("scenarios","scenario",SCENARIO)):
+        existing = vision.get("targets",{}) if group == "targets" else {s["id"] for s in vision.get("scenarios",{}).get("scenarios",[])}
+        edits.update({r["id"]+":"+section:constrain(deepcopy(contract)) for r in context[group]
+            if (section in requested.get(r["id"],[]) if requested is not None else r["id"] not in existing and section not in envelope.get(r["id"],{}))})
+    schema["properties"]["edits"] = obj(**edits)
+    if defs: schema["$defs"] = defs
     return schema
+
+
+def strict_schema(schema):
+    """Audit the emitted common subset; references only share finite enum choices."""
+    import json
+    original, definitions, shared = schema.get("$defs",{}), {}, {}
+    def compact(node, chain=(), depth=0):
+        if "$ref" in node:
+            ref = node["$ref"]
+            if set(node) != {"$ref"} or not ref.startswith("#/$defs/") or ref in chain or ref.rsplit("/",1)[1] not in original:
+                raise ValueError("CODE defect: nonlocal/recursive schema reference")
+            return compact(original[ref.rsplit("/",1)[1]],(*chain,ref),depth)
+        depth += node.get("type") in ("object","array")
+        if depth>10 or "$defs" in node: raise ValueError("CODE defect: unsupported schema nesting")
+        node = {**node, **({"properties":{k:compact(v,chain,depth) for k,v in node["properties"].items()}} if "properties" in node else {}),
+                **({"items":compact(node["items"],chain,depth)} if "items" in node else {}),
+                **({"anyOf":[compact(v,chain,depth) for v in node["anyOf"]]} if "anyOf" in node else {})}
+        if "anyOf" in node or "enum" in node:
+            key = json.dumps(node,sort_keys=True)
+            name = shared.setdefault(key,"s"+str(len(shared)))
+            definitions[name] = node
+            return {"$ref":"#/$defs/"+name}
+        return node
+    result = compact({k:v for k,v in schema.items() if k != "$defs"})
+    def declarations(node):
+        return [node] + [v for child in [*node.get("properties",{}).values(),*node.get("anyOf",[]),*([node["items"]] if "items" in node else [])] for v in declarations(child)]
+    rows = declarations(result) + [v for d in definitions.values() for v in declarations(d)]
+    totals = [0,0,sum(map(len,definitions))]
+    if result.get("type") != "object": raise ValueError("CODE defect: strict root must be an object")
+    for node in rows:
+        if set(node)-{"type","properties","required","additionalProperties","items","anyOf","enum","pattern","minItems","$ref","description"} or node.get("type") not in (None,"object","array","string","number","integer","boolean","null"):
+            raise ValueError("CODE defect: unsupported strict schema keyword/type")
+        if node.get("type") == "object" and (node.get("additionalProperties") is not False or set(node.get("required",[])) != set(node.get("properties",{}))):
+            raise ValueError("CODE defect: strict object properties must equal required and additionalProperties=false")
+        if node.get("minItems",0) not in (0,1) or "pattern" in node and node["pattern"] != r"\S": raise ValueError("CODE defect: unsupported common schema constraint")
+        values = node.get("enum",[])
+        size = sum(len(v) for v in values if isinstance(v,str))
+        if "enum" in node and (not values or any(isinstance(v,(dict,list)) for v in values) or len(values)>250 and size>15000): raise ValueError("CODE defect: invalid/oversized strict enum")
+        totals = [totals[0]+len(node.get("properties",{})),totals[1]+len(values),totals[2]+size+sum(map(len,node.get("properties",{})))]
+    if sum("anyOf" in n for n in rows)>16 or any(v>limit for v,limit in zip(totals,(5000,1000,120000))): raise ValueError("CODE defect: strict schema complexity budget exceeded")
+    if definitions: result["$defs"] = definitions
+    return result

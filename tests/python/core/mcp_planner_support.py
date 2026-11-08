@@ -43,6 +43,7 @@ def provider_shape(schema, value, root=None):
     """Convert retained fixture data to strict optional/null record shapes."""
     root = schema if root is None else root
     if "$ref" in schema:
+        if schema["$ref"] != "#/$defs/data": return provider_shape(root["$defs"][schema["$ref"].rsplit("/",1)[1]],value,root)
         def data(v):
             if isinstance(v, dict):
                 return dict(entries=[dict(key=k, value=data(x)) for k, x in v.items()])
@@ -70,11 +71,18 @@ def provider_shape(schema, value, root=None):
                 return provider_shape(branch, value, root)
         raise AssertionError((schema, value))
     if schema["type"] == "object":
-        return {k: (dict(value=provider_shape({"$ref":"#/$defs/data"},value[k],root)) if k in {"json","jsonEquals","stdoutJsonEquals","fileJsonEquals"} else provider_shape(v, value[k], root)) if k in value else
-                   None if "anyOf" in v and any(b.get("type") == "null" for b in v["anyOf"]) else
-                   [] if v.get("type") == "array" else
-                   provider_shape(v, {}, root) if v.get("type") == "object" else value[k]
-                for k, v in schema["properties"].items()}
+        def missing(contract):
+            if "$ref" in contract:
+                return missing(root["$defs"][contract["$ref"].rsplit("/", 1)[1]])
+            if contract.get("type") == "null" or "anyOf" in contract and any(b.get("type") == "null" for b in contract["anyOf"]):
+                return None
+            if contract.get("type") == "array":
+                return []
+            if contract.get("type") == "object":
+                return {}
+            raise AssertionError(f"Fixture omitted required meaning: {contract}")
+        return {k: (dict(value=provider_shape({"$ref":"#/$defs/data"},value[k],root) if "data" in root.get("$defs",{}) else json.dumps(value[k],ensure_ascii=False)) if k in {"json","jsonEquals","stdoutJsonEquals","fileJsonEquals"} and k in value else provider_shape(v, value[k] if k in value else missing(v), root))
+                for k, v in schema["properties"].items() if k in value or k in schema["required"]}
     if schema["type"] == "array":
         return [provider_shape(schema["items"], x, root) for x in value]
     return value
@@ -188,6 +196,18 @@ def provider_answer(workspace, pending, value):
                             for part in section[len(source["section"]):].strip(".").split(".") if section != source["section"] else []: value = value[part]
                             confined.append(dict(ref=ref,section=section,value=value))
                     edits = confined
+                if pending["answerSchema"]["properties"]["edits"]["type"] == "object":
+                    projected = {}
+                    for key, contract in pending["answerSchema"]["properties"]["edits"]["properties"].items():
+                        ref, section = key.rsplit(":",1)
+                        if section == "fields":
+                            v = next(r["fields"] for r in answer["records"] if r["ref"] == ref)
+                        else:
+                            source = next((e for e in edits if e["ref"] == ref and (section == e["section"] or section.startswith(e["section"]+"."))),None)
+                            v = source["value"] if source else None
+                            for part in section[len(source["section"]):].strip(".").split(".") if source and section != source["section"] else []: v = v[part]
+                        projected[key] = None if contract.get("type") == "null" else [] if v is None and contract.get("type") == "array" else v
+                    edits = projected
                 answer = dict(edits=edits,rationale=answer["rationale"],reply=answer["reply"])
 
     elif family == "direction":
@@ -715,7 +735,7 @@ def _node(kind, node_id, parents, fields=None, text=None):
 
 
 def node_example(kind, semantic=False):
-    from codex_harness.core.spine import Spine, semantic_spec, bead_contract, ALLOWED_PARENTS
+    from codex_harness.core.spine import Spine, semantic_spec, ALLOWED_PARENTS
     import sys
     """Small planning examples, never observations or evidence of acceptance."""
     vision = _node("vision", "V1", [])
@@ -792,7 +812,7 @@ def node_example(kind, semantic=False):
                 "bead",
                 "B1",
                 ["R1"],
-                {k: example for k, (example, _) in bead_contract(semantic).items()},
+                dict(ownedFiles=["hello.py"], dependsOn=[], lessons=[], **({"semanticPhase":"contracts"} if semantic else {"proofModule":"test_parser"})),
             ),
         ),
         "test": (

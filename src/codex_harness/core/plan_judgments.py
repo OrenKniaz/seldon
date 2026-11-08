@@ -9,7 +9,6 @@ from contextlib import nullcontext
 from uuid import uuid4
 
 from codex_harness.core.planner_schema import (
-    Judgment,
     judgment_refs,
     judgment_response,
 )
@@ -20,7 +19,7 @@ from codex_harness.core.plan_types import PlanStoreError, _json, _now, _nonempty
 
 
 class PlanJudgments:
-    def _judgment_record(self, judgment_id: str) -> Judgment:
+    def _judgment_record(self, judgment_id: str) -> dict:
         snapshot = getattr(self, "_review_read_snapshot", None)
         if snapshot is not None and judgment_id in snapshot.get("judgmentRecords", {}):
             return snapshot["judgmentRecords"][judgment_id]
@@ -41,7 +40,7 @@ class PlanJudgments:
         evidence_ids=None,
         source_event_ids=None,
         candidate=None,
-    ) -> Judgment:
+    ) -> dict:
         """Capture canonical facts, not a default verdict or a provider launch."""
         _nonempty(question, "question")
         if not subject_ids:
@@ -79,7 +78,7 @@ class PlanJudgments:
                 raise PlanStoreError(
                     "judgment-candidate-unbound", "Select a candidate from the captured evidence"
                 )
-            record: Judgment = dict(
+            record: dict = dict(
                 id=uuid4().hex,
                 question=question,
                 subjectRefs=subjects,
