@@ -32,7 +32,7 @@ def trace_refusal(node_id, message, *sections):
     return error
 
 
-def validate_trace_fields(node, nodes):
+def validate_trace_fields(node, nodes, previous=None):
     """Validate shape/identity, never product eligibility or semantic quality."""
     def refusal(message, *labels):
         return trace_refusal(node["id"], message, *("fields." + label for label in labels))
@@ -78,6 +78,9 @@ def validate_trace_fields(node, nodes):
         for ref in baseline["resultRefs"]:
             evidence = nodes[ref["id"]]["fields"].get("evidence")
             if not isinstance(evidence, dict) or evidence.get("observation") is None:
+                prior = next((n for n in (previous or {}).get("nodes", []) if n["id"] == ref["id"]), {})
+                if prior.get("fields", {}).get("evidence", {}).get("observation") is not None:
+                    raise trace_refusal(ref["id"], "Baseline evidence requires its retained observation; restore the result", "fields.evidence.observation", "fields.evidence.state")
                 raise refusal("Baseline resultRefs require observed evidence before change planning", "baseline.resultRefs")
     if kind == "result":
         e = f.get("evidence")

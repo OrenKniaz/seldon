@@ -3228,6 +3228,8 @@ def r18_authoring_golden(workspace):
     rebound, and accepted content from repair overreach; happy repair missed both.
     Round 3 protects sequential parent/path correction: a later refused execution
     section must remain editable, rather than exhausting a confined repair.
+    REV1B protects retained brownfield ancestry: repair the moved parent, without
+    rewriting baseline provenance. Detector-only field scopes missed that cause.
     """
     from tests.python.core.mcp_planner_support import LoopClient
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
@@ -3365,6 +3367,39 @@ def r18_authoring_golden(workspace):
         with open_plan_store(workspace) as store:
             assert store.spine().node("A_FRESH_RESULT")["fields"]["evidence"]["state"] == "integrated"
             assert scripted_judgment(store, question="Judge the repaired stop goal", subject_ids=[stop["id"]], meaning=dict(assessment="Fresh verification after repair"))["current"]["positiveCredit"]
+
+        from tests.python.core.semantic_wiring_support import node
+        with open_plan_store(workspace) as store:
+            requirement = fixture_id(workspace, "R4")
+            feature = store.spine().node(fixture_id(workspace, "F1"))
+            apply_content(store, dict(nodes=[node("BASE_OTHER", "feature", ["V1"]),
+                node("BASE_TEST", "test", [requirement], module="sensor/readback", level="semantic"),
+                node("BASE_CODE", "code", ["BASE_TEST"])]))
+            refs = {key: dict(id=key, revision=store.spine().revision(key)) for key in ("BASE_TEST", "BASE_CODE")}
+            store.upsert_node(node("BASE_RESULT", "result", ["BASE_CODE"], evidence=dict(itemRef=refs["BASE_CODE"], candidate="baseline-sensor",
+                source=dict(reference="baseline:sensor", realProvider=False, historical=True), observation=dict(reference="baseline:readback", outcome="passed"), state="integrated")))
+            baseline = dict(source="existing-repository", behavior="Retain sensor readback", rationale="Preserve observed behavior",
+                codeRefs=[refs["BASE_CODE"]], testRefs=[refs["BASE_TEST"]], resultRefs=[dict(id="BASE_RESULT", revision=store.spine().revision("BASE_RESULT"))])
+            feature["fields"]["baseline"] = baseline
+            store.upsert_node(feature)
+            unrelated = {key: store.spine().node(key) for key in ("BASE_OTHER", "UNRELATED_OPERATOR_NOTE")}
+        client.send_steer(rationale="Retain the baseline while revisiting requirement ownership.")
+        client.progress()
+        client.answer(dict(option="replan", rationale="Preserve baseline provenance and accepted scope", content={}))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("question") or {}).get("purpose") == "trace")
+        moved = json.loads(provider_answer(workspace, client.current["question"], dict(option="ready", rationale="Recheck ownership", content=content)))
+        row = next(r for r in moved["records"] if r["ref"] == requirement)
+        original_parents = row["parents"]
+        row["parents"] = ["BASE_OTHER"]
+        for _ in range(3): client.answer(json.dumps(moved))
+        row["parents"] = original_parents
+        client.answer(json.dumps(moved))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+        assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution", client.current
+        with open_plan_store_readonly(workspace) as store:
+            assert store.spine().node(feature["id"])["fields"]["baseline"] == baseline, "Repair rewrote retained baseline provenance"
+            assert store.spine().node(requirement)["parents"] == original_parents
+            assert all(store.spine().node(key) == value for key, value in unrelated.items()), "Ancestry repair changed unrelated accepted nodes"
 
     finally:
         client.close()

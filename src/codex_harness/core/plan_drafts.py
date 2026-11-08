@@ -63,7 +63,7 @@ class PlanDrafts:
             ):
                 raise PlanStoreError("plan-node-identity-conflict", node["id"])
             merged[node["id"]] = node
-        after = Spine({**before.to_dict(), "nodes": list(merged.values())})
+        after = Spine({**before.to_dict(), "nodes": list(merged.values())}, previous=before.to_dict())
         changed = [
             node
             for node in nodes

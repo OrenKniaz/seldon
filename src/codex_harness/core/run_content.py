@@ -4,8 +4,7 @@ from uuid import uuid4
 from copy import deepcopy
 from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.semantic_schema import TRACE_LINKS
-from codex_harness.core.spine import content_revision
-from codex_harness.core.spine import ALLOWED_PARENTS, SpineError
+from codex_harness.core.spine import SpineError, content_revision
 from codex_harness.core.plan_types import PlanStoreError
 
 
@@ -91,13 +90,9 @@ def apply_answer(store, pending, meaning):
     ids = set(store.spine().ids())
     for group, supplied in (("records","nodes"),("targets","targets"),("scenarios","scenarios")):
         identities(meaning[group],"ref",{r["id"] for r in pending["context"][supplied]})
-    known = {n["id"]: n["kind"] for n in store.list_nodes() if n["fields"].get("schema") != "dot-reviewer-selection-v1"}
-    known.update({r["ref"]: r["kind"] for r in rows})
-    relationships = [r for r in rows if not r["parents"] or any(known.get(p) not in ALLOWED_PARENTS[r["kind"]] for p in r["parents"])]
-    if relationships:
-        error = PlanStoreError("trace-relationship-invalid", "Rejected parents; choose an eligible parent for each named node")
-        error.diagnostics = dict(kind="graph", rejectedAnswer=meaning, editableFields={r["ref"]: ["parents"] for r in relationships},
-                                 eligibleParents={r["ref"]: [key for key, kind in known.items() if kind in ALLOWED_PARENTS[r["kind"]] and key != r["ref"]] for r in relationships})
+    if empty := {r["ref"]: ["parents"] for r in rows if not r["parents"]}:
+        error = PlanStoreError("trace-relationship-invalid", "Supply parents for the named nodes; use the supplied trace identities and their kinds")
+        error.diagnostics = dict(kind="graph", rejectedAnswer=meaning, editableFields=empty)
         raise error
     def ref(key):
         if key not in ids | set(drafts):

@@ -19,7 +19,7 @@ def batch_nodes(store, nodes: list, validate_node) -> str:
         data = store._data()
         merged = {node["id"]: node for node in data["nodes"]}
         merged.update({node["id"]: node for node in nodes})
-        spine = Spine({**data, "nodes": list(merged.values())})
+        spine = Spine({**data, "nodes": list(merged.values())}, previous=data)
         for node in nodes:
             store._write_node(spine, node["id"])
             store._event(

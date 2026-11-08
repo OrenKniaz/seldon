@@ -280,11 +280,10 @@ class PlanStore(
 
     def upsert_node(self, node: dict, *, reopen_vision_lock: bool = False) -> None:
         with self._transaction():
-            data = self._data()
+            previous = self._data()
             node_id = node.get("id") if isinstance(node, dict) else None
-            data["nodes"] = [item for item in data["nodes"] if item["id"] != node_id]
-            data["nodes"].append(node)
-            spine = Spine(data)
+            data = {**previous, "nodes": [item for item in previous["nodes"] if item["id"] != node_id] + [node]}
+            spine = Spine(data, previous=previous)
             self._write_node(spine, node_id)
             self._event(
                 "node-upserted",

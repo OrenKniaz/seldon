@@ -134,7 +134,7 @@ def _acyclic(parents: dict[str, list[str]], code: str) -> dict[str, list[str]]:
 class Spine:
     """Validated snapshot; node access returns copies so revisions cannot become stale."""
 
-    def __init__(self, data: dict) -> None:
+    def __init__(self, data: dict, *, previous=None) -> None:
         if (
             not isinstance(data, dict)
             or data.get("schema") != SCHEMA
@@ -150,8 +150,7 @@ class Spine:
                 not isinstance(node, dict)
                 or set(node) != {"id", "kind", "title", "text", "parents", "fields"}
                 or any(not isinstance(node[key], str) for key in ("id", "kind", "title", "text"))
-                or not node["id"].strip()
-                or not node["title"].strip()
+                or not _strings([node["id"], node["title"]])
                 or node["kind"] not in ALLOWED_PARENTS
                 or not _strings(node["parents"])
                 or not isinstance(node["fields"], dict)
@@ -178,11 +177,8 @@ class Spine:
             raise SpineError("spine-schema-invalid", "Unsupported planMode", self.ids("vision")[0], "fields.planMode")
         self.semantic = mode == "semantic-v1"
         for node_id, node in self._nodes.items():
-            if any(
-                self._nodes[parent]["kind"] not in ALLOWED_PARENTS[node["kind"]]
-                for parent in node["parents"]
-            ):
-                raise SpineError("spine-parent-kind-not-allowed", f"Invalid parent kind for {node_id}", node_id, "parents")
+            if any(self._nodes[parent]["kind"] not in ALLOWED_PARENTS[node["kind"]] for parent in node["parents"]):
+                raise SpineError("spine-parent-kind-not-allowed", f"Invalid parent kind for {node_id}; choose parents of kind {sorted(ALLOWED_PARENTS[node['kind']])}", node_id, "parents")
             if node["kind"] == "bead":
                 self._validate_bead(node)
             elif node["kind"] == "test":
@@ -194,14 +190,21 @@ class Spine:
         _acyclic({node_id: self._nodes[node_id]["fields"]["dependsOn"] for node_id in self.ids("bead")}, "spine-bead-fields-invalid")
         try:
             for node in self._nodes.values():
-                validate_trace_fields(node, self._nodes)
-                if node["kind"] == "result" and node["fields"]["evidence"]["itemRef"]["id"] not in self.ancestors(node["id"]):
-                    raise trace_refusal(node["id"], "Result must descend from its revision-bound evidence item", "parents", "fields.evidence.itemRef")
-                if "baseline" in node["fields"]:
-                    descendants = set(self.descendants(node["id"]))
-                    for link in ("codeRefs", "testRefs", "resultRefs"):
-                        if any(ref["id"] not in descendants for ref in node["fields"]["baseline"][link]):
-                            raise trace_refusal(node["id"], "Baseline references must map this feature's own existing behavior", "fields.baseline." + link)
+                validate_trace_fields(node, self._nodes, previous)
+                bindings = [(node["id"], ref["id"], ("fields.baseline." + link,))
+                            for link in ("codeRefs", "testRefs", "resultRefs") for ref in node["fields"].get("baseline", {}).get(link, [])]
+                if node["kind"] == "result":
+                    bindings.append((node["fields"]["evidence"]["itemRef"]["id"], node["id"], ("parents", "fields.evidence.itemRef")))
+                for ancestor, descendant, sections in bindings:
+                    if ancestor not in self.ancestors(descendant):
+                        error = trace_refusal(node["id"], f"{descendant} must descend from {ancestor}; restore the owning ancestry", *sections)
+                        if previous and previous["nodes"]:
+                            before = Spine(previous)
+                            if ancestor in before.ids() and descendant in before.ids() and ancestor in before.ancestors(descendant):
+                                path = set(before.descendants(ancestor)) & {*before.ancestors(descendant), descendant}
+                                if changed := {key: ["parents"] for key in path if key in self._nodes and self.parents(key) != before.parents(key)}:
+                                    error.editable_fields, error.refused_sections = changed, deepcopy(changed)
+                        raise error
         except ValueError as error:
             refusal = SpineError("spine-trace-invalid", str(error))
             refusal.__dict__.update({key: getattr(error, key, {}) for key in ("editable_fields", "refused_sections")})
