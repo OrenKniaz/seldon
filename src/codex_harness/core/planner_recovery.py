@@ -207,21 +207,9 @@ def inspect(workspace, job_id):
             )
         ],
     )
-    paths = list(directory.glob("runs/*/evidence/run.json"))
-    run = read_record_json(jobs._inside(directory, paths[0])) if len(paths) == 1 else {}
-    proof["faultBeads"] = [
-        key
-        for key, bead in run.get("beads", {}).items()
-        if bead.get("attempt")
-        and bead["status"]
-        not in {
-            "contracts-red",
-            "requirement-validated",
-            jobs.dispatch.STATUS_MOCK_ONLY,
-            "already-satisfied",
-            "reused",
-        }
-    ]
+    admitted = read_record_json(segment / "request.json")
+    outcomes = terminal.get("outcomes") or jobs.segment_outcomes(directory, admitted)
+    proof["faultBeads"] = [key for key, outcome in outcomes.items() if outcome["fault"]]
     with open_plan_store_readonly(workspace) as store:
         repair = next(
             (r for r in approvals.records(store, "run-repair-required") if r["jobId"] == job_id),
@@ -238,45 +226,18 @@ def inspect(workspace, job_id):
             }
         )
         proof["repairObservation"] = repair
-    proof["faultOutcomes"] = {key: run["beads"][key]["status"] for key in proof["faultBeads"]}
-    manifest = read_record_json(directory / "plan/sample.json")
-    # Canonical lineage follows unchanged work across publication revisions.
-    # Derive identities from the original admission, never a mutable retry counter.
-    with open_plan_store_readonly(workspace) as store:
-        authority = next(
-            (
-                r
-                for r in approvals.records(store, approvals.EVENT)
-                if r["id"] == request["executionRequestId"]
-            ),
-            None,
-        )
-    if authority is None:
-        raise ValueError(
-            "Recovery requires the original bound B record; retain evidence and inspect the admission"
-        )
-    accepted = authority["subject"]["scope"]["nodes"]
-    admitted = request["executionScope"]["inputs"]["nodes"]
-    proof["faultWork"] = {}
-    for key in proof["faultBeads"]:
-        node = accepted[key] if key in accepted else admitted[key]
-        todo, upstream = list(node["parents"]), {}
-        while todo:
-            identifier = todo.pop()
-            if identifier in upstream:
-                continue
-            item = accepted[identifier] if identifier in accepted else admitted[identifier]
-            if item["kind"] != "vision":
-                upstream[identifier] = item
-                todo.extend(item["parents"])
-        proof["faultWork"][key] = jobs._digest(
-            dict(
-                bead=key,
-                phase=manifest["beads"][key].get("semanticPhase"),
-                ownedFiles=node["fields"]["ownedFiles"],
-                obligations=upstream,
-            )
-        )
+    proof["faultOutcomes"] = {key: outcomes[key]["workStatus"] for key in proof["faultBeads"]}
+    proof["processOutcomes"] = {key: outcome["status"] for key, outcome in outcomes.items()}
+    proof["faultWork"] = {key: outcomes[key]["workId"] for key in proof["faultBeads"]}
+    held = jobs.dispatch.DENIAL_HELD_STATUSES | {"ambiguous launch"}
+    proof["held"] = not proof["faultBeads"] or any(
+        not outcomes[key]["launchCertain"] or outcomes[key]["status"] in held
+        or outcomes[key].get("workStatus") == jobs.dispatch.STATUS_PROVENANCE_HELD
+        or any(
+            outcomes[key].get("permissionGuard", {}).get(flag)
+            for flag in ("requiresUserDisposition", "requiresAuditHold"))
+        for key in outcomes
+    )
     from codex_harness.core.planner_candidate import retained
 
     try:
@@ -376,7 +337,9 @@ def resolve(store, job_id, choice, reason, *, direction_judgment_id=None):
             )
             for work in proof["faultWork"].values()
         }
-        if choice == "readmit" and any(count >= 2 for count in recoveries.values()) and not steered:
+        if choice == "readmit" and proof["held"]:
+            choice = "abandon"
+        elif choice == "readmit" and not steered and any(c >= 2 for c in recoveries.values()):
             choice = "steer"
         resolved = dict(
             jobId=job_id,
@@ -449,8 +412,6 @@ def monitor(workspace, job_id, segment_id):
     except (OSError, jobs.subprocess.SubprocessError) as error:
         control, code = {**getattr(error, "audit_control", {}), "error": str(error)}, 1
     receipt = dict(requestDigest=request["requestDigest"], segmentId=segment_id, control=control)
-    write_record_json_once(path / "quiescence.json", receipt)
-    write_record_json(directory / "quiescence.json", receipt)
     if not (path / "terminal.json").exists():
         write_record_json_once(
             path / "terminal.json",
@@ -461,8 +422,12 @@ def monitor(workspace, job_id, segment_id):
                 requestDigest=request["requestDigest"],
                 segmentId=segment_id,
                 at=_now(),
+                outcomes=jobs.segment_outcomes(directory, segment),
             ),
         )
+    # Quiescence releases recovery only after its canonical outcome is available.
+    write_record_json_once(path / "quiescence.json", receipt)
+    write_record_json(directory / "quiescence.json", receipt)
     if (path / "terminal.json").exists():
         write_record_json(directory / "terminal.json", read_record_json(path / "terminal.json"))
     with open_plan_store(workspace) as store:

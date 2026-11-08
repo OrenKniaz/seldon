@@ -341,8 +341,74 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
     actual_review = roundtable._run
     actual_run = dispatch.run_plan
     actual_write = dispatch._write_record
+    denial_fault = (workspace / "denial-fault.json").exists()
+
+    death_path = workspace / "controller-death.json"
+    death = json.loads(death_path.read_text()) if death_path.exists() else None
+
+    def death_boundary(stage):
+        import socket
+
+        with socket.create_connection(("127.0.0.1", death["port"])) as boundary:
+            boundary.sendall((json.dumps(dict(stage=stage, jobId=job_id)) + "\n").encode())
+            assert boundary.recv(1) == b"!", "Controller death was not acknowledged"
+        os._exit(73)
+
+    if mode == "worker" and death and death["afterStarted"]:
+        entry_write = planner_jobs.write_record_json_once
+
+        def hold_segment_entry(path, record):
+            entry_write(path, record)
+            if path.name == "started.json" and path.parent.name == segment_id:
+                death_boundary("started")  # Job teardown kills this payload before dispatch.
+
+        planner_jobs.write_record_json_once = hold_segment_entry
+
+    if mode == "controller":
+        from codex_harness.core import planner_recovery
+
+        quiescence_write = planner_recovery.write_record_json_once
+
+        def hold_quiescence(path, receipt):
+            quiescence_write(path, receipt)
+            if path.name == "quiescence.json" and (workspace / "quiescence-fault.json").exists():
+                import socket
+
+                fault = json.loads((workspace / "quiescence-fault.json").read_text())
+                with socket.create_connection(("127.0.0.1", fault["port"])) as boundary:
+                    boundary.sendall((job_id + "\n").encode())
+                    assert boundary.recv(1) == b"!", "Quiescence publication was not acknowledged"
+
+        planner_recovery.write_record_json_once = hold_quiescence
+
+    if mode == "worker" and denial_fault:
+        from codex_harness.core import dispatch_attempts
+
+        attempt_write = dispatch_attempts._write_record
+
+        def interrupt_denial(path, result):
+            attempt_write(path, result)
+            if path.name == "result.json" and result.get("status") in dispatch.DENIAL_HELD_STATUSES:
+                import socket
+
+                fault = json.loads((workspace / "denial-fault.json").read_text())
+                with socket.create_connection(("127.0.0.1", fault["port"])) as barrier:
+                    barrier.sendall((job_id + "\n").encode())
+                    assert barrier.recv(1) == b"!", "Persisted denial was not acknowledged"
+                os._exit(72)  # Result is durable; no future/run projection update can follow.
+
+        dispatch_attempts._write_record = interrupt_denial
 
     def publish(path, record):
+        if (mode == "worker" and path.name == "run.json" and record.get("resumedAt")
+                and (workspace / "resume-fault.json").exists()):
+            import socket
+
+            fault = json.loads((workspace / "resume-fault.json").read_text())
+            with socket.create_connection(("127.0.0.1", fault["port"])) as barrier:
+                barrier.sendall((job_id + "\n").encode())
+                assert barrier.recv(1) == b"!", "Interrupted resume was not acknowledged"
+            os._exit(71)  # Owned payload dies before replacing the prior segment's run.
         actual_write(path, record)
         if surface == "web" and path.name == "retained-candidate.json" and record["bead"] == "B":
             # Hold the real producer after publication so MCP must consume this
@@ -352,6 +418,33 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 time.sleep(0.05)
 
     dispatch._write_record = publish
+
+    if mode == "worker" and (workspace / "packet-fault.json").exists():
+        import socket
+
+        original_packet = dispatch.worker_packet.build_packet
+
+        def fault_packet(plan, bead, *args, **kwargs):
+            from codex_harness.core.plan_store import open_plan_store_readonly
+
+            with open_plan_store_readonly(workspace) as store:
+                recoveries = [
+                    r for r in approvals.records(store, "worker-recovery-resolved")
+                    if r["choice"] == "readmit" and not r.get("steeringJudgmentId")
+                ]
+            fault = json.loads((workspace / "packet-fault.json").read_text())
+            if bead["id"] == "C" and len(recoveries) == fault["afterReadmission"]:
+                # This boundary precedes current["attempt"] assignment. The real
+                # dispatch exception handler must publish the failed outcome.
+                with socket.create_connection(("127.0.0.1", fault["port"])) as barrier:
+                    barrier.sendall((json.dumps(dict(
+                        jobId=job_id, work=recoveries[0]["proof"]["faultWork"]["C"]
+                    )) + "\n").encode())
+                    assert barrier.recv(1) == b"!", "Packet fault was not acknowledged"
+                raise OSError("Acknowledged pre-attempt packet failure")
+            return original_packet(plan, bead, *args, **kwargs)
+
+        dispatch.worker_packet.build_packet = fault_packet
 
     def command(role, project, job=None, segment=None):
         return [sys.executable, "-B", str(Path(__file__).resolve()), role, project, surface] + (
@@ -369,6 +462,10 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         return actual_popen(argv, **options)
 
     def controller_payload(argv, **options):
+        if death:
+            if not death["afterStarted"]:
+                death_boundary("controller")  # No payload has been spawned.
+            threading.Thread(target=death_boundary, args=("controller",), daemon=True).start()
         return actual_audit(command("worker", str(workspace), job_id, segment_id), **options)
 
     def write_shelflife(root, phase):
@@ -488,7 +585,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             )
         return json.loads(payload_path.read_text(encoding="utf-8"))
 
-    if surface in {"shelflife", "parallel-http"}:
+    if surface in {"shelflife", "parallel-http"} or denial_fault:
         from codex_harness.core.provider_launch import ProviderNormalLaunch
 
         class ScriptedWorker:
@@ -518,7 +615,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         dispatch_attempts.get_adapter = lambda _: ScriptedWorker()
 
     def workers(plan, **options):
-        if surface in {"parallel-http", "shelflife"}:
+        if surface in {"parallel-http", "shelflife"} or denial_fault:
             return actual_run(plan, **options)
         from codex_harness.core import graph
 
@@ -724,6 +821,16 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 dict(type="turn.failed", error=dict(message=reason)),
             ):
                 print(json.dumps(event), flush=True)
+
+        if denial_fault:
+            print(json.dumps(dict(type="item.completed", item=dict(
+                id="denied-call", type="command_execution", command="scripted forbidden command",
+                status="denied", exit_code=1,
+            ))), flush=True)
+            _, output, stderr = protocol("codex", text="Scripted provider observed a denied command")
+            print(output, flush=True)
+            print(stderr, file=sys.stderr, flush=True)
+            return
 
         prompt = sys.stdin.read()
         phase = "contracts" if prompt.startswith("semantic-v1 contracts;") else "build"
@@ -4326,7 +4433,7 @@ def advance_meaning(client, content, *, stop_at=None):
     pytest.fail("Semantic journey did not terminate")
 
 
-def controller_interruptions(workspace):
+def controller_interruptions(workspace, after_readmission):
     """C16/C18/C23: lost response/live work/pause/wake/stop at the wire boundary.
 
     A synchronous server previously prevented active steering, and happy-path
@@ -4334,10 +4441,15 @@ def controller_interruptions(workspace):
     over the same stdio connection, then expire its successor after a wake gap.
     An idle restart must also wait for an ordinary writer reservation longer
     than SQLite's default five seconds; uncontended restarts miss locked errors.
+    Force packet failure before an attempt on automatic successor #1 or #2;
+    post-attempt worker failures never covered this lost-work-identity boundary.
     """
+    import socket
+    from datetime import UTC, datetime
+
     from tests.python.core.mcp_planner_support import LoopClient
 
-    from codex_harness.core import approvals
+    from codex_harness.core import approvals, planner_jobs
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
 
     workspace.mkdir()
@@ -4347,6 +4459,20 @@ def controller_interruptions(workspace):
     (workspace / "template/checks/retired.json").write_text("[1]\n")
     content = plan_content()
     client = LoopClient(workspace)
+    barrier = socket.socket()
+    barrier.bind(("127.0.0.1", 0))
+    barrier.listen()
+    barrier.settimeout(180)  # Same transport bound as LoopClient, not an exhaustion deadline.
+    quiescent = None
+
+    def recovery_state():
+        client.call("harness_plan_status")
+        with open_plan_store_readonly(workspace) as store:
+            decisions = list(approvals.records(store, "worker-recovery-resolved"))
+        return dict(run=client.current, recoveries=decisions,
+                    serverLog=client.log_path.read_text(encoding="utf-8")[-4096:],
+                    controllerLogs={str(p.relative_to(workspace)): p.read_text("utf-8", errors="replace")[-4096:]
+                                    for p in workspace.glob(".codex-harness/worker-jobs/*/segments/*/stderr.txt")})
 
     def wait_for(path):
         deadline = time.monotonic() + 30
@@ -4370,8 +4496,22 @@ def controller_interruptions(workspace):
         client.words()
         lost = client.send_answer(judge_reply(client.current["question"]))
         wait_for(workspace / "contracts-entered")
-        client.call("harness_steer", direction="pause", rationale="Actual user pauses active work")
+        # Force pause/resume to consume quiescence before the monitor can mirror
+        # its terminal. Happy scheduling hid missing segment outcomes in this gap.
+        (workspace / "quiescence-fault.json").write_text(json.dumps(dict(
+            port=barrier.getsockname()[1]
+        )))
+        pause = client.send_steer(direction="pause", rationale="Actual user pauses active work")
+        quiescent, _ = barrier.accept()
+        quiescent.makefile("rb").readline()
+        (workspace / "quiescence-fault.json").unlink()
+        client.take_reply(pause)
+        client.call("harness_plan_status")
         assert client.current["state"] == "PAUSED" and not client.current["effect"]
+        state = recovery_state()
+        assert not state["recoveries"][0]["proof"]["held"], (
+            "Pause recovery lost the admitted outcome before successor launch", state
+        )
         client.take_reply(lost)
         assert not (workspace / "build-entered").exists()
         with open_plan_store_readonly(workspace) as store:
@@ -4422,31 +4562,82 @@ def controller_interruptions(workspace):
         assert not (workspace / "build-entered").exists()
         (workspace / "hold-contracts").unlink()
         (workspace / "fault-contracts").touch()
-        client.call(
-            "harness_steer",
+        (workspace / "packet-fault.json").write_text(json.dumps(dict(
+            port=barrier.getsockname()[1], afterReadmission=after_readmission
+        )))
+        quiescent.sendall(b"!")
+        quiescent.close()
+        quiescent = None
+        resume = client.send_steer(
             direction="continue",
             rationale="Actual user explicitly resumes",
             resume=True,
         )
-        # A transient STEER may precede automatic recovery. Wait for the actual
-        # exhausted-recovery question, not an instantaneous intermediate cursor.
-        deadline = time.monotonic() + 45
-        while not (client.current.get("question") and
-                   "Two automatic recoveries exhausted" in client.current["question"]["purpose"]):
-            assert time.monotonic() < deadline, client.current
-            time.sleep(0.05)
-            client.call("harness_plan_status")
+        try:
+            packet_socket, _ = barrier.accept()
+        except TimeoutError:
+            pytest.fail("Packet fault point not reached: " + json.dumps(recovery_state(), default=str))
+        with packet_socket as packet:
+            injected = json.loads(packet.makefile("rb").readline())
+            (workspace / "packet-fault.json").unlink()
+            packet.sendall(b"!")
+        client.take_reply(resume)
+
+        def is_exhaustion(run):
+            pending = run.get("question") or {}
+            resolved = pending.get("context", {}).get("observation", {}).get("recovery", {})
+            return (
+                "Two automatic recoveries exhausted" in pending.get("purpose", "")
+                and resolved.get("proof", {}).get("faultWork", {}).get("C") == injected["work"]
+            )
+
+        def wait_exhaustion():
+            # Observe the run's finite admitted segments, never guess how long
+            # three real jobs take. Status is read-only; the monitor advances.
+            while True:
+                client.call("harness_plan_status")
+                run = client.current
+                pending = run.get("question") or {}
+                resolved = pending.get("context", {}).get("observation", {}).get("recovery", {})
+                if resolved.get("proof", {}).get("faultWork", {}).get("C") == injected["work"]:
+                    assert "Two automatic recoveries exhausted" in pending["purpose"], (
+                        pending["purpose"], resolved["choice"], resolved["proof"]["faultWork"]
+                    )
+                    return
+                # A wrong durable hold is failure, not transient exhaustion.
+                assert not (pending and resolved.get("jobId") == injected["jobId"]), (
+                    pending.get("purpose"), resolved.get("choice"),
+                    resolved.get("proof", {}).get("faultWork")
+                )
+                with open_plan_store_readonly(workspace) as store:
+                    segment = planner_jobs.latest_segment(store, run["jobId"])
+                    admitted = json.loads((segment / "request.json").read_text())
+                assert datetime.now(UTC) < datetime.fromisoformat(admitted["deadlineAt"]), run
+                time.sleep(0.05)
+
+        wait_exhaustion()
         assert client.current["state"] == "STEER" and not client.current["effect"], client.current
         with open_plan_store_readonly(workspace) as store:
+            assert any(
+                not r["automaticRecoveriesExhausted"]
+                and injected["work"] in r["proof"]["faultWork"].values()
+                for r in approvals.records(store, "worker-recovery-steering-required")
+            ), "Pause's non-exhaustion steering event must remain distinguishable"
             recoveries = [
                 r
                 for r in approvals.records(store, "worker-recovery-resolved")
                 if r["choice"] == "readmit" and not r.get("steeringJudgmentId")
+                and injected["work"] in r["proof"]["faultWork"].values()
             ]
             assert len(recoveries) == 2
-            faults = list(approvals.records(store, "worker-recovery-steering-required"))
-            assert faults[0]["automaticRecoveriesExhausted"]
-        print("golden recovery: exhausted-recovery question observed; automatic readmissions=2", flush=True)
+            fault, = [r for r in approvals.records(store, "worker-recovery-steering-required")
+                      if r["jobId"] == client.current["question"]["context"]["jobId"]
+                      and injected["work"] in r["proof"]["faultWork"].values()]
+            assert fault["automaticRecoveriesExhausted"]
+        print(
+            f"golden recovery twin #{after_readmission}: bound exhaustion; automatic readmissions=2",
+            flush=True,
+        )
         # An unrelated downstream amendment cannot buy two more retries for C.
         build = next(n for n in content["nodes"] if n["id"] == "B")
         build["title"] += " (clearer handoff)"
@@ -4457,12 +4648,14 @@ def controller_interruptions(workspace):
                 content=dict(nodes=[build]),
             )
         )
-        advance_meaning(client, content, stop_at=lambda r: r["state"] == "STEER")
+        advance_meaning(client, content, stop_at=lambda r: is_exhaustion(r) or bool(r.get("effect")))
+        wait_exhaustion()
         with open_plan_store_readonly(workspace) as store:
             recoveries = [
                 r
                 for r in approvals.records(store, "worker-recovery-resolved")
                 if r["choice"] == "readmit" and not r.get("steeringJudgmentId")
+                and injected["work"] in r["proof"]["faultWork"].values()
             ]
             assert len(recoveries) == 2
         (workspace / "fault-contracts").unlink()
@@ -4480,7 +4673,41 @@ def controller_interruptions(workspace):
         client.answer(wrong)
         assert client.current["question"]["requestId"] == pending["requestId"]
         assert "execution" in client.current["question"]["judgment"]["error"]
-        client.answer(judge_reply(client.current["question"]))
+        if after_readmission == 2:
+            # C18/I6: a prior segment's receipts cannot certify the new launch.
+            # Ordinary packet failures always persist a fresh segment record.
+            (workspace / "resume-fault.json").write_text(json.dumps(dict(
+                port=barrier.getsockname()[1]
+            )))
+            resumed = client.send_answer(judge_reply(client.current["question"]))
+            with barrier.accept()[0] as interrupted:
+                held_job = interrupted.makefile("rb").readline().decode().strip()
+                (workspace / "resume-fault.json").unlink()
+                interrupted.sendall(b"!")
+            client.take_reply(resumed)
+            while True:
+                client.call("harness_plan_status")
+                pending = client.current.get("question") or {}
+                resolved = pending.get("context", {}).get("observation", {}).get("recovery", {})
+                if resolved.get("jobId") == held_job:
+                    assert pending["purpose"] == "Permission/uncertain launch held"
+                    assert resolved["choice"] == "abandon"
+                    assert injected["work"] in resolved["proof"]["faultWork"].values()
+                    assert set(resolved["proof"]["faultOutcomes"].values()) == {"unknown launch"}
+                    break
+                with open_plan_store_readonly(workspace) as store:
+                    segment = planner_jobs.latest_segment(store, held_job)
+                    admitted = json.loads((segment / "request.json").read_text())
+                assert datetime.now(UTC) < datetime.fromisoformat(admitted["deadlineAt"])
+                time.sleep(0.05)
+            with open_plan_store_readonly(workspace) as store:
+                assert sum(
+                    r["choice"] == "readmit" and not r.get("steeringJudgmentId")
+                    for r in approvals.records(store, "worker-recovery-resolved")
+                ) == 2
+            print("golden recovery: interrupted resume retained unknown-launch hold", flush=True)
+        else:
+            client.answer(judge_reply(client.current["question"]))
         client.call(
             "harness_steer",
             direction="stop",
@@ -4493,8 +4720,162 @@ def controller_interruptions(workspace):
         with open_plan_store_readonly(workspace) as store:
             assert not store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchone()
     finally:
+        if quiescent is not None:
+            quiescent.sendall(b"!")
+            quiescent.close()
+        barrier.close()
         (workspace / "hold-contracts").unlink(missing_ok=True)
         client.close()
+
+
+def controller_launch_interruption(workspace, after_started):
+    """C18/C23: a dead controller is replayable only before durable segment entry.
+
+    Existing packet faults run after entry and known dispatch failure; the denial
+    twin has a result. Neither covered controller death without either outcome.
+    """
+    import socket
+    from datetime import UTC, datetime
+
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core import planner_jobs
+    from codex_harness.core.plan_store import open_plan_store_readonly
+
+    workspace.mkdir()
+    content = plan_content()
+    with socket.socket() as barrier:
+        barrier.bind(("127.0.0.1", 0))
+        barrier.listen()
+        barrier.settimeout(180)
+        fault = workspace / "controller-death.json"
+        fault.write_text(json.dumps(dict(port=barrier.getsockname()[1], afterStarted=after_started)))
+        client = LoopClient(workspace)
+        connections = {}
+        try:
+            client.call("harness_plan_start", name="Controller launch certainty", idea=content["nodes"][0]["text"])
+            advance_meaning(client, content, stop_at=lambda r: bool(
+                r.get("userRequest") and r["userRequest"]["gate"] == "plan-execution"
+                and not r.get("question")
+            ))
+            client.words()
+            reply = client.send_answer(judge_reply(client.current["question"]))
+            for _ in range(2 if after_started else 1):
+                try:
+                    connection, _ = barrier.accept()
+                except TimeoutError:
+                    client.call("harness_plan_status")
+                    pytest.fail("Controller death boundary not reached: " + json.dumps(dict(
+                        run=client.current, reached=list(connections),
+                        controllerLogs={str(p.relative_to(workspace)): p.read_text("utf-8", errors="replace")[-4096:]
+                                        for p in workspace.glob(".codex-harness/worker-jobs/*/segments/*/stderr.txt")},
+                    ), default=str))
+                connection.settimeout(180)
+                observed = json.loads(connection.makefile("rb").readline())
+                job = observed["jobId"]
+                connections[observed["stage"]] = connection
+            fault.unlink()
+            connections["controller"].sendall(b"!")
+            assert connections["controller"].recv(1) == b"", "Controller must actually exit before activation"
+            if after_started:
+                try:
+                    assert connections["started"].recv(1) == b"", "Owned Job must stop the entered payload"
+                except ConnectionResetError:
+                    pass  # Windows Job termination may reset the held payload's socket.
+            client.take_reply(reply)
+            client.reconnect()
+            client.call("harness_plan_start", name="Reattach dead controller", idea="Retain admitted work")
+            with open_plan_store_readonly(workspace) as store:
+                resolved, = [r for r in approvals.records(store, "worker-recovery-resolved") if r["jobId"] == job]
+            assert resolved["choice"] == ("abandon" if after_started else "readmit"), resolved
+            assert resolved["proof"]["held"] is after_started, resolved
+            assert set(resolved["proof"]["processOutcomes"].values()) == {
+                "unknown launch" if after_started else "not launched"
+            }, resolved
+            if after_started:
+                assert not (workspace / "contracts-entered").exists(), "Revoked segment must not reach dispatch"
+                assert client.current["question"]["purpose"] == "Permission/uncertain launch held", client.current
+                assert not client.current["effect"]
+            else:
+                # Prove the canonical successor actually executes, not merely a
+                # computed readmit disposition. Bound the wait by its admission.
+                while not (workspace / "contracts-entered").exists():
+                    client.call("harness_plan_status")
+                    with open_plan_store_readonly(workspace) as store:
+                        segment = planner_jobs.latest_segment(store, resolved["successor"])
+                        admitted = json.loads((segment / "request.json").read_text())
+                    assert datetime.now(UTC) < datetime.fromisoformat(admitted["deadlineAt"]), client.current
+                    assert not (client.current.get("question") or {}).get("purpose", "").startswith(
+                        "Permission/uncertain launch held"
+                    ), client.current
+                    time.sleep(0.05)
+            print(f"golden controller death afterStarted={after_started}: {resolved['choice']}; canonical successor/hold observed", flush=True)
+        finally:
+            for connection in connections.values():
+                connection.close()
+            client.call("harness_steer", direction="stop", rationale="End the controller launch fault journey")
+            client.close()
+
+
+def denial_interruption(workspace, source_root=None):
+    """C18/I6: durable provider denial holds even when its run projection is lost.
+
+    Packet faults have no result; ordinary denied returns update run.json. Kill
+    the owned payload at the acknowledged gap between those two publications.
+    """
+    import socket
+    from datetime import UTC, datetime
+
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core import planner_jobs
+    from codex_harness.core.plan_store import open_plan_store_readonly
+
+    workspace.mkdir()
+    content = plan_content()
+    with socket.socket() as barrier:
+        barrier.bind(("127.0.0.1", 0))
+        barrier.listen()
+        barrier.settimeout(180)
+        (workspace / "denial-fault.json").write_text(json.dumps(dict(port=barrier.getsockname()[1])))
+        client = LoopClient(workspace, source_root=source_root)
+        try:
+            client.call("harness_plan_start", name="Retain denied launch", idea=content["nodes"][0]["text"])
+            advance_meaning(client, content, stop_at=lambda r: bool(
+                r.get("userRequest") and r["userRequest"]["gate"] == "plan-execution"
+                and not r.get("question")
+            ))
+            client.words()
+            reply = client.send_answer(judge_reply(client.current["question"]))
+            with barrier.accept()[0] as denied:
+                job = denied.makefile("rb").readline().decode().strip()
+                (workspace / "denial-fault.json").unlink()
+                denied.sendall(b"!")
+            client.take_reply(reply)
+            while True:
+                client.call("harness_plan_status")
+                with open_plan_store_readonly(workspace) as store:
+                    resolved = [r for r in approvals.records(store, "worker-recovery-resolved")
+                                if r["jobId"] == job]
+                    readmissions = [r for r in approvals.records(store, "worker-recovery-resolved")
+                                    if r["choice"] == "readmit"]
+                    segment = planner_jobs.latest_segment(store, job)
+                    admitted = json.loads((segment / "request.json").read_text())
+                assert not readmissions, "A persisted provider denial was automatically readmitted"
+                if resolved:
+                    pending = client.current.get("question") or {}
+                    bound = pending.get("context", {}).get("observation", {}).get("recovery", {})
+                    if bound.get("jobId") == job:
+                        assert resolved[0]["choice"] == "abandon"
+                        assert bound["proof"]["processOutcomes"]["C"] == "held: permission guard"
+                        assert bound["proof"]["held"]
+                        assert pending["purpose"] == "Permission/uncertain launch held"
+                        assert not client.current["effect"]
+                        break
+                assert datetime.now(UTC) < datetime.fromisoformat(admitted["deadlineAt"])
+                time.sleep(0.05)  # Status has no blocking wait; bounded by admitted progress.
+            print("golden recovery denial: durable permission hold; zero readmissions", flush=True)
+        finally:
+            client.call("harness_steer", direction="stop", rationale="End the owned denial twin")
+            client.close()
 
 
 def dead_review_wake(workspace):
@@ -5007,7 +5388,15 @@ def test_golden_path(tmp_path, request, surface):
         )
         client.log.flush()
         if surface == "cli":
-            controller_interruptions(tmp_path.parent / (tmp_path.name + "-interruptions"))
+            for after in (1, 2):
+                controller_interruptions(
+                    tmp_path.parent / (tmp_path.name + f"-interruptions-{after}"), after
+                )
+            for entered in (False, True):
+                controller_launch_interruption(
+                    tmp_path.parent / (tmp_path.name + f"-controller-death-{entered}"), entered
+                )
+            denial_interruption(tmp_path.parent / (tmp_path.name + "-denial-interruption"))
             dead_review_wake(tmp_path.parent / (tmp_path.name + "-wake"))
         all_calls = {
             phase: sum(other.calls[phase] for other in LoopClient.instances[ledger_start:])
@@ -5028,7 +5417,13 @@ def test_golden_path(tmp_path, request, surface):
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "http-golden":
+    if sys.argv[1] == "denial-twin":
+        denial_interruption(Path(sys.argv[2]), Path(sys.argv[3]) if len(sys.argv) > 3 else None)
+    elif sys.argv[1] == "controller-death-twin":
+        controller_launch_interruption(Path(sys.argv[2]), bool(int(sys.argv[3])))
+    elif sys.argv[1] == "recovery-twin":
+        controller_interruptions(Path(sys.argv[2]), int(sys.argv[3]))
+    elif sys.argv[1] == "http-golden":
         from tests.python.core.acceptance_support import http_golden
 
         http_golden(Path(sys.argv[2]), semantic=bool(int(sys.argv[3])))

@@ -1,5 +1,67 @@
 # Legacy capability audit for the local Seldon extraction
 
+RECOV1 (C18/C23/C25, I6/I9): TRIAGE DESIGN — recovery lost work identity before
+an attempt existed; siblings: prelaunch failure, dead controller, interrupted launch.
+Owner: planner_jobs binds work at admission and publishes segment outcomes with launch
+certainty; planner_recovery alone decides allowance/disposition from existing lineage.
+Both forced packet-failure twins were RED on Seldon base 676e26b (one/two readmissions,
+then an incorrect permission/uncertain hold). Bound exhaustion and downstream-amendment
+coverage now share the real pause/reattach/resume journey; gate/review: ../stage-recov1-report.md.
+This supersedes scheduling-only attribution of the count flake, not historical incident
+causality. TD#6 segment/root mirroring remains open and unchanged; normal-Chromium and
+real-provider acceptance remain outside this sandbox lane.
+Host evidence (../stage-recov1-hostnote.md): unmodified 676e26b times out at the
+original sweep1 exhaustion wait 2/2; before-sweep1 fix17 passed 3/3. The combined
+patch still requires CC's normal host gate; forced twins do not prove incident causality.
+Inherited, nonblocking review discovery: a denial result may precede its copy into
+run.json. Owner: dispatch outcome publication; no new defect established here.
+Exit: crash after real denial-result publication but before run update must hold
+without readmission. This is separate from TD#6 and remains a follow-up.
+RECOV1 CC rereview supersedes that nonblocking disposition: HOLD is required in
+this lane. The acknowledged real-provider-double denial/result-before-run twin
+was RED on canonical 676e26b and on rejected 795d740f: both readmitted denied work.
+The segment now reads process status and permission guard from the canonical
+attempt result, including cancelled results retaining a guard. Work completion
+and structured provenance observations remain separate; no projected running
+label overrides the process outcome. The focused twin is GREEN with zero readmissions.
+No blocking status wait is exposed by the current planner wire; retained polls
+use the admitted segment deadline. Gate speed remains a separate lane; caps unchanged.
+The intermediate a77 gate was RED in the existing ShelfLife missing-verifier
+journey: readmission was allowed but its repair reason became only "exited".
+Process outcomes now remain distinct from work-failure outcomes; the existing
+proof/worker guidance contract retains the concrete missing-verifier reason.
+
+RECOV1 host-gate revision (C18/C23/C25, I5/I6): the 8c104c6 host gate
+missed packet twin #1's fault point; its scratch is access-denied here. A forced
+quiescence-publication barrier on approved a5 reproduces the same no-successor
+shape: pause reads missing terminal outcomes; resume abandons B/C as unknown
+launch. This establishes a concrete ordering, not the unobserved host incident's
+cause. Monitor now publishes the canonical segment outcome before quiescence
+releases recovery; root terminal mirroring remains later and TD#6 stays open.
+The existing pause/resume packet twins force this window and report actual run,
+recovery disposition/proof and server diagnostics if the packet point is missed.
+Canonical denial ownership and its zero-readmission twin remain unchanged.
+
+RECOV1 write-ahead revision (C18/C23/C25, I6): host144d6ed missed packet
+fault #2; its dump records two readmissions then dead-controller activation,
+missing outcomes and an unknown-launch hold. Host segment files remain denied.
+A real controller exit before payload entry reproduces that false hold on ae281495.
+The admitted segment's started.json is written and fsynced before store access,
+dispatch or provider spawn (planner_jobs.execute_worker_job; verify_job also
+requires its digest/PID/generation). After owner revocation, missing segment entry
+means not entered; entry without stronger evidence means unknown/HOLD. Canonical
+attempt result/guard and observed prelaunch failure retain precedence. Recovery
+now delegates missing-terminal outcomes to that same producer instead of making
+its own unknown-launch dictionary. No new store/counter or allowance expansion.
+Launcher audit: worker attempt request.json='launching' precedes _run_provider;
+plan review commits review_attempts before invocation; acceptance review commits
+STARTED/REGISTERED events before invocation; acceptance execution commits
+running/started_at before its worker. These have different owners, not a universal
+started.json contract; no absence-based replay was added outside worker segments.
+Forced before/after-entry controller deaths protect readmit vs HOLD, and the
+existing packet/unknown-resume/denial twins remain. Two exhausted readmissions
+still steer: a controller that never entered does not authorize a third recovery.
+
 FIX16 (C8/C14/C23, I6/I8): TRIAGE DESIGN — the public user_words contract hid
 the confirmation consumer's required fields. ShelfLife r16 turn03 item_4/6/8/11/13/17
 retained request d2013e563a294ade8246183837cb5d12, revision 2ffcf501 and fingerprint

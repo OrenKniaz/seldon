@@ -712,22 +712,15 @@ def _quarantine(store, run, effect, reason):
 
 
 def _recover(store, run, effect, reason, *, observation=None):
-    from codex_harness.core import planner_recovery as recovery, dispatch
-
-    proof = recovery.inspect(store.workspace, effect["jobId"])
-    outcomes = set(proof["faultOutcomes"].values())
-    denied = not proof["faultBeads"] or bool(
-        outcomes
-        & (dispatch.DENIAL_HELD_STATUSES | {dispatch.STATUS_PROVENANCE_HELD, "ambiguous launch"})
-    )
+    from codex_harness.core import planner_recovery as recovery
     run["generation"] += 1
     run["effect"] = None
     save(store, run)
-    resolved = recovery.resolve(store, effect["jobId"], "abandon" if denied else "readmit", reason)
+    resolved = recovery.resolve(store, effect["jobId"], "readmit", reason)
     run.update(
         effect=None, resumeRun=None, observation=dict(recovery=resolved, execution=observation)
     )
-    if denied:
+    if resolved["choice"] == "abandon":
         run["semanticHeld"] = True
     if resolved["choice"] == "readmit":
         run.update(state="BUILD", reason=reason + "; automatic recovery within existing B")
@@ -736,7 +729,7 @@ def _recover(store, run, effect, reason, *, observation=None):
             store,
             run,
             "Permission/uncertain launch held"
-            if denied
+            if resolved["choice"] == "abandon"
             else "Two automatic recoveries exhausted; planner direction required",
         )
 

@@ -444,6 +444,83 @@ def worker_job_status(workspace, job_id):
     return worker_status(workspace, result)
 
 
+def admitted_work(store, directory, request):
+    """Bind work to the admitted B before controller or provider launch."""
+    manifest = read_record_json(directory / "plan/sample.json")
+    authority = next(
+        (
+            r
+            for r in approvals.records(store, approvals.EVENT)
+            if r["id"] == request["executionRequestId"]
+        ),
+        None,
+    )
+    if authority is None:
+        raise ValueError("Recovery requires original bound B; retain evidence and inspect admission")
+    accepted = authority["subject"]["scope"]["nodes"]
+    admitted = request["executionScope"]["inputs"]["nodes"]
+    work = {}
+    for key in manifest["beads"]:
+        node = accepted[key] if key in accepted else admitted[key]
+        todo, upstream = list(node["parents"]), {}
+        while todo:
+            identifier = todo.pop()
+            if identifier in upstream:
+                continue
+            item = accepted[identifier] if identifier in accepted else admitted[identifier]
+            if item["kind"] != "vision":
+                upstream[identifier] = item
+                todo.extend(item["parents"])
+        work[key] = _digest(
+            dict(
+                bead=key,
+                phase=manifest["beads"][key].get("semanticPhase"),
+                ownedFiles=node["fields"]["ownedFiles"],
+                obligations=upstream,
+            )
+        )
+    return work
+
+
+def segment_outcomes(directory, segment):
+    """Publish work and launch certainty even when dispatch has no attempt."""
+    paths = list(directory.glob("runs/*/evidence/run.json"))
+    run = read_record_json(_inside(directory, paths[0])) if len(paths) == 1 else {}
+    if (run.get("control") or {}).get("effectId") != segment["segmentId"]:
+        run = {}
+    entered = (directory / "segments" / segment["segmentId"] / "started.json").is_file()
+    unobserved = "unknown launch" if entered else "not launched"
+    outcomes = {}
+    for key, work in segment["work"].items():
+        bead = run.get("beads", {}).get(key, {})
+        work_status = bead.get("status", unobserved)
+        result_path = _inside(
+            directory, Path(bead.get("evidenceDir", directory)) / "attempt/result.json"
+        )
+        result = read_record_json(result_path) if result_path.is_file() else {}
+        outcomes[key] = dict(
+            workId=work,
+            status=result.get(
+                "status", "not launched" if bead and not bead.get("attempt") else unobserved
+            ),
+            workStatus=work_status,
+            fault=not bead or (
+                bool(bead.get("attempt") or work_status.startswith("prelaunch failed:"))
+                and work_status not in {
+                    "contracts-red", "requirement-validated", dispatch.STATUS_MOCK_ONLY,
+                    "already-satisfied", "reused",
+                }
+            ),
+            permissionGuard=result.get("permissionGuard") or {},
+            launchCertain=not entered or bool(bead) and (
+                not bead.get("attempt")
+                or bead.get("isMocked")
+                or type(result.get("didRunProvider")) is bool
+            ),
+        )
+    return outcomes
+
+
 def dispatch_job(store, directory, request, resume_run_dir=None):
     workers = _workers(
         read_record_json(directory / "plan/sample.json"), request["options"]["workers"]
@@ -565,6 +642,7 @@ def start_segment(store, job_id, segment_id, resume_run_dir):
         generation=run["generation"],
         deadlineAt=run["effect"]["deadlineAt"],
         resumeRun=resume_run_dir,
+        work=admitted_work(store, path.parent.parent, _request(path.parent.parent)),
     )
     write_record_json_once(path / "request.json", request)
     command = [
@@ -700,6 +778,7 @@ def execute_worker_job(workspace, job_id, segment_id):
             traceback="".join(traceback.format_exception(error, limit=-6))[-4096:],
         )
     terminal["at"] = _now()
+    terminal["outcomes"] = segment_outcomes(directory, segment)
     write_record_json_once(path / "terminal.json", terminal)
     return terminal
 
