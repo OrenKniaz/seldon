@@ -104,12 +104,6 @@ def review_replacement_golden(store, reviewer):
         return [r for r in store.successful_reviews(store.manifest_revision())
                 if (r["reviewer"], r["provider"]) == (reviewer["name"], reviewer["provider"])]
 
-    # Migration twin: keep the actual native review original from a history
-    # predating reservations. Fresh reviews must still use ordinary admission.
-    historical = credit()[0]
-    with store._transaction():
-        store.connection.execute("DELETE FROM review_attempts WHERE id=?", (historical["id"],))
-
     with pytest.MonkeyPatch.context() as patch, ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="slow-review"
     ) as pool:
@@ -123,7 +117,7 @@ def review_replacement_golden(store, reviewer):
             fail_new = False
             latest = roundtable.run_roundtable(store, reviewers=[reviewer], timeout=5)
             expected = credit()
-            assert len(expected) == 1, "An older reservation or legacy row overrode the latest pass"
+            assert len(expected) == 1, "An older reservation overrode the latest pass"
         finally:
             release.set()
         future.result(timeout=15)
@@ -2916,100 +2910,67 @@ def planning_surface_golden(workspace):
 
 
 @timed
-def retired_permission_golden(workspace):
-    """C8/C20/C23: a base-produced reviewer P wait resumes without another P card.
+def old_format_refusal_golden(workspace):
+    """C18/C23/C26/I6: reconnect refuses old records without rewriting history.
 
-    Fresh-run journeys never load the retired consumer's persisted wait. Run the
-    base producer through A and native reviewer P, then reconnect the candidate;
-    the old elicitation/reply must not gain credit or replace the bound B card.
-    TRACE1B also resumes real prepatch trace/repair producers to B. Fresh questions
-    missed saved-envelope deadlock; an exact-fix wait must retain its allowance.
+    Current-format restart journeys never encounter a retired P wait or saved
+    trace envelope; the old compatibility path silently upgraded both. Start
+    through the actual chat producer, retain an old wait, then exercise reconnect
+    and chat refusal before starting the same dream fresh in another workspace.
     """
-    import io
-    from zipfile import ZipFile
+    import sqlite3
     from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core import run_loop
+    from codex_harness.core.plan_store import open_plan_store
 
-    base = workspace.parent / (workspace.name + "-base")
-    with ZipFile(io.BytesIO(subprocess.check_output(["git", "archive", "--format=zip", "c7219cb5933970f4837c5068c682cadd26762a51", "src"], cwd=ROOT))) as archive:
-        archive.extractall(base)
-    client = LoopClient(workspace, source_root=base)
-    try:
-        content = plan_content()
-        client.call("harness_plan_start", name="Retire base reviewer P", idea=content["nodes"][0]["text"])
-        client._chat_send("/authorize", client.current["userRequest"]["request_id"])
-        client.progress()
-        advance_meaning(client, content, stop_at=lambda run:
-            (run.get("userRequest") or {}).get("gate") == "invocations" and not run.get("question"))
-        old_offer = client.native_offer()
-        client.call("harness_plan_status")
-        old_request = client.current["userRequest"]["request_id"]
-        assert client.current["state"] == "WAIT_USER" and client.current["question"] is None
-        assert client.current["userRequest"]["subject"]["kind"] == "P"
-        client.env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), str(ROOT)])
-        client.reconnect()
-        assert (client.current.get("userRequest") or {}).get("gate") != "invocations"
-        client.progress(timeout=30)
-        advance_meaning(client, content, stop_at=lambda run:
-            (run.get("userRequest") or {}).get("gate") == "plan-execution" and not run.get("question"))
-        card = client.current["userRequest"]
-        assert card["subject"]["kind"] == "B" and card["subject"]["reviewers"] == client.setup["reviewers"]
-        client.native_response(old_offer, retain_reply=False)
-        assert client.rpc("ping", {}) == {}
-        refused = client.call("harness_chat", text="yes", reply_to=old_request, error=True)
-        assert refused["structuredContent"]["refusal"]["code"] == "user-subject-stale"
-        assert client.call("harness_plan_status")["run"]["userRequest"]["request_id"] == card["request_id"]
-    finally:
-        client.close()
-
-    for base, repair in (("97d059b",False), ("97d059b",True), ("2a833b6",False), ("2a833b6",True), ("2a833b6","malformed-data")):
-        trace_base = workspace.parent / (workspace.name + "-trace-base-" + base)
-        if not trace_base.exists():
-            with ZipFile(io.BytesIO(subprocess.check_output(["git","archive","--format=zip",base,"src"],cwd=ROOT))) as archive:
-                archive.extractall(trace_base)
-        root = workspace / (base + ("-malformed-data" if repair == "malformed-data" else "-old-repair" if repair else "-old-trace"))
-        client = LoopClient(root,source_root=trace_base)
+    for shape in ("permission", "question", "database"):
+        root = workspace / shape
+        root.mkdir(parents=True)
+        (root / "receipt-gaps").touch()
+        client = LoopClient(root, native=False)
         try:
             content = plan_content()
-            client.call("harness_plan_start",name="Retained trace",idea=content["nodes"][0]["text"])
-            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "trace")
-            if repair == "malformed-data":
-                rejected = json.loads(provider_answer(root,client.current["question"],dict(option="ready",rationale="Author the receipt plan",content=content)))
-                value = next(e["value"] for e in rejected["edits"] if e["section"] == "scenario" and any(c.get("stdoutJsonEquals") for a in e["value"]["actions"] for c in a["checks"]))
-                check = next(c for a in value["actions"] for c in a["checks"] if c.get("stdoutJsonEquals"))
-                bad_wrapper = json.loads(json.dumps(check)); bad_wrapper["stdoutJsonEquals"] = 1
-                next(a for a in value["actions"] if check in a["checks"])["checks"].append(bad_wrapper)
-                check["stdoutJsonEquals"]["value"] = dict(entries=1)
-                client.answer(json.dumps(rejected))
-            elif repair:
-                rejected = json.loads(provider_answer(root,client.current["question"],dict(option="ready",rationale="Author the receipt plan",content=content)))
-                if "records" in rejected:
-                    next(r for r in rejected["records"] if r["ref"] == fixture_id(root,"T_RECEIPT"))["parents"] = [fixture_id(root,"B")]
-                else:
-                    next(e for e in rejected["edits"] if e["ref"] == fixture_id(root,"T_RECEIPT") and e["section"] == "parents")["value"] = [fixture_id(root,"B")]
-                for _ in range(3): client.answer(json.dumps(rejected))
-                assert client.current["question"]["family"] == "repair"
-            else:
-                client.answer("{")
-            old = client.current["question"]
-            assert old["answerSchema"]["properties"].get("edits",{}).get("type") != "object"
-            client.env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"),str(ROOT)])
-            client.ignored_offers.add(client.last_offer)
-            client.reconnect()
-            client.progress(timeout=30)
-            current = client.current["question"]
-            assert current["requestId"] != old["requestId"] and current["answerSchema"]["properties"]["edits"]["type"] == "object"
-            assert current["judgment"]["fixesIssued"] == old["judgment"]["fixesIssued"], "Schema retirement reset the exact-fix allowance"
-            assert {n["id"] for n in current["context"]["nodes"]} == {n["id"] for n in old["context"]["nodes"]}
-            advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
-            assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution", client.current
-            from codex_harness.core.plan_store import open_plan_store_readonly
-            with open_plan_store_readonly(root) as store:
-                scenarios = store.spine().node("V1")["fields"]["scenarios"]["scenarios"]
-                empty = dict(bytes=0,sha256=hashlib.sha256(b"").hexdigest(),label=None)
-                assert any(o.get("stdoutJsonEquals") == empty for row in scenarios for o in row["observe"]), "Retirement changed literal JSON meaning"
-
+            client.call("harness_plan_start", name="Historical dream", idea=content["nodes"][0]["text"])
+            advance_meaning(client, content, stop_at=lambda run:
+                (run.get("userRequest") or {}).get("gate") == "align+vision-lock" and not run.get("question"))
+            with open_plan_store(root) as store:
+                retained = run_loop.cursor(store)
+                if shape == "permission":
+                    retained.update(state="WAIT_USER", userRequest=dict(gate="invocations", subject=dict(kind="P")))
+                elif shape == "question":
+                    retained.update(userRequest=None, question=dict(family="author", purpose="trace",
+                        answerSchema=dict(type="object", properties=dict(records=dict(type="array")))))
+                with store._transaction():
+                    run_loop.save(store, retained)
+                if shape == "database":
+                    store.connection.execute("ALTER TABLE meta DROP COLUMN locked_vision_json")
+                original = store.connection.execute("SELECT payload_json FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (run_loop.EVENT,)).fetchone()[0]
+                events = store.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            launches = root / ".codex-harness/scripted-review-invocations.jsonl"
+            before = launches.read_bytes()
+            database = root / ".codex-harness/plan.sqlite3"
+            saved_bytes = database.read_bytes()
+            notice = client.reconnect(error=True)
+            refusal = notice["structuredContent"]["refusal"]
+            assert refusal["code"] == "run-format-unsupported", notice
+            assert "new workspace" in refusal["reason"] and "harness_chat" in refusal["nextAction"]
+            refused = client.call("harness_chat", text="Continue the historical dream", error=True)
+            assert refused["structuredContent"]["refusal"]["code"] == refusal["code"]
+            assert launches.read_bytes() == before, "An old run launched a provider"
+            assert database.read_bytes() == saved_bytes, "Refusal changed the historical database"
+            with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
+                assert connection.execute("SELECT payload_json FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (run_loop.EVENT,)).fetchone()[0] == original
+                assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == events, "Refusal rewrote historical state"
         finally:
             client.close()
+    fresh = LoopClient(workspace / "fresh", native=False)
+    try:
+        fresh.call("harness_plan_start", name="Fresh dream", idea=content["nodes"][0]["text"])
+        advance_meaning(fresh, content, stop_at=lambda run:
+            (run.get("userRequest") or {}).get("gate") == "align+vision-lock" and not run.get("question"))
+        assert fresh.current["userRequest"]["subject"]["kind"] == "A"
+    finally:
+        fresh.close()
 
 
 @timed
@@ -5268,7 +5229,7 @@ def test_golden_path(tmp_path, request, surface):
         fixture_ownership_golden(tmp_path / "fixture-ownership")
         planning_surface_golden(tmp_path / "planning-surface")
         missing_kickoff_golden(tmp_path / "missing-kickoff")
-        retired_permission_golden(tmp_path / "retired-permission")
+        old_format_refusal_golden(tmp_path / "old-format")
         reviewer_order_golden(tmp_path / "reviewer-order")
         approval_order_golden(tmp_path / "approval-order")
         r18_authoring_golden(tmp_path / "r18-replay")

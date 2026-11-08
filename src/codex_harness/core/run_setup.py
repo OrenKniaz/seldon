@@ -138,45 +138,4 @@ def initialize(store, *, setup=None):
             save(store, run)
         else:
             frozen_setup(run)
-            pending = run.get("question") or {}
-            from codex_harness.core.run_schemas import strict_schema
-            obsolete = False
-            if pending:
-                try: strict_schema(pending["answerSchema"])
-                except ValueError: obsolete = True
-            if obsolete and run["state"] not in {"PAUSED","STOPPED","DONE"}:
-                from codex_harness.core.run_loop import _interrupt
-                from codex_harness.core.run_questions import ask_question
-                old = store._judgment_record(pending["requestId"])
-                context = {**pending["context"], **old.get("diagnostics",{}), "retiredRequestId":old["id"]}
-                if rejected := context.pop("rejectedAnswer",None):
-                    context["rejectedEdits"] = [dict(ref=r["ref"],section=s,value=v) for r in rejected["records"]
-                        for s,v in [("parents",r["parents"]), *(("fields."+k,v) for k,v in r["fields"].items())]]
-                    context["rejectedEdits"].extend(dict(ref=r["ref"],section=s,value={k:v for k,v in r.items() if k != "ref"})
-                        for group,s in (("targets","target"),("scenarios","scenario")) for r in rejected[group])
-                if isinstance(context.get("rejectedEdits"),list):
-                    context["rejectedEdits"] = {e["ref"]+":"+e["section"]:e["value"] for e in context["rejectedEdits"]}
-                if "data" in pending["answerSchema"].get("$defs",{}):
-                    import json
-                    invalid = set()
-                    def migrate(d):
-                        if set(d) == {"entries"}:
-                            rows = d["entries"]
-                            if not isinstance(rows,list) or any(not isinstance(r,dict) or set(r) != {"key","value"} or not isinstance(r["key"],str) for r in rows) or len(rows) != len({r["key"] for r in rows}): invalid.add(key); return d
-                            return {r["key"]:r["value"] for r in rows}
-                        if any(k in {"json","jsonEquals","stdoutJsonEquals","fileJsonEquals"} and v is not None and (not isinstance(v,dict) or set(v) != {"value"}) for k,v in d.items()): invalid.add(key)
-                        return {k:dict(value=json.dumps(v["value"])) if key not in invalid and k in {"json","jsonEquals","stdoutJsonEquals","fileJsonEquals"} and v is not None else v for k,v in d.items()}
-                    for key,value in context.get("rejectedEdits",{}).items():
-                        context["rejectedEdits"][key] = json.loads(json.dumps(value),object_hook=migrate)
-                    for key in invalid:
-                        ref,section = key.rsplit(":",1)
-                        context.setdefault("editableFields",{}).setdefault(ref,[]).append(section)
-                _interrupt(store,run)
-                ask_question(store,run,pending["family"],pending["purpose"],context=context)
-                replacement = store._judgment_record(run["question"]["requestId"])
-                replacement["fixesIssued"] = old["fixesIssued"]
-                store._event("judgment-recorded",replacement)
-                old.update(disposition="steer",supersededBy=replacement["id"],error="Obsolete trace schema retired; answer the current typed question",owner=None)
-                store._event("judgment-recorded",old)
-                save(store,run)
     return run

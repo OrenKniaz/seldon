@@ -199,9 +199,6 @@ def apply_judgment(store, judgment):
         return None
     seen = set()
     for saved in records(store, "confirmation-pending-judgment"):
-        from codex_harness.core.run_loop import obsolete_permission
-        if obsolete_permission(saved):
-            continue
         if saved["request_id"] in seen:
             continue
         seen.add(saved["request_id"])
@@ -232,11 +229,7 @@ def complete_confirmation(
         request = next((r for r in records(store, REQUEST) if r["request_id"] == request_id), None)
         if request is None:
             raise PlanStoreError("plan-confirmation-request-unknown", str(request_id))
-        from codex_harness.core.run_loop import cursor, obsolete_permission
-
-        if obsolete_permission(request):
-            raise PlanStoreError("confirmation-control-superseded",
-                "Invocation permission is obsolete; follow the current baton under frozen kickoff choices")
+        from codex_harness.core.run_loop import cursor
 
         run = cursor(store)
         if run and (

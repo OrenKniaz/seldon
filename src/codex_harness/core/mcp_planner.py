@@ -130,16 +130,14 @@ class PlannerServer(PlannerTransport):
                     self.store = store
                     return self.call_tool(name, arguments, schema_tools=self._wire_tools())
             return self.call_tool(name, arguments, schema_tools=self._wire_tools())
+        except ValueError as error:
+            return self._reply_error(error)
         finally:
             self.store = previous
 
     def _reply_error(self, error):
-        from codex_harness.core.planner_refusals import render
-        refusal = dict(code=getattr(error, "code", "operation-error"), reason=str(error),
-                       current=dict(workspace=str(self.workspace)),
-                       nextAction=getattr(error, "nextAction", "Read harness_plan_status and supply the named correction through harness_chat"))
-        return dict(isError=True, refusalCode=refusal["code"], structuredContent=dict(refusal=refusal),
-                    content=[dict(type="text", text=render(refusal))])
+        from codex_harness.core.planner_refusals import reply
+        return reply(error, self.workspace)
 
     def call_tool(self, name, arguments, *, schema_tools=None):
         try:

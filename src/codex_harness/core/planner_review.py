@@ -156,9 +156,7 @@ class ReviewOwner:
                             {r["slot"] for _, r in returned}
                             == {r["id"] for r in headers[0][1]["slots"]}
                             and (
-                                not registered
-                                and all(r.get("schema") == 1 for _, r in returned)
-                                or all(r.get("schema") == 2 for _, r in returned)
+                                all(r.get("schema") == 2 for _, r in returned)
                                 and {r["id"] for _, r in registered}
                                 == {r.get("launchId") for _, r in returned}
                             )

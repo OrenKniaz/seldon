@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from codex_harness.core.format_admission import admit_store, require_current_store
 from codex_harness.core.graph import load_plan
 from codex_harness.core.spine import (
     SCHEMA,
@@ -50,6 +51,7 @@ class PlanStore(
         self.workspace = workspace
         self.path = workspace / ".codex-harness" / "plan.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        admit_store(self)
         # Concurrent activations wait for the existing bounded admission writer.
         self.connection = sqlite3.connect(self.path, isolation_level=None, timeout=30)
         self.connection.row_factory = sqlite3.Row
@@ -60,14 +62,15 @@ class PlanStore(
                 "title TEXT NOT NULL, text TEXT NOT NULL, fields_json TEXT NOT NULL, "
                 "parents_json TEXT NOT NULL, revision TEXT NOT NULL, updated_at TEXT NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS meta (name TEXT NOT NULL, phase TEXT NOT NULL, "
-                "vision_locked_revision TEXT, published_revision TEXT)",
+                "vision_locked_revision TEXT, published_revision TEXT, "
+                "vision_lock_stale INTEGER NOT NULL DEFAULT 0, locked_vision_json TEXT)",
                 "CREATE TABLE IF NOT EXISTS clarifications (id TEXT PRIMARY KEY, "
                 "question TEXT NOT NULL, answer TEXT, status TEXT NOT NULL "
                 "CHECK(status IN ('open','answered','waived')), node_ids_json TEXT NOT NULL, "
                 "asked_at TEXT NOT NULL, answered_at TEXT)",
                 "CREATE TABLE IF NOT EXISTS assumptions (id TEXT PRIMARY KEY, text TEXT NOT NULL, "
                 "status TEXT NOT NULL CHECK(status IN ('open','confirmed','rejected')), "
-                "node_ids_json TEXT NOT NULL)",
+                "node_ids_json TEXT NOT NULL, rationale TEXT, resolved_by TEXT)",
                 "CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, gate TEXT NOT NULL, "
                 'plan_revision TEXT NOT NULL, "by" TEXT NOT NULL, statement TEXT NOT NULL, '
                 "at TEXT NOT NULL)",
@@ -110,18 +113,6 @@ class PlanStore(
                 "BEGIN SELECT RAISE(ABORT, 'events are append-only'); END",
             ):
                 self.connection.execute(sql)
-            for table, column, declaration in (
-                ("meta", "vision_lock_stale", "INTEGER NOT NULL DEFAULT 0"),
-                ("meta", "locked_vision_json", "TEXT"),
-                ("assumptions", "rationale", "TEXT"),
-                ("assumptions", "resolved_by", "TEXT"),
-                ("audit_attempts", "engine_identity", "TEXT"),
-            ):
-                columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({table})")}
-                if column not in columns:
-                    self.connection.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
-                    )
             if self.connection.execute("SELECT 1 FROM meta").fetchone() is None:
                 self.connection.execute(
                     "INSERT INTO meta (name, phase) VALUES (?, 'align')",
@@ -145,11 +136,9 @@ class PlanStore(
             return
         self.connection.execute("BEGIN IMMEDIATE")
         try:
-            before = (
-                self._data()
-                if self.connection.execute("PRAGMA table_info(nodes)").fetchone()
-                else {"nodes": []}
-            )
+            before = self._data() if self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='nodes'"
+            ).fetchone() else {"nodes": []}
             yield
             after = self._data()
             if before["nodes"] and before != after:
@@ -826,6 +815,7 @@ def open_plan_store_readonly(workspace: str | Path):
         source.close()
         memory.row_factory = sqlite3.Row
         memory.execute("PRAGMA query_only=ON")
+        require_current_store(memory)
         store = _ReadOnlyPlanStore.__new__(_ReadOnlyPlanStore)
         store.workspace, store.path, store.connection = workspace, path, memory
         yield store

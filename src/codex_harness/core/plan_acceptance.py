@@ -39,7 +39,10 @@ class PlanAcceptance:
         ]
         spine = self.spine()
         for scenario in scenarios:
-            refs = scenario.get("nodeRevisions", {})
+            if "nodeRevisions" not in scenario:
+                from codex_harness.core.plan_types import refuse_old_format
+                refuse_old_format("Acceptance scenario without node revisions")
+            refs = scenario["nodeRevisions"]
             if not spine.bindings_current(refs):
                 scenario["status"] = "stale"
         return scenarios
@@ -746,8 +749,3 @@ class PlanAcceptance:
             )
             self._event("accepted", approval)
             return approval
-
-    def accept_rebind(self, repo) -> dict:
-        from codex_harness.core.acceptance import rebind_acceptance
-
-        return rebind_acceptance(self, repo)

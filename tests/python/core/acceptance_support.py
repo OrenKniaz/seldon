@@ -43,7 +43,7 @@ def http_golden(workspace, semantic=False):
     scope under verifier/catalog/wave changes; a frozen happy plan misses those seams.
     Preserve real importer/SQLite/server-restart RED-to-GREEN, bounded descendant
     cleanup, independent bead recovery counts, retained-candidate revalidation,
-    changed-dependency delivery and migration/fresh-C binding. Ordinary successful
+    changed-dependency delivery and current C binding. Ordinary successful
     CLI/UI execution cannot catch those HTTP/persistence/recovery regressions.
     Only external provider replies are doubled; owners, HTTP and evidence are real.
     """
@@ -2679,25 +2679,13 @@ with TemporaryDirectory(dir=root) as scratch:
 
             mark_phase("retained validation/delivery")
             if semantic:
-                from codex_harness.core import acceptance
-                old_run = acceptance._latest_run(store)
-                legacy = dict(old_run, revisionAlgorithm="git-diff-v1",
-                              revision=acceptance._integrated_revision_v1(run["repo"]))
-                with store._transaction():
-                    store.connection.execute("UPDATE acceptance_runs SET result_json=? WHERE id=?",
-                                             (json.dumps(legacy), legacy["id"]))
-                assert read_status(full=True)["acceptance"]["invalidReason"] == "revision-algorithm-upgraded"
-                refreshed = store.accept_rebind(run["repo"])
-                assert refreshed["run"]["passed"] and refreshed["run"]["id"] != legacy["id"]
-                assert "approval" not in refreshed and "reviews" not in refreshed
-                assert not read_status()["acceptance"]["accepted"]
                 acceptance_review(repo=run["repo"])
                 decisions.append("accept")
                 fresh_c = settle_decision(store, accept_product(by="user", statement="Yes"))
-                assert fresh_c["runId"] == refreshed["run"]["id"] and store.status()["acceptance"]["accepted"]
+                assert fresh_c["runId"] == accepted["structuredContent"]["result"]["id"]
+                assert store.status()["acceptance"]["accepted"]
                 assert decisions == ["align+vision-lock", "plan-execution", "accept"]
-                mark_phase("semantic legacy refresh/C")
-            else:
+            if not semantic:
                 # Retry/receipt regression: a frozen header previously rejected the
                 # controller's corrected stdin and discarded paid malformed returns.
                 # Ordinary successful plan reviews never traverse acceptance recovery.
@@ -2743,85 +2731,22 @@ with TemporaryDirectory(dir=root) as scratch:
                 with pytest.raises(ValueError):
                     exhausted_attempt.read_returns()
 
-                # Actual schema1 producer format: canonical packet/attempt admission,
-                # native provider-double bytes and old slot-named sealed returns. This
-                # historical input reserves a session; it grants no semantic credit.
-                from codex_harness.core.acceptance import _prepare_acceptance_review
-
-                old_run, old_selected, old_dossiers, old_evidence, _, _, _, old_identity = (
-                    _prepare_acceptance_review(store, run["repo"], None, None)
-                )
-                old_selected = old_selected[:1]
-                roundtable.bind_review_dossiers(
-                    store, old_dossiers, old_selected, candidate_run=old_run
-                )
-                old_attempt = review_receipts.ReviewAttempt.start(
-                    store,
-                    run["repo"],
-                    old_run,
-                    old_selected,
-                    old_dossiers,
-                    {r["provider"]: sys.executable for r in old_selected},
-                    old_evidence,
-                    mocked=False,
-                    expected_identity=old_identity,
-                )
-                old_slot, old_reviewer = old_attempt.header["slots"][0], old_selected[0]
-                old_native = protocol(
-                    old_reviewer["provider"],
-                    text="[]",
-                    model=old_reviewer["model"],
-                    effort=old_reviewer["effort"],
-                )
-                old_runtime = review_receipts.runtime_identity(
-                    old_reviewer["provider"], old_reviewer, old_native[1], old_native[2]
-                )
-                with store._transaction():
-                    store._event(
-                        review_receipts.COMPLETED,
-                        dict(
-                            schema=1,
-                            attemptId=old_attempt.id,
-                            headerHash=review_receipts.digest(old_attempt.header),
-                            slot=old_slot["id"],
-                            launch=old_slot["launch"],
-                            exitCode=old_native[0],
-                            isMocked=False,
-                            didRunProvider=True,
-                            runtime=old_runtime,
-                            stdout=review_receipts._write(
-                                old_attempt.root,
-                                old_slot["id"] + ".stdout",
-                                old_native[1].encode("utf-8"),
-                            ),
-                            stderr=review_receipts._write(
-                                old_attempt.root,
-                                old_slot["id"] + ".stderr",
-                                old_native[2].encode("utf-8"),
-                            ),
-                        ),
-                    )
-                with pytest.raises(ValueError, match="fresh acceptance review"):
-                    old_attempt.read_returns()
-
-                def repeated_old_session(launch, *args, **options):
+                # Reusing a native session remains invalid within the current format.
+                # Reuse a real sealed schema-2 return from the exhausted attempt;
+                # successful independent reviews never exercise this replay boundary.
+                prior_runtime = exhausted_returns[0][1]["runtime"]
+                prior_reviewer = exhausted_attempt.header["slots"][0]["reviewer"]
+                def repeated_session(launch, *args, **options):
                     response = positive_review(launch, *args, **options)
                     request = review_request(launch)
                     reviewer = request["sourceRefs"][0]["payload"]["facts"]["reviewer"]
-                    if reviewer["name"] == old_reviewer["name"]:
-                        actual = review_receipts.runtime_identity(
-                            reviewer["provider"], reviewer, response[1], response[2]
-                        )
-                        response = tuple(
-                            v.replace(actual["session"], old_runtime["session"])
-                            if isinstance(v, str)
-                            else v
-                            for v in response
-                        )
+                    if reviewer["name"] == prior_reviewer["name"]:
+                        actual = review_receipts.runtime_identity(reviewer["provider"], reviewer, response[1], response[2])
+                        response = tuple(value.replace(actual["session"], prior_runtime["session"])
+                                         if isinstance(value, str) else value for value in response)
                     return response
-
                 with pytest.MonkeyPatch.context() as replay:
-                    replay.setattr(review_provider, "_run", repeated_old_session)
+                    replay.setattr(review_provider, "_run", repeated_session)
                     with pytest.raises(ValueError, match="Native session was already registered"):
                         acceptance_review(repo=run["repo"])
 
@@ -2980,101 +2905,8 @@ with TemporaryDirectory(dir=root) as scratch:
                     rerun = finish_domain_acceptance(server, admitted)
                     assert rerun["structuredContent"]["result"]["passed"], rerun
                 mark_phase("acceptance/receipts")
-                # Migration refreshes execution only. No review/approval lineage is
-                # restored; both legacy inputs must proceed through fresh judgments.
-                from codex_harness.core import acceptance
-
-                original_approval = read_status()["acceptance"]["approval"]
-                old_run = acceptance._latest_run(store)
-                legacy = dict(
-                    old_run,
-                    revisionAlgorithm="git-diff-v1",
-                    revision=acceptance._integrated_revision_v1(run["repo"]),
-                )
-                # Historical persisted input only; judgments and refreshed runs still
-                # come from their canonical producers, with no mocked acceptance.
-                with store._transaction():
-                    if not semantic:
-                        legacy_scenarios = acceptance._raw_scenarios(store)
-                        for item in legacy_scenarios:
-                            del item["nodeRevisions"]
-                            store.connection.execute(
-                                "UPDATE acceptance_scenarios SET scenario_json=? WHERE id=?",
-                                (json.dumps(item), item["id"]),
-                            )
-                        legacy["scenarioRevision"] = acceptance._hash(legacy_scenarios)
-                    store.connection.execute(
-                        "UPDATE acceptance_runs SET result_json=? WHERE id=?",
-                        (json.dumps(legacy), legacy["id"]),
-                    )
-                status = read_status(full=True)
-                assert status["acceptance"]["invalidReason"] in {
-                    "revision-algorithm-upgraded",
-                    "legacy-unbound",
-                }
-                refreshed = store.accept_rebind(run["repo"])
-                refreshed_id = refreshed["run"]["id"]
-                assert refreshed["run"]["passed"] and refreshed_id != legacy["id"]
-                assert "approval" not in refreshed and "reviews" not in refreshed
-                status = read_status(full=True)
-                assert status["acceptance"]["accepted"] is False
-                assert status["acceptance"]["approval"] == original_approval
-                assert not store.finding_state()["dispositionPrerequisite"]["complete"]
-                if not semantic:
-                    # Upgrade fixture: retain a base-produced positive C with no review
-                    # binding. Prior replays created only newly bound C, missing revival
-                    # of historical consent after template drift and fresh same-run reviews.
-                    from codex_harness.core.approvals import assess
-                    from codex_harness.core.reviewer_evidence import review_binding
-
-                    historical = assess(
-                        store,
-                        "user-decision",
-                        dict(
-                            subject=dict(kind="C", run=refreshed["run"]),
-                            reviewBinding=review_binding(store, run_id=refreshed_id),
-                            words="Yes",
-                            actor="user",
-                        ),
-                    )
-                    scripted_judgment(store, historical, dict(decision="approve"))
-                    historical = store._judgment_record(historical["id"])
-                    for ref in historical["sourceRefs"]:
-                        ref["payload"]["facts"].pop("reviewBinding", None)
-                    historical["binding"] = hashlib.sha256(
-                        json.dumps(
-                            {
-                                key: historical[key]
-                                for key in (
-                                    "id",
-                                    "question",
-                                    "subjectRefs",
-                                    "evidenceRefs",
-                                    "sourceRefs",
-                                    "candidate",
-                                )
-                            },
-                            sort_keys=True,
-                            ensure_ascii=False,
-                            allow_nan=False,
-                        ).encode("utf-8")
-                    ).hexdigest()
-                    legacy_c = dict(
-                        id="legacy-unbound-C",
-                        runId=refreshed_id,
-                        by="user",
-                        statement="Yes",
-                        isProxy=False,
-                        judgmentId=historical["id"],
-                        human_identity_verified=False,
-                    )
-                    with store._transaction():
-                        store._event("judgment-recorded", historical)
-                        store.connection.execute(
-                            "INSERT INTO acceptance_approvals VALUES (?, ?)",
-                            (legacy_c["id"], json.dumps(legacy_c)),
-                        )
-                mark_phase("migration inputs")
+                from codex_harness.core.acceptance import _latest_run
+                current_id = _latest_run(store)["id"]
                 # Before fresh review, changed template bytes grant no credit. Earlier
                 # replays restored lineage instead of exercising current judgments.
                 template_file = next(
@@ -3082,11 +2914,11 @@ with TemporaryDirectory(dir=root) as scratch:
                 )
                 original_template = template_file.read_bytes()
                 template_file.write_text(
-                    template_file.read_text(encoding="utf-8") + "\n# Changed migration review input\n",
+                    template_file.read_text(encoding="utf-8") + "\n# Changed current review input\n",
                     encoding="utf-8",
                 )
                 scope_how(
-                    "The migration-review template comment changes no executable "
+                    "The current-review template comment changes no executable "
                     "assertion or product obligation"
                 )
                 required = store.finding_state()["dispositionPrerequisite"]["members"]
@@ -3098,7 +2930,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     )
                     for row in required
                 ]
-                assert store.acceptance_review_guard(refreshed_id) == "acceptance-review-required"
+                assert store.acceptance_review_guard(current_id) == "acceptance-review-required"
                 acceptance_review(repo=run["repo"])
                 held = observe(lambda: accept_product(by="user", statement="Yes"))
                 assert held["isError"] and held["refusalCode"] == "pending-judgment", held
@@ -3107,7 +2939,7 @@ with TemporaryDirectory(dir=root) as scratch:
                 prepared = resolve_findings(findings=dispositions)
                 facts = prepared["judgment"]["sourceRefs"][0]["payload"]["facts"]
                 assert (
-                    prepared["judgment"]["current"] and facts["reviewBinding"]["runId"] == refreshed_id
+                    prepared["judgment"]["current"] and facts["reviewBinding"]["runId"] == current_id
                 )
                 scripted_judgment(
                     store,
@@ -3121,17 +2953,14 @@ with TemporaryDirectory(dir=root) as scratch:
                     "acceptance"
                 ]
                 assert "harness_chat" in status["acceptance"]["next"]
-                if not semantic:
-                    assert status["acceptance"]["approval"] == legacy_c
-                    assert not read_judgment(judgment_id=historical["id"])["positiveCredit"]
                 decisions.append("accept")
                 fresh_c = settle_decision(store, accept_product(by="user", statement="Yes"))
-                assert fresh_c["runId"] == refreshed_id and fresh_c["by"] == "user"
+                assert fresh_c["runId"] == current_id and fresh_c["by"] == "user"
                 assert read_judgment(judgment_id=fresh_c["judgmentId"])["positiveCredit"]
                 assert store.status()["acceptance"]["accepted"]
                 assert decisions == ["align+vision-lock", "plan-execution", "accept"]
-                mark_phase("fresh migration C")
-                # After completed migration/C, further template drift must stale both
+                mark_phase("fresh current C")
+                # After completed current C, further template drift must stale both
                 # review credit and C's canonical judgment; finding holds cannot mask it.
                 retained_template = template_file.read_text(encoding="utf-8")
                 template_file.write_text(
@@ -3141,7 +2970,7 @@ with TemporaryDirectory(dir=root) as scratch:
                     "The additional template comment preserves every approved "
                     "behavior and acceptance assertion"
                 )
-                assert store.acceptance_review_guard(refreshed_id) == "acceptance-review-required"
+                assert store.acceptance_review_guard(current_id) == "acceptance-review-required"
                 assert not read_judgment(judgment_id=fresh_c["judgmentId"])["current"]
                 assert read_status()["acceptance"]["accepted"] is False
             if not semantic:

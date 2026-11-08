@@ -24,21 +24,24 @@ TERMINAL = {"STOPPED", "DONE"}
 CONTROL_STATES = {"pause": "PAUSED", "stop": "STOPPED", "repair": "PLAN", "replan": "PLAN"}
 
 
-def obsolete_permission(request):
-    return request.get("gate") == "invocations" or request.get("subject", {}).get("kind") == "P"
-
-
 def cursor(store):
     row = store.connection.execute(
         "SELECT payload_json FROM events WHERE kind=? ORDER BY id DESC LIMIT 1", (EVENT,)
     ).fetchone()
     run = json.loads(row[0]) if row else None
-    if run and obsolete_permission(run.get("userRequest") or {}):
-        resume = run.pop("afterPermission", "REVIEW" if run["phase"] == "roundtable" else "PLAN")
-        if run["state"] == "WAIT_USER":
-            run["state"] = resume
-        run.update(userRequest=None, reason="Obsolete invocation permission retired",
-                   nextAction="Continue under the frozen kickoff provider/model choices")
+    if run:
+        from codex_harness.core.plan_types import refuse_old_format
+        from codex_harness.core.run_schemas import strict_schema
+        request = run.get("userRequest") or {}
+        if request.get("gate") == "invocations" or request.get("subject", {}).get("kind") == "P":
+            refuse_old_format("Saved invocation permission")
+        if pending := run.get("question"):
+            try:
+                strict_schema(pending["answerSchema"])
+            except ValueError:
+                refuse_old_format("Saved question")
+            if pending["purpose"] == "trace" and pending["answerSchema"]["properties"].get("edits", {}).get("type") != "object":
+                refuse_old_format("Saved trace question")
     return run
 
 

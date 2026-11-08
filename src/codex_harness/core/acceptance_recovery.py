@@ -594,64 +594,50 @@ class ReviewAttempt:
         registrations = _events(self.store, REGISTERED, self.id)
         slots = header["slots"]
         schemas = {row.get("schema") for _, row in completions}
-        if schemas not in ({1}, {2}):
-            raise ValueError("Unsupported review receipts; obtain a fresh acceptance review")
-        historical = schemas == {1}
+        if schemas - {2}:
+            from codex_harness.core.plan_types import refuse_old_format
+            refuse_old_format("Review receipt")
         if (
-            len(completions) != (len(slots) if historical else len(registrations))
+            len(completions) != len(registrations)
             or {row["slot"] for _, row in completions} != {slot["id"] for slot in slots}
-            or not historical
-            and {row["launchId"] for _, row in completions}
+            or {row["launchId"] for _, row in completions}
             != {row["id"] for _, row in registrations}
         ):
             raise ValueError("Incomplete or duplicate original review launches/returns")
         records, sessions = [], set()
         for slot in slots:
             previous, previous_return = None, None
-            launches = (
-                [(None, None)]
-                if historical
-                else [(key, row) for key, row in registrations if row["slot"] == slot["id"]]
-            )
+            launches = [(key, row) for key, row in registrations if row["slot"] == slot["id"]]
             for registration_id, registration in launches:
-                matches = (
-                    [(key, row) for key, row in completions if row["slot"] == slot["id"]]
-                    if historical
-                    else [
-                        (key, row)
-                        for key, row in completions
-                        if row["launchId"] == registration["id"]
-                    ]
-                )
+                matches = [(key, row) for key, row in completions if row["launchId"] == registration["id"]]
                 if len(matches) != 1:
                     raise ValueError("Missing original registered launch return")
                 event_id, row = matches[0]
                 expected_launch, prefix = slot["launch"], slot["id"]
-                if not historical:
-                    if (
-                        registration["headerHash"] != digest(header)
-                        or registration["previousReturn"] != previous_return
-                        or registration_id >= event_id
-                        or previous_return is not None
-                        and previous_return >= registration_id
-                        or (
-                            registration["launch"] != slot["launch"]
-                            if previous is None
-                            else any(
-                                registration["launch"][k] != slot["launch"][k]
-                                for k in ("argv", "executable")
-                            )
-                            or registration["judgmentId"] != previous["judgmentId"]
-                            or registration["binding"] != previous["binding"]
-                            or registration["fixesIssued"] != previous["fixesIssued"] + 1
+                if (
+                    registration["headerHash"] != digest(header)
+                    or registration["previousReturn"] != previous_return
+                    or registration_id >= event_id
+                    or previous_return is not None
+                    and previous_return >= registration_id
+                    or (
+                        registration["launch"] != slot["launch"]
+                        if previous is None
+                        else any(
+                            registration["launch"][k] != slot["launch"][k]
+                            for k in ("argv", "executable")
                         )
-                        or row["registrationEventId"] != registration_id
-                    ):
-                        raise ValueError("Mismatched registered native completion lineage")
-                    expected_launch, prefix = registration["launch"], registration["id"]
-                    stdin = _read(self.root, prefix + ".stdin", registration["stdin"])
-                    if seal(stdin.encode("utf-8")) != expected_launch["stdin"]:
-                        raise ValueError("Registered stdin differs from the actual launch")
+                        or registration["judgmentId"] != previous["judgmentId"]
+                        or registration["binding"] != previous["binding"]
+                        or registration["fixesIssued"] != previous["fixesIssued"] + 1
+                    )
+                    or row["registrationEventId"] != registration_id
+                ):
+                    raise ValueError("Mismatched registered native completion lineage")
+                expected_launch, prefix = registration["launch"], registration["id"]
+                stdin = _read(self.root, prefix + ".stdin", registration["stdin"])
+                if seal(stdin.encode("utf-8")) != expected_launch["stdin"]:
+                    raise ValueError("Registered stdin differs from the actual launch")
                 if (
                     row["headerHash"] != digest(header)
                     or row["slot"] != slot["id"]
@@ -703,20 +689,16 @@ class ReviewAttempt:
             slot = match[0]
             if other["isMocked"] or not other.get("didRunProvider") or other.get("runtime") is None:
                 continue
-            if other.get("schema") == 1:
-                registered = other["launch"] == slot["launch"]
-            elif other.get("schema") == 2:
-                registered = any(
-                    key == other["registrationEventId"]
-                    and row["id"] == other["launchId"]
-                    and row["slot"] == slot["id"]
-                    and row["launch"] == other["launch"]
-                    for key, row in _events(self.store, REGISTERED, other_attempt.id)
-                )
-            else:
-                raise ValueError(
-                    "Unknown historical receipt format; obtain a fresh acceptance review"
-                )
+            if other.get("schema") != 2:
+                from codex_harness.core.plan_types import refuse_old_format
+                refuse_old_format("Review receipt")
+            registered = any(
+                key == other["registrationEventId"]
+                and row["id"] == other["launchId"]
+                and row["slot"] == slot["id"]
+                and row["launch"] == other["launch"]
+                for key, row in _events(self.store, REGISTERED, other_attempt.id)
+            )
             if other["headerHash"] != digest(other_attempt.header) or not registered:
                 raise ValueError("Conflicting original completion registration")
             # Damaging an older file never releases its privately sealed session.

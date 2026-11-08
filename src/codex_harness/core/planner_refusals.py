@@ -9,3 +9,11 @@ TEACHING = (
 
 def render(refusal):
     return f"{refusal['code']}: {refusal['reason']}\nCurrent: {refusal['current']}\nNext: {refusal['nextAction']}"
+
+
+def reply(error, workspace):
+    refusal = dict(code=getattr(error, "code", "operation-error"), reason=str(error),
+                   current=dict(workspace=str(workspace)),
+                   nextAction=getattr(error, "nextAction", "Read harness_plan_status and supply the named correction through harness_chat"))
+    return dict(isError=True, refusalCode=refusal["code"], structuredContent=dict(refusal=refusal),
+                content=[dict(type="text", text=render(refusal))])

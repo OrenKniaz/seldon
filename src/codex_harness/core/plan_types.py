@@ -25,6 +25,13 @@ class PlanStoreError(SpineError):
     """A stable refusal code from the planning store."""
 
 
+def refuse_old_format(record):
+    error = PlanStoreError("run-format-unsupported",
+        f"{record} uses an unsupported older Seldon format. Start a new run in a new workspace with harness_chat and your dream; keep this workspace untouched as history.")
+    error.nextAction = "Start a new run in a new workspace with harness_chat and your dream"
+    raise error
+
+
 def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
 

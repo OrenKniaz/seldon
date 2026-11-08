@@ -179,12 +179,11 @@ class PlannerTransport:
     def _cancel_confirmation(self, reason, *, preserve_pending=False):
         from codex_harness.core.planner_confirmation_cards import pending_outcome
         from codex_harness.core.planner_confirmations import complete_confirmation
-        from codex_harness.core.run_loop import obsolete_permission
 
         pending, self._pending_confirmation = self._pending_confirmation, None
         outcome = (
             pending_outcome(pending["request"])
-            if preserve_pending or obsolete_permission(pending["request"])
+            if preserve_pending
             else complete_confirmation(self._store(), pending["request"]["request_id"], "cancel")
         )
         reply = self._confirmation_reply(outcome, error=True, reason=reason)

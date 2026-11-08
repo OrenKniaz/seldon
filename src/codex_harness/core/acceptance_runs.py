@@ -1,4 +1,4 @@
-"""Acceptance run lifecycle, revision validity, rebind and shared C evidence gate."""
+"""Acceptance run lifecycle, revision validity and shared C evidence gate."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from codex_harness.core import spine as plan_spine, candidate_delivery
-from codex_harness.core.acceptance_revision import _hash, _integrated_revision_v1, _metadata_remaining, integrated_revision
+from codex_harness.core.acceptance_revision import _hash, _metadata_remaining, integrated_revision
 from codex_harness.core.acceptance_scenarios import derive_scenarios, run_scenarios
 from codex_harness.core.plan_store import PlanStoreError, _now
 from codex_harness.core.planner_candidate import current_job_run, judgments_for
@@ -14,10 +14,8 @@ from codex_harness.core.record_io import read_record_json
 from codex_harness.core.semantic_runner import web_toolchain
 
 def run_subject(run) -> str:
-    """Legacy product evidence is recognized only at a dispatch integrated repo."""
-    if "subject" in run:
-        return run["subject"]
-    return "product" if (Path(run["repo"]).parent / "evidence" / "run.json").is_file() else "oracle"
+    return run["subject"]
+
 
 def acceptance_inputs(store, repo, *, subject=None) -> dict:
     if subject not in ("product", "oracle"):
@@ -192,15 +190,11 @@ def _latest_run(store) -> dict | None:
     ).fetchone()
     if row is None:
         return None
-    return json.loads(row[0])
-
-def _raw_scenarios(store) -> list[dict]:
-    return [
-        json.loads(row[0])
-        for row in store.connection.execute(
-            "SELECT scenario_json FROM acceptance_scenarios ORDER BY id"
-        )
-    ]
+    run = json.loads(row[0])
+    if run.get("revisionAlgorithm") != "tree-bytes-v2" or "subject" not in run:
+        from codex_harness.core.plan_types import refuse_old_format
+        refuse_old_format("Acceptance run")
+    return run
 
 def run_invalid_reason(store, run) -> str | None:
     if store.connection.execute(
@@ -223,10 +217,7 @@ def run_invalid_reason(store, run) -> str | None:
         return "plan-changed"
     if not Path(run["repo"]).is_dir():
         return "product-changed"
-    algorithm = run.get("revisionAlgorithm", "git-diff-v1")
-    if algorithm not in {"git-diff-v1", "tree-bytes-v2"}:
-        return "revision-algorithm-unsupported"
-    current_revision = _integrated_revision_v1(run["repo"]) if algorithm == "git-diff-v1" else integrated_revision(run["repo"])
+    current_revision = integrated_revision(run["repo"])
     if run["revision"] != current_revision:
         return "product-changed"
     if "webToolchain" in run:
@@ -235,8 +226,6 @@ def run_invalid_reason(store, run) -> str | None:
                 return "web-toolchain-changed"
         except (OSError, ValueError):
             return "web-toolchain-changed"
-    raw = _raw_scenarios(store)
-    legacy_unbound = any("nodeRevisions" not in item for item in raw)
     scenarios = store.acceptance_scenarios()
     if plan_spine.Spine(store._data()).semantic:
         if (
@@ -244,19 +233,10 @@ def run_invalid_reason(store, run) -> str | None:
             != acceptance_inputs(store, run["repo"], subject=run_subject(run))["scenarioRevision"]
         ):
             return "scenarios-changed"
-        legacy_unbound = False
-    if legacy_unbound:
-        if run["scenarioRevision"] != _hash(raw) or any(
-            item.get("status") == "stale" for item in scenarios if "nodeRevisions" in item
-        ):
-            return "scenarios-changed"
-    elif not plan_spine.Spine(store._data()).semantic and run["scenarioRevision"] != _hash(
-        scenarios
-    ):
+    elif run["scenarioRevision"] != _hash(scenarios):
         return "scenarios-changed"
-    if algorithm == "git-diff-v1":
-        return "legacy-unbound" if legacy_unbound else "revision-algorithm-upgraded"
-    return "legacy-unbound" if legacy_unbound else None
+    return None
+
 
 def current_run(store) -> dict | None:
     run = _latest_run(store)
@@ -292,19 +272,11 @@ INVALID_MESSAGES = {
         "Scenarios verified against the reference implementation (dry run); "
         "product acceptance is required."
     ),
-    "revision-algorithm-upgraded": (
-        "The revision algorithm was upgraded; the v1 product revision still matches."
-    ),
     "product-changed": "The product revision has changed or its repository is unavailable.",
     "web-toolchain-changed": "The web toolchain changed; rerun with the current tools.",
-    "legacy-unbound": (
-        "The saved legacy scenarios lack node revision bindings; their raw hash still matches "
-        "the acceptance run. Rebind to back-fill bindings and rerun all scenarios."
-    ),
     "plan-changed": "The plan has changed since the acceptance run.",
     "scenarios-changed": "The acceptance scenarios have changed since the run.",
     "vision-unlocked": "The current vision is not locked.",
-    "revision-algorithm-unsupported": "The recorded revision algorithm is unsupported.",
     "acceptance-scenarios-required": "All current acceptance scenarios must pass.",
     "acceptance-approval-required": "Acceptance approval is required for the current run.",
     "acceptance-review-required": "An acceptance review is required for the current run.",
@@ -330,36 +302,3 @@ def acceptance_run_prerequisite(store):
         "acceptance-product-required" if run and run_subject(run) != "product" else None)
     return dict(kind="acceptance_run_required", state="pending-judgment", reason=reason,
                 message=acceptance_next(reason)) if reason else None
-
-
-def rebind_acceptance(store, repo, env=None) -> dict:
-    """Migrate execution evidence only; reviews and C require current judgments."""
-    with store._transaction():
-        if store.phase() != "accept":
-            raise PlanStoreError("acceptance-phase-required", "Next: Advance to accept first")
-        old_run = _latest_run(store)
-        if old_run is not None and run_subject(old_run) != "product":
-            _refuse("acceptance-product-required")
-        reason = run_invalid_reason(store, old_run)
-        if reason not in ("revision-algorithm-upgraded", "legacy-unbound"):
-            if reason is None:
-                raise PlanStoreError("acceptance-rebind-not-required", "Next: Check current acceptance status")
-            _refuse(reason, old_run["repo"] if old_run else None)
-        if Path(repo).resolve() != Path(old_run["repo"]).resolve():
-            _refuse("product-changed")
-        if reason == "legacy-unbound":
-            store.save_acceptance_scenarios([
-                dict(item, nodeRevisionsBackfilled=True, nodeRevisionsBackfilledAt=_now(), by="harness")
-                if "nodeRevisions" not in item else item for item in _raw_scenarios(store)])
-            store._event("acceptance-scenario-bindings-backfilled", dict(reboundFrom=old_run["id"], by="harness"))
-    run = run_acceptance(store, repo, env, subject="product")
-    with store._transaction():
-        if store.phase() != "accept":
-            raise PlanStoreError("acceptance-phase-required", "Next: Advance to accept first")
-        if reason := run_invalid_reason(store, run):
-            _refuse(reason)
-        if _latest_run(store) != run:
-            raise PlanStoreError("acceptance-revision-changed", "Next: Rerun acceptance on the current revision")
-        result = dict(run=run, reboundFrom=old_run["id"], by="harness")
-        store._event("acceptance-rebound", result)
-    return result

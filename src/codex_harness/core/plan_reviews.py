@@ -176,7 +176,7 @@ class PlanReviews:
                 dict(row)
                 for row in self.connection.execute(
                     "SELECT * FROM review_runs WHERE (plan_revision=? OR ?) "
-                    "ORDER BY finished_at DESC, rowid DESC",
+                    "ORDER BY rowid DESC",
                     (revision, carry),
                 )
             ]
@@ -199,12 +199,11 @@ class PlanReviews:
         for identity in identities:
             matches = [r for r in runs if (r["reviewer"], r["provider"]) == identity]
             reserved = [r for r in attempts if (r["reviewer"], r["provider"]) == identity]
-            reservation = reserved[0] if reserved else None
-            run = (
-                next((r for r in matches if r["id"] == reservation["id"]), None)
-                if reservation
-                else next(iter(matches), None)
-            )
+            if not reserved:
+                from codex_harness.core.plan_types import refuse_old_format
+                refuse_old_format("Plan review without a reservation")
+            reservation = reserved[0]
+            run = next((r for r in matches if r["id"] == reservation["id"]), None)
             success = bool(
                 run
                 and run["exit_code"] == 0
@@ -226,11 +225,11 @@ class PlanReviews:
                 run=run,
                 success=success,
                 latestReviewId=run["id"] if run else None,
-                latestAttemptId=reservation["id"] if reservation else None,
-                attemptOrdering="reservation-rowid" if reserved else "legacy-completion-fallback",
+                latestAttemptId=reservation["id"],
+                attemptOrdering="reservation-rowid",
                 ambiguousAttemptOrder=False,
                 incompleteAttempt=bool(
-                    reservation and not run and reservation.get("state") != "abandoned"
+                    not run and reservation.get("state") != "abandoned"
                 ),
             )
         return result
@@ -415,19 +414,7 @@ class PlanReviews:
 
     def successful_reviews(self, revision: str) -> list[dict]:
         """Credit only the latest reservation, with native identity and explicit judged reuse."""
-        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(review_runs)")}
-        if (
-            not {
-                "plan_revision",
-                "provider",
-                "reviewer",
-                "id",
-                "shardDetails",
-                "shards",
-                "nodesDigest",
-            }
-            <= columns
-        ):
+        if not self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='review_runs'").fetchone():
             return []
         policy = self.plan_review_policy_state(revision)
         from codex_harness.core.planner_review import selection_inputs, delivery_review_selection

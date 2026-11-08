@@ -648,7 +648,7 @@ class LoopClient:
             return self.native_response(result)
         return result
 
-    def reconnect(self):
+    def reconnect(self, *, error=False):
         self.process.kill()
         self.process.wait(timeout=5)
         assert self.process.returncode != 0
@@ -661,7 +661,7 @@ class LoopClient:
         self.active_call = None
         self.last_offer = None
         self._open()
-        return self.call("harness_plan_status")
+        return self.call("harness_plan_status", error=error)
 
     def close(self):
         failing = sys.exc_info()[0] is not None

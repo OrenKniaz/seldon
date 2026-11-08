@@ -28,7 +28,7 @@ def record_refusals(method):
             if (
                 result.get("workspaceBinding", {}).get("match") != "matched"
                 or not (self.workspace / ".codex-harness/plan.sqlite3").is_file()
-                or result.get("refusalCode") == "workspace-discovery-unavailable"
+                or result.get("refusalCode") in {"workspace-discovery-unavailable", "run-format-unsupported"}
             ):
                 continue
             try:
