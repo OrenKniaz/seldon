@@ -6,7 +6,6 @@ POSIX commands run in a private session/process group with verified group teardo
 
 import ctypes
 import json
-import locale
 import os
 import subprocess
 import sys
@@ -294,8 +293,7 @@ def _run_portable_process(
         def members():
             rows = subprocess.run(
                 ["ps", "-e", "-o", "pid=,pgid=,stat="],
-                capture_output=True,
-                text=True,
+                capture_output=True, encoding="utf-8", errors="replace",
                 timeout=1,
                 check=True,
             ).stdout.splitlines()
@@ -367,8 +365,7 @@ def _run_portable_process(
                     stream.seek(0)
                     value = stream.read()
                     if text:
-                        encoding = "utf-8" if sys.flags.utf8_mode else locale.getencoding()
-                        value = value.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+                        value = value.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
                 output.append(value)
             if timed_out:
                 raise subprocess.TimeoutExpired(args, timeout, output=output[0], stderr=output[1])
@@ -398,7 +395,7 @@ def run_audit_process(
     on_launch=None,
     launch_guard=None,
 ):
-    """Collect closed output after exit/cancellation/deadline, never infer exit from silence."""
+    """Collect closed evidence as UTF-8 with replacement; machine protocols use text=False."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
     if stdin is None:
         stdin = subprocess.DEVNULL
@@ -546,9 +543,8 @@ def run_audit_process(
             raise OSError("Audit output pipes did not drain after Job quiescence")
         stdout, stderr = bytes(buffers["stdout"]), bytes(buffers["stderr"])
         if text:
-            encoding = "utf-8" if sys.flags.utf8_mode else locale.getencoding()
             stdout, stderr = (
-                value.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
+                value.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
                 for value in (stdout, stderr)
             )
         if timed_out:

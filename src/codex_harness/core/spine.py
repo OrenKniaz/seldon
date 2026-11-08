@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from codex_harness.core.graph import PlanError, test_dir, validate_capability_refs
 from codex_harness.core.semantic_schema import validate_trace_fields
+from codex_harness.core.record_io import write_stdout_json
 
 SCHEMA = "codex-harness/spine-v1"
 MARKDOWN_FILES = ("PLAN.md", "REQUIREMENTS.md", "TRACE.md", "VISION.md")
@@ -721,7 +722,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "impact":
-            print(json.dumps(impact(load_spine(args.old), load_spine(args.new)), sort_keys=True))
+            write_stdout_json(impact(load_spine(args.old), load_spine(args.new)), sort_keys=True)
         elif args.command == "compile":
             template = args.template
             if template is None and (args.spine.parent / "template").is_dir():

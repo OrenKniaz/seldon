@@ -2772,10 +2772,12 @@ def planning_surface_golden(workspace):
         assert not {"harness_plan_start", "harness_loop_answer", "harness_steer"} & inventory
         client.call("harness_loop_answer", request_id="invented", answer={}, source="chat", error=True)
         content = plan_content()
-        client.call("harness_plan_start", name="Unicode intent", idea="Build a receipt for caf\u00e9 \u4e2d\u6587 and exact binary input.")
+        user_text = "1–80 “quoted” café 日本"
+        content["nodes"][0]["text"] += " " + user_text
+        client.call("harness_plan_start", name="Unicode intent", idea="Build a receipt for " + user_text)
         assert client.current["userRequest"] is None
         assert client.current["question"]["purpose"] == "understanding"
-        assert "caf\u00e9 \u4e2d\u6587" in str(client.offered["packet"]["facts"]["dialogue"])
+        assert user_text in str(client.offered["packet"]["facts"]["dialogue"])
         with open_plan_store_readonly(workspace) as store:
             before = store.spine().node("V1")
         client.answer('{"understanding":"Missing the quality bar"}')
@@ -2787,6 +2789,30 @@ def planning_surface_golden(workspace):
         client.answer(dict(option="ready", rationale="Preserve the full dream", content=content))
         advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "align+vision-lock" and not r.get("question"))
         token = client.current["userRequest"]["request_id"]
+        # C18/C23: the real status CLI must preserve user meaning at A even with
+        # legacy Windows stdio. MCP-only Unicode journeys miss locale corruption.
+        legacy_env = dict(os.environ, PYTHONUTF8="0", PYTHONIOENCODING="cp1252")
+        from codex_harness.core.audit_process import run_audit_process
+        readback = run_audit_process(
+            [sys.executable, "-B", "-m", "codex_harness.core.plan_cli",
+             "--workspace", str(workspace), "--json", "status"],
+            cwd=workspace, capture_output=True, text=False, env=legacy_env, timeout=30,
+        )
+        assert readback.returncode == 0, readback.stderr
+        status = json.loads(readback.stdout.decode("utf-8"))
+        assert user_text in status["run"]["userRequest"]["card"]
+        assert status["run"]["userRequest"]["request_id"] == token
+        # C23: native tool evidence must survive invalid UTF-8 on either stream;
+        # the Unicode JSON round-trip above never exercises raw legacy bytes.
+        evidence = run_audit_process(
+            [sys.executable, "-B", "-c",
+             "import sys; sys.stdout.buffer.write(b'evidence: caf\\xc3\\xa9 \\x96\\n'); "
+             "sys.stderr.buffer.write(b'diagnostic: \\x96\\n')"],
+            cwd=workspace, env=legacy_env, timeout=10,
+        )
+        assert evidence.returncode == 0
+        assert evidence.stdout == "evidence: café \ufffd\n"
+        assert evidence.stderr == "diagnostic: \ufffd\n"
         stale = client.call("harness_chat", text="Yes", reply_to="stale-token", error=True)
         assert stale["structuredContent"]["refusal"]["code"] == "user-subject-stale"
         assert client.current["userRequest"]["request_id"] == token

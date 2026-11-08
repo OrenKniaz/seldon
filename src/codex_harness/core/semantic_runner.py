@@ -15,7 +15,7 @@ from pathlib import Path
 from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
-from codex_harness.core.record_io import write_record_json
+from codex_harness.core.record_io import write_record_json, write_stdout_json
 from codex_harness.core.semantic_schema import LIMIT, array, content, fields, path, validate
 
 ERRORS = (OSError, ValueError, TypeError, LookupError, TimeoutExpired, RecursionError)
@@ -209,10 +209,7 @@ def execute(s, root, data, targets, seconds, deadline, web=None, judgments=None,
             snapshots[f["id"]] = None
 
     def expired():
-        print(
-            json.dumps(dict(state="ERROR", reason="Product action timeout", action=action)),
-            flush=True,
-        )
+        write_stdout_json(dict(state="ERROR", reason="Product action timeout", action=action))
         os._exit(0)  # Outer held Job reaps the entire owned tree, including pipe holders.
 
     for a in s["actions"]:
@@ -480,7 +477,7 @@ def run(
                 cmd = [sys.executable, "-B", "-m", MODULE, "--worker", str(config)]
                 cleanup.clear()  # Launch may create children even if it raises without a receipt.
                 completed = run_audit_process(
-                    cmd, cwd=root, timeout=max(0.01, end - time.monotonic())
+                    cmd, cwd=root, text=False, timeout=max(0.01, end - time.monotonic())
                 )
                 control = completed.audit_control
                 cleanup.update(control)
@@ -491,7 +488,7 @@ def run(
                     raise OSError("Owned cleanup uncertain; stop further scenarios")
                 if completed.returncode or time.monotonic() > end:
                     raise TimeoutError("Runner failed or scenario deadline expired")
-                result = dict(json.loads(completed.stdout), id=s["id"], cleanup=control)
+                result = dict(json.loads(completed.stdout.decode("utf-8")), id=s["id"], cleanup=control)
                 results.append(result)
                 if result.get("launchDiagnostic"):
                     results.extend(dict(result, id=later["id"], actions={}) for later in scenarios[len(results):])
@@ -537,4 +534,4 @@ if __name__ == "__main__":
         files = (args.spec, args.targets)
         spec, targets = [json.loads(read(Path(p), 65536)) for p in files]
         result = run(spec, Path(args.product), targets, args.phase)
-    print(json.dumps(result))
+    write_stdout_json(result)

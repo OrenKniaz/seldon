@@ -39,8 +39,7 @@ def adapter_provenance() -> dict:
             try:
                 top = subprocess.run(
                     ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-                    capture_output=True,
-                    text=True,
+                    capture_output=True, encoding="utf-8", errors="replace",
                     check=True,
                 ).stdout.strip()
                 if Path(top).resolve() != root:
@@ -55,16 +54,14 @@ def adapter_provenance() -> dict:
                         "--",
                         "src/codex_harness/core/package_provenance.py",
                     ],
-                    capture_output=True,
-                    text=True,
+                    capture_output=True, encoding="utf-8", errors="replace",
                     check=True,
                 )
                 if tracked.stdout.strip() == "src/codex_harness/core/package_provenance.py":
                     commit = (
                         subprocess.run(
                             ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
-                            capture_output=True,
-                            text=True,
+                            capture_output=True, encoding="utf-8", errors="replace",
                             check=True,
                         ).stdout.strip()
                         or None

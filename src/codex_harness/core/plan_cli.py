@@ -1,6 +1,6 @@
 """CLI commands enter the same controller as MCP; status is a read-only baton."""
 
-import json
+from codex_harness.core.record_io import write_stdout_json
 from codex_harness.core.mcp_planner import PlannerServer
 from codex_harness.core.planner_cli_input import parser
 
@@ -22,7 +22,7 @@ def main(argv=None):
         reply = server.call_tool(
             "harness_" + names[command], {k: v for k, v in args.items() if v is not None}
         )
-        print(json.dumps(reply.get("structuredContent", reply), ensure_ascii=False))
+        write_stdout_json(reply.get("structuredContent", reply))
         return 2 if reply["isError"] else 0
     finally:
         server.close()

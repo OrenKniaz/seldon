@@ -31,6 +31,8 @@ class _GitError(subprocess.CalledProcessError):
 def _git_run(cwd: Path, *args: str, ok=(0,), **kwargs):
     command = ["git", "-c", f"safe.directory={cwd.resolve().as_posix()}", "-C", str(cwd), *args]
     kwargs.setdefault("stdin", None if "input" in kwargs else subprocess.DEVNULL)
+    if kwargs.get("text"):
+        kwargs.update(encoding="utf-8", errors="replace")
     result = subprocess.run(command, capture_output=True, **kwargs)
     if result.returncode not in ok:
         stderr = result.stderr

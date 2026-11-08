@@ -1,16 +1,22 @@
-"""Atomic JSON publication and participating readers, with bounded Windows sharing."""
+"""UTF-8 process JSON and atomic records, with bounded Windows sharing."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import sleep
 from typing import BinaryIO
+
+
+def write_stdout_json(value, *, sort_keys=False) -> None:
+    sys.stdout.buffer.write((json.dumps(value, ensure_ascii=False, sort_keys=sort_keys) + "\n").encode("utf-8"))
+    sys.stdout.buffer.flush()
 
 
 @contextmanager

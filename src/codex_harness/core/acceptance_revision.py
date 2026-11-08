@@ -37,7 +37,7 @@ def _product_git_head(repo: Path, deadline=None, should_stop=None) -> str | None
         stdin=subprocess.DEVNULL,
         timeout=_metadata_remaining(deadline, should_stop),
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         check=False,
     )
     if top.returncode != 0:
@@ -51,7 +51,7 @@ def _product_git_head(repo: Path, deadline=None, should_stop=None) -> str | None
         stdin=subprocess.DEVNULL,
         timeout=_metadata_remaining(deadline, should_stop),
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         check=False,
     )
     return head.stdout.strip() if head.returncode == 0 else None

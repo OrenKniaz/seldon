@@ -11,6 +11,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from codex_harness.core.record_io import write_stdout_json
 
 KINDS = ("note", "question", "blocker", "replan-trigger", "answer")
 SECRET_PATTERNS = ("sk-", "ghp_", "-----begin", "password=", "api_key=")
@@ -221,9 +222,9 @@ def main() -> int:
         else:
             result = {"id": getattr(mailbox, command)(**args)}
     except MailError as error:
-        print(json.dumps({"error": str(error)}))
+        write_stdout_json({"error": str(error)})
         return 1
-    print(json.dumps(result, ensure_ascii=True))
+    write_stdout_json(result)
     return 0
 
 
