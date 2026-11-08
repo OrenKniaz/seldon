@@ -42,10 +42,7 @@ def relevant_ids(store, family, purpose, context, judgment=None):
     """Select the question's dependency slice, including its upstream meaning."""
     spine = store.spine()
     visions = set(spine.ids("vision"))
-    if family == "repair" or context.get("relationships"):
-        keys = {p["ref"] for r in context["relationships"] for p in r["eligibleParents"]}
-        keys &= set(spine.ids())
-    elif purpose in {"understanding", "planning-size", "vision-expansion", "vision-intent"}:
+    if purpose in {"understanding", "planning-size", "vision-expansion", "vision-intent"}:
         keys = {n["id"] for n in store.list_nodes("feature") if n["fields"].get("baseline")}
         for key in list(keys):
             baseline = spine.node(key)["fields"]["baseline"]
@@ -55,12 +52,13 @@ def relevant_ids(store, family, purpose, context, judgment=None):
         if judgment:
             members = next((r["payload"].get("facts", {}).get("members", []) for r in judgment["sourceRefs"] if r["payload"].get("facts", {}).get("members")), members)
         keys = {m.get("node_id") for m in members} & set(spine.ids())
-    elif family == "author":
+    elif family in {"author", "repair"}:
         # A complete plan is one meaningful slice. Runtime history and kickoff
         # selection nodes are not authored by the planner.
         keys = {n["id"] for n in store.list_nodes() if n["kind"] in {
             "feature", "story", "requirement", "architecture", "design", "contract", "test", "bead", "research", "metric", "stop-condition", "amendment"
         }}
+        keys.update(ref["id"] for key in list(keys) for ref in spine.node(key)["fields"].get("decisionRefs", []))
     elif family == "direction":
         keys = set(context.get("affectedNodeIds", [])) & set(spine.ids())
     elif judgment:
@@ -146,8 +144,6 @@ def packet(store, pending):
         "SELECT payload_json FROM events WHERE kind='chat-message' ORDER BY id DESC LIMIT 12")]
     selected = relevant_ids(store, pending["family"], pending["purpose"], pending.get("context", {}), record)
     nodes = [store.spine().node(key) for key in selected]
-    if pending["family"] == "repair":
-        sources = []  # CODE retains the whole rejected slice; the model repairs the named links.
     for source in sources:
         facts = source.get("facts", {})
         if "currentNodes" in facts:

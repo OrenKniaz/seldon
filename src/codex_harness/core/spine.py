@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
 from codex_harness.core.graph import PlanError, test_dir, validate_capability_refs
-from codex_harness.core.semantic_schema import validate_trace_fields
+from codex_harness.core.semantic_schema import TRACE_LINKS, trace_refusal, validate_trace_fields
 from codex_harness.core.record_io import write_stdout_json
 
 SCHEMA = "codex-harness/spine-v1"
@@ -41,9 +41,11 @@ ALLOWED_PARENTS["result"] = set(ALLOWED_PARENTS) - {"result"}
 
 
 class SpineError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, node_id=None, *sections) -> None:
         super().__init__(message)
         self.code = code
+        if node_id:
+            self.__dict__.update(trace_refusal(node_id, message, *sections).__dict__)
 
 
 def _strings(value: object) -> bool:
@@ -91,6 +93,16 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def content_revision(node: dict) -> str:
+    """Bind this node's content and link IDs, never another node's revision."""
+    def fields(value):
+        return {k: [r["id"] if isinstance(r, dict) else r for r in v]
+                if k in TRACE_LINKS or k == "targetRefs" else
+                v["id"] if k in {"sourceRef", "itemRef"} and isinstance(v, dict) else
+                fields(v) if k in {"baseline", "evidence"} else v for k, v in value.items()}
+    return _hash(_canonical(dict(node, parents=sorted(node["parents"]), fields=fields(node["fields"]))))
+
+
 def _acyclic(parents: dict[str, list[str]], code: str) -> dict[str, list[str]]:
     children: dict[str, list[str]] = {node_id: [] for node_id in parents}
     remaining = {node_id: len(values) for node_id, values in parents.items()}
@@ -106,7 +118,16 @@ def _acyclic(parents: dict[str, list[str]], code: str) -> dict[str, list[str]]:
             if remaining[child] == 0:
                 ready.append(child)
     if visited != len(parents):
-        raise SpineError(code, "Graph contains a cycle")
+        path, positions, key = [], {}, next(k for k, n in remaining.items() if n)
+        while key not in positions:
+            positions[key] = len(path)
+            path.append(key)
+            key = next(p for p in parents[key] if remaining[p])
+        cycle, field = path[positions[key]:], "parents" if code == "spine-cycle" else "fields.dependsOn"
+        error = SpineError(code, f"{code}: cycle in {field}; remove a cycle edge among {sorted(cycle)}")
+        error.refused_sections = {key: [field] for key in cycle}
+        error.editable_fields = {key: [field] for key in cycle}
+        raise error
     return {node_id: sorted(values) for node_id, values in children.items()}
 
 
@@ -133,12 +154,13 @@ class Spine:
                 or not node["title"].strip()
                 or node["kind"] not in ALLOWED_PARENTS
                 or not _strings(node["parents"])
-                or len(set(node["parents"])) != len(node["parents"])
                 or not isinstance(node["fields"], dict)
             ):
                 raise SpineError("spine-schema-invalid", "Invalid node shape or kind")
             if node["id"] in self._nodes:
                 raise SpineError("spine-duplicate-id", f"Duplicate node {node['id']}")
+            if len(set(node["parents"])) != len(node["parents"]):
+                raise SpineError("spine-schema-invalid", f"{node['id']}: use unique parents", node["id"], "parents")
             node["parents"].sort()
             self._nodes[node["id"]] = node
         self._nodes = dict(sorted(self._nodes.items()))
@@ -146,104 +168,80 @@ class Spine:
         for node_id, parents in self._parents.items():
             for parent in parents:
                 if parent not in self._nodes:
-                    raise SpineError(
-                        "spine-unknown-parent", f"{node_id} has unknown parent {parent}"
-                    )
+                    raise SpineError("spine-unknown-parent", f"{node_id} has unknown parent {parent}", node_id, "parents")
         # Detect cycles first, even though a cycle necessarily also violates the kind table.
         self._children = _acyclic(self._parents, "spine-cycle")
         if len(self.ids("vision")) != 1:
             raise SpineError("spine-vision-count", "Expected exactly one vision")
         mode = self.node(self.ids("vision")[0])["fields"].get("planMode", "legacy")
         if mode not in ("legacy", "semantic-v1"):
-            raise SpineError("spine-schema-invalid", "Unsupported planMode")
+            raise SpineError("spine-schema-invalid", "Unsupported planMode", self.ids("vision")[0], "fields.planMode")
         self.semantic = mode == "semantic-v1"
         for node_id, node in self._nodes.items():
             if any(
                 self._nodes[parent]["kind"] not in ALLOWED_PARENTS[node["kind"]]
                 for parent in node["parents"]
             ):
-                raise SpineError(
-                    "spine-parent-kind-not-allowed", f"Invalid parent kind for {node_id}"
-                )
+                raise SpineError("spine-parent-kind-not-allowed", f"Invalid parent kind for {node_id}", node_id, "parents")
             if node["kind"] == "bead":
                 self._validate_bead(node)
             elif node["kind"] == "test":
                 fields = node["fields"]
-                if (
-                    not isinstance(fields.get("module"), str)
-                    or not fields["module"].strip()
-                    or fields.get("level") not in ("unit", "semantic", "e2e")
-                ):
-                    raise SpineError(
-                        "spine-test-fields-invalid", f"Invalid test fields for {node_id}"
-                    )
-        _acyclic(
-            {node_id: self._nodes[node_id]["fields"]["dependsOn"] for node_id in self.ids("bead")},
-            "spine-bead-fields-invalid",
-        )
-        try:
-            self._revisions = {
-                node_id: _hash(_canonical(node)) for node_id, node in self._nodes.items()
-            }
-        except (TypeError, ValueError) as error:
-            raise SpineError("spine-schema-invalid", "Fields must be finite JSON values") from error
+                checks = {"module": _strings([fields.get("module")]), "level": fields.get("level") in ("unit", "semantic", "e2e")}
+                invalid = [key for key, valid in checks.items() if not valid]
+                if invalid:
+                    raise SpineError("spine-test-fields-invalid", f"Invalid test fields for {node_id}", node_id, *("fields." + k for k in invalid))
+        _acyclic({node_id: self._nodes[node_id]["fields"]["dependsOn"] for node_id in self.ids("bead")}, "spine-bead-fields-invalid")
         try:
             for node in self._nodes.values():
                 validate_trace_fields(node, self._nodes)
                 if node["kind"] == "result" and node["fields"]["evidence"]["itemRef"]["id"] not in self.ancestors(node["id"]):
-                    raise ValueError("Result must descend from its revision-bound evidence item")
+                    raise trace_refusal(node["id"], "Result must descend from its revision-bound evidence item", "parents", "fields.evidence.itemRef")
                 if "baseline" in node["fields"]:
                     descendants = set(self.descendants(node["id"]))
                     for link in ("codeRefs", "testRefs", "resultRefs"):
                         if any(ref["id"] not in descendants for ref in node["fields"]["baseline"][link]):
-                            raise ValueError("Baseline references must map this feature's own existing behavior")
+                            raise trace_refusal(node["id"], "Baseline references must map this feature's own existing behavior", "fields.baseline." + link)
         except ValueError as error:
-            raise SpineError("spine-trace-invalid", str(error)) from error
+            refusal = SpineError("spine-trace-invalid", str(error))
+            refusal.__dict__.update({key: getattr(error, key, {}) for key in ("editable_fields", "refused_sections")})
+            raise refusal from error
+        try:
+            self._revisions = {node_id: content_revision(node) for node_id, node in self._nodes.items()}
+        except (TypeError, ValueError) as error:
+            raise SpineError("spine-schema-invalid", "Fields must be finite JSON values") from error
         for key in self.ids("result"):
             evidence = self._nodes[key]["fields"]["evidence"]
             ref = evidence["itemRef"]
-            if evidence["state"] != "awaiting" and ref["revision"] != self.revision(ref["id"]):
+            if evidence["state"] != "awaiting" and not self.bindings_current({ref["id"]: ref["revision"]}):
                 evidence["state"] = "stale"
-                self._revisions[key] = _hash(_canonical(self._nodes[key]))
+                self._revisions[key] = content_revision(self._nodes[key])
 
     def _impact_parents(self) -> dict[str, list[str]]:
         parents = {key: set(values) for key, values in self._parents.items()}
-        # Operational side links affect consumers. Baselines, evidence/history,
-        # amendment targets and baton pointers preserve provenance, not causality.
+        # Every trace field participates. Nested baseline/evidence provenance is history.
         for key, node in self._nodes.items():
             fields = node["fields"]
-            for link in ("decisionRefs", "researchRefs", "metricRefs", "stopConditionRefs"):
-                parents[key].update(ref["id"] for ref in fields.get(link, []))
+            parents[key].update(ref["id"] for link in TRACE_LINKS for ref in fields.get(link, []))
             if node["kind"] == "bead":
                 parents[key].update([*fields["dependsOn"], *fields["lessons"]])
         return {key: sorted(values) for key, values in parents.items()}
 
     def _validate_bead(self, node: dict) -> None:
         fields = node["fields"]
+        invalid = [key for key, (_, check) in bead_contract(self.semantic).items() if not check(fields.get(key))]
+        invalid += ["proofModule"] if self.semantic and "proofModule" in fields else []
         try:
             validate_capability_refs(fields.get("capabilityRefs", []))
         except PlanError as error:
-            raise SpineError("spine-bead-fields-invalid", str(error)) from error
-        valid = (
-            all(check(fields.get(key)) for key, (_, check) in bead_contract(self.semantic).items())
-            and (not self.semantic or "proofModule" not in fields)
-        )
-        if valid:
-            for key, kind in (("dependsOn", "bead"), ("lessons", "decision")):
-                values = fields[key]
-                valid = (
-                    valid
-                    and len(values) == len(set(values))
-                    and all(
-                        value in self._nodes and self._nodes[value]["kind"] == kind
-                        for value in values
-                    )
-                )
-        if not valid:
-            raise SpineError(
-                "spine-bead-fields-invalid",
-                f"Invalid bead fields for {node['id']}. {bead_rules(self.semantic)}",
-            )
+            raise SpineError("spine-bead-fields-invalid", str(error), node["id"], "fields.capabilityRefs") from error
+        for key, kind in (("dependsOn", "bead"), ("lessons", "decision")):
+            if key not in invalid and (len(fields[key]) != len(set(fields[key])) or any(
+                value not in self._nodes or self._nodes[value]["kind"] != kind for value in fields[key])):
+                invalid.append(key)
+        if invalid:
+            raise SpineError("spine-bead-fields-invalid", f"Invalid bead fields for {node['id']}: {invalid}. {bead_rules(self.semantic)}",
+                             node["id"], *("fields." + key for key in invalid))
 
     def ids(self, kind: str | None = None) -> list[str]:
         return [key for key, node in self._nodes.items() if kind is None or node["kind"] == kind]
@@ -289,8 +287,35 @@ class Spine:
     def revision(self, node_id: str) -> str:
         return self._revisions[node_id]
 
+    def dependency_revisions(self, ids) -> dict[str, str]:
+        """Capture content bindings over the reference graph; cycles terminate."""
+        parents, pending, bound = self._impact_parents(), list(ids), {}
+        while pending:
+            key = pending.pop()
+            if key not in bound:
+                bound[key] = self.revision(key)
+                pending.extend(parents[key])
+        return dict(sorted(bound.items()))
+
+    def bindings_current(self, bindings) -> bool:
+        if not bindings or any(self._revisions.get(key) != rev for key, rev in bindings.items()):
+            return False
+        pending, seen = list(bindings), set()
+        while pending:
+            key = pending.pop()
+            if key in seen: continue
+            seen.add(key)
+            node, fields = self._nodes[key], self._nodes[key]["fields"]
+            if node["kind"] == "result" and fields["evidence"]["state"] in {"stale", "awaiting"}: continue
+            # evidenceRefs are append-only history; their IDs still participate in capture/impact.
+            refs = [r for link in TRACE_LINKS if link != "evidenceRefs" for r in fields.get(link, [])]
+            if node["kind"] == "result": refs.append(fields["evidence"]["itemRef"])
+            if any(self._revisions.get(ref["id"]) != ref["revision"] for ref in refs): return False
+            pending.extend(ref["id"] for ref in refs)
+        return True
+
     def plan_revision(self) -> str:
-        return _hash("\n".join(f"{key}:{value}" for key, value in self._revisions.items()))
+        return _hash("\n".join(f"{key}:{value}" for key, value in self.dependency_revisions(self.ids()).items()))
 
     def coverage_gaps(self) -> list[dict[str, str]]:
         gaps = []
@@ -366,33 +391,15 @@ def diff(old: Spine, new: Spine) -> dict[str, list[str]]:
 def impact(old: Spine, new: Spine) -> dict[str, list[str]]:
     changes = diff(old, new)
     changed = set().union(*changes.values())
-    affected = set(changed)
-    followers = {}
-    for version, spine in (("old", old), ("new", new)):
-        edges = {key: set() for key in spine.ids()}
-        for consumer, producers in spine._impact_parents().items():
-            for producer in producers:
-                edges[producer].add(consumer)
-        followers[version] = edges
-    # Follow both snapshots: a removed/reparented link must retire its old proof too.
-    pending = [(version, key) for version, spine in (("old", old), ("new", new))
-               for key in changed if key in spine._nodes]
-    visited: set[tuple[str, str]] = set()
-    while pending:
-        version, key = pending.pop()
-        if (version, key) in visited:
-            continue
-        visited.add((version, key))
-        affected.add(key)
-        pending.extend((version, child) for child in followers[version][key])
+    # Both snapshots preserve removed/reparented dependencies and retired proof.
+    affected = changed | {key for spine in (old, new) for key in spine.ids()
+                          if set(spine.dependency_revisions([key])) & changed}
     # Include retired beads/tests in affected lists so consumers can retire their evidence.
-    beads = set(old.ids("bead")) | set(new.ids("bead"))
-    tests = set(old.ids("test")) | set(new.ids("test"))
     return {
         "changed": sorted(changed),
         "affected": sorted(affected),
-        "affectedBeads": sorted(affected & beads),
-        "affectedTests": sorted(affected & tests),
+        "affectedBeads": sorted(affected & (set(old.ids("bead")) | set(new.ids("bead")))),
+        "affectedTests": sorted(affected & (set(old.ids("test")) | set(new.ids("test")))),
         "untouchedBeads": sorted(set(new.ids("bead")) - affected),
         "staleDocs": _stale_docs(old, new, changes),
     }
@@ -400,46 +407,27 @@ def impact(old: Spine, new: Spine) -> dict[str, list[str]]:
 
 def stale_evidence(old: Spine, new: Spine) -> Spine:
     """Invalidate affected retained observations once at the canonical transaction boundary."""
-    for key in old.ids():
-        prior_node = old.node(key)
-        links = prior_node["fields"].get("evidenceRefs", [])
-        current = new.node(key)["fields"].get("evidenceRefs", []) if key in new.ids() else []
-        if any(ref not in current for ref in links):
-            raise SpineError("spine-evidence-preservation-required", f"Retain {key}'s evidenceRefs; append evidence without dropping history")
-        if prior_node["kind"] == "result" and prior_node["fields"]["evidence"]["observation"] is not None:
-            before = prior_node["fields"]["evidence"]
-            after = new.node(key)["fields"]["evidence"] if key in new.ids("result") else {}
-            if any(before[field] != after.get(field) for field in ("itemRef", "candidate", "source", "observation")):
-                raise SpineError("spine-evidence-preservation-required", f"Retain observed result {key}; append a new result for new evidence")
-    for key in old.ids("feature"):
-        prior = old.node(key)["fields"]
-        if "baseline" not in prior:
-            continue
-        if key not in new.ids("feature"):
-            raise SpineError("spine-baseline-preservation-required", f"Retain existing feature {key} and its baseline before planning changes")
-        current = new.node(key)["fields"]
-        if current.get("baseline") != prior["baseline"]:
-            raise SpineError("spine-baseline-preservation-required", f"Retain {key}'s baseline provenance; record changes as linked amendments")
-    affected = set(impact(old, new)["affected"])
-    changes = set().union(*diff(old, new).values())
-    old_parents, new_parents = old._impact_parents(), new._impact_parents()
+    for key, prior_node in old._nodes.items():
+        fields, current = prior_node["fields"], new._nodes.get(key, {})
+        current_fields = current.get("fields", {})
+        if any(ref not in current_fields.get("evidenceRefs", []) for ref in fields.get("evidenceRefs", [])):
+            raise SpineError("spine-evidence-preservation-required", f"Retain {key}'s evidenceRefs; append evidence without dropping history", key, "fields.evidenceRefs")
+        if prior_node["kind"] == "result" and fields["evidence"]["observation"] is not None:
+            after = current_fields.get("evidence", {}) if current.get("kind") == "result" else {}
+            if any(fields["evidence"][field] != after.get(field) for field in ("itemRef", "candidate", "source", "observation")):
+                raise SpineError("spine-evidence-preservation-required", f"Retain observed result {key}; append a new result for new evidence", key, "fields.evidence")
+        if prior_node["kind"] == "feature" and "baseline" in fields:
+            if current.get("kind") != "feature" or current_fields.get("baseline") != fields["baseline"]:
+                raise SpineError("spine-baseline-preservation-required", f"Retain existing feature {key} and its baseline provenance; record changes as linked amendments", key, "fields.baseline")
     nodes = new.to_dict()["nodes"]
-    for node in nodes:
+    for node in (n for n in nodes if n["kind"] == "result"):
         key = node["id"]
-        if node["kind"] != "result":
-            continue
         evidence = node["fields"]["evidence"]
         prior = old.node(key)["fields"]["evidence"] if key in old.ids("result") else None
-        retained = prior is not None and evidence["observation"] is not None and prior["observation"] is not None and (
-            evidence["source"]["reference"], evidence["observation"]["reference"]
-        ) == (prior["source"]["reference"], prior["observation"]["reference"])
-        upstream = set(new._walk(key, new_parents))
-        if key in old_parents:
-            upstream.update(old._walk(key, old_parents))
-        if evidence["state"] != "awaiting" and (
-            key in affected and retained and bool(upstream & changes)
-            or evidence["itemRef"]["revision"] != new.revision(evidence["itemRef"]["id"])
-        ):
+        retained = prior is not None and prior["observation"] is not None
+        ref = evidence["itemRef"]
+        bindings = old.dependency_revisions([key]) if retained else {ref["id"]: ref["revision"]}
+        if evidence["state"] != "awaiting" and not new.bindings_current(bindings):
             evidence["state"] = "stale"
     return Spine({**new.to_dict(), "nodes": nodes})
 
@@ -612,7 +600,7 @@ def semantic_spec(spine, product=None, *, draft=False):
             kind = kinds[0]
             for ref in scenario[field]:
                 key, pinned, revision = ref.partition("@")
-                if key not in {k for kind in kinds for k in spine.ids(kind)} or pinned and revision != spine.revision(key):
+                if key not in {k for kind in kinds for k in spine.ids(kind)} or pinned and not spine.bindings_current({key: revision}):
                     gaps.append(f"{ref} missing/stale ({field} in {scenario['id']})")
                     messages.append(
                         f"Stale/unknown semantic reference: {ref}; "
@@ -643,7 +631,7 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
             "dependsOn": fields["dependsOn"], "requirementRefs": refs,
             "specRefs": [
                 {"id": key, "kind": spine.node(key)["kind"], "revision": spine.revision(key)}
-                for key in spine.ancestors(node_id)
+                for key in spine.dependency_revisions([node_id]) if key != node_id
             ],
             "requirements": [ref["id"] for ref in refs],
             "lessons": [{"decisionId": key, "text": spine.node(key)["text"]}
@@ -659,7 +647,7 @@ def compile_manifest(spine: Spine, template_dir: str | Path | None = None) -> di
         "requirementFiles": list(dict.fromkeys([*root.get("requirementFiles", []), *MARKDOWN_FILES])),
         "planRevision": spine.plan_revision(), "beads": beads, "integration": {},
         "trace": spine.to_dict(),
-        "traceRevisions": {key: spine.revision(key) for key in spine.ids()},
+        "traceRevisions": spine.dependency_revisions(spine.ids()),
         "evidenceStates": spine.evidence_states(),
     }
     if spine.semantic:

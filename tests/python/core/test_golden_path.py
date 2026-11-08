@@ -2475,6 +2475,8 @@ def trace_contract_golden(workspace):
             store.upsert_node(node=mismatched)
             assert store.spine().node("OLD_ITEM")["fields"]["evidence"]["state"] == "stale"
             changed = store.compile_template(root / "template")
+            affected = store.impact_since(str(sample))
+            assert "C1" in affected["affected"] and "C2" not in affected["affected"], "Public impact lost the changed dependency or marked the independent branch"
             assert changed["evidenceStates"]["OLD_ITEM"]["state"] == "stale"
             assert (
                 next(n for n in changed["trace"]["nodes"] if n["id"] == "OLD_ITEM")["fields"][
@@ -3153,15 +3155,27 @@ RETAINED_PHASE_CALLS = {
 
 @timed
 def r18_authoring_golden(workspace):
-    """C1/C4/C18/C23: r18 graph rejection cannot become an ID-disposition loop.
+    """C9/C16/C18: reciprocal semantics survive repair; structural cycles do not.
 
     The old manual-answer journey hid the lost relationship, empty member set and
     per-request retry reset. This exercises the real decoder, graph writer,
     canonical retry owner, typed link repair and unchanged-facts admission guard.
+    r21 adds reciprocal test/stop-condition and test/decision links: the old
+    acyclic fixtures missed recursive revision rejection and parents-only repair.
+    Round 2 protects retained STOP evidence/judgment after T changes and is
+    rebound, and accepted content from repair overreach; happy repair missed both.
+    Round 3 protects sequential parent/path correction: a later refused execution
+    section must remain editable, rather than exhausting a confined repair.
     """
     from tests.python.core.mcp_planner_support import LoopClient
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
     content = plan_content()
+    content["nodes"].extend([
+        dict(id="MEASURE", kind="metric", title="Receipt integrity", text="Measure correct receipts", parents=["V1"], fields=dict(definition="Correct receipt fraction", unit="fraction")),
+        dict(id="STOP", kind="stop-condition", title="Receipt goal", text="Stop at complete integrity", parents=["V1"], fields=dict(metricRefs=["MEASURE"], condition="All receipts match", testRefs=["T_RECEIPT"])),
+        dict(id="CHOICE", kind="decision", title="Verify bytes", text="Use a binary receipt", parents=["V1"], fields=dict(testRefs=["T_RECEIPT"])),
+    ])
+    next(n for n in content["nodes"] if n["id"] == "T_RECEIPT")["fields"].update(stopConditionRefs=["STOP"], decisionRefs=["CHOICE"])
     scenario = content["nodes"][0]["fields"]["scenarios"]["scenarios"][5]
     scenario["setup"]["snapshots"] = [dict(id="input-baseline",path="checks/input.json")]
     scenario["observe"].extend([dict(path="checks/input.json",bytesUnchangedFrom="input-baseline",fileJsonEquals=[0,255,65]),
@@ -3180,7 +3194,12 @@ def r18_authoring_golden(workspace):
     try:
         raw = json.loads(provider_answer(workspace, client.current["question"], dict(option="ready",rationale="Author the accepted receipt plan",content=content)))
         child = fixture_id(workspace,"R4")
-        next(r for r in raw["records"] if r["ref"] == child)["parents"] = ["V1"]
+        test = next(r for r in raw["records"] if r["ref"] == fixture_id(workspace,"T_RECEIPT"))
+        original_roots = test["fields"]["execution"]["testRoots"]
+        test["fields"]["execution"]["testRoots"] = ["../outside"]
+        original_parents = test["parents"]
+        test["parents"] = [fixture_id(workspace,"B")]
+        next(r for r in raw["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["testRefs"] = ["V1"]
         client.answer(json.dumps(raw))
         # CC reviewH P2: former private empty-member/transition checks move to
         # public B progression and unchanged-continuation holding.
@@ -3188,26 +3207,102 @@ def r18_authoring_golden(workspace):
         client.answer(json.dumps(dict(option="repair",rationale="Report the graph defect",content=dict(findings=[dict(node_id=child,severity="blocker",finding="Invalid parent kind",suggestion="Correct the relationship",resolved=False)]))))
         client.answer(json.dumps(raw))
         packet = client.offered["packet"]
-        changes = []
-        for relationship in packet["facts"]["context"]["relationships"]:
-            parent = next(p for p in relationship["eligibleParents"] if p["kind"] in relationship["allowedParentKinds"])
-            changes.append(dict(childHandle=relationship["childHandle"],parentRefs=[parent["ref"]]))
-        client.answer(json.dumps(dict(relationships=changes,rationale="The requirement belongs to the supplied product feature",reply="I corrected the plan relationship.")))
+        repaired = json.loads(json.dumps(raw))
+        assert "parents" in packet["facts"]["context"]["rejectedError"] and "cycle" in packet["facts"]["context"]["rejectedError"]
+        # Both parent kinds are legal, but the structural test/bead cycle is not.
+        test = next(r for r in repaired["records"] if r["ref"] == fixture_id(workspace,"T_RECEIPT"))
+        stop = next(r for r in repaired["records"] if r["ref"] == fixture_id(workspace,"STOP"))
+        with open_plan_store_readonly(workspace) as store:
+            assert not store.spine().ids("test"), "A rejected structural cycle was persisted"
+        test["parents"] = original_parents
+        client.answer(json.dumps(repaired))
+        assert ".fields.testRefs" in client.offered["packet"]["exactFix"]
+        stop["fields"]["testRefs"] = [fixture_id(workspace,"T_RECEIPT")]
+        client.answer(json.dumps(repaired))
+        test["fields"]["execution"]["testRoots"] = original_roots
+        client.answer(json.dumps(repaired))
         advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
-        assert client.current["userRequest"]["gate"] == "plan-execution" and client.current["userRequest"]["card"]
+        assert (client.current.get("userRequest") or {}).get("gate") == "plan-execution" and client.current["userRequest"]["card"], client.current
+        client.reconnect()
+        with open_plan_store(workspace) as store:
+            spine = store.spine()
+            test_revision = spine.revision(fixture_id(workspace,"T_RECEIPT"))
+            stop_revision = spine.revision(fixture_id(workspace,"STOP"))
+            for origin, field, target in (("T_RECEIPT","stopConditionRefs","STOP"), ("STOP","testRefs","T_RECEIPT"),
+                                          ("T_RECEIPT","decisionRefs","CHOICE"), ("CHOICE","testRefs","T_RECEIPT")):
+                link = spine.node(fixture_id(workspace,origin))["fields"][field][0]
+                assert link == dict(id=fixture_id(workspace,target), revision=spine.revision(fixture_id(workspace,target))), "Writer and reopened reader disagree about the referenced content"
+            store.upsert_node(dict(id="STOP_RESULT", kind="result", title="Retained stop verification", text="Observed the goal", parents=[fixture_id(workspace,"STOP")],
+                fields=dict(evidence=dict(itemRef=dict(id=fixture_id(workspace,"STOP"), revision=stop_revision), candidate="receipt-candidate",
+                    source=dict(reference="fixture:stop-measurement", realProvider=False, historical=False), observation=dict(reference="fixture:stop-readback", outcome="passed"), state="integrated"))))
+            verdict = scripted_judgment(store, question="Judge the retained stop goal", subject_ids=[fixture_id(workspace,"STOP")], meaning=dict(assessment="The observed receipt meets the goal"))["current"]
+            assert verdict["positiveCredit"] and store.spine().evidence_states()[fixture_id(workspace,"STOP")]["state"] == "integrated"
+            imported = store.spine().to_dict()
+        # Fresh-store import has no transaction preimage: stale declared links
+        # must still remove credit, rather than being rebound by the reader.
+        next(n for n in imported["nodes"] if n["id"] == fixture_id(workspace,"T_RECEIPT"))["text"] += "; changed outside the retained binding"
+        stale_path = workspace.parent / (workspace.name + "-stale.json")
+        stale_path.write_text(json.dumps(imported), encoding="utf-8")
+        imported_root = workspace.parent / (workspace.name + "-imported")
+        imported_root.mkdir()
+        with open_plan_store(imported_root) as store:
+            store.import_spine(stale_path)
+            assert store.spine().evidence_states()[fixture_id(workspace,"STOP")]["state"] == "stale"
+            imported_verdict = scripted_judgment(store, question="Judge the imported stop goal", subject_ids=[fixture_id(workspace,"STOP")], meaning=dict(assessment="Attempted credit on stale links"))["current"]
+            assert not imported_verdict["positiveCredit"], "Imported stale edge received new judgment credit"
         # Re-authoring existing identities must not collapse two proposed meanings
         # or duplicate one snapshot reused by independent file checks.
+        next(n for n in content["nodes"] if n["id"] == "T_RECEIPT")["text"] += "; verify the complete byte sequence"
         client.send_steer(rationale="Recheck the same complete plan after its relationship repair.")
         client.progress()
         client.answer(dict(option="replan",rationale="Retain the complete plan and verify its linked observations",content={}))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
         outline = json.loads(provider_answer(workspace,client.current["question"],dict(option="ready",rationale="Retain every current requirement",content=content)))
         duplicate = json.loads(json.dumps(outline));duplicate["feature"].append(dict(duplicate["feature"][0]))
         client.answer(json.dumps(duplicate))
         duplicate = json.loads(json.dumps(outline));duplicate["targets"].append(dict(duplicate["targets"][0]))
         client.answer(json.dumps(duplicate))
         client.answer(json.dumps(outline))
+        rejected = json.loads(provider_answer(workspace,client.current["question"],dict(option="ready",rationale="Recheck the proposed links",content=content)))
+        next(r for r in rejected["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["metricRefs"] = []
+        for _ in range(3): client.answer(json.dumps(rejected))
+        with open_plan_store_readonly(workspace) as store:
+            preserved = store.spine().to_dict()
+        next(r for r in rejected["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["metricRefs"] = [fixture_id(workspace,"MEASURE")]
+        remove = json.loads(json.dumps(rejected)); remove["remove"] = ["UNRELATED_OPERATOR_NOTE"]
+        client.answer(json.dumps(remove))
+        with open_plan_store_readonly(workspace) as store:
+            assert store.spine().to_dict() == preserved, "Repair deleted unrelated accepted content"
+        altered = json.loads(json.dumps(rejected))
+        next(r for r in altered["records"] if r["ref"] == fixture_id(workspace,"STOP"))["fields"]["condition"] = "Overwrite an unrelated accepted condition"
+        client.answer(json.dumps(altered))
+        with open_plan_store_readonly(workspace) as store:
+            assert store.spine().to_dict() == preserved, "Repair deleted or changed unrelated accepted content"
+        client.answer(json.dumps(rejected))
         advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         assert client.current["userRequest"]["gate"] == "plan-execution"
+        with open_plan_store(workspace) as store:
+            spine = store.spine()
+            assert spine.revision(fixture_id(workspace,"STOP")) == stop_revision, "Dependency freshness changed the stop's own identity"
+            assert spine.revision(fixture_id(workspace,"T_RECEIPT")) != test_revision
+            assert spine.node(fixture_id(workspace,"STOP"))["fields"]["testRefs"][0]["revision"] == spine.revision(fixture_id(workspace,"T_RECEIPT"))
+            assert spine.evidence_states()[fixture_id(workspace,"STOP")]["state"] == "stale"
+            assert not store.judgment(verdict["id"])["positiveCredit"], "STOP-only judgment survived a changed and rebound test"
+            # Retained immutable history must not poison the next observation or judgment.
+            stop = spine.node(fixture_id(workspace,"STOP"))
+            stop["fields"]["evidenceRefs"] = [dict(id="STOP_RESULT", revision=spine.revision("STOP_RESULT"))]
+            store.upsert_node(stop)
+            test = store.spine().node(fixture_id(workspace,"T_RECEIPT"))
+            test["fields"]["stopConditionRefs"] = [dict(id=stop["id"], revision=store.spine().revision(stop["id"]))]
+            store.upsert_node(test)
+            fresh = store.spine().node("STOP_RESULT")
+            fresh.update(id="A_FRESH_RESULT", title="New stop verification")
+            fresh["fields"]["evidence"].update(itemRef=dict(id=stop["id"], revision=store.spine().revision(stop["id"])), state="integrated",
+                observation=dict(reference="fixture:fresh-stop-readback", outcome="passed"))
+            store.upsert_node(fresh)
+        with open_plan_store(workspace) as store:
+            assert store.spine().node("A_FRESH_RESULT")["fields"]["evidence"]["state"] == "integrated"
+            assert scripted_judgment(store, question="Judge the repaired stop goal", subject_ids=[stop["id"]], meaning=dict(assessment="Fresh verification after repair"))["current"]["positiveCredit"]
 
     finally:
         client.close()

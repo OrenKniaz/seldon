@@ -54,12 +54,15 @@ def _steering(store, run, reason, *, failed=None):
     context = recovery_context(store, run)
     family = "direction"
     if failed:
+        diagnostics = failed.get("diagnostics", {})
         context = dict(failedRequestId=failed["id"], rejectedResponseEventId=failed.get("rejectedResponseEventId"),
-                       relationships=failed.get("diagnostics", {}).get("relationships", []),
+                       **diagnostics,
                        rejectedError=failed["error"], internalFailure=True)
-        if context["relationships"]:
+        if diagnostics.get("kind") == "graph" and diagnostics.get("editableFields"):
+            original = next(s["payload"]["context"] for s in failed["sourceRefs"] if s["kind"] == "loop-question")
+            context = {**original, **context}
             family = "repair"
-            reason = "graph-relationships"
+            reason = "trace"
     run.update(state="STEER", question=None, effect=None)
     ask_question(store, run, family, reason, context=context)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from codex_harness.core.semantic_schema import TRACE_LINKS
 from contextlib import nullcontext
 from uuid import uuid4
 
@@ -83,6 +84,7 @@ class PlanJudgments:
                 question=question,
                 subjectRefs=subjects,
                 evidenceRefs=evidence,
+                dependencyRevisions=spine.dependency_revisions(list(subject_ids) + list(evidence_ids or [])),
                 sourceRefs=sources,
                 candidate=candidate,
             )
@@ -114,10 +116,12 @@ class PlanJudgments:
         spine = snapshot["judgmentSpine"] if snapshot is not None else self.spine()
         current = (
             not record.get("supersededBy")
-            and all(
-                ref["id"] in spine.ids() and spine.revision(ref["id"]) == ref["revision"]
-                for ref in record["subjectRefs"] + record["evidenceRefs"]
-            )
+            and spine.bindings_current(record.get("dependencyRevisions", {
+                ref["id"]: ref["revision"] for ref in record["subjectRefs"] + record["evidenceRefs"]
+            }))
+            and ("dependencyRevisions" in record or all(
+                not ref["node"]["fields"].get(link) for ref in record["subjectRefs"] + record["evidenceRefs"]
+                for link in TRACE_LINKS))
             and (
                 record["question"] != "scope-intent"
                 or all(
@@ -152,17 +156,10 @@ class PlanJudgments:
                 or facts.get("subject", {}).get("kind") == "C"
             )
         candidate_current = record["candidate"] is None or candidate == record["candidate"]
-        reason = (
-            record["error"]
-            if record.get("supersededBy")
-            else None
-            if current and candidate_current
-            else (
-                "Refresh changed subject/evidence bindings"
-                if not current
-                else "Supply the current bound candidate"
-            )
-        )
+        reason = None
+        if record.get("supersededBy"): reason = record["error"]
+        elif not current: reason = "Refresh changed subject/evidence bindings"
+        elif not candidate_current: reason = "Supply the current bound candidate"
         judged = current and candidate_current and record["status"] == "judged"
         return dict(
             record,

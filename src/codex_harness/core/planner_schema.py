@@ -14,6 +14,7 @@ class Judgment(TypedDict):
     subjectRefs: list[dict]
     evidenceRefs: list[dict]
     sourceRefs: list[dict]
+    dependencyRevisions: NotRequired[dict[str, str]]
     candidate: str | None
     binding: str
     status: Literal["pending-judgment", "judged"]

@@ -85,7 +85,7 @@ def provider_answer(workspace, pending, value):
     if isinstance(value, str):
         return value
     family, purpose = pending["family"], pending["purpose"]
-    if family == "author":
+    if family in {"author", "repair"}:
         content = value.get("content", {})
         plan_path = Path(workspace) / ".codex-harness/provider-plan.json"
         if content.get("nodes"):

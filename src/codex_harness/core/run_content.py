@@ -1,9 +1,10 @@
 """Question-specific canonical consumers; CODE allocates IDs and resolves links."""
 
 from uuid import uuid4
+from copy import deepcopy
 from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.semantic_schema import TRACE_LINKS
-from codex_harness.core.spine import _hash, _canonical
+from codex_harness.core.spine import content_revision
 from codex_harness.core.spine import ALLOWED_PARENTS, SpineError
 from codex_harness.core.plan_types import PlanStoreError
 
@@ -30,6 +31,18 @@ def identities(rows, key, expected=None):
 
 def apply_answer(store, pending, meaning):
     purpose = pending["purpose"]
+    if pending["family"] == "repair":
+        scope = store._judgment_record(pending["requestId"]).get("diagnostics") or pending["context"]
+        retained = deepcopy(scope["rejectedAnswer"])
+        supplied = {r["ref"]: r for r in meaning["records"]}
+        for row in retained["records"]:
+            for field in scope["editableFields"].get(row["ref"], []):
+                parts, owner, source = field.split("."), row, supplied.get(row["ref"], {})
+                for part in parts[:-1]:
+                    owner, source = owner[part], source.get(part, {})
+                owner[parts[-1]] = source.get(parts[-1])
+        if meaning["remove"] or any(meaning[k] != retained[k] for k in ("records", "targets", "scenarios")):
+            raise ValueError(f"Repair only the refused fields {scope['editableFields']}; preserve all other nodes/content and remove nothing")
     if purpose == "plan-outline":
         outline = {}
         for group, rows in meaning.items():
@@ -38,23 +51,6 @@ def apply_answer(store, pending, meaning):
                                       **({"kind":group} if group not in {"targets","scenarios"} else {})) for row in rows]
         for rows in outline.values(): identities(rows,"id")
         store._event("trace-outline",dict(requestId=pending["requestId"], nodes=[r for k,v in outline.items() if k not in {"targets","scenarios"} for r in v], targets=outline["targets"], scenarios=outline["scenarios"]))
-        return
-    if pending["family"] == "repair":
-        context = pending["context"]
-        row = store.connection.execute("SELECT payload_json FROM events WHERE id=? AND kind='judgment-response'", (context["rejectedResponseEventId"],)).fetchone()
-        import json
-        from codex_harness.core.provider_response import _response
-        retained = json.loads(row[0])
-        provider = retained["source"].split(":",2)[1]
-        original = json.loads(_response(retained["response"],provider,structured=True))
-        changes = {r["childHandle"]: r["parentRefs"] for r in meaning["relationships"]}
-        required = {r["childHandle"] for r in context["relationships"]}
-        if set(changes) != required or len(changes) != len(meaning["relationships"]):
-            raise ValueError("Repair each supplied rejected child exactly once")
-        for node in original["records"]:
-            if node["ref"] in changes:
-                node["parents"] = changes[node["ref"]]
-        apply_answer(store, dict(pending, family="author", purpose="trace", context=next(s["payload"]["context"] for s in store._judgment_record(context["failedRequestId"])["sourceRefs"] if s["kind"] == "loop-question")), original)
         return
     if purpose == "understanding":
         vision = store.spine().node(store.spine().ids("vision")[0])
@@ -95,16 +91,13 @@ def apply_answer(store, pending, meaning):
     ids = set(store.spine().ids())
     for group, supplied in (("records","nodes"),("targets","targets"),("scenarios","scenarios")):
         identities(meaning[group],"ref",{r["id"] for r in pending["context"][supplied]})
-    known = {n["id"]: dict(ref=n["id"],kind=n["kind"],title=n["title"],text=n["text"]) for n in store.list_nodes() if n["fields"].get("schema") != "dot-reviewer-selection-v1"}
-    known.update({r["ref"]: dict(ref=r["ref"],kind=r["kind"],title=r["title"],text=r["text"]) for r in rows})
-    def relationship(r):
-        return dict(childHandle=r["ref"], childKind=r["kind"], childText=r["text"],
-        rejectedParents=r["parents"], allowedParentKinds=sorted(ALLOWED_PARENTS[r["kind"]]),
-        eligibleParents=[p for p in known.values() if p["kind"] in ALLOWED_PARENTS[r["kind"]] and p["ref"] != r["ref"]])
-    relationships = [relationship(r) for r in rows if not r["parents"] or any(p not in known or known[p]["kind"] not in ALLOWED_PARENTS[r["kind"]] for p in r["parents"])]
+    known = {n["id"]: n["kind"] for n in store.list_nodes() if n["fields"].get("schema") != "dot-reviewer-selection-v1"}
+    known.update({r["ref"]: r["kind"] for r in rows})
+    relationships = [r for r in rows if not r["parents"] or any(known.get(p) not in ALLOWED_PARENTS[r["kind"]] for p in r["parents"])]
     if relationships:
-        error = PlanStoreError("trace-relationship-invalid", "Rejected parent relationship; use the supplied child, parent and allowed parent kinds")
-        error.diagnostics = dict(kind="graph", relationships=relationships)
+        error = PlanStoreError("trace-relationship-invalid", "Rejected parents; choose an eligible parent for each named node")
+        error.diagnostics = dict(kind="graph", rejectedAnswer=meaning, editableFields={r["ref"]: ["parents"] for r in relationships},
+                                 eligibleParents={r["ref"]: [key for key, kind in known.items() if kind in ALLOWED_PARENTS[r["kind"]] and key != r["ref"]] for r in relationships})
         raise error
     def ref(key):
         if key not in ids | set(drafts):
@@ -120,34 +113,30 @@ def apply_answer(store, pending, meaning):
             fields = {**store.spine().node(identifier)["fields"], **fields}
         nodes.append(dict(id=identifier, kind=row["kind"], title=row["title"], text=row["text"],
                           parents=[ref(r) for r in row["parents"]], fields=fields))
-    proposed = {n["id"]: n for n in nodes}
-    resolved, visiting = {}, set()
-    def materialize(key):
-        if key in resolved:
-            return resolved[key]
-        if key in visiting:
-            raise ValueError("Trace reference cycle; author acyclic links")
-        if key not in proposed:
-            return store.spine().node(key)
-        visiting.add(key)
-        node = proposed[key]
-        def bound(handle):
-            target = ref(handle)
-            return dict(id=target, revision=_hash(_canonical(materialize(target))))
-        def fields(value):
-            return {k: [bound(x) if isinstance(x,str) else x for x in v] if k in TRACE_LINKS or k == "targetRefs" else
-                    bound(v) if k == "sourceRef" and isinstance(v,str) else
-                    fields(v) if k == "baseline" else v for k,v in value.items()}
+    revisions = {node["id"]: content_revision(node) for node in nodes}
+    def bound(handle):
+        target = ref(handle)
+        return dict(id=target, revision=revisions[target] if target in revisions else store.spine().revision(target))
+    def fields(value):
+        return {k: [bound(x) if isinstance(x,str) else x for x in v] if k in TRACE_LINKS or k == "targetRefs" else
+                bound(v) if k == "sourceRef" and isinstance(v,str) else
+                fields(v) if k == "baseline" else v for k,v in value.items()}
+    for node in nodes:
         node["fields"] = fields(node["fields"])
-        visiting.remove(key)
-        resolved[key] = node
-        return node
     if nodes:
         try:
-            batch_nodes(store, [materialize(n["id"]) for n in nodes], lambda n: None)
+            batch_nodes(store, nodes, lambda n: None)
         except SpineError as cause:
-            error = PlanStoreError(cause.code, str(cause))
-            error.diagnostics = dict(kind="graph", relationships=[relationship(r) for r in rows])
+            editable = getattr(cause, "editable_fields", {})
+            defect = not any(editable.values())
+            if defect:
+                editable = getattr(cause, "refused_sections", {})
+            if not any(editable.values()):
+                raise RuntimeError(f"CODE defect: structural refusal omitted its node/section: {cause}") from cause
+            message = f"CODE defect: missing editable scope; repair only {editable}. {cause}" if defect else str(cause)
+            error = PlanStoreError(cause.code, message)
+            error.diagnostics = dict(kind="graph", rejectedAnswer=meaning,
+                                     editableFields=editable, repairScopeDefect=defect)
             raise error from cause
     for key in meaning["remove"]:
         from codex_harness.core.run_loop import cursor

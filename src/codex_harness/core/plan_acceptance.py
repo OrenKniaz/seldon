@@ -10,9 +10,7 @@ from uuid import uuid4
 
 from codex_harness.core import worker_packet_budget
 from codex_harness.core.reviewer_evidence import finding_records, native_reviewer, review_binding
-from codex_harness.core.spine import (
-    Spine,
-)
+from codex_harness.core.spine import Spine
 
 
 from codex_harness.core.plan_types import PlanStoreError, _json, _nonempty
@@ -39,13 +37,10 @@ class PlanAcceptance:
                 "SELECT scenario_json FROM acceptance_scenarios ORDER BY id"
             )
         ]
-        revisions = {
-            row["id"]: row["revision"]
-            for row in self.connection.execute("SELECT id, revision FROM nodes")
-        }
+        spine = self.spine()
         for scenario in scenarios:
             refs = scenario.get("nodeRevisions", {})
-            if not refs or any(revisions.get(key) != value for key, value in refs.items()):
+            if not spine.bindings_current(refs):
                 scenario["status"] = "stale"
         return scenarios
 
@@ -59,7 +54,6 @@ class PlanAcceptance:
         with nullcontext() if self.connection.in_transaction else self._transaction():
             spine = self.locked_acceptance_spine()
             required = {item["id"] for item in derive_scenarios(spine)}
-            current = Spine(self._data())
             ids = []
             stored = []
             for scenario in scenarios:
@@ -94,7 +88,7 @@ class PlanAcceptance:
                         **scenario,
                         "status": "planned" if executable else "draft",
                         "executable": executable,
-                        "nodeRevisions": {key: current.revision(key) for key in sorted(refs)},
+                        "nodeRevisions": spine.dependency_revisions(refs),
                     }
                 )
             if len(set(ids)) != len(ids) or not required <= set(ids):
@@ -562,11 +556,10 @@ class PlanAcceptance:
         if not isinstance(refs, list) or not refs:
             raise ValueError("review-closure-node-evidence-required")
         spine = self.spine()
-        for ref in refs:
-            if not isinstance(ref, dict) or set(ref) != {"nodeId", "revision"}:
-                raise ValueError("review-closure-node-reference-invalid")
-            if ref["nodeId"] not in spine.ids() or spine.revision(ref["nodeId"]) != ref["revision"]:
-                raise ValueError("review-closure-artifact-stale-or-absent")
+        if any(not isinstance(ref, dict) or set(ref) != {"nodeId", "revision"} for ref in refs):
+            raise ValueError("review-closure-node-reference-invalid")
+        if not spine.bindings_current({ref["nodeId"]: ref["revision"] for ref in refs}):
+            raise ValueError("review-closure-artifact-stale-or-absent")
         for field, table, binding in (
             ("reviewIds", "review_runs", "plan_revision"),
             ("auditIds", "audit_runs", "manifest_revision"),

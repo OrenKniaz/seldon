@@ -125,7 +125,6 @@ QUESTIONS = {
     'visualQuality': (obj(**{**VERDICT, **dict(qualitativeChecks=array(obj(check=TEXT, passed=BOOL)))}), [dict(verdict="inconclusive", gaps=[], rationale="The supplied observations do not establish this question", **dict(qualitativeChecks=[]))]),
     'user-decision': (DECISION, [dict(words='Yes, build exactly that', answer=dict(decision='approve', requestedChanges='', reply='I will build the displayed plan.', rationale='Unqualified approval of the displayed subject')), dict(words='How would it handle audio input?', answer=dict(decision='unclear', requestedChanges='', reply='Let us clarify audio input before deciding.', rationale='A question asks for explanation, not consent'))]),
     'direction': (STEERING, [dict(action='ask_user', amendments=[], question='May the accepted scope change?', reply='This discovery affects the agreed scope.', rationale='The observed gap requires a user scope decision')]),
-    'repair': (obj(relationships=array(obj(childHandle=TEXT,parentRefs=array())),rationale=TEXT,reply=STRING), [dict(relationships=[], rationale='Repair only the supplied rejected relationships', reply='I will preserve the complete proposed slice and correct its links.')]),
     'understanding': (UNDERSTANDING, [dict(understanding='Compare measured performance with an agreed goal', users=['A person investigating a measurement'], firstUserMoment='Load a measurement and see its result', scopeIn=['Measure and compare'], scopeOut=['Unrequested changes'], qualityBar='Make uncertainty visible', doneFeelsLike='The person can reproduce and explain the result', assumptions=[], openQuestions=['Which measurement defines success?'], upgrades=[dict(proposal='Show uncertainty alongside the result', kind='micro', impact='Avoid misleading confidence', disposition='accept')], qualityCriteria=['Results are reproducible'], metrics=[], stopConditions=[], readiness='ask_user', question='Which measurement defines success?', reply='Let us agree on the success measurement before locking the vision.', rationale='The metric changes what we build')]),
     'finding-dispositions': (obj(dispositions=array(obj(memberRef=TEXT,disposition=choice("resolved","rejected","deferred"),resolution=TEXT)),rationale=TEXT,reply=STRING), [dict(dispositions=[], rationale='Await the current repair evidence before proposing closure', reply='The concern remains open.')]),
     "trace": (dict(TRACE, **{"$defs":{"data":DATA_DEF}}), [dict(records=[],remove=[],targets=[],scenarios=[],rationale="Author the supplied plan handles",reply="The linked plan is ready.")]),
@@ -134,7 +133,7 @@ QUESTIONS = {
 
 
 def question_spec(family,purpose):
-    return QUESTIONS["repair" if family == "repair" else "direction" if family == "direction" else "user-decision" if family == "user-interpretation" else purpose]
+    return QUESTIONS["direction" if family == "direction" else "user-decision" if family == "user-interpretation" else purpose]
 
 
 def author_contract(store, purpose, context):

@@ -57,7 +57,7 @@ from copy import deepcopy
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
-from codex_harness.core.spine import Spine, _acyclic, _canonical, _hash
+from codex_harness.core.spine import Spine, _acyclic, _canonical, _hash, content_revision
 
 WaveAccountingV1 = dict[str, Any]
 EVIDENCE = {
@@ -208,7 +208,7 @@ def validate_map(
             "wave-reference-invalid",
         )
         _need(
-            _sha(value["revision"]) and spine.revision(value["id"]) == value["revision"],
+            _sha(value["revision"]) and spine.bindings_current({value["id"]: value["revision"]}),
             "Source revision is stale",
             "wave-reference-stale",
         )
@@ -547,7 +547,7 @@ def product_digest(spine: Spine, plan: dict, detail_values: list[dict]) -> str:
         )
         if is_carrier:
             value["fields"] = {}
-            revisions[key] = _hash(_canonical(value))
+            revisions[key] = content_revision(value)
         else:
             revisions[key] = spine.revision(key)
     digest = _hash(_canonical({"nodeRevisions": revisions, "waveMap": plan}))

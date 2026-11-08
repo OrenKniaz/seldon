@@ -317,10 +317,7 @@ class PlanReviews:
             else {}
         )
         return dict(
-            nodes={
-                node["id"]: hashlib.sha256(_json(node).encode()).hexdigest()
-                for node in spine.to_dict()["nodes"]
-            },
+            nodes=spine.dependency_revisions(spine.ids()),
             files={
                 name: hashlib.sha256(path.read_bytes()).hexdigest()
                 for name, path in sources.items()

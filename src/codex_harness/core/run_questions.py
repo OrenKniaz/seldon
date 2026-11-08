@@ -87,12 +87,9 @@ def ask_question(store, run, family, purpose, *, judgment=None, context=None):
     schema, examples = question_spec(family,purpose)
     pending = dict(family=family,purpose=purpose,revision=store._revision(),context=context,
         role="mechanical" if family == "user-interpretation" or purpose == "planning-size" else "judge" if family == "assess" else "planner",
-        answerSchema=author_contract(store,purpose,context) if family == "author" and purpose in {"trace","plan-outline"} else deepcopy(schema), examples=deepcopy(examples))
+        answerSchema=author_contract(store,purpose,context) if family in {"author", "repair"} and purpose in {"trace","plan-outline"} else deepcopy(schema), examples=deepcopy(examples))
     if family == "repair":
-        pending["answerSchema"]["properties"]["relationships"]["minItems"] = 1
-        props = pending["answerSchema"]["properties"]["relationships"]["items"]["properties"]
-        props["childHandle"] = dict(props["childHandle"], enum=sorted({r["childHandle"] for r in context["relationships"]}))
-        pending["examples"][0]["relationships"] = [dict(childHandle=r["childHandle"], parentRefs=[r["eligibleParents"][0]["ref"]]) for r in context["relationships"] if r["eligibleParents"]]
+        pending["answerSchema"]["properties"]["remove"]["maxItems"] = 0
     if purpose in {"finding-dispositions", "finding-disposition"}:
         props = pending["answerSchema"]["properties"]["dispositions"]["items"]["properties"]
         props["memberRef"] = dict(props["memberRef"], enum=[m["id"] for m in context["members"]])

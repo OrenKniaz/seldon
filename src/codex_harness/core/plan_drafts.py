@@ -69,7 +69,7 @@ class PlanDrafts:
             for node in nodes
             if node["id"] not in before.ids() or after.node(node["id"]) != before.node(node["id"])
         ]
-        identities = {node["id"]: after.revision(node["id"]) for node in nodes}
+        identities = after.dependency_revisions(node["id"] for node in nodes)
         event = {"nodeRevisions": identities, **deepcopy(provenance)}
         if changed or self._latest_draft_event(kind) != event:
             for node in changed:
@@ -460,7 +460,7 @@ class PlanDrafts:
             productLockRevision=lock["digest"],
             productLockSource=lock["sourceRef"],
             waveMapRevision=scope["waveMapRevision"],
-            nodeRevisions={k: spine.revision(k) for k in spine.ids()},
+            nodeRevisions=spine.dependency_revisions(spine.ids()),
             throughWaveId=scope["throughWaveId"],
             waveIds=scope["waveIds"],
             scenarioIds=ids,
@@ -655,7 +655,7 @@ class PlanDrafts:
             "productLockRevision": None,
             "waveMap": validated["waveMap"],
             "waveDetails": validated["waveDetails"],
-            "nodeRevisions": {key: spine.revision(key) for key in spine.ids()},
+            "nodeRevisions": spine.dependency_revisions(spine.ids()),
             "selectedWaveIds": validated["waveMap"]["order"][:1],
             "historicalMeasurements": history,
             "beadDependencies": {
@@ -687,9 +687,7 @@ class PlanDrafts:
                 event = self._latest_draft_event(kind)
                 if event:
                     node = nodes.get(event["nodeId"])
-                    current = node is not None and event["nodeRevisions"][
-                        node["id"]
-                    ] == spine.revision(node["id"])
+                    current = node is not None and spine.bindings_current(event["nodeRevisions"])
                     item = {"node": node, "state": "draft" if current else "stale"}
                     result[field] = item
             event = self._latest_draft_event("wave-map-recorded")
@@ -701,7 +699,7 @@ class PlanDrafts:
                 mapNode=map_node,
                 detailNodes=details,
                 nodes=nodes,
-                nodeRevisions={key: spine.revision(key) for key in spine.ids()},
+                nodeRevisions=spine.dependency_revisions(spine.ids()),
             )
             if map_node is None or any(node is None for node in details):
                 return {**result, "state": "stale", "reason": "Recorded map/detail node missing"}
@@ -717,10 +715,7 @@ class PlanDrafts:
                 )
             except ValueError as error:
                 return {**result, "state": "stale", "reason": str(error)}
-            changed = any(
-                key not in nodes or spine.revision(key) != revision
-                for key, revision in event["nodeRevisions"].items()
-            )
+            changed = not spine.bindings_current(event["nodeRevisions"])
             applied = self._latest_draft_event("wave-refinement-applied")
             if applied and applied["spineRevision"] == spine.plan_revision():
                 changed = False
