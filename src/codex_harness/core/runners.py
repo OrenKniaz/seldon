@@ -57,13 +57,13 @@ def executable_scenarios(trace, document):
     return document
 
 
-def execution_sources(root, trace):
+def execution_sources(root, trace, owned=()):
     """Hash the complete declared bundle; bounded bodies are judge context only."""
     from codex_harness.core.candidate_observations import _digest, file_hashes
     from codex_harness.core.semantic_runner import SOURCE_IGNORED
     from codex_harness.core.semantic_schema import path
 
-    root, sources = Path(root).resolve(), []
+    root = Path(root).resolve()
     nodes = (trace or {}).get("nodes", [])
     executions = [n["fields"]["execution"] for n in nodes if n["kind"] == "test" and "execution" in n["fields"]]
     roots = sorted({path(root, r).relative_to(root).as_posix() for e in executions for r in e["testRoots"]})
@@ -72,11 +72,22 @@ def execution_sources(root, trace):
                     if f.is_file() and not any(p in SOURCE_IGNORED for p in f.relative_to(root).parts)})
     missing = sorted(r for r in roots if not any(n == r or n.startswith(r + "/") for n in names))
     hashes = file_hashes(root, names)
-    for name, digest in hashes.items():
-        with (root / name).open("rb") as stream:
-            sources.append(dict(path=name, sha256=digest, body=stream.read(16384).decode("utf-8", errors="replace"),
-                                omitted=(root / name).stat().st_size > 16384))
-    return dict(roots=roots, contentHash=_digest(dict(roots=roots, files=hashes)), files=sources, missing=missing)
+    def bodies(files):
+        budget = 32768
+        result = []
+        for index,(name, digest) in enumerate(files.items()):
+            file = path(root, name)
+            limit = min(16384, budget // (len(files)-index))
+            with file.open("rb") as stream:
+                raw = stream.read(limit)
+            budget -= len(raw)
+            result.append(dict(path=name, sha256=digest, body=raw.decode("utf-8", errors="replace"),
+                               omittedBytes=max(0, file.stat().st_size-len(raw))))
+        return result
+    implementation = file_hashes(root, sorted(set(owned)-set(names)))
+    return dict(roots=roots, contentHash=_digest(dict(roots=roots, files=hashes)), files=bodies(hashes), missing=missing, byteBudget=32768,
+                implementation=dict(files=bodies({n:h for n,h in implementation.items() if h is not None}),
+                                    missing=[n for n,h in implementation.items() if h is None], byteBudget=32768))
 
 
 def execution_witnesses(integrated):

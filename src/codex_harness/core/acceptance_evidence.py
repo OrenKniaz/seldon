@@ -9,6 +9,12 @@ from codex_harness.core.planner_candidate import judgments_for
 from codex_harness.core.spine import compile_manifest, requirement_file_sources
 
 
+SOURCE_SUFFIXES = frozenset(
+    ".py .js .mjs .cjs .ts .tsx .jsx .go .rs .c .h .cpp .hpp .cs .java .kt "
+    ".swift .rb .php .sh .ps1 .sql .html .css .vue .svelte".split()
+)
+
+
 def candidate_evidence(store, repo, run, *, execution_assessment_ids=None):
     """Read explicit manifest-owned source only; never follow imports or scan the repo."""
     template = store.workspace / "template"
@@ -18,16 +24,12 @@ def candidate_evidence(store, repo, run, *, execution_assessment_ids=None):
         for name in bead["ownedFiles"]:
             owners.setdefault(name, []).append(bead_id)
     implementation = []
-    source_suffixes = set(
-        ".py .js .mjs .cjs .ts .tsx .jsx .go .rs .c .h .cpp .hpp .cs .java .kt "
-        ".swift .rb .php .sh .ps1 .sql .html .css .vue .svelte".split()
-    )
     for name in sorted(owners):
         relative = PurePosixPath(name.replace("\\", "/"))
         record = {"path": name, "owners": sorted(owners[name])}
         if (
             any(part.startswith(".") for part in relative.parts)
-            or relative.suffix.lower() not in source_suffixes
+            or relative.suffix.lower() not in SOURCE_SUFFIXES
         ):
             record["status"] = "not-source; contents not read"
         elif (Path(repo) / relative).is_dir():

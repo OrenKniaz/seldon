@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from codex_harness.core.plan_store import PHASES
-from codex_harness.core.planner_refusals import refusal_code, refusal_hold, refusal_text
+from codex_harness.core.planner_refusals import render
 
 
 def connection_projection(workspace: str | Path, status: dict | None = None) -> dict:
@@ -76,15 +76,10 @@ def connection_reply(
     for item in payload["content"]:
         if item.get("type") == "text":
             item["text"] = _text(item["text"], projection)
-            values = {
-                "status": status or {},
-                "data": payload.get("structuredContent", {}),
-                "binding": payload.get("workspaceBinding", {}),
-                **(refusal_values or {}),
-            }
-            if payload.get("isError") or refusal_hold(values):
-                payload.setdefault("refusalCode", refusal_code(item["text"], values))
-                item["text"] = refusal_text(item["text"], workspace, values)
+            refusal = payload.get("structuredContent", {}).get("refusal")
+            if refusal is not None:
+                payload["refusalCode"] = refusal["code"]
+                item["text"] = _text(render(refusal), projection)
             # One header per response; additional text blocks remain untouched.
             break
     return result
@@ -104,20 +99,10 @@ def workspace_refusal(self, request_id, binding, code, name=None):
         "result": {
             "isError": True,
             "workspaceBinding": binding,
-            "structuredContent": {"workspaceBinding": binding},
-            "content": [
-                {
-                    "type": "text",
-                    "text": code
-                    + ": workspace binding refused.\n"
-                    + self._binding_text(binding)
-                    + "\nNo store access or provider admission was attempted for this call.\n"
-                    "Next: Inspect harness_plan_status read-only, verify the intended project "
-                    "from the caller, then use a correctly bound connection with "
-                    "expected_workspace. A supported client reload route is unknown; "
-                    "changing config alone proves no live binding.",
-                }
-            ],
+            "structuredContent": {"workspaceBinding": binding, "refusal": dict(
+                code=code, reason="Workspace binding refused; no store access or provider admission attempted",
+                current=binding, nextAction="Inspect harness_plan_status read-only and use the intended project connection with expected_workspace")},
+            "content": [dict(type="text", text="")],
         },
     }
     return connection_reply(response, self.workspace)

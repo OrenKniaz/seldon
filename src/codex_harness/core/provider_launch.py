@@ -128,6 +128,8 @@ class _CodexProvider:
         executable: str | None = None,
         allowed_tools: Sequence[str] = (),
         platform: str = sys.platform,
+        answer_schema: dict | None = None,
+        schema_path: str | None = None,
     ) -> ProviderNormalLaunch:
         # Codex gates by sandbox, not per-tool rules; allowed_tools is unused.
         del allowed_tools
@@ -138,7 +140,7 @@ class _CodexProvider:
             "--color",
             "never",
             "--sandbox",
-            "workspace-write",
+            "read-only" if answer_schema is not None else "workspace-write",
             "-c",
             'approval_policy="never"',
         ]
@@ -148,9 +150,13 @@ class _CodexProvider:
             command.extend(["-c", f"model_reasoning_effort={json.dumps(reasoning_effort)}"])
         # The exact prompt is one argv element; collapsing it would merge
         # code and comments in the task text.
+        if answer_schema is not None:
+            if schema_path is None:
+                raise ValueError("Semantic Codex calls require a schema file")
+            command.extend(["--output-schema", schema_path, "--ephemeral"])
         command.append("-" if prompt_via_stdin else prompt)
         protections = [
-            "Requested sandbox workspace-write: per Codex documentation, writes are limited "
+            "Requested sandbox read-only for semantic calls. " if answer_schema is not None else "Requested sandbox workspace-write: per Codex documentation, writes are limited "
             "to the workspace and temp directories, which is not repo-only. Enforcement is "
             "not verified by Harness.",
             "Requested approval policy never: blocked actions fail instead of prompting.",
@@ -193,23 +199,27 @@ class _ClaudeProvider:
         executable: str | None = None,
         allowed_tools: Sequence[str] = (),
         platform: str = sys.platform,
+        answer_schema: dict | None = None,
+        schema_path: str | None = None,
     ) -> ProviderNormalLaunch:
         tools = tuple(
             dict.fromkeys((*CLAUDE_PROVIDER_NORMAL_BASE_TOOLS, *require_tool_rules(allowed_tools)))
-        )
+        ) if answer_schema is None else ()
         command = [
             executable or "claude",
             "-p",
             "--output-format",
-            "stream-json",
+            "stream-json" if answer_schema is None else "json",
             "--verbose",
             "--permission-mode",
-            "acceptEdits",
+            "acceptEdits" if answer_schema is None else "default",
             "--allowedTools",
             ",".join(tools),
             *_model_and_effort(model, reasoning_effort),
             *([] if prompt_via_stdin else [prompt]),
         ]
+        if answer_schema is not None:
+            command.extend(["--json-schema", json.dumps(answer_schema), "--tools", "", "--no-session-persistence"])
         protections = [
             "Requested permission mode acceptEdits with allowed tools: "
             + ", ".join(tools)
@@ -228,7 +238,7 @@ class _ClaudeProvider:
             cli="claude",
             command=tuple(command),
             protections=tuple(protections),
-            environment={"PYTHONUTF8": "1"},
+            environment={"PYTHONUTF8": "1", **({"CLAUDE_CODE_MAX_RETRIES": "0"} if answer_schema is not None else {})},
             stdin_text=prompt if prompt_via_stdin else None,
         )
 
@@ -244,14 +254,20 @@ class _CopilotProvider:
         executable: str | None = None,
         allowed_tools: Sequence[str] = (),
         platform: str = sys.platform,
+        answer_schema: dict | None = None,
+        schema_path: str | None = None,
     ) -> ProviderNormalLaunch:
         del platform
-        tools = tuple(dict.fromkeys(("write", *require_tool_rules(allowed_tools))))
+        tools = tuple(dict.fromkeys(("write", *require_tool_rules(allowed_tools)))) if answer_schema is None else ()
         command: list[str] = [
             executable or "copilot",
             *([] if prompt_via_stdin else ["-p", prompt]),
             "--no-ask-user",
         ]
+        if answer_schema is not None:
+            # Copilot has no schema flag. Its final JSON is checked by the same decoder.
+            command = [executable or "copilot", "-p", prompt, "--output-format", "json", "--no-ask-user", "--deny-tool", "*"]
+            prompt_via_stdin = False
         for tool in tools:
             command.extend(["--allow-tool", tool])
         # Workers never publish; the single integrator owns pushes.

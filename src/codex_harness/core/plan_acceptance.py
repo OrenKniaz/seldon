@@ -453,7 +453,7 @@ class PlanAcceptance:
             state="pending-judgment",
             question="finding-disposition",
             findingIds=ids,
-            mcpTool="harness_loop_answer",
+            mcpTool="harness_chat",
             message="Answer the current typed question with content.findings for obligation ids "
             + ", ".join(ids)
             + "; supply evidence-backed dispositions and reasons. The controller prepares the bound judgment.",

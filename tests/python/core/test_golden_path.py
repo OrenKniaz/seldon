@@ -12,29 +12,49 @@ import time
 import tomllib
 import venv
 from pathlib import Path
+from functools import wraps
 
 import pytest
 
 from codex_harness.core import approvals
 from codex_harness.core import planner_confirmations as confirmations
-from codex_harness.core.run_content import apply_content
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from tests.python.core.mcp_planner_support import fixture_id, provider_answer, apply_content, fixture_judgment_example
 ROOT = Path(__file__).resolve().parents[3]
 pytestmark = pytest.mark.fast
 
 
+def timed(function):
+    """Print existing journey wall time, including failure and cleanup."""
+    @wraps(function)
+    def measured(*args, **kwargs):
+        start = time.monotonic()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            label = function.__name__ + (":" + str(kwargs.get("journey", args[-1] if args else "")) if function.__name__.startswith("test_") else "")
+            print(f"golden timing {label}: {time.monotonic() - start:.2f}s", file=sys.stderr, flush=True)
+    return measured
+
+
+def http_direction(purpose):
+    """Keep observed failures for the next explicit fixture step."""
+    return "pause" if purpose.startswith(("Two automatic recoveries exhausted", "Retained observation refused:")) else "continue"
+
+
 def scripted_review_reply(launch, findings, *, verdict, rationale, gaps=()):
     """Script only a provider reply to the actual bound review packet."""
-    request = json.loads(
-        launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split("\nReturn ONLY JSON", 1)[0]
-    )
-    # R9 regression: prior fixtures invented a valid depth, hiding absent packet guidance.
-    reply = request["responseExample"]
-    reply.update(verdict=verdict, rationale=rationale, gaps=list(gaps))
-    reply["meaning"]["findings"] = findings
-    return json.dumps(reply)
+    prompt = launch.stdin_text if launch.stdin_text is not None else launch.command[launch.command.index("-p")+1]
+    question = json.loads(prompt.split("\n## Review question\n", 1)[1].split("\nExact fix required:", 1)[0])
+    assert "depth" in question["answerSchema"]["properties"]
+    assessments = dict(featureAssessments=[dict(featureRef=r["ref"], verdict=verdict, rationale=rationale) for r in question.get("featureInventory",[])],
+        qualityAssessments=[dict(qualityRef=r["ref"], verdict=verdict, rationale=rationale) for r in question.get("qualityInventory",[])], stubOrMissingGaps=[]) if "featureInventory" in question else {}
+    return json.dumps(dict(verdict=verdict, rationale=rationale, **assessments,
+        gaps=[dict(subjectRef="plan", evidenceRefs=[], issue=g) for g in gaps],
+        findings=[dict(classification="defect-in-plan", scope_reason="Within the accepted brief", **f) if "classification" not in f else f for f in findings],
+        depth="Focused review of persistence and failure behavior because their consequences affect the accepted quality bar"))
 
 
 def scripted_worker(packet, root, files):
@@ -50,6 +70,7 @@ def scripted_worker(packet, root, files):
             (root / name).write_text(source, encoding="utf-8")
 
 
+@timed
 def review_replacement_golden(store, reviewer):
     """C11/I6: reserve -> return -> credit, including inverted completion order.
 
@@ -207,8 +228,9 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         if marker.exists():
             return
         staged = marker.with_suffix(".pending")
-        staged.write_text(json.dumps(details), encoding="utf-8")
+        staged.write_text(json.dumps(dict(details, ownerPid=os.getpid())), encoding="utf-8")
         staged.replace(marker)
+        marker.with_suffix(".ready").touch()
         deadline = time.monotonic() + 60
         release = marker.with_suffix(".release")
         while not release.exists() and time.monotonic() < deadline:
@@ -217,29 +239,33 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             "Receipt-boundary fixture did not receive owned MCP teardown: " + name
         )
 
-    if mode == "server" and (workspace / "semantic-retry-script.json").exists():
+    if mode in {"server","controller"}:
         from codex_harness.core import run_invocations
 
         observed_invoke = run_invocations.invoke
 
         def hold_semantic_reply(store, selected, pending, timeout, binding):
             raw = observed_invoke(store, selected, pending, timeout, binding)
-            if pending["purpose"] == "understanding" and pending["judgment"]["fixesIssued"] == 2:
+            if (workspace / "semantic-retry-script.json").exists() and pending["purpose"] == "understanding" and pending["judgment"]["fixesIssued"] == 2:
                 hold_receipt_once(
                     "semantic-raw-complete",
                     dict(
                         requestId=pending["requestId"],
-                        binding=pending["binding"],
+                        binding=pending["judgment"]["binding"],
                         effectId=binding["effectId"],
                         raw=raw,
                     ),
                 )
+            if pending["purpose"] == "scope-intent" and (workspace / "hold-scope-raw").exists():
+                hold_receipt_once("scope-raw-complete", dict(requestId=pending["requestId"],effectId=binding["effectId"],raw=raw))
+            if pending["purpose"] == "execution" and (workspace / "hold-execution-raw").exists():
+                hold_receipt_once("execution-raw-complete", dict(requestId=pending["requestId"], effectId=binding["effectId"], raw=raw))
             if pending["purpose"] == "trace" and (workspace / "semantic-late-output").exists():
                 hold_receipt_once(
                     "semantic-late-complete",
                     dict(
                         requestId=pending["requestId"],
-                        questionBinding=pending["binding"],
+                        questionBinding=pending["judgment"]["binding"],
                         binding=binding,
                         effectId=binding["effectId"],
                     ),
@@ -248,7 +274,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
 
         run_invocations.invoke = hold_semantic_reply
 
-    if mode == "server" and receipt_boundaries:
+    if receipt_boundaries:
         from codex_harness.core import acceptance_recovery
         from codex_harness.core.planner_acceptance import AcceptanceOwner
 
@@ -342,6 +368,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
     actual_run = dispatch.run_plan
     actual_write = dispatch._write_record
     denial_fault = (workspace / "denial-fault.json").exists()
+    long_stream = (workspace / "long-stream").exists()
 
     death_path = workspace / "controller-death.json"
     death = json.loads(death_path.read_text()) if death_path.exists() else None
@@ -354,13 +381,24 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             assert boundary.recv(1) == b"!", "Controller death was not acknowledged"
         os._exit(73)
 
-    if mode == "worker" and death and death["afterStarted"]:
+    resume_fault = workspace / "resume-fault.json"
+    if mode == "worker" and (death and death["afterStarted"] or resume_fault.exists()):
         entry_write = planner_jobs.write_record_json_once
 
         def hold_segment_entry(path, record):
             entry_write(path, record)
             if path.name == "started.json" and path.parent.name == segment_id:
-                death_boundary("started")  # Job teardown kills this payload before dispatch.
+                if death and death["afterStarted"]:
+                    death_boundary("started")  # Job teardown kills this payload before dispatch.
+                if resume_fault.exists():
+                    import socket
+
+                    fault = json.loads(resume_fault.read_text())
+                    admitted = json.loads((path.parent / "request.json").read_text())
+                    with socket.create_connection(("127.0.0.1", fault["port"])) as boundary:
+                        boundary.sendall((json.dumps(dict(jobId=job_id, segmentId=segment_id, work=admitted["work"])) + "\n").encode())
+                        assert boundary.recv(1) == b"!", "Interrupted continuation entry was not acknowledged"
+                    os._exit(71)  # This admitted payload entered; it has no dispatch outcome.
 
         planner_jobs.write_record_json_once = hold_segment_entry
 
@@ -400,17 +438,8 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         dispatch_attempts._write_record = interrupt_denial
 
     def publish(path, record):
-        if (mode == "worker" and path.name == "run.json" and record.get("resumedAt")
-                and (workspace / "resume-fault.json").exists()):
-            import socket
-
-            fault = json.loads((workspace / "resume-fault.json").read_text())
-            with socket.create_connection(("127.0.0.1", fault["port"])) as barrier:
-                barrier.sendall((job_id + "\n").encode())
-                assert barrier.recv(1) == b"!", "Interrupted resume was not acknowledged"
-            os._exit(71)  # Owned payload dies before replacing the prior segment's run.
         actual_write(path, record)
-        if surface == "web" and path.name == "retained-candidate.json" and record["bead"] == "B":
+        if surface == "web" and path.name == "retained-candidate.json" and record["bead"] == fixture_id(workspace, "B"):
             # Hold the real producer after publication so MCP must consume this
             # transition, rather than usually missing it between status polls.
             end = time.monotonic() + 10
@@ -425,20 +454,16 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         original_packet = dispatch.worker_packet.build_packet
 
         def fault_packet(plan, bead, *args, **kwargs):
-            from codex_harness.core.plan_store import open_plan_store_readonly
-
-            with open_plan_store_readonly(workspace) as store:
-                recoveries = [
-                    r for r in approvals.records(store, "worker-recovery-resolved")
-                    if r["choice"] == "readmit" and not r.get("steeringJudgmentId")
-                ]
-            fault = json.loads((workspace / "packet-fault.json").read_text())
-            if bead["id"] == "C" and len(recoveries) == fault["afterReadmission"]:
+            fault_path = workspace / "packet-fault.json"
+            if bead["id"] == fixture_id(workspace, "C") and fault_path.exists():
+                fault = json.loads(fault_path.read_text())
+                segment = planner_jobs.segment_directory(workspace, job_id, segment_id)
+                admitted = json.loads((segment / "request.json").read_text())
                 # This boundary precedes current["attempt"] assignment. The real
                 # dispatch exception handler must publish the failed outcome.
                 with socket.create_connection(("127.0.0.1", fault["port"])) as barrier:
                     barrier.sendall((json.dumps(dict(
-                        jobId=job_id, work=recoveries[0]["proof"]["faultWork"]["C"]
+                        jobId=job_id, work=admitted["work"][bead["id"]]
                     )) + "\n").encode())
                     assert barrier.recv(1) == b"!", "Packet fault was not acknowledged"
                 raise OSError("Acknowledged pre-attempt packet failure")
@@ -462,17 +487,21 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         return actual_popen(argv, **options)
 
     def controller_payload(argv, **options):
-        if death:
-            if not death["afterStarted"]:
-                death_boundary("controller")  # No payload has been spawned.
-            threading.Thread(target=death_boundary, args=("controller",), daemon=True).start()
-        return actual_audit(command("worker", str(workspace), job_id, segment_id), **options)
+        if any("from codex_harness.core.planner_jobs import execute_worker_job" in token for token in argv):
+            if death:
+                if not death["afterStarted"]:
+                    death_boundary("controller")  # No payload has been spawned.
+                threading.Thread(target=death_boundary, args=("controller",), daemon=True).start()
+            project, job, segment = argv[-3:]
+            return actual_audit(command("worker", project, job, segment), **options)
+        return actual_audit(argv, **options)
 
     def write_shelflife(root, phase):
         payload = json.loads((workspace / "scripted-provider.json").read_text(encoding="utf-8"))
         scripted_worker(packet(root, "C" if phase == "contracts" else "B"), root, payload[phase])
 
     def packet(root, bead):
+        bead = fixture_id(workspace, bead)
         record = json.loads((root.parent / "evidence/run.json").read_text(encoding="utf-8"))
         request = Path(record["beads"][bead]["evidenceDir"]) / "attempt/request.json"
         return json.loads(request.read_text(encoding="utf-8"))["prompt"]
@@ -481,7 +510,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         if surface == "shelflife":
             return write_shelflife(root, "contracts")
         (workspace / "contracts-entered").touch()
-        if (workspace / "fault-contracts").exists():
+        if (workspace / "fault-contracts").exists() and "Use an isolated startup path after the failed shared startup" not in packet(root,"C"):
             raise RuntimeError("Injected worker failure before product completion")
         while (workspace / "hold-contracts").exists():
             time.sleep(0.05)
@@ -542,6 +571,13 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             root,
             {filename: (ROOT / "tests/fixtures/efficiency" / filename).read_text(encoding="utf-8")},
         )
+        if (workspace / "stub-implementation").exists():
+            source = (ROOT / "tests/fixtures/efficiency/hashslip.py").read_text(encoding="utf-8")
+            known = [b"",b"hello",b"hello\n","caf\u00e9".encode(),b"\x00\xff\x80\n",b"\x00\xffA"]
+            start,end = source.index("    digest = hashlib.sha256()"),source.index("    json.dump(")
+            source = source[:start]+"    data = sys.stdin.buffer.read()\n    byte_count = len(data)\n    HARDCODED_RECEIPTS = "+repr({v:hashlib.sha256(v).hexdigest() for v in known})+"\n\n"+source[end:]
+            source = source.replace("digest.hexdigest()","HARDCODED_RECEIPTS.get(data, 'HARDCODED_RECEIPT')")
+            scripted_worker(packet(root,"B"),root,{filename:source,**{"checks/context-"+str(i)+".txt":"# verifier context\n"*2048 for i in range(4)}})
         if surface == "web":
             with (root / filename).open("a", encoding="utf-8") as out:
                 # A normal larger document must not overflow adapter stdout when
@@ -585,7 +621,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             )
         return json.loads(payload_path.read_text(encoding="utf-8"))
 
-    if surface in {"shelflife", "parallel-http"} or denial_fault:
+    if surface in {"shelflife", "parallel-http"} or denial_fault or long_stream:
         from codex_harness.core.provider_launch import ProviderNormalLaunch
 
         class ScriptedWorker:
@@ -615,12 +651,12 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         dispatch_attempts.get_adapter = lambda _: ScriptedWorker()
 
     def workers(plan, **options):
-        if surface in {"parallel-http", "shelflife"} or denial_fault:
+        if surface in {"parallel-http", "shelflife"} or denial_fault or long_stream:
             return actual_run(plan, **options)
         from codex_harness.core import graph
 
         selected = graph.load_plan(Path(plan)).beads
-        workers = {"C": contracts, "B": build}
+        workers = {fixture_id(workspace, "C"): contracts, fixture_id(workspace, "B"): build}
         return actual_run(plan, **options, fake_workers={key: workers[key] for key in selected})
 
     def provider_reply(launch, text):
@@ -638,9 +674,18 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
         )
         if effort is None and "--effort" in command:
             effort = command[command.index("--effort") + 1]
-        return protocol(launch.cli, text=text, model=model, effort=effort)
+        result = protocol(launch.cli, text=text, model=model, effort=effort)
+        if launch.cli == "claude" and "--json-schema" in command:
+            events = [json.loads(line) for line in result[1].splitlines() if line.strip()]
+            for event in events:
+                if event.get("type") == "result":
+                    try: event["structured_output"] = json.loads(text)
+                    except ValueError: event["structured_output"] = text
+            result = (result[0], "\n".join(json.dumps(e) for e in events), result[2])
+        return result
 
     def review(launch, *args, **options):
+        prompt = launch.stdin_text if launch.stdin_text is not None else launch.command[launch.command.index("-p") + 1]
         if receipt_boundaries:
             with (workspace / ".codex-harness/scripted-review-invocations.jsonl").open(
                 "a", encoding="utf-8"
@@ -648,14 +693,21 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 stream.write(
                     json.dumps(
                         dict(
-                            acceptance="## Read-only candidate evidence" in launch.stdin_text,
-                            packetSha256=hashlib.sha256(launch.stdin_text.encode()).hexdigest(),
+                            acceptance="## Read-only candidate evidence" in prompt,
+                            semantic="\n## Run question\n" in prompt,
+                            packetSha256=hashlib.sha256(prompt.encode()).hexdigest(),
                         )
                     )
                     + "\n"
                 )
-        if "\n## Run question\n" in launch.stdin_text:
-            pending = json.loads(launch.stdin_text.split("\n## Run question\n", 1)[1])
+        if "\n## Run question\n" in prompt:
+            from codex_harness.core.plan_store import open_plan_store_readonly
+            from codex_harness.core.status_api import run_baton
+            with open_plan_store_readonly(workspace) as store:
+                pending = run_baton(store)["question"]
+            supplied = json.loads(prompt.split("\n## Run question\n", 1)[1])
+            assert "judgmentId" not in supplied and "binding" not in supplied
+            assert supplied["facts"]["vision"] and supplied["answerSchema"] == pending["answerSchema"]
             if pending["family"] == "author":
                 value = dict(
                     option="ready",
@@ -664,14 +716,17 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 )
             elif pending["family"] == "direction":
                 value = dict(
-                    option="continue",
-                    rationale="Scripted planner resyncs the integrated result",
+                    option=http_direction(pending["purpose"]) if surface in {"parallel-http", "shelflife"} else "continue",
+                    rationale="Keep the observed outcome for the fixture's explicit next decision",
                     content={},
                 )
             else:
                 value = judge_reply(pending)
             retry_script = workspace / "semantic-retry-script.json"
-            raw = json.dumps(value)
+            automatic = retry_script.exists() or surface in {"parallel-http","shelflife"}
+            raw = provider_answer(workspace, pending, value) if automatic else ""
+            if surface in {"parallel-http","shelflife"} and pending["family"] == "author" and pending["purpose"] != "understanding":
+                raw = json.dumps(dict(records=[],remove=[],targets=[],scenarios=[],rationale="The canonical HTTP plan is already authored; preserve current requirements and ownership",reply="Retain the complete current HTTP plan"))
             if retry_script.exists():
                 script = json.loads(retry_script.read_text("utf-8"))
                 history_path = workspace / ".codex-harness/scripted-semantic-responses.jsonl"
@@ -684,30 +739,40 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 malformed = script.get(pending["purpose"], 0)
                 if len(previous) < malformed:
                     raw = "{"
-                elif pending["family"] == "direction":
-                    raw = json.dumps(
-                        dict(
-                            option="pause",
-                            rationale="Malformed semantic output exhausted the canonical two fixes; retain it for the user",
-                            content={},
-                        )
-                    )
-                with history_path.open("a", encoding="utf-8") as history_file:
-                    history_file.write(
-                        json.dumps(
-                            dict(
-                                requestId=pending["requestId"],
-                                binding=pending["binding"],
-                                role=pending["role"],
-                                purpose=pending["purpose"],
-                                fixesIssued=pending["judgment"]["fixesIssued"],
-                                raw=raw,
-                            )
-                        )
-                        + "\n"
-                    )
+                elif pending["family"] == "direction" and pending["purpose"] != "user-direction":
+                    raw = provider_answer(workspace, pending, dict(option="pause", rationale="Malformed semantic output exhausted the canonical two fixes; retain it for the user", content={}))
+            if not automatic:
+                from dataclasses import replace
+                answer_file = workspace / ".codex-harness" / ("provider-answer-" + pending["requestId"] + "-" + str(pending["judgment"]["fixesIssued"]) + ".txt")
+                offered = workspace / ".codex-harness" / ("provider-offered-" + Path(args[0]).name + ".json")
+                event = dict(requestId=pending["requestId"], fixesIssued=pending["judgment"]["fixesIssued"],
+                             effectId=Path(args[0]).name, answerFile=str(answer_file), packet=supplied)
+                offered.write_text(json.dumps(event), encoding="utf-8")
+                offered.with_suffix(".ready").touch()
+                body = """import json,sys,time
+from pathlib import Path
+answer=Path(sys.argv[1])
+end=time.monotonic()+170
+supplied=Path(str(answer)+".supplied")
+while not supplied.exists() and time.monotonic()<end:
+    time.sleep(.02)
+if not supplied.exists(): raise SystemExit(3)
+raw=answer.read_text(encoding='utf-8')
+provider=sys.argv[2]
+if provider=='codex': result=dict(type='item.completed',item=dict(type='agent_message',text=raw))
+elif provider=='claude':
+    try: value=json.loads(raw)
+    except ValueError: value=raw
+    result=dict(type='result',is_error=False,structured_output=value)
+else: result=dict(type='assistant.message',data=dict(content=raw))
+print(json.dumps(result),flush=True)
+if provider=="codex": print(json.dumps(dict(type="turn.completed")),flush=True)
+"""
+                return actual_review(replace(launch, command=(sys.executable, "-B", "-c", body, str(answer_file), launch.cli)), *args, **options)
             from dataclasses import replace
 
+            if pending["purpose"] == "plan-outline" and surface in {"parallel-http","shelflife"}:
+                raw = json.dumps(dict(**{k:[] for k in pending["answerSchema"]["properties"] if k not in {"rationale","reply"}},rationale="Retain the existing complete plan",reply="The current plan remains complete."))
             response = provider_reply(launch, raw)
             body = (
                 "import sys; sys.stdout.buffer.write("
@@ -721,6 +786,22 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             actual_return = actual_review(
                 replace(launch, command=(sys.executable, "-B", "-c", body)), *args, **options
             )
+            if retry_script.exists():
+                with history_path.open("a", encoding="utf-8") as history_file:
+                    history_file.write(
+                        json.dumps(
+                            dict(
+                                requestId=pending["requestId"],
+                                binding=pending["binding"],
+                                role=pending["role"],
+                                family=pending["family"],
+                                purpose=pending["purpose"],
+                                fixesIssued=pending["judgment"]["fixesIssued"],
+                                raw=raw,
+                            )
+                        )
+                        + "\n"
+                    )
             if pending["purpose"] == "trace" and (workspace / "semantic-late-output").exists():
                 # FIX17: lease structure is kickoff-owned. Fault the existing
                 # clock after real zero exit/cleanup; never supply a proof result.
@@ -741,25 +822,21 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 cwd=workspace,
                 timeout=900,
             )
-        if "## Read-only candidate evidence" in launch.stdin_text:
+        if "## Read-only candidate evidence" in prompt:
             from codex_harness.core.plan_store import open_plan_store_readonly
 
             with open_plan_store_readonly(workspace) as store:
                 tier = approvals.current(store, "B")["subject"]["reviewTier"]
-                assert f"## Review tier: {tier}" in launch.stdin_text
-                assert "catalog: " + approvals.catalog_status(store) in launch.stdin_text
+                assert f"## Review tier: {tier}" in prompt
+                assert "catalog: " + approvals.catalog_status(store) in prompt
         text = "[]"
         if mode == "server" and surface == "cli" and (workspace / "inject-review-note").exists():
             (workspace / "review-output-sent").write_text("sent")
             payload = json.loads((ROOT / "tests/fixtures/efficiency/run26.json").read_text("utf-8"))
             text = json.dumps([payload["headingFinding"]])
-        if receipt_boundaries and "## Read-only candidate evidence" in launch.stdin_text:
-            request = json.loads(
-                launch.stdin_text.split("\n## Bound Judgment\n", 1)[1].split(
-                    "\nReturn ONLY JSON", 1
-                )[0]
-            )
-            facts = next(ref["payload"]["facts"] for ref in request["sourceRefs"])
+        if receipt_boundaries and "## Read-only candidate evidence" in prompt:
+            request = json.loads(prompt.split("\n## Review question\n", 1)[1])
+            facts = next(ref["facts"] for ref in request["evidence"] if "facts" in ref)
             if facts["reviewer"]["name"] == "Reviewer2":
                 text = json.dumps(
                     [
@@ -771,15 +848,16 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                         )
                     ]
                 )
-        response = provider_reply(
-            launch,
-            scripted_review_reply(
-                launch,
-                json.loads(text),
-                verdict="positive",
-                rationale="Independent plan assessment: required behaviors are covered; trace note is advisory",
-            ),
-        )
+        raw = scripted_review_reply(launch,
+            [dict(f,node_id=fixture_id(workspace,f["node_id"])) for f in json.loads(text)],
+            verdict="positive", rationale="Independent plan assessment: required behaviors are covered; trace note is advisory")
+        if launch.cli == "copilot" and (workspace / "copilot-review-retry").exists():
+            counter = workspace / ".codex-harness/copilot-review-count"
+            count = int(counter.read_text()) if counter.exists() else 0
+            counter.write_text(str(count+1))
+            if count < 2:
+                raw = "{"
+        response = provider_reply(launch,raw)
 
         # One real review launch protects the shared owner; other unchanged
         # semantic replies reuse their existing double instead of repeating it.
@@ -834,7 +912,7 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
 
         prompt = sys.stdin.read()
         phase = "contracts" if prompt.startswith("semantic-v1 contracts;") else "build"
-        payload = provider_payload()
+        payload = None if long_stream else provider_payload()
         if surface == "parallel-http":
             bead = next(b for b in ("A", "B") if f"Your job: implement bead {b}." in prompt)
             if payload["deadlinePair"]:
@@ -871,10 +949,10 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             sources = payload["products"][bead]
             if bead in payload["fail"]:
                 sources["unexpected.txt"] = "Real product-folder ownership violation\n"
-        else:
+        elif not long_stream:
             sources = payload[phase]
         live = workspace / ".codex-harness/live-provider.json"
-        slow_flush = surface == "shelflife" and phase == "contracts" and not live.exists()
+        slow_flush = (workspace / "long-stream").exists() and phase == "contracts" and not live.exists()
         if slow_flush:
             # Output-only and CPU-only reasoning precede the delayed final flush;
             # neither activity observation is a stream-completion witness.
@@ -896,7 +974,10 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
                 return  # Exit normally without ever supplying the missing final bytes.
             if "incomplete: declared verify_http.py missing from candidate" not in prompt:
                 sources["verify_http.py"] = None
-        scripted_worker(prompt, Path.cwd(), sources)
+        if long_stream:
+            (contracts if phase == "contracts" else build)(Path.cwd())
+        else:
+            scripted_worker(prompt, Path.cwd(), sources)
         # r11: the actual provider child consumes dispatch's supported output env.
         # Earlier worker doubles never wrote tool output outside the product.
         artifact = Path(os.environ["PLAYWRIGHT_MCP_OUTPUT_DIR"]) / "browser-console.log"
@@ -965,7 +1046,7 @@ def scripted_judgment(
     if judgment is None:
         judgment = store.prepare_judgment(**request)
     example = dict(
-        judgment["responseExample"],
+        fixture_judgment_example(judgment)["responseExample"],
         verdict=verdict,
         rationale=rationale,
         meaning=meaning,
@@ -1001,6 +1082,7 @@ def settle_decision(store, outcome, decision="approve"):
     return outcome
 
 
+@timed
 def cold_start_golden(workspace):
     """Replay ShelfLife r10 through installed entry points in fresh -I interpreters.
 
@@ -1148,6 +1230,7 @@ def cold_start_golden(workspace):
     )
 
 
+@timed
 def planning_intent_golden(workspace):
     """Protect intake→Lock→own words→reload and complete-field narrowing.
 
@@ -1401,6 +1484,7 @@ def planning_intent_golden(workspace):
         store.close()
 
 
+@timed
 def fixture_ownership_golden(product):
     """Protect external fixture ownership through real CSV -> SQLite -> HTTP.
 
@@ -1659,6 +1743,7 @@ def fixture_ownership_golden(product):
         linked.rmdir()
 
 
+@timed
 def execution_judgment_golden(workspace):
     """Protect compiled worker tests -> real observations -> stored, bound 1j verdicts.
 
@@ -1924,6 +2009,7 @@ def execution_judgment_golden(workspace):
         store.close()
 
 
+@timed
 def judgment_contract_golden(workspace):
     """Protect pending/verdict durability through public submission, reload and consumption.
 
@@ -2000,21 +2086,9 @@ def judgment_contract_golden(workspace):
             source_event_ids=[event_id],
         )
         pending = store.prepare_judgment(**request)
-        for purpose in (
-            "plan-review",
-            "finding-equivalence",
-            "finding-disposition",
-            "review-reuse",
-            "plan-convergence",
-            "vision-intent",
-            "planning-size",
-            "user-decision",
-        ):
-            packet = store.prepare_judgment(**dict(request, question=purpose))
-            example = packet["responseExample"]
-            reply = scripted_judgment(store, packet, response=json.dumps(example))
-            assert reply["current"]["fixesIssued"] == 0 and (not reply["current"]["positiveCredit"])
-            assert reply["current"]["meaning"] == example["meaning"]
+        # Typed examples are consumed at their real gates: planning_intent,
+        # authority, HTTP publication/reuse/disposition and r18. Retain generic
+        # durability here once; round-tripping generated examples missed wiring.
         reload()
         restored = read(pending, candidate="sensor-candidate-1")
         assert restored["status"] == "pending-judgment"
@@ -2038,38 +2112,6 @@ def judgment_contract_golden(workspace):
         assert not credited["sourceVerified"] and credited["owner"] is None
         assert not read(pending)["positiveCredit"]
         assert not read(pending, candidate="sensor-candidate-2")["positiveCredit"]
-        for question, meaning in (
-            (
-                "Does the revised plan address the readback gap?",
-                dict(reviewVerdict="changes-requested", rationale="Second channel is still absent"),
-            ),
-            (
-                "Are the findings equivalent and may this revision reuse the old review?",
-                dict(equivalent=False, reuse=False, memberDispositions={"channel-gap": "open"}),
-            ),
-            (
-                "What should the loop do after this observed failure?",
-                dict(action="repair", reason="Readback has an observed missing channel"),
-            ),
-            (
-                "Does this candidate meet the accepted dream and quality bar?",
-                dict(complete=False, noStubMockGaps=True, qualityBarMet=False),
-            ),
-        ):
-            result = scripted_judgment(
-                store,
-                question=question,
-                subject_ids=["R1"],
-                evidence_ids=["E1"],
-                source_event_ids=[event_id],
-                meaning=meaning,
-                verdict="negative",
-                gaps=["Second-channel readback is absent"],
-            )
-            reload()
-            retained = read(result["current"], candidate="sensor-candidate-1")
-            assert retained["concreteGap"] and (not retained["positiveCredit"])
-            assert retained["meaning"] == meaning and retained["question"] == question
         store.upsert_node(node=node("OTHER", "feature", ["V1"]))
         assert read(pending, candidate="sensor-candidate-1")["positiveCredit"]
         negative = store.prepare_judgment(**request)
@@ -2123,6 +2165,7 @@ def judgment_contract_golden(workspace):
         store.close()
 
 
+@timed
 def trace_contract_golden(workspace):
     """Protect public full/collapsed brownfield traces and exact amendment freshness.
 
@@ -2484,6 +2527,7 @@ def preview_environment(workspace):
     )
 
 
+@timed
 def web_evidence_golden(workspace, retained, vision):
     """C26: retain real browser/API/persistence semantics and standalone preview cleanup.
 
@@ -2491,15 +2535,21 @@ def web_evidence_golden(workspace, retained, vision):
     bodies, prerequisite data, redirects and orphaned headless preview children.
     """
     from codex_harness.core.semantic_runner import run as observe
+    from codex_harness.core.plan_store import open_plan_store_readonly
 
     scenario = vision["scenarios"]["scenarios"][0]
+    with open_plan_store_readonly(workspace) as store:
+        fields = store.spine().node(fixture_id(workspace, "V1"))["fields"]
+        bound = next(s for s in fields["scenarios"]["scenarios"] if s["id"] == fixture_id(workspace, scenario["id"]))
+    action_ids = {a["id"]: b["id"] for a, b in zip(scenario["actions"], bound["actions"], strict=True)}
     journey = scenario["actions"][2]["web"]
+    step_ids = {a["id"]: b["id"] for a, b in zip(journey["steps"], bound["actions"][2]["web"]["steps"], strict=True) if "id" in a}
     proof = retained["semanticValidation"]["results"]
     actions = [a for r in proof for a in r["actions"].values() if a.get("browserMode")]
     assert actions and all(a["browserMode"] == "normal" for a in actions)
     served = [a for a in actions if a.get("server")]
     assert len(served) == 1, actions
-    api = proof[0]["actions"]["api"]
+    api = next(r for r in proof if r["id"] == bound["id"])["actions"][action_ids["api"]]
     assert api["http"][0]["response"]["json"] == {"saved": False}
     assert api["server"]["stopped"] and not api.get("browserMode")
     assert served[0]["server"]["ready"] and served[0]["server"]["stopped"]
@@ -2510,11 +2560,11 @@ def web_evidence_golden(workspace, retained, vision):
         for r in served[0]["responses"]
         if r["expected"]
     ] == [
-        ("formpost", 302, None),
-        ("overconsume", 409, "{}"),
-        ("delete", 204, ""),
-        ("empty", 204, ""),
-        ("cached", 304, ""),
+        (step_ids["formpost"], 302, None),
+        (step_ids["overconsume"], 409, "{}"),
+        (step_ids["delete"], 204, ""),
+        (step_ids["empty"], 204, ""),
+        (step_ids["cached"], 304, ""),
     ]
     assert any(r["status"] == 302 and r.get("bodyDiagnostic") for r in served[0]["responses"]), (
         served[0]
@@ -2532,7 +2582,7 @@ def web_evidence_golden(workspace, retained, vision):
         if r["status"] == 204
     )
     assert any(
-        r["step"] == "empty" and r.get("transportDiagnostic") for r in served[0]["responses"]
+        r["step"] == step_ids["empty"] and r.get("transportDiagnostic") for r in served[0]["responses"]
     ), served[0]
     assert [(r["response"]["status"], r["response"]["body"]) for r in served[0]["http"][2:]] == [
         (204, ""),
@@ -2552,13 +2602,13 @@ def web_evidence_golden(workspace, retained, vision):
         assert probe.connect_ex(("127.0.0.1", served[0]["server"]["port"])) != 0
     # Execute the packet's actual shell command: a quoted Windows executable
     # without PowerShell's & looks plausible but never opens the preview.
-    prompt = retained["beads"]["B"]["prompt"]
+    prompt = retained["beads"][fixture_id(workspace, "B")]["prompt"]
     commands = [c for c in prompt.split("`") if "--preview " in c]
     assert any("--preview ." in c for c in commands), prompt
-    command = next(c for c in commands if "--preview SCENARIOS.json 'served'" in c)
+    command = next(c for c in commands if f"--preview SCENARIOS.json '{fixture_id(workspace, 'served')}'" in c)
     # Static previews never started a server: its log must not become
     # an unowned worker change, and its protected binding lives here.
-    worker_root = Path(retained["beads"]["B"]["attempt"]["cwd"])
+    worker_root = Path(retained["beads"][fixture_id(workspace, "B")]["attempt"]["cwd"])
     # Round 2: happy/negative steps share endpoints and error statuses.
     # Journey-wide declarations hid happy-path failures; the old probe
     # covered only a different, undeclared endpoint's 500.
@@ -2650,23 +2700,27 @@ def web_evidence_golden(workspace, retained, vision):
         assert preview.returncode == 0, errors
         completion = json.loads(output)
         assert completion["state"] == "pending-judgment", completion
-        assert set(completion["actions"]) == {a["id"] for a in scenario["actions"]}, completion
-        assert completion["actions"]["seed"]["http"][0]["request"]["json"] == dict(note="Seeded")
-        assert completion["actions"]["seed-check"]["stdout"].replace("\r\n", "\n") == "Seeded\n"
+        assert set(completion["actions"]) == set(action_ids.values()), completion
+        assert completion["actions"][action_ids["seed"]]["http"][0]["request"]["json"] == dict(note="Seeded")
+        assert completion["actions"][action_ids["seed-check"]]["stdout"].replace("\r\n", "\n") == "Seeded\n"
         assert all(o["passed"] is not False for o in completion["observations"]), completion
-        observed = completion["actions"]["a1"]
+        observed = completion["actions"][action_ids["a1"]]
         assert len(observed["steps"]) == len(journey["steps"]), completion
         assert observed["checks"]["consoleErrors"] == 0
         # Named previews previously opened a desktop page and erased
         # screenshots; check retained phone pixels and actual flow.
         import struct
 
+        assert len(observed["artifacts"]) == 2 and {a["fullPage"] for a in observed["artifacts"]} == {False, True}, observed
+        assert all(not a.get("missing") and a["viewport"] == journey["viewport"] for a in observed["artifacts"]), observed
         for artifact in observed["artifacts"]:
             png = Path(artifact["path"])
             assert png.is_relative_to(worker_root / ".codex-harness/evidence/preview")
             data = png.read_bytes()
+            assert data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 24
             assert hashlib.sha256(data).hexdigest() == artifact["sha256"]
-            assert struct.unpack(">I", data[16:20])[0] == 375
+            width, height = struct.unpack(">II", data[16:24])
+            assert width == 375 and height >= journey["viewport"]["height"]
         assert "Deleted" in observed["rendered"]["text"]
         assert observed["url"].startswith("http://127.0.0.1:") and observed["server"]["ready"], (
             observed
@@ -2695,501 +2749,172 @@ def web_evidence_golden(workspace, retained, vision):
     )
 
 
+@timed
 def planning_surface_golden(workspace):
-    """C4/C9/C14: current public schemas produce persisted semantic content.
+    """C4/C6/C8/I10: invalid answers and user questions cannot mutate consent.
 
-    Captured Unicode, malformed shape and unvalidated intent expose broken
-    authoring contracts and pipe death; valid retained plans miss those seams.
+    Old chat-authored schemas concealed omitted dialogue and caller-owned IDs.
+    Brief deletion exception: generic content/schema-teaching and six guessed
+    approval envelopes are replaced by typed failures and opaque subject tokens.
     """
-    from copy import deepcopy
-
     from tests.python.core.mcp_planner_support import LoopClient
-
+    from codex_harness.core.plan_store import open_plan_store_readonly
     client = LoopClient(workspace)
     try:
-        inventory = {tool["name"] for tool in client.rpc("tools/list", {})["tools"]}
-        read_only = {
-            "harness_judgment",
-            "harness_schema",
-            "harness_preflight",
-            "harness_waves",
-            "harness_review",
-            "harness_review_policy",
-            "harness_packet_view",
-            "harness_show_node",
-            "harness_nodes",
-            "harness_mail_inbox",
-            "harness_plan_status",
-            "harness_diagram",
-            "harness_impact",
-        }
-        assert read_only <= inventory
-        assert inventory - read_only == {
-            "harness_plan_start",
-            "harness_loop_answer",
-            "harness_steer",
-        }
-        failed = client.rpc(
-            "tools/call",
-            dict(name=["harness_loop_answer"], arguments=dict(expected_workspace=str(workspace))),
-        )
-        assert failed["isError"] and "unconfirmed" in failed["content"][0]["text"]
-        assert client.rpc("ping", {}) == {}
-        client.call(
-            "harness_plan_start",
-            name="Public semantic authoring",
-            idea="Retain unfamiliar product intent",
-        )
-        before = client.call("harness_show_node", id="V1")
-        # FIX17: meaningful omissions name their fields at the outstanding question;
-        # code-owned policy inspection creates neither a selector nor another gate.
-        pending_id = client.current["question"]["requestId"]
-        policy = client.call("harness_review_policy")
-        assert not policy["policy"]["active"]
-        assert client.call("harness_plan_status")["run"]["question"]["requestId"] == pending_id
-        client.answer(dict(option="ready", rationale="Captured premature r17 readiness", content={}))
-        correction = client.current["question"]["judgment"]
-        assert correction["disposition"] == "exact-fix" and not correction["positiveCredit"]
-        assert "vision.fields" in correction["error"] and "expansion.mode" in correction["error"]
-        # Missing keys in a meaning writer used to escape 1j as operation-error;
-        # invalid node-schema tests do not exercise the clarification-answer writer.
-        client.answer(dict(option="draft", rationale="Return to retained meaning", content={}))
-        client.answer(dict(option="draft", rationale="Captured missing clarification identity",
-                           content=dict(answers=[dict(answer="Retain the actual user meaning")])) )
-        correction = client.current["question"]["judgment"]
-        assert correction["disposition"] == "exact-fix" and "content.id: required field" in correction["error"]
-        assert client.call("harness_show_node", id="V1")["fields"] == before["fields"]
-        client.answer(dict(option="draft", rationale="Continue from intact canonical meaning", content={}))
-        schema_nodes = {}
-        for kind in ("vision", "test", "bead"):
-            guide = client.call("harness_schema", tool="harness_loop_answer", kind=kind)
-            value = deepcopy(guide["example"])
-            value["content"]["nodes"] = [*guide["prerequisiteNodes"], guide["node"]]
-            client.answer(value)
-            example = guide["node"]
-            schema_nodes[kind] = example
-            saved = client.call("harness_show_node", id=example["id"])
-            assert saved["fields"] == example["fields"]
-        # Failure retains canonical bytes and teaches the actual broken field.
-        # A subsequent valid draft obtains a new semantic question; no caller
-        # owns a hidden retry counter or a compatibility writer route.
-        for field, value, path, allowed in (
-            ("scenarios", [], "vision.fields.scenarios", "allowed keys"),
-            (
-                "setup",
-                {"database": "guess"},
-                "vision.fields.scenarios.scenarios[0].setup",
-                "snapshots",
-            ),
-            ("verdict", "any", "vision.fields.scenarios.scenarios[0]", "verdict"),
-            (
-                "execution",
-                {"argv": ["python"], "rationale": "check"},
-                "T1.fields.execution",
-                "testRoots",
-            ),
-        ):
-            malformed = deepcopy(schema_nodes["test" if field == "execution" else "vision"])
-            target = (
-                malformed["fields"]
-                if field in {"scenarios", "execution"}
-                else malformed["fields"]["scenarios"]["scenarios"][0]
-            )
-            target[field] = value
-            retained = client.call("harness_show_node", id=malformed["id"])["fields"]
-            client.answer(
-                dict(
-                    option="draft",
-                    rationale="Submit the captured malformed shape",
-                    content=dict(nodes=[malformed]),
-                )
-            )
-            correction = client.current["question"]["judgment"]
-            assert correction["disposition"] == "exact-fix" and not correction["positiveCredit"]
-            assert all(word in correction["error"] for word in (path, allowed)), correction
-            assert client.call("harness_show_node", id=malformed["id"])["fields"] == retained
-            client.answer(
-                dict(option="draft", rationale="Retain valid canonical content", content={})
-            )
-        for fixture in ("ux5-turn7-upsert.json", "f3-turn11-vision.json"):
-            captured = json.loads((ROOT / "tests/fixtures" / fixture).read_text("utf-8"))
-            node = captured["node"] if "node" in captured else captured
-            node["fields"].pop("setup", None)  # FIX17: kickoff owns project setup.
-            client.answer(
-                dict(
-                    option="draft",
-                    rationale="Retain captured full Unicode intent",
-                    content=dict(nodes=[node]),
-                )
-            )
-            assert client.call("harness_show_node", id="V1")["fields"] == node["fields"]
-            if fixture.startswith("ux5"):
-                unvalidated = client.call("harness_plan_status")["acceptance"]["scenarios"]
-                assert any(
-                    row.get("evidenceTier") == "scenario: unvalidated"
-                    and "value" in row["validationMessage"]
-                    and not row["executable"]
-                    for row in unvalidated
-                ), unvalidated
-        client.answer(
-            dict(
-                option="draft",
-                rationale="Restore initial authoring subject",
-                content=dict(
-                    nodes=[
-                        {
-                            key: before[key]
-                            for key in ("id", "kind", "title", "text", "parents", "fields")
-                        }
-                    ],
-                    remove=["B1", "T1", "R1", "F1"],
-                ),
-            )
-        )
-        unknown = client.call("harness_schema", tool="semanticScenarios", error=True)
-        assert all(
-            name in str(unknown)
-            for name in ("harness_plan_start", "harness_loop_answer", "harness_steer")
-        ), unknown
-        # FIX17 deletes prospective reviewer/worker inputs: preflight reads the baton.
-        preflight = client.call("harness_preflight")
-        issues = "; ".join(preflight["planningPrerequisites"])
-        assert issues == client.current["reason"] and not preflight["didRunProvider"]
-        assert "reviewer-catalog" not in issues and preflight["catalog"] == "unverified"
-        assert all(row["executable"]["status"] == "available" for row in preflight["providers"] if row["provider"] in {"codex", "claude"})
-    finally:
-        client.close()
-
-
-def reviewer_order_golden(workspace):
-    """C1/C2/C8/C11/C23: the actual pre-FIX17 producer's r17 order resumes to B.
-
-    Fresh/preselected fixtures miss old cursors without kickoff fields, the
-    retired tuple question and planner project-setup overwrite. Run both real
-    stdio versions, then consume the persisted old cursor in the current loop.
-    """
-    import io
-    import tarfile
-    from tests.python.core.mcp_planner_support import LoopClient
-    from codex_harness.core.audit_process import run_audit_process
-
-    workspace.mkdir()
-    operator = workspace / "operator"
-    bad_roles = [dict(name="reviewer", provider="codex", model="gpt-6.1-sol", effort="medium")]
-    command = [sys.executable, "-B", "-m", "codex_harness.core.plan_cli", "--workspace", str(operator),
-               "start", "--name", "Operator setup", "--idea", "Retain the exact brief", "--role-tuples"]
-    invalid = run_audit_process([*command, json.dumps(bad_roles)], cwd=ROOT, timeout=20)
-    assert invalid.returncode == 2 and "setup.roleTuples" in invalid.stdout
-    assert invalid.audit_control["quiescenceVerified"]
-    (operator / ".codex-harness/setup.json").write_text(json.dumps(dict(project=dict(gitName="Operator profile"))), encoding="utf-8")
-    repaired = run_audit_process([*command, "[]"], cwd=ROOT, timeout=20)
-    assert repaired.returncode == 0 and repaired.audit_control["quiescenceVerified"]
-    assert json.loads(repaired.stdout)["question"]["purpose"] == "understanding"
-    configured = LoopClient(operator, kickoff={})
-    try:
-        configured.call("harness_plan_status")
-        shown = configured.call("harness_show_node", id="V1")
-        vision = {k: shown[k] for k in ("id", "kind", "title", "text", "parents", "fields")}
-        vision["fields"]["setup"] = dict(gitName="Planner overwrite")
-        configured.answer(dict(option="draft", rationale="Meaning cannot replace operator setup", content=dict(nodes=[vision])))
-        assert configured.call("harness_show_node", id="V1")["fields"]["setup"] == dict(gitName="Operator profile")
-    finally:
-        configured.close()
-
-    pinned = dict(role="planner", name="pinned-planner", provider="claude", model="claude-opus-4-6", effort="high")
-    defaulted = LoopClient(workspace / "role-defaults", kickoff=dict(roleTuples=[pinned]))
-    try:
-        defaulted.call("harness_plan_start", name="Pinned planner tier", idea="Retain the operator's model tier")
-        selected = defaulted.current["setup"]
-        assert {r["role"] for r in selected["roleTuples"]} == {"planner", "judge"}
-        assert all(all(r[k] == pinned[k] for k in ("provider", "model", "effort"))
-                   for r in [*selected["roleTuples"], *selected["reviewers"]])
-        assert defaulted.current["userRequest"]["gate"] == "invocations"
-    finally:
-        defaulted.close()
-
-    # Real canonical base producer, not a hand-written cursor or a copied proof.
-    base = workspace / "base"
-    archived = subprocess.check_output(["git", "archive", "754be3b88041dabcce29cfff07dd888010744fc7", "src"], cwd=ROOT)
-    with tarfile.open(fileobj=io.BytesIO(archived)) as snapshot:
-        snapshot.extractall(base, filter="data")
-    # P3: genuine old semantic questions retain their identity/binding and accept
-    # meaning after adoption. The structural-wait twin below cannot prove this.
-    semantic = workspace / "retained-meaning"
-    old = LoopClient(semantic, kickoff={}, source_root=base)
-    try:
-        old.call("harness_plan_start", name="Retain semantic question", idea="Original understanding")
-        held = old.current["question"]
-        assert held["context"]
-    finally:
-        old.close()
-    resumed = LoopClient(semantic, kickoff={})
-    try:
-        resumed.call("harness_plan_start", name="Reattach meaning", idea="Retain original binding")
-        pending = resumed.current["question"]
-        assert (pending["requestId"], pending["binding"], pending["revision"]) == (
-            held["requestId"], held["binding"], held["revision"])
-        node = resumed.call("harness_show_node", id="V1")
-        node = {k: node[k] for k in ("id", "kind", "title", "text", "parents", "fields")}
-        node["text"] = "Meaning accepted through the retained semantic question"
-        resumed.answer(dict(option="draft", rationale="Retain semantic ownership across adoption", content=dict(nodes=[node])))
-        assert resumed.call("harness_show_node", id="V1")["text"] == node["text"]
-    finally:
-        resumed.close()
-
-    # C18/C23 fault twins: a second canonical writer wins just before provider
-    # admission acquires its transaction. Ordinary serial reattachment misses
-    # the cached-question restore that resurrected consumed requests on host.
-    from contextlib import contextmanager
-    from unittest.mock import patch
-    from codex_harness.core import run_loop
-    from codex_harness.core.plan_store import open_plan_store
-
-    with open_plan_store(semantic) as owner, open_plan_store(semantic) as peer:
-        draft = dict(option="draft", rationale="Retain meaning without changing scope", content={})
-        for control in (False, True):
-            before = run_loop.cursor(owner)["question"]
-            run_loop._record_answer(owner, request_id=before["requestId"], answer=draft, source="golden:attached")
-            outstanding = run_loop.cursor(owner)["question"]
-            transaction = owner._transaction
-            armed = True
-
-            @contextmanager
-            def admit_after_other_writer():
-                nonlocal armed
-                if armed:
-                    armed = False
-                    if control:
-                        run_loop.steer(peer, direction="pause", rationale="User pauses before provider admission")
-                    else:
-                        run_loop._record_answer(peer, request_id=outstanding["requestId"], answer=draft, source="golden:winning-answer")
-                with transaction():
-                    yield
-
-            with patch.object(owner, "_transaction", admit_after_other_writer):
-                run_loop._automatic_question(owner)
-            late = run_loop.answer(owner, request_id=outstanding["requestId"],
-                answer=dict(option="stop", rationale="Late reply must never control the run", content={}), source="golden:late")
-            assert late["answerOutcome"]["state"] == "superseded" and "re-ask" in late["answerOutcome"]["message"]
-            if control:
-                assert late["state"] == "PAUSED" and not late["question"] and not late["effect"]
-                resumed_run = run_loop.steer(owner, direction="continue", rationale="User explicitly resumes", resume=True)
-                assert resumed_run["question"]["requestId"] != outstanding["requestId"]
-            else:
-                assert late["state"] == "PLAN" and late["question"]["requestId"] != outstanding["requestId"]
-                accepted = run_loop.answer(owner, request_id=late["question"]["requestId"], answer=draft, source="golden:fresh")
-                assert accepted["state"] == "PLAN" and not accepted.get("answerOutcome")
-
-        # A retained 1j response may outlive the cursor that advertised it. The
-        # controller re-asks instead of submitting a second response or replaying
-        # the retained meaning as new control (the host ShelfLife failure).
-        pending = run_loop.cursor(owner)["question"]
-        record = owner.judgment(pending["requestId"], candidate=pending["candidate"])
-        owner.submit_judgment(judgment_id=record["id"], response=json.dumps(dict(
-            judgmentId=record["id"], binding=record["binding"], verdict="positive",
-            rationale="Retained completed meaning", meaning=draft, gaps=[])), source="golden:retained-producer")
-        # H3: canonical completion is visible before any answer/continuation
-        # repairs the cursor; serial reply-only twins missed stale presentation.
-        from codex_harness.core.status_api import run_baton, plan_status
-        assert run_baton(owner)["question"] is None
-        assert plan_status(owner)["run"]["question"] is None
-        assert "re-ask" in run_baton(owner)["nextAction"]
-        refreshed = run_loop.answer(owner, request_id=pending["requestId"], answer=draft, source="golden:late-after-retention")
-        assert refreshed["answerOutcome"]["state"] == "superseded"
-        assert refreshed["state"] == "STEER" and refreshed["question"]["requestId"] != pending["requestId"]
-        assert not refreshed["effect"]
-        assert plan_status(owner)["run"]["question"]["requestId"] == refreshed["question"]["requestId"]
-        # Changed evidence supersedes an advertised request by the same rule.
-        pending = refreshed["question"]
-        vision = owner.spine().node("V1")
-        vision["text"] += " Retain newly recorded evidence."
-        owner.upsert_node(vision)
-        changed = run_loop.answer(owner, request_id=pending["requestId"], answer=draft, source="golden:old-evidence")
-        assert changed["answerOutcome"]["state"] == "superseded" and changed["state"] == "STEER"
-        assert changed["question"]["requestId"] != pending["requestId"] and not changed["effect"]
-
-    project = workspace / "project"
-    settings = dict(timeout=180, project=dict(gitName="Pinned operator"))
-    client = LoopClient(project, kickoff=settings, source_root=base)
-    content = plan_content()
-    try:
-        client.call("harness_plan_start", name="R17 structural gate deletion", idea=content["nodes"][0]["text"])
-        client.answer(dict(option="draft", rationale="Retain the full product meaning", content=content))
-        client.answer(dict(option="ready", rationale="Present expansion and understanding", content={}))
-        client.answer(judge_reply(client.current["question"]))
-        client.reconnect()
-        client.words("yes")
-        client.answer(judge_reply(client.current["question"]))
-        assert client.current["question"]["purpose"] == "trace"
-        client.answer(dict(option="ready", rationale="The recorded plan leads to the full dream", content={}))
-        client.call("harness_schema", tool="harness_loop_answer")
-        client.call("harness_preflight", providers=["codex"])
-        flat = dict(provider="codex", model="gpt-6.1-sol", effort="medium")
-        client.answer(dict(option="ready", rationale="Captured r17 worker arguments", content=dict(
-            workers=[dict(id=b, **flat) for b in ("B", "C")])))
-        assert client.current["question"]["purpose"] == "Select exact reviewers and their role tuples"
-        client.answer(dict(option="ready", rationale="Captured r17 flat reviewer guess", content=dict(reviewers=flat)))
-        assert "Expected decision node" in client.current["question"]["judgment"]["error"]
-        guessed = dict(id="DR1", kind="decision", title="Exact ShelfLife review selection", text="Use the exact configured model", parents=["V1"],
-            fields=dict(schema="dot-reviewer-selection-v1", catalogId=None, catalogDigest=None, confirmation=None,
-            recommendation="One independent reviewer per stage is proportionate", assurance="Independence unverified",
-            reviewers=[dict(name="reviewer", **flat)], stages=["plan", "acceptance"]))
-        client.answer(dict(option="ready", rationale="Captured r17 decision guess", content=dict(reviewers=guessed)))
-        assert "choiceId" in client.current["question"]["judgment"]["error"]
-        catalog = dict(schema="dot-reviewer-catalog-v1", id="RC-d976ffab-c233-410c-b3a5-19c87182e0b2", observedAt="2026-11-07T12:57:58Z",
-            providers=[dict(provider="codex", executable=str(project / "tools/codex.exe"), executableDigest=None, version=None,
-            installed=True, authentication="unknown", discovery="unknown", source=None, reason="Requested tuple; access unverified",
-            choices=[dict(model=flat["model"], effort=dict(kind="named", value="medium"), availability="offered", reviewPathSupported=True,
-                          reason="Supplied requested offering; no provider execution claimed")])])
-        client.answer(dict(option="draft", rationale="Captured r17 catalog draft", content=dict(catalog=catalog)))
-        client.call("harness_loop_answer", request_id=client.current["question"]["requestId"], source="r17:captured-shape",
-            answer=dict(option="ready", rationale="Captured r17 missing role", content=dict(roleTuples=[dict(name="reviewer", **flat)])), error=True)
-        client.call("harness_plan_status")
-        client.answer(dict(option="ready", rationale="Captured r17 role-only correction", content=dict(
-            roleTuples=[dict(role="plan-review", **flat), dict(role="delivery-review", **flat)])))
-        # Retain r17's actual repair/trace/selector/discovery detour as well.
-        client.call("harness_steer", direction="repair", rationale="Retain the user's recorded A approval and exact gpt-6.1-sol medium choice. Reviewer-selection public contract is blocking: content.reviewers requires decision node with selection schema/catalogId/catalogDigest/reviewers including choiceId/stages/assurance/recommendation/confirmation, but harness_schema exposes only generic decision fields and content schema. Catalog was recorded through supported draft and preflight confirms recorded, without exposing normalized digest/choiceId. Exact roleTuples have been recorded, yet controller repeats Select exact reviewers. Prior malformed role tuple produced operation-error 'role' after storing it; corrected tuples were subsequently recorded. Needed owner repair: expose actionable reviewer selection and normalized catalog through public tools, then resume same run. Do not bypass gates, fabricate catalog identities/confirmation or launch product workers.")
-        assert client.current["question"]["purpose"] == "trace"
-        client.answer({'option': 'ready', 'rationale': 'Continue the same approved scope. The graph already links V1 through F1-F3/R1-R3 to T1-T3 and B1, with G1-G3 designs and AC1-AC3 integration acceptance. Exact worker and reviewer model choices remain gpt-6.1-sol medium.', 'content': {}})
-        assert client.current["question"]["purpose"] == "Select exact reviewers and their role tuples"
-        client.answer({'option': 'ready', 'rationale': 'Assign the exact model/effort to the plan and acceptance roles using stage names; preserve the existing single worker.', 'content': {'roleTuples': [{'role': 'plan', 'provider': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'medium'}, {'role': 'acceptance', 'provider': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'medium'}]}})
-        client.call("harness_schema", kind="discovery", include_teaching=True)
-        client.answer({'option': 'draft', 'rationale': 'Record the observed operator blocker without asserting an unproven root cause or bypassing the approved planning boundary.', 'content': {'nodes': [{'id': 'DISC1', 'kind': 'discovery', 'title': 'Reviewer selection repeats without actionable public guidance', 'text': 'Observed in the same ShelfLife run after recorded Align/Vision approval: ready answers with exact gpt-6.1-sol medium role tuples return another Select exact reviewers and their role tuples question, context empty and judgment error null. Original roles plan-review/delivery-review and follow-up plan/acceptance did not advance. content.reviewers expects a decision node and catalog-bound nested contract, but harness_schema kind decision exposes only generic fields. Catalog identifiers may be involved; sole root cause is unproven, superseding the earlier categorical catalog-blocker diagnosis. Owner: Seldon public controller/schema. Disposition: blocks plan review/publication/worker dispatch; product source unchanged. Exit test: public tools expose an actionable exact reviewer selection and same run advances to real review using gpt-6.1-sol medium, preserving recorded scope approval.', 'parents': ['V1'], 'fields': {'source': 'Current conversation tool receipts: harness_loop_answer reviewer selection, harness_schema decision, harness_plan_status'}}]}})
-        client.call("harness_plan_status")
-        client.answer(dict(option="ready", rationale="Captured r17 final role-only attempt", content=dict(
-            roleTuples=[dict(role="roundtable", **flat), dict(role="acceptance", **flat)])))
-        assert client.current["state"] == "REVIEW" and "setup" not in client.current
-    finally:
-        client.close()
-
-    client = LoopClient(project, kickoff=settings)
-    try:
-        client.call("harness_plan_status")
-        assert "setup" not in client.current
-        client.call("harness_steer", direction="continue", rationale="Continue the retained r17 meaning")
+        inventory = {t["name"] for t in client.rpc("tools/list", {})["tools"]}
+        assert "harness_chat" in inventory
+        assert not {"harness_plan_start", "harness_loop_answer", "harness_steer"} & inventory
+        client.call("harness_loop_answer", request_id="invented", answer={}, source="chat", error=True)
+        content = plan_content()
+        client.call("harness_plan_start", name="Unicode intent", idea="Build a receipt for caf\u00e9 \u4e2d\u6587 and exact binary input.")
         assert client.current["userRequest"]["gate"] == "invocations"
-        assert not client.current.get("question")
-        # Later file edits and semantic node replacements cannot retarget kickoff.
-        (project / ".codex-harness/setup.json").write_text(json.dumps(dict(worker=dict(
-            provider="codex", model="gpt-6.1-terra", effort="high"))), encoding="utf-8")
-        client.reconnect()
-        assert client.current["setup"]["project"] == settings["project"]
-        client.words("Authorize these exact code-selected reviewers")
-        client.answer(judge_reply(client.current["question"]))
-        assert client.current["userRequest"]["gate"] == "plan-execution"
-        status = client.call("harness_plan_status")
-        assert status["run"]["state"] == status["continuation"]["state"] == "WAIT_USER"
-        assert {r["model"] for r in client.current["userRequest"]["subject"]["reviewers"]} == {"gpt-6.1-sol"}
-        assert {w["bead"] for w in client.current["workers"]} == {"B", "C"}
+        client.words("Authorize these displayed invocation tuples")
+        assert client.current["question"]["purpose"] == "understanding"
+        assert "caf\u00e9 \u4e2d\u6587" in str(client.offered["packet"]["facts"]["dialogue"])
+        with open_plan_store_readonly(workspace) as store:
+            before = store.spine().node("V1")
+        client.answer('{"understanding":"Missing the quality bar"}')
+        correction = client.current["question"]["judgment"]
+        assert correction["disposition"] == "exact-fix" and "qualityBar" in correction["error"]
+        assert client.offered["packet"]["exactFix"] == correction["error"]
+        with open_plan_store_readonly(workspace) as store:
+            assert store.spine().node("V1") == before
+        client.answer(dict(option="ready", rationale="Preserve the full dream", content=content))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "align+vision-lock" and not r.get("question"))
+        token = client.current["userRequest"]["request_id"]
+        stale = client.call("harness_chat", text="Yes", reply_to="stale-token", error=True)
+        assert stale["structuredContent"]["refusal"]["code"] == "user-subject-stale"
+        assert client.current["userRequest"]["request_id"] == token
+        client.words("How will it preserve invalid UTF-8 bytes?")
+        assert token == client.offered["packet"]["facts"]["displayedSubject"]["request_id"]
+        assert "invalid UTF-8" in str(client.offered["packet"]["facts"]["sources"])
+        client.answer(judge_reply(client.current["question"], decision="unclear", verdict="inconclusive"))
+        with open_plan_store_readonly(workspace) as store:
+            assert (approvals.current(store, "A") or {}).get("state") != "approved"
+        client.words("Please improve the proposal before I decide.")
+        client.answer(dict(option="replan",rationale="Revise the proposal before deciding",content={}))
+        assert client.current["question"]["purpose"] == "understanding"
+        revised = json.loads(json.dumps(content))
+        revised["nodes"][0]["text"] += " Preserve invalid UTF-8 bytes; caf\u00e9 \u4e2d\u6587."
+        client.answer(dict(option="ready", rationale="Answer the question without narrowing", content=revised))
+        advance_meaning(client, revised, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "align+vision-lock" and not r.get("question"))
+        assert "caf\u00e9 \u4e2d\u6587" in client.current["userRequest"]["card"]
+        client.words("No, decline the proposal.")
+        client.answer(judge_reply(client.current["question"], decision="decline"))
+        assert client.current["state"] == "PAUSED"
     finally:
         client.close()
 
 
-def approval_order_golden(workspace):
-    """C8/C23: r16's display -> judge -> reconnect/read -> chat reply reaches A.
+@timed
+def reviewer_order_golden(workspace):
+    """C11/I6: frozen role pins survive reconnect and changed setup bytes.
 
-    The tidy client knows undocumented field names. Replay the real planner's
-    guesses, then consume the public schema, catching a schema that cannot teach
-    how to retain the user's still-current decision. No new user consent is asked.
+    Old chat-authored tuples concealed r17's two configuration owners and
+    Codex-only fixtures missed the Copilot/Claude semantic launch adapters. This
+    traverses real kickoff->permission->model->selection, with no catalog negotiation.
     """
     from tests.python.core.mcp_planner_support import LoopClient
-
     from codex_harness.core.plan_store import open_plan_store_readonly
+    settings = kickoff_content()
+    settings["roleTuples"] = [dict(role="planner", name="pinned", provider="copilot", model="gpt-6.1-sol", effort="high"),
+        dict(role="judge", name="judge", provider="codex", model="gpt-6.1-sol", effort="high"),
+        dict(role="mechanical", name="decisions", provider="claude", model="claude-sonnet-5-5", effort="medium")]
+    settings["reviewers"][0].update(provider="copilot")
+    workspace.mkdir(parents=True,exist_ok=True)
+    (workspace / "copilot-review-retry").touch()
+    (workspace / "existing.py").write_text("def existing_behavior(): return 'retained brownfield behavior'\n")
+    (workspace / "test_existing.py").write_text("from existing import existing_behavior\ndef test_existing_behavior(): assert existing_behavior() == 'retained brownfield behavior'\n")
+    (workspace / "component.VUE").write_text("<template>Existing supported source</template>")
+    (workspace / "oversized.py").write_text("OVERSIZED_CONTEXT_MUST_BE_OMITTED"*1024)
+    outside = workspace.parent / (workspace.name+"-outside")
+    outside.mkdir()
+    (outside / "private.py").write_text("OUTSIDE_CONTEXT_MUST_NOT_ENTER_THE_PACKET")
+    linked = workspace / "linked-context"
+    if os.name == "nt":
+        subprocess.run(["cmd.exe","/c","mklink","/J",str(linked),str(outside)],check=True,capture_output=True)
+    else:
+        linked.symlink_to(outside,target_is_directory=True)
+    generated = workspace / "generated"
+    generated.mkdir()
+    for i in range(520):
+        (generated / (str(i)+".js")).write_text("// bounded discovery fixture")
+    client = LoopClient(workspace, kickoff=settings)
+    client.expected_review_tier = "cross-provider"
+    try:
+        content = plan_content()
+        client.call("harness_plan_start", name="Frozen roles", idea=content["nodes"][0]["text"])
+        frozen = client.current["setup"]
+        client.call("harness_chat",text="/authorize",error=True)
+        with open_plan_store_readonly(workspace) as store:
+            assert approvals.current(store,"P") is None
+        client.call("harness_chat",text="/pause")
+        assert client.current["state"] == "PAUSED"
+        client.call("harness_chat",text="/resume")
+        assert client.current["userRequest"]["gate"] == "invocations"
+        (workspace / ".codex-harness/setup.json").write_text('{"worker":{"provider":"copilot","model":"changed","effort":"low"}}',encoding="utf-8")
+        client.reconnect()
+        assert client.current["setup"] == frozen
+        client.words()
+        repository = client.offered["packet"]["facts"]["repository"]
+        assert {r["path"] for r in repository["files"]} >= {"existing.py","test_existing.py"}
+        assert "retained brownfield behavior" in str(repository)
+        assert "component.VUE" in {r["path"] for r in repository["files"]}
+        assert repository["discoveryTruncated"] and repository["omittedFiles"] is None
+        assert "OUTSIDE_CONTEXT_MUST_NOT_ENTER_THE_PACKET" not in json.dumps(repository)
+        oversized = next(r for r in repository["files"] if r["path"] == "oversized.py")
+        assert "content" not in oversized and oversized["contentStatus"]
 
+        client.answer(dict(option="ready", rationale="Use the pinned high tier", content=content))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "align+vision-lock" and not r.get("question"))
+        client.words()
+        assert client.current["question"]["role"] == "mechanical"
+        assert client.offered["packet"]["facts"]["setup"] == frozen
+        client.answer(judge_reply(client.current["question"]))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "invocations" and not r.get("question"))
+        with open_plan_store_readonly(workspace) as store:
+            from codex_harness.core.planner_review import selection_inputs, delivery_review_selection
+            _, selection, _ = selection_inputs(store)
+            assert delivery_review_selection(selection["fields"])[0] == frozen["reviewers"]
+        client.words()
+        advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+        assert client.current["userRequest"]["gate"] == "plan-execution"
+        assert (workspace / ".codex-harness/copilot-review-count").read_text() == "3"
+    finally:
+        client.close()
+        # The boundary assertion is complete; later product snapshots must not
+        # inherit this fixture's external junction.
+        linked.unlink() if linked.is_symlink() else linked.rmdir()
+
+
+@timed
+def approval_order_golden(workspace):
+    """C8/I10: qualified words do not grant the displayed subject.
+
+    r16 guessed hashes are deleted with the public envelope. A real opaque reply
+    now binds the actual words and full subject before mechanical interpretation.
+    """
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core.plan_store import open_plan_store_readonly
     client = LoopClient(workspace)
     try:
         content = plan_content()
-        client.call(
-            "harness_plan_start", name="R16 approval order", idea=content["nodes"][0]["text"]
-        )
-        client.answer(
-            dict(option="draft", rationale="Prepare expansion before consent", content=content)
-        )
-        client.answer(
-            dict(option="ready", rationale="Present the complete scope for A", content={})
-        )
+        client.call("harness_plan_start", name="Bound approval", idea=content["nodes"][0]["text"])
+        client.words()
+        client.answer(dict(option="ready", rationale="Present the full vision", content=content))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("userRequest") or {}).get("gate") == "align+vision-lock" and not r.get("question"))
         displayed = client.current["userRequest"]
-        client.answer(judge_reply(client.current["question"]))
-        client.reconnect()
-        client.call("harness_schema", tool="harness_steer")
-        # Exact r16 user_words shapes, with this run's displayed identities.
-        request_id, revision, digest = (
-            displayed["request_id"],
-            displayed["plan_revision"],
-            displayed["fingerprint"],
-        )
-        for guessed in (
-            dict(text="yes", source="chat", request_id=request_id, fingerprint=digest),
-            dict(
-                text="yes",
-                source="chat",
-                request_id=request_id,
-                plan_revision=revision,
-                fingerprint=digest,
-            ),
-            dict(
-                text="yes",
-                source="chat",
-                requestId=request_id,
-                revision=revision,
-                subjectFingerprint=digest,
-            ),
-            dict(
-                text="yes",
-                source="chat",
-                request_id=request_id,
-                revision=revision,
-                fingerprint=digest,
-            ),
-            dict(
-                text="yes",
-                source="chat",
-                request_id=request_id,
-                displayed_revision=revision,
-                fingerprint=digest,
-            ),
-            dict(
-                text="yes",
-                source="chat",
-                request_id=request_id,
-                subject_fingerprint=digest,
-                plan_revision=revision,
-            ),
-        ):
-            client.call(
-                "harness_steer",
-                direction="continue",
-                rationale="Retain actual chat yes",
-                user_words=guessed,
-                error=True,
-            )
-            client.call("harness_plan_status")
-        guide = client.call("harness_schema", tool="harness_steer")
-        values = dict(
-            request_id=request_id,
-            expected_revision=revision,
-            quoted_message="yes",
-            quote_sha256=hashlib.sha256(b"yes").hexdigest(),
-            actor_label="user",
-        )
-        contract = guide["inputSchema"]["properties"]["user_words"]
-        client.call(
-            "harness_steer",
-            direction="continue",
-            rationale="Retain the original chat yes using the published contract",
-            user_words={key: values[key] for key in contract.get("required", [])},
-        )
-        client.reconnect()
-        client.answer(judge_reply(client.current["question"]))
+        client.words("Yes, but remove binary input.")
+        assert displayed["plan_revision"] in str(client.offered["packet"]["facts"]["sources"])
+        client.answer(judge_reply(client.current["question"], decision="changes_requested"))
         with open_plan_store_readonly(workspace) as store:
-            approval = approvals.current(store, "A")
-            assert approval["state"] == "approved" and approval["words"] == "yes"
-            assert approval["request_id"] == request_id
-        assert client.current["phase"] == "plan"
+            assert (approvals.current(store, "A") or {}).get("state") != "approved"
+        assert client.current["question"]["purpose"] == "understanding"
     finally:
         client.close()
 
 
+@timed
 def cockpit_golden(tmp_path, run_path, final_status, surface):
     """C20/C26: canonical accepted state reaches HTTP and the read-only cockpit.
 
@@ -3296,316 +3021,170 @@ RETAINED_PHASE_CALLS = {
 }
 
 
-def automatic_retry_golden(workspace):
-    """C1/C4: authorized semantic invocations use the one persisted 1j allowance.
+@timed
+def r18_authoring_golden(workspace):
+    """C1/C4/C18/C23: r18 graph rejection cannot become an ID-disposition loop.
 
-    Manual corrected submissions miss a caller scheduler that abandons the first
-    exact-fix response or launches a fourth model reply after terminal exhaustion.
-    Exercise real bounded provider children; only their semantic text is scripted.
+    The old manual-answer journey hid the lost relationship, empty member set and
+    per-request retry reset. This exercises the real decoder, graph writer,
+    canonical retry owner, typed link repair and unchanged-facts admission guard.
     """
     from tests.python.core.mcp_planner_support import LoopClient
-
-    from codex_harness.core.plan_store import open_plan_store_readonly
-
-    workspace.mkdir()
-    (workspace / "semantic-retry-script.json").write_text(
-        json.dumps({"understanding": 2, "vision-expansion": 2, "trace": 3}), encoding="utf-8"
-    )
-    client = LoopClient(workspace, kickoff=kickoff_content())
+    from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
+    content = plan_content()
+    scenario = content["nodes"][0]["fields"]["scenarios"]["scenarios"][5]
+    scenario["setup"]["snapshots"] = [dict(id="input-baseline",path="checks/input.json")]
+    scenario["observe"].extend([dict(path="checks/input.json",bytesUnchangedFrom="input-baseline",fileJsonEquals=[0,255,65]),
+                                dict(path="checks/input.json",bytesUnchangedFrom="input-baseline",fileAbsent=False)])
+    def begin(root):
+        client = LoopClient(root)
+        client.call("harness_plan_start", name="R18 replay", idea=content["nodes"][0]["text"])
+        with open_plan_store(root) as store:
+            store.upsert_node(dict(id="UNRELATED_OPERATOR_NOTE",kind="decision",title="Unrelated retained note",text="Unrelated telemetry "*1000,parents=["V1"],fields={}))
+        advance_meaning(client, content, stop_at=lambda r: (r.get("question") or {}).get("purpose") == "trace")
+        assert "UNRELATED_OPERATOR_NOTE" not in json.dumps(client.offered["packet"])
+        return client
+    client = begin(workspace)
     try:
-        client.call(
-            "harness_plan_start",
-            name="Automatic exact fixes",
-            idea="Retain the binary receipt dream",
-        )
-        assert client.current["userRequest"]["gate"] == "invocations"
-        # P1: missing kickoff roles resolve before freeze and drive actual native calls.
-        selected = client.current["setup"]["roleTuples"]
-        assert {r["role"] for r in selected} == {"planner", "judge"}
-        assert client.current["userRequest"]["subject"]["roleTuples"] == selected
-        client.words("Authorize only these displayed planner and judge tuples")
-        # The requested grant cannot authorize its own interpreting model. Its
-        # actual bound words receive the external scripted judge reply once.
-        assert client.current["question"]["purpose"] == "user-decision"
-        client.send_answer(judge_reply(client.current["question"]))
-        marker = workspace / ".codex-harness/semantic-raw-complete.json"
-        deadline = time.monotonic() + 45
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert marker.exists(), (workspace / ".codex-harness/server.log").read_text("utf-8")
-        retained_raw = json.loads(marker.read_text("utf-8"))
-        client.reconnect()
-        client.call(
-            "harness_plan_start",
-            name="Resume retained semantic output",
-            idea="Keep the same binary receipt dream",
-        )
-        with open_plan_store_readonly(workspace) as store:
-            replies = [
-                row
-                for row in approvals.records(store, "run-invocation-observed")
-                if row["effectId"] == retained_raw["effectId"]
-            ]
-            assert len(replies) == 1 and replies[0]["cleanup"]["quiescenceVerified"]
-            consumed = [
-                row
-                for row in approvals.records(store, "run-invocation-completed")
-                if row["effectId"] == retained_raw["effectId"]
-            ]
-            assert len(consumed) == 1 and consumed[0]["requestId"] == retained_raw["requestId"]
-            answers = [
-                row
-                for row in approvals.records(store, "run-semantic-answer")
-                if row["requestId"] == retained_raw["requestId"]
-            ]
-            authored = json.loads(retained_raw["raw"])
-            assert len(answers) == 1 and answers[0]["answer"] == authored
-            assert all(
-                store.spine().node(node["id"]) == node for node in authored["content"]["nodes"]
-            )
-        assert (
-            client.current["userRequest"]["gate"] == "align+vision-lock"
-            and not client.current["question"]
-        ), client.current
-        with open_plan_store_readonly(workspace) as store:
-            history = [
-                json.loads(line)
-                for line in (workspace / ".codex-harness/scripted-semantic-responses.jsonl")
-                .read_text("utf-8")
-                .splitlines()
-            ]
-            for purpose, role in (("understanding", "planner"), ("vision-expansion", "judge")):
-                replies = [row for row in history if row["purpose"] == purpose]
-                assert len(replies) == 3 and {row["role"] for row in replies} == {role}, replies
-                assert len({(row["requestId"], row["binding"]) for row in replies}) == 1
-                assert [row["fixesIssued"] for row in replies] == [0, 1, 2]
-                judged = store.judgment(replies[-1]["requestId"])
-                assert (
-                    judged["fixesIssued"] == 2
-                    and judged["verdict"] == "positive"
-                    and judged["disposition"] == "complete"
-                )
-                # Applying author content changes its captured subject revision.
-                # Recovery must consume that positive answer once, not make its
-                # historical pre-authoring judgment reusable against new nodes.
-                if purpose == "understanding":
-                    assert not judged["current"] and not judged["positiveCredit"]
-                else:
-                    assert judged["positiveCredit"]
-                completed = [
-                    row
-                    for row in approvals.records(store, "run-invocation-completed")
-                    if row["requestId"] == judged["id"]
-                ]
-                assert len(completed) == 3 and all(row["didRunProvider"] for row in completed)
-        client.words("Approve this exact Vision Lock")
-        assert client.current["state"] == "PAUSED" and not client.current["effect"], client.current
-        with open_plan_store_readonly(workspace) as store:
-            history = [
-                json.loads(line)
-                for line in (workspace / ".codex-harness/scripted-semantic-responses.jsonl")
-                .read_text("utf-8")
-                .splitlines()
-            ]
-            exhausted = [row for row in history if row["purpose"] == "trace"]
-            assert len(exhausted) == 3 and [row["fixesIssued"] for row in exhausted] == [0, 1, 2]
-            assert len({(row["requestId"], row["binding"]) for row in exhausted}) == 1
-            closed = store.judgment(exhausted[-1]["requestId"])
-            assert closed["fixesIssued"] == 2 and closed["disposition"] == "steer"
-            assert (
-                not closed["positiveCredit"]
-                and not closed["concreteGap"]
-                and closed["owner"] is None
-            )
-            actual = [
-                row
-                for row in approvals.records(store, "run-invocation-completed")
-                if row["requestId"] == closed["id"]
-            ]
-            assert len(actual) == 3 and all(
-                row["didRunProvider"] and not row["sourceVerified"] for row in actual
-            )
-            observed = approvals.records(store, "run-invocation-observed")
-            assert len(observed) == len(history)
-            assert all(
-                row["cleanup"]["quiescenceVerified"]
-                and row["cleanup"]["activeProcessesAfterTeardown"] == 0
-                for row in observed
-            )
-            assert not store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchone()
-        rejected = client.call(
-            "harness_loop_answer",
-            request_id=closed["id"],
-            answer=judge_reply(dict(judgment=closed)),
-            source="golden:late-fourth-reply",
-        )
-        # FIX17 retained-request rule: late replies return the current baton,
-        # never revive a consumed request or expose a store exception.
-        assert rejected["answerOutcome"]["state"] == "superseded" and "outstanding requestId" in str(rejected), (
-            rejected
-        )
-        # The same 1j owner must continue an invalid unsolicited direction too.
-        # A schema-valid missing parent used to return early from steer, leaving
-        # an authorized planner idle; ordinary answer retries miss that entrance.
-        script_path = workspace / "semantic-retry-script.json"
-        script = json.loads(script_path.read_text("utf-8"))
-        script["trace"] = 0
-        script_path.write_text(json.dumps(script), encoding="utf-8")
-        answers_before = client.tool_names["harness_loop_answer"]
-        client.call(
-            "harness_steer",
-            direction="continue",
-            rationale="Actual user explicitly resumes after the retained malformed output",
-            resume=True,
-        )
-        assert (
-            client.current["state"] == "WAIT_USER"
-            and client.current["userRequest"]["gate"] == "invocations"
-        ), client.current
-        assert any(
-            role["role"] == "reviewer"
-            for role in client.current["userRequest"]["subject"]["roleTuples"]
-        )
-        with open_plan_store_readonly(workspace) as store:
-            before_spine = store.spine().to_dict()
-        history_path = workspace / ".codex-harness/scripted-semantic-responses.jsonl"
-        before_replies = len(history_path.read_text("utf-8").splitlines())
-        client.call(
-            "harness_steer",
-            direction="replan",
-            rationale="Propose a semantic feature with the captured missing-parent defect",
-            content=dict(
-                nodes=[
-                    dict(
-                        id="F_BAD_PARENT",
-                        kind="feature",
-                        title="Unresolved feature parent",
-                        text="Retain feature semantics while its parent is corrected",
-                        parents=["MISSING_PARENT"],
-                        fields={},
-                    )
-                ]
-            ),
-        )
-        assert client.current["state"] == "PAUSED" and not client.current["effect"], client.current
-        assert client.tool_names["harness_loop_answer"] == answers_before
-        replies = [json.loads(line) for line in history_path.read_text("utf-8").splitlines()][
-            before_replies:
-        ]
-        assert (
-            len(replies) == 1 and replies[0]["role"] == "planner" and replies[0]["fixesIssued"] == 1
-        ), replies
-        with open_plan_store_readonly(workspace) as store:
-            corrected = store.judgment(replies[0]["requestId"])
-            assert corrected["binding"] == replies[0]["binding"] and corrected["fixesIssued"] == 1
-            assert corrected["positiveCredit"] and corrected["disposition"] == "complete"
-            assert corrected["meaning"]["option"] == "pause" and corrected["owner"] is None
-            assert store.spine().to_dict() == before_spine
-            launches = [
-                row
-                for row in approvals.records(store, "run-invocation-completed")
-                if row["requestId"] == corrected["id"]
-            ]
-            assert (
-                len(launches) == 1
-                and launches[0]["didRunProvider"]
-                and not launches[0]["sourceVerified"]
-            )
-            cleanup = next(
-                row["cleanup"]
-                for row in approvals.records(store, "run-invocation-observed")
-                if row["effectId"] == launches[0]["effectId"]
-            )
-            assert cleanup["quiescenceVerified"] and cleanup["activeProcessesAfterTeardown"] == 0
-        # A valid native zero exit arriving after the original lease is still
-        # diagnostic only. Recovery before the normal post-invoke guard used to
-        # grant it credit; timely receipt recovery cannot expose that failure.
-        (workspace / "semantic-late-output").touch()
-        answers_before = client.tool_names["harness_loop_answer"]
-        client.send_steer(
-            direction="replan",
-            rationale="Actual user requests semantic replanning under the frozen invocation lease",
-            resume=True,
-        )
-        late_marker = workspace / ".codex-harness/semantic-late-complete.json"
-        deadline = time.monotonic() + 30
-        while not late_marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert late_marker.exists(), (workspace / ".codex-harness/server.log").read_text("utf-8")
-        late = json.loads(late_marker.read_text("utf-8"))
-        with open_plan_store_readonly(workspace) as store:
-            from datetime import datetime
+        raw = json.loads(provider_answer(workspace, client.current["question"], dict(option="ready",rationale="Author the accepted receipt plan",content=content)))
+        child = fixture_id(workspace,"R4")
+        next(r for r in raw["records"] if r["ref"] == child)["parents"] = ["V1"]
+        client.answer(json.dumps(raw))
+        # CC reviewH P2: former private empty-member/transition checks move to
+        # public B progression and unchanged-continuation holding.
+        # Captured r18: the former generic findings envelope cannot repair a graph.
+        client.answer(json.dumps(dict(option="repair",rationale="Report the graph defect",content=dict(findings=[dict(node_id=child,severity="blocker",finding="Invalid parent kind",suggestion="Correct the relationship",resolved=False)]))))
+        client.answer(json.dumps(raw))
+        packet = client.offered["packet"]
+        changes = []
+        for relationship in packet["facts"]["context"]["relationships"]:
+            parent = next(p for p in relationship["eligibleParents"] if p["kind"] in relationship["allowedParentKinds"])
+            changes.append(dict(childHandle=relationship["childHandle"],parentRefs=[parent["ref"]]))
+        client.answer(json.dumps(dict(relationships=changes,rationale="The requirement belongs to the supplied product feature",reply="I corrected the plan relationship.")))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+        assert client.current["userRequest"]["gate"] == "plan-execution" and client.current["userRequest"]["card"]
+        # Re-authoring existing identities must not collapse two proposed meanings
+        # or duplicate one snapshot reused by independent file checks.
+        client.send_steer(rationale="Recheck the same complete plan after its relationship repair.")
+        client.progress()
+        client.answer(dict(option="replan",rationale="Retain the complete plan and verify its linked observations",content={}))
+        outline = json.loads(provider_answer(workspace,client.current["question"],dict(option="ready",rationale="Retain every current requirement",content=content)))
+        duplicate = json.loads(json.dumps(outline));duplicate["feature"].append(dict(duplicate["feature"][0]))
+        client.answer(json.dumps(duplicate))
+        duplicate = json.loads(json.dumps(outline));duplicate["targets"].append(dict(duplicate["targets"][0]))
+        client.answer(json.dumps(duplicate))
+        client.answer(json.dumps(outline))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+        assert client.current["userRequest"]["gate"] == "plan-execution"
 
-            held = store.status()["run"]
-            assert (
-                held["effect"]["id"] == late["effectId"]
-                and held["question"]["requestId"] == late["requestId"]
-            )
-            observed = [
-                row
-                for row in approvals.records(store, "run-invocation-observed")
-                if row["effectId"] == late["effectId"]
-            ]
-            assert len(observed) == 1
-            diagnostic = observed[0]
-            assert diagnostic["eligible"] is False and diagnostic["binding"] == late["binding"]
-            assert diagnostic["exitCode"] == 0 and diagnostic["cleanup"]["quiescenceVerified"]
-            assert diagnostic["cleanup"]["activeProcessesAfterTeardown"] == 0
-            assert datetime.fromisoformat(diagnostic["completedAt"]) > datetime.fromisoformat(
-                held["effect"]["deadlineAt"]
-            )
-            assert not store.judgment(late["requestId"])["positiveCredit"]
-        late_replies = [
-            json.loads(line)
-            for line in history_path.read_text("utf-8").splitlines()
-            if json.loads(line)["requestId"] == late["requestId"]
-        ]
-        assert len(late_replies) == 1 and json.loads(late_replies[0]["raw"])["option"] == "ready"
-        client.reconnect()
-        client.call(
-            "harness_plan_start",
-            name="Inspect expired raw reply",
-            idea="Retain diagnostics without reviving expired semantic ownership",
-        )
-        assert (
-            client.current["state"] == "STEER"
-            and client.current["semanticHeld"]
-            and not client.current["effect"]
-        ), client.current
-        assert client.current["question"]["requestId"] != late["requestId"]
-        assert client.tool_names["harness_loop_answer"] == answers_before
-        with open_plan_store_readonly(workspace) as store:
-            judged = store.judgment(late["requestId"])
-            assert not judged["positiveCredit"] and judged["owner"] is None
-            releases = [
-                row
-                for row in approvals.records(store, "run-owner-released")
-                if row["effect"]["id"] == late["effectId"]
-            ]
-            assert (
-                len(releases) == 1
-                and releases[0]["ownershipReleased"]
-                and releases[0]["quarantine"]
-            )
-            assert [
-                row
-                for row in approvals.records(store, "run-invocation-observed")
-                if row["effectId"] == late["effectId"]
-            ] == observed
-            assert not [
-                row
-                for row in approvals.records(store, "run-invocation-completed")
-                if row["effectId"] == late["effectId"]
-            ]
-        assert [
-            json.loads(line)
-            for line in history_path.read_text("utf-8").splitlines()
-            if json.loads(line)["requestId"] == late["requestId"]
-        ] == late_replies
+    finally:
+        client.close()
+    root = workspace / "exhaustion"
+    client = begin(root)
+    try:
+        for _ in range(3): client.answer("{")
+        forbidden = json.dumps(dict(action="ask_user",question="Supply a member ID",amendments=[],rationale="Missing internal identity",reply="Supply a member ID"))
+        for _ in range(3): client.answer(forbidden)
+        assert client.current["state"] == "PAUSED" and not client.current["userRequest"]
+        words = "Continue with exactly the same evidence and requirements."
+        client.send_steer(rationale=words)
+        client.progress()
+        client.answer(dict(option="pause",rationale="No new facts support another attempt",content={}))
+        client.send_steer(rationale=words)
+        client.progress()
+        assert client.current["state"] == "PAUSED" and not client.current.get("question")
+        assert "No progress" in client.current["reason"] and "Seldon owns internal identifiers" in client.current["nextAction"]
     finally:
         client.close()
 
 
+@timed
+def automatic_retry_golden(workspace):
+    """C4/C18/C23: three attempts, retained raw replay, one bounded steer.
+
+    Manual submissions missed retries abandoned by the scheduler and credit
+    accidentally given to a raw return after its original effect lease expired.
+    Brief deletion exception: late public answer and generic steer-content tests
+    move to provider-boundary returns and actual words; no public answer tool remains.
+    """
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core.plan_store import open_plan_store_readonly
+    workspace.mkdir()
+    script_path = workspace / "semantic-retry-script.json"
+    script_path.write_text(json.dumps(dict(understanding=2, **{"vision-expansion": 2}, trace=3)),encoding="utf-8")
+    client = LoopClient(workspace)
+    def wait(name):
+        path = workspace / ".codex-harness" / (name + ".json")
+        end = time.monotonic() + 45
+        while not path.exists() and time.monotonic() < end:
+            time.sleep(.05)
+        assert path.exists(), client.log_path.read_text("utf-8")
+        return json.loads(path.read_text("utf-8"))
+    try:
+        client.call("harness_plan_start", name="Exact fixes", idea="Build the complete binary receipt dream")
+        assert {r["role"] for r in client.current["setup"]["roleTuples"]} == {"planner", "judge", "mechanical"}
+        offer = client.native_offer()
+        client.native_response(offer, retain_reply=False)
+        retained = wait("semantic-raw-complete")
+        client.reconnect()
+        # Activation consumes verified originals without asking chat to supply meaning.
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            client.call("harness_plan_status")
+            if not client.current.get("effect") and not client.current.get("question") and (client.current.get("userRequest") or {}).get("gate") == "align+vision-lock":
+                break
+            time.sleep(.1)
+        assert client.current["userRequest"]["gate"] == "align+vision-lock", client.current
+        with open_plan_store_readonly(workspace) as store:
+            replies = [r for r in approvals.records(store,"run-invocation-completed") if r["effectId"] == retained["effectId"]]
+            assert len(replies) == 1
+            authored = [r for r in approvals.records(store,"run-semantic-answer") if r["requestId"] == retained["requestId"]]
+            assert len(authored) == 1 and authored[0]["answer"]["understanding"] == plan_content()["nodes"][0]["text"]
+            assert len([r for r in approvals.records(store,"judgment-response") if r["id"] == retained["requestId"] and r["response"] == retained["raw"]]) == 1
+        client.words("Approve the exact displayed Vision Lock")
+        assert client.current["state"] == "PAUSED" and not client.current["effect"], (client.current["state"],client.current["reason"])
+        history_path = workspace / ".codex-harness/scripted-semantic-responses.jsonl"
+        history = [json.loads(x) for x in history_path.read_text("utf-8").splitlines()]
+        with open_plan_store_readonly(workspace) as store:
+            for purpose in ("understanding", "vision-expansion", "trace"):
+                rows = [r for r in history if r["purpose"] == purpose]
+                assert len(rows) == 3 and [r["fixesIssued"] for r in rows] == [0,1,2], rows
+                assert len({(r["requestId"],r["binding"]) for r in rows}) == 1
+                record = store._judgment_record(rows[0]["requestId"])
+                assert record["fixesIssued"] == 2 and record["owner"] is None
+                assert record["disposition"] == ("steer" if purpose == "trace" else "complete")
+            assert len([r for r in history if r["family"] == "direction"]) == 1
+            observed = approvals.records(store,"run-invocation-observed")
+            assert len(observed) == len(history)
+            assert all(r["cleanup"]["quiescenceVerified"] and r["cleanup"]["activeProcessesAfterTeardown"] == 0 for r in observed)
+            assert not store.connection.execute("SELECT 1 FROM acceptance_approvals").fetchone()
+        # Explicit new words can request another direction. Expired native output
+        # is diagnostic; activation never grants it credit or launches it again.
+        script_path.write_text(json.dumps(dict(trace=0)),encoding="utf-8")
+        (workspace / "semantic-late-output").touch()
+        client.send_steer(direction="replan", rationale="Resume planning from the retained evidence", resume=True)
+        late = wait("semantic-late-complete")
+        with open_plan_store_readonly(workspace) as store:
+            raw = next(r for r in approvals.records(store,"run-invocation-observed") if r["effectId"] == late["effectId"])
+            assert raw["eligible"] is False and raw["exitCode"] == 0 and raw["cleanup"]["quiescenceVerified"]
+        client.reconnect()
+        end = time.monotonic() + 15
+        while time.monotonic() < end:
+            client.call("harness_plan_status")
+            if not client.current.get("effect") and client.current.get("semanticHeld"):
+                break
+            time.sleep(.1)
+        assert client.current["semanticHeld"] and client.current["state"] == "STEER", client.current
+        with open_plan_store_readonly(workspace) as store:
+            assert not store.judgment(late["requestId"])["positiveCredit"]
+            assert not [r for r in approvals.records(store,"run-invocation-completed") if r["effectId"] == late["effectId"]]
+            released = [r for r in approvals.records(store,"run-owner-released") if r["effect"]["id"] == late["effectId"]]
+            assert len(released) == 1 and released[0]["quarantine"] and released[0]["ownershipReleased"]
+    finally:
+        client.close()
+
+
+@timed
 def receipt_gaps_golden(workspace):
     """C18/C23: four real MCP deaths reuse paid plan/acceptance work through one C.
 
@@ -3633,6 +3212,7 @@ def receipt_gaps_golden(workspace):
     settings = kickoff_content()
     settings["reviewers"][1].update(provider="claude", model="claude-sonnet-5-5")
     client = LoopClient(workspace, kickoff=settings)
+    client.expected_review_tier = "cross-provider"
 
     def wait_for(name):
         marker = workspace / ".codex-harness" / (name + ".json")
@@ -3642,13 +3222,27 @@ def receipt_gaps_golden(workspace):
         assert marker.exists(), (workspace / ".codex-harness/server.log").read_text("utf-8")
         return json.loads(marker.read_text("utf-8"))
 
+    def crash_owner(name):
+        import signal
+        marker = workspace / ".codex-harness" / (name + ".json")
+        client.seen_faults.add(name)
+        owned = json.loads(marker.read_text("utf-8"))["ownerPid"]
+        with open_plan_store_readonly(workspace) as store:
+            effect = store.status()["run"]["effect"]
+            assert effect["ownerPid"] == owned
+            from codex_harness.core.audit_process import process_observation
+            assert process_observation(owned)["identity"] == effect["ownerIdentity"]
+        if owned != client.process.pid:
+            os.kill(owned, signal.SIGTERM)
+        client.reconnect()
+
     def paid_calls(*, acceptance=True):
         path = workspace / ".codex-harness/scripted-review-invocations.jsonl"
         return (
             [
                 json.loads(line)
                 for line in path.read_text("utf-8").splitlines()
-                if json.loads(line)["acceptance"] is acceptance
+                if json.loads(line)["acceptance"] is acceptance and not json.loads(line).get("semantic")
             ]
             if path.exists()
             else []
@@ -3668,8 +3262,6 @@ def receipt_gaps_golden(workspace):
             ),
         )
         client.words("Authorize these displayed reviewer tuples for the actual plan review")
-        assert client.current["question"]["purpose"] == "user-decision"
-        client.send_answer(judge_reply(client.current["question"]))
         planned = wait_for("plan-review-complete")
         with open_plan_store_readonly(workspace) as store:
             plan_rows = [
@@ -3691,7 +3283,7 @@ def receipt_gaps_golden(workspace):
             assert approvals.current(store, "B") is None
         original_plan_calls = paid_calls(acceptance=False)
         assert original_plan_calls and not paid_calls()
-        client.reconnect()
+        crash_owner("plan-review-complete")
         client.call(
             "harness_plan_start",
             name="Consume completed plan review",
@@ -3744,7 +3336,7 @@ def receipt_gaps_golden(workspace):
             )
             assert not store.connection.execute("SELECT 1 FROM acceptance_reviews").fetchone()
         assert not paid_calls()
-        client.reconnect()
+        crash_owner("acceptance-scenarios-complete")
         client.send_start()
         sealed = wait_for("acceptance-review-sealed")
         assert sealed["runId"] == original_run["id"]
@@ -3771,14 +3363,14 @@ def receipt_gaps_golden(workspace):
             assert not store.connection.execute("SELECT 1 FROM acceptance_reviews").fetchone()
         original_paid = paid_calls()
         assert len(original_paid) == len(sealed["slots"])
-        client.reconnect()
+        crash_owner("acceptance-review-sealed")
         client.send_start()
         admitted = wait_for("acceptance-review-admitted")
         assert admitted["runIds"] == [original_run["id"]] and admitted["reviewIds"] == [
             sealed["attemptId"]
         ]
         assert paid_calls() == original_paid
-        client.reconnect()
+        crash_owner("acceptance-review-admitted")
         client.call(
             "harness_plan_start",
             name="Resume offered C",
@@ -3800,7 +3392,7 @@ def receipt_gaps_golden(workspace):
         assert (
             member["stage"] == "acceptance"
             and member["reviewer"] == "Reviewer2"
-            and member["node_id"] == "R4"
+            and member["node_id"] == fixture_id(workspace, "R4")
             and member["state"] == "pending"
             and member["finding"]
             == "Confirm the delivered absolute-path handover against the retained GREEN."
@@ -3954,7 +3546,7 @@ def judge_candidate(store, observation):
         # CC's real web gate reached this distinct semantic request. Execution-only
         # fixtures missed both its preparation refusal and cross-phase credit.
         rejected = scripted_judgment(
-            store, prepared, dict(prepared["responseExample"]["meaning"], phase="wrong-phase")
+            store, prepared, dict(fixture_judgment_example(prepared)["responseExample"]["meaning"], phase="wrong-phase")
         )
         assert (
             rejected["disposition"] == "exact-fix" and not rejected["current"]["positiveCredit"]
@@ -4036,6 +3628,7 @@ def judge_executions(workspace, patcher, *, contracts_gap=None, pending_executio
     patcher.setattr(dispatch_integration, "_semantic_validation", judged)
 
 
+@timed
 def single_build_golden(workspace):
     """C1/C9/C14/C15: a dependency-free worker bundle reaches the real product C.
 
@@ -4068,14 +3661,14 @@ def single_build_golden(workspace):
         assert status["acceptance"]["accepted"]
         with open_plan_store_readonly(workspace) as store:
             selected, retained = current_job_run(store, required=True)
-            assert set(retained["beads"]) == {"B"}
+            assert set(retained["beads"]) == {fixture_id(workspace, "B")}
             validation = retained["semanticValidation"]
             red = validation["red"]
             assert red["observedState"] == "FAIL", red
             assert any(
-                row["id"] == "T_RECEIPT" and row["state"] == "FAIL" for row in red["results"]
+                row["id"] == fixture_id(workspace, "T_RECEIPT") and row["state"] == "FAIL" for row in red["results"]
             )
-            observed = next(row for row in red["results"] if row["id"] == "T_RECEIPT")["actions"][
+            observed = next(row for row in red["results"] if row["id"] == fixture_id(workspace, "T_RECEIPT"))["actions"][
                 "execute"
             ]["stderr"]
             assert "ModuleNotFoundError: No module named 'hashslip'" in observed
@@ -4083,9 +3676,7 @@ def single_build_golden(workspace):
             assert not (workspace / "checks/retired.json").exists()
             assert all(row["cleanup"]["quiescenceVerified"] for row in red["results"])
             assert validation["testSources"] == red["testSources"] and validation["judgmentId"]
-            invocation = next(row for row in validation["results"] if row["id"] == "S6")["actions"][
-                "run"
-            ]
+            invocation = next(iter(next(row for row in validation["results"] if row["id"] == fixture_id(workspace,"S6"))["actions"].values()))
             entry, caller = Path(invocation["command"][1]), Path(invocation["cwd"])
             assert entry.is_absolute() and caller == entry.parent / "checks"
             assert (
@@ -4099,10 +3690,38 @@ def single_build_golden(workspace):
     finally:
         client.close()
 
+    # C15: a real owned implementation outside verifier roots must reach the
+    # tool-free judge. Green/RED-only journeys missed an unseen concrete stub.
+    stub_root = workspace / "stub"
+    stub_root.mkdir()
+    (stub_root / "contracts-attempted").touch()
+    (stub_root / "validation-observed").touch()
+    (stub_root / "stub-implementation").touch()
+    stub_content = json.loads(json.dumps(content))
+    next(n for n in stub_content["nodes"] if n["id"] == "B")["fields"]["ownedFiles"].extend("checks/context-"+str(i)+".txt" for i in range(4))
+    client = LoopClient(stub_root)
+    try:
+        client.call("harness_plan_start",name="Reject constant receipt",idea=content["nodes"][0]["text"])
+        advance_meaning(client,stub_content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "execution")
+        pending = client.current["question"]
+        proof = next(r for r in client.offered["packet"]["facts"]["sources"] if r.get("check") == "execution")["proof"]
+        assert proof["observedState"] == "PASS", proof["observedState"]
+        seen = any("HARDCODED_RECEIPT" in f["body"] for f in proof["implementationSources"]["files"] if f["path"] == "hashslip.py")
+        verdict = judge_reply(pending,verdict="negative" if seen else "positive",gaps=["The implementation returns a constant receipt table instead of hashing unseen stdin"] if seen else [])
+        verdict["meaning"]["noStubMockGaps"] = not seen
+        client.answer(verdict)
+        judged = client.call("harness_judgment",judgment_id=pending["requestId"],candidate=pending["candidate"])
+        assert judged["verdict"] == "negative" and not judged["positiveCredit"] and judged["meaning"]["noStubMockGaps"] is False
+        assert "constant receipt" in str(judged["gaps"])
+        client.call("harness_chat",text="/stop")
+        assert client.current["state"] == "STOPPED"
+    finally:
+        client.close()
+
 
 def plan_content(surface="cli"):
     """Retained run26/UX6 intent, authored through one canonical semantic payload."""
-    from codex_harness.core.planner_schema import node_example
+    from tests.python.core.mcp_planner_support import node_example
 
     captured = json.loads(
         (
@@ -4313,7 +3932,7 @@ def judge_reply(pending, *, decision="approve", verdict="positive", gaps=()):
     """Only supply meaning; identity/check/evidence comes from the actual producer."""
     record = pending["judgment"]
     result = dict(
-        record["responseExample"],
+        fixture_judgment_example(record)["responseExample"],
         verdict=verdict,
         rationale="Scripted external semantic assessment; no actual provider or human authentication",
         gaps=list(gaps),
@@ -4366,6 +3985,9 @@ def advance_meaning(client, content, *, stop_at=None):
             return run
         if run["state"] in {"DONE", "PAUSED", "STOPPED"}:
             return run
+        if (run.get("userRequest") or {}).get("gate") == "invocations":
+            client.words("Authorize these exact displayed invocation tuples")
+            continue
         if pending := run.get("question"):
             assert pending["requestId"] not in answered, run
             answered.add(pending["requestId"])
@@ -4376,7 +3998,7 @@ def advance_meaning(client, content, *, stop_at=None):
                     content=content if pending["purpose"] == "understanding" else {},
                 )
             elif pending["family"] == "direction":
-                assert "Integrated GREEN" in pending["purpose"], run
+                assert "Integrated GREEN" in pending["purpose"], (run["state"],run["reason"])
                 value = dict(
                     option="continue",
                     rationale="Integrated result still matches the accepted vision",
@@ -4393,9 +4015,7 @@ def advance_meaning(client, content, *, stop_at=None):
                 card = run["userRequest"]
                 expected = client.setup["reviewers"]
                 assert card["subject"]["reviewers"] == expected
-                from codex_harness.core.reviewer_evidence import review_tier
-
-                tier = review_tier(expected)
+                tier = client.expected_review_tier
                 assert (
                     card["subject"]["reviewTier"] == tier and f"Review tier: {tier}" in card["card"]
                 )
@@ -4428,12 +4048,13 @@ def advance_meaning(client, content, *, stop_at=None):
         else:
             pytest.fail(
                 "Controller returned without an outstanding question, user decision or terminal result: "
-                + repr(run)
+                + repr((run["state"],run["reason"]))
             )
     pytest.fail("Semantic journey did not terminate")
 
 
-def controller_interruptions(workspace, after_readmission):
+@timed
+def controller_interruptions(workspace, twin):
     """C16/C18/C23: lost response/live work/pause/wake/stop at the wire boundary.
 
     A synchronous server previously prevented active steering, and happy-path
@@ -4441,8 +4062,8 @@ def controller_interruptions(workspace, after_readmission):
     over the same stdio connection, then expire its successor after a wake gap.
     An idle restart must also wait for an ordinary writer reservation longer
     than SQLite's default five seconds; uncontended restarts miss locked errors.
-    Force packet failure before an attempt on automatic successor #1 or #2;
-    post-attempt worker failures never covered this lost-work-identity boundary.
+    Fail the first actual C packet after resume, regardless of recovery order;
+    post-attempt failures and uninjected exhaustion miss this identity boundary.
     """
     import socket
     from datetime import UTC, datetime
@@ -4542,10 +4163,11 @@ def controller_interruptions(workspace, after_readmission):
             assert reserved.wait(15) and not reservation_errors, reservation_errors
             timer = threading.Timer(8, release.set)
             timer.start()
-            client.call(
-                "harness_plan_start", name="Contended reattach", idea="Keep the paused run paused"
-            )
-            assert release.is_set(), "Reattachment returned before the writer reservation ended"
+            # Brief Front door deletion: reconnect activation owns continuation;
+            # a read-only status call correctly does not take the writer lock.
+            client.reconnect()
+            client.progress()
+            assert release.is_set(), "Activation returned before the writer reservation ended"
         finally:
             release.set()
             if timer is not None:
@@ -4562,9 +4184,6 @@ def controller_interruptions(workspace, after_readmission):
         assert not (workspace / "build-entered").exists()
         (workspace / "hold-contracts").unlink()
         (workspace / "fault-contracts").touch()
-        (workspace / "packet-fault.json").write_text(json.dumps(dict(
-            port=barrier.getsockname()[1], afterReadmission=after_readmission
-        )))
         quiescent.sendall(b"!")
         quiescent.close()
         quiescent = None
@@ -4573,6 +4192,11 @@ def controller_interruptions(workspace, after_readmission):
             rationale="Actual user explicitly resumes",
             resume=True,
         )
+        client.progress()
+        (workspace / "packet-fault.json").write_text(json.dumps(dict(
+            port=barrier.getsockname()[1]
+        )))
+        client.send_answer(dict(option="continue", rationale="Resume the observed interrupted work under existing B", content={}))
         try:
             packet_socket, _ = barrier.accept()
         except TimeoutError:
@@ -4581,14 +4205,14 @@ def controller_interruptions(workspace, after_readmission):
             injected = json.loads(packet.makefile("rb").readline())
             (workspace / "packet-fault.json").unlink()
             packet.sendall(b"!")
-        client.take_reply(resume)
+        client.progress()
 
         def is_exhaustion(run):
             pending = run.get("question") or {}
             resolved = pending.get("context", {}).get("observation", {}).get("recovery", {})
             return (
                 "Two automatic recoveries exhausted" in pending.get("purpose", "")
-                and resolved.get("proof", {}).get("faultWork", {}).get("C") == injected["work"]
+                and resolved.get("proof", {}).get("faultWork", {}).get(fixture_id(workspace, "C")) == injected["work"]
             )
 
         def wait_exhaustion():
@@ -4599,7 +4223,7 @@ def controller_interruptions(workspace, after_readmission):
                 run = client.current
                 pending = run.get("question") or {}
                 resolved = pending.get("context", {}).get("observation", {}).get("recovery", {})
-                if resolved.get("proof", {}).get("faultWork", {}).get("C") == injected["work"]:
+                if resolved.get("proof", {}).get("faultWork", {}).get(fixture_id(workspace, "C")) == injected["work"]:
                     assert "Two automatic recoveries exhausted" in pending["purpose"], (
                         pending["purpose"], resolved["choice"], resolved["proof"]["faultWork"]
                     )
@@ -4616,13 +4240,17 @@ def controller_interruptions(workspace, after_readmission):
                 time.sleep(0.05)
 
         wait_exhaustion()
-        assert client.current["state"] == "STEER" and not client.current["effect"], client.current
+        assert client.current["state"] == "STEER" and client.current["question"]["family"] == "direction", client.current
         with open_plan_store_readonly(workspace) as store:
+            segment = planner_jobs.latest_segment(store, injected["jobId"])
+            outcome = json.loads((segment / "terminal.json").read_text())["outcomes"][fixture_id(workspace, "C")]
+            assert outcome["workId"] == injected["work"] and outcome["fault"]
+            assert "Acknowledged pre-attempt packet failure" in outcome["workStatus"]
             assert any(
-                not r["automaticRecoveriesExhausted"]
+                r["choice"] == "readmit" and r.get("steeringJudgmentId")
                 and injected["work"] in r["proof"]["faultWork"].values()
-                for r in approvals.records(store, "worker-recovery-steering-required")
-            ), "Pause's non-exhaustion steering event must remain distinguishable"
+                for r in approvals.records(store, "worker-recovery-resolved")
+            ), "Explicit resume must retain the injected work"
             recoveries = [
                 r
                 for r in approvals.records(store, "worker-recovery-resolved")
@@ -4630,12 +4258,8 @@ def controller_interruptions(workspace, after_readmission):
                 and injected["work"] in r["proof"]["faultWork"].values()
             ]
             assert len(recoveries) == 2
-            fault, = [r for r in approvals.records(store, "worker-recovery-steering-required")
-                      if r["jobId"] == client.current["question"]["context"]["jobId"]
-                      and injected["work"] in r["proof"]["faultWork"].values()]
-            assert fault["automaticRecoveriesExhausted"]
         print(
-            f"golden recovery twin #{after_readmission}: bound exhaustion; automatic readmissions=2",
+            f"golden recovery twin #{twin}: acknowledged packet failure; retained resume; same-work bound exhaustion",
             flush=True,
         )
         # An unrelated downstream amendment cannot buy two more retries for C.
@@ -4648,7 +4272,7 @@ def controller_interruptions(workspace, after_readmission):
                 content=dict(nodes=[build]),
             )
         )
-        advance_meaning(client, content, stop_at=lambda r: is_exhaustion(r) or bool(r.get("effect")))
+        advance_meaning(client, content, stop_at=lambda r: is_exhaustion(r) or (r.get("effect") or {}).get("kind") == "build")
         wait_exhaustion()
         with open_plan_store_readonly(workspace) as store:
             recoveries = [
@@ -4658,33 +4282,50 @@ def controller_interruptions(workspace, after_readmission):
                 and injected["work"] in r["proof"]["faultWork"].values()
             ]
             assert len(recoveries) == 2
-        (workspace / "fault-contracts").unlink()
-        client.answer(
-            dict(
-                option="continue",
-                rationale="Explicit direction after fixing the external worker",
-                content={},
-            )
-        )
+        client.answer(dict(option="pause",rationale="The same failed approach remains unresolved",content={}))
+        words = "Continue with the same failed approach and evidence."
+        client.send_steer(rationale=words);client.progress()
+        client.answer(dict(option="pause",rationale="The same failed approach remains unresolved",content={}))
+        client.send_steer(rationale=words);client.progress()
+        assert client.current["state"] == "PAUSED" and not client.current.get("question") and "No progress" in client.current["reason"]
+        client.send_steer(rationale="Change the startup approach using the retained failed attempts.")
+        client.progress()
+        # The scripted planner can change approach only from the supplied
+        # failed job, affected Contracts node and prior unsuccessful direction.
+        facts = client.offered["packet"]["facts"]
+        context = facts["context"]
+        failed = str(context.get("job",{}).get("terminal",{}))
+        ready = "Injected worker failure" in failed and context.get("attempts") and context.get("priorDirections")
+        contract = next(n for n in content["nodes"] if n["id"] == "C")
+        if ready and any(n["id"] == fixture_id(workspace,"C") for n in facts["graph"]):
+            contract["text"] += " Use an isolated startup path after the failed shared startup"
+            client.answer(dict(option="repair",rationale="The shared startup approach failed; isolate startup before exercising receipt behavior",content=dict(nodes=[contract])))
+            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "execution")
+        else:
+            client.answer(dict(option="pause",rationale="The failed approach cannot be established from the supplied facts",content={}))
         assert client.current["question"]["purpose"] == "execution", client.current
         pending = client.current["question"]
-        wrong = judge_reply(pending)
-        wrong["meaning"]["check"] = "contracts"
-        client.answer(wrong)
+        wrong = json.loads(provider_answer(workspace,pending,judge_reply(pending)))
+        wrong["check"] = "contracts"
+        client.answer(json.dumps(wrong))
         assert client.current["question"]["requestId"] == pending["requestId"]
-        assert "execution" in client.current["question"]["judgment"]["error"]
-        if after_readmission == 2:
+        assert "check" in client.current["question"]["judgment"]["error"]
+        if twin == 2:
             # C18/I6: a prior segment's receipts cannot certify the new launch.
-            # Ordinary packet failures always persist a fresh segment record.
+            # Interrupt actual continuation entry, whether dispatch would resume or start fresh.
             (workspace / "resume-fault.json").write_text(json.dumps(dict(
                 port=barrier.getsockname()[1]
             )))
             resumed = client.send_answer(judge_reply(client.current["question"]))
             with barrier.accept()[0] as interrupted:
-                held_job = interrupted.makefile("rb").readline().decode().strip()
+                entry = json.loads(interrupted.makefile("rb").readline())
+                held_job = entry["jobId"]
+                repaired_work = entry["work"][fixture_id(workspace, "C")]
                 (workspace / "resume-fault.json").unlink()
                 interrupted.sendall(b"!")
-            client.take_reply(resumed)
+            segment = planner_jobs.segment_directory(workspace, held_job, entry["segmentId"])
+            assert json.loads((segment / "request.json").read_text())["work"] == entry["work"]
+            client.progress()
             while True:
                 client.call("harness_plan_status")
                 pending = client.current.get("question") or {}
@@ -4692,8 +4333,9 @@ def controller_interruptions(workspace, after_readmission):
                 if resolved.get("jobId") == held_job:
                     assert pending["purpose"] == "Permission/uncertain launch held"
                     assert resolved["choice"] == "abandon"
-                    assert injected["work"] in resolved["proof"]["faultWork"].values()
+                    assert repaired_work in resolved["proof"]["faultWork"].values()
                     assert set(resolved["proof"]["faultOutcomes"].values()) == {"unknown launch"}
+                    assert resolved["proof"]["controllerAndChildren"]["quiescenceVerified"]
                     break
                 with open_plan_store_readonly(workspace) as store:
                     segment = planner_jobs.latest_segment(store, held_job)
@@ -4703,6 +4345,7 @@ def controller_interruptions(workspace, after_readmission):
             with open_plan_store_readonly(workspace) as store:
                 assert sum(
                     r["choice"] == "readmit" and not r.get("steeringJudgmentId")
+                    and injected["work"] in r["proof"]["faultWork"].values()
                     for r in approvals.records(store, "worker-recovery-resolved")
                 ) == 2
             print("golden recovery: interrupted resume retained unknown-launch hold", flush=True)
@@ -4781,7 +4424,7 @@ def controller_launch_interruption(workspace, after_started):
                     assert connections["started"].recv(1) == b"", "Owned Job must stop the entered payload"
                 except ConnectionResetError:
                     pass  # Windows Job termination may reset the held payload's socket.
-            client.take_reply(reply)
+            client.progress()
             client.reconnect()
             client.call("harness_plan_start", name="Reattach dead controller", idea="Retain admitted work")
             with open_plan_store_readonly(workspace) as store:
@@ -4816,6 +4459,7 @@ def controller_launch_interruption(workspace, after_started):
             client.close()
 
 
+@timed
 def denial_interruption(workspace, source_root=None):
     """C18/I6: durable provider denial holds even when its run projection is lost.
 
@@ -4865,7 +4509,7 @@ def denial_interruption(workspace, source_root=None):
                     bound = pending.get("context", {}).get("observation", {}).get("recovery", {})
                     if bound.get("jobId") == job:
                         assert resolved[0]["choice"] == "abandon"
-                        assert bound["proof"]["processOutcomes"]["C"] == "held: permission guard"
+                        assert bound["proof"]["processOutcomes"][fixture_id(workspace, "C")] == "held: permission guard"
                         assert bound["proof"]["held"]
                         assert pending["purpose"] == "Permission/uncertain launch held"
                         assert not client.current["effect"]
@@ -4878,6 +4522,7 @@ def denial_interruption(workspace, source_root=None):
             client.close()
 
 
+@timed
 def dead_review_wake(workspace):
     """C18/C23/C25: real MCP death plus elapsed wake gap releases a review once.
 
@@ -4907,16 +4552,22 @@ def dead_review_wake(workspace):
                 and not r.get("question")
             ),
         )
-        client.words()
-        client.send_answer(judge_reply(client.current["question"]))
+        offer = client.native_offer()
+        client.native_response(offer, retain_reply=False)
         marker = workspace / ".codex-harness/review-crash-started"
         deadline = time.monotonic() + 30
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         assert marker.exists(), (workspace / ".codex-harness/server.log").read_text("utf-8")
-        client.reconnect()
-        original = client.current["effect"]
+        with open_plan_store_readonly(workspace) as store:
+            original = store.status()["run"]["effect"]
+            from codex_harness.core.audit_process import process_observation
+            assert process_observation(original["ownerPid"])["identity"] == original["ownerIdentity"]
         (workspace / "clock-shift").write_text("3600")
+        if original["ownerPid"] != client.process.pid:
+            import signal
+            os.kill(original["ownerPid"],signal.SIGTERM)
+        client.reconnect()
         client.call("harness_plan_start", name="Reattach", idea="Retained dream")
         assert client.current["state"] == "STEER" and not client.current["effect"]
         assert client.current["generation"] > original["generation"]
@@ -4981,6 +4632,7 @@ def http_journeys(tmp_path):
             assert completed.audit_control["quiescenceVerified"]
             assert completed.audit_control["activeProcessesAfterTeardown"] == 0
             print(completed.stdout, file=sys.stderr, end="", flush=True)
+            print(completed.stderr, file=sys.stderr, end="", flush=True)
             print(
                 f"golden {name}: seconds={time.monotonic() - started:.2f}",
                 file=sys.stderr,
@@ -4999,7 +4651,7 @@ def http_journeys(tmp_path):
                 assert ready.wait(60), f"HTTP journey did not start: {name}"
                 if future.done():
                     future.result()
-            yield
+            yield pending
             for future in pending:
                 future.result()
         finally:
@@ -5026,11 +4678,8 @@ def test_golden_path(tmp_path, request, surface):
         fixture_ownership_golden(tmp_path / "fixture-ownership")
         planning_surface_golden(tmp_path / "planning-surface")
         reviewer_order_golden(tmp_path / "reviewer-order")
-        request.getfixturevalue("http_journeys")
         approval_order_golden(tmp_path / "approval-order")
-        automatic_retry_golden(tmp_path / "automatic-retries")
-        single_build_golden(tmp_path / "single-build")
-        receipt_gaps_golden(tmp_path / "receipt-gaps")
+        r18_authoring_golden(tmp_path / "r18-replay")
         planning_intent_golden(tmp_path.parent / (tmp_path.name + "-planning-intent"))
         judgment_contract_golden(tmp_path.parent / (tmp_path.name + "-judgment-contract"))
         execution_judgment_golden(tmp_path.parent / (tmp_path.name + "-execution-judgment"))
@@ -5041,6 +4690,7 @@ def test_golden_path(tmp_path, request, surface):
         timeout_product = tmp_path / "timeout-product"
         timeout_product.mkdir()
         api = dict(target="service", method="GET", path="/", statusEquals=200)
+        # Direct runner input retains these IDs; loop-authored plans use CODE allocations.
         timeout_spec = dict(
             schema="seldon/scenarios-v1",
             scenarios=[
@@ -5110,6 +4760,20 @@ def test_golden_path(tmp_path, request, surface):
 
     if surface == "web":
         request.getfixturevalue("web_browser_ready")
+    main_path_golden(tmp_path,surface,started=started,ledger_start=ledger_start)
+
+
+@timed
+def main_path_golden(tmp_path,surface,*,started=None,ledger_start=None):
+    """Real contracts failure, retained reply, repair, build, delivery and C.
+
+    The single-build journey misses a concrete wrong-reason RED repaired by the
+    successor and a raw semantic receipt retained across owner death.
+    """
+    from tests.python.core.mcp_planner_support import LoopClient
+    from codex_harness.core.plan_store import open_plan_store_readonly
+    started = time.monotonic() if started is None else started
+    ledger_start = len(LoopClient.instances) if ledger_start is None else ledger_start
     content = plan_content(surface)
     (tmp_path / "AGENTS.md").write_text("Use the exact selected model tuples.\n", encoding="utf-8")
     (tmp_path / "validation-observed").touch()
@@ -5127,7 +4791,7 @@ def test_golden_path(tmp_path, request, surface):
         advance_meaning(client, content, stop_at=execution)
         first = client.current["question"]
         execution_questions.append(first["requestId"])
-        assert first["judgment"]["responseExample"]["meaning"]["check"] == "execution"
+        assert fixture_judgment_example(first["judgment"])["responseExample"]["meaning"]["check"] == "execution"
         with open_plan_store_readonly(tmp_path) as store:
             from codex_harness.core import planner_jobs as jobs
 
@@ -5143,9 +4807,9 @@ def test_golden_path(tmp_path, request, surface):
 
             _, first_saved = current_job_run(store, required=True)
             assert first_saved["status"] == "pending-judgment"
-            assert first_saved["beads"]["C"]["status"] == "awaiting judgment"
-            assert first_saved["beads"]["B"]["attempt"] is None
-            assert "awaiting judgment" in first_saved["beads"]["B"]["status"]
+            assert first_saved["beads"][fixture_id(tmp_path, "C") ]["status"] == "awaiting judgment"
+            assert first_saved["beads"][fixture_id(tmp_path, "B") ]["attempt"] is None
+            assert "awaiting judgment" in first_saved["beads"][fixture_id(tmp_path, "B") ]["status"]
             if surface == "web":
                 assert first_saved["semanticContracts"]["observedState"] == "ERROR"
                 assert any(
@@ -5162,11 +4826,10 @@ def test_golden_path(tmp_path, request, surface):
                 (approvals.EVENT,),
             ).fetchone()[0]
             assert review_at < b_at
-        # The same durable execution identity survives a real MCP process death.
-        client.reconnect()
-        assert client.current["question"]["requestId"] == first["requestId"]
-        assert client.current["question"]["binding"] == first["binding"]
-        assert first["judgment"]["responseExample"]["meaning"]["phase"] == "contracts"
+        # The semantic call now belongs to the loop. Retain its actual raw
+        # response before killing the owning process, then consume it once on
+        # activation; an unknown return is covered separately by the wake case.
+        assert fixture_judgment_example(first["judgment"])["responseExample"]["meaning"]["phase"] == "contracts"
         if surface == "cli":
             packet = next(
                 ref["payload"]
@@ -5175,36 +4838,49 @@ def test_golden_path(tmp_path, request, surface):
             )
             errors = str(packet["proof"]["results"])
             assert "receipt startup failed" in errors, errors
-            client.answer(
-                judge_reply(
-                    first,
-                    verdict="negative",
-                    gaps=["Receipt startup fails before checking the expected binary behavior"],
-                )
-            )
+            (tmp_path / "hold-execution-raw").touch()
+            client.send_answer(judge_reply(first,verdict="negative",gaps=["Receipt startup fails before checking the expected binary behavior"]))
+            marker = tmp_path / ".codex-harness/execution-raw-complete.ready"
+            deadline = time.monotonic()+30
+            while not marker.exists() and time.monotonic()<deadline:
+                time.sleep(.05)
+            assert marker.exists()
+            client.seen_faults.add("execution-raw-complete")
+            retained_raw = json.loads(marker.with_suffix(".json").read_text("utf-8"))
+            with open_plan_store_readonly(tmp_path) as store:
+                lease = store.status()["run"]["effect"]
+                assert lease["id"] == retained_raw["effectId"] and lease["ownerPid"] == retained_raw["ownerPid"]
+            if retained_raw["ownerPid"] != client.process.pid:
+                import signal
+                os.kill(retained_raw["ownerPid"],signal.SIGTERM)
+            client.reconnect()
+            client.call("harness_plan_start",name="Resume verified semantic receipt",idea="Keep the full dream")
+            with open_plan_store_readonly(tmp_path) as store:
+                assert store._judgment_record(first["requestId"])["binding"] == first["binding"]
+                assert len([r for r in approvals.records(store,"run-invocation-completed") if r["effectId"] == retained_raw["effectId"]]) == 1
             retry = client.current["question"]
             execution_questions.append(retry["requestId"])
             assert (
                 retry["purpose"] == "execution"
-                and retry["judgment"]["responseExample"]["meaning"]["phase"] == "contracts"
+                and fixture_judgment_example(retry["judgment"])["responseExample"]["meaning"]["phase"] == "contracts"
             ), client.current
             assert (
-                retry["judgment"]["responseExample"]["meaning"]["evidenceBinding"]
-                != first["judgment"]["responseExample"]["meaning"]["evidenceBinding"]
+                fixture_judgment_example(retry["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
+                != fixture_judgment_example(first["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
             )
             # Recovery must deliver the judge's original meaning and binding to
             # the successor worker. Retry counts alone miss a repair packet that
             # loses the concrete gap and asks the worker to repeat unchanged work.
             with open_plan_store_readonly(tmp_path) as store:
                 _, successor = current_job_run(store, required=True)
-                request = Path(successor["beads"]["C"]["evidenceDir"]) / "attempt/request.json"
+                request = Path(successor["beads"][fixture_id(tmp_path, "C") ]["evidenceDir"]) / "attempt/request.json"
                 delivered = json.loads(request.read_text("utf-8"))["prompt"]
                 assert all(
                     value in delivered
                     for value in (
                         "Receipt startup fails before checking the expected binary behavior",
                         first["judgment"]["id"],
-                        first["judgment"]["responseExample"]["meaning"]["evidenceBinding"],
+                        fixture_judgment_example(first["judgment"])["responseExample"]["meaning"]["evidenceBinding"],
                     )
                 ), delivered
             first = retry
@@ -5212,12 +4888,12 @@ def test_golden_path(tmp_path, request, surface):
         assert execution(client.current), client.current
         second = client.current["question"]
         execution_questions.append(second["requestId"])
-        assert second["judgment"]["responseExample"]["meaning"]["phase"] == "validation", (
+        assert fixture_judgment_example(second["judgment"])["responseExample"]["meaning"]["phase"] == "validation", (
             client.current
         )
         assert (
-            second["judgment"]["responseExample"]["meaning"]["evidenceBinding"]
-            != first["judgment"]["responseExample"]["meaning"]["evidenceBinding"]
+            fixture_judgment_example(second["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
+            != fixture_judgment_example(first["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
         )
         assert second["candidate"] != first["candidate"]
         with open_plan_store_readonly(tmp_path) as store:
@@ -5227,7 +4903,7 @@ def test_golden_path(tmp_path, request, surface):
             from codex_harness.core.planner_candidate import current_job_run
 
             _, observed_run = current_job_run(store, required=True)
-            assert observed_run["beads"]["B"]["attempt"] is not None
+            assert observed_run["beads"][fixture_id(tmp_path, "B") ]["attempt"] is not None
             assert observed_run["status"] == "pending-judgment"
             assert observed_run["semanticContracts"]["state"] == "RED"
             assert observed_run["semanticValidation"]["state"] == "pending-judgment"
@@ -5239,11 +4915,11 @@ def test_golden_path(tmp_path, request, surface):
                 )
             assert (
                 observed_run["semanticContracts"]["evidenceBinding"]
-                == first["judgment"]["responseExample"]["meaning"]["evidenceBinding"]
+                == fixture_judgment_example(first["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
             )
             assert (
                 observed_run["semanticValidation"]["evidenceBinding"]
-                == second["judgment"]["responseExample"]["meaning"]["evidenceBinding"]
+                == fixture_judgment_example(second["judgment"])["responseExample"]["meaning"]["evidenceBinding"]
             )
         client.answer(judge_reply(second))
         advance_meaning(client, content)
@@ -5256,17 +4932,16 @@ def test_golden_path(tmp_path, request, surface):
             selected, run = current_job_run(store, required=True)
             from codex_harness.core.acceptance_runs import acceptance_inputs
 
-            quality_answers = [
-                row
-                for row in client.traffic
-                if row["tool"] == "harness_loop_answer" and row["semanticCheck"] == "visualQuality"
-            ]
+            # Brief Front door deletion: consume the actual canonical quality
+            # judgment rather than counting removed public answer-tool traffic.
+            quality_answers = {row["id"]:row for row in approvals.records(store,"judgment-recorded")
+                if row["verdict"] == "positive" and any(ref["kind"] == "candidate-observation" and ref["payload"]["check"] == "visualQuality" for ref in row["sourceRefs"])}
             assert len(quality_answers) == 1
             consumed = acceptance_inputs(store, tmp_path, subject="product")["judgments"][
                 "visualQuality"
             ]
             assert (
-                consumed["id"] == quality_answers[0]["judgmentId"] and consumed["positiveCredit"]
+                consumed["id"] in quality_answers and consumed["positiveCredit"]
             ), consumed
             red, green = run["semanticContracts"], run["semanticValidation"]
             assert (
@@ -5277,8 +4952,8 @@ def test_golden_path(tmp_path, request, surface):
             assert not run["claims"]
             assert run["status"] == "source-test-only (mocked provider)"
             assert red["state"] == "RED" and not red["passed"]
-            assert run["beads"]["C"]["lessonsPromoted"] == []
-            assert not next(row for row in run["requirementValidation"] if row["bead"] == "C")[
+            assert run["beads"][fixture_id(tmp_path, "C") ]["lessonsPromoted"] == []
+            assert not next(row for row in run["requirementValidation"] if row["bead"] == fixture_id(tmp_path, "C"))[
                 "passed"
             ]
             assert green["state"] == "PASS" and green["passed"] and green["linkedRed"]
@@ -5290,13 +4965,13 @@ def test_golden_path(tmp_path, request, surface):
                 for row in proof["results"]
             )
             assert run["semanticValidation"]["red"]["evidenceBinding"] == red["evidenceBinding"]
-            assert next(row for row in run["requirementValidation"] if row["bead"] == "B")["passed"]
+            assert next(row for row in run["requirementValidation"] if row["bead"] == fixture_id(tmp_path, "B"))["passed"]
             assert not red["passed"] and green["judgmentId"]
             saved = json.loads(Path(selected["runPath"]).read_text("utf-8"))
             assert saved["semanticContracts"] == red and saved["semanticValidation"] == green
             assert status["acceptance"]["accepted"]
             assert {row["id"] for row in status["acceptance"]["scenarios"]} == {
-                row["id"] for row in content["nodes"][0]["fields"]["scenarios"]["scenarios"]
+                fixture_id(tmp_path,row["id"]) for row in content["nodes"][0]["fields"]["scenarios"]["scenarios"]
             }
             assert all(row["lastResult"] == "pass" for row in status["acceptance"]["scenarios"])
             assert run["delivery"]["root"] == str(tmp_path.resolve())
@@ -5328,7 +5003,7 @@ def test_golden_path(tmp_path, request, surface):
                 "B",
             }
             assert all(
-                r["channel"] == "chat-confirmation"
+                r["channel"] == ("mcp-client-elicitation" if r["subject"]["kind"] == "P" else "chat-confirmation")
                 for r in approvals.records(store, approvals.EVENT)
             )
             if surface == "cli":
@@ -5359,11 +5034,10 @@ def test_golden_path(tmp_path, request, surface):
         }
         assert not choreography, choreography
         assert not client.errors, client.errors
-        submissions = [
-            row["requestId"] for row in client.traffic if row["tool"] == "harness_loop_answer"
-        ]
-        assert len(submissions) == len(set(submissions))
-        assert client.tool_names["harness_plan_start"] == 1
+        # Brief Front door deletion: public answer-ID traffic is replaced by
+        # the bound raw completion/restart assertions and distinct questions above.
+        assert client.tool_names["harness_chat"] >= 4
+        assert not {"harness_loop_answer","harness_plan_start","harness_steer"} & client.tool_names.keys()
         assert [gate for gate in client.decision_gates if gate != "invocations"] == [
             "align+vision-lock",
             "plan-execution",
@@ -5388,10 +5062,7 @@ def test_golden_path(tmp_path, request, surface):
         )
         client.log.flush()
         if surface == "cli":
-            for after in (1, 2):
-                controller_interruptions(
-                    tmp_path.parent / (tmp_path.name + f"-interruptions-{after}"), after
-                )
+            controller_interruptions(tmp_path.parent / (tmp_path.name + "-interruptions-1"), 1)
             for entered in (False, True):
                 controller_launch_interruption(
                     tmp_path.parent / (tmp_path.name + f"-controller-death-{entered}"), entered

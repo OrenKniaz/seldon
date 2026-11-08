@@ -43,13 +43,19 @@ class PlannerServer(PlannerTransport):
             return super().handle_line(line)
         if not isinstance(request, dict):
             return super().handle_line(line)
+        if request.get("method") == "notifications/initialized":
+            reply = super().handle_line(line)
+            from codex_harness.core.run_chat import activate
+            activate(self.workspace,self._completed_calls.put,self.audits.wake)
+            return reply
         params = request.get("params", {})
         mutation = (
             request.get("method") == "tools/call"
             and isinstance(params, dict)
-            and params.get("name") in {"harness_plan_start", "harness_loop_answer", "harness_steer"}
-            and not params.get("arguments", {}).get("native_confirmation")
+            and params.get("name") in {"harness_chat"}
         )
+        if mutation and params.get("arguments", {}).get("text") == "/confirm":
+            mutation = False
         pending = self._pending_confirmation
         native_reply = (
             "method" not in request
@@ -97,7 +103,7 @@ class PlannerServer(PlannerTransport):
     def _store(self):
         if self.store is None:
             if not (self.workspace / ".codex-harness/plan.sqlite3").exists():
-                raise ValueError("Call harness_plan_start first")
+                raise ValueError("Call harness_chat first")
             self.store = open_plan_store(self.workspace)
         return self.store
 
@@ -114,7 +120,7 @@ class PlannerServer(PlannerTransport):
         return plan_status(self._store())
 
     def _wire_call_tool(self, name, arguments):
-        mutations = {"harness_plan_start", "harness_loop_answer", "harness_steer"}
+        mutations = {"harness_chat"}
         if name in mutations:
             return self.call_tool(name, arguments, schema_tools=self._wire_tools())
         previous = self.store
@@ -128,23 +134,23 @@ class PlannerServer(PlannerTransport):
             self.store = previous
 
     def _reply_error(self, error):
-        return dict(
-            isError=True,
-            content=[
-                dict(type="text", text=f"{getattr(error, 'code', 'operation-error')}: {error}")
-            ],
-        )
+        from codex_harness.core.planner_refusals import render
+        refusal = dict(code=getattr(error, "code", "operation-error"), reason=str(error),
+                       current=dict(workspace=str(self.workspace)),
+                       nextAction=getattr(error, "nextAction", "Read harness_plan_status and supply the named correction through harness_chat"))
+        return dict(isError=True, refusalCode=refusal["code"], structuredContent=dict(refusal=refusal),
+                    content=[dict(type="text", text=render(refusal))])
 
     def call_tool(self, name, arguments, *, schema_tools=None):
         try:
             tool = next((t for t in TOOLS if t["name"] == name), None)
             if tool is None:
                 raise ValueError(
-                    f"Unknown tool: {name}; use harness_plan_start, harness_loop_answer or harness_steer"
+                    f"Unknown tool: {name}; use harness_chat and read-only inspection"
                 )
             validate_input(arguments, tool["inputSchema"])
             data = self._dispatch(name, arguments)
-            if name in {"harness_loop_answer", "harness_steer"} and not data.get("answerOutcome"):
+            if name == "harness_chat" and not data.get("nativePermissionRequired"):
                 data = run_loop.wait_for_question(self._store())
             reply = dict(
                 isError=False,
@@ -164,26 +170,11 @@ class PlannerServer(PlannerTransport):
             return self._reply_error(error)
 
     def _dispatch(self, name, args):
-        if name == "harness_plan_start":
+        if name == "harness_chat":
+            from codex_harness.core.run_chat import chat
             if self.store is None:
-                self.store = open_plan_store(self.workspace, args["name"])
-            from codex_harness.core.run_setup import kickoff, validate
-            setup = kickoff(self.workspace) if run_loop.cursor(self.store) is None else None
-            if setup is not None:
-                validate(self.store, setup)
-            if not self.store._data()["nodes"]:
-                fields = {} if setup["planMode"] == "legacy" else dict(planMode="semantic-v1")
-                if setup["project"]:
-                    fields["setup"] = setup["project"]
-                self.store.upsert_node(dict(id="V1", kind="vision", title=args["name"],
-                    text=args["idea"], parents=[], fields=fields))
-            return run_loop.start(self.store, setup=setup)
-        if name == "harness_loop_answer":
-            return run_loop.answer(self._store(), **args)
-        if name == "harness_steer":
-            return run_loop.steer(
-                self._store(), **{k: v for k, v in args.items() if k != "native_confirmation"}
-            )
+                self.store = open_plan_store(self.workspace, self.workspace.name)
+            return chat(self.store, **args)
         if name == "harness_plan_status":
             return self._status()
         if name == "harness_schema":
@@ -233,11 +224,11 @@ class PlannerServer(PlannerTransport):
 
     def _begin_loop_confirmation(self, request_id, arguments):
         validate_input(
-            arguments, next(t["inputSchema"] for t in TOOLS if t["name"] == "harness_steer")
+            arguments, next(t["inputSchema"] for t in TOOLS if t["name"] == "harness_chat")
         )
         if not self._elicitation or not self._initialized:
             raise ValueError(
-                "Native elicitation unavailable; retain actual words through harness_steer user_words"
+                "Native elicitation unavailable; invocation permission remains pending; reconnect with a native confirmation host"
             )
         if self._pending_confirmation is not None:
             raise ValueError("Native confirmation already pending")
@@ -248,6 +239,8 @@ class PlannerServer(PlannerTransport):
             "invocations",
         }:
             raise ValueError("No native planning confirmation pending")
+        if arguments.get("reply_to") not in (None, request["request_id"]):
+            raise ValueError("Reply to the current displayed subject token")
         proposed = request.get("proposedAction", {})
         prepared = confirmations.prepare_confirmation(
             self._store(),
@@ -268,7 +261,8 @@ class PlannerServer(PlannerTransport):
             if data["state"] != "pending":
                 run_loop._decision(self.store, run, data)
             run_loop.save(self.store, run)
-        result = run_loop.run_loop(self.store)
+        run_loop.run_loop(self.store)
+        result = run_loop.wait_for_question(self.store)
         return dict(
             isError=error,
             structuredContent=result,

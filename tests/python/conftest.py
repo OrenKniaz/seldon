@@ -23,7 +23,23 @@ def tmp_path(tmp_path_factory):
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
-    items.sort(key=lambda item: item.path.name != "test_golden_path.py")
+    # xdist initially gives each worker two consecutive cases. Give HTTP/Shelf
+    # an idle parent, and start the real 125s stream on another existing worker.
+    def order(item):
+        if item.name.endswith("[http-domains]"):
+            return 0
+        if item.path.name == "test_suite_budget.py":
+            return 1
+        if item.name.endswith("[delivery]"):
+            return 2
+        if item.name.endswith("[reconnect-a]"):
+            return 3
+        if item.name == "test_golden_path[cli]":
+            return 4
+        if item.path.name == "test_module_size.py":
+            return 5
+        return 6
+    items.sort(key=order)
     config._suite_count = len(items)
 
 

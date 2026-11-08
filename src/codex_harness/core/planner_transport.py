@@ -27,9 +27,6 @@ class PlannerTransport:
             }
             if tool["name"] not in {"harness_schema", "harness_preflight", "harness_plan_status"}:
                 schema["required"].append("expected_workspace")
-            for branch in schema.get("oneOf", []):
-                if "maxProperties" in branch:
-                    branch["maxProperties"] += 1
         return tools
 
     def _workspace_binding(self, arguments):
@@ -270,7 +267,7 @@ class PlannerTransport:
             result = {
                 "protocolVersion": negotiated_version,
                 "serverInfo": {"name": "harness-planner", "version": "1.0.0"},
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {}, "logging": {}},
             }
         elif method in ("ping", "notifications/initialized"):
             result = {}
@@ -296,9 +293,9 @@ class PlannerTransport:
                     key: value for key, value in arguments.items() if key != "expected_workspace"
                 }
             if (
-                name == "harness_steer"
+                name == "harness_chat"
                 and isinstance(arguments, dict)
-                and arguments.get("native_confirmation") is True
+                and arguments.get("text") == "/confirm"
             ):
                 try:
                     response = self._begin_loop_confirmation(request_id, arguments)

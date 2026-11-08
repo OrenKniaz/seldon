@@ -8,6 +8,8 @@ def protocol(provider, *, text=None, model="source-only", effort=None):
     text = text or json.dumps(
         [{"node_id": "R1", "severity": "note", "finding": "SOURCE ONLY gap", "suggestion": ""}]
     )
+    if provider == "copilot":
+        return 0, json.dumps(dict(type="assistant.message",data=dict(content=text))), ""
     if provider == "codex":
         events = [
             {"type": "thread.started", "thread_id": session},
@@ -42,6 +44,7 @@ def protocol(provider, *, text=None, model="source-only", effort=None):
                 "session_id": session,
                 "permission_denials": [],
                 "result": text,
+                "structured_output": json.loads(text),
             },
         ]
         stderr = ""

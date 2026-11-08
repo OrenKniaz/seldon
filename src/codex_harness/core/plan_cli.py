@@ -2,28 +2,15 @@
 
 import json
 from codex_harness.core.mcp_planner import PlannerServer
-from codex_harness.core.planner_cli_input import parser, read_json
+from codex_harness.core.planner_cli_input import parser
 
 
 def main(argv=None):
     args = vars(parser().parse_args(argv))
     workspace, command = args.pop("workspace"), args.pop("command")
     args.pop("json")
-    for key in ("answer", "content", "user_words", "role_tuples"):
-        if args.get(key) is not None:
-            args[key] = read_json(args[key])
-    roles = args.pop("role_tuples", None)
-    if command == "start" and roles is not None:
-        from pathlib import Path
-        from codex_harness.core.record_io import read_record_json, write_record_json
-        path = Path(workspace).resolve() / ".codex-harness/setup.json"
-        settings = read_record_json(path) if path.is_file() else {}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_record_json(path, dict(settings, roleTuples=roles))
     names = dict(
-        start="plan_start",
-        answer="loop_answer",
-        steer="steer",
+        chat="chat",
         status="plan_status",
         schema="schema",
         nodes="nodes",

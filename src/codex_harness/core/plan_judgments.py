@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from codex_harness.core.planner_schema import (
     Judgment,
-    judgment_example,
     judgment_refs,
     judgment_response,
 )
@@ -100,7 +99,6 @@ class PlanJudgments:
                 source=None,
                 sourceVerified=False,
                 error=None,
-                **judgment_example(record),
             )
             self._event("judgment-recorded", record)
         return record
@@ -176,7 +174,7 @@ class PlanJudgments:
         )
 
     def submit_judgment(
-        self, *, judgment_id, response, source, review_context=None, apply_meaning=None
+        self, *, judgment_id, response, source, review_context=None, apply_meaning=None, decoder=None
     ) -> dict:
         """An initial response gets exactly two exact fixes; every return releases ownership."""
         _nonempty(source, "source")
@@ -185,6 +183,7 @@ class PlanJudgments:
 
             ensure_effect(self)
             record = self._judgment_record(judgment_id)
+            diagnostics = None
             if record["disposition"] in {"steer", "complete"}:
                 raise PlanStoreError(
                     "judgment-attempt-closed",
@@ -196,7 +195,7 @@ class PlanJudgments:
                 )
             else:
                 try:
-                    parsed = judgment_response(response, record)
+                    parsed = judgment_response(decoder(response, record) if decoder else response, record)
                     if apply_meaning is not None:
                         self.connection.execute("SAVEPOINT judgment_payload")
                         try:
@@ -209,6 +208,9 @@ class PlanJudgments:
                             raise
                         self.connection.execute("RELEASE judgment_payload")
                 except (ValueError, TypeError) as error:
+                    diagnostics = getattr(error, "diagnostics", None)
+                    if diagnostics:
+                        record["diagnostics"] = diagnostics
                     record.update(
                         error=str(error),
                         disposition="exact-fix" if record["fixesIssued"] < 2 else "steer",
@@ -217,6 +219,8 @@ class PlanJudgments:
                         record["fixesIssued"] += 1
                 else:
                     record.update(parsed, error=None)
+                    record.pop("diagnostics", None)
+                    record.pop("rejectedResponseEventId", None)
                     decided = parsed["verdict"] in {"positive", "negative"}
                     record.update(
                         status="judged" if decided else "pending-judgment",
@@ -233,6 +237,8 @@ class PlanJudgments:
                     sourceVerified=False,
                 ),
             )
+            if diagnostics:
+                record["rejectedResponseEventId"] = self.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
             self._event("judgment-recorded", record)
             facts = next(
                 (r["payload"]["facts"] for r in record["sourceRefs"] if "facts" in r["payload"]), {}

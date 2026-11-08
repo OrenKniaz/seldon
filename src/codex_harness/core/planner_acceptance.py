@@ -74,7 +74,7 @@ class AcceptanceOwner:
             quiescence="UNVERIFIED",
             ownershipReleased=state not in {"queued", "running", "unknown-interrupted"},
             resultScope="Captured snapshot; canonical freshness checks own current validity",
-            next="harness_steer: provide direction after inspecting retained acceptance evidence"
+            next="harness_chat: provide direction after inspecting retained acceptance evidence"
             if state == "unknown-interrupted"
             else None,
         )

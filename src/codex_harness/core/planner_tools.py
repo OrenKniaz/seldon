@@ -1,4 +1,4 @@
-"""The planner command surface: three mutations plus canonical inspection."""
+"""One chat mutation and canonical read-only inspection."""
 
 from codex_harness.core.spine import ALLOWED_PARENTS
 
@@ -31,43 +31,9 @@ def _tool(name: str, description: str, properties: dict, required=None) -> dict:
 
 TOOLS = [
     _tool(
-        "harness_plan_start",
-        "Start or reattach the durable run; returns its pending meaning or user decision.",
-        {
-            "name": STRING,
-            "idea": STRING,
-        },
-        ["name", "idea"],
-    ),
-    _tool(
-        "harness_loop_answer",
-        "Answer only the outstanding bound typed question. The run loop owns every transition.",
-        {"request_id": STRING, "answer": {"type": ["object", "string"]}, "source": STRING},
-    ),
-    _tool(
-        "harness_steer",
-        "Record direction/mail/user words; never infer consent. request_id/expected_revision copy "
-        "userRequest.request_id/plan_revision. Hash quoted_message's exact UTF-8 (no newline).",
-        {
-            "direction": {
-                "type": "string",
-                "enum": ["continue", "repair", "replan", "research", "ask_user", "pause", "stop"],
-            },
-            "rationale": STRING,
-            "content": {"type": "object"},
-            "user_words": _object(
-                {
-                    "request_id": STRING,
-                    "expected_revision": STRING,
-                    "quoted_message": STRING,
-                    "quote_sha256": STRING,
-                    "actor_label": STRING,
-                }
-            ),
-            "resume": {"type": "boolean"},
-            "native_confirmation": {"type": "boolean"},
-        },
-        ["direction", "rationale"],
+        "harness_chat",
+        "Relay the user's actual words and display Seldon's replies. The server owns all decisions, IDs, setup and transitions.",
+        {"text": STRING, "reply_to": STRING}, ["text"],
     ),
     _tool(
         "harness_judgment",

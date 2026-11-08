@@ -18,7 +18,7 @@ def record_refusals(method):
             tool = (
                 request.get("params", {}).get("name", "unknown-tool")
                 if request.get("method") == "tools/call"
-                else pending.get("tool_name", "harness_steer")
+                else pending.get("tool_name", "harness_chat")
             )
             if not result.get("isError"):
                 continue

@@ -58,7 +58,7 @@ def packet_view(store, bead_id: str, provider: str = "codex") -> dict:
     if manifest is None:
         raise ValueError(
             "No current compiled or published manifest. "
-            "Next: answer the author question or use harness_steer with missing canonical content"
+            "Next: answer the author question or use harness_chat with missing canonical content"
         )
     if bead_id not in manifest["beads"]:
         raise ValueError(f"Unknown bead: {bead_id}")

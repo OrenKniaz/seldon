@@ -14,7 +14,7 @@ CHAT = "chat-confirmation"
 NATIVE = "mcp-client-elicitation"
 
 
-def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, actor_label):
+def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, actor_label, message_id=None):
     if not all(isinstance(value, str) and value.strip() for value in (quoted_message, actor_label)):
         raise ValueError("chat-confirmation-quote-and-actor-required")
     expected = hashlib.sha256(quoted_message.encode("utf-8")).hexdigest()
@@ -30,6 +30,7 @@ def _chat_evidence(request_id, expected_revision, quoted_message, quote_sha256, 
         quote_sha256=expected,
         actor_label=actor_label,
         actor_identity_verified=False,
+        message_id=message_id,
         source_claim="latest-external-chat-message",
         source_verified=False,
     )
@@ -212,14 +213,24 @@ def apply_judgment(store, judgment):
 
 
 def complete_chat_confirmation(
-    store, request_id, *, gate, expected_revision, quoted_message, quote_sha256, actor_label
+    store, request_id, *, gate, expected_revision, quoted_message, quote_sha256, actor_label, message_id=None
 ):
     action, content, evidence = _chat_evidence(
-        request_id, expected_revision, quoted_message, quote_sha256, actor_label
+        request_id, expected_revision, quoted_message, quote_sha256, actor_label, message_id
     )
     return complete_confirmation(
         store, request_id, action, content, chat=evidence, expected_gate=gate
     )
+
+
+def permission_command(store, request, text, message_id):
+    """An exact, bound P command is structural consent, never interpreted approval."""
+    if request["gate"] != "invocations" or text != "/authorize":
+        raise ValueError("Use /authorize only for the displayed invocation permission")
+    action, content, evidence = _chat_evidence(request["request_id"], request["plan_revision"], text,
+        hashlib.sha256(text.encode("utf-8")).hexdigest(), "proxy:external-chat", message_id)
+    evidence["permissionCommand"] = text
+    return complete_confirmation(store, request["request_id"], action, content, chat=evidence, expected_gate="invocations")
 
 
 def complete_confirmation(

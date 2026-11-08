@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from codex_harness.core.provider_process import _run as _run
+from codex_harness.core.provider_response import _response as _response
 import hashlib
 import json
 import os
@@ -50,26 +51,29 @@ def coverage(selected):
     )
 
 
-def _launch_review(reviewer, packet, executable, *, instructions=None):
+def _launch_review(reviewer, packet, executable, *, instructions=None, answer_schema=None, schema_path=None, exact_fix=None):
     from codex_harness.core.provider_launch import get_adapter
     if not executable:
         raise OSError(f"Reviewer executable unavailable: {reviewer['provider']}")
     if "\n## Bound review requests\n" in packet:
-        requests = json.loads(packet.split("\n## Bound review requests\n", 1)[1])
-        packet += ("\n## Bound Judgment\n" + json.dumps(requests[reviewer["name"]], ensure_ascii=False)
-                   + "\nReturn ONLY JSON using responseExample's shape and responseGuidance; supply your own assessment.")
+        from codex_harness.core.run_context import review_packet
+        packet, answer_schema, schema_path = review_packet(reviewer, packet, exact_fix=exact_fix)
+    if answer_schema is not None:
+        Path(schema_path).write_text(json.dumps(answer_schema, ensure_ascii=False), encoding="utf-8")
     launch = get_adapter(reviewer["provider"]).provider_normal_command(
         prompt=packet,
         prompt_via_stdin=True,
         model=reviewer.get("model"),
         reasoning_effort=reviewer.get("effort"),
         executable=executable,
+        answer_schema=answer_schema,
+        schema_path=str(schema_path) if schema_path is not None else None,
     )
     if reviewer["provider"] == "codex":
         launch = replace(
             launch, command=(*launch.command[:-1], "--skip-git-repo-check", launch.command[-1])
         )
-    elif reviewer["provider"] == "claude":
+    elif reviewer["provider"] == "claude" and answer_schema is None:
         launch = replace(
             launch,
             command=(*launch.command, "--tools", ""),
@@ -99,34 +103,6 @@ def _launch_review(reviewer, packet, executable, *, instructions=None):
         else:
             raise ValueError("Readiness instruction channel supports codex and claude")
     return launch
-
-def _response(output: str, provider: str) -> str:
-    """Select final provider text; never mine earlier tool/event payloads."""
-    final = None
-    has_events = False
-    for line in output.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict) or "type" not in event:
-            continue
-        has_events = True
-        if provider == "codex" and event.get("type") == "item.completed":
-            item = event.get("item")
-            if isinstance(item, dict) and item.get("type") == "agent_message":
-                final = item.get("text")
-        elif provider == "claude" and event.get("type") == "result":
-            if event.get("is_error"):
-                raise ValueError(
-                    "Claude returned an error result: " + json.dumps(event, ensure_ascii=False)
-                )
-            final = event.get("result")
-    if has_events:
-        if not isinstance(final, str):
-            raise ValueError("Provider stream has no final review text")
-        return final
-    return output
 
 def packet_binding(output: str, provider: str) -> dict:
     """Label observed out-of-packet tools without changing review admission."""

@@ -1,6 +1,7 @@
 """Keep the owner-approved E2E journeys and structural guards as the entire suite."""
 
 import ast
+import subprocess
 from pathlib import Path
 
 CEILINGS = {"suite": 19}
@@ -34,4 +35,9 @@ def test_only_owner_approved_e2e_and_structural_guards(pytestconfig):
         "Seldon allows only golden-path/journey E2E tests (owner rule): "
         + ", ".join(sorted(forbidden))
     )
-    assert pytestconfig._suite_count <= CEILINGS["suite"]
+    # Behavioral journeys cannot catch an editable guard accepting its own raise.
+    guard = Path(__file__).relative_to(ROOT.parents[1]).as_posix()
+    committed = subprocess.check_output(["git", "show", f"HEAD:{guard}"], cwd=ROOT.parents[1], text=True)
+    baseline = next(ast.literal_eval(n.value) for n in ast.parse(committed).body
+                    if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "CEILINGS" for t in n.targets))
+    assert pytestconfig._suite_count <= CEILINGS["suite"] <= baseline["suite"]

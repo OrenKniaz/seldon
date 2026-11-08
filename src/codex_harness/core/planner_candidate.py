@@ -127,7 +127,7 @@ def current_job_run(store, *, required=False):
         reason = "retained candidate unavailable: " + str(error)
         job_id = candidate.get("jobId") if isinstance(candidate, dict) else None
         next_step = (
-            "harness_steer direction=repair with recorded planner meaning and retained observations"
+            "harness_chat direction=repair with recorded planner meaning and retained observations"
         )
         if required:
             raise ValueError(reason + "; Next: " + next_step) from error

@@ -160,7 +160,9 @@ def _semantic_validation(root, plan, record, phase):
     from codex_harness.core.dispatch_repository import _git
     from codex_harness.core.runners import executable_scenarios, execution_sources
 
-    sources = execution_sources(root, plan.trace)
+    owned = {name for bead in plan.beads.values() for name in bead.owned_files}
+    sources = execution_sources(root, plan.trace, owned)
+    implementation = sources.pop("implementation")
     if sources["missing"]:
         return dict(
             state="incomplete",
@@ -196,12 +198,9 @@ def _semantic_validation(root, plan, record, phase):
         )
         for s in document["scenarios"]
     ]
-    names = (
-        {name for bead in plan.beads.values() for name in bead.owned_files}
-        | {f["path"] for f in sources["files"]}
-        | set(((record.get("integrated") or {}).get("semantic") or {}).get("candidateFiles", {}))
-    )
-    before = {name: observed_files.get(name) for name in names}
+    before = {name: observed_files.get(name) for name in owned
+              | {f["path"] for f in sources["files"]}
+              | set(((record.get("integrated") or {}).get("semantic") or {}).get("candidateFiles", {}))}
     red = (
         next(
             (
@@ -287,6 +286,7 @@ def _semantic_validation(root, plan, record, phase):
         red=red,
         results=results,
         testSources=sources,
+        implementationSources=implementation,
         tests=tests,
     )
     proof["evidenceBinding"] = _evidence_digest(proof)

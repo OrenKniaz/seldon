@@ -3,6 +3,7 @@
 from codex_harness.core.record_io import read_record_json
 
 DEFAULT_WORKER = dict(provider="codex", model="gpt-6.1-sol", effort="medium")
+DEFAULT_PLANNER = dict(provider="codex", model="gpt-6-astra", effort="high")
 
 
 def kickoff(workspace):
@@ -11,8 +12,9 @@ def kickoff(workspace):
     from codex_harness.core.planner_inspection import validate_setup
     validate_setup(supplied.get("project", {}), workspace)
     worker = dict(DEFAULT_WORKER, **supplied.get("worker", {}))
-    planner = next((r for r in supplied.get("roleTuples", []) if r.get("role") == "planner"), DEFAULT_WORKER)
-    reviewers = supplied.get("reviewers", [dict(name=f"reviewer-{i}", **{k: planner.get(k) for k in DEFAULT_WORKER}) for i in (1, 2)])
+    planner = next((r for r in supplied.get("roleTuples", []) if r.get("role") == "planner"), DEFAULT_PLANNER)
+    review_default = dict(provider="codex", model="gpt-6.1-sol", effort="high") if planner["provider"] == "claude" else dict(provider="claude", model="claude-sonnet-5-5", effort="high")
+    reviewers = supplied.get("reviewers", [dict(name=f"reviewer-{i}", **review_default) for i in (1, 2)])
     return dict(worker=worker, reviewers=reviewers, roleTuples=supplied.get("roleTuples", []),
                 project=supplied.get("project", {}), planMode=supplied.get("planMode", "semantic-v1"),
                 max_parallel=supplied.get("max_parallel", 1), timeout=supplied.get("timeout", 900),
@@ -40,10 +42,14 @@ def workers(store, run):
 
 def resolve_roles(setup):
     roles = setup["roleTuples"]
-    planner = next((r for r in roles if r.get("role") == "planner"), dict(role="planner", name="planner", **DEFAULT_WORKER))
-    for role in ("planner", "judge"):
+    named = [r.get("role") for r in roles if r.get("role") != "reviewer"]
+    if len(named) != len(set(named)):
+        raise ValueError("setup.roleTuples: configure each semantic role once")
+    planner = next((r for r in roles if r.get("role") == "planner"), DEFAULT_PLANNER)
+    for role in ("planner", "judge", "mechanical"):
         if not any(r.get("role") == role for r in roles):
-            roles.append(dict(role=role, name=role, **{k: planner.get(k) for k in DEFAULT_WORKER}))
+            defaults = DEFAULT_WORKER if role == "mechanical" else planner
+            roles.append(dict(role=role, name=role, **{k: defaults[k] for k in DEFAULT_WORKER}))
 
 
 def validate(store, setup):
@@ -95,7 +101,7 @@ def adopt(store, run):
             if all(dict(role="reviewer", **r) in setup["roleTuples"] for r in reviewers):
                 setup["reviewers"] = reviewers
     validate(store, setup)
-    run.update(setup=setup, roleTuples=setup["roleTuples"], max_parallel=setup["max_parallel"],
+    run.update(setup=setup, max_parallel=setup["max_parallel"],
                timeout=setup["timeout"], reviewerNodeId="REVIEWERS_" + uuid4().hex)
 
 
@@ -123,7 +129,6 @@ def initialize(store, *, setup=None):
                 timeout=setup["timeout"],
                 setup=setup,
                 reviewerNodeId="REVIEWERS_" + uuid4().hex,
-                roleTuples=setup["roleTuples"],
                 nextAction="Author understanding and expansion",
                 reason="New dream",
             )
@@ -137,8 +142,8 @@ def initialize(store, *, setup=None):
                 _interrupt(store, run)
                 run.update(state="REVIEW", step="plan-review")
             save(store, run)
-        elif not {"planner", "judge"} <= {r["role"] for r in run["roleTuples"]}:
+        elif not {"planner", "judge", "mechanical"} <= {r["role"] for r in run["setup"]["roleTuples"]}:
             validate(store, run["setup"])
-            run["roleTuples"] = run["setup"]["roleTuples"]
+            run.pop("roleTuples", None)
             save(store, run)
     return run

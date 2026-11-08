@@ -15,7 +15,7 @@ def render_agents(text, *, remove=False):
     start, end = "<!-- seldon-init v1 begin -->", "<!-- seldon-init v1 end -->"
     block = (
         f"{start}\nFor requests to plan, build or implement a product in this project, use Seldon "
-        "harness_plan_start first; no special wording or plan mode request is needed.\n"
+        "harness_chat first; no special wording or plan mode request is needed.\n"
         "Do not write product source directly before Seldon's plan is published and worker "
         "execution is approved. Preserve Align/Vision/execution gates and higher-priority user "
         "instructions. Unrelated discussion and maintenance need no extra process.\n"

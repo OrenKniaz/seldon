@@ -312,7 +312,7 @@ INVALID_MESSAGES = {
 }
 
 def acceptance_next(reason, repo=None) -> str:
-    return "Read the durable run baton; answer its bound question or use harness_steer with recorded direction."
+    return "Read the durable run baton; answer its bound question or use harness_chat with recorded direction."
 
 
 def _refuse(reason, repo=None):

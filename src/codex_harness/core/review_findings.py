@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from codex_harness.core.plan_store import PlanStore
-from codex_harness.core.review_provider import _binding_fields, _response, packet_binding
+from codex_harness.core.run_questions import review_decoder
+from codex_harness.core.review_provider import _binding_fields, packet_binding
 
 def review_members(store, judgment, shard):
     from codex_harness.core.spine import scenario_nodes
@@ -36,15 +37,15 @@ def _parse_review_return(store, reviewer, shard, response, *, mocked):
     judgment = store.review_judgment(reviewer, shard, prepare=False)
     if not judgment.get("id"):
         raise ValueError("Prepare the bound 1j review before returning a verdict")
-    output = _response(response[1], reviewer["provider"])
     if judgment["disposition"] == "complete":
         from codex_harness.core.planner_schema import judgment_response
-        parsed = judgment_response(output, judgment)
+        parsed = judgment_response(review_decoder(reviewer["provider"], shard)(response[1], judgment), judgment)
         if any(parsed[key] != judgment[key] for key in parsed):
             raise ValueError("Original review reply differs from its retained judgment")
     else:
-        judgment = store.submit_judgment(judgment_id=judgment["id"], response=output,
-                                         source="review:" + reviewer["name"], review_context=_binding_fields(record))
+        judgment = store.submit_judgment(judgment_id=judgment["id"], response=response[1],
+                                         source="review:" + reviewer["name"], review_context=_binding_fields(record),
+                                         decoder=review_decoder(reviewer["provider"], shard))
     from codex_harness.core.acceptance_recovery import runtime_identity
     try:
         runtime = runtime_identity(reviewer["provider"], reviewer, response[1], response[2] if len(response) > 2 else "")
@@ -60,7 +61,6 @@ def _parse_review_return(store, reviewer, shard, response, *, mocked):
         record["invalid"] = 1
         return record, []
     return record, review_members(store, judgment, shard)
-
 def findings(store: PlanStore, status=None, *, expand=False) -> list[dict]:
     if status is not None and status not in ("open", "pending", "closed", "resolved", "rejected", "deferred"):
         raise ValueError("Unknown finding status")

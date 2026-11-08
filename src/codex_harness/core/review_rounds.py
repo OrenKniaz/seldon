@@ -128,11 +128,8 @@ def _review_shard(
             lambda response: _parse_review_return(
                 store, reviewer, shard, response, mocked=runner is not None
             ),
-            capture=(
-                lambda current, response: capture(reviewer, shard, current, executable, response)
-            )
-            if capture is not None
-            else None,
+            retry=lambda judgment: _launch_review(reviewer, shard["packet"], executable, exact_fix=judgment["error"]),
+            capture=(lambda current, response: capture(reviewer, shard, current, executable, response)) if capture is not None else None,
         )
         record["didRunProvider"] = runner is None
         record["exitCode"], output = response[:2]

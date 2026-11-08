@@ -104,7 +104,7 @@ def status(store, attempt_id):
         result.update(
             outcome="UNKNOWN",
             reason="Owner not observed; paid starts/liveness UNKNOWN. No automatic replay.",
-            next="harness_steer: provide direction after inspecting retained review evidence",
+            next="harness_chat: provide direction after inspecting retained review evidence",
         )
     return result
 
@@ -272,6 +272,6 @@ def review(
     except sqlite3.Error as error:
         raise PlanStoreError(
             "acceptance-review-interrupted",
-            f"Attempt {attempt.id}: {error}. Preserve original receipts; harness_steer supplies recorded "
+            f"Attempt {attempt.id}: {error}. Preserve original receipts; harness_chat supplies recorded "
             "direction to the run loop, which owns recovery and further admission.",
         ) from error

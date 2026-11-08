@@ -4,7 +4,7 @@ import json
 
 from codex_harness.core import approvals, review_provider
 from codex_harness.core.plan_types import PlanStoreError, _now
-from codex_harness.core.run_questions import decode_answer
+from codex_harness.core.run_context import packet as fresh_packet
 
 
 def invoke(store, selected, pending, timeout, binding):
@@ -15,11 +15,11 @@ def invoke(store, selected, pending, timeout, binding):
     packet = (
         "Return only structured semantics for the supplied answerSchema. "
         "Do not write source/tests, schedule work, grant consent or infer a human identity.\n"
-        "## Run question\n" + json.dumps(pending, ensure_ascii=False)
+        "## Run question\n" + json.dumps(fresh_packet(store, pending), ensure_ascii=False)
     )
-    launch = review_provider._launch_review(selected, packet, executable)
     directory = store.path.parent / "semantic-invocations" / binding["effectId"]
     directory.mkdir(parents=True)
+    launch = review_provider._launch_review(selected, packet, executable, answer_schema=pending["answerSchema"], schema_path=directory / "answer-schema.json")
     stop = store.path.parent / ("effect-stop-" + binding["effectId"])
     code, output, stderr, cleanup = review_provider._run(
         launch,
@@ -56,10 +56,7 @@ def invoke(store, selected, pending, timeout, binding):
         raise ValueError(
             f"Semantic invocation exited {code}; inspect retained provider result before direction"
         )
-    try:
-        return review_provider._response(output, selected["provider"])
-    except ValueError:
-        return output  # Malformed model output belongs to the existing 1j exact-fix owner.
+    return output
 
 
 def completed_response(store, effect, pending, roles):
@@ -83,8 +80,4 @@ def completed_response(store, effect, pending, roles):
     ):
         return None
     selected = next(r for r in roles if r["role"] == pending["role"])
-    try:
-        raw = review_provider._response(observed["stdout"], selected["provider"])
-    except ValueError:
-        raw = observed["stdout"]
-    return selected, decode_answer(pending, raw)
+    return selected, observed["stdout"]

@@ -15,12 +15,13 @@ from codex_harness.core.mail import Mailbox
 from codex_harness.core.plan_types import PlanStoreError, _now
 from codex_harness.core.run_ownership import ensure_effect
 from codex_harness.core.status_api import run_baton
-from codex_harness.core.run_content import apply_content, apply_answer
+from codex_harness.core.run_content import apply_answer
 from codex_harness.core.run_setup import initialize
-from codex_harness.core.run_questions import ask_question, decode_answer
+from codex_harness.core.run_questions import ask_question, response as question_response
 
 EVENT = "run-loop-cursor"
 TERMINAL = {"STOPPED", "DONE"}
+CONTROL_STATES = {"pause": "PAUSED", "stop": "STOPPED", "repair": "PLAN", "replan": "PLAN"}
 
 
 def cursor(store):
@@ -37,19 +38,19 @@ def save(store, run):
     store._event(EVENT, run)
 
 
-def _steering(store, run, reason):
+def _steering(store, run, reason, *, failed=None):
+    from codex_harness.core.run_context import recovery_context
+    context = recovery_context(store, run)
+    family = "direction"
+    if failed:
+        context = dict(failedRequestId=failed["id"], rejectedResponseEventId=failed.get("rejectedResponseEventId"),
+                       relationships=failed.get("diagnostics", {}).get("relationships", []),
+                       rejectedError=failed["error"], internalFailure=True)
+        if context["relationships"]:
+            family = "repair"
+            reason = "graph-relationships"
     run.update(state="STEER", question=None, effect=None)
-    ask_question(
-        store,
-        run,
-        "direction",
-        reason,
-        context=dict(
-            jobId=run.get("jobId"),
-            observation=run.get("observation"),
-            publicationRevision=run.get("publicationRevision"),
-        ),
-    )
+    ask_question(store, run, family, reason, context=context)
 
 
 def _user(store, run, gate, **scope):
@@ -96,8 +97,9 @@ def _pending(store, run):
         current = store.judgment(record["id"], candidate=record["candidate"])
         if not current["current"] or current["positiveCredit"] or current["concreteGap"]:
             continue
-        family = "user-interpretation" if record["question"] == "user-decision" else "assess"
-        ask_question(store, run, family, record["question"], judgment=current)
+        purpose = next((ref["payload"]["check"] for ref in record["sourceRefs"] if ref["kind"] == "candidate-observation"), record["question"])
+        family = "user-interpretation" if purpose == "user-decision" else "assess"
+        ask_question(store, run, family, purpose, judgment=current)
         return True
     needed = store.finding_state()["dispositionPrerequisite"]
     if not needed["complete"] and needed["nextAction"]["kind"] == "reconcile_findings":
@@ -115,14 +117,7 @@ def start(store, *, setup=None):
     return run_loop(store)
 
 
-def answer(store, *, request_id, answer, source):
-    initialize(store)
-    if outcome := _record_answer(store, request_id=request_id, answer=answer, source=source):
-        return dict(run_baton(store), answerOutcome=outcome)
-    return run_loop(store)
-
-
-def _record_answer(store, *, request_id, answer, source):
+def _record_answer(store, *, request_id, answer, source, provider=None):
     """Persist the answer, its canonical writes and the cursor before acknowledging."""
     with store._transaction():
         run = cursor(store)
@@ -142,41 +137,37 @@ def _record_answer(store, *, request_id, answer, source):
         if run.get("semanticHeld") and pending["family"] != "direction":
             raise PlanStoreError(
                 "semantic-new-evidence-required",
-                "Retain new evidence or explicit direction with harness_steer before another semantic attempt",
+                "Supply new evidence or direction through harness_chat before another semantic attempt",
             )
-        planner_answer = pending["family"] in {"author", "direction"}
-        if planner_answer:
-            record = retained
-            wrapped = dict(
-                judgmentId=record["id"],
-                binding=record["binding"],
-                verdict="positive",
-                rationale=answer.get("rationale", "Malformed author answer")
-                if isinstance(answer, dict)
-                else "Malformed author answer",
-                meaning=answer,
-                gaps=[],
-            )
-        else:
-            wrapped = answer
+        planner_answer = pending["family"] in {"author", "direction", "repair"}
         result = store.submit_judgment(
             judgment_id=pending["requestId"],
-            response=wrapped if isinstance(wrapped, str) else json.dumps(wrapped),
+            response=answer,
             source=source,
-            apply_meaning=(lambda meaning: apply_answer(store, pending, meaning))
-            if planner_answer
-            else None,
+            decoder=lambda raw, record: question_response(pending, raw, record, provider),
+            apply_meaning=(lambda meaning: apply_answer(store, pending, meaning)) if planner_answer else None,
         )
         result = store.judgment(result["id"], candidate=pending["candidate"])
         if result["disposition"] in {"exact-fix", "steer"}:
             if result["disposition"] == "steer":
-                _steering(store, run, result["error"])
+                if pending["family"] in {"direction", "repair"}:
+                    run.update(state="PAUSED", question=None, semanticHeld=True,
+                               reason=result["error"], nextAction="Supply new direction through harness_chat; steering exhausted")
+                else:
+                    _steering(store, run, result["error"], failed=result)
             save(store, run)
             return
+        meaning = result["meaning"]
+        if pending["purpose"] == "planning-size":
+            run["reply"] = f"Size: {meaning['size']}. {meaning['process']}. You may override the size in your own words."
+            store._event("chat-message", dict(role="seldon", text=run["reply"], sourceRequest=pending["requestId"]))
+        if meaning.get("reply"):
+            run["reply"] = meaning["reply"]
+            store._event("chat-message", dict(role="seldon", text=meaning["reply"], sourceRequest=pending["requestId"]))
         if result["verdict"] in {"inconclusive", "unsupported"}:
             run.update(
                 semanticHeld=True,
-                nextAction="Supply new evidence or recorded direction through harness_steer",
+                nextAction="Supply new evidence or recorded direction through harness_chat",
                 reason="Meaning remains pending; no invocation or reservation is held",
             )
             save(store, run)
@@ -222,26 +213,33 @@ def _record_answer(store, *, request_id, answer, source):
                 dict(
                     requestId=request_id,
                     family=pending["family"],
-                    answer=answer,
+                    answer=meaning,
                     source=source,
                     sourceVerified=False,
                 ),
             )
-            option = answer["option"]
+            option = meaning["option"] if pending["family"] == "direction" else meaning.get("readiness", "ready")
             if pending["family"] == "direction":
                 _direction(
                     store,
                     run,
                     option,
-                    answer["content"],
-                    answer["rationale"],
+                    ({"question": meaning["question"]} if meaning.get("question") else {}),
+                    meaning["rationale"],
                     direction_judgment_id=result["id"],
                 )
             elif option == "draft":
                 ask_question(store, run, "author", pending["purpose"], context=pending["context"])
             elif option in {"research", "ask_user"}:
-                _direction(store, run, option, answer["content"], answer["rationale"])
-            elif pending["purpose"] == "finding-dispositions" and not answer["content"].keys() - {"findings", "mail"}:
+                _direction(store, run, option, ({"question": meaning["question"]} if meaning.get("question") else {}), meaning["rationale"])
+            elif pending["purpose"] == "plan-outline":
+                outline = next(r for r in approvals.records(store,"trace-outline") if r["requestId"] == pending["requestId"])
+                context = {**pending["context"], **{k:v for k,v in outline.items() if k != "requestId"}}
+                if any(context[k] for k in ("nodes","targets","scenarios")):
+                    ask_question(store,run,"author","trace",context=context)
+                else:
+                    run.update(state="PLAN",step="prepare")
+            elif pending["purpose"] == "finding-dispositions":
                 pass
             elif run["step"] == "understanding":
                 _user(store, run, "align+vision-lock")
@@ -300,159 +298,107 @@ def _interrupt(store, run, *, advance_generation=True):
     run.update(question=None, effect=None, semanticHeld=False, settling=old_effect)
 
 
-def steer(store, *, direction, rationale, content=None, user_words=None, resume=False):
-    """An interrupt commits before cleanup; no launch can use the previous generation."""
-    content = content or {}
-    if direction not in {"pause", "stop"} or content or user_words is not None:
-        initialize(store)
+def user_reply(store, user_words):
+    """Retain words for the current displayed subject; no caller chooses transitions."""
+    initialize(store)
     with store._transaction():
         run = cursor(store)
         if run is None or run["state"] in TERMINAL:
+            raise PlanStoreError("run-terminal", "This run is terminal")
+        request = run.get("userRequest")
+        if not request or request.get("request_id") != user_words.get("request_id"):
             raise PlanStoreError(
-                "run-terminal",
-                "Use a new workspace for a new run; stopped continuation cannot be revived",
+                "user-subject-stale",
+                "Retain actual words for the current userRequest.request_id",
             )
-        if user_words is not None:
-            request = run.get("userRequest")
-            if not request or request.get("request_id") != user_words.get("request_id"):
-                raise PlanStoreError(
-                    "user-subject-stale",
-                    "Retain actual words for the current userRequest.request_id",
-                )
-            gate = request["gate"]
-            if user_words.get("expected_revision") != request["plan_revision"]:
-                raise PlanStoreError(
-                    "user-subject-stale", "Retain words against the current displayed revision"
-                )
-            confirmations._chat_evidence(
-                user_words["request_id"],
-                user_words["expected_revision"],
-                user_words["quoted_message"],
-                user_words["quote_sha256"],
-                user_words["actor_label"],
+        gate = request["gate"]
+        if user_words.get("expected_revision") != request["plan_revision"]:
+            raise PlanStoreError(
+                "user-subject-stale", "Retain words against the current displayed revision"
             )
-            if run.get("effect") or run.get("semanticHeld"):
-                _interrupt(store, run, advance_generation=False)
-            if gate == "C":
-                outcome = store.accept(
-                    by=user_words["actor_label"], statement=user_words["quoted_message"]
-                )
-                if outcome.get("judgment"):
-                    ask_question(
-                        store,
-                        run,
-                        "user-interpretation",
-                        "user-decision",
-                        judgment=outcome["judgment"],
-                    )
-                elif outcome.get("id"):
-                    run.update(
-                        state="DONE",
-                        userRequest=None,
-                        reason="Bound C accepted",
-                        nextAction="Complete",
-                    )
-            elif gate in {"research", "ask_user", "wave-check-in"}:
-                assessment = approvals.assess(
-                    store,
-                    "user-decision",
-                    dict(
-                        subject=request,
-                        words=user_words["quoted_message"],
-                        source=user_words,
-                        question="Interpret these retained actual user words for the displayed question; never infer human identity",
-                    ),
-                )
-                store._event(
-                    "run-user-words",
-                    dict(request=request, words=user_words, judgmentId=assessment["id"]),
-                )
+        if run.get("effect") or run.get("semanticHeld"):
+            _interrupt(store, run, advance_generation=False)
+        if gate == "C":
+            outcome = store.accept(
+                by=user_words["actor_label"], statement=user_words["quoted_message"]
+            )
+            if outcome.get("judgment"):
                 ask_question(
-                    store, run, "user-interpretation", "user-decision", judgment=assessment
+                    store,
+                    run,
+                    "user-interpretation",
+                    "user-decision",
+                    judgment=outcome["judgment"],
+                )
+            elif outcome.get("id"):
+                run.update(
+                    state="DONE",
+                    userRequest=None,
+                    reason="Bound C accepted",
+                    nextAction="Complete",
+                )
+        elif gate in {"research", "ask_user", "wave-check-in"}:
+            assessment = approvals.assess(
+                store,
+                "user-decision",
+                dict(
+                    subject=request,
+                    words=user_words["quoted_message"],
+                    source=user_words,
+                    question="Interpret these retained actual user words for the displayed question; never infer human identity",
+                ),
+            )
+            store._event(
+                "run-user-words",
+                dict(request=request, words=user_words, judgmentId=assessment["id"]),
+            )
+            ask_question(
+                store, run, "user-interpretation", "user-decision", judgment=assessment
+            )
+        else:
+            outcome = confirmations.complete_chat_confirmation(store, gate=gate, **user_words)
+            if outcome["state"] == "pending-judgment":
+                ask_question(
+                    store,
+                    run,
+                    "user-interpretation"
+                    if outcome["judgment"]["purpose"] == "user-decision"
+                    else "assess",
+                    outcome["judgment"]["purpose"],
+                    judgment=outcome["judgment"],
                 )
             else:
-                outcome = confirmations.complete_chat_confirmation(store, gate=gate, **user_words)
-                if outcome["state"] == "pending-judgment":
-                    ask_question(
-                        store,
-                        run,
-                        "user-interpretation"
-                        if outcome["judgment"]["purpose"] == "user-decision"
-                        else "assess",
-                        outcome["judgment"]["purpose"],
-                        judgment=outcome["judgment"],
-                    )
+                _decision(store, run, outcome)
+        save(store, run)
+    return run_loop(store)
+
+
+def control(store,text,message_id):
+    """Literal controls and permission-return continuation have one loop owner."""
+    with store._transaction():
+        run = cursor(store)
+        if run["state"] not in TERMINAL:
+            retained = run.get("userRequest")
+            _interrupt(store,run)
+            if text == "/resume" and not retained:
+                # Resume after a released attempt needs bound meaning; the
+                # recovery owner decides whether that direction permits work.
+                run["semanticHeld"] = False
+                _steering(store,run,"user-direction")
+            elif text == "/resume" and retained:
+                if retained["gate"] == "C":
+                    _offer_c(store,run)
+                elif retained["gate"] in {"align+vision-lock","plan-execution","invocations"}:
+                    scope = retained.get("proposedAction",{})
+                    _user(store,run,retained["gate"], **{k:v for k,v in dict(execution=scope.get("execution"),role_tuples=scope.get("roleTuples")).items() if v is not None})
                 else:
-                    _decision(store, run, outcome)
-            save(store, run)
-        else:
-            was_paused = run["state"] == "PAUSED"
-            if direction in {"continue", "repair", "replan"}:
-                if (
-                    run.get("semanticHeld")
-                    and (run.get("question") or {}).get("purpose") == "scope-intent"
-                ):
-                    run["freshConsent"] = True
-                pending_words = next(
-                    (
-                        r
-                        for r in approvals.records(store, "confirmation-pending-judgment")
-                        if r["gate"] == "plan-execution"
-                        and not any(
-                            c["request_id"] == r["request_id"]
-                            for c in approvals.records(store, confirmations.RESPONSE)
-                        )
-                    ),
-                    None,
-                )
-                if pending_words:
-                    run["pendingConsent"] = pending_words["request_id"]
-            if run["state"] == "PAUSED" and not resume and direction == "continue":
-                raise PlanStoreError(
-                    "run-explicit-resume-required", "Supply resume=true with actual user control"
-                )
-            _interrupt(store, run)
-            ask_question(
-                store,
-                run,
-                "direction",
-                "Unsolicited direction or actual user control",
-                context=dict(jobId=run.get("jobId")),
-            )
-            pending = store._judgment_record(run["question"]["requestId"])
-            meaning = dict(option=direction, rationale=rationale, content=content)
-            accepted = store.submit_judgment(
-                judgment_id=pending["id"],
-                response=json.dumps(
-                    dict(
-                        judgmentId=pending["id"],
-                        binding=pending["binding"],
-                        verdict="positive",
-                        rationale=rationale,
-                        meaning=meaning,
-                        gaps=[],
-                    )
-                ),
-                source="caller:unsolicited-direction",
-                apply_meaning=lambda meaning: apply_content(store, meaning["content"]),
-            )
-            if accepted["disposition"] == "complete":
-                run["question"] = None
-                _direction(
-                    store, run, direction, content, rationale, direction_judgment_id=accepted["id"]
-                )
-                if was_paused and not resume and direction != "stop":
-                    run.update(state="PAUSED", nextAction="Explicit user resume")
-                store._event(
-                    "run-control",
-                    dict(
-                        direction=direction,
-                        rationale=rationale,
-                        generation=run["generation"],
-                        content=content,
-                    ),
-                )
-            save(store, run)
+                    run.update(state="WAIT_USER",userRequest=retained)
+            else:
+                _direction(store,run,{"/pause":"pause","/stop":"stop","/resume":"continue"}[text],{},"Explicit user run control")
+                if text == "/pause":
+                    run["userRequest"] = retained
+            store._event("run-control",dict(direction=text[1:],messageId=message_id,generation=run["generation"]))
+            save(store,run)
     return run_loop(store)
 
 
@@ -480,13 +426,13 @@ def _direction(store, run, direction, content, rationale, *, direction_judgment_
         run["semanticHeld"] = True
     elif direction in {"pause", "stop"}:
         run.update(
-            state="PAUSED" if direction == "pause" else "STOPPED",
+            state=CONTROL_STATES[direction],
             nextAction="Explicit user resume" if direction == "pause" else "Terminal",
         )
     elif direction in {"repair", "replan"}:
         run.update(
             state="PLAN",
-            step="trace",
+            step=run.pop("returnAuthorStep", "trace"),
             repairDirection=direction_judgment_id if run.get("jobId") else None,
         )
     elif direction == "continue" and run.get("freshConsent"):
@@ -504,6 +450,7 @@ def _direction(store, run, direction, content, rationale, *, direction_judgment_
                 question=content.get("question"),
                 research=content.get("research"),
                 clarificationId=clarification,
+                returnStep=run["step"],
             ),
         )
     else:
@@ -654,7 +601,7 @@ def _consume_completed_effect(store, run, effect):
             from codex_harness.core.run_invocations import completed_response
 
             pending = run.get("question")
-            completed = completed_response(store, effect, pending, run["roleTuples"])
+            completed = completed_response(store, effect, pending, run["setup"]["roleTuples"])
             if completed is None:
                 return False
             selected, value = completed
@@ -676,6 +623,7 @@ def _consume_completed_effect(store, run, effect):
                 request_id=pending["requestId"],
                 answer=value,
                 source="provider-normal:" + selected["provider"] + ":" + selected["model"],
+                provider=selected["provider"],
             )
             run.clear()
             run.update(cursor(store))
@@ -749,7 +697,7 @@ def _step(store):
     with store._transaction():
         run = cursor(store)
         if run is None:
-            raise PlanStoreError("run-not-started", "Call harness_plan_start")
+            raise PlanStoreError("run-not-started", "Call harness_chat")
         for error in Mailbox.deliver_run_requests(store, run["runId"]):
             if run["state"] not in TERMINAL | {"PAUSED"}:
                 _steering(store, run, "Structured mail was refused by its owner: " + error)
@@ -808,9 +756,8 @@ def _step(store):
                         store,
                         run,
                         "author",
-                        run["step"],
+                        "plan-outline" if run["step"] == "trace" else run["step"],
                         context=dict(
-                            nodes=store.list_nodes(),
                             instructions="Author semantics only. Workers write source and tests.",
                         ),
                     )
@@ -1019,10 +966,8 @@ def _step(store):
         run = cursor(store)
 
 
-def review_response(store, launch, invoke, consume, capture=None):
+def review_response(store, launch, invoke, consume, retry, capture=None):
     """One retry policy; the existing judgment owns its exact-fix allowance."""
-    from dataclasses import replace
-
     while True:
         ensure_effect(store)
         if capture is not None:
@@ -1034,9 +979,7 @@ def review_response(store, launch, invoke, consume, capture=None):
         if record.get("disposition") != "exact-fix":
             return launch, response, record, items
         judgment = store.judgment(record["judgmentId"])
-        launch = replace(
-            launch, stdin_text=launch.stdin_text + "\nExact fix required: " + judgment["error"]
-        )
+        launch = retry(judgment)
 
 
 def review_dossier(
@@ -1373,7 +1316,7 @@ def _automatic_question(store):
                 or store._judgment_record(pending["requestId"])["disposition"] in {"steer", "complete"}):
             _record_answer(store, request_id=pending["requestId"], answer=None, source="run-loop:retained")
             return True
-        selected = next((r for r in run["roleTuples"] if r["role"] == pending["role"]), None)
+        selected = next((r for r in run["setup"]["roleTuples"] if r["role"] == pending["role"]), None)
         if selected is None:
             raise ValueError(f"setup.roleTuples: missing required {pending['role']} role; resolve kickoff before continuing")
         try:
@@ -1381,7 +1324,7 @@ def _automatic_question(store):
         except PlanStoreError:
             if not run.get("userRequest"):
                 run["afterPermission"] = run["state"]
-                _user(store, run, "invocations", role_tuples=run["roleTuples"])
+                _user(store, run, "invocations", role_tuples=run["setup"]["roleTuples"])
                 run.update(state=run["afterPermission"], question=pending,
                            nextAction="Answer the outstanding meaning or authorize its code-selected provider")
                 save(store, run)
@@ -1406,7 +1349,7 @@ def _automatic_question(store):
             run["timeout"],
             dict(workspace=str(store.workspace), generation=run["generation"], effectId=identifier),
         )
-        value = decode_answer(pending, raw)
+        value = raw
         with store._transaction():
             ensure_effect(store, run["generation"], identifier)
             current = cursor(store)
@@ -1428,6 +1371,7 @@ def _automatic_question(store):
                 request_id=pending["requestId"],
                 answer=value,
                 source=f"provider-normal:{selected['provider']}:{selected['model']}",
+                provider=selected["provider"],
             )
         return True
     except (ValueError, OSError) as error:
@@ -1446,8 +1390,14 @@ def _automatic_question(store):
 
 def wait_for_question(store):
     """A retained bounded segment may finish after its initiating MCP request is lost."""
-    while (run := cursor(store)).get("effect"):
-        effect = run["effect"]
+    while True:
+        run = cursor(store)
+        effect = run.get("effect")
+        if not effect:
+            if run["state"] in TERMINAL | {"PAUSED"} or run.get("semanticHeld") or run.get("userRequest"):
+                return run_baton(store)
+            run_loop(store)
+            continue
         expired = datetime.now(UTC) >= datetime.fromisoformat(effect["deadlineAt"])
         if effect["kind"] == "build":
             from codex_harness.core.planner_jobs import segment_status

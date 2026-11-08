@@ -56,7 +56,7 @@ def current(store, kind):
             for r in records(store, "confirmation-pending-judgment")
         ):
             return dict(saved, state="pending-judgment")
-    if saved and saved["state"] == "approved" and not saved.get("judgment"):
+    if saved and saved["state"] == "approved" and not saved.get("judgment") and not (kind == "P" and saved.get("explicitPermission") is True):
         return dict(saved, state="pending-judgment")
     return saved
 
@@ -214,6 +214,7 @@ def subject(store, kind, proposed_action=None):
             if set(role) != {"role", "name", "provider", "model", "effort"} or role["role"] not in {
                 "planner",
                 "judge",
+                "mechanical",
                 "reviewer",
             }:
                 raise ValueError("role tuple requires role, name, provider, model, effort")
@@ -403,7 +404,9 @@ def record_approval(
             and not (judgment.get("positiveCredit") or judgment.get("concreteGap"))
             else "stale"
         )
-    if state not in {"stale", "decline", "declined", "cancel", "pending-judgment"}:
+    native_permission = (payload["kind"] == "P" and affirmative and not conditions and state == "accept"
+        and (channel == "mcp-client-elicitation" or channel == "chat-confirmation" and (source or {}).get("permissionCommand") == "/authorize"))
+    if state not in {"stale", "decline", "declined", "cancel", "pending-judgment"} and not native_permission:
         if payload["kind"] == "A":
             judgment = expansion_assessment(store)
             if judgment["positiveCredit"] and request.get("deviation"):
@@ -451,6 +454,7 @@ def record_approval(
         state="approved" if affirmative and state == "accept" else state,
         request_id=request["request_id"],
         human_identity_verified=False,
+        explicitPermission=native_permission,
         judgment=judgment,
         deviation=request.get("deviation"),
     )
