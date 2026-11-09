@@ -6,6 +6,13 @@ import sys
 from .schema import answer_schema, validate
 from .store import encode
 
+TASTE = (" If this product has a user interface, it must look designed by someone with a point of view. "
+         "Avoid the default AI look: a system-font stack as the whole typography, a centered column on off-white, "
+         "a generic pill button, purple gradients, cards in cards, gray text on color, bounce easing. "
+         "Instead: one clear visual idea; deliberate type with real hierarchy from fonts available offline; "
+         "a confident color palette with strong contrast; generous rhythm in spacing; "
+         "motion that is brief, purposeful and honors reduced-motion; words a person would actually say.")
+
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and a complete quality bar. "
              "Improve it toward the most beautiful, simplest, most delightful version of what was asked, within scope. "
@@ -24,11 +31,11 @@ PROMPTS = {
     "REVIEW": "Does this plan deliver the accepted dream and its quality bar, as simply as possible? No implementation evidence is needed. "
               "The wave check-in is a Seldon workflow step, not product work or a product dependency.",
     "WORK": "Complete this task in its assigned worktree and owned files. Build it beautifully the first time: "
-            "max simple, max efficient, max delightful, nothing that does not earn its place. Report, do not prove.",
+            "max simple, max efficient, max delightful, nothing that does not earn its place. Report, do not prove." + TASTE,
     "JUDGE": "What does this evidence establish for the requested obligations? RED means a "
-             "functioning test observes missing behavior; GREEN judges verification-stage tests only. "
+             "functioning test fails because the product is not built yet: a missing product file or command IS valid RED; broken test tooling is not. GREEN judges verification-stage tests only. "
              "Walkthrough, guide, full trace and quality acceptance belong to demo after guide work. "
-             "At demo, judge real screenshots against the quality bar: working but plain is a gap. Output is the last 4 KiB per stream.",
+             "At demo, judge real screenshots against the quality bar: working but plain or forgettable is a gap. Output is the last 4 KiB per stream." + TASTE,
 }
 
 
