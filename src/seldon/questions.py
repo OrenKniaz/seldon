@@ -20,12 +20,12 @@ PROMPTS = {
     "DECIDE": "Interpret the supplied verbatim words about this exact displayed subject. "
               "For revise, state the requested change in why.",
     "PLAN": "What product work and semantic checks deliver the accepted vision, by the simplest design that reaches its quality bar? "
-            "Write only features, requirements, executable tests and productFiles/testFiles. "
+            "Describe features, requirements, executable tests and their file scopes. "
             "Commands are argv: [executable, argument, ...], never PowerShell or shell strings. "
-            "No beads, waves, check-in, guide or evidence paths: CODE owns those.",
+            "For multiple units, decompose semantic scopes and dependency indices; CODE assigns durable identities and schedules work.",
     "REPAIR": "What minimal product edits resolve the supplied cause and actual command output (last 4 KiB per stream)? "
-              "Edit vision/features/requirements/tests only. "
-              "CODE regenerates work; never edit beads or waves.",
+              "Amend product semantics and existing unit contracts together, including local requirement/test links and owned files. "
+              "CODE owns identities, scheduling and waves.",
     "IMPACT": "Does this proposed change preserve the user-authorized scope? Uncertainty grants no authorization.",
     "REVIEW": "Does this plan deliver the accepted dream and its quality bar, as simply as possible? No implementation evidence is needed.",
     "WORK": "Complete this task in its assigned worktree and owned files. Build it beautifully the first time: "
@@ -73,6 +73,9 @@ def build(kind, facts, context):
     contract = answer_schema(kind, facts, context)
     ref = next(iter(facts))
     example = deepcopy(EXAMPLES.get(kind, EXAMPLES["PLAN"]))
+    if kind == "PLAN" and context.get("size", "tiny") != "tiny":
+        example = {"edits": example["edits"], "units": [{"requirements": ["new:2"], "tests": ["new:3"],
+            "productFiles": example["productFiles"], "testFiles": example["testFiles"], "dependencies": []}]}
     if kind == "REPAIR":
         nodes = next((f["boundedContent"]["document"]["nodes"] for f in facts.values()
                       if "document" in f["boundedContent"]), {})

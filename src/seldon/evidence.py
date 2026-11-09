@@ -42,12 +42,22 @@ def save(store, attempt, purpose, candidate, results, document):
     for result in results:
         body = {key: (value[-4096:].decode("utf-8", errors="replace") if isinstance(value, bytes) else value)
                 for key, value in result.items() if key != "evidenceFiles"}
-        inputs = store.read(candidate)["files"]
+        scopes = {r: n["body"] for r, n in document["nodes"].items() if n["kind"] == "bead"}
+        owners = {r for r, scope in scopes.items() if result["test"] in scope["tests"]}
+        while True:
+            expanded = owners | {d for r in owners for d in scopes[r]["dependencies"]}
+            if expanded == owners:
+                break
+            owners = expanded
+        paths = {p for r in owners for p in scopes[r]["ownedPaths"]}
         if document["nodes"][result["test"]]["body"]["stage"] == "verification":
-            inputs = {p: h for p, h in inputs.items() if p != "TRY.txt"}
-        products = {p for n in document["nodes"].values() if n["kind"] == "bead" and n["body"]["task"] == "build"
-                    for p in n["body"]["ownedPaths"] if p != "TRY.txt"}
-        body.update(attempt=attempt, purpose=purpose, candidate=candidate, inputs=inputs,
+            paths.discard("TRY.txt")
+        inputs = {p: store.read(candidate)["files"].get(p) for p in paths}
+        products = {p for r in owners for p in scopes[r]["ownedPaths"] if p not in scopes[r]["testPaths"] and p != "TRY.txt"}
+        obligations = {r: digest(document["nodes"][r]) for owner in owners for r in scopes[owner]["requirements"]}
+        units = store.units()
+        scope_identities = {r: [digest(scopes[r]), units[r].get("checkGeneration", 0)] for r in owners}
+        body.update(attempt=attempt, purpose=purpose, candidate=candidate, inputs=inputs, obligations=obligations, scopes=scope_identities,
                     products={p: store.read(candidate)["files"].get(p) for p in products},
                     outputRefs=[store.artifact(result[s], attempt) for s in ("stdout", "stderr")],
                     artifactRefs=[store.artifact(Path(p).read_bytes(), attempt)
@@ -60,11 +70,16 @@ def facts(store, refs, candidate, document):
     """I6: the sole applicability/execution owner, shared by judgment and C."""
     delivered = store.read(candidate)["files"]
     result = {}
+    units = store.units()
     for ref in refs:
         body = store.read(ref)
         test = document["nodes"].get(body["test"], {}).get("body")
         applies = (test is not None and digest(test) == body["testIdentity"]
-                   and all(delivered.get(p) == h for p, h in {**body["inputs"], **body["products"]}.items()))
+                   and all(delivered.get(p) == h for p, h in {**body["inputs"], **body["products"]}.items())
+                   and all(r in document["nodes"] and digest(document["nodes"][r]) == h for r, h in body["obligations"].items()))
+        applies = applies and all(r in document["nodes"] and r in units and
+            [digest(document["nodes"][r]["body"]), units[r].get("checkGeneration", 0)] == identity
+            for r, identity in body["scopes"].items())
         statuses = [c["status"] for c in body["checks"]]
         usable = (body["executionStarted"] and body["cleanupVerified"] and not body["timedOut"]
                   and body["exitCode"] is not None and body["toolReady"] and any(s != "skipped" for s in statuses))

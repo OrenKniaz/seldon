@@ -30,13 +30,16 @@ def create(vision, answer):
     edits = list(answer["edits"])
     requirements = [e["targetHandle"] for e in edits if e["kind"] == "requirement"]
     tests = [e["targetHandle"] for e in edits if e["kind"] == "test"]
-    for task, paths in (("tests", answer["testFiles"]), ("build", [*answer["productFiles"], "TRY.txt"])):
-        edits.append({"kind": "bead", "targetHandle": "workflow:" + task, "typedBody": {
-            "task": task, "ownedPaths": paths, "dependencies": [], "requirements": requirements,
-            "tests": tests, "instructions": {"tests": "Write semantic checks for the declared tests and run them; save browser evidence in SELDON_EVIDENCE_DIR. The product does not exist yet, so done means the checks really execute and fail for that reason; that failure is the goal, not a blocker.",
-                "build": "Implement the accepted requirements and quality bar. Deliver TRY.txt with usage, demonstration and reproduction instructions."}[task]}})
+    scopes = answer.get("units", [{"requirements": requirements, "tests": tests,
+        "productFiles": answer.get("productFiles", []), "testFiles": answer.get("testFiles", []), "dependencies": []}])
+    for index, scope in enumerate(scopes, 1):
+        edits.append({"kind": "bead", "targetHandle": f"workflow:{index}", "typedBody": {
+            "ownedPaths": [*scope["testFiles"], *scope["productFiles"], *(["TRY.txt"] if index == len(scopes) else [])],
+            "testPaths": scope["testFiles"], "dependencies": [f"workflow:{int(d)}" for d in scope["dependencies"]],
+            "requirements": scope["requirements"], "tests": scope["tests"],
+            "instructions": "Deliver these obligations and semantic checks; final delivery includes TRY.txt with reproduction instructions."}})
     edits.append({"kind": "wave", "targetHandle": "workflow:wave", "typedBody": {
-        "goal": "Deliver the accepted product", "beads": ["workflow:tests", "workflow:build"]}})
+        "goal": "Deliver the accepted product", "beads": [f"workflow:{i}" for i in range(1, len(scopes) + 1)]}})
     return apply({"nodes": {"vision": {"kind": "vision", "body": vision}}}, edits)
 
 
@@ -71,9 +74,6 @@ def apply(document, edits):
             node["body"][relation] = list(dict.fromkeys(
                 target for ref in links
                 for target in replacements.get(ref, [ref])))
-    for bead in (n["body"] for n in nodes.values() if n["kind"] == "bead"):
-        bead["tests"] += [r for r in handles.values() if nodes.get(r, {}).get("kind") == "test"
-                          and r not in bead["tests"] and set(nodes[r]["body"]["requirements"]).intersection(bead["requirements"])]
     if edits and nodes == document["nodes"]:
         raise ValueError("Repair changes nothing; unresolved gap requires a concrete edit")
     result = {"nodes": nodes, "nextHandle": maximum + len(slots) + 1}
@@ -81,9 +81,10 @@ def apply(document, edits):
     return result
 
 
-def affected(before, after):
+def affected(before, after, roots=()):
     changed = {ref for ref in before["nodes"].keys() | after["nodes"].keys()
                if before["nodes"].get(ref) != after["nodes"].get(ref)}
+    changed.update(roots)
     while True:
         downstream = {ref for ref, node in after["nodes"].items()
                       if any(changed.intersection(node["body"][relation])
@@ -113,7 +114,7 @@ def validate(plan):
     for kind in ("feature", "requirement", "test", "bead", "wave"):
         if not select(plan, kind):
             errors.append(f"Plan needs {kind} records")
-    products = {p for b in select(plan, "bead").values() if b["task"] == "build" for p in b["ownedPaths"]}
+    products = {p for b in select(plan, "bead").values() for p in b["ownedPaths"] if p not in b["testPaths"]}
     for ref, test in select(plan, "test").items():
         executable = test["command"][0]
         if executable.replace("\\", "/").removeprefix("./") not in products and not shutil.which(executable):
@@ -128,25 +129,19 @@ def validate(plan):
             errors.append(f"Uncovered trace records: {targets.keys() - covered}")
     if not any(test["stage"] == "verification" for test in tests.values()):
         errors.append("Plan requires verification commands")
-    tasks = {b["task"] for b in beads.values()}
-    if tasks != {"tests", "build"}:
-        errors.append("Plan requires tests and build work")
     if set(beads) != {
             r for w in select(plan, "wave").values() for r in w["beads"]}:
         errors.append("Waves must cover all product work")
-    paths = {}
     for ref, bead in beads.items():
-        order = {"tests": 0, "build": 1}
-        if any(order[beads[dep]["task"]] > order[bead["task"]] for dep in bead["dependencies"] if dep in beads):
-            errors.append("Product dependencies cannot reverse CODE-owned task ordering")
+        if not set(bead["testPaths"]) <= set(bead["ownedPaths"]):
+            errors.append("Unit test paths must be owned")
+        if not set(bead["requirements"]) >= {r for t in bead["tests"] if t in tests for r in tests[t]["requirements"]}:
+            errors.append("Unit checks must refer to its own obligations")
         for path in bead["ownedPaths"]:
             try:
                 safe_path(path)
             except ValueError as error:
                 errors.append(str(error))
-            if path in paths:
-                errors.append(f"Two writers own {path}")
-            paths[path] = ref
     from graphlib import TopologicalSorter, CycleError
     try:
         tuple(TopologicalSorter({r: b["dependencies"] for r, b in beads.items()}).static_order())

@@ -2,7 +2,10 @@
 
 import hashlib
 import json
+import os
+import uuid
 import sqlite3
+import threading
 from contextlib import contextmanager
 
 
@@ -17,23 +20,48 @@ def digest(value):
 class Store:
     def __init__(self, project):
         self.root = project / ".seldon"
-        self.root.mkdir()
-        (self.root / "artifacts").mkdir()
-        self.db = sqlite3.connect(self.root / "state.sqlite3")
+        self.root.mkdir(exist_ok=True)
+        (self.root / "artifacts").mkdir(exist_ok=True)
+        self._local = threading.local()
+        self._lock = threading.RLock()
         self.db.executescript("""
-            CREATE TABLE run (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL);
-            CREATE TABLE plan_revision (id INTEGER PRIMARY KEY, parent INTEGER,
+            CREATE TABLE IF NOT EXISTS run (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS plan_revision (id INTEGER PRIMARY KEY, parent INTEGER,
                                         digest TEXT NOT NULL, document TEXT NOT NULL);
-            CREATE TABLE record (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL);
-            CREATE TABLE artifact (digest TEXT PRIMARY KEY, location TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS record (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS artifact (digest TEXT PRIMARY KEY, location TEXT NOT NULL,
                                    producer TEXT NOT NULL, media_type TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS unit (id TEXT PRIMARY KEY, body TEXT NOT NULL);
         """)
         self.db.commit()
 
     @contextmanager
     def transaction(self):
-        with self.db:
-            yield
+        with self._lock:
+            nested = self.db.in_transaction
+            if not nested:
+                self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                if not nested:
+                    self.db.commit()
+            except BaseException:
+                if not nested:
+                    self.db.rollback()
+                raise
+
+    @property
+    def db(self):
+        if not hasattr(self._local, "db"):
+            self._local.db = sqlite3.connect(self.root / "state.sqlite3", isolation_level=None, timeout=30)
+        return self._local.db
+
+    def units(self):
+        return {ref: json.loads(body) for ref, body in self.db.execute("SELECT id,body FROM unit ORDER BY rowid")}
+
+    def unit(self, ref, body):
+        self.db.execute("INSERT INTO unit VALUES (?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                        (ref, encode(body)))
 
     def record(self, kind, body):
         row = self.db.execute("INSERT INTO record(kind,body) VALUES (?,?)", (kind, encode(body)))
@@ -70,10 +98,30 @@ class Store:
         key = hashlib.sha256(content).hexdigest()
         location = f"artifacts/{key}"
         path = self.root / location
-        if not path.exists():
-            path.write_bytes(content)
-        self.db.execute("INSERT OR IGNORE INTO artifact VALUES (?,?,?,?)",
-                        (key, location, producer, media_type))
+        with self._lock:
+            if not path.exists():
+                temporary = path.with_name(key + "-" + uuid.uuid4().hex)
+                temporary.write_bytes(content)
+                os.replace(temporary, path)
+            self.db.execute("INSERT OR IGNORE INTO artifact VALUES (?,?,?,?)",
+                            (key, location, producer, media_type))
         return key
 
-    # C19 extension: sourced lessons and structured mail are additional record kinds.
+    def claim_controller(self):
+        """C23/I6: reopening cannot race a surviving controller."""
+        lease = (self.root / "controller.lock").open("a+b")
+        if lease.tell() == 0:
+            lease.write(b"0")
+            lease.flush()
+        lease.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lease.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lease.close()
+            raise ValueError("Another controller owns this run; wait for it to exit") from None
+        return lease

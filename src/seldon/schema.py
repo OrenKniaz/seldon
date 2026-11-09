@@ -27,7 +27,7 @@ BODIES = {
     "test": obj(purpose=TEXT, stage=choice("verification", "walkthrough"),
                 command=COMMAND, requiredEnvironment=REFS, expectedEvidence=TEXT,
                 requirements=array(TEXT, 1)),
-    "bead": obj(task=choice("tests", "build"), instructions=TEXT,
+    "bead": obj(instructions=TEXT, testPaths=array(TEXT, 1),
                 ownedPaths=array(TEXT, 1), dependencies=REFS,
                 requirements=array(TEXT, 1), tests=array(TEXT, 1)),
     "wave": obj(goal=TEXT, beads=array(TEXT, 1)),
@@ -61,17 +61,25 @@ def answer_schema(kind, facts, context):
         bodies = {k: BODIES[k] for k in ("feature", "requirement", "test")}
         if kind == "REPAIR":
             bodies = {"vision": VISION, **bodies}
+            if context.get("units"):
+                bodies["bead"] = BODIES["bead"]
         for node_kind, body in bodies.items():
             body = deepcopy(body)
             from .plan import LINKS
             for relation in LINKS.get(node_kind, {}):
                 body["properties"][relation]["items"] = choice(*handles, *slots)
-            puts.append(obj(kind=choice(node_kind), targetHandle=choice(*handles, *slots), typedBody=body))
+            targets_for_kind = context.get("units", []) if node_kind == "bead" else [*handles, *slots]
+            puts.append(obj(kind=choice(node_kind), targetHandle=choice(*targets_for_kind), typedBody=body))
         edits = puts if kind == "PLAN" else [*puts,
             obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(choice(*handles, *slots)))]
         payload = obj(edits=array({"anyOf": edits}, 1))
         if kind == "PLAN":
-            payload = obj(**payload["properties"], productFiles=array(TEXT, 1), testFiles=array(TEXT, 1))
+            if context.get("size", "tiny") == "tiny":
+                payload = obj(**payload["properties"], productFiles=array(TEXT, 1), testFiles=array(TEXT, 1))
+            else:
+                scope = obj(requirements=array(choice(*handles, *slots), 1), tests=array(choice(*handles, *slots), 1),
+                    productFiles=array(TEXT, 1), testFiles=array(TEXT, 1), dependencies=REFS)
+                payload = obj(**payload["properties"], units=array(scope, 1))
     for field in ("gaps", "discoveries", "neededFacts"):
         if field in payload["properties"]:
             payload["properties"][field]["items"]["properties"]["target"] = reference
