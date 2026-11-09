@@ -1,5 +1,6 @@
-# SELDON CHARTER v1.2 — the hard goal
+# SELDON CHARTER v1.3 — the hard goal
 
+> **Status: RATIFIED v1.3 by Oren, 2026-11-09 (choice delegated to CC: "Your choice I'm ok with either"). Adds the clean-code rule to I9; nothing else changed. v1.2 text below stands.**
 > **Status: RATIFIED v1.2 by Oren, 2026-11-07 ("yes I ratify v1.2"). Binding; supersedes v1.1 (2026-11-04) and v1.0.** v1.2 adds: Seldon calls the LLM (C1, C20, I10) and the LLM-or-code design rule (§6). `AGENTS.md` line 1 points here; every brief cites C#/I#.
 > **Only Oren changes this document.** CC/DOT may propose edits with reasons. North Stars, plans, specs, spikes and briefs sit *below* it, must trace to it, and never replace it.
 > Sources: Oren's statements (March → 11-07) and his 67 answers (`SELDON-CHARTER-ANSWERS-2026-11-04.md`), North Stars v3/v4, ASTRA-DESIGN-1/2.
@@ -58,7 +59,7 @@ Seldon is the user's **cofounder, friend and competitor**: it improves the dream
 - **I7 Product-neutral.** No assumption of CLI, Python, static web, a language, or N beads.
 - **I8 Every refusal teaches.** It names the one concrete fix.
 - **I10 Questions, not tools.** Each LLM call answers exactly one typed question chosen by the loop: a small schema (enum choices where the answer is a choice), a few-shot example, and the facts it needs supplied by code (setup, store, retrieval), never asked of the LLM. Structure (setup, reviewers, providers, gate order, IDs) comes from kickoff, defaults or the store. Invalid answer → C4's two exact-fix retries, then judge/steer.
-- **I9 Thin and deleting.** One shared rule beats a special case. Every blocker gets `TRIAGE: BUG|DESIGN — why — sibling cases`; DESIGN = fix the shared rule, never patch. No god files.
+- **I9 Thin and deleting.** One shared rule beats a special case. Every blocker gets `TRIAGE: BUG|DESIGN — why — sibling cases`; DESIGN = fix the shared rule, never patch. No god files. One way to do each thing. Every module names the charter clause it serves; no clause, no module. Code written before a charter change earns its place or is deleted; it is never kept for compatibility.
 
 ## 4. The journey (the size router collapses steps for small dreams)
 Align (size routed) → Expand → **A: understanding + Vision Lock** → Research (if unknowns) → Spec (features, stories, requirements, architecture, contracts, planned tests) → Wave + bead plan → multi-model plan review → **B: plan approval** → per wave: tests-first RED → parallel beads in worktrees → integrate → semantic tests GREEN → steer → **check-in** → next wave → real-dream validation (trace complete, no stubs, UX bar) → repair waves if needed → live demo + try-it guide → **C: acceptance**.
