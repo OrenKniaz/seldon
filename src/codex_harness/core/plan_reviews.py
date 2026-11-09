@@ -506,7 +506,8 @@ class PlanReviews:
                 "audit-binding-required: legacy unbound prospective history "
                 "grants no current credit"
             )
-        if not self.review_prerequisite(revision)["complete"]:
+        prerequisite = self.review_prerequisite(revision)
+        if not (prerequisite["complete"] or prerequisite["unavailable"]):
             missing.append(
                 "current positive verdict from every selected reviewer and current convergence judgment"
             )

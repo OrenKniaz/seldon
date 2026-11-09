@@ -487,9 +487,11 @@ class PlanAcceptance:
         _, node, _ = selection_inputs(self)
         selected = delivery_review_selection(node["fields"])[0] if node else []
         expected = {(r["provider"], r["name"]) for r in selected}
+        if node and not selected:
+            return dict(complete=False, unavailable=True, reviews=[], convergence=None)
         convergence = self.review_convergence() if reviews else None
         return dict(
-            complete=bool(node)
+            complete=bool(expected)
             and expected <= {(r["provider"], r["reviewer"]) for r in reviews}
             and not any(
                 r["submitReady"] and r["question"] == "plan-review" and r["acceptanceRunId"] is None
@@ -502,6 +504,7 @@ class PlanAcceptance:
             ),
             reviews=reviews,
             convergence=convergence,
+            unavailable=False,
         )
 
     def acceptance_findings(self) -> list[dict]:

@@ -874,7 +874,7 @@ if provider=="codex": print(json.dumps(dict(type="turn.completed")),flush=True)
                 (workspace / "clock-shift").write_text(str(float(args[1]) + 1))
                 run_invocations._now = lambda: AwakeClock.now(UTC).isoformat()
             return actual_return
-        if launch.cli == "claude" and (workspace / "review-auth-fault").exists():
+        if (workspace / "review-auth-fault").exists() and (launch.cli == "claude" or (workspace / "review-auth-fault").read_text() == "all"):
             return 1, json.dumps([dict(type="assistant", error="authentication_failed", is_api_error_message=True,
                 message=dict(content=[dict(type="text", text="Failed to authenticate: OAuth session expired and could not be refreshed")])),
                 dict(type="result", is_error=True, result="Failed to authenticate: OAuth session expired and could not be refreshed")]), ""
@@ -4329,7 +4329,7 @@ def plan_content(surface="cli"):
 
 
 @timed
-def small_plan_golden(workspace, *, size="small", auth_fault=False):
+def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=False):
     """C5/C9/C11: eligible dreams reach B with five kinds and size-scaled review.
 
     Catch r24: incomplete Spec escaped to prepare and asked the user to repair.
@@ -4341,6 +4341,8 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False):
     Catch r26: ordinary success measures forced full trace; empty measures missed it.
     Catch r27: an expired reviewer session must reach B with an honest tier and
     only the normal A/B questions; successful-provider journeys missed reselection.
+    All reviewers unavailable must remain visibly uncredited at B. A dialogue-ID
+    gap must become a semantic refusal, not a citation error; prior gaps cited nodes.
     """
     from tests.python.core.mcp_planner_support import LoopClient, provider_shape
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
@@ -4350,7 +4352,7 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False):
         settings["reviewers"] = [dict(r, provider="claude", model="claude-sonnet-5-5") for r in settings["reviewers"]]
     client = LoopClient(workspace, kickoff=settings)
     if auth_fault:
-        (workspace / "review-auth-fault").touch()
+        (workspace / "review-auth-fault").write_text(str(auth_fault))
     def correction(edits, additions=()):
         return json.dumps(provider_shape(client.current["question"]["answerSchema"],dict(edits=edits,add=list(additions),rationale="Correct only the named obligations",reply="Retain the rest of the plan")))
     content = dict(nodes=[dict(id="V1",kind="vision",title="Small notes",parents=[],
@@ -4363,6 +4365,14 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False):
             stopConditions=["Acceptance remains incomplete if saved notes change after restart"])
     try:
         client.call("harness_plan_start", name="Small notes", idea=content["nodes"][0]["text"])
+        if facts_fault:
+            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "planning-size")
+            message = next(r["id"] for r in client.offered["packet"]["facts"]["dialogue"] if r["role"] == "user")
+            answer = json.loads(provider_answer(workspace,client.current["question"],judge_reply(client.current["question"],verdict="negative")))
+            answer["gaps"] = [dict(subjectRef=message,evidenceRefs=[message],issue="The supplied dream does not establish whether this is a brownfield change")]
+            client.answer(json.dumps(answer))
+            assert client.current["state"] == "STEER" and "brownfield" in client.current["reason"]
+            return
         advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "planning-size")
         sizing = judge_reply(client.current["question"])
         sizing["meaning"].update(size=size, process="One complete plan and consequence-scaled independent review")
@@ -4425,12 +4435,18 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False):
             assert store._judgment_record(pending["requestId"])["fixesIssued"] == 2
             assert approvals.current(store,"A") and not approvals.current(store,"B")
             assert len([r for r in approvals.records(store,"chat-message") if r.get("role") == "user"]) == 2
-            assert store.review_prerequisite(store.manifest_revision())["complete"]
+            prerequisite = store.review_prerequisite(store.manifest_revision())
+            assert prerequisite["complete"] == (auth_fault != "all") and prerequisite["unavailable"] == (auth_fault == "all")
             rounds = approvals.records(store,"roundtable-completed")
             if auth_fault:
                 card = client.current["userRequest"]
-                assert card["subject"]["reviewTier"] == "same-model" and "Review tier: same-model" in card["card"]
-                assert {r["provider"] for r in card["subject"]["reviewers"]} == {"codex"}
+                tier = "unavailable" if auth_fault == "all" else "same-model"
+                assert card["subject"]["reviewTier"] == tier and f"Review tier: {tier}" in card["card"]
+                if auth_fault == "all":
+                    assert not card["subject"]["reviewComplete"] and not prerequisite["reviews"]
+                    assert "No independent review ran" in card["card"]
+                else:
+                    assert {r["provider"] for r in card["subject"]["reviewers"]} == {"codex"}
                 assert not any(r["family"] == "direction" for r in approvals.records(store,"loop-question"))
             else:
                 assert len(rounds) == 1 and all(r["shards"] == 1 for r in rounds[0]["reviewers"])
@@ -4525,8 +4541,10 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False):
         assert any(key.endswith(":fields.baseline") for key in client.current["question"]["answerSchema"]["properties"]["edits"]["properties"]), "Fuller contract cannot author baseline provenance"
     finally:
         client.close()
-    if size == "small" and not auth_fault:
+    if size == "small" and not auth_fault and not facts_fault:
         small_plan_golden(workspace / "auth-twin", auth_fault=True)
+        small_plan_golden(workspace / "unavailable-twin", auth_fault="all")
+        small_plan_golden(workspace / "facts-twin", facts_fault=True)
 
 
 def kickoff_content(surface="cli"):

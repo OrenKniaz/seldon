@@ -134,7 +134,7 @@ def start(store, *, setup=None):
     return run_loop(store)
 
 
-def _record_answer(store, *, request_id, answer, source, provider=None):
+def _record_answer(store, *, request_id, answer, source, provider=None, facts=None):
     """Persist the answer, its canonical writes and the cursor before acknowledging."""
     with store._transaction():
         run = cursor(store)
@@ -158,12 +158,11 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
             )
         planner_answer = pending["family"] in {"author", "direction", "repair"}
         pending = dict(pending, context={**pending["context"], **retained.get("diagnostics",{})})
-        supplied_facts = next((r.get("facts") for r in approvals.records(store, "run-invocation-observed") if r["effectId"] == (run.get("effect") or {}).get("id")), None)
         result = store.submit_judgment(
             judgment_id=pending["requestId"],
             response=answer,
             source=source,
-            decoder=lambda raw, record: question_response(pending, raw, record, provider, facts=supplied_facts),
+            decoder=lambda raw, record: question_response(pending, raw, record, provider, facts=facts),
             apply_meaning=(lambda meaning: apply_answer(store, pending, meaning)) if planner_answer else None,
         )
         result = store.judgment(result["id"], candidate=pending["candidate"])
@@ -609,7 +608,8 @@ def _reconcile(store, run):
 
 def _reviewed(store, run, reviewed):
     run.update(effect=None, observation=dict(review=reviewed, findings=store.finding_state()))
-    ready = store.review_prerequisite(store.manifest_revision())["complete"]
+    prerequisite = store.review_prerequisite(store.manifest_revision())
+    ready = prerequisite["complete"] or prerequisite["unavailable"]
     if not ready and not _pending(store, run):
         _steering(store, run, "Review did not establish current semantic readiness")
 
@@ -663,7 +663,7 @@ def _consume_completed_effect(store, run, effect):
             completed = completed_response(store, effect, pending, run["setup"]["roleTuples"])
             if completed is None:
                 return False
-            selected, value = completed
+            selected, value, facts = completed
             run.update(generation=run["generation"] + 1, effect=None)
             save(store, run)
             store._event(
@@ -683,6 +683,7 @@ def _consume_completed_effect(store, run, effect):
                 answer=value,
                 source="provider-normal:" + selected["provider"] + ":" + selected["model"],
                 provider=selected["provider"],
+                facts=facts,
             )
             run.clear()
             run.update(cursor(store))
@@ -838,7 +839,8 @@ def _step(store):
                 if _pending(store, run):
                     save(store, run)
                     break
-                if store.review_prerequisite(store.manifest_revision())["complete"]:
+                prerequisite = store.review_prerequisite(store.manifest_revision())
+                if prerequisite["complete"] or prerequisite["unavailable"]:
                     execution = dict(
                         expected_revision=store.manifest_revision(),
                         workers=run["workers"],
@@ -1286,7 +1288,7 @@ def _execute_effect(store, run, kind):
 
 def _automatic_question(store):
     """Invoke authorized semantic roles; MCP itself never initiates host completions."""
-    from codex_harness.core.run_invocations import invoke
+    from codex_harness.core.run_invocations import invoke, completed_response
     from codex_harness.core.audit_process import process_observation
 
     with store._transaction():
@@ -1315,17 +1317,17 @@ def _automatic_question(store):
         )
         save(store, run)
     try:
-        raw = invoke(
+        invoke(
             store,
             selected,
             pending,
             run["timeout"],
             dict(workspace=str(store.workspace), generation=run["generation"], effectId=identifier),
         )
-        value = raw
         with store._transaction():
             ensure_effect(store, run["generation"], identifier)
             current = cursor(store)
+            selected, value, facts = completed_response(store, current["effect"], pending, run["setup"]["roleTuples"])
             current["effect"] = None
             store._event(
                 "run-invocation-completed",
@@ -1345,6 +1347,7 @@ def _automatic_question(store):
                 answer=value,
                 source=f"provider-normal:{selected['provider']}:{selected['model']}",
                 provider=selected["provider"],
+                facts=facts,
             )
         return True
     except (ValueError, OSError) as error:

@@ -234,6 +234,7 @@ def subject(store, kind, proposed_action=None):
         ),
         "reviewers": reviewers,
         "reviewTier": review_tier(reviewers),
+        "reviewComplete": store.review_prerequisite(store.manifest_revision())["complete"],
         "reviewSelection": selection,
     }
 
@@ -270,6 +271,8 @@ def render(payload, changes, catalog):
     ]
     if payload["kind"] == "B":
         lines.append("Review tier: " + payload["reviewTier"])
+        if payload["reviewTier"] == "unavailable":
+            lines.append("No independent review ran. Review is unavailable; delivery may continue at this labelled tier, without review credit.")
         lines.append("catalog: " + catalog)
     lines.extend(
         f"{title}:\n{json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)}"

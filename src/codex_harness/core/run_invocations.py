@@ -83,4 +83,4 @@ def completed_response(store, effect, pending, roles):
     ):
         return None
     selected = next(r for r in roles if r["role"] == pending["role"])
-    return selected, observed["stdout"]
+    return selected, observed["stdout"], observed.get("facts")
