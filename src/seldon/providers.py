@@ -106,6 +106,12 @@ class Codex:
                 'plugins._default.enabled', 'features.apps', 'features.shell_tool', 'features.multi_agent',
                 'features.code_mode_host', 'features.memory_tool', 'features.sleep_tool', 'tools.update_plan.enabled')]
             command += [arg for option in options for arg in ("-c", option)]
+        images = [f["boundedContent"]["imagePath"] for f in question["facts"].values()
+                  if isinstance(f["boundedContent"], dict) and "imagePath" in f["boundedContent"]]
+        for index, source in enumerate(images):
+            attached = folder / f"image-{index}.png"
+            shutil.copyfile(source, attached)
+            command.append(f"--image={attached}")
         command += ["-"]
         metadata = {"command": command, "commandLine": subprocess.list2cmdline(command),
                     "cwd": str(cwd), "timeout": self.timeout,

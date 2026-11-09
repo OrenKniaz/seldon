@@ -59,7 +59,7 @@ class Loop:
             for key in body.get("artifactRefs", []) + list(body.get("files", {}).values()):
                 content = (self.store.root / "artifacts" / key).read_bytes()
                 facts[f"artifact:{key}"] = ({"imagePath": str(self.store.root / "artifacts" / key),
-                    "instruction": "Open this actual browser screenshot with view_image to judge visual quality"}
+                    "instruction": "This actual browser screenshot is attached to the question; look at it to judge visual quality"}
                     if content.startswith((b"\x89PNG", b"\xff\xd8")) else content[:8192].decode("utf-8", errors="replace"))
                 sources[f"artifact:{key}"] = ref
         facts = _facts if _facts is not None else {ref: {"sourceRecord": sources[ref], "revision": cursor["revision"],
