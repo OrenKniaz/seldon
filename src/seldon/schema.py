@@ -15,8 +15,6 @@ def choice(*values):
 
 
 TEXT = {"type": "string", "minLength": 1, "maxLength": 8192}
-BOOL = {"type": "boolean"}
-NULL_TEXT = {"anyOf": [TEXT, {"type": "null"}]}
 REFS = array(TEXT)
 COMMAND = {**array(TEXT, 1), "description": 'Executable argv, never shell text. Example: ["C:/node/node.exe", "tests/play.cjs"]. argv[0] must resolve to an installed executable; each argument is a separate element.'}
 VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT,
@@ -35,19 +33,16 @@ BODIES = {
     "wave": obj(goal=TEXT, beads=array(TEXT, 1)),
 }
 GAP = obj(target=TEXT, correction=TEXT)
-NEED = obj(target=TEXT, question=TEXT)
 PAYLOADS = {
     "ALIGN": VISION,
-    "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear"),
-                  requestedChange=NULL_TEXT),
-    "REVIEW": obj(verdict=choice("adequate", "gap", "uncertain"),
-                  gaps=array(GAP), neededFacts=array(NEED)),
+    "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
+    "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
     "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT,
                 artifactPaths=REFS, discoveries=array(GAP)),
-    "IMPACT": obj(verdict=choice("within_scope", "scope_change", "uncertain"), neededFacts=array(NEED)),
-    "JUDGE": obj(verdict=choice("satisfied", "gap", "uncertain"),
-                 assessments=array(obj(target=TEXT, satisfied=BOOL, why=TEXT)),
-                 gaps=array(GAP), neededFacts=array(NEED)),
+    "IMPACT": obj(verdict=choice("within_scope", "scope_change")),
+    "JUDGE": obj(verdict=choice("satisfied", "gap"),
+                 assessments=array(obj(target=TEXT, satisfied={"type": "boolean"}, why=TEXT)),
+                 gaps=array(GAP)),
 }
 
 
@@ -62,7 +57,9 @@ def answer_schema(kind, facts, context):
     payload = deepcopy(PAYLOADS.get(kind, obj()))
     if kind in ("PLAN", "REPAIR"):
         puts = []
-        bodies = {k: BODIES[k] for k in ("feature", "requirement", "test")} if kind == "PLAN" else {"vision": VISION, **BODIES}
+        bodies = {k: BODIES[k] for k in ("feature", "requirement", "test")}
+        if kind == "REPAIR":
+            bodies = {"vision": VISION, **bodies}
         for node_kind, body in bodies.items():
             body = deepcopy(body)
             from .plan import LINKS
@@ -70,11 +67,8 @@ def answer_schema(kind, facts, context):
                 body["properties"][relation]["items"] = choice(*handles, *slots)
             puts.append(obj(kind=choice(node_kind), targetHandle=choice(*handles, *slots), typedBody=body))
         edits = puts if kind == "PLAN" else [*puts,
-            obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(choice(*handles, *slots))),
-            obj(op=choice("ReplaceLinks"), targetHandle=choice(*handles, *slots),
-                relation=choice("vision", "features", "requirements", "tests", "dependencies", "beads"),
-                targetHandles=array(choice(*handles, *slots)))]
-        payload = obj(edits=array({"anyOf": edits}, 1))
+            obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(choice(*handles, *slots)))]
+        payload = obj(edits=array({"anyOf": edits}, 1 if kind == "PLAN" else 0))
         if kind == "PLAN":
             payload = obj(**payload["properties"], productFiles=array(TEXT, 1), testFiles=array(TEXT, 1))
     for field in ("gaps", "discoveries", "neededFacts"):
@@ -108,8 +102,6 @@ def validation_errors(value, contract, path="answer"):
     if type(value) is not expected:
         return [f"{path}: expected {kind}"]
     errors = []
-    if "const" in contract and value != contract["const"]:
-        errors.append(f"{path}: expected {contract['const']!r}")
     if kind == "object":
         fields = contract["properties"]
         errors += [f"{path}.{key}: required field missing" for key in fields.keys() - value.keys()]

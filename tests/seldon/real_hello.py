@@ -68,7 +68,7 @@ def run(slot, dry_run):
         outcome = loop.store.records("outcome")[-1][2]
         print(json.dumps({"state": cursor["state"], "scriptedUser": True,
                           "ownerAccepted": False, "outcome": outcome}, indent=2), flush=True)
-        return 0 if cursor["state"] == "ACCEPTED" else 1
+        return 0 if cursor["state"] == "SCRIPTED_C" else 1
     finally:
         loop.store.db.close()
 

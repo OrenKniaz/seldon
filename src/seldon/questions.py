@@ -7,20 +7,27 @@ from .schema import answer_schema, validate
 from .store import encode
 
 PROMPTS = {
-    "ALIGN": "What improved dream should we agree to? Recommend size and a complete quality bar.",
-    "DECIDE": "Interpret these verbatim user words about this exact displayed subject.",
-    "PLAN": "What product work and semantic checks deliver the accepted vision? "
+    "ALIGN": "What improved dream should we agree to? Recommend size and a complete quality bar. "
+             "Improve it toward the most beautiful, simplest, most delightful version of what was asked, within scope.",
+    "DECIDE": "Interpret the supplied verbatim words about this exact displayed subject. "
+              "A scripted reply is still interpretable: approve means scripted approval when scriptedUser is true; "
+              "CODE labels the terminal outcome, never owner acceptance. For revise, state the requested change in why.",
+    "PLAN": "What product work and semantic checks deliver the accepted vision, by the simplest design that reaches its quality bar? "
             "Write only features, requirements, executable tests and productFiles/testFiles. "
             "Commands are argv: [executable, argument, ...], never PowerShell or shell strings. "
             "No beads, waves, check-in, guide or evidence paths: CODE owns those.",
-    "REPAIR": "What minimal product edits resolve the supplied cause and actual command output (last 4 KiB per stream)?",
+    "REPAIR": "What minimal product edits resolve the supplied cause and actual command output (last 4 KiB per stream)? "
+              "Edit vision/features/requirements/tests only; use no edits for implementation-only gaps. "
+              "CODE regenerates work; never edit beads or waves.",
     "IMPACT": "Does this proposed change preserve the user-authorized scope? Uncertainty grants no authorization.",
-    "REVIEW": "Does this plan deliver the accepted dream? No implementation evidence is needed. "
+    "REVIEW": "Does this plan deliver the accepted dream and its quality bar, as simply as possible? No implementation evidence is needed. "
               "The wave check-in is a Seldon workflow step, not product work or a product dependency.",
-    "WORK": "Complete this task in its assigned worktree and owned files. Report, do not prove.",
+    "WORK": "Complete this task in its assigned worktree and owned files. Build it beautifully the first time: "
+            "max simple, max efficient, max delightful, nothing that does not earn its place. Report, do not prove.",
     "JUDGE": "What does this evidence establish for the requested obligations? RED means a "
-             "functioning test observes missing behavior; GREEN/demo require real passing interactions, "
-             "complete scope and accepted quality, including supplied visual evidence. Output is the last 4 KiB per stream.",
+             "functioning test observes missing behavior; GREEN judges verification-stage tests only. "
+             "Walkthrough, guide, full trace and quality acceptance belong to demo after guide work. "
+             "At demo, judge real screenshots against the quality bar: working but plain is a gap. Output is the last 4 KiB per stream.",
 }
 
 
@@ -29,7 +36,7 @@ EXAMPLES = {
         "users": ["The requester"], "scopeIn": ["The agreed interaction"], "scopeOut": [],
         "improvements": [], "quality": [{"criterion": "Clear feedback",
         "verification": "Observe the interaction"}], "unknowns": []},
-    "DECIDE": {"choice": "approve", "requestedChange": None},
+    "DECIDE": {"choice": "approve"},
     "PLAN": {"edits": [
         {"kind": "feature", "targetHandle": "new:1", "typedBody": {
             "story": "The user completes the agreed interaction", "acceptance": "The expected result is visible", "vision": ["vision"]}},
@@ -40,10 +47,10 @@ EXAMPLES = {
             "purpose": "Exercise the interaction", "stage": "verification", "command": [sys.executable, "-B", "tests/check.py"],
             "requiredEnvironment": ["Configured verification tool"], "expectedEvidence": "Observed result", "requirements": ["new:2"]}},
     ], "productFiles": ["index.html"], "testFiles": ["tests/check.py"]},
-    "REVIEW": {"verdict": "adequate", "gaps": [], "neededFacts": []},
+    "REVIEW": {"verdict": "adequate", "gaps": []},
     "WORK": {"outcome": "done", "summary": "Completed the assigned changes",
              "artifactPaths": [], "discoveries": []},
-    "IMPACT": {"verdict": "within_scope", "neededFacts": []},
+    "IMPACT": {"verdict": "within_scope"},
 }
 
 
@@ -62,7 +69,7 @@ def build(kind, facts, context):
         else:
             example = None
     if kind == "JUDGE":
-        example = {"verdict": "satisfied", "gaps": [], "neededFacts": [],
+        example = {"verdict": "satisfied", "gaps": [],
             "assessments": [{"target": target, "satisfied": True,
                              "why": "The supplied interaction establishes this obligation"}
                             for target in context["assessments"]]}
@@ -93,8 +100,6 @@ def ask(provider, question, record, check=lambda answer: None):
             validate(decoded, question["schema"])
             answer = decoded["answer"]
             if answer.get("verdict") != "uncertain":
-                if answer.get("neededFacts"):
-                    raise ValueError("A definite verdict cannot require missing facts")
                 if answer.get("verdict") == "gap" and not answer["gaps"]:
                     raise ValueError("A gap verdict must name its correction")
                 check(answer)
@@ -111,6 +116,3 @@ def ask(provider, question, record, check=lambda answer: None):
         question = build(original["kind"], dict(facts), {**original["context"],
             "exactFix": "Correct every recorded error. Original facts and all rejected answers "
                         "remain supplied. Return the complete corrected answer."})
-
-
-# C5/C9/C11 extension: page large subjects with explicit coverage in bounded projections.

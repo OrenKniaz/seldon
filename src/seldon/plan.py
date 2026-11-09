@@ -59,9 +59,8 @@ def apply(document, edits):
     handles = {slot: f"n{maximum + i}" for i, slot in enumerate(slots, 1)}
     edits = deepcopy(edits)
     for edit in edits:
-        for field in ("replacementHandles", "targetHandles"):
-            if field in edit:
-                edit[field] = [handles.get(ref, ref) for ref in edit[field]]
+        if "replacementHandles" in edit:
+            edit["replacementHandles"] = [handles.get(ref, ref) for ref in edit["replacementHandles"]]
         if "typedBody" in edit:
             for relation in LINKS.get(edit["kind"], {}):
                 edit["typedBody"][relation] = [handles.get(ref, ref) for ref in edit["typedBody"][relation]]
@@ -72,21 +71,18 @@ def apply(document, edits):
                 raise ValueError("Vision cannot be retired")
             del nodes[ref]
             replacements[ref] = edit["replacementHandles"]
-        elif operation == "ReplaceLinks":
-            node = nodes[ref]
-            if edit["relation"] not in LINKS.get(node["kind"], {}):
-                raise ValueError("Relation does not belong to this record")
-            node["body"][edit["relation"]] = edit["targetHandles"]
         else:
             nodes[ref] = {"kind": edit["kind"], "body": deepcopy(edit["typedBody"])}
     for node in nodes.values():
-        for relation in LINKS.get(node["kind"], {}):
+        for relation, kind in LINKS.get(node["kind"], {}).items():
+            links = ([r for r, n in nodes.items() if n["kind"] == kind]
+                     if node["kind"] == "bead" and relation in ("requirements", "tests") else node["body"][relation])
             node["body"][relation] = list(dict.fromkeys(
-                target for ref in node["body"][relation]
+                target for ref in links
                 for target in replacements.get(ref, [ref])))
-    result = {"nodes": nodes, "nextHandle": maximum + len(slots) + 1}
-    if nodes == document["nodes"]:
+    if edits and nodes == document["nodes"]:
         raise ValueError("Repair changes nothing; unresolved gap requires a concrete edit")
+    result = {"nodes": nodes, "nextHandle": maximum + len(slots) + 1}
     validate(result)
     return result
 
@@ -173,7 +169,6 @@ def validate(plan):
         errors.append("Cyclic bead dependencies")
     if errors:
         raise ValueError("\n".join(dict.fromkeys(errors)))
-    return plan
 
 
 def select(plan, kind):
@@ -183,6 +178,3 @@ def select(plan, kind):
 def subject(gate, **bindings):
     body = {"gate": gate, **bindings}
     return {**body, "digest": digest(body)}
-
-
-# C24 extension: baseline records map existing behavior before change planning.

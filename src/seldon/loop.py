@@ -34,7 +34,8 @@ class Loop:
         if cursor.get("plan") in facts:
             nodes = self.store.plan(cursor["revision"])["nodes"]
             facts[cursor["plan"]] = {"document": {"nodes": {r: n for r, n in nodes.items()
-                if kind == "REPAIR" or n["kind"] not in ("bead", "wave") or
+                if (n["kind"] not in ("bead", "wave") and (kind != "JUDGE" or n["kind"] != "test" or
+                    context["purpose"] == "demo" or n["body"]["stage"] == "verification")) or
                 (kind == "WORK" and n["kind"] == "bead" and n["body"]["task"] in (context["task"], "build"))}}}
             facts.pop(cursor["vision"], None)
         if cursor["kickoff"] in facts:
@@ -42,8 +43,11 @@ class Loop:
                 {k: v for k, v in self.setup.items() if k not in ("providers", "codexCommand", "factFiles", "userOrigin", "evidenceDirectory")})
         if kind == "REPAIR":
             facts.update({r: self.store.read(r) for r in cursor.get("latestObservations", [])})
+        if kind == "WORK" and cursor.get("repairCause"):
+            facts[cursor["repairCause"]] = self.store.read(cursor["repairCause"])
         if kind in ("PLAN", "REPAIR", "REVIEW", "JUDGE", "WORK"):
-            context["handles"] = list(self.store.plan(cursor["revision"])["nodes"]) if cursor["revision"] else ["vision"]
+            context["handles"] = [r for r, n in self.store.plan(cursor["revision"])["nodes"].items()
+                                  if n["kind"] not in ("bead", "wave")] if cursor["revision"] else ["vision"]
         sources = {ref: ref for ref in facts}
         for handle, path in (self.setup.get("factFiles", {}) if kind not in ("ALIGN", "DECIDE") else {}).items():
             facts[handle], sources[handle] = {"path": path}, cursor["kickoff"]
@@ -149,7 +153,7 @@ class Loop:
     def step(self):
         cursor = self.store.cursor()
         state = cursor["state"]
-        if state in ("ACCEPTED", "INCOMPLETE"):
+        if state in ("ACCEPTED", "SCRIPTED_C", "INCOMPLETE"):
             return state
         document = self.store.plan(cursor["revision"]) if cursor["revision"] else None
         if state == "ALIGN":
@@ -164,7 +168,8 @@ class Loop:
             with self.store.transaction():
                 words_ref = self.store.record("user_words", {"request": request_ref,
                     "subject": request["subject"], "words": words, "origin": request["origin"]})
-            call = self._call(cursor, "DECIDE", [request_ref, words_ref])
+            call = self._call(cursor, "DECIDE", [request_ref, words_ref], gate=request["gate"],
+                              scriptedUser=self.setup.get("scriptedUser", False))
             with self.store.transaction():
                 answer_ref = self._answer(call)
                 if self.store.cursor()["decision"] != request_ref:
@@ -193,12 +198,13 @@ class Loop:
                         cursor["checkin"], cursor["task"] = approval, "guide"
                         self._next(cursor, "WORK(guide)", approval)
                     elif gate == "C" and self._eligible(cursor):
-                        outcome = self.store.record("outcome", {"accepted": True,
+                        scripted = self.setup.get("scriptedUser", False)
+                        outcome = self.store.record("outcome", {"accepted": not scripted, "scriptedUser": scripted,
                             "verification_complete": True, "candidate": cursor["candidate"],
                             "approval": approval, "lastProvenResult": cursor["demoJudgment"],
-                            "reason": "User accepted the demonstrated candidate",
+                            "reason": "scripted C, not owner acceptance" if scripted else "User accepted the demonstrated candidate",
                             "nextAction": None})
-                        self._next(cursor, "ACCEPTED", outcome)
+                        self._next(cursor, "SCRIPTED_C" if scripted else "ACCEPTED", outcome)
                     else:
                         self._incomplete(cursor, "C requires the current demonstrated candidate")
         elif state == "PLAN":
@@ -227,7 +233,7 @@ class Loop:
                 self.store.cursor(cursor)
             vision_changed = before["nodes"]["vision"] != after["nodes"]["vision"]
             impact = None
-            if cursor.get("B"):
+            if cursor.get("B") and before != after:
                 call = self._call(cursor, "IMPACT", [proposal])
                 with self.store.transaction():
                     impact = self._answer(call)
@@ -245,8 +251,7 @@ class Loop:
                 cursor["review"] = self.store.record("review", {"answer": result,
                     "revision": cursor["revision"], "planDigest": digest(document),
                     "reviewer": call["provider"]})
-                if (answer["verdict"] == "adequate" and not answer["gaps"]
-                        and not answer["neededFacts"]):
+                if answer["verdict"] == "adequate" and not answer["gaps"]:
                     if cursor.get("resumeRepair") and cursor.get("B"):
                         self._resume_repair(cursor, cursor["review"])
                     else:
@@ -325,14 +330,14 @@ class Loop:
             purpose = cursor["purpose"]
             quality = document["nodes"]["vision"]["body"]["quality"]
             inventory = ([ref for ref, body in plan.select(document, "test").items()
-                          if body["stage"] == "verification"] if purpose == "RED" else
+                          if body["stage"] == "verification"] if purpose != "demo" else
                          [*plan.select(document, "requirement"),
                           "traceComplete", "noStubsMocksMissing",
                           *[f"quality:{i}" for i, _ in enumerate(quality, 1)]])
             if purpose == "demo":
                 inventory += ["walkthrough", "tryItGuide"]
-            refs = [cursor["plan"], cursor["candidate"],
-                    *cursor["latestObservations"]]
+            refs = [cursor["plan"], cursor["candidate"], *cursor["latestObservations"],
+                    *([cursor["greenJudgment"]] if purpose == "demo" else [])]
             call = self._call(cursor, "JUDGE", refs, purpose=purpose, assessments=inventory)
             answer = call["answer"]
             assessments = answer["assessments"]
@@ -341,7 +346,7 @@ class Loop:
                            and (o["exitCode"] != 0 if purpose == "RED" else o["exitCode"] == 0)
                            for o in observations)
             satisfied = (observed and answer["verdict"] == "satisfied" and not answer["gaps"]
-                         and not answer["neededFacts"] and all(a["satisfied"] for a in assessments))
+                         and all(a["satisfied"] for a in assessments))
             with self.store.transaction():
                 result = self._answer(call)
                 judgment = self.store.record("judgment", {"answer": result, "purpose": purpose,
@@ -402,6 +407,7 @@ class Loop:
                       if node and node["kind"] == "bead" and node["body"]["task"] != "tests"
                       for test in node["body"]["tests"]}
         stale = {ref for ref in cursor["observations"] if self.store.read(ref)["test"] in affected
+                 or (before == after and self.store.read(ref)["purpose"] == ("GREEN" if body["origin"] == "GREEN" else "demo"))
                  or (self.store.read(ref)["purpose"] != "RED" and self.store.read(ref)["test"] in work_tests)}
         cursor["plan"] = self.store.record("plan", {"revision": cursor["revision"],
             "document": after, "source": proposal, "authority": authority,
@@ -427,6 +433,8 @@ class Loop:
                 cursor.pop(key, None)
         if not cursor.get("A"):
             self._request(cursor, "A", plan.subject("A", vision=after["nodes"]["vision"]["body"]))
+        elif before == after and cursor.get("B"):
+            self._resume_repair(cursor, proposal)
         else:
             self._next(cursor, "PLAN" if set(after["nodes"]) == {"vision"} else "REVIEW", proposal)
 
@@ -474,11 +482,9 @@ class Loop:
 
     def run(self):
         try:
-            while self.store.cursor()["state"] not in ("ACCEPTED", "INCOMPLETE"):
+            while self.store.cursor()["state"] not in ("ACCEPTED", "SCRIPTED_C", "INCOMPLETE"):
                 self.step()
         except (ValueError, KeyError, RuntimeError, OSError) as error:
             with self.store.transaction():
                 self._incomplete(self.store.cursor(), f"{type(error).__name__}: {error}")
         return self.store.cursor()
-
-    # C17 extension: wave-end continuation plans successive waves from integrated results.

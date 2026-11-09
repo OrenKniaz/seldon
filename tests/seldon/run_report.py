@@ -81,10 +81,12 @@ def report(slot):
             db.close()
     records = {ref: body for ref, _, body in rows}
     transitions = [b for _, k, b in rows if k == "transition"]
-    reached = [b["next"] for b in transitions if b["next"] not in ("INCOMPLETE", "ACCEPTED")]
+    reached = [b["next"] for b in transitions if b["next"] not in ("INCOMPLETE", "ACCEPTED", "SCRIPTED_C")]
     furthest = reached[-1] if reached else cursor.get("state", "unknown")
     outcome = next((b for _, k, b in reversed(rows) if k == "outcome"), {})
     accepted = cursor.get("state") == "ACCEPTED" and outcome.get("accepted") is True
+    scripted = cursor.get("state") == "SCRIPTED_C" and outcome.get("scriptedUser") is True and outcome.get("verification_complete") is True and not outcome.get("accepted")
+    terminal = "SCRIPTED_C" if scripted else "ACCEPTED" if accepted else "INCOMPLETE"
     reason = outcome.get("reason", "No terminal outcome recorded; state " + cursor.get("state", "unknown"))
     # Early core embedded the entire review in reason; show its human rationale.
     prefix, separator, detail = reason.partition(": ")
@@ -117,8 +119,8 @@ def report(slot):
     for folder, q, answer, result in calls:
         state = q.get("kind", "unknown")
         context = q.get("context", {})
-        label = state + ("(" + str(context.get("purpose", context.get("task"))) + ")"
-                         if "purpose" in context or "task" in context else "")
+        label = state + ("(" + str(context.get("purpose", context.get("task", context.get("gate")))) + ")"
+                         if any(k in context for k in ("purpose", "task", "gate")) else "")
         stats = efficiency[label]
         stats["calls"] += 1
         stats["seconds"] += result.get("seconds", 0)
@@ -164,7 +166,8 @@ def report(slot):
             for obs_ref in body.get("observations", []):
                 obs = records.get(obs_ref, {})
                 code = obs.get("exitCode")
-                if (code == 0 and answer.get("verdict") == "gap") or (code is not None and code != 0 and answer.get("verdict") == "satisfied"):
+                expected = code != 0 if body.get("purpose") == "RED" else code == 0
+                if code is not None and expected != (answer.get("verdict") == "satisfied"):
                     mismatches.append(f"{ref}/{obs_ref} {body.get('purpose')}: {obs.get('test')} exit={code}, judge={answer.get('verdict')}")
             if body.get("purpose") == "RED":
                 red.append(f"{ref}: {answer.get('why', 'no reason recorded')}")
@@ -175,7 +178,7 @@ def report(slot):
               for p in (f / "question.json", f / "answer.txt", f / "result.json") if p.is_file()]
     wall = max(stamps) - min(stamps) if stamps else None
     wall_text = f"{wall:.3f}s (artifact envelope; setup/teardown unknown)" if wall is not None else "unknown"
-    flags = len(repairs) + retries + len(refused) + len(uncertain) + len(repeats) + len(blocked) + int(not accepted)
+    flags = len(repairs) + retries + len(refused) + len(uncertain) + len(repeats) + len(blocked) + int(not (accepted or scripted))
     lines = ["CHARTER: serves C2/C4/C23 — violates no I#",
              f"!!! RED FLAGS: {flags} events (categories can overlap); target: zero repairs, zero retries !!!",
              f"Repairs {len(repairs)}; exact-fix retries {retries}; refused citation errors {len(refused)}; uncertain {len(uncertain)}; unchanged-fact repeats {len(repeats)}; blocked workers {len(blocked)}."]
@@ -185,7 +188,7 @@ def report(slot):
                          ("Uncertain", uncertain), ("Repeated questions", repeats), ("Blocked workers", blocked)):
         if items:
             lines.append(title + ": " + "; ".join(items))
-    lines += [f"OUTCOME: {'ACCEPTED' if accepted else 'INCOMPLETE'}; furthest {furthest}; {reason}; wall {wall_text}."]
+    lines += [f"OUTCOME: {terminal}; furthest {furthest}; {reason}; wall {wall_text}."]
     if outcome.get("nextAction"):
         lines.append("Next: " + str(outcome["nextAction"]))
     lines += ["REVIEW LOG (vocabulary tags only):", *(gaps or ["No reviewer/judge gaps recorded."]),
@@ -204,7 +207,7 @@ def report(slot):
     kickoff = next((b for _, k, b in rows if k == "kickoff"), {})
     commit = kickoff.get("setup", {}).get("commit", "unknown (not recorded)")
     summary = [datetime.fromtimestamp(min(stamps), timezone.utc).date().isoformat() if stamps else "unknown",
-               str(slot), commit, "ACCEPTED" if accepted else "INCOMPLETE", furthest, len(repairs), retries,
+               str(slot), commit, terminal, furthest, len(repairs), retries,
                len(gaps), len(uncertain), f"{wall:.3f}s*" if wall is not None else "unknown", len(calls),
                len(plan.get("nodes", {})), plan_bytes, flags]
     return "\n".join(lines), summary
