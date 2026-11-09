@@ -8,7 +8,8 @@ from .store import encode
 
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and a complete quality bar. "
-             "Improve it toward the most beautiful, simplest, most delightful version of what was asked, within scope.",
+             "Improve it toward the most beautiful, simplest, most delightful version of what was asked, within scope. "
+             "Every quality criterion must be observable with the supplied setup; beauty means craft, not extra requirements.",
     "DECIDE": "Interpret the supplied verbatim words about this exact displayed subject. "
               "A scripted reply is still interpretable: approve means scripted approval when scriptedUser is true; "
               "CODE labels the terminal outcome, never owner acceptance. For revise, state the requested change in why.",

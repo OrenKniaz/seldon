@@ -293,7 +293,7 @@ class Loop:
                                "after": self.store.artifact(data, attempt)}
                         for name, data in self.changed.items()}})
                 cursor["bead"], cursor["workAttempt"] = ref, attempt
-                if answer["outcome"] != "done" or answer["discoveries"]:
+                if answer["outcome"] != "done":
                     self._incomplete(cursor, result)
                 elif task == "build":
                     self._next(cursor, "INTEGRATE", cursor["work"])
