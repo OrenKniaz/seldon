@@ -13,10 +13,11 @@ def invoke(store, selected, pending, timeout, binding):
 
     require_invocation(store, pending["role"], selected)
     executable = review_provider._executable(selected["provider"], None)
+    question = fresh_packet(store, pending)
     packet = (
         "Return only structured semantics for the supplied answerSchema. "
         "Do not write source/tests, schedule work, grant consent or infer a human identity.\n"
-        "## Run question\n" + json.dumps(fresh_packet(store, pending), ensure_ascii=False)
+        "## Run question\n" + json.dumps(question, ensure_ascii=False)
     )
     directory = store.path.parent / "semantic-invocations" / binding["effectId"]
     directory.mkdir(parents=True)
@@ -46,6 +47,7 @@ def invoke(store, selected, pending, timeout, binding):
                 cleanup=cleanup,
                 exitCode=code,
                 stdout=output,
+                facts=question["facts"],
                 stderr=stderr,
             ),
         )

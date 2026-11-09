@@ -7,7 +7,7 @@ from codex_harness.core.run_schemas import question_spec, author_contract
 from codex_harness.core.planner_schema import validate_input, json_value
 
 
-def response(pending, raw, record, provider=None):
+def response(pending, raw, record, provider=None, *, facts=None):
     """Validate meaning once and attach CODE-owned identities for the 1j writer."""
     if provider is not None:
         from codex_harness.core.provider_response import _response
@@ -59,10 +59,15 @@ def response(pending, raw, record, provider=None):
         if meaning["stubOrMissingGaps"]:
             raise ValueError("Named stub/missing gaps cannot establish full-dream completion")
     gaps = value.get("gaps", []) + value.get("stubOrMissingGaps", [])
-    supplied = {r["id"] for r in record["subjectRefs"] + record["evidenceRefs"]} | ({"plan"} if purpose in {"plan-review", "full-dream"} else set())
+    from codex_harness.core.run_context import evidence_facts
+    def references(value):
+        if isinstance(value, str): return {value}
+        rows = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+        return set().union(*(references(row) for row in rows))
+    supplied = references(facts if facts is not None else [record["subjectRefs"], record["evidenceRefs"], evidence_facts(record), pending.get("context", {})]) | ({"plan"} if purpose in {"plan-review", "full-dream"} else set())
     for gap in gaps:
         if gap["subjectRef"] not in supplied or set(gap["evidenceRefs"]) - supplied:
-            raise ValueError("answer.gaps must cite supplied subject/evidence references")
+            raise ValueError("answer.gaps must cite references supplied in the question's facts")
     return dict(judgmentId=record["id"], binding=record["binding"], verdict=verdict,
                            rationale=value["rationale"], meaning=meaning,
                            gaps=[g["issue"] for g in gaps])
@@ -144,7 +149,8 @@ def ask_question(store, run, family, purpose, *, judgment=None, context=None):
                          answerSchema=pending["answerSchema"], context=context, factsDigest=digest))
             event_id = store.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
             judgment = store.prepare_judgment(question="loop-" + family, subject_ids=subjects,
-                source_event_ids=[event_id] + ([run["userDecisionEventId"]] if run.get("userDecisionEventId") else []))
+                source_event_ids=[event_id] + ([run["userDecisionEventId"]] if run.get("userDecisionEventId") else []) + ([context["rejectedResponseEventId"]] if context.get("rejectedResponseEventId") else [])
+                + ([r["id"] for r in store._judgment_record(context["failedRequestId"])["sourceRefs"]] if context.get("failedRequestId") else []))
     pending.update(requestId=judgment["id"], candidate=judgment.get("candidate"))
     current = store.judgment(judgment["id"], candidate=judgment.get("candidate"))
     if not current["current"] or current["disposition"] in {"steer", "complete"}:

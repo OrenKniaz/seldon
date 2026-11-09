@@ -233,7 +233,7 @@ class PlanJudgments:
                     sourceVerified=False,
                 ),
             )
-            if diagnostics:
+            if record["error"] is not None:
                 record["rejectedResponseEventId"] = self.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
             self._event("judgment-recorded", record)
             facts = next(

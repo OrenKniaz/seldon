@@ -874,6 +874,10 @@ if provider=="codex": print(json.dumps(dict(type="turn.completed")),flush=True)
                 (workspace / "clock-shift").write_text(str(float(args[1]) + 1))
                 run_invocations._now = lambda: AwakeClock.now(UTC).isoformat()
             return actual_return
+        if launch.cli == "claude" and (workspace / "review-auth-fault").exists():
+            return 1, json.dumps([dict(type="assistant", error="authentication_failed", is_api_error_message=True,
+                message=dict(content=[dict(type="text", text="Failed to authenticate: OAuth session expired and could not be refreshed")])),
+                dict(type="result", is_error=True, result="Failed to authenticate: OAuth session expired and could not be refreshed")]), ""
         if mode == "server" and surface == "cli" and (workspace / "inject-review-crash").exists():
             # A real provider wait survives a lost client until its process owner
             # is killed. Recovery must not reuse that abandoned review's evidence.
@@ -4324,7 +4328,8 @@ def plan_content(surface="cli"):
     return dict(nodes=nodes)
 
 
-def small_plan_golden(workspace, *, size="small"):
+@timed
+def small_plan_golden(workspace, *, size="small", auth_fault=False):
     """C5/C9/C11: eligible dreams reach B with five kinds and size-scaled review.
 
     Catch r24: incomplete Spec escaped to prepare and asked the user to repair.
@@ -4334,11 +4339,18 @@ def small_plan_golden(workspace, *, size="small"):
     missed three-bead dead ends, draft loss and small brownfield selection.
     Catch r25: medium used the full contract and stalled; small-only proof missed it.
     Catch r26: ordinary success measures forced full trace; empty measures missed it.
+    Catch r27: an expired reviewer session must reach B with an honest tier and
+    only the normal A/B questions; successful-provider journeys missed reselection.
     """
     from tests.python.core.mcp_planner_support import LoopClient, provider_shape
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
     from codex_harness.core import approvals
-    client = LoopClient(workspace)
+    settings = kickoff_content()
+    if auth_fault:
+        settings["reviewers"] = [dict(r, provider="claude", model="claude-sonnet-5-5") for r in settings["reviewers"]]
+    client = LoopClient(workspace, kickoff=settings)
+    if auth_fault:
+        (workspace / "review-auth-fault").touch()
     def correction(edits, additions=()):
         return json.dumps(provider_shape(client.current["question"]["answerSchema"],dict(edits=edits,add=list(additions),rationale="Correct only the named obligations",reply="Retain the rest of the plan")))
     content = dict(nodes=[dict(id="V1",kind="vision",title="Small notes",parents=[],
@@ -4415,7 +4427,13 @@ def small_plan_golden(workspace, *, size="small"):
             assert len([r for r in approvals.records(store,"chat-message") if r.get("role") == "user"]) == 2
             assert store.review_prerequisite(store.manifest_revision())["complete"]
             rounds = approvals.records(store,"roundtable-completed")
-            assert len(rounds) == 1 and all(r["shards"] == 1 for r in rounds[0]["reviewers"])
+            if auth_fault:
+                card = client.current["userRequest"]
+                assert card["subject"]["reviewTier"] == "same-model" and "Review tier: same-model" in card["card"]
+                assert {r["provider"] for r in card["subject"]["reviewers"]} == {"codex"}
+                assert not any(r["family"] == "direction" for r in approvals.records(store,"loop-question"))
+            else:
+                assert len(rounds) == 1 and all(r["shards"] == 1 for r in rounds[0]["reviewers"])
             manifest = approvals.records(store,"manifest-compiled")[0]["manifest"]
             from codex_harness.core.runners import executable_scenarios
             commands = executable_scenarios(manifest["trace"],manifest["semantic"]["scenarios"])["scenarios"]
@@ -4426,6 +4444,8 @@ def small_plan_golden(workspace, *, size="small"):
             contracts = spine.node(build["fields"]["dependsOn"][0])
             assert contracts["fields"]["semanticPhase"] == "contracts" and contracts["fields"]["dependsOn"] == []
             original_ids = spine.ids()
+        if auth_fault:
+            return
         if size == "medium":
             return
         # A current-plan revision must update CODE's identities, not append a
@@ -4474,6 +4494,8 @@ def small_plan_golden(workspace, *, size="small"):
         client.answer(json.dumps(dict(edits={aliases["contractsBead"]+":parents":[aliases["contractsBead"]]},rationale="Try an unrelated cyclic edit",reply="Invalid correction")))
         assert client.current["state"] == "STEER" and client.current["question"]["family"] == "direction", client.current
         assert client.current["question"]["context"]["internalFailure"] and not client.current.get("userRequest")
+        rejected_id = client.current["question"]["context"]["rejectedResponseEventId"]
+        assert rejected_id and any("Try an unrelated cyclic edit" in json.dumps(s) for s in client.offered["packet"]["facts"]["sources"])
         client.answer(json.dumps(dict(action="pause",amendments=[],question=None,rationale="The bounded plan repairs are exhausted",reply="Planning paused after two exact fixes; the remaining gap is protected ownership and an unrelated parent edit.")))
         client.send_steer(rationale="Please continue")
         client.progress()
@@ -4503,6 +4525,8 @@ def small_plan_golden(workspace, *, size="small"):
         assert any(key.endswith(":fields.baseline") for key in client.current["question"]["answerSchema"]["properties"]["edits"]["properties"]), "Fuller contract cannot author baseline provenance"
     finally:
         client.close()
+    if size == "small" and not auth_fault:
+        small_plan_golden(workspace / "auth-twin", auth_fault=True)
 
 
 def kickoff_content(surface="cli"):

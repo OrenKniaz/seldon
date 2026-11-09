@@ -158,11 +158,12 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
             )
         planner_answer = pending["family"] in {"author", "direction", "repair"}
         pending = dict(pending, context={**pending["context"], **retained.get("diagnostics",{})})
+        supplied_facts = next((r.get("facts") for r in approvals.records(store, "run-invocation-observed") if r["effectId"] == (run.get("effect") or {}).get("id")), None)
         result = store.submit_judgment(
             judgment_id=pending["requestId"],
             response=answer,
             source=source,
-            decoder=lambda raw, record: question_response(pending, raw, record, provider),
+            decoder=lambda raw, record: question_response(pending, raw, record, provider, facts=supplied_facts),
             apply_meaning=(lambda meaning: apply_answer(store, pending, meaning)) if planner_answer else None,
         )
         result = store.judgment(result["id"], candidate=pending["candidate"])
@@ -1057,7 +1058,7 @@ def review_dossier(store, result, reviewer, record, *, executable, runner, timeo
             completed.append((shard_record, items))
             if shard_record.get("primaryError", {}).get("promptTooLong"):
                 break
-            if stop_on_invalid and shard_record["invalid"]:
+            if shard_record.get("primaryError", {}).get("authenticationFailed") or stop_on_invalid and shard_record["invalid"]:
                 yield from completed
                 return
         else:

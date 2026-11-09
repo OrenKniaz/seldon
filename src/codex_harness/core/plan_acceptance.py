@@ -489,7 +489,7 @@ class PlanAcceptance:
         expected = {(r["provider"], r["name"]) for r in selected}
         convergence = self.review_convergence() if reviews else None
         return dict(
-            complete=bool(expected)
+            complete=bool(node)
             and expected <= {(r["provider"], r["reviewer"]) for r in reviews}
             and not any(
                 r["submitReady"] and r["question"] == "plan-review" and r["acceptanceRunId"] is None

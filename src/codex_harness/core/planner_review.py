@@ -18,6 +18,8 @@ _owners = {}
 
 def acceptance_reviewers(selected):
     """Two distinct reviewers; cross-subscription is preferred, never required."""
+    if not selected:
+        return dict(independentRequired=False, minIndependentReviewers=0, crossProviderRequired=False)
     if len(selected) < 2 or len({r["name"] for r in selected}) != len(selected):
         raise ValueError("Two distinct reviewers required")
     return dict(independentRequired=True, minIndependentReviewers=2, crossProviderRequired=False)

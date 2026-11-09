@@ -180,6 +180,7 @@ def packet(store, pending):
             openQuestions=[dict(r) for r in store.connection.execute("SELECT * FROM clarifications")],
             context=pending.get("context", {}),
             authoringFailure=record.get("diagnostics"),
+            rejectedResponse=json.loads(store.connection.execute("SELECT payload_json FROM events WHERE id=?", (record["rejectedResponseEventId"],)).fetchone()[0]) if record.get("rejectedResponseEventId") else None,
             memory=cited_memory, observation=run.get("observation") if pending["family"] == "author" and "observation" not in pending.get("context",{}) else None, displayedSubject=run.get("userRequest"),
         ),
     )

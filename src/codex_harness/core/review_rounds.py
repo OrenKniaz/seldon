@@ -180,6 +180,7 @@ def _review_shard(
         elif record["exitCode"] not in (None, 0) and output:
             reason += ": " + "\n".join(output.splitlines()[-10:])
         record["primaryError"] = {
+            "authenticationFailed": bool(re.search(r"authentication_failed|Failed to authenticate", output + "\n" + stderr, re.IGNORECASE)),
             "exitCode": record["exitCode"],
             "stderrTail": "\n".join(stderr.splitlines()[-10:]),
             "resultErrors": result_errors,
@@ -349,6 +350,8 @@ def run_roundtable(
                 record["didRunProvider"],
             )
         )
+        if record.get("primaryError", {}).get("authenticationFailed"):
+            break
     with store._transaction():
         from codex_harness.core.run_ownership import ensure_effect
 
@@ -382,6 +385,8 @@ def run_roundtable(
         result["crossSubscription"] = (
             len({row["provider"] for row in result["successfulReviews"]}) > 1
         )
-        result["convergence"] = store.review_convergence(prepare=True)
+        result["convergence"] = store.review_convergence(prepare=True) if selected and not any(r.get("primaryError", {}).get("authenticationFailed") for r in result["reviewers"]) else None
         _event(store, "roundtable-completed", result)
+    if review_provider.reselect_unavailable(store, result, executable_for):
+        return run_roundtable(store, runner=runner, executable_for=executable_for, timeout=timeout, token_budgets=token_budgets)
     return result

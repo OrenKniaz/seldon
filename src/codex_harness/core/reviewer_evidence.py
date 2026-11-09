@@ -32,6 +32,7 @@ def native_reviewer(reviewer, store=None, *, current=True):
 
 
 def review_tier(reviewers):
+    if not reviewers: return "unavailable"
     return ("same-model" if len({(r["provider"], r.get("model")) for r in reviewers}) == 1
             else "same-provider" if len({r["provider"] for r in reviewers}) == 1 else "cross-provider")
 

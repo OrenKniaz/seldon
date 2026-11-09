@@ -15,7 +15,7 @@ from codex_harness.core.reviewer_evidence import review_tier
 
 _REVIEWERS = (
     {"name": "codex-reviewer", "provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
-    {"name": "claude-reviewer", "provider": "claude", "model": "claude-sonnet-5-5"},
+    {"name": "claude-reviewer", "provider": "claude", "model": "claude-sonnet-5-5", "effort": "high"},
 )
 
 _SEVERITIES = ("blocker", "major", "minor", "note")
@@ -34,13 +34,36 @@ def _executable(provider: str, executable_for) -> str | None:
         return executable_for(provider)
     return executable_for.get(provider)
 
-def default_reviewers(*, executable_for=None) -> list[dict]:
+def default_reviewers(*, executable_for=None, unavailable=()) -> list[dict]:
     """Offer reviewers for resolvable providers; missing overrides mean unavailable."""
-    selected = [dict(r) for r in _REVIEWERS if _executable(r["provider"], executable_for)]
+    selected = [dict(r) for r in _REVIEWERS if r["provider"] not in unavailable and _executable(r["provider"], executable_for)]
 
     if len(selected) == 1:
         selected.append({**selected[0], "name": selected[0]["name"] + "-2"})
     return selected
+
+def reselect_unavailable(store, result, executable_for=None):
+    """An observed authentication failure removes that provider, not delivery."""
+    failed = {r["provider"] for r in result["reviewers"] if r.get("primaryError", {}).get("authenticationFailed")}
+    if not failed:
+        return False
+    from codex_harness.core.run_loop import cursor, save
+    from codex_harness.core.run_ownership import ensure_effect
+    from codex_harness.core.run_setup import select_reviewers
+    with store._transaction():
+        ensure_effect(store)
+        run = cursor(store)
+        unavailable = set(run.get("unavailableReviewProviders", [])) | failed
+        selected = [r for r in run["setup"]["reviewers"] if r["provider"] not in unavailable]
+        selected = selected or default_reviewers(executable_for=executable_for, unavailable=unavailable)
+        if len(selected) == 1:
+            selected.append({**selected[0], "name": selected[0]["name"] + "-2"})
+        run["unavailableReviewProviders"] = sorted(unavailable)
+        run["setup"]["reviewers"] = selected
+        select_reviewers(store, run)
+        save(store, run)
+    return True
+
 
 def coverage(selected):
     return (
