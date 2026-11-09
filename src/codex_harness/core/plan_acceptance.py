@@ -605,7 +605,7 @@ class PlanAcceptance:
                 if (
                     set(item) - {"id", "status", "resolution", "closure"}
                     or item.get("id") not in members
-                    or item.get("status") not in {"resolved", "rejected", "deferred"}
+                    or item.get("status") not in {"resolved", "rejected", "deferred", "open"}
                     or not isinstance(item.get("resolution"), str)
                     or not item["resolution"].strip()
                 ):

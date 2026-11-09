@@ -56,6 +56,13 @@ def _steering(store, run, reason, *, failed=None):
     from codex_harness.core.run_context import recovery_context
     context = recovery_context(store, run)
     family = "direction"
+    if run["step"] == "plan-review" and not any(r["subject"]["kind"] == "B" and r["state"] == "approved" for r in approvals.records(store, approvals.EVENT)):
+        members = store.finding_state()["dispositionPrerequisite"]["members"]
+        if members and all(m["classification"] == "defect-in-plan" for m in members):
+            family, reason = "repair", "trace"
+            context = dict(reviewFindings=members, obligations=[m["finding"] for m in members],
+                nodes=[n for n in store.list_nodes() if n["kind"] not in {"vision","decision","result","amendment"}], targets=[], scenarios=[],
+                instructions="Repair these findings within the accepted vision using typed edits; CODE binds their identities and revision. Workers write code.")
     if failed:
         diagnostics = failed.get("diagnostics", {})
         context = dict(failedRequestId=failed["id"], rejectedResponseEventId=failed.get("rejectedResponseEventId"),
@@ -120,7 +127,10 @@ def _pending(store, run):
         return True
     needed = store.finding_state()["dispositionPrerequisite"]
     if not needed["complete"] and needed["nextAction"]["kind"] == "reconcile_findings":
-        ask_question(store, run, "author", "finding-dispositions", context=needed)
+        if all(m["status"] == "open" and m["resolution"] for m in needed["members"]) and run["step"] == "plan-review":
+            _steering(store, run, "Repair the retained open plan findings")
+        else:
+            ask_question(store, run, "author", "finding-dispositions", context=needed)
         return True
     return False
 
@@ -212,7 +222,7 @@ def _record_answer(store, *, request_id, answer, source, provider=None, facts=No
             elif pending["purpose"] == "execution" and run["state"] == "JUDGE":
                 run["state"] = "NEXT"
             elif result["concreteGap"]:
-                run.update(observation=result, repairRequired=True)
+                run.update(observation=result, repairRequired=bool(run.get("jobId")))
                 _steering(store, run, "; ".join(result["gaps"]))
             elif pending["family"] == "user-interpretation" and run.get("userRequest"):
                 words = next(iter(approvals.records(store, "run-user-words")), {})

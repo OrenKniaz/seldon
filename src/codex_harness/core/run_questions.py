@@ -119,10 +119,17 @@ def ask_question(store, run, family, purpose, *, judgment=None, context=None):
     if purpose in {"finding-dispositions", "finding-disposition"}:
         props = pending["answerSchema"]["properties"]["dispositions"]["items"]["properties"]
         props["memberRef"] = dict(props["memberRef"], enum=[m["id"] for m in context["members"]])
+        if purpose == "finding-dispositions": pending["examples"] = [dict(dispositions=[dict(memberRef=m["id"],disposition="open",resolution="Repair evidence is still needed") for m in context["members"]],rationale="Retain each concern until repaired",reply="Repairing the open concerns")]
     if family == "direction" and context.get("internalFailure"):
         pending["answerSchema"]["properties"]["action"]["enum"] = ["repair", "replan", "pause", "stop"]
         pending["answerSchema"]["properties"]["question"] = dict(type="null")
         pending["examples"] = [dict(action="pause", question=None, amendments=[], rationale="The internal repair needs new evidence", reply="Planning is paused; Seldon retains the failed work and its identifiers.")]
+    from codex_harness.core import approvals
+    if not any(r["subject"]["kind"] == "B" and r["state"] == "approved" for r in approvals.records(store, approvals.EVENT)):
+        for key in {"amendment", "amendments"} & pending["answerSchema"]["properties"].keys():
+            del pending["answerSchema"]["properties"][key]
+            pending["answerSchema"]["required"].remove(key)
+            for example in pending["examples"]: example.pop(key, None)
     if judgment is None:
         subjects = relevant_ids(store, family, purpose, context)
         words = [json.loads(r[0])["text"] for r in store.connection.execute(

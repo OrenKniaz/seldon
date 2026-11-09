@@ -247,6 +247,7 @@ class PlanJudgments:
                     and facts["reviewBinding"]["runId"] is None
                     or record["question"] != "plan-review"
                     and record["verdict"] == "negative"
+                    and not facts["reviewBinding"].get("memberIds")
                 )
             ):
                 from codex_harness.core.roundtable import review_members

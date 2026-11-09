@@ -218,7 +218,7 @@ def provider_answer(workspace, pending, value):
             merged.update({n["id"]:n for n in value["content"]["nodes"]})
             complete["nodes"] = list(merged.values())
             plan_path.write_text(json.dumps(complete),encoding="utf-8")
-        answer = dict(action=value["option"], amendments=[], question=value.get("content", {}).get("question"),
+        answer = dict(action=value["option"], **({"amendments":[]} if "amendments" in pending["answerSchema"]["properties"] else {}), question=value.get("content", {}).get("question"),
                       rationale=value["rationale"], reply="I have recorded the direction.")
     else:
         meaning = dict(value["meaning"])

@@ -77,7 +77,7 @@ def apply_answer(store, pending, meaning):
         return
     if pending["family"] == "direction":
         spine = store.spine()
-        for amendment in meaning["amendments"]:
+        for amendment in meaning.get("amendments", []):
             def bound(key):
                 return dict(id=key, revision=spine.revision(key))
             fields = dict(amendment, sourceRef=bound(amendment["sourceRef"]), targetRefs=[bound(k) for k in amendment["targetRefs"]], decisionRefs=[])

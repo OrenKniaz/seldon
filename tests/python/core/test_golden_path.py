@@ -921,9 +921,16 @@ if provider=="codex": print(json.dumps(dict(type="turn.completed")),flush=True)
                         )
                     ]
                 )
+        verdict = "positive"
+        if (workspace / "review-plan-defect").exists() and "--verify-python-3.12" not in prompt:
+            request = json.loads(prompt.split("\n## Review question\n", 1)[1])
+            facts = next(ref["facts"] for ref in request["evidence"] if "facts" in ref)
+            if facts["reviewer"]["name"] == "Reviewer1":
+                verdict = "negative"
         raw = scripted_review_reply(launch,
             [dict(f,node_id=fixture_id(workspace,f["node_id"])) for f in json.loads(text)],
-            verdict="positive", rationale="Independent plan assessment: required behaviors are covered; trace note is advisory")
+            verdict=verdict, gaps=["The planned journey does not explicitly verify Python 3.12; include runtime-version verification in the command"] if verdict == "negative" else [],
+            rationale="Independent plan assessment: required behaviors are covered; trace note is advisory" if verdict == "positive" else "Repair verification within the accepted brief")
         if launch.cli == "copilot" and (workspace / "copilot-review-retry").exists():
             counter = workspace / ".codex-harness/copilot-review-count"
             count = int(counter.read_text()) if counter.exists() else 0
@@ -4352,6 +4359,10 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
     Catch r28: the actual review prompt must carry the original brief and pre-B
     obligations; the plan question must supply observed setup and descriptor forms.
     Earlier journeys checked B readiness but missed these provider context losses.
+    Catch r29: one concrete review gap must survive open disposition and typed
+    repair to passing review/B without amendment or user provenance questions.
+    A judge reiterating that gap must not create another finding member.
+    Earlier all-positive reviewers never exercised this repair boundary.
     """
     from tests.python.core.mcp_planner_support import LoopClient, provider_shape
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
@@ -4365,7 +4376,7 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
     def correction(edits, additions=()):
         return json.dumps(provider_shape(client.current["question"]["answerSchema"],dict(edits=edits,add=list(additions),rationale="Correct only the named obligations",reply="Retain the rest of the plan")))
     content = dict(nodes=[dict(id="V1",kind="vision",title="Small notes",parents=[],
-        text="A local note app: save a note, reopen it, and read the same text, including empty and Unicode notes.",
+        text="A local note app running under Python 3.12: save a note, reopen it, and read the same text, including empty and Unicode notes.",
         fields=dict(planMode="semantic-v1",users=["A person taking local notes"],first_user_moment="Save and reopen a note",
             scope_in=["Save and reopen exact text"],scope_out=["Sync and sharing"],quality_bar="Preserve empty and Unicode text across restart",
             done_feels_like="A saved note reopens unchanged",expansion=dict(upgrades=[])))])
@@ -4375,6 +4386,9 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
     try:
         brief = content["nodes"][0]["text"] + " Keep all saved notes on this household's computer."
         (workspace / "review-brief.txt").write_text(brief, encoding="utf-8")
+        review_repair = size == "small" and not auth_fault and not facts_fault
+        if review_repair:
+            (workspace / "review-plan-defect").touch()
         client.call("harness_plan_start", name="Small notes", idea=brief)
         if facts_fault:
             advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "planning-size")
@@ -4431,6 +4445,20 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
         client.answer(correction({identities["reopen"]+":parents":[identities["persist"],identities["empty"]],
             identities["contractsBead"]+":parents":[identities["reopen"]], identities["buildBead"]+":parents":[identities["persist"],identities["empty"]]}))
         assert (client.current.get("question") or {}).get("purpose") != "trace", client.current
+        if review_repair:
+            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "finding-dispositions")
+            members = client.current["question"]["context"]["members"]
+            assert len(members) == 1
+            member_id = members[0]["id"]
+            client.answer(json.dumps(dict(dispositions=[dict(memberRef=member_id,disposition="open",resolution="The runtime-version command still needs repair")],rationale="Retain the concrete review gap",reply="Repairing the planned verification")))
+            client.answer(json.dumps(dict(verdict="negative",rationale="The same concrete plan gap remains open",
+                gaps=[dict(subjectRef=member_id,evidenceRefs=[member_id],issue="Python 3.12 verification is still absent from the planned command")],
+                dispositions=[dict(memberRef=member_id,disposition="open")])))
+            answer["test"][0]["fields"]["execution"]["argv"].append("--verify-python-3.12")
+            client.answer(correction({identities["reopen"]+":fields.execution":answer["test"][0]["fields"]["execution"]}))
+            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "finding-dispositions")
+            client.answer(json.dumps(dict(dispositions=[dict(memberRef=member_id,disposition="resolved",resolution="The planned command now explicitly includes Python 3.12 verification")],rationale="Judge the repaired plan",reply="The runtime-version gap has been repaired")))
+            content["findings"] = [dict(id=member_id,status="resolved",resolution="The retained planned command explicitly includes Python 3.12 verification")]
         advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
         assert client.current["userRequest"]["gate"] == "plan-execution", client.current
         with open_plan_store_readonly(workspace) as store:
@@ -4463,12 +4491,16 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
                     assert {r["provider"] for r in card["subject"]["reviewers"]} == {"codex"}
                 assert not any(r["family"] == "direction" for r in approvals.records(store,"loop-question"))
             else:
-                assert len(rounds) == 1 and all(r["shards"] == 1 for r in rounds[0]["reviewers"])
+                assert len(rounds) == (2 if review_repair else 1) and all(r["shards"] == 1 for round_ in rounds for r in round_["reviewers"])
+            if review_repair:
+                assert not spine.ids("amendment")
+                assert [(m["id"],m["state"]) for m in store.finding_state()["members"]] == [(member_id,"closed")]
+                assert len(prerequisite["reviews"]) == len(settings["reviewers"])
             manifest = approvals.records(store,"manifest-compiled")[0]["manifest"]
             from codex_harness.core.runners import executable_scenarios
             commands = executable_scenarios(manifest["trace"],manifest["semantic"]["scenarios"])["scenarios"]
             assert len(commands) == 1 and commands[0]["actions"][0]["process"]["entry"] == "checks/reopen.py"
-            assert commands[0]["actions"][0]["process"]["argv"] == [""]
+            assert commands[0]["actions"][0]["process"]["argv"] == answer["test"][0]["fields"]["execution"]["argv"]
             build = next(n for n in authored if n["kind"] == "bead" and n["fields"]["semanticPhase"] == "build")
             assert len(build["fields"]["dependsOn"]) == 1
             contracts = spine.node(build["fields"]["dependsOn"][0])
@@ -4526,7 +4558,7 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
         assert client.current["question"]["context"]["internalFailure"] and not client.current.get("userRequest")
         rejected_id = client.current["question"]["context"]["rejectedResponseEventId"]
         assert rejected_id and any("Try an unrelated cyclic edit" in json.dumps(s) for s in client.offered["packet"]["facts"]["sources"])
-        client.answer(json.dumps(dict(action="pause",amendments=[],question=None,rationale="The bounded plan repairs are exhausted",reply="Planning paused after two exact fixes; the remaining gap is protected ownership and an unrelated parent edit.")))
+        client.answer(json.dumps(dict(action="pause",question=None,rationale="The bounded plan repairs are exhausted",reply="Planning paused after two exact fixes; the remaining gap is protected ownership and an unrelated parent edit.")))
         client.send_steer(rationale="Please continue")
         client.progress()
         client.answer(dict(option="continue",rationale="Continue within accepted scope",content={}))
@@ -4634,7 +4666,7 @@ def advance_meaning(client, content, *, stop_at=None):
                 value = dict(
                     option="ready",
                     rationale="Author the retained dream without narrowing",
-                    content=content if pending["purpose"] == "understanding" else {},
+                    content=content if pending["purpose"] in {"understanding", "finding-dispositions"} else {},
                 )
             elif pending["family"] == "direction":
                 assert "Integrated GREEN" in pending["purpose"], (run["state"],run["reason"])
