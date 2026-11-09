@@ -16,6 +16,8 @@ from functools import wraps
 
 import pytest
 
+from tests.seldon.test_journey import clean_core_golden
+
 from codex_harness.core import approvals
 from codex_harness.core import planner_confirmations as confirmations
 
@@ -5540,6 +5542,7 @@ def test_golden_path(tmp_path, request, surface):
     started = time.monotonic()
     ledger_start = len(LoopClient.instances)
     if surface == "cli":
+        clean_core_golden(tmp_path / "clean-core")
         small_plan_golden(tmp_path / "small-plan")
         fixture_ownership_golden(tmp_path / "fixture-ownership")
         planning_surface_golden(tmp_path / "planning-surface")

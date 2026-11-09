@@ -33,29 +33,58 @@ BODIES = {
                 requirements=array(TEXT, 1), tests=array(TEXT, 1)),
     "wave": obj(goal=TEXT, beads=array(TEXT, 1)),
 }
-PUTS = [{**obj(kind={"type": "string", "const": kind}, targetHandle=TEXT, typedBody=body)}
-        for kind, body in BODIES.items()]
 GAP = obj(target=TEXT, correction=TEXT)
 NEED = obj(target=TEXT, question=TEXT)
 PAYLOADS = {
     "ALIGN": VISION,
     "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear"),
                   requestedChange=NULL_TEXT),
-    "PLAN": obj(edits=array({"anyOf": PUTS}, 1)),
     "REVIEW": obj(verdict=choice("adequate", "gap", "uncertain"),
                   gaps=array(GAP), neededFacts=array(NEED)),
     "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT,
                 artifactPaths=REFS, discoveries=array(GAP)),
+    "IMPACT": obj(verdict=choice("within_scope", "scope_change", "uncertain"), neededFacts=array(NEED)),
     "JUDGE": obj(verdict=choice("satisfied", "gap", "uncertain"),
-                 assessments=array(obj(target=TEXT, satisfied=BOOL, why=TEXT), 1),
+                 assessments=array(obj(target=TEXT, satisfied=BOOL, why=TEXT)),
                  gaps=array(GAP), neededFacts=array(NEED)),
-    "STEER": obj(choice=choice("continue"), targets=array(TEXT, 1),
-                 action=obj(kind=choice("user_decision"))),
 }
 
 
-def answer_schema(kind):
-    return obj(**PAYLOADS[kind]["properties"], why=TEXT, citations=array(TEXT, 1))
+def answer_schema(kind, facts, context):
+    from copy import deepcopy
+    handles = list(context.get("handles", {}))
+    slots = [f"new:{i}" for i in range(1, 33)]
+    targets = list(dict.fromkeys([*facts, *handles, *context.get("assessments", [])]))
+    reference = choice(*targets)
+    need = obj(target=reference, question=TEXT)
+    uncertain = obj(verdict=choice("uncertain"), neededFacts=array(need, 1))
+    payload = deepcopy(PAYLOADS.get(kind, obj()))
+    if kind in ("PLAN", "REPAIR"):
+        puts = []
+        for node_kind, body in {"vision": VISION, **BODIES}.items():
+            body = deepcopy(body)
+            from .plan import LINKS
+            for relation in LINKS.get(node_kind, {}):
+                body["properties"][relation]["items"] = choice(*handles, *slots)
+            puts.append(obj(kind=choice(node_kind), targetHandle=choice(*handles, *slots), typedBody=body))
+        edits = [*puts,
+            obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(choice(*handles, *slots))),
+            obj(op=choice("ReplaceLinks"), targetHandle=choice(*handles, *slots),
+                relation=choice("vision", "features", "requirements", "tests", "dependencies", "beads"),
+                targetHandles=array(choice(*handles, *slots)))]
+        payload = obj(edits=array({"anyOf": edits}, 1))
+    for field in ("gaps", "discoveries", "neededFacts"):
+        if field in payload["properties"]:
+            payload["properties"][field]["items"]["properties"]["target"] = reference
+    if kind == "WORK":
+        paths = [path for fact in facts.values() if isinstance(fact["boundedContent"], dict)
+                 for path in fact["boundedContent"].get("ownedPaths", [])]
+        payload["properties"]["artifactPaths"]["items"] = choice(*paths)
+    if kind == "JUDGE":
+        payload["properties"]["assessments"]["items"]["properties"]["target"] = choice(*context["assessments"])
+    variants = [payload, uncertain]
+    return obj(answer={"anyOf": [obj(**p["properties"], why=TEXT, citations=array(choice(*facts), 1))
+                                  for p in variants]})
 
 
 def validate(value, contract, path="answer"):

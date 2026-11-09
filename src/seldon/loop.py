@@ -27,11 +27,23 @@ class Loop:
             return self.store.record("attempt", {"operation": operation, **bindings,
                                                  "deadline": time.time() + 30})
 
-    def _call(self, cursor, kind, refs, **context):
-        role = {"REVIEW": "reviewer", "WORK": "worker", "JUDGE": "judge"}.get(kind, "planner")
+    def _call(self, cursor, kind, refs, _facts=None, **context):
+        role = {"REVIEW": "reviewer", "WORK": "worker", "JUDGE": "judge", "IMPACT": "judge"}.get(kind, "planner")
         refs = list(dict.fromkeys([cursor["kickoff"], *refs]))
         facts = {ref: {"sourceRecord": ref, "revision": cursor["revision"],
                        "boundedContent": self.store.read(ref)} for ref in refs}
+        if _facts is not None:
+            facts = _facts
+        for handle, path in self.setup.get("factFiles", {}).items():
+            facts.setdefault(handle, {"sourceRecord": cursor["kickoff"], "revision": cursor["revision"],
+                                      "boundedContent": {"path": path}})
+        if cursor["revision"] or kind in ("PLAN", "REPAIR"):
+            context["handles"] = (self.store.plan(cursor["revision"])["nodes"]
+                if cursor["revision"] else {"vision": {"kind": "vision",
+                    "body": plan.vision_body(self.store.read(cursor["vision"])["answer"])}})
+        for handle, node in context.get("handles", {}).items():
+            facts.setdefault(handle, {"sourceRecord": cursor.get("plan", cursor["vision"]),
+                                      "revision": cursor["revision"], "boundedContent": node})
         for ref in refs:
             body = facts[ref]["boundedContent"]
             artifacts = body.get("outputRefs", []) + body.get("artifactRefs", []) + list(body.get("files", {}).values())
@@ -54,11 +66,36 @@ class Loop:
         def check(answer):
             if kind == "PLAN":
                 plan.create(self.store.read(cursor["vision"])["answer"], answer["edits"])
+            elif kind == "REPAIR":
+                plan.apply({"nodes": context["handles"]}, answer["edits"])
             if kind == "JUDGE" and sorted(a["target"] for a in answer["assessments"]) != sorted(context["assessments"]):
                 raise ValueError("Judge must assess the exact requested inventory once")
         answer = questions.ask(self.provider, question, record, check)
-        return {"question": question_ref, "attempt": attempt, "answer": answer,
-                "provider": self.setup["providers"][role]}
+        invocation = {"question": question_ref, "attempt": attempt, "answer": answer,
+                      "provider": self.setup["providers"][role]}
+        if answer.get("verdict") == "uncertain":
+            with self.store.transaction():
+                uncertain = self._answer(invocation)
+            additions = {}
+            for need in answer["neededFacts"]:
+                target = need["target"]
+                if target in self.setup.get("factFiles", {}):
+                    content = Path(self.setup["factFiles"][target]).read_text(encoding="utf-8")
+                    if content != facts[target]["boundedContent"]:
+                        additions[target] = {**facts[target], "boundedContent": content}
+                elif target in facts:
+                    full = self.store.read(facts[target]["sourceRecord"])
+                    if digest(full) not in {digest(f["boundedContent"]) for f in facts.values()}:
+                        additions[target] = {**facts[target], "boundedContent": full}
+                    for value in full.values():
+                        if isinstance(value, str) and value.startswith("r") and value[1:].isdigit() and value not in facts:
+                            additions[value] = {"sourceRecord": value, "revision": cursor["revision"],
+                                                "boundedContent": self.store.read(value)}
+            if _facts is not None or not additions:
+                raise ValueError("Unresolved question: " + "; ".join(n["question"] for n in answer["neededFacts"]))
+            self.store.record("fact_gather", {"cause": uncertain, "supplied": list(additions)})
+            return self._call(cursor, kind, refs, _facts={**facts, **additions}, **context)
+        return invocation
 
     def _answer(self, invocation):
         ref = self.store.record("answer", invocation)
@@ -96,7 +133,7 @@ class Loop:
         proven = [ref for ref in cursor["judgments"] if self.store.read(ref)["satisfied"]]
         outcome = self.store.record("outcome", {"accepted": False, "verification_complete": False,
             "reason": reason, "lastProvenResult": proven[-1:],
-            "nextAction": "Resolve the named failure and launch a fresh slot; REPAIR is not implemented"})
+            "nextAction": "Supply the named missing fact or resolve the unresolved gap before resuming"})
         self._next(cursor, "INCOMPLETE", outcome)
 
     def _eligible(self, cursor):
@@ -131,19 +168,26 @@ class Loop:
             call = self._call(cursor, "DECIDE", [request_ref, words_ref])
             with self.store.transaction():
                 answer_ref = self._answer(call)
-                if (self.store.cursor()["decision"] != request_ref
-                        or call["answer"]["choice"] != "approve"):
+                if self.store.cursor()["decision"] != request_ref:
+                    self._incomplete(cursor, "Decision subject changed; obtain a fresh reply")
+                elif call["answer"]["choice"] in ("revise", "decline"):
+                    self._repair(cursor, answer_ref, "decision:" + request["gate"])
+                elif call["answer"]["choice"] != "approve":
                     self._incomplete(cursor, answer_ref)
                 else:
                     approval = self.store.record("approval", {"request": request_ref,
                         "subject": request["subject"], "words": words_ref,
                         "interpretation": answer_ref})
                     gate = request["gate"]
-                    if gate == "A":
+                    if gate == "scope":
+                        cursor["scopeApproval"] = approval
+                        self._apply_repair(cursor, cursor["pendingRepair"], approval)
+                    elif gate == "A":
                         cursor["A"] = approval
                         self._next(cursor, "PLAN", approval)
                     elif gate == "B":
                         cursor["B"] = approval
+                        cursor.pop("resumeRepair", None)
                         cursor["task"] = "tests"
                         self._next(cursor, "WORK(tests)", approval)
                     elif gate == "check-in":
@@ -168,6 +212,32 @@ class Loop:
                 cursor["plan"] = self.store.record("plan", {"revision": cursor["revision"],
                     "document": proposed, "source": source, "visionApproval": cursor["A"]})
                 self._next(cursor, "REVIEW", cursor["plan"])
+        elif state == "REPAIR":
+            cause, origin = cursor["repairCause"], cursor["repairOrigin"]
+            refs = [cursor["vision"], cause] + ([cursor["plan"]] if cursor.get("plan") else [])
+            call = self._call(cursor, "REPAIR", refs)
+            before = document or {"nodes": {"vision": {"kind": "vision",
+                "body": plan.vision_body(self.store.read(cursor["vision"])["answer"])}}}
+            after = plan.apply(before, call["answer"]["edits"])
+            with self.store.transaction():
+                source = self._answer(call)
+                proposal = self.store.record("repair_proposal", {"cause": cause,
+                    "preimage": cursor["revision"], "source": source,
+                    "before": before, "after": after, "origin": origin})
+                cursor["pendingRepair"] = proposal
+                self.store.cursor(cursor)
+            vision_changed = before["nodes"]["vision"] != after["nodes"]["vision"]
+            impact = None
+            if cursor.get("B"):
+                call = self._call(cursor, "IMPACT", [proposal, cursor["B"]])
+                with self.store.transaction():
+                    impact = self._answer(call)
+            with self.store.transaction():
+                if (vision_changed and cursor.get("A")) or (impact and call["answer"]["verdict"] == "scope_change"):
+                    self._request(cursor, "scope", plan.subject("scope", proposal=proposal,
+                        before=before, after=after, impact=impact))
+                else:
+                    self._apply_repair(cursor, proposal, impact)
         elif state == "REVIEW":
             call = self._call(cursor, "REVIEW", [cursor["vision"], cursor["plan"]])
             answer = call["answer"]
@@ -178,10 +248,13 @@ class Loop:
                     "reviewer": call["provider"]})
                 if (answer["verdict"] == "adequate" and not answer["gaps"]
                         and not answer["neededFacts"]):
-                    self._request(cursor, "B", plan.subject("B", revision=cursor["revision"],
-                        plan=document, review=cursor["review"]))
+                    if cursor.get("resumeRepair") and cursor.get("B"):
+                        self._resume_repair(cursor, cursor["review"])
+                    else:
+                        self._request(cursor, "B", plan.subject("B", revision=cursor["revision"],
+                            plan=document, review=cursor["review"]))
                 else:
-                    self._incomplete(cursor, result)
+                    self._repair(cursor, result, "REVIEW")
         elif state.startswith("WORK("):
             task = cursor["task"]
             beads = plan.select(document, "bead")
@@ -192,8 +265,8 @@ class Loop:
                 raise ValueError(f"No dependency-ready {task} bead")
             ref, bead = ready[0]
             approved = self.store.read(cursor["B"])["subject"]
-            if approved["revision"] != cursor["revision"] or approved["plan"] != document:
-                raise ValueError("Work requires B authorization for this canonical plan")
+            if (approved["revision"] != cursor["revision"] or approved["plan"] != document) and cursor.get("authorizedRevision") != cursor["revision"]:
+                raise ValueError("Work requires B or a recorded impact/scope authorization for this plan")
             if cursor.get("candidate") and not self._current_candidate(cursor["candidate"]):
                 raise ValueError("Delivered candidate changed outside integration")
             attempt = self._attempt("worktree", bead=ref, authorization=cursor["B"])
@@ -272,7 +345,7 @@ class Loop:
                     "satisfied": satisfied})
                 cursor["judgments"].append(judgment)
                 if not satisfied:
-                    self._incomplete(cursor, judgment)
+                    self._repair(cursor, judgment, purpose)
                 elif purpose == "RED":
                     cursor["task"] = "build"
                     self._next(cursor, "WORK(build)", judgment)
@@ -285,25 +358,101 @@ class Loop:
                         raise ValueError("C requires all authorized work and final evidence")
                     self._request(cursor, "C", plan.subject("C", scope=document["nodes"]["vision"],
                         revision=cursor["revision"], candidate=cursor["candidate"],
-                        evidence=cursor["observations"], judgments=cursor["judgments"],
+                        evidence=[ref for ref in cursor["observations"] if ref not in cursor.get("staleObservations", [])],
+                        judgments=[ref for ref in cursor["judgments"] if self.store.read(ref)["satisfied"]
+                            and not set(self.store.read(ref)["observations"]).intersection(cursor.get("staleObservations", []))],
                         guide=cursor["work"]))
         elif state == "STEER":
             waves = plan.select(document, "wave")
             if any(not set(wave["beads"]) <= set(cursor["completed"]) for wave in waves.values()):
                 raise ValueError("Wave check-in requires every member to be integrated")
-            call = self._call(cursor, "STEER", [
-                cursor["plan"], cursor["greenJudgment"], cursor["candidate"]])
             with self.store.transaction():
-                result = self._answer(call)
-                self._request(cursor, "check-in", plan.subject("check-in",
-                    waves=waves,
+                self._request(cursor, "check-in", plan.subject("check-in", waves=waves,
                     candidate=cursor["candidate"], judgment=cursor["greenJudgment"],
-                    continuation="Final walkthrough and try-it-yourself guide", direction=result))
+                    continuation="Final walkthrough and try-it-yourself guide"))
         else:
             raise ValueError(f"Unknown state: {state}")
         return self.store.cursor()["state"]
 
+    def _repair(self, cursor, cause, origin):
+        counts = cursor.setdefault("repairCounts", {})
+        counts[origin] = counts.get(origin, 0) + 1
+        if counts[origin] > 3:
+            gap = self.store.read(cause)
+            if isinstance(gap.get("answer"), str):
+                gap = {**gap, "answerDetail": self.store.read(gap["answer"])}
+            self._incomplete(cursor, {"unresolvedGap": gap,
+                                      "reason": "Three repairs exhausted for " + origin})
+            return
+        cursor["repairCause"], cursor["repairOrigin"] = cause, origin
+        self._next(cursor, "REPAIR", cause)
+
+    def _apply_repair(self, cursor, proposal, authority):
+        body = self.store.read(proposal)
+        if body["preimage"] != cursor["revision"]:
+            raise ValueError("Repair preimage changed; proposal is stale")
+        before, after = body["before"], body["after"]
+        affected = plan.affected(before, after)
+        cursor["revision"] = self.store.revision(after, cursor["revision"])
+        work_tests = {test for ref in affected for node in [after["nodes"].get(ref)]
+                      if node and node["kind"] == "bead" and node["body"]["task"] != "tests"
+                      for test in node["body"]["tests"]}
+        stale = {ref for ref in cursor["observations"] if self.store.read(ref)["test"] in affected
+                 or (self.store.read(ref)["purpose"] != "RED" and self.store.read(ref)["test"] in work_tests)}
+        cursor["plan"] = self.store.record("plan", {"revision": cursor["revision"],
+            "document": after, "source": proposal, "authority": authority,
+            "visionApproval": cursor.get("A"), "staleTargets": sorted(affected),
+            "staleEvidence": sorted(stale)})
+        cursor["staleObservations"] = list(set(cursor.get("staleObservations", [])) | stale)
+        if before["nodes"]["vision"] != after["nodes"]["vision"]:
+            cursor["vision"] = self.store.record("vision", {"answer": after["nodes"]["vision"]["body"],
+                "proposal": proposal, "approval": authority})
+        cursor["completed"] = [ref for ref in cursor["completed"]
+                                if ref in after["nodes"] and ref not in affected]
+        cursor.setdefault("resumeRepair", body["origin"])
+        if cursor.get("B"):
+            cursor["authorizedRevision"] = cursor["revision"]
+            self.store.record("authorization", {"revision": cursor["revision"],
+                "B": cursor["B"], "impactOrApproval": authority, "proposal": proposal})
+            invalidates_build = any(after["nodes"].get(ref, {}).get("kind") == "bead"
+                and after["nodes"][ref]["body"]["task"] in ("tests", "build") for ref in affected)
+            keys = ["demoJudgment", "demoCandidate"]
+            if invalidates_build:
+                keys += ["greenJudgment", "checkin"]
+            for key in keys:
+                cursor.pop(key, None)
+        if not cursor.get("A"):
+            self._request(cursor, "A", plan.subject("A", vision=after["nodes"]["vision"]["body"]))
+        else:
+            self._next(cursor, "PLAN" if set(after["nodes"]) == {"vision"} else "REVIEW", proposal)
+
+    def _resume_repair(self, cursor, review):
+        document = self.store.plan(cursor["revision"])
+        beads = plan.select(document, "bead")
+        pending = [b["task"] for ref, b in beads.items() if ref not in cursor["completed"]]
+        origin = cursor.pop("resumeRepair")
+        red_valid = any(self.store.read(ref)["purpose"] == "RED" and self.store.read(ref)["satisfied"]
+                        and not set(self.store.read(ref)["observations"]).intersection(cursor.get("staleObservations", []))
+                        for ref in cursor["judgments"])
+        if "tests" in pending or not red_valid:
+            task = "tests"
+            cursor["completed"] = [ref for ref in cursor["completed"] if beads[ref]["task"] != task]
+        elif "build" in pending:
+            task = "build"
+        elif origin in ("GREEN", "RED"):
+            # A repaired failed judgment needs new implementation, never the same re-asked evidence.
+            task = "build"
+            cursor["completed"] = [ref for ref in cursor["completed"] if beads[ref]["task"] != task]
+        else:
+            task = "guide"
+            cursor["completed"] = [ref for ref in cursor["completed"] if beads[ref]["task"] != task]
+        cursor["task"] = task
+        cursor["requiresChangedWork"] = True
+        self._next(cursor, f"WORK({task})", review)
+
     def _integrate(self, cursor):
+        if cursor.pop("requiresChangedWork", False) and not self.changed:
+            raise ValueError("Repair produced no changed files; unresolved gap needs new inputs")
         integration = work.integrate(self.project, self.assignment["baseline"], self.changed)
         ref = self.store.record("integration", {"work": cursor["work"], **integration})
         cursor["candidate"] = self._candidate()
