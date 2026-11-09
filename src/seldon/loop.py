@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from . import evidence, plan, questions, work
-from .store import Store, digest
+from .store import Store, digest, encode
 
 
 class Loop:
@@ -34,18 +34,29 @@ class Loop:
                        "boundedContent": self.store.read(ref)} for ref in refs}
         for ref in refs:
             body = facts[ref]["boundedContent"]
-            artifacts = body.get("outputRefs", []) + list(body.get("files", {}).values())
+            artifacts = body.get("outputRefs", []) + body.get("artifactRefs", []) + list(body.get("files", {}).values())
             for key in artifacts:
                 content = (self.store.root / "artifacts" / key).read_bytes()
+                image = content.startswith(b"\x89PNG") or content.startswith(b"\xff\xd8")
                 facts[f"artifact:{key}"] = {"sourceRecord": ref, "revision": cursor["revision"],
-                    "boundedContent": content.decode("utf-8", errors="replace")}
+                    "boundedContent": {"imagePath": str(self.store.root / "artifacts" / key),
+                        "instruction": "Open this actual browser screenshot with view_image to judge visual quality"}
+                        if image else content.decode("utf-8", errors="replace")}
         question = questions.build(kind, facts, context)
         with self.store.transaction():
             question_ref = self.store.record("question", question)
             attempt = self.store.record("attempt", {"operation": kind, "question": question_ref,
                                                      "provider": self.setup["providers"][role],
-                                                     "deadline": time.time() + 30})
-        answer = questions.ask(self.provider, question)
+                                                     "deadline": time.time() + getattr(self.provider, "timeout", 30)})
+        def record(body):
+            with self.store.transaction():
+                return self.store.record("provider_reply", body)
+        def check(answer):
+            if kind == "PLAN":
+                plan.create(self.store.read(cursor["vision"])["answer"], answer["edits"])
+            if kind == "JUDGE" and sorted(a["target"] for a in answer["assessments"]) != sorted(context["assessments"]):
+                raise ValueError("Judge must assess the exact requested inventory once")
+        answer = questions.ask(self.provider, question, record, check)
         return {"question": question_ref, "attempt": attempt, "answer": answer,
                 "provider": self.setup["providers"][role]}
 
@@ -76,9 +87,16 @@ class Loop:
         return self.store.read(ref) == work.candidate(work.files(self.project))
 
     def _incomplete(self, cursor, cause):
+        detail = self.store.read(cause) if isinstance(cause, str) and cause[0:1] == "r" and cause[1:].isdigit() else cause
+        if isinstance(detail, dict) and isinstance(detail.get("answer"), str):
+            detail = {**detail, "answerDetail": self.store.read(detail["answer"])}
+        if isinstance(detail, dict) and "observations" in detail:
+            detail = {**detail, "observationDetails": [self.store.read(ref) for ref in detail["observations"]]}
+        reason = f"{cursor['state']}: {encode(detail)}"
+        proven = [ref for ref in cursor["judgments"] if self.store.read(ref)["satisfied"]]
         outcome = self.store.record("outcome", {"accepted": False, "verification_complete": False,
-            "reason": cause, "lastProvenResult": cursor["judgments"][-1:],
-            "nextAction": "Resolve this cause through milestone M1a before continuing"})
+            "reason": reason, "lastProvenResult": proven[-1:],
+            "nextAction": "Resolve the named failure and launch a fresh slot; REPAIR is not implemented"})
         self._next(cursor, "INCOMPLETE", outcome)
 
     def _eligible(self, cursor):
@@ -241,10 +259,8 @@ class Loop:
             call = self._call(cursor, "JUDGE", refs, purpose=purpose, assessments=inventory)
             answer = call["answer"]
             assessments = answer["assessments"]
-            if sorted(a["target"] for a in assessments) != sorted(inventory):
-                raise ValueError("Judge must assess the exact requested inventory once")
             observations = [self.store.read(ref) for ref in cursor["latestObservations"]]
-            observed = all(o["executionStarted"] and not o["timedOut"] and o["exitCode"] is not None
+            observed = all(o["executionStarted"] and o["cleanupVerified"] and not o["timedOut"] and o["exitCode"] is not None
                            and (o["exitCode"] != 0 if purpose == "RED" else o["exitCode"] == 0)
                            for o in observations)
             satisfied = (observed and answer["verdict"] == "satisfied" and not answer["gaps"]
@@ -304,8 +320,12 @@ class Loop:
             self._next(cursor, f"OBSERVE({cursor['purpose']})", ref)
 
     def run(self):
-        while self.store.cursor()["state"] not in ("ACCEPTED", "INCOMPLETE"):
-            self.step()
+        try:
+            while self.store.cursor()["state"] not in ("ACCEPTED", "INCOMPLETE"):
+                self.step()
+        except (ValueError, KeyError, RuntimeError, OSError) as error:
+            with self.store.transaction():
+                self._incomplete(self.store.cursor(), f"{type(error).__name__}: {error}")
         return self.store.cursor()
 
     # C17 extension: wave-end continuation plans successive waves from integrated results.

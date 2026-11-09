@@ -72,15 +72,19 @@ def scripted_plan():
 
 
 @pytest.mark.fast
-def test_journey_delivers_tested_demonstrated_candidate(tmp_path):
+@pytest.mark.parametrize("fault", ["none", "malformed-fixed", "malformed-exhausted", "review-gap", "judgment-gap"])
+def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
     """Protect delivery and C binding against canned proof or skipped RED/integration.
 
     Legacy journeys import the old runtime; none exercise this clean producer-to-consumer spine.
     The script writes files only; independent assertions inspect actual outputs and persisted truth.
+    Malformed twins catch lost retry facts/unbounded retries; happy replies never challenge decoding.
+    Gap twins catch false continuation to workers/C; happy semantics never exercise INCOMPLETE.
     """
     calls = Counter()
     requests = []
     worker_roots = []
+    malformed_questions = []
     scripts = {
         ("ALIGN", 1): {"size": "tiny", "understanding": "A personal greeting command",
             "users": ["Terminal users"], "scopeIn": ["Greet a supplied name"],
@@ -112,7 +116,8 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path):
 
     def provider(question):
         kind = question["kind"]
-        calls[kind] += 1
+        if "exactFix" not in question["context"]:
+            calls[kind] += 1
         key = kind, calls[kind]
         answer = dict(scripts[key])
         facts = question["facts"]
@@ -131,6 +136,16 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path):
             answer["targets"] = [next(iter(facts))]
         answer.setdefault("why", "The supplied facts support the scripted semantic answer")
         answer["citations"] = list(facts)
+        if kind == "REVIEW" and fault == "review-gap":
+            answer.update(verdict="gap", gaps=[{"target": "name",
+                          "correction": "Plan lacks an input validation requirement"}])
+        if kind == "JUDGE" and question["context"]["purpose"] == "GREEN" and fault == "judgment-gap":
+            answer.update(verdict="gap", gaps=[{"target": "quality:1",
+                          "correction": "The delivered command has no usage guidance"}])
+        if kind == "ALIGN" and fault.startswith("malformed"):
+            malformed_questions.append(question)
+            if fault == "malformed-exhausted" or len(malformed_questions) <= 2:
+                answer.update(size="invalid", users=False, unexpected=True)
         return json.dumps(answer)
 
     user_words = ["Yes, that is the dream I want", "Build that plan",
@@ -157,6 +172,30 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path):
         persisted = json.loads(db.execute("SELECT cursor FROM run").fetchone()[0])
     records = {ref: body for ref, _, body in rows}
     observations = [(ref, body) for ref, kind, body in rows if kind == "observation"]
+    if malformed_questions:
+        assert len(malformed_questions) == 3
+        original = malformed_questions[0]["facts"]
+        for index, question in enumerate(malformed_questions[1:], 1):
+            assert all(question["facts"][key] == value for key, value in original.items())
+            rejected = [f["boundedContent"] for ref, f in question["facts"].items()
+                        if ref not in original]
+            assert len(rejected) == index
+            for previous in rejected:
+                assert json.loads(previous["rejectedAnswer"])["size"] == "invalid"
+                errors = " ".join(previous["errors"])
+                assert all(field in errors for field in ("size", "users", "unexpected"))
+    if fault in ("malformed-exhausted", "review-gap", "judgment-gap"):
+        assert cursor["state"] == persisted["state"] == "INCOMPLETE"
+        outcome = next(body for _, kind, body in rows if kind == "outcome")
+        assert not outcome["accepted"] and not outcome["verification_complete"]
+        expected = {"malformed-exhausted": "two exact-fix retries", "review-gap": "input validation requirement",
+                    "judgment-gap": "no usage guidance"}[fault]
+        assert expected in outcome["reason"] and outcome["nextAction"]
+        assert len(worker_roots) == len(observations) == (2 if fault == "judgment-gap" else 0)
+        assert len(requests) == {"malformed-exhausted": 0, "review-gap": 1, "judgment-gap": 2}[fault]
+        if fault == "judgment-gap":
+            assert records[outcome["lastProvenResult"][0]]["purpose"] == "RED"
+        return
     assert cursor["state"] == persisted["state"] == "ACCEPTED"
     assert [r["gate"] for r in requests] == ["A", "B", "check-in", "C"]
     assert [o["purpose"] for _, o in observations] == ["RED", "GREEN", "demo"]

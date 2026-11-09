@@ -33,7 +33,7 @@ BODIES = {
                 requirements=array(TEXT, 1), tests=array(TEXT, 1)),
     "wave": obj(goal=TEXT, beads=array(TEXT, 1)),
 }
-PUTS = [{**obj(kind={"const": kind}, targetHandle=TEXT, typedBody=body)}
+PUTS = [{**obj(kind={"type": "string", "const": kind}, targetHandle=TEXT, typedBody=body)}
         for kind, body in BODIES.items()]
 GAP = obj(target=TEXT, correction=TEXT)
 NEED = obj(target=TEXT, question=TEXT)
@@ -60,36 +60,37 @@ def answer_schema(kind):
 
 def validate(value, contract, path="answer"):
     """Validate the emitted JSON-schema subset; never interpret product meaning."""
+    errors = validation_errors(value, contract, path)
+    if errors:
+        raise ValueError("\n".join(errors))
+
+
+def validation_errors(value, contract, path="answer"):
     if "anyOf" in contract:
-        errors = []
-        for alternative in contract["anyOf"]:
-            try:
-                validate(value, alternative, path)
-                return
-            except ValueError as error:
-                errors.append(str(error))
-        raise ValueError("; ".join(errors))
-    if "const" in contract:
-        if value != contract["const"]:
-            raise ValueError(f"{path}: expected {contract['const']!r}")
-        return
+        branches = [validation_errors(value, child, path) for child in contract["anyOf"]]
+        return [] if [] in branches else [error for branch in branches for error in branch]
     kind = contract["type"]
     expected = {"object": dict, "array": list, "string": str,
                 "boolean": bool, "null": type(None)}[kind]
     if type(value) is not expected:
-        raise ValueError(f"{path}: expected {kind}")
+        return [f"{path}: expected {kind}"]
+    errors = []
+    if "const" in contract and value != contract["const"]:
+        errors.append(f"{path}: expected {contract['const']!r}")
     if kind == "object":
-        if value.keys() != contract["properties"].keys():
-            raise ValueError(f"{path}: fields must be {contract['required']}")
-        for key, child in value.items():
-            validate(child, contract["properties"][key], f"{path}.{key}")
+        fields = contract["properties"]
+        errors += [f"{path}.{key}: required field missing" for key in fields.keys() - value.keys()]
+        errors += [f"{path}.{key}: unexpected field" for key in value.keys() - fields.keys()]
+        for key in fields.keys() & value.keys():
+            errors += validation_errors(value[key], fields[key], f"{path}.{key}")
     elif kind == "array":
         if not contract["minItems"] <= len(value) <= contract["maxItems"]:
-            raise ValueError(f"{path}: invalid array length")
+            errors.append(f"{path}: invalid array length")
         for index, child in enumerate(value):
-            validate(child, contract["items"], f"{path}[{index}]")
+            errors += validation_errors(child, contract["items"], f"{path}[{index}]")
     elif kind == "string":
         if "enum" in contract and value not in contract["enum"]:
-            raise ValueError(f"{path}: expected one of {contract['enum']}")
+            errors.append(f"{path}: expected one of {contract['enum']}")
         if not contract.get("minLength", 0) <= len(value) <= contract.get("maxLength", 8192):
-            raise ValueError(f"{path}: invalid text length")
+            errors.append(f"{path}: invalid text length")
+    return errors
