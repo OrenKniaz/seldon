@@ -112,7 +112,7 @@ def provider_answer(workspace, pending, value):
                 scopeOut=words("scope_out"), qualityBar=f["quality_bar"], doneFeelsLike=f["done_feels_like"],
                 assumptions=words("assumptions"), openQuestions=[],
                 upgrades=[dict(proposal=u["text"], kind="macro" if u["kind"] == "macro" else "micro", impact=u["impact"], disposition=u["disposition"]) for u in f["expansion"]["upgrades"]],
-                qualityCriteria=words("qualityCriteria"), metrics=[], stopConditions=[], readiness=value["option"],
+                qualityCriteria=words("qualityCriteria"), metrics=f.get("metrics",[]), stopConditions=words("stopConditions"), readiness=value["option"],
                 question=content.get("question"), reply="Here is the complete proposal and quality bar.", rationale=value["rationale"])
         elif purpose == "plan-outline":
             from codex_harness.core.run_schemas import TRACE_FIELDS

@@ -4333,6 +4333,7 @@ def small_plan_golden(workspace, *, size="small"):
     through confined C4 fixes, then reach B using only A words. Previous fixtures
     missed three-bead dead ends, draft loss and small brownfield selection.
     Catch r25: medium used the full contract and stalled; small-only proof missed it.
+    Catch r26: ordinary success measures forced full trace; empty measures missed it.
     """
     from tests.python.core.mcp_planner_support import LoopClient, provider_shape
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
@@ -4345,6 +4346,9 @@ def small_plan_golden(workspace, *, size="small"):
         fields=dict(planMode="semantic-v1",users=["A person taking local notes"],first_user_moment="Save and reopen a note",
             scope_in=["Save and reopen exact text"],scope_out=["Sync and sharing"],quality_bar="Preserve empty and Unicode text across restart",
             done_feels_like="A saved note reopens unchanged",expansion=dict(upgrades=[])))])
+    if size == "medium":
+        content["nodes"][0]["fields"].update(metrics=[dict(definition="Exactly one of two concurrent consumes succeeds",unit="successful consumes")],
+            stopConditions=["Acceptance remains incomplete if saved notes change after restart"])
     try:
         client.call("harness_plan_start", name="Small notes", idea=content["nodes"][0]["text"])
         advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "planning-size")
@@ -4403,6 +4407,8 @@ def small_plan_golden(workspace, *, size="small"):
             assert spine.node(identities["persist"])["fields"]["interfaceContracts"] == answer["requirement"][0]["fields"]["interfaceContracts"]
             assert "save(text) and load() preserve Unicode text" in (workspace / "template/REQUIREMENTS.md").read_text("utf-8")
             vf = spine.node(spine.ids("vision")[0])["fields"]
+            if size == "medium":
+                assert all(vf[k] == content["nodes"][0]["fields"][k] for k in ("metrics","stopConditions")), "Five-kind planning lost the vision's success measures"
             assert vf["planSize"] == size and not vf.get("targets") and not vf.get("scenarios")
             assert store._judgment_record(pending["requestId"])["fixesIssued"] == 2
             assert approvals.current(store,"A") and not approvals.current(store,"B")
