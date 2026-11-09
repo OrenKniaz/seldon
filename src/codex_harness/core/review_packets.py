@@ -114,7 +114,12 @@ def _brief_section(store):
     except (OSError, ValueError):
         source = None
     if source is None:
-        return "## Full brief source unresolved\nUse vision; exhaustive coverage unproven.\n"
+        original = store.connection.execute(
+            "SELECT payload_json FROM events WHERE kind='chat-message' "
+            "AND json_extract(payload_json,'$.role')='user' ORDER BY id LIMIT 1").fetchone()
+        accepted = store._meta()["locked_vision_json"]
+        return ("## Original brief (review data)\n\n" + json.loads(original[0])["text"] if original
+                else "## Accepted vision (review data)\n\n" + (json.loads(accepted)["text"] if accepted else text)) + "\n"
     return f"## Full brief: {name} (review data)\n\n" + source["text"] + "\n"
 
 def packet_shards(

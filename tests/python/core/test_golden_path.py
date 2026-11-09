@@ -878,6 +878,12 @@ if provider=="codex": print(json.dumps(dict(type="turn.completed")),flush=True)
             return 1, json.dumps([dict(type="assistant", error="authentication_failed", is_api_error_message=True,
                 message=dict(content=[dict(type="text", text="Failed to authenticate: OAuth session expired and could not be refreshed")])),
                 dict(type="result", is_error=True, result="Failed to authenticate: OAuth session expired and could not be refreshed")]), ""
+        if (workspace / "review-brief.txt").exists():
+            assert (workspace / "review-brief.txt").read_text("utf-8") in prompt, "Reviewer lost the original brief"
+            question = json.loads(prompt.split("\n## Review question\n", 1)[1])["question"]
+            assert "can this plan deliver the whole accepted dream" in question
+            assert "do not request them or return inconclusive because they are absent" in question
+            assert "plan and candidate" not in question, "Pre-B review asks for a built candidate"
         if mode == "server" and surface == "cli" and (workspace / "inject-review-crash").exists():
             # A real provider wait survives a lost client until its process owner
             # is killed. Recovery must not reuse that abandoned review's evidence.
@@ -4343,6 +4349,9 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
     only the normal A/B questions; successful-provider journeys missed reselection.
     All reviewers unavailable must remain visibly uncredited at B. A dialogue-ID
     gap must become a semantic refusal, not a citation error; prior gaps cited nodes.
+    Catch r28: the actual review prompt must carry the original brief and pre-B
+    obligations; the plan question must supply observed setup and descriptor forms.
+    Earlier journeys checked B readiness but missed these provider context losses.
     """
     from tests.python.core.mcp_planner_support import LoopClient, provider_shape
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
@@ -4364,7 +4373,9 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
         content["nodes"][0]["fields"].update(metrics=[dict(definition="Exactly one of two concurrent consumes succeeds",unit="successful consumes")],
             stopConditions=["Acceptance remains incomplete if saved notes change after restart"])
     try:
-        client.call("harness_plan_start", name="Small notes", idea=content["nodes"][0]["text"])
+        brief = content["nodes"][0]["text"] + " Keep all saved notes on this household's computer."
+        (workspace / "review-brief.txt").write_text(brief, encoding="utf-8")
+        client.call("harness_plan_start", name="Small notes", idea=brief)
         if facts_fault:
             advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "planning-size")
             message = next(r["id"] for r in client.offered["packet"]["facts"]["dialogue"] if r["role"] == "user")
@@ -4379,6 +4390,9 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
         client.answer(sizing)
         advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
         pending = client.current["question"]
+        setup = client.offered["packet"]["facts"]["executionSetup"]
+        assert Path(setup["pythonExecutable"]).samefile(sys.executable) and setup["pythonVersion"] == sys.version
+        assert all(term in setup["descriptorForms"] for term in ("candidate-owned entry or dotted module", "absolute installed runtime", "argv", "testRoots"))
         assert set(pending["answerSchema"]["properties"]) == {"feature","requirement","test","contractsBead","buildBead","rationale","reply"}
         for slot in ("contractsBead","buildBead"):
             contract = pending["answerSchema"]["properties"][slot]

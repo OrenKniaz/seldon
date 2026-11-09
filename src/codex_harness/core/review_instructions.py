@@ -6,7 +6,7 @@ RUNNER_GUARANTEES = (
     "## Already guaranteed by Seldon's runner\n\n"
     "The canonical semantic module runner sets product-root PYTHONPATH even when "
     "action.cwd changes. Interpreter selection is controller-owned, not scenario setup; "
-    "a required interpreter version still needs controller/runtime evidence. "
+    "a required interpreter version needs a plan for verification during execution. "
     "Seldon owns observation: offline web targets use file://; served web/API targets declare "
     "server:{argv,readyPath,readyWithin (0,10] seconds}. argv uses SELDON_HOST/SELDON_PORT or "
     "{host}/{port}; Seldon allocates loopback, waits bounded readiness, drives headless "
@@ -23,8 +23,8 @@ RUNNER_GUARANTEES = (
 def instructions(history=()):
     return RUNNER_GUARANTEES + (
         "Report only findings with concrete user/product impact; name that impact. "
-        "Judge whether the plan/product delivers the user's requirements and whether "
-        "scenarios prove them. No style, format, schema or wording remarks; deterministic "
+        "Judge only the supplied phase's review question, including whether planned "
+        "scenarios can verify the requirements. No style, format, schema or wording remarks; deterministic "
         "gates enforce schema. Return at most 5 findings per reviewer across all shards, "
         "ranked by severity. For a re-review after repairs, verify the listed repairs; "
         "only add NEW blocker/major findings caused by those repairs. No fresh minor/note "

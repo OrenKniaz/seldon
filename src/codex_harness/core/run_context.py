@@ -1,6 +1,7 @@
 """Fresh semantic packets from canonical facts; no provider session is resumed."""
 
 import json
+import sys
 
 
 def direction_content(record):
@@ -171,6 +172,13 @@ def packet(store, pending):
         exactFix=record["error"],
         facts=dict(
             setup=run["setup"], vision=[n for n in nodes if n["kind"] == "vision"],
+            executionSetup=dict(pythonExecutable=sys.executable, pythonVersion=sys.version,
+                descriptorForms="Use exactly one candidate-owned entry or dotted module; the other is null. "
+                "entry uses an absolute installed runtime executable (or null for a directly executable entry); "
+                "module uses controller Python and must name a candidate package, never unittest or another standard-library module. "
+                "argv holds arguments only; testRoots names candidate-owned test directories. "
+                "These are observed controller facts, not proof of a requested product runtime version.")
+                if pending["purpose"] in {"plan-outline", "trace"} else None,
             acceptedVision=json.loads(store._meta()["locked_vision_json"]) if store._meta()["locked_vision_json"] else None,
             graph=[n for n in nodes if n["kind"] != "vision"],
             referenceInventory=[{k:n[k] for k in ("id","kind","title")} for n in spine.to_dict()["nodes"] if n["id"] not in selected] if pending["purpose"] == "trace" else [],
@@ -198,7 +206,10 @@ def review_packet(reviewer, packet, *, exact_fix=None):
     inventory = acceptance_inventory(record) if acceptance else {}
     schema_path = Path(gettempdir()) / ("seldon-review-schema-" + record["id"] + ".json")
     packet += "\n## Review question\n" + json.dumps(dict(
-        question="Does this plan and candidate deliver the accepted dream? State review depth and its consequence-based reason.",
+        question=("Does this integrated candidate deliver the accepted dream?" if acceptance else
+                  "Before B, can this plan deliver the whole accepted dream? Judge coverage, feasibility and planned verification. "
+                  "Implementation and execution evidence belong after Build; do not request them or return inconclusive because they are absent.")
+                 + " State review depth and its consequence-based reason.",
         answerSchema=answer_schema, **inventory,
         evidence=evidence_facts(record),
         exactFix=exact_fix or record["error"],
