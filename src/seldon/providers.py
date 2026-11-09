@@ -108,6 +108,8 @@ class Codex:
                    "--model", config["model"], "-c", 'model_reasoning_effort=' + encode(config["effort"]),
                    "-c", 'approval_policy="never"', "--cd", str(cwd),
                    "--output-schema", str(folder / "schema.json")]
+        if worker and self.setup.get("evidenceDirectory"):
+            command += ["--add-dir", self.setup["evidenceDirectory"]]
         if not worker:
             command += ["--ignore-user-config", "--ephemeral"]
             options = ['project_doc_max_bytes=0', 'developer_instructions=""', 'web_search="disabled"',

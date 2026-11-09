@@ -33,7 +33,7 @@ def create(vision, answer):
     for task, paths in (("tests", answer["testFiles"]), ("build", [*answer["productFiles"], "TRY.txt"])):
         edits.append({"kind": "bead", "targetHandle": "workflow:" + task, "typedBody": {
             "task": task, "ownedPaths": paths, "dependencies": [], "requirements": requirements,
-            "tests": tests, "instructions": {"tests": "Write semantic checks for the declared tests; save browser evidence in SELDON_EVIDENCE_DIR.",
+            "tests": tests, "instructions": {"tests": "Write semantic checks for the declared tests and run them; save browser evidence in SELDON_EVIDENCE_DIR. The product does not exist yet, so done means the checks really execute and fail for that reason; that failure is the goal, not a blocker.",
                 "build": "Implement the accepted requirements and quality bar. Deliver TRY.txt with usage, demonstration and reproduction instructions."}[task]}})
     edits.append({"kind": "wave", "targetHandle": "workflow:wave", "typedBody": {
         "goal": "Deliver the accepted product", "beads": ["workflow:tests", "workflow:build"]}})
