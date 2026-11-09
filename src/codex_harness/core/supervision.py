@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from codex_harness.core.plan_store import open_plan_store_readonly
+from codex_harness.core.process_launch import hidden_process_kwargs
 from codex_harness.core.record_io import open_record_read
 from codex_harness.core.spine import Spine, SpineError, impact
 from codex_harness.core.steering import steering_report
@@ -57,6 +58,7 @@ def _time(value):
 def _git(repo, *args):
     return subprocess.run(
         ["git", "--literal-pathspecs", "-C", str(repo), *args],
+        **hidden_process_kwargs(),
         capture_output=True,
         check=True,
         timeout=15,

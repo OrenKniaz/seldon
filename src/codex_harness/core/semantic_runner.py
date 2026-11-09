@@ -15,6 +15,7 @@ from pathlib import Path
 from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 
 from codex_harness.core.audit_process import run_audit_process
+from codex_harness.core.process_launch import hidden_process_kwargs
 from codex_harness.core.record_io import write_record_json, write_stdout_json
 from codex_harness.core.semantic_schema import LIMIT, array, content, fields, path, validate
 
@@ -140,7 +141,10 @@ def capture(cmd, root, cwd=None, payload=None, *, browser=False, hold_open=False
         env["DEBUG"] = "pw:browser"
     started = time.monotonic()
     stdin = PIPE if payload is not None or hold_open else DEVNULL
-    child = Popen(cmd, cwd=cwd or root, env=env, stdin=stdin, stdout=PIPE, stderr=PIPE)
+    child = Popen(
+        cmd, cwd=cwd or root, env=env, stdin=stdin, stdout=PIPE, stderr=PIPE,
+        **hidden_process_kwargs(),
+    )
     data = [None, None]
     omitted = [0, 0]
 

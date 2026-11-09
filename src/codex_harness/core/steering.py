@@ -7,6 +7,7 @@ import subprocess
 from itertools import zip_longest
 from pathlib import Path, PurePosixPath
 
+from codex_harness.core.process_launch import hidden_process_kwargs
 from codex_harness.core.spine import compile_manifest
 from codex_harness.core.spine_render import render_markdown
 
@@ -17,6 +18,7 @@ _SEVERITIES = ("blocker", "major", "minor")
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "--literal-pathspecs", "-C", str(repo), *args],
+        **hidden_process_kwargs(),
         capture_output=True,
         stdin=subprocess.DEVNULL,
         timeout=30,

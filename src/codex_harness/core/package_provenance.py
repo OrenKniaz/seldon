@@ -9,6 +9,8 @@ import tomllib
 from importlib import metadata
 from pathlib import Path
 
+from codex_harness.core.process_launch import hidden_process_kwargs
+
 
 def _source_digest(package: Path) -> str:
     sources = [
@@ -39,6 +41,7 @@ def adapter_provenance() -> dict:
             try:
                 top = subprocess.run(
                     ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                    **hidden_process_kwargs(),
                     capture_output=True, encoding="utf-8", errors="replace",
                     check=True,
                 ).stdout.strip()
@@ -54,6 +57,7 @@ def adapter_provenance() -> dict:
                         "--",
                         "src/codex_harness/core/package_provenance.py",
                     ],
+                    **hidden_process_kwargs(),
                     capture_output=True, encoding="utf-8", errors="replace",
                     check=True,
                 )
@@ -61,6 +65,7 @@ def adapter_provenance() -> dict:
                     commit = (
                         subprocess.run(
                             ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                            **hidden_process_kwargs(),
                             capture_output=True, encoding="utf-8", errors="replace",
                             check=True,
                         ).stdout.strip()

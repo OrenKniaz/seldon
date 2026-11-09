@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from codex_harness.core.graph import load_plan, topological_order
 from codex_harness.core.planner_audits import AuditTemporaryDirectory
+from codex_harness.core.process_launch import hidden_process_kwargs
 from codex_harness.core.runners import resolve_runner, validate_proof
 from codex_harness.core.spine import (
     Spine,
@@ -98,6 +99,7 @@ def audit_revised_tests(
     if base_ref == "auto":
         head = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
+            **hidden_process_kwargs(),
             capture_output=True,
             check=False,
         )
@@ -122,6 +124,7 @@ def audit_revised_tests(
             baseline.mkdir()
             archive = subprocess.run(
                 ["git", "-C", str(repo), "archive", "--format=tar", base_ref],
+                **hidden_process_kwargs(),
                 capture_output=True,
                 check=True,
             ).stdout

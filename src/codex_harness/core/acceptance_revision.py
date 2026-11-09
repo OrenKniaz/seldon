@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from codex_harness.core.plan_store import PlanStoreError
+from codex_harness.core.process_launch import hidden_process_kwargs
 from codex_harness.core.semantic_runner import SOURCE_IGNORED
 
 def _hash(value) -> str:
@@ -34,6 +35,7 @@ def _product_git_head(repo: Path, deadline=None, should_stop=None) -> str | None
     """
     top = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+        **hidden_process_kwargs(),
         stdin=subprocess.DEVNULL,
         timeout=_metadata_remaining(deadline, should_stop),
         capture_output=True,
@@ -48,6 +50,7 @@ def _product_git_head(repo: Path, deadline=None, should_stop=None) -> str | None
         return None
     head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        **hidden_process_kwargs(),
         stdin=subprocess.DEVNULL,
         timeout=_metadata_remaining(deadline, should_stop),
         capture_output=True,
@@ -75,6 +78,7 @@ def integrated_revision(repo, *, deadline=None, should_stop=None) -> str:
                 "--exclude-standard",
                 "-z",
             ],
+            **hidden_process_kwargs(),
             stdin=subprocess.DEVNULL,
             timeout=_metadata_remaining(deadline, should_stop),
             capture_output=True,

@@ -9,6 +9,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from codex_harness.core import graph
+from codex_harness.core.process_launch import hidden_process_kwargs
 from codex_harness.core.record_io import write_record_json
 from codex_harness.core.runners import resolve_runner, validate_proof
 from codex_harness.core.spine import (
@@ -33,6 +34,7 @@ def _git_run(cwd: Path, *args: str, ok=(0,), **kwargs):
     kwargs.setdefault("stdin", None if "input" in kwargs else subprocess.DEVNULL)
     if kwargs.get("text"):
         kwargs.update(encoding="utf-8", errors="replace")
+    kwargs.update(hidden_process_kwargs(kwargs.get("creationflags", 0)))
     result = subprocess.run(command, capture_output=True, **kwargs)
     if result.returncode not in ok:
         stderr = result.stderr

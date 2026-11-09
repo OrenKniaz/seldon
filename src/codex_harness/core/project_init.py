@@ -18,6 +18,7 @@ from pathlib import Path
 from codex_harness.core.init_hosts import HOSTS, MARKER, claude, codex, server_entry
 from codex_harness.core.planner_refusals import TEACHING
 from codex_harness.core.preflight import preflight_report
+from codex_harness.core.process_launch import hidden_process_kwargs
 
 IGNORE_START = f"# {MARKER} begin\n"
 IGNORE_END = f"# {MARKER} end\n"
@@ -263,6 +264,7 @@ def server_check(command, root):
     try:
         result = subprocess.run(
             [command, "-I", "-m", "codex_harness.core.seldon_mcp", "--workspace", str(root)],
+            **hidden_process_kwargs(),
             input=json.dumps(request) + "\n",
             text=True,
             encoding="utf-8",

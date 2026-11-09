@@ -18,6 +18,7 @@ from codex_harness.core.audit_process import run_audit_process
 from codex_harness.core.graph import Plan, PlanError
 from codex_harness.core.graph import test_dir as unittest_test_dir
 from codex_harness.core.planner_audits import AuditTemporaryDirectory as TemporaryDirectory
+from codex_harness.core.process_launch import hidden_process_kwargs
 
 CMD_META = '&|<>^%!"\r\n'
 
@@ -642,6 +643,7 @@ def _unittest_observer():
                     )
                 except (OSError, ValueError, IndexError) as error:
                     entry["reason"] = str(error)
+            kwargs.update(hidden_process_kwargs(kwargs.get("creationflags", 0)))
             super().__init__(args, *positional, **kwargs)
             self.module_observation = entry if current is not None else None
             if current is not None:
@@ -874,6 +876,8 @@ def observe_unittest(repo: Path, runner: Runner, module: str, owned: tuple[str, 
             "-B",
             "-c",
             inspect.getsource(_module_startup_identity)
+            + "\n"
+            + inspect.getsource(hidden_process_kwargs)
             + "\n"
             + inspect.getsource(_unittest_observer)
             + "\n_unittest_observer()\n",

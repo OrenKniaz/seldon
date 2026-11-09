@@ -11,6 +11,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
 from codex_harness.core import waves
+from codex_harness.core.process_launch import hidden_process_kwargs
 from codex_harness.core.spine import Spine, SpineError, _canonical, _hash, impact, requirement_refs
 
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -201,7 +202,8 @@ def parse_json(raw):
 def git(repo, *args, binary=False):
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), *args], check=True, capture_output=True, timeout=30
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, timeout=30,
+            **hidden_process_kwargs(),
         )
     except subprocess.TimeoutExpired as error:
         raise SpineError(
