@@ -6,10 +6,17 @@ import sys
 from .schema import answer_schema, validate
 from .store import encode
 
+CRAFT = (" If this product has a user interface, it must look designed by someone with a point of view. "
+         "Avoid the default AI look: a system-font stack as the whole typography, a centered column on off-white, "
+         "a generic pill button, purple gradients, cards in cards, gray text on color, bounce easing. "
+         "Instead: deliberate type with real hierarchy from fonts available offline; a confident palette with strong contrast; "
+         "generous rhythm in spacing; motion that is brief, purposeful and honors reduced-motion; words a person would actually say.")
+
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and a complete quality bar. "
              "Improve it toward the most beautiful, simplest, most delightful version of what was asked, within scope. "
-             "Every quality criterion must be observable with the supplied setup; beauty means craft, not extra requirements.",
+             "Every quality criterion must be observable with the supplied setup; beauty means craft, not extra requirements. "
+             "A product with a user interface states one distinctive visual direction as a quality criterion.",
     "DECIDE": "Interpret the supplied verbatim words about this exact displayed subject. "
               "For revise, state the requested change in why.",
     "PLAN": "What product work and semantic checks deliver the accepted vision, by the simplest design that reaches its quality bar? "
@@ -22,7 +29,7 @@ PROMPTS = {
     "IMPACT": "Does this proposed change preserve the user-authorized scope? Uncertainty grants no authorization.",
     "REVIEW": "Does this plan deliver the accepted dream and its quality bar, as simply as possible? No implementation evidence is needed.",
     "WORK": "Complete this task in its assigned worktree and owned files. Build it beautifully the first time: "
-            "max simple, max efficient, max delightful, nothing that does not earn its place. "
+            "max simple, max efficient, max delightful, nothing that does not earn its place." + CRAFT + " "
             "Run the assigned checks, inspect your actual UI screenshots against the accepted quality bar, "
             "and refine before returning. Local checks are feedback; Seldon independently observes acceptance. "
             "Write execution.json in SELDON_EVIDENCE_DIR using the supplied report contract: toolReady only after "
