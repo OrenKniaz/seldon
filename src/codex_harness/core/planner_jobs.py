@@ -58,9 +58,11 @@ def _directory(workspace, job_id):
 
 
 def execution_inputs(store):
+    spine = store.spine()
     payload = dict(
-        nodes={n["id"]: n for n in store.spine().to_dict()["nodes"]},
-        files=file_inputs(store.workspace / "template"),
+        nodes={n["id"]: n for n in spine.to_dict()["nodes"]
+               if not spine.semantic or n["fields"].get("schema") != "dot-reviewer-selection-v1"},
+        files={} if spine.semantic else file_inputs(store.workspace / "template"),
     )
     return dict(payload, digest=_digest(payload))
 

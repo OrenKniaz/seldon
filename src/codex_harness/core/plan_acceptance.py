@@ -639,14 +639,12 @@ class PlanAcceptance:
             if not judgment["positiveCredit"]:
                 return dict(dispositions=0, state="pending-judgment", judgment=judgment, owner=None)
             approved = judgment["meaning"].get("memberDispositions", {})
-            reuse = self.prepare_review_reuse()
             return dict(
                 dispositions=sum(
                     approved.get(item["id"]) == item["status"] for item in dispositions
                 ),
                 state="judged",
                 judgment=judgment,
-                reuseJudgments=reuse,
                 convergence=self.review_convergence(prepare=True),
                 owner=None,
             )

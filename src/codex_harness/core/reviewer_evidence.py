@@ -47,8 +47,9 @@ def review_binding(store, member_ids=(), *, convergence=False, run_id=None):
         if key not in snapshot:
             snapshot[key] = read()
         return snapshot[key]
+    evidence = observed("evidence", store.review_nodes_digest)
     binding = dict(memberIds=sorted(member_ids), convergence=convergence, runId=run_id,
-                   revision=observed("revision", store._revision), evidence=observed("evidence", store.review_nodes_digest))
+                   revision=evidence.get("digest") or observed("revision", store._revision), evidence=evidence)
     if member_ids:
         members = {row["id"]: row for row in finding_records(store)}
         acceptance = {key: row for key, row in members.items() if row.get("stage") == "acceptance"}
@@ -63,7 +64,7 @@ def review_binding(store, member_ids=(), *, convergence=False, run_id=None):
         from codex_harness.core.acceptance import current_run
         binding["acceptanceRun"] = observed("acceptanceRun", lambda: current_run(store))
     if convergence:
-        binding["credits"] = observed("reviewCredits", lambda: [dict(id=row["id"], reuse=row.get("reuseJudgmentId"))
+        binding["credits"] = observed("reviewCredits", lambda: [dict(id=row["id"])
                               for row in store.successful_reviews(store.manifest_revision())])
     return binding
 

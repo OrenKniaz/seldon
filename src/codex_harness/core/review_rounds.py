@@ -247,6 +247,7 @@ def run_roundtable(
         raise ValueError("timeout must be a finite positive number")
     spine = store.spine()
     revision = store.manifest_revision()
+    snapshot = store.review_nodes_digest() if spine.semantic else None
     if revision is None:
         raise ValueError(
             "Review requires a compilable manifest: add validation and requirementFiles"
@@ -356,10 +357,9 @@ def run_roundtable(
         from codex_harness.core.run_ownership import ensure_effect
 
         ensure_effect(store)
-        if store.manifest_revision() != revision:
+        if (store.review_nodes_digest() != snapshot if spine.semantic else store.manifest_revision() != revision):
             raise PlanStoreError("roundtable-plan-changed", "Review the new plan revision")
         _table(store)
-        snapshot = json.dumps(store.review_nodes_digest()) if spine.semantic else None
         store.connection.executemany(
             "INSERT INTO review_runs "
             "(id, round_id, plan_revision, reviewer, provider, model, exit_code, "
@@ -367,7 +367,7 @@ def run_roundtable(
             "shards, shardDetails, truncatedNodes, reshardedFrom, isMocked, didRunProvider, "
             "nodesDigest) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [(*run, snapshot) for run in runs],
+            [(*run, json.dumps(snapshot) if snapshot is not None else None) for run in runs],
         )
         store.connection.executemany(
             "UPDATE review_attempts SET state='completed' WHERE id=?", [(run[0],) for run in runs]

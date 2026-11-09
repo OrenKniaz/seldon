@@ -99,7 +99,9 @@ def assess(store, purpose, facts, *, subject_ids=None, prepare=True):
         event_id = store.connection.execute("SELECT last_insert_rowid()").fetchone()[0]
         judgment = store.prepare_judgment(
             question=purpose,
-            subject_ids=subject_ids or store.spine().ids("vision"),
+            subject_ids=(list(facts["reviewBinding"]["evidence"]["nodes"])
+                         if store.spine().semantic and "reviewBinding" in facts
+                         else subject_ids) or store.spine().ids("vision"),
             source_event_ids=[event_id],
         )
         store._event(

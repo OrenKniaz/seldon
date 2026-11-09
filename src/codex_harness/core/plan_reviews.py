@@ -6,7 +6,7 @@ import hashlib
 import json
 from contextlib import nullcontext
 
-from codex_harness.core.reviewer_evidence import finding_records, native_reviewer, review_binding
+from codex_harness.core.reviewer_evidence import native_reviewer, review_binding
 from codex_harness.core.spine import (
     Spine,
     requirement_file_sources,
@@ -307,8 +307,11 @@ class PlanReviews:
         return result
 
     def review_nodes_digest(self) -> dict:
-        """Capture exact planning nodes and template bytes without semantic repair exceptions."""
+        """Bind semantic reviews and B to the same immutable canonical meaning."""
         spine = self.spine()
+        if spine.semantic:
+            from codex_harness.core.planner_jobs import execution_inputs
+            return execution_inputs(self)
         template = self.workspace / "template"
         sources = (
             requirement_file_sources(template, [p.name for p in template.iterdir()])
@@ -379,41 +382,8 @@ class PlanReviews:
                 self, "plan-review", facts, subject_ids=self.spine().ids(), prepare=prepare
             )
 
-    def review_reuse(self, row, current, *, prepare=False):
-        from codex_harness.core.approvals import assess
-
-        details = json.loads(row.get("shardDetails") or "[]")
-        originals = [
-            self.judgment(part["judgmentId"]) for part in details if part.get("judgmentId")
-        ]
-        member_ids = [
-            r["id"]
-            for r in finding_records(self)
-            if r.get("round_id") == row["round_id"]
-            and r["reviewer"] == row["reviewer"]
-            and r["provider"] == row["provider"]
-        ]
-        return assess(
-            self,
-            "review-reuse",
-            dict(
-                review=dict(row),
-                before=originals,
-                reviewBinding=review_binding(self, member_ids),
-                beforeDigest=json.loads(row["nodesDigest"]),
-                afterDigest=current,
-                currentNodes=self.list_nodes(),
-                currentRevision=self.manifest_revision(),
-                question="Judge the actual revision delta, including repaired and changed evidence. "
-                "May this independent prior review still supply approval for this exact revision? "
-                "meaning.reuse must be explicit; unchanged field locations or similar text grant no credit.",
-            ),
-            subject_ids=self.spine().ids(),
-            prepare=prepare,
-        )
-
     def successful_reviews(self, revision: str) -> list[dict]:
-        """Credit only the latest reservation, with native identity and explicit judged reuse."""
+        """Credit the latest native review only for its exact canonical snapshot."""
         if not self.connection.execute("SELECT 1 FROM sqlite_master WHERE name='review_runs'").fetchone():
             return []
         policy = self.plan_review_policy_state(revision)
@@ -436,6 +406,8 @@ class PlanReviews:
                 continue
             if policy["active"] and row["id"] not in policy["successfulReviewIds"]:
                 continue
+            if carry and json.loads(row.get("nodesDigest") or "null") != snapshot:
+                continue
             details = json.loads(row.get("shardDetails") or "[]")
             profiles = [
                 ref["payload"].get("facts", {}).get("reviewer")
@@ -447,15 +419,9 @@ class PlanReviews:
             if not profiles or any(profile not in allowed for profile in profiles):
                 continue
             if row["plan_revision"] != revision:
-                if not row.get("nodesDigest"):
-                    continue
-                reuse = self.review_reuse(row, snapshot)
-                if not (reuse["positiveCredit"] and reuse["meaning"].get("reuse") is True):
-                    continue
                 row.update(
                     carriedForward=True,
                     carriedFromRevision=row["plan_revision"],
-                    reuseJudgmentId=reuse["id"],
                 )
             latest.setdefault((row["provider"], row["reviewer"]), row)
         return [latest[key] for key in sorted(latest)]
@@ -465,6 +431,7 @@ class PlanReviews:
 
         rows = [dict(row) for row in self.connection.execute("SELECT * FROM review_runs ORDER BY rowid")]
         spine = self.spine()
+        snapshot = self.review_nodes_digest()
         rounds = 1 if spine.node(spine.ids("vision")[0])["fields"].get("planSize") in {"tiny", "small"} else 3
         if len({row["round_id"] for row in rows}) < rounds:
             return None
@@ -473,9 +440,9 @@ class PlanReviews:
             "plan-convergence",
             dict(
                 rounds=rows,
-                currentNodes=self.list_nodes(),
+                currentNodes=[n for n in self.list_nodes() if n["id"] in snapshot["nodes"]],
                 reviewBinding=review_binding(self, convergence=True),
-                revision=self.manifest_revision(),
+                revision=snapshot.get("digest", self.manifest_revision()),
                 defaultRounds=rounds,
                 question="After these independent review rounds, judge convergence and consequence-scaled "
                 "depth (tiny/small: one short independent round unless a concrete gap needs repair). "
@@ -517,23 +484,6 @@ class PlanReviews:
                 f"Missing {' and '.join(missing)} for current manifest revision {revision}",
             )
 
-    def prepare_review_reuse(self):
-        """The existing reuse owner judges actual deltas before another paid review."""
-        if (
-            not self.spine().semantic
-            or not self.connection.execute("PRAGMA table_info(review_runs)").fetchone()
-        ):
-            return []
-        reuse = []
-        for credit in self._review_credit_rows(self.manifest_revision(), carry=True).values():
-            row = credit["run"]
-            if not credit["success"]:
-                continue
-            if row["plan_revision"] == self.manifest_revision() or not row.get("nodesDigest"):
-                continue
-            reuse.append(self.review_reuse(row, self.review_nodes_digest(), prepare=True))
-        return reuse
-
     def completed_review(self, effect):
         """Read the exact completed round recorded by this effect's admissions."""
         ids = [
@@ -543,8 +493,11 @@ class PlanReviews:
             self.connection.execute("SELECT * FROM review_runs WHERE id=?", (key,)).fetchone()
             for key in ids
         ]
+        snapshot = self.review_nodes_digest() if self.spine().semantic else None
         if not rows or any(
-            row is None or row["plan_revision"] != self.manifest_revision() for row in rows
+            row is None or (json.loads(row["nodesDigest"] or "null") != snapshot
+                            if snapshot is not None else row["plan_revision"] != self.manifest_revision())
+            for row in rows
         ):
             return None
         rounds = {row["round_id"] for row in rows}

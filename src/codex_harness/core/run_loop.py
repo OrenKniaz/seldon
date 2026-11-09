@@ -845,7 +845,6 @@ def _step(store):
                 from codex_harness.core.run_setup import select_reviewers, workers
                 select_reviewers(store, run)
                 run["workers"] = workers(store, run)
-                store.prepare_review_reuse()
                 if _pending(store, run):
                     save(store, run)
                     break

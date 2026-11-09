@@ -4363,6 +4363,9 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
     repair to passing review/B without amendment or user provenance questions.
     A judge reiterating that gap must not create another finding member.
     Earlier all-positive reviewers never exercised this repair boundary.
+    Catch r30: fallback reviewer bookkeeping and regenerated documents must not
+    stale positive reviews or B; a real meaning edit must still invalidate both.
+    Earlier fallback journeys stopped at the displayed B without answering it.
     """
     from tests.python.core.mcp_planner_support import LoopClient, provider_shape
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
@@ -4506,6 +4509,25 @@ def small_plan_golden(workspace, *, size="small", auth_fault=False, facts_fault=
             contracts = spine.node(build["fields"]["dependsOn"][0])
             assert contracts["fields"]["semanticPhase"] == "contracts" and contracts["fields"]["dependsOn"] == []
             original_ids = spine.ids()
+        if auth_fault is True:
+            reviewed = {r["id"] for r in prerequisite["reviews"]}
+            with open_plan_store(workspace) as store:
+                document = (workspace / "template/VISION.md").read_bytes()
+                store.compile_template(workspace / "template")
+                assert (workspace / "template/VISION.md").read_bytes() != document, "Fallback did not exercise regenerated reviewer metadata"
+            client.words("Yes, approve the displayed plan.")
+            assert client.current["question"]["purpose"] == "user-decision", client.current
+            client.answer(judge_reply(client.current["question"]))
+            with open_plan_store(workspace) as store:
+                assert store._current_approval("B"), "Projection regeneration invalidated the displayed B"
+                assert {r["id"] for r in store.successful_reviews(store.manifest_revision())} == reviewed
+                assert not any(r["purpose"] == "review-reuse" for r in approvals.records(store,"semantic-facts"))
+                assert not any(r["state"] == "stale" for r in approvals.records(store,"confirmation-responded"))
+                assert len(approvals.records(store,"confirmation-requested")) == 2, "Bookkeeping asked another user question"
+                requirement = store.spine().node(identities["persist"])
+                requirement["text"] += "; allow exporting saved notes to a shared service"
+                store.upsert_node(requirement)
+                assert not store._current_approval("B") and not store.successful_reviews(store.manifest_revision()), "A real meaning edit retained B or review credit"
         if auth_fault:
             return
         if size == "medium":
@@ -4624,8 +4646,6 @@ def judge_reply(pending, *, decision="approve", verdict="positive", gaps=()):
         result["meaning"] = dict(
             memberDispositions={k: "resolved" for k in result["meaning"]["memberDispositions"]}
         )
-    elif purpose == "review-reuse":
-        result["meaning"] = dict(reuse=True)
     elif purpose == "plan-convergence":
         result["meaning"] = dict(action="ready")
     packet = next(

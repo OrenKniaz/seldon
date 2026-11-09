@@ -276,6 +276,4 @@ class PlanJudgments:
             if record["question"] == "vision-intent":
                 self._classify_vision_edit(self.spine().node(self.spine().ids("vision")[0]))
         result = self.judgment(judgment_id)
-        if record["question"] == "review-reuse" and result["positiveCredit"]:
-            result["convergence"] = self.review_convergence(prepare=True)
         return result
