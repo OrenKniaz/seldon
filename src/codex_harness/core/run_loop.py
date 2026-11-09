@@ -61,7 +61,7 @@ def _steering(store, run, reason, *, failed=None):
         context = dict(failedRequestId=failed["id"], rejectedResponseEventId=failed.get("rejectedResponseEventId"),
                        **diagnostics,
                        rejectedError=failed["error"], internalFailure=True)
-        if diagnostics.get("kind") == "graph" and diagnostics.get("editableFields"):
+        if diagnostics.get("kind") == "graph" and diagnostics.get("editableFields") and not diagnostics.get("obligations"):
             original = next(s["payload"]["context"] for s in failed["sourceRefs"] if s["kind"] == "loop-question")
             context = {**original, **context}
             family = "repair"
@@ -157,6 +157,7 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
                 "Supply new evidence or direction through harness_chat before another semantic attempt",
             )
         planner_answer = pending["family"] in {"author", "direction", "repair"}
+        pending = dict(pending, context={**pending["context"], **retained.get("diagnostics",{})})
         result = store.submit_judgment(
             judgment_id=pending["requestId"],
             response=answer,
@@ -166,7 +167,7 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
         )
         result = store.judgment(result["id"], candidate=pending["candidate"])
         if result["disposition"] in {"exact-fix", "steer"}:
-            if result["disposition"] == "exact-fix" and pending["purpose"] == "trace" and result.get("diagnostics",{}).get("editableFields"):
+            if result["disposition"] == "exact-fix" and pending["family"] in {"author", "repair"} and (result.get("diagnostics",{}).get("editableFields") or result.get("diagnostics",{}).get("obligations")):
                 ask_question(store,run,pending["family"],"trace",judgment=result,context={**pending["context"],**result["diagnostics"]})
             if result["disposition"] == "steer":
                 if pending["family"] in {"direction", "repair"}:
@@ -178,7 +179,11 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
             return
         meaning = result["meaning"]
         if pending["purpose"] == "planning-size":
-            run["reply"] = f"Size: {meaning['size']}. {meaning['process']}. You may override the size in your own words."
+            vision = store.spine().node(store.spine().ids("vision")[0])
+            override = vision["fields"].get("sizeOverride")
+            vision["fields"]["planSize"] = override["size"] if override and meaning["overrideAccepted"] else meaning["size"]
+            store.upsert_node(vision)
+            run["reply"] = f"Size: {vision['fields']['planSize']}. {meaning['process']}. You may override the size in your own words."
             store._event("chat-message", dict(role="seldon", text=run["reply"], sourceRequest=pending["requestId"]))
         if meaning.get("reply"):
             run["reply"] = meaning["reply"]
@@ -224,16 +229,8 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
             elif run["state"] == "JUDGE":
                 run["state"] = "NEXT"
         else:
-            store._event(
-                "run-semantic-answer",
-                dict(
-                    requestId=request_id,
-                    family=pending["family"],
-                    answer=meaning,
-                    source=source,
-                    sourceVerified=False,
-                ),
-            )
+            store._event("run-semantic-answer", dict(requestId=request_id, family=pending["family"],
+                         answer=meaning, source=source, sourceVerified=False))
             option = meaning["option"] if pending["family"] == "direction" else meaning.get("readiness", "ready")
             if pending["family"] == "direction":
                 _direction(
@@ -248,7 +245,7 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
                 ask_question(store, run, "author", pending["purpose"], context=pending["context"])
             elif option in {"research", "ask_user"}:
                 _direction(store, run, option, ({"question": meaning["question"]} if meaning.get("question") else {}), meaning["rationale"])
-            elif pending["purpose"] == "plan-outline":
+            elif pending["purpose"] == "plan-outline" and "targets" in pending["answerSchema"]["properties"]:
                 outline = next(r for r in approvals.records(store,"trace-outline") if r["requestId"] == pending["requestId"])
                 context = {**pending["context"], **{k:v for k,v in outline.items() if k != "requestId"}}
                 if any(context[k] for k in ("nodes","targets","scenarios")):
@@ -258,7 +255,7 @@ def _record_answer(store, *, request_id, answer, source, provider=None):
             elif pending["purpose"] == "finding-dispositions":
                 pass
             elif run["step"] == "understanding":
-                _user(store, run, "align+vision-lock")
+                run.update(state="PLAN", step="trace")
             else:
                 run.update(state="PLAN", step="prepare")
         save(store, run)
@@ -807,11 +804,14 @@ def _step(store):
                     except PlanStoreError:
                         _user(store, run, "align+vision-lock")
                     else:
-                        if store.spine().semantic:
-                            (store.workspace / "template").mkdir(exist_ok=True)
-                        store.compile_template(store.workspace / "template")
-                        store.advance_to("roundtable", by="run-loop")
-                        run.update(state="REVIEW", step="plan-review")
+                        try:
+                            if store.spine().semantic: (store.workspace / "template").mkdir(exist_ok=True)
+                            store.compile_template(store.workspace / "template")
+                            store.advance_to("roundtable", by="run-loop")
+                        except ValueError as error:
+                            ask_question(store,run,"author","trace",context={**getattr(error,"diagnostics",{}),"obligations":[str(error)],
+                                "instructions":"Complete the compiler obligations inside the accepted scope; workers write code."})
+                        else: run.update(state="REVIEW", step="plan-review")
                 elif run["step"] == "trace":
                     try:
                         approvals.require_approval(store, "A")
@@ -826,16 +826,9 @@ def _step(store):
                             _user(store, run, "align+vision-lock")
                     else:
                         store.advance_to("plan", by="run-loop")
-                if run["state"] == "PLAN" and not run.get("userRequest"):
-                    ask_question(
-                        store,
-                        run,
-                        "author",
-                        "plan-outline" if run["step"] == "trace" else run["step"],
-                        context=dict(
-                            instructions="Author semantics only. Workers write source and tests.",
-                        ),
-                    )
+                if run["state"] == "PLAN" and not run.get("userRequest") and not run.get("question"):
+                    ask_question(store,run,"author","plan-outline" if run["step"] == "trace" else run["step"],
+                                 context=dict(instructions="Author semantics only. Workers write source and tests."))
             elif state == "REVIEW":
                 from codex_harness.core.run_setup import select_reviewers, workers
                 select_reviewers(store, run)
@@ -1038,56 +1031,26 @@ def review_response(store, launch, invoke, consume, retry, capture=None):
         launch = retry(judgment)
 
 
-def review_dossier(
-    store,
-    result,
-    reviewer,
-    record,
-    *,
-    executable,
-    runner,
-    timeout,
-    token_budget=None,
-    shards=None,
-    stop_on_invalid=False,
-    capture=None,
-    abandon=None,
-    before_launch=None,
-    **packet_options,
-):
+def review_dossier(store, result, reviewer, record, *, executable, runner, timeout,
+                   token_budget=None, shards=None, stop_on_invalid=False, capture=None,
+                   abandon=None, before_launch=None, **packet_options):
     """Replace overflowed dossiers once; the request owner retains obligations."""
     from codex_harness.core import review_packets
     from codex_harness.core.review_rounds import _review_shard
-    from codex_harness.core.review_packets import bind_review_dossiers
     from codex_harness.core.worker_packet_budget import PROVIDER_TOKEN_BUDGETS
 
     provider = reviewer["provider"]
-    if provider not in PROVIDER_TOKEN_BUDGETS:
-        raise ValueError(
-            f"Unknown provider {provider!r}; use one of: {', '.join(PROVIDER_TOKEN_BUDGETS)}"
-        )
     budget = PROVIDER_TOKEN_BUDGETS[provider] if token_budget is None else token_budget
     if shards is None:
-        shards = review_packets.packet_shards(
-            store, provider, token_budget=budget, **packet_options
-        )
+        shards = review_packets.packet_shards(store, provider, token_budget=budget, **packet_options)
     for attempt in range(2):
         completed = []
-        record["shards"] = len(shards)
-        record["shardDetails"] = []
-        record["truncatedNodes"] = sorted(
-            {key for shard in shards for key in shard["truncatedNodes"]}
-        )
+        record.update(shards=len(shards), shardDetails=[],
+                      truncatedNodes=sorted({key for shard in shards for key in shard["truncatedNodes"]}))
         for shard in shards:
             shard_record, items = _review_shard(
-                store,
-                result,
-                reviewer,
-                shard,
-                executable=executable,
-                runner=runner,
-                timeout=timeout,
-                capture=capture,
+                store, result, reviewer, shard, executable=executable,
+                runner=runner, timeout=timeout, capture=capture,
                 **({"before_launch": before_launch} if before_launch is not None else {}),
             )
             record["shardDetails"].append(shard_record)
@@ -1103,12 +1066,8 @@ def review_dossier(
         if attempt == 1:
             yield from completed
             return
-        record["reshardedFrom"] = {
-            "budget": budget,
-            "shards": len(shards),
-            "shardDetails": record["shardDetails"],
-            "reason": shard_record["primaryError"]["reason"],
-        }
+        record["reshardedFrom"] = dict(budget=budget, shards=len(shards),
+            shardDetails=record["shardDetails"], reason=shard_record["primaryError"]["reason"])
         if abandon is not None:
             abandon()
             yield from completed
@@ -1116,9 +1075,7 @@ def review_dossier(
         budget = max(1, budget // 2)
         record["reshardedFrom"]["newBudget"] = budget
         try:
-            shards = review_packets.packet_shards(
-                store, provider, token_budget=budget, **packet_options
-            )
+            shards = review_packets.packet_shards(store, provider, token_budget=budget, **packet_options)
         except ValueError as error:
             # A header that cannot fit must not hide the actual provider failure.
             record["reshardedFrom"]["reshardError"] = str(error)
@@ -1127,12 +1084,8 @@ def review_dossier(
         prior = record["reshardedFrom"]["shardDetails"][0]
         for shard in shards:
             shard["reviewRoundId"] = prior["reviewRoundId"]
-        bind_review_dossiers(
-            store,
-            {provider: shards},
-            [reviewer],
-            candidate_run={"id": prior["acceptanceRunId"]} if prior["acceptanceRunId"] else None,
-        )
+        review_packets.bind_review_dossiers(store, {provider: shards}, [reviewer],
+            candidate_run={"id": prior["acceptanceRunId"]} if prior["acceptanceRunId"] else None)
         record["reshardedFrom"]["newShardCount"] = len(shards)
 
 

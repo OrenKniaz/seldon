@@ -629,8 +629,6 @@ class PlanDrafts:
                 "Protected product contradiction",
                 "wave-proposal-unapplied",
             )
-            self._check_coverage(after, "bead")
-            self._check_coverage(after, "test")
             self._manifest(after)
             for node in nodes:
                 self._write_node(after, node["id"])

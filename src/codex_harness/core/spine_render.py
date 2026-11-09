@@ -18,6 +18,8 @@ def _heading(spine: Spine, node_id: str, depth: int) -> list[str]:
         f"{'#' * depth} {node_id}: {node['title']} ({spine.revision(node_id)[:12]})",
         "",
         node["text"],
+        *(key + ": " + json.dumps(node["fields"][key],ensure_ascii=False)
+          for key in ("story","architecture","design","interfaceContracts") if key in node["fields"]),
         "",
     ]
 

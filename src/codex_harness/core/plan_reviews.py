@@ -463,10 +463,10 @@ class PlanReviews:
     def review_convergence(self, *, prepare=False):
         from codex_harness.core.approvals import assess
 
-        rows = [
-            dict(row) for row in self.connection.execute("SELECT * FROM review_runs ORDER BY rowid")
-        ]
-        if len({row["round_id"] for row in rows}) < 3:
+        rows = [dict(row) for row in self.connection.execute("SELECT * FROM review_runs ORDER BY rowid")]
+        spine = self.spine()
+        rounds = 1 if spine.node(spine.ids("vision")[0])["fields"].get("planSize") in {"tiny", "small"} else 3
+        if len({row["round_id"] for row in rows}) < rounds:
             return None
         return assess(
             self,
@@ -476,9 +476,10 @@ class PlanReviews:
                 currentNodes=self.list_nodes(),
                 reviewBinding=review_binding(self, convergence=True),
                 revision=self.manifest_revision(),
-                defaultRounds=3,
+                defaultRounds=rounds,
                 question="After these independent review rounds, judge convergence and consequence-scaled "
-                "depth. meaning.action is ready, repair, continue-review or steer. Three rounds never "
+                "depth (tiny/small: one short independent round unless a concrete gap needs repair). "
+                "meaning.action is ready, repair, continue-review or steer. Three rounds never "
                 "grant approval automatically. Explain remaining concrete gaps or readiness.",
             ),
             subject_ids=self.spine().ids(),

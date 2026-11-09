@@ -67,7 +67,6 @@ class PlanPublication:
                 if current == "requirements":
                     self._check_coverage(spine, "test")
                 if current == "plan":
-                    self._check_coverage(spine, "bead")
                     self._manifest(spine)
                 if to_phase == "publish":
                     consent = require_approval(self, "B")

@@ -279,22 +279,22 @@ class Spine:
     def coverage_gaps(self) -> list[dict[str, str]]:
         gaps = []
         for node_id, node in self._nodes.items():
-            if node["kind"] == "acceptance" and not node["fields"].get("steps"):
+            if node["kind"] == "acceptance" and not self.semantic and not node["fields"].get("steps"):
                 gaps.append({"id": node_id, "gap": "acceptance scenario has no executable steps"})
             elif node["kind"] == "requirement":
                 kinds = {self._nodes[item]["kind"] for item in self.descendants(node_id)}
                 for kind in ("bead", "test"):
                     if kind not in kinds:
-                        gaps.append({"id": node_id, "gap": f"requirement-without-{kind}"})
+                        gaps.append({"id": node_id, "gap": f"requirement-without-{kind}", "addKinds":[kind], "editableFields":{key:["parents"] for key in self.ids(kind)}})
             elif node["kind"] == "bead" and not any(
                 self._nodes[item]["kind"] == "vision" for item in self.ancestors(node_id)
             ):
-                gaps.append({"id": node_id, "gap": "bead-without-vision"})
+                gaps.append({"id": node_id, "gap": "bead-without-vision", "editableFields":{key:["parents"] for key in [node_id,*self.ancestors(node_id)] if self.node(key)["kind"] != "vision"}})
             elif node["kind"] == "test" and not any(
                 self._nodes[item]["kind"] in ("requirement", "bead")
                 for item in self.ancestors(node_id)
             ):
-                gaps.append({"id": node_id, "gap": "test-covering-nothing"})
+                gaps.append({"id": node_id, "gap": "test-covering-nothing", "editableFields":{node_id:["parents"]}})
         return gaps
 
     def to_dict(self) -> dict:

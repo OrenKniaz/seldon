@@ -18,10 +18,10 @@ def response(pending, raw, record, provider=None):
     if retain:
         scope = record.get("diagnostics") or pending["context"]
         known = pending["answerSchema"]["properties"]["edits"]["properties"]
-        retained = {**scope.get("rejectedEdits",{}), **{k:v for k,v in value["edits"].items() if k in known}}
+        retained = {**scope.get("rejectedEdits",{}), **{k:v for k,v in value["edits"].items() if k in known and (v is not None or not scope.get("obligations"))}}
         if scope.get("editableFields") is not None and any(k not in known for k in value["edits"]):
             raise ValueError(f"Repair only the refused fields {scope['editableFields']}")
-        value["edits"] = {**{k:v for k,v in retained.items() if k in known}, **value["edits"]}
+        value["edits"] = ({k:None for k in known} if scope.get("obligations") else {k:v for k,v in retained.items() if k in known}) | value["edits"]
     try:
         validate_input(value, pending["answerSchema"], "answer")
     except ValueError as error:
@@ -87,6 +87,9 @@ def ask_question(store, run, family, purpose, *, judgment=None, context=None):
     from codex_harness.core.spine import _hash, _canonical
 
     context = context or {}
+    if purpose == "trace" and context.get("obligations"):
+        context = {**context, "nodes":context.get("nodes",[n for n in store.list_nodes() if n["kind"] not in {"vision","result"} and n["id"] != run["reviewerNodeId"]]),
+                   "targets":context.get("targets",[]), "scenarios":context.get("scenarios",[])}
     if family == "author" and purpose == "plan-outline" and run.get("jobId"):
         context = {**context, **recovery_context(store,run)}
     def hold(reason):
@@ -105,6 +108,9 @@ def ask_question(store, run, family, purpose, *, judgment=None, context=None):
     pending = dict(family=family,purpose=purpose,revision=store._revision(),context=context,
         role="mechanical" if family == "user-interpretation" or purpose == "planning-size" else "judge" if family == "assess" else "planner",
         answerSchema=author_contract(store,purpose,context) if family in {"author", "repair"} and purpose in {"trace","plan-outline"} else deepcopy(schema), examples=deepcopy(examples))
+    if purpose == "plan-outline" and "targets" not in pending["answerSchema"]["properties"]:
+        from codex_harness.core.run_schemas import SMALL_EXAMPLE
+        pending["examples"] = [deepcopy(SMALL_EXAMPLE)]
     if purpose in {"finding-dispositions", "finding-disposition"}:
         props = pending["answerSchema"]["properties"]["dispositions"]["items"]["properties"]
         props["memberRef"] = dict(props["memberRef"], enum=[m["id"] for m in context["members"]])

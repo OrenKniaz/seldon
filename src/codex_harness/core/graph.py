@@ -14,9 +14,10 @@ from types import MappingProxyType
 
 
 class PlanError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, editable_fields=None, add_kinds=()) -> None:
         super().__init__(message)
         self.code = code
+        self.editable_fields, self.add_kinds = editable_fields or {}, add_kinds
 
 
 @dataclass(frozen=True)
@@ -188,11 +189,12 @@ def _spec_refs(value: object) -> tuple[tuple[str, str, str], ...]:
     return refs
 
 
-def load_plan(path: Path) -> Plan:
+def load_plan(path: Path | dict, *, root: Path | None = None) -> Plan:
     """Load a manifest, rejecting unsafe ownership and invalid dependencies."""
-    manifest_path = path / "sample.json" if path.is_dir() else path
+    manifest_path = (root or Path.cwd()) / "sample.json" if isinstance(path, dict) else path / "sample.json" if path.is_dir() else path
+    failures = []
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = path if isinstance(path, dict) else json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict) or not isinstance(manifest["beads"], dict):
             raise PlanError("plan-schema-invalid", "Expected a plan and bead mapping")
         semantic = manifest.get("planMode") == "semantic-v1"
@@ -238,11 +240,13 @@ def load_plan(path: Path) -> Plan:
                 capability_refs=validate_capability_refs(data.get("capabilityRefs", [])),
             )
         if semantic and not any(b.get("semanticPhase") == "build" for b in manifest["beads"].values()):
-            raise PlanError("semantic-v1-build-missing", "add one build bead" + (" that depends on the contracts bead" if any(b.get("semanticPhase") == "contracts" for b in manifest["beads"].values()) else ""))
+            failures.append(PlanError("semantic-v1-build-missing", "add one build bead" + (" that depends on the contracts bead" if any(b.get("semanticPhase") == "contracts" for b in manifest["beads"].values()) else ""), {k:["fields.semanticPhase"] for k in beads}, ("bead",)))
         if semantic and sorted(str(b.get("semanticPhase", "")) for b in manifest["beads"].values()) not in (["build"], ["build", "contracts"]):
-            raise PlanError("semantic-v1-build-shape", "semantic-v1 runs one build bead until Stage 3a (DV2): merge build beads into one")
+            failures.append(PlanError("semantic-v1-build-shape", "Use one build bead and an optional prerequisite contracts bead until Stage 3a (DV2)", {k:["fields.semanticPhase"] for k in beads}))
+        if semantic and trace and trace.node(trace.ids("vision")[0])["fields"].get("planSize") in {"tiny", "small"} and len(beads) != 2:
+            failures.append(PlanError("small-plan-tests-first", "Declare a contracts bead for tests and a build bead depending on it", add_kinds=("bead",)))
         if semantic and len(beads) == 2 and any(bool(b.depends_on) != (manifest["beads"][k]["semanticPhase"] == "build") for k, b in beads.items()):
-            raise PlanError("semantic-v1-contract-order", "semantic-v1 contracts must supply RED first: set contracts dependsOn=[] and build dependsOn=[contracts bead id]")
+            failures.append(PlanError("semantic-v1-contract-order", "Contracts must supply RED first: set contracts dependsOn=[] and build dependsOn=[contracts bead id]", {k:["fields.dependsOn"] for k in beads}))
         integration = manifest.get("integration", {})
         if not isinstance(integration, dict):
             raise PlanError("plan-schema-invalid", "Expected an integration object")
@@ -276,7 +280,15 @@ def load_plan(path: Path) -> Plan:
     except (KeyError, json.JSONDecodeError) as error:
         raise PlanError("plan-schema-invalid", f"Invalid plan manifest: {error}") from error
 
-    order = topological_order(plan)
+    if trace:
+        scope = manifest.get("waveScope", {}).get("inScopeRequirementIds", trace.ids("requirement"))
+        failures.extend(PlanError("plan-"+gap["gap"], gap["id"]+": "+gap["gap"], gap.get("editableFields"), gap.get("addKinds",())) for gap in trace.coverage_gaps()
+                        if (semantic or trace.node(gap["id"])["kind"] in {"requirement", "bead"})
+                        and (not gap["gap"].startswith("requirement-without-") or gap["id"] in scope))
+    try: order = topological_order(plan)
+    except PlanError as error:
+        failures.append(error)
+        order = []  # Do not infer ownership ordering from an invalid dependency graph.
     ancestors: dict[str, set[str]] = {}
     protected = tuple(
         _file_path(name) for name in (*plan.requirement_files, *([directory] if directory else []))
@@ -291,22 +303,23 @@ def load_plan(path: Path) -> Plan:
             len(set(bead.proof_depends_on)) != len(bead.proof_depends_on)
             or set(bead.proof_depends_on) - ancestors[bead_id]
         ):
-            raise PlanError(
-                "plan-proof-dependency-invalid",
-                f"{bead_id} proof dependencies must be unique transitive prerequisites",
-            )
+            failures.append(PlanError("plan-proof-dependency-invalid", f"{bead_id} proof dependencies must be unique transitive prerequisites"))
+    for bead_id, bead in plan.beads.items():
         for name in bead.owned_files:
-            owned = _file_path(name)
+            try: owned = _file_path(name)
+            except PlanError as error:
+                failures.append(PlanError(error.code, str(error), {bead_id:["fields.ownedFiles"]}))
+                continue
             if any(owned == item or item in owned.parents for item in protected):
-                raise PlanError(
-                    "plan-owned-file-protected", f"{bead_id} owns protected file {name}"
-                )
+                failures.append(PlanError("plan-owned-file-protected", f"{bead_id}.ownedFiles owns protected file {name}", {bead_id:["fields.ownedFiles"]}))
             for owner in owners.get(owned, []):
-                if owner != bead_id and owner not in ancestors[bead_id]:
-                    raise PlanError(
-                        "plan-ownership-overlap", f"{owner} and {bead_id} both own {name}"
-                    )
+                if order and owner != bead_id and owner not in ancestors[bead_id] and bead_id not in ancestors[owner]:
+                    failures.append(PlanError("plan-ownership-overlap", f"{owner} and {bead_id} both own {name}; add their dependency or separate ownedFiles", {k:["fields.ownedFiles","fields.dependsOn"] for k in (owner,bead_id)}))
             owners.setdefault(owned, []).append(bead_id)
+    if failures:
+        error = PlanError(failures[0].code if len(failures) == 1 else "plan-incomplete", "; ".join(f"{e.code}: {e}" for e in failures))
+        error.diagnostics = dict(kind="plan", obligations=[str(e) for e in failures], addKinds=sorted({k for e in failures for k in e.add_kinds}), editableFields={key:sorted({f for e in failures for f in e.editable_fields.get(key,[])}) for key in {k for e in failures for k in e.editable_fields}})
+        raise error
     return plan
 
 
@@ -319,9 +332,7 @@ def topological_order(plan: Plan) -> list[str]:
         dependencies = set(bead.depends_on)
         for dependency in dependencies:
             if dependency not in plan.beads:
-                raise PlanError(
-                    "plan-unknown-dependency", f"{bead_id} depends on unknown bead {dependency}"
-                )
+                raise PlanError("plan-unknown-dependency", f"{bead_id} depends on unknown bead {dependency}", {bead_id:["fields.dependsOn"]})
             dependents[dependency].append(bead_id)
         remaining[bead_id] = len(dependencies)
     ready = [(indices[bead_id], bead_id) for bead_id, count in remaining.items() if count == 0]
@@ -335,7 +346,7 @@ def topological_order(plan: Plan) -> list[str]:
             if remaining[dependent] == 0:
                 heapq.heappush(ready, (indices[dependent], dependent))
     if len(order) != len(plan.beads):
-        raise PlanError("plan-dependency-cycle", "Plan dependencies contain a cycle")
+        raise PlanError("plan-dependency-cycle", "Plan dependencies contain a cycle", {k:["fields.dependsOn"] for k,v in remaining.items() if v})
     return order
 
 

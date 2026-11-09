@@ -151,19 +151,10 @@ def packet_shards(
     if scenario_section is None:
         scenario_section = _scenario_section(scenarios, semantic=spine.semantic)
     brief_section = _brief_section(store) if packet is None else ""
-    full = (
-        packet
-        if packet is not None
-        else _packet(
-            spine,
-            report,
-            _test_bodies(store, protected),
-            scenarios,
-            scenario_section=scenario_section,
-            brief_section=brief_section,
-            review_history=findings(store, expand=True),
-        )
-    )
+    full = packet if packet is not None else _packet(
+        spine, report, _test_bodies(store, protected), scenarios,
+        scenario_section=scenario_section, brief_section=brief_section,
+        review_history=findings(store, expand=True))
 
     def record(text, features=(), nodes=(), truncated=(), *, partial=False):
         context_ids = []
@@ -187,17 +178,12 @@ def packet_shards(
                     context_ids.append(key)
             text = text.rsplit("\nAllowed node ids: ", 1)[0] + "\nAllowed node ids: "
             text += json.dumps(sorted(nodes), ensure_ascii=False) + "\n"
-        return {
-            "packet": text,
-            "hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            "estimatedTokens": estimated_tokens(text),
-            "features": list(features),
-            "nodeIds": list(nodes),
-            "truncatedNodes": list(truncated),
-            "contextNodeIds": context_ids,
-        }
+        return dict(packet=text, hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    estimatedTokens=estimated_tokens(text), features=list(features), nodeIds=list(nodes),
+                    truncatedNodes=list(truncated), contextNodeIds=context_ids)
 
-    if estimated_tokens(full) <= budget:
+    small = spine.node(spine.ids("vision")[0])["fields"].get("planSize") in {"tiny", "small"}
+    if small or estimated_tokens(full) <= budget:
         return [record(full, spine.ids("feature"), spine.ids())]
     features = sorted(spine.ids("feature"))
     members = {feature: set(spine.descendants(feature)) | {feature} for feature in features}

@@ -7,7 +7,6 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from codex_harness.core.format_admission import admit_store, require_current_store
@@ -436,6 +435,7 @@ class PlanStore(
                 raise PlanStoreError("spine-requirement-path-invalid", str(path))
             path.write_text(text, encoding="utf-8", newline="\n")
         manifest = compile_manifest(spine, template)
+        load_plan(manifest, root=template)
         self.check_requirement_files(manifest, template)
         with self._transaction():
             self._event("manifest-compiled", {"manifest": manifest, "spine": spine.to_dict()})
@@ -458,12 +458,8 @@ class PlanStore(
     def _manifest(self, spine: Spine) -> dict:
         template = self.workspace / "template"
         manifest = compile_manifest(spine, template if template.is_dir() else None)
-        if template.is_dir():
-            self.check_requirement_files(manifest, template)
-        with TemporaryDirectory(prefix="harness-plan-") as temp:
-            path = Path(temp) / "manifest.json"
-            path.write_text(_json(manifest), encoding="utf-8")
-            load_plan(path)
+        if template.is_dir(): self.check_requirement_files(manifest, template)
+        load_plan(manifest, root=template)
         return manifest
 
     def manifest_revision(self) -> str | None:
@@ -519,14 +515,7 @@ class PlanStore(
                 raise PlanStoreError("plan-semantic-scenarios-invalid", str(error)) from error
             return
         scope = execution_scope(spine)
-        coverage = spine.coverage_gaps()
-        if kind == "bead":
-            # Wave scope already requires every executable bead in its detailed prefix.
-            # Sketches and unrelated draft nodes are not executable beads.
-            unlinked = [gap for gap in coverage if gap["gap"] == "bead-without-vision"]
-            if unlinked:
-                raise PlanStoreError("plan-bead-without-vision", _json(unlinked))
-        gaps = [gap for gap in coverage if gap["gap"] == f"requirement-without-{kind}"]
+        gaps = [gap for gap in spine.coverage_gaps() if gap["gap"] == f"requirement-without-{kind}"]
         if scope:
             gaps = [gap for gap in gaps if gap["id"] in scope["inScopeRequirementIds"]]
         if gaps:

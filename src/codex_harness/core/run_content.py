@@ -4,7 +4,8 @@ from uuid import uuid4
 from codex_harness.core.planner_nodes import batch_nodes
 from codex_harness.core.semantic_schema import TRACE_LINKS, required_fields, REFERENCE_KINDS
 from codex_harness.core.planner_schema import json_value
-from codex_harness.core.spine import SpineError, content_revision, ALLOWED_PARENTS
+from codex_harness.core.spine import SpineError, content_revision, ALLOWED_PARENTS, compile_manifest
+from codex_harness.core.graph import load_plan
 from codex_harness.core.plan_types import PlanStoreError
 
 
@@ -15,7 +16,26 @@ def canonical(value):
 
 
 def apply_answer(store, pending, meaning):
-    purpose = pending["purpose"]
+    purpose, handles = pending["purpose"], pending["context"].get("handles", {})
+    small = purpose == "plan-outline" and "targets" not in pending["answerSchema"]["properties"]
+    if small or meaning.get("add"):
+        spine = store.spine()
+        phases = {spine.node(k)["fields"].get("semanticPhase"):k for k in spine.ids("bead")}
+        rows = ([dict(row, kind=kind) for kind in ("feature", "requirement", "test") for row in meaning[kind]] +
+                [dict(meaning[slot],kind="bead",key=phases.get(phase,slot),fields=dict(meaning[slot]["fields"],semanticPhase=phase,dependsOn=[] if phase == "contracts" else [phases.get("contracts","contractsBead")])) for slot,phase in (("contractsBead","contracts"),("buildBead","build"))]) if small else meaning["add"]
+        if not small and any(r["key"] in {*spine.ids(), *(n["id"] for n in pending["context"]["nodes"]), *handles} for r in rows): raise ValueError("Repair additions require fresh keys; change existing nodes only through the named edits")
+        handles = {r["key"]:r["key"] if r["key"] in spine.ids(r["kind"]) else handles.get(r["key"],r["kind"][:2]+"_"+uuid4().hex[:10]) for r in rows}
+        if len(handles) != len(rows) or any(k in spine.ids() and handles[k] != k for k in handles):
+            raise ValueError("Use unique local keys, or supplied existing IDs of the matching kind for revisions")
+        def link(key):
+            if key not in handles and key not in {*spine.ids(),*(n["id"] for n in pending["context"].get("nodes",[]))}: raise ValueError(f"Unknown plan key {key!r}; use a declared key or supplied ID")
+            return handles.get(key,key)
+        nodes = [dict(id=handles[r["key"]], kind=r["kind"], title=r["title"], text=r["text"], parents=[link(k) for k in r["parents"]],
+                      fields={**{k:[handles.get(x,x) for x in v] if k in TRACE_LINKS and isinstance(v,list) else v for k,v in r["fields"].items()}, **({"dependsOn":[link(k) for k in r["fields"]["dependsOn"]], "lessons":[]} if r["kind"] == "bead" else
+                          {"module":r["fields"]["execution"]["module"] or r["fields"]["execution"]["entry"], "level":"semantic"} if small and r["kind"] == "test" else {})}) for r in rows]
+        context = dict(pending["context"],nodes=[],targets=[],scenarios=[]) if small else pending["context"]
+        purpose, pending = "trace", dict(pending, purpose="trace", context={**context,"nodes":[*context["nodes"],*nodes],"handles":handles})
+        meaning = dict(edits={**meaning.get("edits",{}), **{n["id"]+":"+section:value for n in nodes for section,value in [("parents",n["parents"]), ("fields",n["fields"])]}})
     if purpose == "plan-outline":
         outline = {}
         for group, rows in meaning.items():
@@ -75,6 +95,7 @@ def apply_answer(store, pending, meaning):
         if key in REFERENCE_KINDS and c["type"] == "array" and not c.get("minItems")}, **canonical(r["fields"])}) for k,r in envelope.items() if k in drafts]
     revisions = {node["id"]: content_revision(node) for node in nodes}
     def bound(target):
+        target = handles.get(target,target)
         return dict(id=target, revision=revisions[target] if target in revisions else store.spine().revision(target))
     def fields(value, historical=False):
         return {k: [bound(x if isinstance(x,str) else x["id"]) if (not historical and k != "evidenceRefs") or isinstance(x,str) else x for x in v] if k in TRACE_LINKS or k == "targetRefs" else
@@ -89,8 +110,7 @@ def apply_answer(store, pending, meaning):
             editable = getattr(cause, "editable_fields", {})
             if not any(editable.values()):
                 raise RuntimeError(f"CODE defect: structural refusal omitted its node/section: {cause}") from cause
-            error = PlanStoreError(cause.code, str(cause))
-            error.diagnostics = dict(kind="graph", rejectedEdits=meaning["edits"], editableFields=editable)
+            error = PlanStoreError(cause.code, str(cause)); error.diagnostics = {**pending["context"], "kind":"graph", "addKinds":[], "rejectedEdits":meaning["edits"], "editableFields":editable}
             raise error from cause
     if any("target" in r or "scenario" in r for r in envelope.values()):
         targets = {k:canonical(r["target"]) for k,r in envelope.items() if "target" in r}
@@ -118,6 +138,11 @@ def apply_answer(store, pending, meaning):
             scenarios[s["id"]] = s
         vision["fields"].update(targets={**vision["fields"].get("targets",{}), **targets}, scenarios=dict(schema="seldon/scenarios-v1", scenarios=list(scenarios.values())))
         store.upsert_node(vision)
+    try:
+        load_plan(compile_manifest(store.spine()), root=store.workspace / "template")
+    except ValueError as error:
+        error.diagnostics = {**pending["context"], **getattr(error,"diagnostics",{}), "kind":"plan", "obligations":[str(error)], "rejectedEdits":meaning["edits"]}
+        raise
 
 
 def trace_envelope(spine, context, edits=None):

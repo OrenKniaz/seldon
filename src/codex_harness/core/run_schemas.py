@@ -1,4 +1,5 @@
 """Question-specific output contracts. Control is closed; product meaning is open."""
+from codex_harness.core.semantic_schema import ARGV, TRACE_LINKS, REFERENCE_KINDS, eligible_refs, required_fields, outstanding_fields, small_plan
 
 TEXT = dict(type="string", pattern=r"\S")
 STRING = dict(type="string")
@@ -36,7 +37,6 @@ STEERING = obj(action=choice("continue", "repair", "replan", "research", "ask_us
                question=nullable(TEXT), amendments=array(AMENDMENT), rationale=TEXT, reply=STRING)
 
 DATA = dict(type="string", description="JSON-encoded literal application data")
-ARGV = array(dict(anyOf=[STRING, obj(path=TEXT), obj(input=TEXT)]))
 LAUNCH = obj(entry=nullable(TEXT), module=nullable(TEXT), runtime=nullable(TEXT), argv=ARGV)
 HTTP = obj(method=TEXT, path=TEXT, statusEquals=dict(type="integer"), json=nullable(obj(value=DATA)), jsonEquals=nullable(obj(value=DATA)))
 LOCATOR = dict(anyOf=[obj(text=TEXT), obj(selector=TEXT), obj(role=TEXT, name=TEXT)])
@@ -68,10 +68,9 @@ TARGET = obj(kind=nullable(choice("web")), **LAUNCH["properties"],
              server=nullable(obj(**LAUNCH["properties"], readyPath=TEXT, readyWithin=dict(type="number"))))
 
 # CODE retains identity; questions expose only requested meaning.
-from codex_harness.core.semantic_schema import TRACE_LINKS, REFERENCE_KINDS, eligible_refs, required_fields, outstanding_fields
 COMMON = dict(expansionRefs=array(), rationale=nullable(STRING), **{k:array() for k in TRACE_LINKS})
 EXECUTION = obj(**LAUNCH["properties"], testRoots=array(), rationale=TEXT)
-from codex_harness.core.spine import ALLOWED_PARENTS
+from codex_harness.core.spine import ALLOWED_PARENTS, SCENARIO_LINKS
 TRACE_FIELDS = {
     kind: obj(**({} if kind in {"discovery", "metric"} else COMMON), **{
         "feature": dict(baseline=nullable(obj(source=TEXT, behavior=TEXT, rationale=TEXT, codeRefs=array(), testRefs=array(), resultRefs=array()))),
@@ -94,7 +93,7 @@ UNDERSTANDING = obj(
 
 OUTLINE = obj(**{kind:array(obj(ref=nullable(TEXT), title=TEXT, text=STRING)) for kind in TRACE_FIELDS},
               targets=array(obj(ref=nullable(TEXT), purpose=TEXT)), scenarios=array(obj(ref=nullable(TEXT), purpose=TEXT)), rationale=TEXT, reply=STRING)
-
+SMALL_EXAMPLE = dict(feature=[dict(key="notes",title="Save notes",text="Reopen saved text",parents=["<supplied vision ID>"],fields=dict(story="As a note taker I can reopen my saved text"))], requirement=[dict(key="persist",title="Preserve text",text="A reopened note contains the exact saved text",parents=["notes"],fields=dict(architecture=[dict(boundary="Storage",contract="A local file persists the note",rationale="Survive restart")],design=[],interfaceContracts=[]))], test=[dict(key="reopen",title="Reopen a saved note",text="Save Unicode text, restart, and compare readback",parents=["persist"],fields=dict(execution=dict(entry="checks/reopen",module=None,runtime=None,argv=[],testRoots=["checks"],rationale="Observe persistence across restart")))], contractsBead=dict(title="Write the journey",text="Observe RED for missing persistence",parents=["reopen"],fields=dict(ownedFiles=["checks/reopen"])),buildBead=dict(title="Implement notes",text="Make the same journey GREEN",parents=["persist"],fields=dict(ownedFiles=["notes"])),rationale="One complete small plan; keys are local references, CODE allocates IDs. Include only real boundaries; empty section arrays mean no separate boundary.",reply="Review the complete note plan")
 
 QUESTIONS = {
     'planning-size': (obj(**{**VERDICT, **dict(size=choice('tiny', 'small', 'medium', 'large'), process=TEXT, overrideAccepted=BOOL)}), [dict(verdict="inconclusive", gaps=[], rationale="The supplied observations do not establish this question", **dict(size='small', process='Focused review of consequence and recovery', overrideAccepted=False))]),
@@ -125,18 +124,21 @@ def question_spec(family,purpose):
 def author_contract(store, purpose, context):
     from copy import deepcopy
     spine = store.spine()
-    supplied = {key:spine.node(key) for key in spine.ids()} | {n["id"]:n for n in context.get("nodes",[])}
+    supplied = {n["id"]:n for n in context.get("nodes",[])} | {key:spine.node(key) for key in spine.ids()}
     schema = deepcopy(question_spec("author",purpose)[0])
+    vision = spine.node(spine.ids("vision")[0])["fields"]
     if purpose == "plan-outline":
-        vision = spine.node(spine.ids("vision")[0])["fields"]
+        if small_plan(supplied):
+            return obj(**{kind:dict(array(obj(key=TEXT, title=TEXT, text=TEXT, parents=dict(array(), minItems=1),
+                fields=obj(**{k:v for k,v in required_fields(kind,spine.semantic,supplied).items() if k not in {"module", "level"}}))), minItems=1)
+                for kind in ("feature", "requirement", "test")}, **{slot:obj(title=TEXT,text=TEXT,parents=dict(array(),minItems=1),
+                fields=obj(**{k:v for k,v in required_fields("bead",spine.semantic,supplied).items() if k not in {"lessons","dependsOn","semanticPhase"}})) for slot in ("contractsBead","buildBead")}, rationale=TEXT, reply=STRING)
         for group in OUTLINE["properties"].keys()-{"rationale","reply"}:
             refs = list(vision.get("targets",{})) if group == "targets" else [s["id"] for s in vision.get("scenarios",{}).get("scenarios",[])] if group == "scenarios" else [key for key,node in supplied.items() if node["kind"] == group]
             schema["properties"][group]["items"]["properties"]["ref"] = nullable(choice(*refs)) if refs else dict(type="null")
         return schema
-    from codex_harness.core.spine import SCENARIO_LINKS
     handles = {k:eligible_refs(supplied,k) for k in REFERENCE_KINDS}
     handles.update({k:[key for key,n in supplied.items() if n["kind"] in kinds] for k,kinds in {**SCENARIO_LINKS,"testRef":{"test"}}.items()})
-    vision = spine.node(spine.ids("vision")[0])["fields"]
     handles.update(target=sorted(set(vision.get("targets",{})) | {n["id"] for n in context["targets"]}), expansionRefs=[u["id"] for u in vision.get("expansion",{}).get("upgrades",[])])
     defs = {}
     def reference(name, refs):
@@ -171,12 +173,17 @@ def author_contract(store, purpose, context):
             value = contracts[section.split(".")[0]]
             for part in section.split(".")[1:]:
                 value = next(branch["properties"][part] for branch in value.get("anyOf",[value]) if part in branch.get("properties",{}))
-            edits[ref+":"+section] = value
+            edits[ref+":"+section] = nullable(value) if context.get("obligations") else value
     for group,section,contract in (("targets","target",TARGET),("scenarios","scenario",SCENARIO)):
         existing = vision.get("targets",{}) if group == "targets" else {s["id"] for s in vision.get("scenarios",{}).get("scenarios",[])}
         edits.update({r["id"]+":"+section:constrain(deepcopy(contract)) for r in context[group]
             if (section in requested.get(r["id"],[]) if requested is not None else r["id"] not in existing and section not in envelope.get(r["id"],{}))})
     schema["properties"]["edits"] = obj(**edits)
+    if kinds := [kind for kind in context.get("addKinds",[]) if kind != "bead" or not small_plan(supplied)]:
+        schema["properties"]["add"] = array(dict(anyOf=[obj(kind=choice(kind), key=TEXT, title=TEXT, text=TEXT,
+            parents=dict(array(),minItems=1), fields=obj(**{k:v for k,v in
+            {**TRACE_FIELDS[kind]["properties"], **required_fields(kind,spine.semantic,supplied)}.items() if k != "lessons"})) for kind in kinds]))
+        schema["required"].append("add")
     if defs: schema["$defs"] = defs
     return schema
 

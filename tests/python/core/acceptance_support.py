@@ -727,9 +727,9 @@ class ConcurrentHTTP(unittest.TestCase):
             # DV2: refuse a multi-build plan before any worker can run, then
             # replan through the public writer; earlier fixtures claimed multi-build.
             refused = observe(lambda: compile_current())
-            assert refused["isError"] and (
-                "semantic-v1 runs one build bead until Stage 3a (DV2): merge build beads into one"
-            ) in str(refused)
+            assert refused["isError"] and refused["refusalCode"] == "semantic-v1-build-shape" and (
+                "Use one build bead and an optional prerequisite contracts bead until Stage 3a (DV2)"
+            ) in str(refused), refused
             bead = store.spine().node("B")
             bead["fields"]["dependsOn"] = ["C"]
             put_node(node=bead)
@@ -747,7 +747,9 @@ class ConcurrentHTTP(unittest.TestCase):
             bead["fields"]["dependsOn"], contracts["fields"]["dependsOn"] = [], ["B"]
             put_nodes(nodes=[bead, contracts])
             wrong_order = observe(lambda: compile_current())
-            assert wrong_order["isError"] and "contracts must supply RED first" in str(wrong_order)
+            assert wrong_order["isError"] and wrong_order["refusalCode"] == "semantic-v1-contract-order" and (
+                "Contracts must supply RED first: set contracts dependsOn=[] and build dependsOn=[contracts bead id]"
+            ) in str(wrong_order), wrong_order
             bead["fields"]["dependsOn"], contracts["fields"]["dependsOn"] = ["C"], []
             put_nodes(nodes=[bead, contracts])
             assert not list((workspace / ".codex-harness" / "worker-jobs").glob("*/started.json"))

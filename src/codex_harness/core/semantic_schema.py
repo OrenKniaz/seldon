@@ -15,6 +15,7 @@ WEB = (
     "textContrastAA headingStructure reducedMotionRespected"
 ).split()
 
+ARGV = dict(type="array", items=dict(anyOf=[dict(type="string"), *[dict(type="object", properties={k:dict(type="string",pattern=r"\S")}, required=[k], additionalProperties=False) for k in ("path","input")]]))
 EVIDENCE_STATES = ("awaiting", "failed", "stale", "integrated", "validated live")
 TRACE_LINKS = {
     "decisionRefs": {"decision"}, "researchRefs": {"research"},
@@ -37,6 +38,11 @@ def eligible_refs(nodes, field):
     return [key for key,n in nodes.items() if REFERENCE_KINDS[field] is None or n["kind"] in REFERENCE_KINDS[field]]
 
 
+def small_plan(nodes):
+    return (any(n["kind"] == "vision" and n["fields"].get("planSize") in {"tiny", "small"} and not (n["fields"].get("metrics") or n["fields"].get("stopConditions")) for n in nodes.values())
+            and not any(n.get("fields",{}).get("baseline") or n["kind"] in {"metric", "iteration", "stop-condition"} for n in nodes.values()))
+
+
 def required_fields(kind, semantic=False, nodes=None, fields=None):
     """One consumer-owned completeness contract; schemas also read these fields."""
     text = dict(type="string", pattern=r"\S")
@@ -54,6 +60,18 @@ def required_fields(kind, semantic=False, nodes=None, fields=None):
         "baton": {**{k:text for k in ("currentState", "nextSafeAction", "rationale")},
                   **{k:strings for k in ("assumptions", "openQuestions")}, "decisionRefs":dict(type="array")},
     }.get(kind,{})
+    if nodes and small_plan(nodes):
+        section = dict(type="array", items=dict(type="object", properties=dict(boundary=text, contract=text, rationale=text),
+                       required=["boundary", "contract", "rationale"], additionalProperties=False))
+        contract.update({
+            "feature": dict(story=text),
+            "requirement": dict(architecture=section, design=section, interfaceContracts=section),
+            "test": dict(execution=dict(type="object", properties=dict(
+                entry=dict(anyOf=[text, dict(type="null")]), module=dict(anyOf=[text, dict(type="null")]),
+                runtime=dict(anyOf=[text, dict(type="null")]), argv=ARGV,
+                testRoots={**strings, "minItems":1}, rationale=text),
+                required=["entry", "module", "runtime", "argv", "testRoots", "rationale"], additionalProperties=False)),
+        }.get(kind, {}))
     # Only iteration results await observation; other trace links remain mandatory.
     if kind == "iteration" and nodes is not None and (not eligible_refs(nodes,"resultRefs") or fields is not None and "resultRefs" not in fields):
         contract.pop("resultRefs")
@@ -63,8 +81,10 @@ def required_fields(kind, semantic=False, nodes=None, fields=None):
 def outstanding_fields(node, semantic=False, nodes=None, authoring=False):
     from codex_harness.core.planner_schema import validate_input
     rules = required_fields(node["kind"],semantic,nodes,None if authoring else node["fields"])
+    values = {k:v for k,v in node["fields"].items() if k in rules}
+    if isinstance(values.get("execution"),dict): values["execution"] = dict.fromkeys(("entry","module","runtime")) | values["execution"]
     try:
-        validate_input({k:v for k,v in node["fields"].items() if k in rules},dict(type="object",properties=rules,required=list(rules)),"fields")
+        validate_input(values,dict(type="object",properties=rules,required=list(rules)),"fields")
     except ValueError as error: return error.locations
     return []
 

@@ -567,6 +567,9 @@ def provider_host(mode, workspace, surface, job_id=None, segment_id=None):
             return write_shelflife(root, "contracts")
         (workspace / "contracts-entered").touch()
         if (workspace / "fault-contracts").exists() and "Use an isolated startup path after the failed shared startup" not in packet(root,"C"):
+            successor_fault = workspace / "controller-after-failure.json"
+            if successor_fault.exists():
+                death_path.write_bytes(successor_fault.read_bytes()); successor_fault.unlink()
             raise RuntimeError("Injected worker failure before product completion")
         while (workspace / "hold-contracts").exists():
             time.sleep(0.05)
@@ -4308,6 +4311,9 @@ def plan_content(surface="cli"):
         contracts = next(n for n in nodes if n["id"] == "C")
         contracts["parents"] = ["T_RECEIPT"]
         contracts["fields"]["ownedFiles"] = list(build["fields"]["ownedFiles"])
+    elif surface == "web":
+        nodes.append(dict(id="T_WEB",kind="test",title="Saved notes browser journey",text="Exercise the retained browser, HTTP and persistence scenarios against the real UI",parents=["G1"],fields=dict(module="SCENARIOS.json",level="e2e")))
+        for scenario in nodes[0]["fields"]["scenarios"]["scenarios"]: scenario["testRef"] = "T_WEB"
     for n in nodes:
         # FIX17 DELETE-structure: provider pins/project setup are operator kickoff data.
         if n["kind"] == "bead":
@@ -4316,6 +4322,212 @@ def plan_content(surface="cli"):
         elif n["kind"] == "vision":
             n["fields"].pop("setup", None)
     return dict(nodes=nodes)
+
+
+def small_plan_golden(workspace, *, size="small"):
+    """C5/C9/C11: a small dream reaches B from one complete five-kind answer.
+
+    Catch r24: incomplete Spec escaped to prepare and asked the user to repair.
+    Two named bead slots make the DV2 shape and tests-first dependency CODE-owned.
+    Catch uncovered requirement/test and ownership gaps together, preserve meaning
+    through confined C4 fixes, then reach B using only A words. Previous fixtures
+    missed three-bead dead ends, draft loss and small brownfield selection.
+    """
+    from tests.python.core.mcp_planner_support import LoopClient, provider_shape
+    from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
+    from codex_harness.core import approvals
+    client = LoopClient(workspace)
+    def correction(edits, additions=()):
+        return json.dumps(provider_shape(client.current["question"]["answerSchema"],dict(edits=edits,add=list(additions),rationale="Correct only the named obligations",reply="Retain the rest of the plan")))
+    content = dict(nodes=[dict(id="V1",kind="vision",title="Small notes",parents=[],
+        text="A local note app: save a note, reopen it, and read the same text, including empty and Unicode notes.",
+        fields=dict(planMode="semantic-v1",users=["A person taking local notes"],first_user_moment="Save and reopen a note",
+            scope_in=["Save and reopen exact text"],scope_out=["Sync and sharing"],quality_bar="Preserve empty and Unicode text across restart",
+            done_feels_like="A saved note reopens unchanged",expansion=dict(upgrades=[])))])
+    if size == "medium":
+        content = plan_content()
+        content["nodes"].extend(dict(id=f"AC{i}",kind="acceptance",title=f"Acceptance meaning {i}",text="Verify retained semantic scenarios",parents=["F1"],fields={}) for i in range(8))
+    try:
+        client.call("harness_plan_start", name="Small notes", idea=content["nodes"][0]["text"])
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "planning-size")
+        sizing = judge_reply(client.current["question"])
+        sizing["meaning"].update(size=size, process="One complete plan and consequence-scaled independent review")
+        client.answer(sizing)
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
+        pending = client.current["question"]
+        if size == "medium":
+            from tests.python.core.mcp_planner_support import provider_shape
+            outline = json.loads(provider_answer(workspace,pending,dict(option="ready",rationale="Declare the retained complete dream",content=content)))
+            outline["bead"] = []
+            client.answer(json.dumps(outline))
+            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "trace")
+            pending = client.current["question"]
+            client.answer(dict(option="ready",rationale="Fill every declared field",content=content))
+            repair = client.current["question"]
+            assert repair["requestId"] == pending["requestId"] and repair["judgment"]["fixesIssued"] == 1
+            assert "requirement-without-bead" in client.offered["packet"]["exactFix"] and "add" in repair["answerSchema"]["properties"]
+            parents = [fixture_id(workspace,"T_RECEIPT")]
+            beads = [dict(kind="bead",key="contracts",title="Write tests first",text="Observe meaningful RED",parents=parents,
+                          fields=dict(ownedFiles=["checks"],dependsOn=[],semanticPhase="contracts")),
+                     dict(kind="bead",key="build",title="Implement the receipt",text="Make those tests GREEN",parents=parents,
+                          fields=dict(ownedFiles=["hashslip.py"],dependsOn=["contracts"],semanticPhase="build"))]
+            reply = provider_shape(repair["answerSchema"],dict(edits={},add=beads,rationale="Supply the missing work without changing scope",reply="The complete plan is ready for review"))
+            unordered = json.loads(json.dumps(reply)); unordered["add"][1]["fields"]["dependsOn"] = []
+            client.answer(json.dumps(unordered))
+            repair = client.current["question"]
+            assert repair["requestId"] == pending["requestId"] and repair["judgment"]["fixesIssued"] == 2
+            assert "contract-order" in client.offered["packet"]["exactFix"], client.offered["packet"]["exactFix"]
+            ids = repair["context"]["handles"]
+            client.answer(correction({ids["build"]+":fields.dependsOn":[ids["contracts"]]}))
+            advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+            assert client.current["userRequest"]["gate"] == "plan-execution", client.current
+            with open_plan_store_readonly(workspace) as store:
+                assert len(store.spine().ids("bead")) == 2 and len(store.spine().ids("acceptance")) == 8
+                assert not store.status()["coverage_gaps"], "Retained semantic scenarios acquired legacy acceptance.steps obligations"
+                assert len([r for r in approvals.records(store,"chat-message") if r.get("role") == "user"]) == 2
+            return
+        assert set(pending["answerSchema"]["properties"]) == {"feature","requirement","test","contractsBead","buildBead","rationale","reply"}
+        for slot in ("contractsBead","buildBead"):
+            contract = pending["answerSchema"]["properties"][slot]
+            assert contract["type"] == "object" and set(contract["properties"]) == {"title","text","parents","fields"}
+            assert set(contract["properties"]["fields"]["properties"]) == {"ownedFiles"}, "The planner still controls fixed bead phases/dependency"
+        vision = client.offered["packet"]["facts"]["vision"][0]["id"]
+        def row(key,title,parents,**fields):
+            return dict(key=key,title=title,text=title,parents=parents,fields=fields)
+        answer = dict(
+            feature=[row("notes","Save and reopen notes",[vision],story="As a person taking notes, I can reopen saved text without losing it")],
+            requirement=[row("persist","Reopening preserves the exact note",["notes"],
+                architecture=[dict(boundary="Storage",contract="A local file stores the note",rationale="Persistence across process restarts")],
+                design=[dict(boundary="Save",contract="Write before acknowledging save",rationale="An acknowledged note survives restart")],
+                interfaceContracts=[dict(boundary="Note API",contract="save(text) and load() preserve Unicode text",rationale="The UI and storage agree on text")])],
+            test=[row("reopen","Save Unicode text, restart, and read it back",["persist"],execution=dict(
+                entry="checks/reopen.py",module=None,runtime=sys.executable,argv=[""],testRoots=["checks"],rationale="Observe real persistence across restart, including an empty note argument"))],
+            contractsBead=dict(title="Write the persistence journey first",text="Observe persistence RED",parents=["reopen"],fields=dict(ownedFiles=["checks/reopen.py"])),
+            buildBead=dict(title="Implement the note app",text="Make the same journey GREEN",parents=["persist"],fields=dict(ownedFiles=["notes.py"])),
+            rationale="A complete small closed-loop product with tests before implementation",reply="Review the complete note plan.")
+        answer["requirement"].append(row("empty","Empty notes reopen unchanged",["notes"],architecture=[],design=[],interfaceContracts=[]))
+        answer["test"][0]["parents"].append("empty")
+        answer["buildBead"]["parents"].append("empty")
+        missing = json.loads(json.dumps(answer))
+        missing["test"][0]["parents"] = ["persist"]
+        missing["buildBead"].update(parents=["persist"],fields=dict(ownedFiles=["VISION.md"]))
+        client.answer(json.dumps(missing))
+        assert all(gap in client.offered["packet"]["exactFix"] for gap in ("requirement-without-bead","requirement-without-test","owned-file-protected")), client.offered["packet"]["exactFix"]
+        repair = client.current["question"]
+        assert repair["purpose"] == "trace" and repair["requestId"] == pending["requestId"]
+        assert "bead" not in repair["context"].get("addKinds",[]) or repair["answerSchema"]["properties"]["add"]["items"]["anyOf"][0]["properties"]["kind"]["enum"] == ["test"], "Confined repair can introduce a third bead"
+        identities = dict(repair["context"]["handles"])
+        with open_plan_store_readonly(workspace) as store:
+            assert not store.spine().ids("feature"), "A refused plan leaked partial records"
+        client.answer(correction({identities["buildBead"]+":fields.ownedFiles":["notes.py"]}))
+        assert all(gap in client.offered["packet"]["exactFix"] for gap in ("requirement-without-bead","requirement-without-test"))
+        client.answer(correction({identities["reopen"]+":parents":[identities["persist"],identities["empty"]],
+            identities["contractsBead"]+":parents":[identities["reopen"]], identities["buildBead"]+":parents":[identities["persist"],identities["empty"]]}))
+        assert (client.current.get("question") or {}).get("purpose") != "trace", client.current
+        advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+        assert client.current["userRequest"]["gate"] == "plan-execution", client.current
+        with open_plan_store_readonly(workspace) as store:
+            spine = store.spine()
+            authored = [n for n in spine.to_dict()["nodes"] if n["id"] != client.current.get("reviewerNodeId") and n["kind"] != "decision"]
+            assert {n["kind"] for n in authored} == {"vision","feature","requirement","test","bead"}
+            assert len(spine.ids("vision")) == 1 and len(spine.ids("bead")) == 2
+            assert not spine.coverage_gaps()
+            assert spine.node(spine.ids("feature")[0])["fields"]["story"] == answer["feature"][0]["fields"]["story"]
+            assert spine.node(identities["persist"])["fields"]["interfaceContracts"] == answer["requirement"][0]["fields"]["interfaceContracts"]
+            assert "save(text) and load() preserve Unicode text" in (workspace / "template/REQUIREMENTS.md").read_text("utf-8")
+            vf = spine.node(spine.ids("vision")[0])["fields"]
+            assert vf["planSize"] == "small" and not vf.get("targets") and not vf.get("scenarios")
+            assert store._judgment_record(pending["requestId"])["fixesIssued"] == 2
+            assert approvals.current(store,"A") and not approvals.current(store,"B")
+            assert len([r for r in approvals.records(store,"chat-message") if r.get("role") == "user"]) == 2
+            assert store.review_prerequisite(store.manifest_revision())["complete"]
+            rounds = approvals.records(store,"roundtable-completed")
+            assert len(rounds) == 1 and all(r["shards"] == 1 for r in rounds[0]["reviewers"])
+            manifest = approvals.records(store,"manifest-compiled")[0]["manifest"]
+            from codex_harness.core.runners import executable_scenarios
+            commands = executable_scenarios(manifest["trace"],manifest["semantic"]["scenarios"])["scenarios"]
+            assert len(commands) == 1 and commands[0]["actions"][0]["process"]["entry"] == "checks/reopen.py"
+            assert commands[0]["actions"][0]["process"]["argv"] == [""]
+            build = next(n for n in authored if n["kind"] == "bead" and n["fields"]["semanticPhase"] == "build")
+            assert len(build["fields"]["dependsOn"]) == 1
+            contracts = spine.node(build["fields"]["dependsOn"][0])
+            assert contracts["fields"]["semanticPhase"] == "contracts" and contracts["fields"]["dependsOn"] == []
+            original_ids = spine.ids()
+        # A current-plan revision must update CODE's identities, not append a
+        # second copy of every feature/test/bead. First-plan-only answers miss it.
+        aliases = {r["key"]:next(n["id"] for n in authored if n["kind"] == kind and n["title"] == r["title"])
+                   for kind in ("feature","requirement","test") for r in answer[kind]}
+        aliases.update({slot:next(n["id"] for n in authored if n["kind"] == "bead" and n["fields"]["semanticPhase"] == phase)
+                        for slot,phase in (("contractsBead","contracts"),("buildBead","build"))})
+        revised = json.loads(json.dumps(answer))
+        for kind in ("feature","requirement","test"):
+            for r in revised[kind]:
+                r.update(key=aliases[r["key"]],parents=[aliases.get(k,k) for k in r["parents"]])
+        for slot in ("contractsBead","buildBead"):
+            revised[slot]["parents"] = [aliases.get(k,k) for k in revised[slot]["parents"]]
+        revised["test"][0]["text"] += "; also verify a second restart"
+        client.send_steer(rationale="Clarify the restart test in the same complete small plan.")
+        client.progress()
+        client.answer(dict(option="replan",rationale="Clarify verification without changing accepted features",content={}))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
+        invalid = json.loads(json.dumps(revised)); invalid["buildBead"]["fields"]["ownedFiles"] = ["VISION.md"]
+        client.answer(json.dumps(invalid))
+        repair = client.current["question"]
+        assert repair["purpose"] == "trace"
+        assert set(repair["answerSchema"]["properties"]) == {"edits","rationale","reply"}, "A bead-only refusal allowed unrelated additions or whole-plan replacement"
+        assert all(key.split(":",1)[0] in {aliases["contractsBead"],aliases["buildBead"]} for key in repair["answerSchema"]["properties"]["edits"]["properties"])
+        retained = {n["id"]:json.dumps(n,sort_keys=True,ensure_ascii=False).encode() for n in repair["context"]["nodes"] if n["kind"] in {"feature","requirement"}}
+        client.answer(correction({aliases["buildBead"]+":fields.ownedFiles":["notes.py"]}))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
+        assert client.current["userRequest"]["gate"] == "plan-execution", client.current
+        with open_plan_store_readonly(workspace) as store:
+            assert {key:json.dumps(store.spine().node(key),sort_keys=True,ensure_ascii=False).encode() for key in retained} == retained, "Confined bead repair changed retained requirements/story/typed sections"
+            assert store.spine().ids() == original_ids, "Plan revision duplicated existing items"
+            assert store.spine().node(aliases["reopen"])["text"] == revised["test"][0]["text"]
+            assert not approvals.current(store,"B"), "Plan repair silently granted B"
+        # A last correction can fail at a different owning boundary. Exhaustion
+        # must steer once, not grant a fresh structural-repair allowance.
+        client.send_steer(rationale="Reconsider file ownership within the accepted note scope.")
+        client.progress()
+        client.answer(dict(option="replan",rationale="Review the same accepted plan",content={}))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
+        exhausted = client.current["question"]["requestId"]
+        invalid = json.loads(json.dumps(revised)); invalid["buildBead"]["fields"]["ownedFiles"] = ["VISION.md"]
+        client.answer(json.dumps(invalid))
+        client.answer(correction({aliases["buildBead"]+":fields.ownedFiles":["VISION.md"]}))
+        assert client.current["question"]["requestId"] == exhausted and client.current["question"]["judgment"]["fixesIssued"] == 2
+        client.answer(json.dumps(dict(edits={aliases["contractsBead"]+":parents":[aliases["contractsBead"]]},rationale="Try an unrelated cyclic edit",reply="Invalid correction")))
+        assert client.current["state"] == "STEER" and client.current["question"]["family"] == "direction", client.current
+        assert client.current["question"]["context"]["internalFailure"] and not client.current.get("userRequest")
+        client.answer(json.dumps(dict(action="pause",amendments=[],question=None,rationale="The bounded plan repairs are exhausted",reply="Planning paused after two exact fixes; the remaining gap is protected ownership and an unrelated parent edit.")))
+        client.send_steer(rationale="Please continue")
+        client.progress()
+        client.answer(dict(option="continue",rationale="Continue within accepted scope",content={}))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
+        assert client.current["question"]["purpose"] == "plan-outline" and client.current["state"] == "PLAN", client.current
+        # Existing behavior is mapped by the canonical writer before planning a
+        # small change. Size alone must not remove its baseline authoring fields.
+        with open_plan_store(workspace) as store:
+            test_id = aliases["reopen"]
+            store.upsert_node(dict(id="BASE_CODE",kind="code",title="Existing notes",text="Observed note storage",parents=[test_id],fields={}))
+            ref = dict(id="BASE_CODE",revision=store.spine().revision("BASE_CODE"))
+            store.upsert_node(dict(id="BASE_RESULT",kind="result",title="Existing readback",text="Historical observed readback",parents=["BASE_CODE"],fields=dict(evidence=dict(itemRef=ref,candidate="existing-notes",source=dict(reference="fixture:existing-readback",realProvider=False,historical=True),observation=dict(reference="fixture:readback",outcome="passed"),state="integrated"))))
+            feature = store.spine().node(aliases["notes"])
+            feature["fields"]["baseline"] = dict(source="existing-repository",behavior="Save and reopen existing notes",rationale="Preserve existing behavior while adding a toggle",codeRefs=[ref],testRefs=[dict(id=test_id,revision=store.spine().revision(test_id))],resultRefs=[dict(id="BASE_RESULT",revision=store.spine().revision("BASE_RESULT"))])
+            store.upsert_node(feature)
+        client.send_steer(rationale="Add a display toggle to these existing notes while preserving their current behavior.")
+        client.progress()
+        client.answer(dict(option="replan",rationale="Plan a small brownfield change with its baseline",content={}))
+        advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
+        full = client.current["question"]
+        assert "targets" in full["answerSchema"]["properties"] and "metric" in full["answerSchema"]["properties"], "A small brownfield dream lost the fuller contract"
+        outline = {kind:[] for kind in full["answerSchema"]["properties"] if kind not in {"rationale","reply"}}
+        outline["feature"] = [dict(ref=None,title="Display toggle",text="Change the display while preserving saved notes")]
+        client.answer(json.dumps(dict(outline,rationale="Retain the baseline while planning the toggle",reply="Map the existing behavior first")))
+        assert client.current["question"]["purpose"] == "trace"
+        assert any(key.endswith(":fields.baseline") for key in client.current["question"]["answerSchema"]["properties"]["edits"]["properties"]), "Fuller contract cannot author baseline provenance"
+    finally:
+        client.close()
 
 
 def kickoff_content(surface="cli"):
@@ -4513,8 +4725,11 @@ def controller_interruptions(workspace, twin):
     than SQLite's default five seconds; uncontended restarts miss locked errors.
     Fail the first actual C packet after resume, regardless of recovery order;
     post-attempt failures and uninjected exhaustion miss this identity boundary.
+    Also kill the post-failure automatic successor before dispatch: a prior
+    question-backed attempt cannot supply the failure that only recovery recorded.
     """
     import socket
+    from concurrent.futures import ThreadPoolExecutor
     from datetime import UTC, datetime
 
     from tests.python.core.mcp_planner_support import LoopClient
@@ -4534,6 +4749,18 @@ def controller_interruptions(workspace, twin):
     barrier.listen()
     barrier.settimeout(180)  # Same transport bound as LoopClient, not an exhaustion deadline.
     quiescent = None
+    pool = ThreadPoolExecutor(max_workers=1)
+    fault = workspace / "controller-death.json"
+
+    def revoke_successor():
+        with barrier.accept()[0] as controller:
+            controller.settimeout(30)
+            admitted = json.loads(controller.makefile("rb").readline())
+            assert admitted["stage"] == "controller", admitted
+            fault.unlink()
+            controller.sendall(b"!")
+            assert controller.recv(1) == b"", "Successor controller must exit before payload entry"
+            return admitted
 
     def recovery_state():
         client.call("harness_plan_status")
@@ -4633,6 +4860,10 @@ def controller_interruptions(workspace, twin):
         assert not (workspace / "build-entered").exists()
         (workspace / "hold-contracts").unlink()
         (workspace / "fault-contracts").touch()
+        if twin == 1:
+            # Host red: fail the last automatic successor before payload, so the
+            # actual worker failure exists only in canonical recovery history.
+            (workspace / "controller-after-failure.json").write_text(json.dumps(dict(port=barrier.getsockname()[1], afterStarted=False)))
         quiescent.sendall(b"!")
         quiescent.close()
         quiescent = None
@@ -4654,6 +4885,7 @@ def controller_interruptions(workspace, twin):
             injected = json.loads(packet.makefile("rb").readline())
             (workspace / "packet-fault.json").unlink()
             packet.sendall(b"!")
+        early_revoked = pool.submit(revoke_successor) if twin == 1 else None
         client.progress()
 
         def is_exhaustion(run):
@@ -4689,6 +4921,9 @@ def controller_interruptions(workspace, twin):
                 time.sleep(0.05)
 
         wait_exhaustion()
+        if early_revoked is not None:
+            early = early_revoked.result(timeout=30)
+            assert client.current["jobId"] == early["jobId"] and "run" not in planner_jobs.worker_job_status(workspace, early["jobId"])
         assert client.current["state"] == "STEER" and client.current["question"]["family"] == "direction", client.current
         with open_plan_store_readonly(workspace) as store:
             segment = planner_jobs.latest_segment(store, injected["jobId"])
@@ -4724,26 +4959,14 @@ def controller_interruptions(workspace, twin):
         # r6: the host lost this new publication's controller before dispatch,
         # so its empty run hid the earlier failed attempts of unchanged work.
         # Use the existing real controller boundary, never fabricated run data.
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            if twin == 1:
-                fault = workspace / "controller-death.json"
-                fault.write_text(json.dumps(dict(port=barrier.getsockname()[1], afterStarted=False)))
-                def revoke_successor():
-                    with barrier.accept()[0] as controller:
-                        controller.settimeout(30)
-                        admitted = json.loads(controller.makefile("rb").readline())
-                        assert admitted["stage"] == "controller", admitted
-                        fault.unlink()
-                        controller.sendall(b"!")
-                        assert controller.recv(1) == b"", "Successor controller must exit before payload entry"
-                        return admitted
-                revoked = pool.submit(revoke_successor)
-            advance_meaning(client, content, stop_at=lambda r: is_exhaustion(r) or (r.get("effect") or {}).get("kind") == "build")
-            if twin == 1:
-                successor = revoked.result(timeout=30)
-                assert client.current["jobId"] == successor["jobId"]
-                assert "run" not in planner_jobs.worker_job_status(workspace, successor["jobId"])
+        if twin == 1:
+            fault.write_text(json.dumps(dict(port=barrier.getsockname()[1], afterStarted=False)))
+            revoked = pool.submit(revoke_successor)
+        advance_meaning(client, content, stop_at=lambda r: is_exhaustion(r) or (r.get("effect") or {}).get("kind") == "build")
+        if twin == 1:
+            successor = revoked.result(timeout=30)
+            assert client.current["jobId"] == successor["jobId"]
+            assert "run" not in planner_jobs.worker_job_status(workspace, successor["jobId"])
         wait_exhaustion()
         with open_plan_store_readonly(workspace) as store:
             recoveries = [
@@ -4765,7 +4988,8 @@ def controller_interruptions(workspace, twin):
         # failed job, affected Contracts node and prior unsuccessful direction.
         facts = client.offered["packet"]["facts"]
         context = facts["context"]
-        failed = str(context.get("job",{}).get("terminal",{}))
+        contracts_id = fixture_id(workspace,"C")
+        failed = str(context.get("job",{}).get("terminal",{})) + str(context.get("attempts",{}).get(contracts_id,[]))
         ready_terms = dict(startupFailure="Injected worker failure" in failed, attempts=bool(context.get("attempts")),
                            priorDirections=bool(context.get("priorDirections")), contractsInGraph=any(n["id"] == fixture_id(workspace,"C") for n in facts["graph"]))
         if twin == 1 and all(ready_terms.values()):
@@ -4773,14 +4997,20 @@ def controller_interruptions(workspace, twin):
             native = planner_jobs.worker_job_status(workspace, context["jobId"])["terminal"]
             dossier = context["job"]["terminal"]
             assert {k:v for k,v in dossier.items() if k != "retainedWorkObservations"} == native
-            work = native["outcomes"][fixture_id(workspace,"C")]["workId"]
-            history = next(h for h in dossier["retainedWorkObservations"] if h["workId"] == work)
-            assert history["historical"] and history["jobId"] != context["jobId"]
-            assert "Injected worker failure" in history["outcome"]["workStatus"]
+            work = native["outcomes"][contracts_id]["workId"]
+            history = [h for h in dossier["retainedWorkObservations"] if h["workId"] == work]
+            assert "Injected worker failure" not in str(native["outcomes"]), "Historical failure was relabeled as current"
+            assert all(any(term in h["outcome"]["workStatus"] for h in history) for term in ("Injected worker failure", "Acknowledged pre-attempt packet failure")), history
+            assert len({h["eventId"] for h in history}) == len(history), "One recovery was repeated as several failures"
             with open_plan_store_readonly(workspace) as store:
-                original = json.loads(store.connection.execute("SELECT payload_json FROM events WHERE id=?", (history["eventId"],)).fetchone()[0])["context"]["job"]
-            assert (original["jobId"], original["terminal"]["segmentId"]) == (history["jobId"], history["segmentId"])
-            assert original["terminal"]["outcomes"][fixture_id(workspace,"C")] == history["outcome"]
+                for h in history:
+                    kind, raw = store.connection.execute("SELECT kind,payload_json FROM events WHERE id=?", (h["eventId"],)).fetchone()
+                    original = json.loads(raw)
+                    assert kind == h["kind"] == "worker-recovery-resolved" and h["historical"] and h["jobId"] != context["jobId"]
+                    assert (original["jobId"],original["segmentId"],original["proof"]["faultWork"][contracts_id]) == (h["jobId"],h["segmentId"],work)
+                    assert h["outcome"] == dict(workId=work,workStatus=original["proof"]["faultOutcomes"][contracts_id])
+                    attempt = next(row for row in context["attempts"][contracts_id] if row.get("source",{}).get("eventId") == h["eventId"])
+                    assert attempt == dict(blocker=h["outcome"]["workStatus"],source={k:v for k,v in h.items() if k != "outcome"})
         contract = next(n for n in content["nodes"] if n["id"] == "C")
         if all(ready_terms.values()):
             contract["text"] += " Use an isolated startup path after the failed shared startup"
@@ -4855,6 +5085,7 @@ def controller_interruptions(workspace, twin):
             quiescent.sendall(b"!")
             quiescent.close()
         barrier.close()
+        pool.shutdown(wait=True,cancel_futures=True)
         (workspace / "hold-contracts").unlink(missing_ok=True)
         client.close()
 
@@ -5226,6 +5457,8 @@ def test_golden_path(tmp_path, request, surface):
     started = time.monotonic()
     ledger_start = len(LoopClient.instances)
     if surface == "cli":
+        small_plan_golden(tmp_path / "small-plan")
+        small_plan_golden(tmp_path / "shared-readiness",size="medium")
         fixture_ownership_golden(tmp_path / "fixture-ownership")
         planning_surface_golden(tmp_path / "planning-surface")
         missing_kickoff_golden(tmp_path / "missing-kickoff")

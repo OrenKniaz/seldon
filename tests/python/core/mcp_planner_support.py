@@ -881,7 +881,7 @@ def fixture_judgment_example(record):
         "vision-intent": dict(impact="changed"),
         "scope-intent": dict(impact="WHAT"),
         "planning-size": dict(
-            size="small",
+            size="medium",
             process="Focused review of consequence and recovery",
             overrideAccepted=False,
         ),

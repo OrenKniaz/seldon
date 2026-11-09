@@ -27,22 +27,20 @@ def recovery_context(store, run):
         context["attempts"] = {key:[{**{k:v for k,v in bead.items() if k in {"status","blocker","workerReport","requirementRefs"}},
             "attempt":{k:v for k,v in (bead.get("attempt") or {}).items() if k in {"status","exitCode","startedAt","finishedAt","changedPaths","requirementRefs"}}}
             for bead in [*record["beads"][key].get("superseded",[]),record["beads"][key]]] for key in record["beads"]}
-    work = {key:o["workId"] for key,o in status.get("terminal",{}).get("outcomes",{}).items() if not any(r.get("attempt") for r in context.get("attempts",{}).get(key,[]))}
+    work = {key:o["workId"] for key,o in status.get("terminal",{}).get("outcomes",{}).items()}
     affected = set(context["affectedNodeIds"]) | context.get("attempts",{}).keys() | work.keys()
+    for event_id, raw in store.connection.execute("SELECT id,payload_json FROM events WHERE kind=? ORDER BY id DESC", (recovery.RESOLVED,)):
+        prior = json.loads(raw)
+        if (prior["jobId"],prior.get("segmentId")) == (run["jobId"],status.get("terminal",{}).get("segmentId")): continue
+        for key, identifier in prior["proof"].get("faultWork",{}).items():
+            if work.get(key) != identifier: continue
+            source = dict(eventId=event_id,kind=recovery.RESOLVED,jobId=prior["jobId"],segmentId=prior["segmentId"],workId=identifier,historical=True)
+            outcome = dict(workId=identifier,workStatus=prior["proof"]["faultOutcomes"][key])
+            context.setdefault("attempts",{}).setdefault(key,[]).append(dict(blocker=outcome["workStatus"],source=source))
+            terminal = context["job"]["terminal"]
+            context["job"]["terminal"] = dict(terminal,retainedWorkObservations=[*terminal.get("retainedWorkObservations",[]),dict(source,outcome=outcome)])
     directions = {}
     for r in approvals.records(store,"judgment-recorded"):
-        for ref in r["sourceRefs"] if work else []:
-            if ref["kind"] != "loop-question":
-                continue
-            prior = ref["payload"].get("context", {})
-            for key,outcome in prior.get("job",{}).get("terminal",{}).get("outcomes",{}).items():
-                rows = [row for row in prior.get("attempts",{}).get(key,[]) if not row.get("source")]
-                # Ignore previously enriched rows: retain the original observation once.
-                if work.get(key) == outcome["workId"] and any(row.get("attempt") for row in rows):
-                    source = dict(eventId=ref["id"], jobId=prior["job"]["jobId"], segmentId=prior["job"]["terminal"]["segmentId"], workId=work.pop(key), historical=True)
-                    context.setdefault("attempts",{})[key] = [dict(row,source=source) for row in rows] + context.get("attempts",{}).get(key,[])
-                    terminal = context["job"]["terminal"]
-                    context["job"]["terminal"] = dict(terminal, retainedWorkObservations=[*terminal.get("retainedWorkObservations",[]), dict(source,outcome=outcome)])
         if (r["question"] == "loop-direction" and r.get("meaning")
             and (r["meaning"].get("option") in {"repair","replan","research"} or r["meaning"].get("amendments"))
             and any(s["payload"].get("context",{}).get("jobId") == run["jobId"] or affected.intersection(s["payload"].get("context",{}).get("affectedNodeIds",[])) for s in r["sourceRefs"])):
