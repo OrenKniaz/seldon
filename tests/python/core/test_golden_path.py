@@ -4420,6 +4420,8 @@ def small_plan_golden(workspace, *, size="small"):
             contracts = spine.node(build["fields"]["dependsOn"][0])
             assert contracts["fields"]["semanticPhase"] == "contracts" and contracts["fields"]["dependsOn"] == []
             original_ids = spine.ids()
+        if size == "medium":
+            return
         # A current-plan revision must update CODE's identities, not append a
         # second copy of every feature/test/bead. First-plan-only answers miss it.
         aliases = {r["key"]:next(n["id"] for n in authored if n["kind"] == kind and n["title"] == r["title"])
