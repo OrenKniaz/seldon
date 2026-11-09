@@ -1,8 +1,11 @@
 """C9/C21/I6: one typed plan, trace coverage, and canonical approval subjects."""
 
 from pathlib import PurePosixPath
+import shutil
+import sys
+import shlex
 
-from .store import digest
+from .store import digest, encode
 
 LINKS = {"feature": {"vision": "vision"}, "requirement": {"features": "feature"},
          "test": {"requirements": "requirement"},
@@ -24,12 +27,25 @@ def vision_body(answer):
     return {field: answer[field] for field in VISION["properties"]}
 
 
-def create(vision, edits):
+def create(vision, answer):
     vision = vision_body(vision)
-    result = apply({"nodes": {"vision": {"kind": "vision", "body": vision}}}, edits)
-    if result["nodes"]["vision"]["body"] != vision or len(result["nodes"]) == 1:
-        raise ValueError("PLAN must deliver the accepted vision; change vision through REPAIR")
-    return result
+    edits = list(answer["edits"])
+    requirements = [e["targetHandle"] for e in edits if e["kind"] == "requirement"]
+    tests = [e["targetHandle"] for e in edits if e["kind"] == "test"]
+    verification = [e for e in edits if e["kind"] == "test" and e["typedBody"]["stage"] == "verification"]
+    if not any(e["kind"] == "test" and e["typedBody"]["stage"] == "walkthrough" for e in edits) and verification:
+        tests.append("workflow:demo")
+        edits.append({"kind": "test", "targetHandle": tests[-1], "typedBody": {
+            **verification[0]["typedBody"], "stage": "walkthrough", "purpose": "Demonstrate the delivered interaction with TRY.txt"}})
+    for task, paths in (("tests", answer["testFiles"]), ("build", answer["productFiles"]), ("guide", ["TRY.txt"])):
+        edits.append({"kind": "bead", "targetHandle": "workflow:" + task, "typedBody": {
+            "task": task, "ownedPaths": paths, "dependencies": [], "requirements": requirements,
+            "tests": tests, "instructions": {"tests": "Write semantic checks for the declared tests; save browser evidence in SELDON_EVIDENCE_DIR.",
+                "build": "Implement the accepted requirements and quality bar.",
+                "guide": "Write TRY.txt: how to use, demonstrate and reproduce the delivered result; distinguish observations from acceptance."}[task]}})
+    edits.append({"kind": "wave", "targetHandle": "workflow:wave", "typedBody": {
+        "goal": "Deliver the accepted product", "beads": ["workflow:tests", "workflow:build"]}})
+    return apply({"nodes": {"vision": {"kind": "vision", "body": vision}}}, edits)
 
 
 def apply(document, edits):
@@ -38,7 +54,7 @@ def apply(document, edits):
     nodes = deepcopy(document["nodes"])
     replacements = {}
     slots = list(dict.fromkeys(e["targetHandle"] for e in edits if e.get("op", "Put") == "Put"
-                               and e["targetHandle"].startswith("new:")))
+                               and e["targetHandle"].startswith(("new:", "workflow:"))))
     maximum = document.get("nextHandle", max([int(ref[1:]) for ref in nodes if ref.startswith("n")] or [0]) + 1) - 1
     handles = {slot: f"n{maximum + i}" for i, slot in enumerate(slots, 1)}
     edits = deepcopy(edits)
@@ -107,6 +123,17 @@ def validate(plan):
     for kind in ("feature", "requirement", "test", "bead", "wave"):
         if not select(plan, kind):
             errors.append(f"Plan needs {kind} records")
+    for ref, test in select(plan, "test").items():
+        executable = test["command"][0]
+        if not shutil.which(executable):
+            try:
+                fix = shlex.split(executable.removeprefix("& "))
+            except ValueError:
+                fix = []
+            if len(fix) < 2 or not shutil.which(fix[0]):
+                fix = [sys.executable, "-B", "tests/check.py"]
+            errors.append(f"{ref}.command[0] does not resolve to an executable: {executable!r}. "
+                f"Fix command to executable argv {encode(fix)}; put each argument in its own element; no shell syntax.")
     features, requirements, tests, beads = (
         select(plan, k) for k in ("feature", "requirement", "test", "bead"))
     for targets, owners, relation in ((features, requirements, "features"),
@@ -139,18 +166,11 @@ def validate(plan):
             if path in paths:
                 errors.append(f"Two writers own {path}")
             paths[path] = ref
-    def visit(ref, active, done):
-        if ref in active:
-            errors.append("Cyclic bead dependencies")
-            return
-        if ref not in done:
-            for dep in beads[ref]["dependencies"]:
-                if dep in beads:
-                    visit(dep, active | {ref}, done)
-            done.add(ref)
-    done = set()
-    for ref in beads:
-        visit(ref, set(), done)
+    from graphlib import TopologicalSorter, CycleError
+    try:
+        tuple(TopologicalSorter({r: b["dependencies"] for r, b in beads.items()}).static_order())
+    except CycleError:
+        errors.append("Cyclic bead dependencies")
     if errors:
         raise ValueError("\n".join(dict.fromkeys(errors)))
     return plan

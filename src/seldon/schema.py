@@ -18,6 +18,7 @@ TEXT = {"type": "string", "minLength": 1, "maxLength": 8192}
 BOOL = {"type": "boolean"}
 NULL_TEXT = {"anyOf": [TEXT, {"type": "null"}]}
 REFS = array(TEXT)
+COMMAND = {**array(TEXT, 1), "description": 'Executable argv, never shell text. Example: ["C:/node/node.exe", "tests/play.cjs"]. argv[0] must resolve to an installed executable; each argument is a separate element.'}
 VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT,
              users=array(TEXT, 1), scopeIn=array(TEXT, 1), scopeOut=REFS,
              improvements=REFS, quality=array(obj(criterion=TEXT, verification=TEXT), 1),
@@ -26,7 +27,7 @@ BODIES = {
     "feature": obj(story=TEXT, acceptance=TEXT, vision=array(TEXT, 1)),
     "requirement": obj(obligation=TEXT, design=TEXT, contract=TEXT, features=array(TEXT, 1)),
     "test": obj(purpose=TEXT, stage=choice("verification", "walkthrough"),
-                command=array(TEXT, 1), requiredEnvironment=REFS, expectedEvidence=TEXT,
+                command=COMMAND, requiredEnvironment=REFS, expectedEvidence=TEXT,
                 requirements=array(TEXT, 1)),
     "bead": obj(task=choice("tests", "build", "guide"), instructions=TEXT,
                 ownedPaths=array(TEXT, 1), dependencies=REFS,
@@ -61,18 +62,21 @@ def answer_schema(kind, facts, context):
     payload = deepcopy(PAYLOADS.get(kind, obj()))
     if kind in ("PLAN", "REPAIR"):
         puts = []
-        for node_kind, body in {"vision": VISION, **BODIES}.items():
+        bodies = {k: BODIES[k] for k in ("feature", "requirement", "test")} if kind == "PLAN" else {"vision": VISION, **BODIES}
+        for node_kind, body in bodies.items():
             body = deepcopy(body)
             from .plan import LINKS
             for relation in LINKS.get(node_kind, {}):
                 body["properties"][relation]["items"] = choice(*handles, *slots)
             puts.append(obj(kind=choice(node_kind), targetHandle=choice(*handles, *slots), typedBody=body))
-        edits = [*puts,
+        edits = puts if kind == "PLAN" else [*puts,
             obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(choice(*handles, *slots))),
             obj(op=choice("ReplaceLinks"), targetHandle=choice(*handles, *slots),
                 relation=choice("vision", "features", "requirements", "tests", "dependencies", "beads"),
                 targetHandles=array(choice(*handles, *slots)))]
         payload = obj(edits=array({"anyOf": edits}, 1))
+        if kind == "PLAN":
+            payload = obj(**payload["properties"], productFiles=array(TEXT, 1), testFiles=array(TEXT, 1))
     for field in ("gaps", "discoveries", "neededFacts"):
         if field in payload["properties"]:
             payload["properties"][field]["items"]["properties"]["target"] = reference

@@ -620,7 +620,7 @@ def execute(command, cwd, timeout=30, input_path=None, env=None):
         except OSError as error:
             control = getattr(error, "process_control", {})
             stderr = str(error).encode("utf-8")
-        started = control.get("payloadReleased", False)
+        started = bool(control.get("payloadPid")) if os.name == "nt" else control.get("payloadReleased", False)
     return {"exitCode": code, "timedOut": timed_out, "executionStarted": started,
             "cleanupVerified": control.get("quiescenceVerified", False),
             "seconds": time.monotonic() - start, "processControl": control,

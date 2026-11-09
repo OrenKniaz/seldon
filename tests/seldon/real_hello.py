@@ -25,6 +25,18 @@ def main():
     if not slot.is_relative_to(Path("C:/seldon/tests/core1").resolve()):
         parser.error("slot must be under C:/seldon/tests/core1")
     slot.mkdir(parents=True)
+    try:
+        return run(slot, args.dry_run)
+    finally:
+        # A diagnostic must never replace the delivery result or its exception.
+        try:
+            from run_report import main as report_run
+            report_run([str(slot)])
+        except Exception as error:
+            print(f"Dev-run report failed: {error}", file=sys.stderr)
+
+
+def run(slot, dry_run):
     temp = slot / "temp"
     temp.mkdir()
     for key in ("TEMP", "TMP", "TMPDIR"):
@@ -43,7 +55,7 @@ def main():
 
     loop = Loop(slot / "product", slot / "workers", DREAM, setup, provider, yes)
     try:
-        if args.dry_run:
+        if dry_run:
             from seldon.questions import build
             kickoff = loop.store.cursor()["kickoff"]
             question = build("ALIGN", {kickoff: {"sourceRecord": kickoff, "revision": None,

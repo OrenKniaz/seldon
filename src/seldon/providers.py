@@ -1,6 +1,5 @@
 """C1/C11/C20/I10: fresh native Codex calls, recorded for exact-answer replay."""
 
-import importlib.util
 import json
 import os
 import shutil
@@ -25,37 +24,22 @@ def setup_facts():
         elif Path(codex).suffix.lower() == ".exe" or os.name != "nt":
             command = [codex]
     cache = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ms-playwright"
-    packages = []
-    for link in sorted((cache / ".links").glob("*")):
-        root = Path(link.read_text(encoding="utf-8").strip())
-        if (root / "package.json").is_file():
-            packages.append(str(root))
-    python_playwright = importlib.util.find_spec("playwright")
-    browsers = set()
-    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
-        if directory := os.environ.get(variable):
-            for relative in ("Microsoft/Edge/Application/msedge.exe",
-                             "Google/Chrome/Application/chrome.exe"):
-                path = Path(directory) / relative
-                if path.is_file():
-                    browsers.add(str(path))
-    for pattern in ("chromium-*/chrome-*/chrome.exe",
-                    "chromium_headless_shell-*/chrome-*/headless_shell.exe"):
-        browsers.update(str(p) for p in cache.glob(pattern) if p.is_file())
+    package = next((str(root) for link in sorted((cache / ".links").glob("*"))
+                    if (root := Path(link.read_text(encoding="utf-8").strip())).joinpath("package.json").is_file()), None)
+    browser = next((str(path) for variable in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")
+                    for relative in ("Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe")
+                    if (path := Path(os.environ.get(variable, "")) / relative).is_file()), None)
+    if browser is None:
+        browser = next((str(p) for pattern in ("chromium-*/chrome-*/chrome.exe", "chromium_headless_shell-*/chrome-*/headless_shell.exe") for p in sorted(cache.glob(pattern)) if p.is_file()), None)
     label = {"provider": "codex", "model": "gpt-6.1-sol", "effort": "medium",
              "version": version}
     return {"python": {"path": sys.executable, "version": sys.version}, "node": node,
-            "codexCommand": command, "playwrightPackages": packages,
-            "pythonPlaywright": python_playwright.origin if python_playwright else None,
-            "playwrightBrowserCache": str(cache) if cache.is_dir() else None,
-            "chromiumExecutables": sorted(browsers),
-            "browserHowTo": "Use the observed Node path with a .cjs test: "
-                "const {chromium}=require(ABSOLUTE_PLAYWRIGHT_PACKAGE); "
-                "await chromium.launch({headless:true,executablePath:OBSERVED_BROWSER}); "
-                "open the product file URL, click Play, assert visible Hello, world!, "
-                "capture a screenshot in process.env.SELDON_EVIDENCE_DIR, close the browser. "
-                "Use an installed package and executable above; no download or server needed. "
-                "Python tests must use -B. Keep browser evidence outside product files.",
+            "codexCommand": command, "playwrightPackage": package,
+            "browserExecutable": browser,
+            "browserHowTo": "Use node with a .cjs test and require(playwrightPackage); "
+                "chromium.launch({headless:true,executablePath:browserExecutable}). "
+                "Exercise the actual product; save screenshots in process.env.SELDON_EVIDENCE_DIR, "
+                "close the browser. No downloads. Python tests use -B.",
             "providers": {role: {**label, "freshCall": True,
                 "independence": "fresh same-provider call" if role == "reviewer" else "same-provider"}
                 for role in ("planner", "worker", "reviewer", "judge")},

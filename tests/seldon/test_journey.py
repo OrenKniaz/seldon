@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sqlite3
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -12,11 +13,14 @@ import pytest
 
 from seldon.loop import Loop
 
-PRODUCT_TEST = '''import subprocess
+PRODUCT_TEST = '''import os
+import subprocess
 import sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
+assert not Path(os.environ["SELDON_EVIDENCE_DIR"]).is_relative_to(root), "Evidence belongs outside product files"
+print("Checking personal greeting", flush=True)
 result = subprocess.run([sys.executable, "-B", str(root / "greet.py"), "Ada"],
                         capture_output=True, text=True, timeout=5)
 if result.returncode:
@@ -53,21 +57,6 @@ def scripted_plan():
             requiredEnvironment=[f"Python interpreter: {sys.executable}"],
             expectedEvidence="Actual CLI stdout and successful semantic assertion",
             requirements=["name"]),
-        put("test", "walkthrough", purpose="Demonstrate the command with the guide's input",
-            stage="walkthrough", command=[sys.executable, "-B", "greet.py", "Ada"],
-            requiredEnvironment=[f"Python interpreter: {sys.executable}"],
-            expectedEvidence="Live stdout Hello, Ada!", requirements=["name"]),
-        put("bead", "tests", task="tests", instructions="Write the CLI semantic test first",
-            ownedPaths=["check_greeting.py"], dependencies=[], requirements=["name"],
-            tests=["personal-greeting"]),
-        put("bead", "build", task="build", instructions="Implement the approved greeting CLI",
-            ownedPaths=["greet.py"], dependencies=["tests"], requirements=["name"],
-            tests=["personal-greeting"]),
-        put("bead", "guide", task="guide", instructions="Write a usable try-it-yourself guide",
-            ownedPaths=["TRY.txt"], dependencies=["build"], requirements=["name"],
-            tests=["walkthrough"]),
-        put("wave", "delivery", goal="Deliver the greeting and check in before final walkthrough",
-            beads=["tests", "build"]),
     ]
     handles = {edit["targetHandle"]: f"new:{i}" for i, edit in enumerate(edits, 1)}
     for edit in edits:
@@ -75,10 +64,12 @@ def scripted_plan():
         for relation in ("vision", "features", "requirements", "tests", "dependencies", "beads"):
             if relation in edit["typedBody"]:
                 edit["typedBody"][relation] = [handles.get(ref, ref) for ref in edit["typedBody"][relation]]
-    return {"edits": edits}
+    return {"edits": edits, "productFiles": ["greet.py"], "testFiles": ["check_greeting.py"]}
 
 
-CASES = ["none", "malformed-fixed", "malformed-exhausted",
+PROMPT_SIZES = {}
+
+CASES = ["none", "shell-command", "missing-plan-executable", "missing-observe-executable", "malformed-fixed", "malformed-exhausted",
     "review-gap", "RED-gap", "GREEN-gap", "demo-gap", "uncertain-fact", "uncertain-empty",
     "uncertain-judge", "uncertain-twice", "repair-bound", "GREEN-bound", "scope-change", "revise-A", "revise-B",
     "revise-C", "atomic-invalid"]
@@ -99,18 +90,39 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
 
     Gaps catch false C/abandoned repair; initial success never changes a plan.
     Uncertainty catches identical re-asks; successful judges never need missing facts.
+    Command twins catch shell text accepted as argv and a disappeared executable
+    counted as RED; ordinary successful command execution cannot expose either.
+    Failed GREEN carries real stderr to judge and repair; review gaps cannot.
+    The running check consumes the evidence path; old checks never exposed an
+    evidence directory inside the product. The success timeline catches guide
+    work preceding check-in, which a delivered-files assertion alone misses.
     Bound/invalid twins catch endless repair or partial application; valid batches cannot.
     Revise/scope twins catch authority transfer without consent; initial yes cannot.
     Malformed twins catch lost retry facts/unbounded retries; valid answers cannot.
     """
     from copy import deepcopy
     calls, purposes, tasks = Counter(), Counter(), Counter()
-    requests, worker_roots, malformed_questions = [], [], []
+    requests, worker_roots, malformed_questions, timeline = [], [], [], []
     uncertainty_facts = []
     gaps = []
+    disposable = tmp_path / "vanishing-python.exe"
+    if fault == "missing-observe-executable":
+        shutil.copyfile(sys.executable, disposable)
 
     def provider(question):
         kind, facts, context = question["kind"], question["facts"], question["context"]
+        label = kind + (":" + context["purpose"] if kind == "JUDGE" else "")
+        PROMPT_SIZES[label] = max(PROMPT_SIZES.get(label, 0), len(json.dumps(question, separators=(",", ":"), ensure_ascii=False).encode()))
+        if kind in ("JUDGE", "REPAIR"):
+            observations = [f["boundedContent"] for f in facts.values()
+                            if isinstance(f["boundedContent"], dict) and "outputRefs" in f["boundedContent"]]
+            for observation in observations:
+                assert observation["command"] and observation["cwd"]
+                assert "exitCode" in observation and "stdout" in observation and "stderr" in observation
+            if fault == "GREEN-gap" and (kind == "REPAIR" or context.get("purpose") == "GREEN") and tasks["build"] == 1:
+                assert any(o["exitCode"] != 0 and "AssertionError" in o["stderr"] and "Wrong greeting" in o["stderr"]
+                           and "Checking personal greeting" in o["stdout"] for o in observations)
+
         if "exactFix" not in context:
             calls[kind] += 1
         why = "The supplied facts support this semantic decision"
@@ -133,6 +145,18 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
                           requestedChange="Make the guide more useful" if revise else None)
         elif kind == "PLAN":
             answer.update(scripted_plan())
+            if fault in ("shell-command", "missing-plan-executable"):
+                if "exactFix" not in context:
+                    answer["edits"][2]["typedBody"]["command"] = ([f"& '{sys.executable}' '-B' 'check_greeting.py'"]
+                        if fault == "shell-command" else [str(tmp_path / "absent.exe"), "check_greeting.py"])
+                else:
+                    rejected = [f["boundedContent"] for f in facts.values() if "errors" in f["boundedContent"]]
+                    assert any("command[0]" in " ".join(r["errors"]) and "each argument" in " ".join(r["errors"]) for r in rejected)
+                    if fault == "shell-command":
+                        from seldon.store import encode
+                        assert encode([sys.executable, "-B", "check_greeting.py"]) in " ".join(rejected[0]["errors"])
+            if fault == "missing-observe-executable":
+                answer["edits"][2]["typedBody"]["command"][0] = str(disposable)
         elif kind == "REVIEW":
             answer.update(verdict="adequate", gaps=[], neededFacts=[])
             if fault in ("review-gap", "repair-bound", "atomic-invalid") and (calls[kind] == 1 or fault == "repair-bound"):
@@ -148,7 +172,11 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
                 uncertainty_facts.append(deepcopy(facts))
                 assert facts["setup:verification"]["boundedContent"] == "Python subprocess verification"
         elif kind == "REPAIR":
-            handles = context["handles"]
+            handles = next((f["boundedContent"]["document"]["nodes"] for f in facts.values()
+                            if "document" in f["boundedContent"]), None)
+            if handles is None:
+                handles = {"vision": {"kind": "vision", "body": next(f["boundedContent"]["answer"] for f in facts.values() if "answer" in f["boundedContent"])}}
+                handles["vision"]["body"] = {k: v for k, v in handles["vision"]["body"].items() if k not in ("why", "citations")}
             if fault in ("GREEN-gap", "GREEN-bound", "scope-change"):
                 old, node = next((r, n) for r, n in handles.items()
                                 if n["kind"] == "bead" and n["body"]["task"] == "build")
@@ -177,6 +205,7 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
             answer.update(verdict="scope_change" if fault == "scope-change" else "within_scope", neededFacts=[])
         elif kind == "WORK":
             task = context["task"]
+            timeline.append(task)
             tasks[task] += 1
             assignment = next(f["boundedContent"] for f in facts.values()
                               if isinstance(f["boundedContent"], dict) and "worktree" in f["boundedContent"])
@@ -191,6 +220,10 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
                     content = {"greet.py": 'import sys\nif len(sys.argv) < 2:\n    print("Usage: greet.py NAME")\n    raise SystemExit(2)\nprint(f"Hello, {sys.argv[1]}!")\n' + f"# repair {calls['REPAIR']}\n"}
                 elif task == "guide":
                     content = {"TRY.txt": GUIDE + "A name is required; omit it to see usage.\n"}
+            if fault == "GREEN-gap" and task == "build" and not calls["REPAIR"]:
+                content = {"greet.py": 'print("Wrong greeting")\n'}
+            if fault == "missing-observe-executable" and task == "tests":
+                disposable.unlink()
             for name, data in content.items():
                 (root / name).write_text(data, encoding="utf-8")
             answer.update(outcome="done", summary="Assigned files written", artifactPaths=list(content), discoveries=[])
@@ -215,6 +248,7 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
 
     def user(request):
         requests.append(request)
+        timeline.append(request["gate"])
         return "Please revise the guidance" if fault == "revise-" + request["gate"] and not calls["REPAIR"] else "I approve this exact subject"
 
     setup = {"providers": {role: f"scripted:{role}" for role in ("planner", "reviewer", "worker", "judge")},
@@ -234,6 +268,12 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
         revisions = [json.loads(row[0]) for row in db.execute("SELECT document FROM plan_revision ORDER BY id")]
     records = {ref: body for ref, _, body in rows}
     observations = [(ref, body) for ref, kind, body in rows if kind == "observation"]
+    if fault == "missing-observe-executable":
+        assert cursor["state"] == "INCOMPLETE" and not calls["JUDGE"] and not calls["REPAIR"]
+        outcome = next(body for _, kind, body in rows if kind == "outcome")
+        assert "SELDON_COMMAND_LAUNCH_FAILED" in outcome["reason"] and disposable.name in outcome["reason"]
+        assert not outcome["accepted"] and not outcome["lastProvenResult"]
+        return
     if malformed_questions:
         assert len(malformed_questions) == 3
         original = malformed_questions[0]["facts"]
@@ -265,6 +305,8 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
             assert calls["REVIEW"] == (1 if fault == "uncertain-empty" else 2)
         return
     gates = [r["gate"] for r in requests]
+    if fault == "none":
+        assert timeline == ["A", "B", "tests", "build", "check-in", "guide", "C"]
     assert gates[0] == "A" and gates[-1] == "C"
     assert gates.count("B") == (2 if fault == "revise-B" else 1)
     assert gates.count("scope") == (1 if fault == "scope-change" else 0)

@@ -29,31 +29,37 @@ class Loop:
 
     def _call(self, cursor, kind, refs, _facts=None, **context):
         role = {"REVIEW": "reviewer", "WORK": "worker", "JUDGE": "judge", "IMPACT": "judge"}.get(kind, "planner")
-        refs = list(dict.fromkeys([cursor["kickoff"], *refs]))
-        facts = {ref: {"sourceRecord": ref, "revision": cursor["revision"],
-                       "boundedContent": self.store.read(ref)} for ref in refs}
-        if _facts is not None:
-            facts = _facts
-        for handle, path in self.setup.get("factFiles", {}).items():
-            facts.setdefault(handle, {"sourceRecord": cursor["kickoff"], "revision": cursor["revision"],
-                                      "boundedContent": {"path": path}})
-        if cursor["revision"] or kind in ("PLAN", "REPAIR"):
-            context["handles"] = (self.store.plan(cursor["revision"])["nodes"]
-                if cursor["revision"] else {"vision": {"kind": "vision",
-                    "body": plan.vision_body(self.store.read(cursor["vision"])["answer"])}})
-        for handle, node in context.get("handles", {}).items():
-            facts.setdefault(handle, {"sourceRecord": cursor.get("plan", cursor["vision"]),
-                                      "revision": cursor["revision"], "boundedContent": node})
-        for ref in refs:
-            body = facts[ref]["boundedContent"]
-            artifacts = body.get("outputRefs", []) + body.get("artifactRefs", []) + list(body.get("files", {}).values())
-            for key in artifacts:
+        refs = list(dict.fromkeys(([cursor["kickoff"]] if kind in ("ALIGN", "PLAN", "WORK") else []) + refs))
+        facts = {ref: self.store.read(ref) for ref in refs}
+        if cursor.get("plan") in facts:
+            nodes = self.store.plan(cursor["revision"])["nodes"]
+            facts[cursor["plan"]] = {"document": {"nodes": {r: n for r, n in nodes.items()
+                if kind == "REPAIR" or n["kind"] not in ("bead", "wave") or
+                (kind == "WORK" and n["kind"] == "bead" and n["body"]["task"] in (context["task"], "build"))}}}
+            facts.pop(cursor["vision"], None)
+        if cursor["kickoff"] in facts:
+            facts[cursor["kickoff"]] = ({"words": facts[cursor["kickoff"]]["words"]} if kind == "ALIGN" else
+                {k: v for k, v in self.setup.items() if k not in ("providers", "codexCommand", "factFiles", "userOrigin", "evidenceDirectory")})
+        if kind == "REPAIR":
+            facts.update({r: self.store.read(r) for r in cursor.get("latestObservations", [])})
+        if kind in ("PLAN", "REPAIR", "REVIEW", "JUDGE", "WORK"):
+            context["handles"] = list(self.store.plan(cursor["revision"])["nodes"]) if cursor["revision"] else ["vision"]
+        sources = {ref: ref for ref in facts}
+        for handle, path in (self.setup.get("factFiles", {}) if kind not in ("ALIGN", "DECIDE") else {}).items():
+            facts[handle], sources[handle] = {"path": path}, cursor["kickoff"]
+        for ref, body in list(facts.items()):
+            if kind in ("DECIDE", "REPAIR") and "words" in body:
+                body.pop("subject", None)
+            if isinstance(body.get("answer"), str):
+                body["answer"] = self.store.read(body["answer"])["answer"]
+            for key in body.get("artifactRefs", []) + list(body.get("files", {}).values()):
                 content = (self.store.root / "artifacts" / key).read_bytes()
-                image = content.startswith(b"\x89PNG") or content.startswith(b"\xff\xd8")
-                facts[f"artifact:{key}"] = {"sourceRecord": ref, "revision": cursor["revision"],
-                    "boundedContent": {"imagePath": str(self.store.root / "artifacts" / key),
-                        "instruction": "Open this actual browser screenshot with view_image to judge visual quality"}
-                        if image else content.decode("utf-8", errors="replace")}
+                facts[f"artifact:{key}"] = ({"imagePath": str(self.store.root / "artifacts" / key),
+                    "instruction": "Open this actual browser screenshot with view_image to judge visual quality"}
+                    if content.startswith((b"\x89PNG", b"\xff\xd8")) else content[:8192].decode("utf-8", errors="replace"))
+                sources[f"artifact:{key}"] = ref
+        facts = _facts if _facts is not None else {ref: {"sourceRecord": sources[ref], "revision": cursor["revision"],
+                "boundedContent": body} for ref, body in facts.items()}
         question = questions.build(kind, facts, context)
         with self.store.transaction():
             question_ref = self.store.record("question", question)
@@ -65,9 +71,10 @@ class Loop:
                 return self.store.record("provider_reply", body)
         def check(answer):
             if kind == "PLAN":
-                plan.create(self.store.read(cursor["vision"])["answer"], answer["edits"])
+                plan.create(self.store.read(cursor["vision"])["answer"], answer)
             elif kind == "REPAIR":
-                plan.apply({"nodes": context["handles"]}, answer["edits"])
+                plan.apply(self.store.plan(cursor["revision"]) if cursor["revision"] else {"nodes": {"vision": {
+                    "kind": "vision", "body": plan.vision_body(self.store.read(cursor["vision"])["answer"])}}}, answer["edits"])
             if kind == "JUDGE" and sorted(a["target"] for a in answer["assessments"]) != sorted(context["assessments"]):
                 raise ValueError("Judge must assess the exact requested inventory once")
         answer = questions.ask(self.provider, question, record, check)
@@ -83,14 +90,6 @@ class Loop:
                     content = Path(self.setup["factFiles"][target]).read_text(encoding="utf-8")
                     if content != facts[target]["boundedContent"]:
                         additions[target] = {**facts[target], "boundedContent": content}
-                elif target in facts:
-                    full = self.store.read(facts[target]["sourceRecord"])
-                    if digest(full) not in {digest(f["boundedContent"]) for f in facts.values()}:
-                        additions[target] = {**facts[target], "boundedContent": full}
-                    for value in full.values():
-                        if isinstance(value, str) and value.startswith("r") and value[1:].isdigit() and value not in facts:
-                            additions[value] = {"sourceRecord": value, "revision": cursor["revision"],
-                                                "boundedContent": self.store.read(value)}
             if _facts is not None or not additions:
                 raise ValueError("Unresolved question: " + "; ".join(n["question"] for n in answer["neededFacts"]))
             self.store.record("fact_gather", {"cause": uncertain, "supplied": list(additions)})
@@ -203,9 +202,9 @@ class Loop:
                     else:
                         self._incomplete(cursor, "C requires the current demonstrated candidate")
         elif state == "PLAN":
-            call = self._call(cursor, "PLAN", [cursor["vision"], cursor["A"]])
+            call = self._call(cursor, "PLAN", [cursor["vision"]])
             vision = self.store.read(cursor["vision"])["answer"]
-            proposed = plan.create(vision, call["answer"]["edits"])
+            proposed = plan.create(vision, call["answer"])
             with self.store.transaction():
                 source = self._answer(call)
                 cursor["revision"] = self.store.revision(proposed)
@@ -229,7 +228,7 @@ class Loop:
             vision_changed = before["nodes"]["vision"] != after["nodes"]["vision"]
             impact = None
             if cursor.get("B"):
-                call = self._call(cursor, "IMPACT", [proposal, cursor["B"]])
+                call = self._call(cursor, "IMPACT", [proposal])
                 with self.store.transaction():
                     impact = self._answer(call)
             with self.store.transaction():
@@ -276,7 +275,7 @@ class Loop:
                     "worktree": str(self.assignment["root"]), "ownedPaths": bead["ownedPaths"],
                     "baseline": work.candidate(self.assignment["baseline"]),
                     "authorization": cursor["B"]})
-            call = self._call(cursor, "WORK", [cursor["plan"], cursor["B"], assignment], task=task)
+            call = self._call(cursor, "WORK", [cursor["plan"], assignment], task=task)
             answer = call["answer"]
             self.changed = work.changes(self.assignment, answer["artifactPaths"])
             with self.store.transaction():
@@ -307,7 +306,7 @@ class Loop:
                 raise ValueError("Observation requires declared commands and the exact candidate")
             attempt = self._attempt("observe", purpose=purpose,
                                     candidate=cursor["candidate"], tests=list(declarations))
-            results = evidence.observe(self.project, declarations)
+            results = evidence.observe(self.project, declarations, self.scratch)
             if not self._current_candidate(cursor["candidate"]):
                 raise ValueError("Observation changed the delivered candidate")
             with self.store.transaction():
@@ -316,7 +315,12 @@ class Loop:
                 cursor["observations"].extend(cursor["latestObservations"])
                 self.store.record("attempt_end", {
                     "attempt": attempt, "results": cursor["latestObservations"]})
-                self._next(cursor, "JUDGE", cursor["latestObservations"])
+                if any(not r["executionStarted"] and not r["timedOut"] for r in results):
+                    fault = self.store.record("seldon_fault", {"fault": "SELDON_COMMAND_LAUNCH_FAILED",
+                        "observations": cursor["latestObservations"]})
+                    self._incomplete(cursor, fault)
+                else:
+                    self._next(cursor, "JUDGE", cursor["latestObservations"])
         elif state == "JUDGE":
             purpose = cursor["purpose"]
             quality = document["nodes"]["vision"]["body"]["quality"]
@@ -328,7 +332,7 @@ class Loop:
             if purpose == "demo":
                 inventory += ["walkthrough", "tryItGuide"]
             refs = [cursor["plan"], cursor["candidate"],
-                    *cursor["latestObservations"], *cursor["judgments"]]
+                    *cursor["latestObservations"]]
             call = self._call(cursor, "JUDGE", refs, purpose=purpose, assessments=inventory)
             answer = call["answer"]
             assessments = answer["assessments"]
