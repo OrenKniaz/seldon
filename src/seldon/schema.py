@@ -16,7 +16,7 @@ def choice(*values):
 
 TEXT = {"type": "string", "minLength": 1, "maxLength": 8192}
 REFS = array(TEXT)
-COMMAND = {**array(TEXT, 1), "description": 'Executable argv, never shell text. Example: ["C:/node/node.exe", "tests/play.cjs"]. argv[0] must resolve to an installed executable; each argument is a separate element.'}
+COMMAND = {**array(TEXT, 1), "description": 'Executable argv: an installed verification tool or a declared product output, followed by separate arguments.'}
 VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT,
              users=array(TEXT, 1), scopeIn=array(TEXT, 1), scopeOut=REFS,
              improvements=REFS, quality=array(obj(criterion=TEXT, verification=TEXT), 1),
@@ -27,22 +27,23 @@ BODIES = {
     "test": obj(purpose=TEXT, stage=choice("verification", "walkthrough"),
                 command=COMMAND, requiredEnvironment=REFS, expectedEvidence=TEXT,
                 requirements=array(TEXT, 1)),
-    "bead": obj(task=choice("tests", "build", "guide"), instructions=TEXT,
+    "bead": obj(task=choice("tests", "build"), instructions=TEXT,
                 ownedPaths=array(TEXT, 1), dependencies=REFS,
                 requirements=array(TEXT, 1), tests=array(TEXT, 1)),
     "wave": obj(goal=TEXT, beads=array(TEXT, 1)),
 }
 GAP = obj(target=TEXT, correction=TEXT)
+FAULT = obj(cause=choice("evidence", "implementation", "plan"), target=TEXT, correction=TEXT)
 PAYLOADS = {
     "ALIGN": VISION,
     "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
     "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
     "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT,
-                artifactPaths=REFS, discoveries=array(GAP)),
+                artifactPaths=REFS, discoveries=array(FAULT)),
     "IMPACT": obj(verdict=choice("within_scope", "scope_change")),
     "JUDGE": obj(verdict=choice("satisfied", "gap"),
                  assessments=array(obj(target=TEXT, satisfied={"type": "boolean"}, why=TEXT)),
-                 gaps=array(GAP)),
+                 gaps=array(FAULT)),
 }
 
 
@@ -50,7 +51,7 @@ def answer_schema(kind, facts, context):
     from copy import deepcopy
     handles = list(context.get("handles", {}))
     slots = [f"new:{i}" for i in range(1, 33)]
-    targets = list(dict.fromkeys([*facts, *handles, *context.get("assessments", [])]))
+    targets = list(dict.fromkeys([*facts, *handles, *context.get("assessments", []), *context.get("paths", [])]))
     reference = choice(*targets)
     need = obj(target=reference, question=TEXT)
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(need, 1))
@@ -68,7 +69,7 @@ def answer_schema(kind, facts, context):
             puts.append(obj(kind=choice(node_kind), targetHandle=choice(*handles, *slots), typedBody=body))
         edits = puts if kind == "PLAN" else [*puts,
             obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(choice(*handles, *slots)))]
-        payload = obj(edits=array({"anyOf": edits}, 1 if kind == "PLAN" else 0))
+        payload = obj(edits=array({"anyOf": edits}, 1))
         if kind == "PLAN":
             payload = obj(**payload["properties"], productFiles=array(TEXT, 1), testFiles=array(TEXT, 1))
     for field in ("gaps", "discoveries", "neededFacts"):

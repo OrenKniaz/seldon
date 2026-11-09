@@ -2,10 +2,8 @@
 
 from pathlib import PurePosixPath
 import shutil
-import sys
-import shlex
 
-from .store import digest, encode
+from .store import digest
 
 LINKS = {"feature": {"vision": "vision"}, "requirement": {"features": "feature"},
          "test": {"requirements": "requirement"},
@@ -32,17 +30,11 @@ def create(vision, answer):
     edits = list(answer["edits"])
     requirements = [e["targetHandle"] for e in edits if e["kind"] == "requirement"]
     tests = [e["targetHandle"] for e in edits if e["kind"] == "test"]
-    verification = [e for e in edits if e["kind"] == "test" and e["typedBody"]["stage"] == "verification"]
-    if not any(e["kind"] == "test" and e["typedBody"]["stage"] == "walkthrough" for e in edits) and verification:
-        tests.append("workflow:demo")
-        edits.append({"kind": "test", "targetHandle": tests[-1], "typedBody": {
-            **verification[0]["typedBody"], "stage": "walkthrough", "purpose": "Demonstrate the delivered interaction with TRY.txt"}})
-    for task, paths in (("tests", answer["testFiles"]), ("build", answer["productFiles"]), ("guide", ["TRY.txt"])):
+    for task, paths in (("tests", answer["testFiles"]), ("build", [*answer["productFiles"], "TRY.txt"])):
         edits.append({"kind": "bead", "targetHandle": "workflow:" + task, "typedBody": {
             "task": task, "ownedPaths": paths, "dependencies": [], "requirements": requirements,
             "tests": tests, "instructions": {"tests": "Write semantic checks for the declared tests; save browser evidence in SELDON_EVIDENCE_DIR.",
-                "build": "Implement the accepted requirements and quality bar.",
-                "guide": "Write TRY.txt: how to use, demonstrate and reproduce the delivered result; distinguish observations from acceptance."}[task]}})
+                "build": "Implement the accepted requirements and quality bar. Deliver TRY.txt with usage, demonstration and reproduction instructions."}[task]}})
     edits.append({"kind": "wave", "targetHandle": "workflow:wave", "typedBody": {
         "goal": "Deliver the accepted product", "beads": ["workflow:tests", "workflow:build"]}})
     return apply({"nodes": {"vision": {"kind": "vision", "body": vision}}}, edits)
@@ -75,11 +67,13 @@ def apply(document, edits):
             nodes[ref] = {"kind": edit["kind"], "body": deepcopy(edit["typedBody"])}
     for node in nodes.values():
         for relation, kind in LINKS.get(node["kind"], {}).items():
-            links = ([r for r, n in nodes.items() if n["kind"] == kind]
-                     if node["kind"] == "bead" and relation in ("requirements", "tests") else node["body"][relation])
+            links = node["body"][relation]
             node["body"][relation] = list(dict.fromkeys(
                 target for ref in links
                 for target in replacements.get(ref, [ref])))
+    for bead in (n["body"] for n in nodes.values() if n["kind"] == "bead"):
+        bead["tests"] += [r for r in handles.values() if nodes.get(r, {}).get("kind") == "test"
+                          and r not in bead["tests"] and set(nodes[r]["body"]["requirements"]).intersection(bead["requirements"])]
     if edits and nodes == document["nodes"]:
         raise ValueError("Repair changes nothing; unresolved gap requires a concrete edit")
     result = {"nodes": nodes, "nextHandle": maximum + len(slots) + 1}
@@ -119,17 +113,11 @@ def validate(plan):
     for kind in ("feature", "requirement", "test", "bead", "wave"):
         if not select(plan, kind):
             errors.append(f"Plan needs {kind} records")
+    products = {p for b in select(plan, "bead").values() if b["task"] == "build" for p in b["ownedPaths"]}
     for ref, test in select(plan, "test").items():
         executable = test["command"][0]
-        if not shutil.which(executable):
-            try:
-                fix = shlex.split(executable.removeprefix("& "))
-            except ValueError:
-                fix = []
-            if len(fix) < 2 or not shutil.which(fix[0]):
-                fix = [sys.executable, "-B", "tests/check.py"]
-            errors.append(f"{ref}.command[0] does not resolve to an executable: {executable!r}. "
-                f"Fix command to executable argv {encode(fix)}; put each argument in its own element; no shell syntax.")
+        if executable.replace("\\", "/").removeprefix("./") not in products and not shutil.which(executable):
+            errors.append(f"{ref}.command[0] must name an installed verification tool or a declared product output: {executable!r}; put each argument in its own element.")
     features, requirements, tests, beads = (
         select(plan, k) for k in ("feature", "requirement", "test", "bead"))
     for targets, owners, relation in ((features, requirements, "features"),
@@ -138,20 +126,17 @@ def validate(plan):
         covered = {ref for body in owners.values() for ref in body[relation]}
         if not targets.keys() <= covered:
             errors.append(f"Uncovered trace records: {targets.keys() - covered}")
-    if {test["stage"] for test in tests.values()} != {"verification", "walkthrough"}:
-        errors.append("Plan requires verification and walkthrough commands")
+    if not any(test["stage"] == "verification" for test in tests.values()):
+        errors.append("Plan requires verification commands")
     tasks = {b["task"] for b in beads.values()}
-    if tasks != {"tests", "build", "guide"}:
-        errors.append("Plan requires tests, build and guide work")
-    for wave in select(plan, "wave").values():
-        if any(beads[ref]["task"] == "guide" for ref in wave["beads"] if ref in beads):
-            errors.append("Waves contain product work; CODE schedules guide work after check-in")
-    if {r for r, b in beads.items() if b["task"] != "guide"} != {
+    if tasks != {"tests", "build"}:
+        errors.append("Plan requires tests and build work")
+    if set(beads) != {
             r for w in select(plan, "wave").values() for r in w["beads"]}:
         errors.append("Waves must cover all product work")
     paths = {}
     for ref, bead in beads.items():
-        order = {"tests": 0, "build": 1, "guide": 2}
+        order = {"tests": 0, "build": 1}
         if any(order[beads[dep]["task"]] > order[bead["task"]] for dep in bead["dependencies"] if dep in beads):
             errors.append("Product dependencies cannot reverse CODE-owned task ordering")
         for path in bead["ownedPaths"]:

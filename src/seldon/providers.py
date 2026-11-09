@@ -11,6 +11,16 @@ from pathlib import Path
 from .processes import execute
 from .store import encode
 
+ROLES = {role: {"provider": "codex", "model": "gpt-6.1-sol", "effort": effort}
+         for role, effort in {"planner": "medium", "reviewer": "medium", "worker": "medium",
+                              "judge": "medium", "build": "high", "demo": "high", "decider": "low"}.items()}
+
+
+def role_for(kind, context):
+    return ("build" if kind == "WORK" and context["task"] == "build" else
+            "demo" if kind == "JUDGE" and context["purpose"] == "demo" else
+            {"REVIEW": "reviewer", "WORK": "worker", "JUDGE": "judge", "IMPACT": "judge", "DECIDE": "decider"}.get(kind, "planner"))
+
 
 def setup_facts():
     """CODE observes installed tools; no model discovery or installation."""
@@ -31,8 +41,6 @@ def setup_facts():
                     if (path := Path(os.environ.get(variable, "")) / relative).is_file()), None)
     if browser is None:
         browser = next((str(p) for pattern in ("chromium-*/chrome-*/chrome.exe", "chromium_headless_shell-*/chrome-*/headless_shell.exe") for p in sorted(cache.glob(pattern)) if p.is_file()), None)
-    label = {"provider": "codex", "model": "gpt-6.1-sol", "effort": "medium",
-             "version": version}
     return {"python": {"path": sys.executable, "version": sys.version}, "node": node,
             "codexCommand": command, "playwrightPackage": package,
             "browserExecutable": browser,
@@ -40,9 +48,9 @@ def setup_facts():
                 "chromium.launch({headless:true,executablePath:browserExecutable}). "
                 "Exercise the actual product; save screenshots in process.env.SELDON_EVIDENCE_DIR, "
                 "close the browser. No downloads. Python tests use -B.",
-            "providers": {role: {**label, "freshCall": True,
+            "providers": {role: {**label, "version": version, "freshCall": True,
                 "independence": "fresh same-provider call" if role == "reviewer" else "same-provider"}
-                for role in ("planner", "worker", "reviewer", "judge")},
+                for role, label in ROLES.items()},
             "scriptedUser": True, "userOrigin": "dev runner scripted yes; not owner acceptance"}
 
 
@@ -79,6 +87,8 @@ class Codex:
         folder.mkdir()
         cwd = folder
         worker = question["kind"] == "WORK"
+        role = role_for(question["kind"], question["context"])
+        config = self.setup["providers"][role]
         if worker:
             assignment = next(f["boundedContent"] for f in question["facts"].values()
                               if isinstance(f["boundedContent"], dict)
@@ -95,7 +105,7 @@ class Codex:
         (folder / "prompt.txt").write_text(prompt, encoding="utf-8")
         command = [*self.setup["codexCommand"], "exec", "--json", "--skip-git-repo-check",
                    "--sandbox", "workspace-write" if worker else "read-only",
-                   "--model", "gpt-6.1-sol", "-c", 'model_reasoning_effort="medium"',
+                   "--model", config["model"], "-c", 'model_reasoning_effort=' + encode(config["effort"]),
                    "-c", 'approval_policy="never"', "--cd", str(cwd),
                    "--output-schema", str(folder / "schema.json")]
         if not worker:
@@ -115,8 +125,7 @@ class Codex:
         command += ["-"]
         metadata = {"command": command, "commandLine": subprocess.list2cmdline(command),
                     "cwd": str(cwd), "timeout": self.timeout,
-                    "provider": self.setup["providers"]["reviewer" if question["kind"] == "REVIEW"
-                                                      else "worker" if worker else "planner"]}
+                    "role": role, "provider": config}
         (folder / "invocation.json").write_text(encode(metadata), encoding="utf-8")
         return folder, metadata
 

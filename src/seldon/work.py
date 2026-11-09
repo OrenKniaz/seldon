@@ -12,7 +12,7 @@ from .store import digest
 
 def git(project, *args):
     result = execute(["git", *args], project)
-    if result["exitCode"] != 0:
+    if result["exitCode"] != 0 or not result["cleanupVerified"]:
         raise RuntimeError(result["stderr"].decode("utf-8", errors="replace"))
 
 

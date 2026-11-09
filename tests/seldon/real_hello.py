@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import sys
+import hashlib
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -45,13 +47,17 @@ def run(slot, dry_run):
     evidence.mkdir()
     os.environ["SELDON_EVIDENCE_DIR"] = str(evidence)
     setup = setup_facts()
+    source = Path(__file__).resolve().parents[2]
+    setup["commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    setup["questionContract"] = hashlib.sha256(b"".join((source / "src/seldon" / name).read_bytes()
+        for name in ("questions.py", "schema.py"))).hexdigest()
     setup["evidenceDirectory"] = str(evidence)
     (slot / "setup.json").write_text(json.dumps(setup, indent=2), encoding="utf-8")
     provider = Codex(slot / "calls", setup)
 
     def yes(request):
         print(json.dumps({"scriptedDecision": request}, ensure_ascii=False), flush=True)
-        return "yes"
+        return {"request": request["request"], "subject": request["subject"]["digest"], "choice": "approve"}
 
     loop = Loop(slot / "product", slot / "workers", DREAM, setup, provider, yes)
     try:

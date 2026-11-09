@@ -10,21 +10,12 @@ import os
 import subprocess
 import sys
 import time
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 from tempfile import TemporaryFile
-
-
-def hidden_process_kwargs(creationflags=0):
-    """C20: source lift from process_launch, preserving existing creation flags."""
-    if os.name == "nt":
-        return {"creationflags": creationflags | subprocess.CREATE_NO_WINDOW}
-    return {}
 
 
 _BOOTSTRAP = r"""
 import json, msvcrt, os, subprocess, sys
-def hidden_process_kwargs():
-    return {"creationflags": subprocess.CREATE_NO_WINDOW}
 gate_handle, status_handle, stdin_devnull = map(int, sys.argv[1:])
 gate = os.fdopen(msvcrt.open_osfhandle(gate_handle, os.O_RDONLY | os.O_BINARY), 'rb')
 status = os.fdopen(
@@ -45,7 +36,7 @@ try:
         config['args'], cwd=config['cwd'], env=config['env'],
         stdin=subprocess.DEVNULL if stdin_devnull else 0,
         stdout=sys.stdout, stderr=sys.stderr,
-        shell=config['shell'], **hidden_process_kwargs())
+        creationflags=subprocess.CREATE_NO_WINDOW)
     send({'kind': 'launched', 'pid': child.pid})
     code = child.wait()
     send({'kind': 'complete', 'returncode': code})
@@ -215,22 +206,7 @@ class _WindowsJob:
         return False
 
 
-def _run_portable_process(
-    args,
-    *,
-    cwd,
-    capture_output,
-    text,
-    timeout,
-    env,
-    stdin,
-    stop_when,
-    stdout,
-    stderr,
-    shell,
-    on_launch,
-    launch_guard,
-):
+def _run_portable_process(args, cwd, timeout, env, stdin):
     import signal
 
     control = dict(
@@ -242,11 +218,7 @@ def _run_portable_process(
     )
     process = None
     with ExitStack() as files:
-        if capture_output:
-            stdout, stderr = (
-                files.enter_context(TemporaryFile(dir=cwd)),
-                files.enter_context(TemporaryFile(dir=cwd)),
-            )
+        stdout, stderr = (files.enter_context(TemporaryFile(dir=cwd)) for _ in range(2))
 
         def members():
             rows = subprocess.run(
@@ -254,7 +226,6 @@ def _run_portable_process(
                 capture_output=True, encoding="utf-8", errors="replace",
                 timeout=1,
                 check=True,
-                **hidden_process_kwargs(),
             ).stdout.splitlines()
             return tuple(
                 int(pid)
@@ -269,31 +240,14 @@ def _run_portable_process(
         try:
             try:
                 deadline = time.monotonic() + timeout
-                with launch_guard() if launch_guard else nullcontext():
-                    process = subprocess.Popen(
-                        args,
-                        cwd=cwd,
-                        env=env,
-                        stdin=stdin,
-                        stdout=stdout,
-                        stderr=stderr,
-                        shell=shell,
-                        start_new_session=True,
-                        **hidden_process_kwargs(),
-                    )
+                process = subprocess.Popen(args, cwd=cwd, env=env, stdin=stdin,
+                    stdout=stdout, stderr=stderr, start_new_session=True)
                 control.update(
                     membershipVerifiedBeforePayload=True,
                     payloadReleased=True,
                     payloadPid=process.pid,
                 )
-                if process.stdin is not None:
-                    process.stdin.close()
-                if on_launch:
-                    on_launch(process.pid)
                 while not exited() and time.monotonic() < deadline:
-                    if stop_when and (reason := stop_when()):
-                        control["stopReason"] = reason
-                        break
                     time.sleep(0.01)
                 timed_out = not exited() and time.monotonic() >= deadline
             finally:
@@ -320,16 +274,11 @@ def _run_portable_process(
                         control.update(activeProcessesAfterTeardown=0, quiescenceVerified=True)
             output = []
             for stream in (stdout, stderr):
-                value = None
-                if capture_output:
-                    stream.seek(0)
-                    value = stream.read()
-                    if text:
-                        value = value.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-                output.append(value)
+                stream.seek(0)
+                output.append(stream.read())
             if timed_out:
                 raise subprocess.TimeoutExpired(args, timeout, output=output[0], stderr=output[1])
-            code = 19 if control.get("stopReason") else process.returncode
+            code = process.returncode
             control["payloadReturnCode"] = code
             result = subprocess.CompletedProcess(args, code, *output)
             result.process_control = control
@@ -339,42 +288,11 @@ def _run_portable_process(
             raise
 
 
-def run_process(
-    args,
-    *,
-    cwd,
-    capture_output=True,
-    text=True,
-    timeout=120,
-    env=None,
-    stdin=subprocess.DEVNULL,
-    stop_when=None,
-    stdout=None,
-    stderr=None,
-    shell=False,
-    on_launch=None,
-    launch_guard=None,
-):
-    """Collect closed evidence as UTF-8 with replacement; machine protocols use text=False."""
+def _run_process(args, cwd, timeout, env, stdin):
+    """The one execution contract: argv, captured bytes, bounded owned lifetime."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
-    if stdin is None:
-        stdin = subprocess.DEVNULL
     if sys.platform != "win32":
-        return _run_portable_process(
-            args,
-            cwd=cwd,
-            capture_output=capture_output,
-            text=text,
-            timeout=timeout,
-            env=env,
-            stdin=stdin,
-            stop_when=stop_when,
-            stdout=stdout,
-            stderr=stderr,
-            shell=shell,
-            on_launch=on_launch,
-            launch_guard=launch_guard,
-        )
+        return _run_portable_process(args, cwd, timeout, env, stdin)
     if sys.implementation.name != "cpython":
         raise OSError("Windows process containment requires CPython")
     import msvcrt
@@ -422,11 +340,11 @@ def run_process(
                 ],
                 cwd=os.path.dirname(image),
                 stdin=stdin,
-                stdout=subprocess.PIPE if capture_output else stdout,
-                stderr=subprocess.PIPE if capture_output else stderr,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 startupinfo=startup,
                 close_fds=True,
-                **hidden_process_kwargs(),
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         finally:
             for handle in handles:
@@ -435,8 +353,6 @@ def run_process(
             os.close(fd)
             fds.remove(fd)
         control["bootstrapPid"] = process.pid
-        if process.stdin is not None:
-            process.stdin.close()  # subprocess.run(input=None) supplies EOF for stdin=PIPE.
         channels["status"] = status_read
         for name in ("stdout", "stderr"):
             if stream := getattr(process, name):
@@ -458,8 +374,6 @@ def run_process(
                 record = json.loads(line)
                 if record["kind"] == "launched":
                     control["payloadPid"] = record["pid"]
-                    if on_launch:
-                        on_launch(record["pid"])
                 else:
                     records.append(record)
 
@@ -477,20 +391,15 @@ def run_process(
                 "args": args,
                 "cwd": os.fspath(cwd),
                 "env": dict(os.environ if env is None else env),
-                "shell": shell,
             }
         ).encode("utf-8")
-        with launch_guard() if launch_guard else nullcontext():
-            with os.fdopen(gate_write, "wb") as gate:
-                fds.remove(gate_write)
-                gate_transfer_started = True
-                gate.write(config)
+        with os.fdopen(gate_write, "wb") as gate:
+            fds.remove(gate_write)
+            gate_transfer_started = True
+            gate.write(config)
         control["payloadReleased"] = True
         while not records and "status" in channels and time.monotonic() < deadline:
             pump()
-            if not records and stop_when and (reason := stop_when()):
-                control["stopReason"] = reason
-                break
             time.sleep(0.005)
         timed_out = not records and time.monotonic() >= deadline
         record = records[0] if records else None
@@ -502,28 +411,21 @@ def run_process(
         if channels:
             raise OSError("Process output pipes did not drain after Job quiescence")
         stdout, stderr = bytes(buffers["stdout"]), bytes(buffers["stderr"])
-        if text:
-            stdout, stderr = (
-                value.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
-                for value in (stdout, stderr)
-            )
         if timed_out:
             raise subprocess.TimeoutExpired(
                 args,
                 timeout,
-                output=stdout if capture_output else None,
-                stderr=stderr if capture_output else None,
+                output=stdout,
+                stderr=stderr,
             )
-        if control.get("stopReason"):
-            record = dict(kind="complete", returncode=19)
         if record is None or record.get("kind") != "complete":
             raise OSError(f"Process bootstrap refused payload: {record}")
         control["payloadReturnCode"] = record["returncode"]
         result = subprocess.CompletedProcess(
             args,
             record["returncode"],
-            stdout if capture_output else None,
-            stderr if capture_output else None,
+            stdout,
+            stderr,
         )
         result.process_control = control
         return result
@@ -610,7 +512,7 @@ def execute(command, cwd, timeout=30, input_path=None, env=None):
     with ExitStack() as inputs:
         stdin = inputs.enter_context(open(input_path, "rb")) if input_path else subprocess.DEVNULL
         try:
-            result = run_process(command, cwd=cwd, text=False, timeout=timeout, stdin=stdin, env=env)
+            result = _run_process(command, cwd, timeout, env, stdin)
             control = result.process_control
             stdout, stderr, code = result.stdout, result.stderr, result.returncode
         except subprocess.TimeoutExpired as error:

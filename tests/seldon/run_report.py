@@ -9,6 +9,7 @@ import argparse
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 import re
 import sqlite3
@@ -205,11 +206,13 @@ def report(slot):
         lines.append(f"  {state}: {stats['calls']} calls, {stats['seconds']:.3f}s, prompt {stats['promptBytes']} bytes, answer {stats['answerBytes']} bytes; tokens {encode(tokens) if tokens else 'unknown'} ({stats['usageCalls']}/{stats['calls']} calls).")
     lines.append(f"Plan (latest of {len(plans)} revisions): {len(plan.get('nodes', {}))} nodes, {plan_bytes} bytes (canonical JSON). Total calls: {len(calls)}.")
     kickoff = next((b for _, k, b in rows if k == "kickoff"), {})
-    commit = kickoff.get("setup", {}).get("commit", "unknown (not recorded)")
+    setup = kickoff.get("setup", {})
+    commit = setup.get("commit", "unknown (not recorded)")
     summary = [datetime.fromtimestamp(min(stamps), timezone.utc).date().isoformat() if stamps else "unknown",
                str(slot), commit, terminal, furthest, len(repairs), retries,
                len(gaps), len(uncertain), f"{wall:.3f}s*" if wall is not None else "unknown", len(calls),
-               len(plan.get("nodes", {})), plan_bytes, flags]
+               len(plan.get("nodes", {})), plan_bytes, flags, setup.get("questionContract", "unknown"),
+               hashlib.sha256(encode(plan["nodes"]["vision"]["body"]).encode()).hexdigest() if plan else "unknown"]
     return "\n".join(lines), summary
 
 
@@ -222,10 +225,18 @@ def main(argv=None):
     print(output, flush=True)
     args.runs.parent.mkdir(parents=True, exist_ok=True)
     with args.runs.open("a+", encoding="utf-8") as ledger:
+        ledger.seek(0)
+        retained = ledger.read()
+        if retained and "| Question contract |" not in retained:
+            retained = retained.replace("| RED FLAG COUNT |", "| RED FLAG COUNT | Question contract | Vision lock |", 1)
+            retained = retained.replace("|" + " --- |" * 14, "|" + " --- |" * 16, 1)
+            ledger.seek(0)
+            ledger.write(retained)
+            ledger.truncate()
         ledger.seek(0, 2)
         if ledger.tell() == 0:
             ledger.write("# Dev runs\n\n*Wall time is the retained call artifact envelope; run commit unknown unless recorded. Counts may overlap.*\n\n")
-            ledger.write("| Date (UTC) | Slot | Commit | Outcome | Furthest state | Repairs | Retries | Gaps | Uncertain | Wall time | Calls | Plan nodes | Plan bytes | RED FLAG COUNT |\n")
+            ledger.write("| Date (UTC) | Slot | Commit | Outcome | Furthest state | Repairs | Retries | Gaps | Uncertain | Wall time | Calls | Plan nodes | Plan bytes | RED FLAG COUNT | Question contract | Vision lock |\n")
             ledger.write("|" + " --- |" * len(row) + "\n")
         ledger.write("| " + " | ".join(str(v).replace("|", "\\|").replace("\n", " ") for v in row) + " |\n")
     return 0

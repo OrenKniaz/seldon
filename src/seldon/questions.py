@@ -6,37 +6,36 @@ import sys
 from .schema import answer_schema, validate
 from .store import encode
 
-TASTE = (" If this product has a user interface, it must look designed by someone with a point of view. "
-         "Avoid the default AI look: a system-font stack as the whole typography, a centered column on off-white, "
-         "a generic pill button, purple gradients, cards in cards, gray text on color, bounce easing. "
-         "Instead: one clear visual idea; deliberate type with real hierarchy from fonts available offline; "
-         "a confident color palette with strong contrast; generous rhythm in spacing; "
-         "motion that is brief, purposeful and honors reduced-motion; words a person would actually say.")
-
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and a complete quality bar. "
              "Improve it toward the most beautiful, simplest, most delightful version of what was asked, within scope. "
              "Every quality criterion must be observable with the supplied setup; beauty means craft, not extra requirements.",
     "DECIDE": "Interpret the supplied verbatim words about this exact displayed subject. "
-              "A scripted reply is still interpretable: approve means scripted approval when scriptedUser is true; "
-              "CODE labels the terminal outcome, never owner acceptance. For revise, state the requested change in why.",
+              "For revise, state the requested change in why.",
     "PLAN": "What product work and semantic checks deliver the accepted vision, by the simplest design that reaches its quality bar? "
             "Write only features, requirements, executable tests and productFiles/testFiles. "
             "Commands are argv: [executable, argument, ...], never PowerShell or shell strings. "
             "No beads, waves, check-in, guide or evidence paths: CODE owns those.",
     "REPAIR": "What minimal product edits resolve the supplied cause and actual command output (last 4 KiB per stream)? "
-              "Edit vision/features/requirements/tests only; use no edits for implementation-only gaps. "
+              "Edit vision/features/requirements/tests only. "
               "CODE regenerates work; never edit beads or waves.",
     "IMPACT": "Does this proposed change preserve the user-authorized scope? Uncertainty grants no authorization.",
-    "REVIEW": "Does this plan deliver the accepted dream and its quality bar, as simply as possible? No implementation evidence is needed. "
-              "The wave check-in is a Seldon workflow step, not product work or a product dependency.",
+    "REVIEW": "Does this plan deliver the accepted dream and its quality bar, as simply as possible? No implementation evidence is needed.",
     "WORK": "Complete this task in its assigned worktree and owned files. Build it beautifully the first time: "
-            "max simple, max efficient, max delightful, nothing that does not earn its place. Report, do not prove." + TASTE,
-    "JUDGE": "What does this evidence establish for the requested obligations? RED means a "
-             "functioning test fails because the product is not built yet: a missing product file or command IS valid RED; broken test tooling is not. GREEN judges verification-stage tests only. "
-             "Walkthrough, guide, full trace and quality acceptance belong to demo after guide work. "
-             "At demo, judge real screenshots against the quality bar: working but plain or forgettable is a gap. Output is the last 4 KiB per stream." + TASTE,
+            "max simple, max efficient, max delightful, nothing that does not earn its place. "
+            "Run the assigned checks, inspect your actual UI screenshots against the accepted quality bar, "
+            "and refine before returning. Local checks are feedback; Seldon independently observes acceptance. "
+            "Write execution.json in SELDON_EVIDENCE_DIR using the supplied report contract: toolReady only after "
+            "the verification tooling initializes, checks from the actual runner inventory, including skips.",
+    "JUDGE": "Judge only the requested semantic obligations using the established execution and applicability facts. "
+             "Unrequested improvements that support the accepted experience and keep its meaning, constraints and commitments are fine; "
+             "reject one only by citing the accepted obligation or material consequence it breaks. "
+             "Classify each gap by cause and name its target and correction. Output is the last 4 KiB per stream.",
 }
+
+JUDGMENTS = {"RED": "Does the attempted check meaningfully challenge its obligation?",
+             "GREEN": "Does the observed check establish its promised behavior?",
+             "demo": "Does the demonstrated product meet the accepted quality bar, without stubs, mocks or missing behavior, and have a usable try-it guide? Inspect the actual UI screenshots."}
 
 
 EXAMPLES = {
@@ -89,7 +88,7 @@ def build(kind, facts, context):
     example, uncertain = {"answer": example or uncertain}, {"answer": uncertain}
     validate(example, contract)
     validate(uncertain, contract)
-    question = {"kind": kind, "prompt": PROMPTS[kind], "facts": facts, "context": context,
+    question = {"kind": kind, "prompt": PROMPTS[kind] + (" " + JUDGMENTS[context["purpose"]] if kind == "JUDGE" else ""), "facts": facts, "context": context,
                 "schema": contract, "examples": [example, uncertain]}
     if len(encode(question).encode("utf-8")) > 65536:
         raise ValueError("Question exceeds 64 KiB; split its coverage before asking")
