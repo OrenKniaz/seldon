@@ -4325,13 +4325,14 @@ def plan_content(surface="cli"):
 
 
 def small_plan_golden(workspace, *, size="small"):
-    """C5/C9/C11: a small dream reaches B from one complete five-kind answer.
+    """C5/C9/C11: eligible dreams reach B with five kinds and size-scaled review.
 
     Catch r24: incomplete Spec escaped to prepare and asked the user to repair.
     Two named bead slots make the DV2 shape and tests-first dependency CODE-owned.
     Catch uncovered requirement/test and ownership gaps together, preserve meaning
     through confined C4 fixes, then reach B using only A words. Previous fixtures
     missed three-bead dead ends, draft loss and small brownfield selection.
+    Catch r25: medium used the full contract and stalled; small-only proof missed it.
     """
     from tests.python.core.mcp_planner_support import LoopClient, provider_shape
     from codex_harness.core.plan_store import open_plan_store, open_plan_store_readonly
@@ -4344,9 +4345,6 @@ def small_plan_golden(workspace, *, size="small"):
         fields=dict(planMode="semantic-v1",users=["A person taking local notes"],first_user_moment="Save and reopen a note",
             scope_in=["Save and reopen exact text"],scope_out=["Sync and sharing"],quality_bar="Preserve empty and Unicode text across restart",
             done_feels_like="A saved note reopens unchanged",expansion=dict(upgrades=[])))])
-    if size == "medium":
-        content = plan_content()
-        content["nodes"].extend(dict(id=f"AC{i}",kind="acceptance",title=f"Acceptance meaning {i}",text="Verify retained semantic scenarios",parents=["F1"],fields={}) for i in range(8))
     try:
         client.call("harness_plan_start", name="Small notes", idea=content["nodes"][0]["text"])
         advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "planning-size")
@@ -4355,37 +4353,6 @@ def small_plan_golden(workspace, *, size="small"):
         client.answer(sizing)
         advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "plan-outline")
         pending = client.current["question"]
-        if size == "medium":
-            from tests.python.core.mcp_planner_support import provider_shape
-            outline = json.loads(provider_answer(workspace,pending,dict(option="ready",rationale="Declare the retained complete dream",content=content)))
-            outline["bead"] = []
-            client.answer(json.dumps(outline))
-            advance_meaning(client,content,stop_at=lambda r:(r.get("question") or {}).get("purpose") == "trace")
-            pending = client.current["question"]
-            client.answer(dict(option="ready",rationale="Fill every declared field",content=content))
-            repair = client.current["question"]
-            assert repair["requestId"] == pending["requestId"] and repair["judgment"]["fixesIssued"] == 1
-            assert "requirement-without-bead" in client.offered["packet"]["exactFix"] and "add" in repair["answerSchema"]["properties"]
-            parents = [fixture_id(workspace,"T_RECEIPT")]
-            beads = [dict(kind="bead",key="contracts",title="Write tests first",text="Observe meaningful RED",parents=parents,
-                          fields=dict(ownedFiles=["checks"],dependsOn=[],semanticPhase="contracts")),
-                     dict(kind="bead",key="build",title="Implement the receipt",text="Make those tests GREEN",parents=parents,
-                          fields=dict(ownedFiles=["hashslip.py"],dependsOn=["contracts"],semanticPhase="build"))]
-            reply = provider_shape(repair["answerSchema"],dict(edits={},add=beads,rationale="Supply the missing work without changing scope",reply="The complete plan is ready for review"))
-            unordered = json.loads(json.dumps(reply)); unordered["add"][1]["fields"]["dependsOn"] = []
-            client.answer(json.dumps(unordered))
-            repair = client.current["question"]
-            assert repair["requestId"] == pending["requestId"] and repair["judgment"]["fixesIssued"] == 2
-            assert "contract-order" in client.offered["packet"]["exactFix"], client.offered["packet"]["exactFix"]
-            ids = repair["context"]["handles"]
-            client.answer(correction({ids["build"]+":fields.dependsOn":[ids["contracts"]]}))
-            advance_meaning(client,content,stop_at=lambda r:(r.get("userRequest") or {}).get("gate") == "plan-execution" and not r.get("question"))
-            assert client.current["userRequest"]["gate"] == "plan-execution", client.current
-            with open_plan_store_readonly(workspace) as store:
-                assert len(store.spine().ids("bead")) == 2 and len(store.spine().ids("acceptance")) == 8
-                assert not store.status()["coverage_gaps"], "Retained semantic scenarios acquired legacy acceptance.steps obligations"
-                assert len([r for r in approvals.records(store,"chat-message") if r.get("role") == "user"]) == 2
-            return
         assert set(pending["answerSchema"]["properties"]) == {"feature","requirement","test","contractsBead","buildBead","rationale","reply"}
         for slot in ("contractsBead","buildBead"):
             contract = pending["answerSchema"]["properties"][slot]
@@ -4436,7 +4403,7 @@ def small_plan_golden(workspace, *, size="small"):
             assert spine.node(identities["persist"])["fields"]["interfaceContracts"] == answer["requirement"][0]["fields"]["interfaceContracts"]
             assert "save(text) and load() preserve Unicode text" in (workspace / "template/REQUIREMENTS.md").read_text("utf-8")
             vf = spine.node(spine.ids("vision")[0])["fields"]
-            assert vf["planSize"] == "small" and not vf.get("targets") and not vf.get("scenarios")
+            assert vf["planSize"] == size and not vf.get("targets") and not vf.get("scenarios")
             assert store._judgment_record(pending["requestId"])["fixesIssued"] == 2
             assert approvals.current(store,"A") and not approvals.current(store,"B")
             assert len([r for r in approvals.records(store,"chat-message") if r.get("role") == "user"]) == 2
@@ -5458,7 +5425,6 @@ def test_golden_path(tmp_path, request, surface):
     ledger_start = len(LoopClient.instances)
     if surface == "cli":
         small_plan_golden(tmp_path / "small-plan")
-        small_plan_golden(tmp_path / "shared-readiness",size="medium")
         fixture_ownership_golden(tmp_path / "fixture-ownership")
         planning_surface_golden(tmp_path / "planning-surface")
         missing_kickoff_golden(tmp_path / "missing-kickoff")
@@ -5471,6 +5437,7 @@ def test_golden_path(tmp_path, request, surface):
         execution_judgment_golden(tmp_path.parent / (tmp_path.name + "-execution-judgment"))
         trace_contract_golden(tmp_path.parent / (tmp_path.name + "-trace-contract"))
     if surface == "web":
+        small_plan_golden(tmp_path / "shared-readiness",size="medium")
         from codex_harness.core.semantic_runner import run as observe
 
         timeout_product = tmp_path / "timeout-product"

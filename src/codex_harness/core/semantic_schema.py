@@ -39,7 +39,7 @@ def eligible_refs(nodes, field):
 
 
 def small_plan(nodes):
-    return (any(n["kind"] == "vision" and n["fields"].get("planSize") in {"tiny", "small"} and not (n["fields"].get("metrics") or n["fields"].get("stopConditions")) for n in nodes.values())
+    return (any(n["kind"] == "vision" and n["fields"].get("planSize") in {"tiny", "small", "medium"} and not (n["fields"].get("metrics") or n["fields"].get("stopConditions")) for n in nodes.values())
             and not any(n.get("fields",{}).get("baseline") or n["kind"] in {"metric", "iteration", "stop-condition"} for n in nodes.values()))
 
 

@@ -208,7 +208,7 @@ def load_plan(path: Path | dict, *, root: Path | None = None) -> Plan:
             if manifest.get("evidenceStates") != trace.evidence_states():
                 raise PlanError("plan-schema-invalid", "Evidence states must match recorded canonical observations")
         if semantic:
-            from codex_harness.core.semantic_schema import validate
+            from codex_harness.core.semantic_schema import small_plan, validate
 
             validate(
                 manifest["semantic"]["scenarios"],
@@ -243,7 +243,7 @@ def load_plan(path: Path | dict, *, root: Path | None = None) -> Plan:
             failures.append(PlanError("semantic-v1-build-missing", "add one build bead" + (" that depends on the contracts bead" if any(b.get("semanticPhase") == "contracts" for b in manifest["beads"].values()) else ""), {k:["fields.semanticPhase"] for k in beads}, ("bead",)))
         if semantic and sorted(str(b.get("semanticPhase", "")) for b in manifest["beads"].values()) not in (["build"], ["build", "contracts"]):
             failures.append(PlanError("semantic-v1-build-shape", "Use one build bead and an optional prerequisite contracts bead until Stage 3a (DV2)", {k:["fields.semanticPhase"] for k in beads}))
-        if semantic and trace and trace.node(trace.ids("vision")[0])["fields"].get("planSize") in {"tiny", "small"} and len(beads) != 2:
+        if semantic and trace and small_plan({k: trace.node(k) for k in trace.ids()}) and len(beads) != 2:
             failures.append(PlanError("small-plan-tests-first", "Declare a contracts bead for tests and a build bead depending on it", add_kinds=("bead",)))
         if semantic and len(beads) == 2 and any(bool(b.depends_on) != (manifest["beads"][k]["semanticPhase"] == "build") for k, b in beads.items()):
             failures.append(PlanError("semantic-v1-contract-order", "Contracts must supply RED first: set contracts dependsOn=[] and build dependsOn=[contracts bead id]", {k:["fields.dependsOn"] for k in beads}))
