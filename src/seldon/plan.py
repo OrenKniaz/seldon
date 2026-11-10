@@ -7,7 +7,7 @@ from .store import digest
 
 LINKS = {"feature": {"vision": "vision"}, "requirement": {"features": "feature"},
          "test": {"requirements": "requirement"},
-         "bead": {"requirements": "requirement", "dependencies": "bead"},
+         "bead": {"requirements": "requirement", "tests": "test", "dependencies": "bead"},
          "wave": {"beads": "bead"}}
 
 
@@ -33,7 +33,7 @@ def create(vision, answer):
         edits.append({"kind": "bead", "targetHandle": f"workflow:{index}", "typedBody": {
             "ownedPaths": [*scope["testFiles"], *scope["productFiles"], *(["TRY.txt"] if index == len(scopes) else [])],
             "testPaths": scope["testFiles"], "dependencies": [f"workflow:{int(d)}" for d in scope["dependencies"]],
-            "requirements": scope["requirements"],
+            "requirements": scope["requirements"], "tests": scope["tests"],
             "instructions": "Deliver these obligations and semantic checks; final delivery includes TRY.txt with reproduction instructions."}})
     edits.append({"kind": "wave", "targetHandle": "workflow:wave", "typedBody": {
         "goal": "Deliver the accepted product", "beads": [f"workflow:{i}" for i in range(1, len(scopes) + 1)]}})
@@ -85,8 +85,7 @@ def affected(before, after, roots=()):
     while True:
         downstream = {ref for ref, node in after["nodes"].items()
                       if any(changed.intersection(node["body"][relation])
-                             for relation in LINKS.get(node["kind"], {})) or
-                      (node["kind"] == "bead" and changed.intersection(select(after, "bead")[ref]["tests"]))}
+                             for relation in LINKS.get(node["kind"], {}))}
         if downstream <= changed:
             return changed
         changed |= downstream
@@ -125,8 +124,6 @@ def validate(plan):
         covered = {ref for body in owners.values() for ref in body[relation]}
         if not targets.keys() <= covered:
             errors.append(f"Uncovered trace records: {targets.keys() - covered}")
-    if any(sum(r in b["requirements"] for b in beads.values()) != 1 for r in requirements):
-        errors.append("Each requirement needs exactly one unit owner")
     if not any(test["stage"] == "verification" for test in tests.values()):
         errors.append("Plan requires verification commands")
     if set(beads) != {
@@ -135,6 +132,8 @@ def validate(plan):
     for ref, bead in beads.items():
         if not set(bead["testPaths"]) <= set(bead["ownedPaths"]):
             errors.append("Unit test paths must be owned")
+        if not set(bead["requirements"]) >= {r for t in bead["tests"] if t in tests for r in tests[t]["requirements"]}:
+            errors.append("Unit checks must refer to its own obligations")
         for path in bead["ownedPaths"]:
             try:
                 safe_path(path)
@@ -150,24 +149,7 @@ def validate(plan):
 
 
 def select(plan, kind):
-    bodies = {ref: node["body"] for ref, node in plan["nodes"].items() if node["kind"] == kind}
-    if kind == "bead":
-        for r, body in bodies.items():
-            tests = [t for t in select(plan, "test") if test_owner(plan, t) == r]
-            dependencies = {u for t in tests for u in test_units(plan, t)} - {r}
-            bodies[r] = {**body, "tests": tests, "dependencies": sorted(set(body["dependencies"]) | dependencies)}
-    return bodies
-
-
-def test_units(document, ref):
-    requirements = set(document["nodes"][ref]["body"]["requirements"])
-    return {r for r, n in document["nodes"].items() if n["kind"] == "bead" and requirements.intersection(n["body"]["requirements"])}
-
-
-def test_owner(document, ref):
-    owners = test_units(document, ref)
-    # The final delivery unit authors integration checks; their judgment stays separate.
-    return next(iter(owners)) if len(owners) == 1 else next(r for r, n in reversed(document["nodes"].items()) if n["kind"] == "bead")
+    return {ref: node["body"] for ref, node in plan["nodes"].items() if node["kind"] == kind}
 
 
 def file_owners(document):

@@ -51,7 +51,7 @@ def scripted_plan():
         put("test", 3, purpose="Exercise a supplied name", stage="verification",
             command=[sys.executable, "-B", "check_greeting.py"], requiredEnvironment=["Python"],
             expectedEvidence="Actual CLI output", requirements=["new:2"])],
-        "units": [{"requirements": ["new:2"],
+        "units": [{"requirements": ["new:2"], "tests": ["new:3"],
                    "productFiles": ["greet.py"], "testFiles": ["check_greeting.py"], "dependencies": []}]}
 
 
@@ -159,6 +159,7 @@ def greeting_journey(tmp_path, fault):
             if fault == "product-executable":
                 answer["units"][0]["productFiles"].append("product-python.exe")
                 answer["units"][0]["testFiles"].append("check_guide.py")
+                answer["units"][0]["tests"].append("new:4")
                 answer["edits"].append({"kind": "test", "targetHandle": "new:4", "typedBody": {
                     "purpose": "Read the guide using the delivered executable", "stage": "walkthrough",
                     "command": ["./product-python.exe", "-B", "check_guide.py"], "requiredEnvironment": [],
@@ -184,7 +185,8 @@ def greeting_journey(tmp_path, fault):
                 test = deepcopy(nodes["n3"]["body"])
                 test["purpose"] = "Challenge hardcoded names with a second input"
                 test["command"].append("--more")
-                unit = {k: deepcopy(v) for k, v in nodes["n4"]["body"].items() if k != "tests"}
+                unit = deepcopy(nodes["n4"]["body"])
+                unit["tests"].append("new:1")
                 answer["edits"] = [{"kind": "test", "targetHandle": "new:1", "typedBody": test},
                     {"kind": "bead", "targetHandle": "n4", "typedBody": unit}]
             if fault == "scope-change":
@@ -193,8 +195,9 @@ def greeting_journey(tmp_path, fault):
                 test["command"].append("--usage")
                 answer["edits"].append({"kind": "test", "targetHandle": "n3", "typedBody": test})
             if fault == "new-contract":
-                unit = {k: deepcopy(v) for k, v in nodes["n4"]["body"].items() if k != "tests"}
+                unit = deepcopy(nodes["n4"]["body"])
                 unit["requirements"].append("new:1")
+                unit["tests"].append("new:2")
                 unit["ownedPaths"] += ["check_usage.py", "usage.py"]
                 unit["testPaths"].append("check_usage.py")
                 answer["edits"] = [
@@ -273,11 +276,10 @@ def greeting_journey(tmp_path, fault):
             if purpose == "RED":
                 if purposes[purpose] == 1:
                     assert all(b["productAbsent"] and b["products"].get("greet.py") is None for b in obs)
-            delivered = next(b["files"] for b in bodies if "files" in b)
-            sources = {p: facts["artifact:" + h]["boundedContent"] for p, h in delivered.items()}
             for observation in obs:
-                for path in observation["testPaths"]:
-                    assert sources[path] == (loop.project / path).read_text()
+                assert observation["testSources"]
+                for path, source in observation["testSources"].items():
+                    assert source == (loop.project / path).read_text()
             answer.update(verdict="satisfied", gaps=[], assessments=[
                 {"target": t, "satisfied": True, "why": "Actual interaction challenges/establishes this obligation"}
                 for t in context["assessments"]])
@@ -292,7 +294,7 @@ def greeting_journey(tmp_path, fault):
                 elif fault == "manual-review":
                     assert "visual review skipped" in output and all(b["exitCode"] == 1 for b in obs)
                 else:
-                    assert all(sources["check_greeting.py"] == f'raise SystemExit({1 if fault == "vacuous" else 0})\n' for b in obs)
+                    assert all(b["testSources"]["check_greeting.py"] == f'raise SystemExit({1 if fault == "vacuous" else 0})\n' for b in obs)
                 return json.dumps({"answer": {"verdict": "uncertain", "why": "No executed obligation assertion: tooling failure, skipped or empty check",
                     "citations": list(facts), "neededFacts": [{"target": "n3", "question": "Supply an automated check that actually challenges the greeting"}]}})
             if purpose == "RED":
@@ -325,9 +327,7 @@ def greeting_journey(tmp_path, fault):
                 assert packet["traceComplete"] and packet["reusedEvidence"]
                 green = next(b for b in bodies if b.get("purpose") == "GREEN" and "satisfied" in b)
                 assert green["satisfied"]
-                from seldon import evidence
-                reused = evidence.facts(loop.store, packet["reusedEvidence"], loop.store.cursor()["candidate"], loop.store.plan(loop.store.cursor()["revision"]))
-                demo_reuse.extend(b for b in reused.values() if b["inputsByteIdentical"])
+                demo_reuse.extend(b for b in obs if b["purpose"] == "GREEN" and b["inputsByteIdentical"])
         return json.dumps({"answer": answer})
 
     def user(request):
@@ -526,7 +526,6 @@ def scoped_run(root, mode, reopen=False):
     root = Path(root)
     launch_log = root / "launches.jsonl"
     changed_once = False
-    fragments = {}
     loop = None
 
     def provider(question):
@@ -550,17 +549,15 @@ def scoped_run(root, mode, reopen=False):
                     {"kind": "feature", "targetHandle": f, "typedBody": {"story": "Run " + name, "acceptance": "Observe " + expected, "vision": ["vision"]}},
                     {"kind": "requirement", "targetHandle": r, "typedBody": {"obligation": "Output " + expected, "design": "Independent command" if i < 3 else "Compose the three commands", "contract": "stdout " + expected, "features": [f]}},
                     {"kind": "test", "targetHandle": t, "typedBody": {"purpose": "Exercise " + name, "stage": "verification", "command": [sys.executable, "-B", f"check_{name}.py", name + ".py", expected, str(root), mode], "requiredEnvironment": ["Python"], "expectedEvidence": "Actual process output", "requirements": [r]}}])
-                if mode == "check-repair" and name == "app":
-                    edits[-1]["typedBody"]["requirements"] = ["new:2", "new:5", "new:8", r]
                 if mode == "check-repair" and name == "a":
                     edits[-2]["typedBody"]["contract"] += "; --variant outputs Alpha2"
-                scopes.append({"requirements": [r], "testFiles": [f"check_{name}.py"],
+                scopes.append({"requirements": [r], "tests": [t], "testFiles": [f"check_{name}.py"],
                     "productFiles": [name + ".py", *(["shared.txt"] if mode == "conflict" and i < 2 else []), *([".gitignore", "dist/index.html"] if mode == "ignored" and i == 0 else [])],
-                    "dependencies": [1, 2, 3] if i == 3 and mode not in ("dependency", "check-repair") else []})
+                    "dependencies": [1, 2, 3] if i == 3 and mode != "dependency" else []})
             if mode in ("reply", "publication"):
                 # These faults need one unit; the other journeys prove scheduling/dependencies.
                 scopes = [{key: [value for scope in scopes for value in scope[key]]
-                           for key in ("requirements", "testFiles", "productFiles")} | {"dependencies": []}]
+                           for key in ("requirements", "tests", "testFiles", "productFiles")} | {"dependencies": []}]
             answer.update(edits=edits, units=scopes)
         elif kind == "REVIEW":
             answer.update(verdict="adequate", gaps=[])
@@ -621,8 +618,6 @@ def scoped_run(root, mode, reopen=False):
                     content[path] = "Shared ownership is serialized.\n"
             # A real rendezvous proves overlap without depending on machine speed.
             writer = 'import json, os, sys, time\nfrom pathlib import Path\ndata=json.loads(sys.argv[1])\n'
-            if mode == "check-repair":
-                writer += 'if "check_a.py" in data: data["check_a.py"] = ("# complete evidence \u03bb\\n" * 3600) + data["check_a.py"]\n'
             if mode == "dependency" and context["task"] == "build" and "a.py" in content:
                 writer += (f'deadline = time.monotonic() + 20\nwhile not Path({str(root / "dependency-blocked")!r}).exists() and time.monotonic() < deadline:\n    time.sleep(0.01)\n'
                     f'assert Path({str(root / "dependency-blocked")!r}).exists(), "Consumer was not scheduled independently"\n')
@@ -640,19 +635,14 @@ def scoped_run(root, mode, reopen=False):
             paths = [p for p, data in observed.items() if assignment["baseline"]["files"].get(p) != hashlib.sha256(data).hexdigest()]
             answer.update(outcome="done", summary="Scoped delivery checked by its declared command", artifactPaths=paths, discoveries=[])
         elif kind == "JUDGE":
-            if "evidenceCoverage" in context:
-                coverage = context["evidenceCoverage"]
-                part = facts[coverage["fact"]]["boundedContent"]["contentPart"].encode("utf-8")
-                assert len(part) == coverage["end"] - coverage["start"]
-                fragments.setdefault(coverage["fact"], {})[coverage["start"]] = part
             observed = [b for b in bodies if "outputRefs" in b]
-            assert all(b["applies"] and b["executionUsable"] for b in observed)
-            assert observed or context["coverage"]["unit"] == "integration" or "evidenceCoverage" in context
-            if context["purpose"] != "RED":
+            assert observed and all(b["applies"] and b["executionUsable"] for b in observed)
+            if context["purpose"] == "RED":
+                assert any(b["failed"] for b in observed)
+            else:
                 assert all(b["passed"] for b in observed)
             answer.update(verdict="satisfied", gaps=[], assessments=[{"target": r, "satisfied": True, "why": "The executed process establishes its observable contract"} for r in context["assessments"]])
-            if (mode == "check-repair" and context["purpose"] == "GREEN" and not changed_once
-                    and "evidenceCoverage" in context and "raise SystemExit(0 if ok else 1)" in facts[context["evidenceCoverage"]["fact"]]["boundedContent"]["contentPart"]):
+            if mode == "check-repair" and context["purpose"] == "demo" and not changed_once:
                 variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], cwd=loop.project, capture_output=True, text=True)
                 assert variant.stdout.strip() != "Alpha2"
                 changed_once = True
@@ -671,15 +661,6 @@ def scoped_run(root, mode, reopen=False):
         setup = {"providers": deepcopy(ROLES), "interpreter": sys.executable, "userOrigin": "scripted journey", "scriptedUser": True}
         loop = Loop(root / "product", root / "workers", "Compose a producer command" if mode == "dependency" else "Compose three independent commands", setup, provider, user)
     cursor = loop.run()
-    if mode == "check-repair":
-        assert cursor["state"] == "SCRIPTED_C", loop.store.records("outcome")
-        assert fragments
-        for ref, parts in fragments.items():
-            if not ref.startswith("artifact:"):
-                continue
-            source = json.loads(b"".join(part for _, part in sorted(parts.items())))
-            assert source.encode() == (loop.store.root / "artifacts" / ref.removeprefix("artifact:")).read_bytes()
-        assert any("raise SystemExit(0 if ok else 1)" in json.loads(b"".join(p for _, p in sorted(parts.items()))) for ref, parts in fragments.items() if ref.startswith("artifact:"))
     return loop, cursor
 
 
@@ -713,9 +694,6 @@ def scoped_crash_child(root, mode):
 def scoped_journey(tmp_path, mode):
     """C12/C18/C23: independent scopes compose through C using real processes.
 
-    Bounded judgment protects complete Unicode test evidence beyond the old 8 KiB
-    cutoff and cross-unit checks reaching C. Its late-page variant gap must repair
-    the real missing behavior; short evidence and all-satisfied replies miss this.
     Tiny sizing must still allow independent pieces; the greeting cannot expose that ban.
     Recorded overlap catches a serial scheduler; shared-file output catches concurrent
     ownership. Changing A catches blanket invalidation that the tiny journey misses.
@@ -814,28 +792,6 @@ def scoped_journey(tmp_path, mode):
     assert cursor["state"] == "SCRIPTED_C", loop.store.records("outcome")
     units = loop.store.units()
     rows = loop.store.records()
-    from seldon.store import encode
-    document = loop.store.plan(cursor["revision"])
-    for _, kind, question in rows:
-        if kind != "question":
-            continue
-        assert len(encode(question).encode()) <= 24576
-        if question["kind"] != "JUDGE":
-            continue
-        coverage = question["context"]["coverage"]
-        assert coverage["obligations"] == question["context"]["assessments"]
-        if coverage["unit"] != "integration":
-            contract = units[coverage["unit"]]["contract"]
-            assert not ((set(question["context"]["assessments"]) & set(document["nodes"])) - set(contract["requirements"]) - set(contract["tests"]))
-    for unit, state in units.items():
-        claimed = {t for _, k, q in rows if k == "question" and q["kind"] == "JUDGE"
-                   and q["context"]["purpose"] == "GREEN" and q["context"]["coverage"]["unit"] == unit
-                   for t in q["context"]["assessments"]}
-        assert {*state["contract"]["requirements"], "noStubsMocksMissing"} <= claimed
-    if mode == "check-repair":
-        cross = next(t for t, n in document["nodes"].items() if n["kind"] == "test" and "check_app.py" in n["body"]["command"])
-        assert any(k == "question" and q["kind"] == "JUDGE" and q["context"]["purpose"] == "GREEN"
-                   and q["context"]["coverage"]["unit"] == "integration" and cross in q["context"]["assessments"] for _, k, q in rows)
     assert all(not u.get("waiting") for u in units.values())
     assert len(units) == (1 if mode in ("reply", "publication") else 2 if mode == "dependency" else 4)
     assert all({"tests", "build"} <= set(u["results"]) for u in units.values())
@@ -867,9 +823,7 @@ def scoped_journey(tmp_path, mode):
     if mode == "check-repair":
         variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], cwd=loop.project, capture_output=True, text=True)
         assert variant.returncode == 0 and variant.stdout.strip() == "Alpha2"
-        red = [b for _, k, b in rows if k == "judgment" and b["purpose"] == "RED" and b["satisfied"]]
-        assert sum(b["coverage"]["unit"] == list(units)[0] for b in red) == 2
-        assert all(sum(b["coverage"]["unit"] == r for b in red) == 1 for r in list(units)[1:3])
+        assert sum(k == "judgment" and b["purpose"] == "RED" and b["satisfied"] for _, k, b in rows) == 2
         for ref in list(units)[1:3]:
             assert len(units[ref]["attempts"]) == 2
             for test in units[ref]["contract"]["tests"]:

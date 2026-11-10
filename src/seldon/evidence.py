@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .processes import execute
 from .store import digest
-from . import plan
 
 
 def observe(project, declarations, scratch):
@@ -32,25 +31,23 @@ def save(store, attempt, purpose, candidate, results, document):
     for result in results:
         body = {key: (value[-4096:].decode("utf-8", errors="replace") if isinstance(value, bytes) else value)
                 for key, value in result.items() if key != "evidenceFiles"}
-        scopes = plan.select(document, "bead")
-        author = plan.test_owner(document, result["test"])
-        owners = plan.test_units(document, result["test"]) | {author}
+        scopes = {r: n["body"] for r, n in document["nodes"].items() if n["kind"] == "bead"}
+        owners = {r for r, scope in scopes.items() if result["test"] in scope["tests"]}
         while True:
             expanded = owners | {d for r in owners for d in scopes[r]["dependencies"]}
             if expanded == owners:
                 break
             owners = expanded
-        test_paths = set(scopes[author]["testPaths"])
-        paths = test_paths | {p for r in owners for p in scopes[r]["ownedPaths"] if p not in scopes[r]["testPaths"]}
+        paths = {p for r in owners for p in scopes[r]["ownedPaths"]}
         if document["nodes"][result["test"]]["body"]["stage"] == "verification":
             paths.discard("TRY.txt")
         inputs = {p: store.read(candidate)["files"].get(p) for p in paths}
         products = {p for r in owners for p in scopes[r]["ownedPaths"] if p not in scopes[r]["testPaths"] and p != "TRY.txt"}
         obligations = {r: digest(document["nodes"][r]) for owner in owners for r in scopes[owner]["requirements"]}
         units = store.units()
-        scope_identities = {r: [digest(document["nodes"][r]["body"]), units[r].get("checkGeneration", 0)] for r in owners}
+        scope_identities = {r: [digest(scopes[r]), units[r].get("checkGeneration", 0)] for r in owners}
         body.update(attempt=attempt, purpose=purpose, candidate=candidate, inputs=inputs, obligations=obligations, scopes=scope_identities,
-                    testPaths=sorted(test_paths),
+                    testPaths=sorted({p for r in owners for p in scopes[r]["testPaths"]}),
                     products={p: store.read(candidate)["files"].get(p) for p in products},
                     outputRefs=[store.artifact(result[s], attempt) for s in ("stdout", "stderr")],
                     artifactRefs=[store.artifact(Path(p).read_bytes(), attempt)
@@ -77,6 +74,8 @@ def facts(store, refs, candidate, document):
                   and body["exitCode"] is not None)
         result[ref] = {**body, "applies": applies, "inputsByteIdentical": applies,
             "productAbsent": bool(body["products"]) and all(h is None for h in body["products"].values()),
+            "testSources": {p: (store.root / "artifacts" / body["inputs"][p]).read_text(encoding="utf-8", errors="replace")
+                            for p in body["testPaths"] if body["inputs"].get(p) is not None},
             "executionUsable": usable, "passed": usable and body["exitCode"] == 0,
             "failed": usable and body["exitCode"] != 0}
     return result
