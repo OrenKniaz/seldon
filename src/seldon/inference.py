@@ -44,7 +44,9 @@ class Inference:
             if kind == "REPAIR":
                 context["units"] = list(plan.select(self.store.plan(cursor["revision"]), "bead")) if cursor["revision"] else []
             context["paths"] = [p for b in plan.select(self.store.plan(cursor["revision"]), "bead").values()
-                                for p in b["ownedPaths"]] if cursor["revision"] else []
+                                for p in b["testPaths" if kind == "JUDGE" and context["purpose"] == "RED" else "ownedPaths"]] if cursor["revision"] else []
+            if kind == "JUDGE" and context["purpose"] == "RED":
+                context["handles"] = context["assessments"]
         if kind == "WORK":
             context["handles"] = list(allowed)
             context["paths"] = scope["ownedPaths"]
@@ -56,7 +58,7 @@ class Inference:
                 body.pop("subject", None)
             if isinstance(body.get("answer"), str):
                 body["answer"] = self.store.read(body["answer"])["answer"]
-            for key in body.get("artifactRefs", []) + list(body.get("files", {}).values()):
+            for key in body.get("artifactRefs", []) + ([] if kind == "JUDGE" and context["purpose"] == "RED" else list(body.get("files", {}).values())):
                 content = (self.store.root / "artifacts" / key).read_bytes()
                 facts[f"artifact:{key}"] = ({"imagePath": str(self.store.root / "artifacts" / key),
                     "instruction": "This actual browser screenshot is attached to the question; look at it to judge visual quality"}

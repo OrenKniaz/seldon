@@ -6,7 +6,7 @@ import sys
 from .schema import answer_schema, validate
 from .store import encode
 
-CRAFT = (" If this product has a user interface, it must look designed by someone with a point of view. "
+CRAFT = (" If this product has a user interface, it must look designed by someone with a point of view, following the accepted visual direction. "
          "Avoid the default AI look: a system-font stack as the whole typography, a centered column on off-white, "
          "a generic pill button, purple gradients, cards in cards, gray text on color, bounce easing. "
          "Instead: deliberate type with real hierarchy from fonts available offline; a confident palette with strong contrast; "
@@ -29,18 +29,18 @@ PROMPTS = {
     "IMPACT": "Does this proposed change preserve the user-authorized scope? Uncertainty grants no authorization.",
     "REVIEW": "Does this plan deliver the accepted dream and its quality bar, as simply as possible? No implementation evidence is needed.",
     "WORK": "Complete this task in its assigned worktree and owned files. Build it beautifully the first time: "
-            "max simple, max efficient, max delightful, nothing that does not earn its place." + CRAFT + " "
-            "Run the assigned checks, inspect your actual UI screenshots against the accepted quality bar, "
-            "and refine before returning. Local checks are feedback; Seldon independently observes acceptance. "
-            "Write execution.json in SELDON_EVIDENCE_DIR using the supplied report contract: toolReady only after "
-            "the verification tooling initializes, checks from the actual runner inventory, including skips.",
+            "meet the accepted quality bar with nothing that does not earn its place." + CRAFT + " "
+            "Run the assigned checks and refine before returning. Local checks are feedback; Seldon independently observes acceptance.",
     "JUDGE": "Judge only the requested semantic obligations using the established execution and applicability facts. "
              "Unrequested improvements that support the accepted experience and keep its meaning, constraints and commitments are fine; "
              "reject one only by citing the accepted obligation or material consequence it breaks. "
              "Classify each gap by cause and name its target and correction. Output is the last 4 KiB per stream.",
 }
 
-JUDGMENTS = {"RED": "Does the attempted check meaningfully challenge its obligation?",
+JUDGMENTS = {"RED": "Review the actual test source against its accepted obligations: would it detect their absence or violation? "
+                    "Attribute the observed failure to the absent/unsatisfied product or to defective tests/tooling. "
+                    "The subject is the test's meaningfulness, not evidence of product behavior. "
+                    "Obligations declared already satisfied must remain green.",
              "GREEN": "Does the observed check establish its promised behavior?",
              "demo": "Does the demonstrated product meet the accepted quality bar, without stubs, mocks or missing behavior, and have a usable try-it guide? Inspect the actual UI screenshots."}
 
@@ -70,6 +70,11 @@ EXAMPLES = {
 
 def build(kind, facts, context):
     from copy import deepcopy
+    if kind in ("PLAN", "REVIEW", "WORK", "JUDGE"):
+        context = {**context, "verification": {"checks": "Automated checks never wait on manual or visual review.",
+            "visualQuality": "Seldon judges visual quality from real screenshots at demo."}}
+    if kind == "JUDGE":
+        context = {**context, "executionMeaning": "Exit codes are execution facts. Tooling failure, all-skipped runs and checks that assert nothing establish neither RED nor GREEN."}
     contract = answer_schema(kind, facts, context)
     ref = next(iter(facts))
     example = deepcopy(EXAMPLES.get(kind, EXAMPLES["PLAN"]))
@@ -88,7 +93,7 @@ def build(kind, facts, context):
     if kind == "JUDGE":
         example = {"verdict": "satisfied", "gaps": [],
             "assessments": [{"target": target, "satisfied": True,
-                             "why": "The supplied interaction establishes this obligation"}
+                             "why": ("The test asserts the obligation and fails on its absence" if context["purpose"] == "RED" else "The supplied interaction establishes this obligation")}
                             for target in context["assessments"]]}
     if example is not None:
         example.update(why="The supplied facts support this decision", citations=[ref])

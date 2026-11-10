@@ -4,7 +4,9 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 
@@ -13,46 +15,29 @@ import pytest
 from seldon.loop import Loop
 from seldon.providers import Codex, ROLES
 
-PRODUCT_TEST = r'''import json, os, subprocess, sys
+PRODUCT_TEST = r'''import subprocess, sys, unittest
 from pathlib import Path
 root = Path(__file__).resolve().parent
-folder = Path(os.environ["SELDON_EVIDENCE_DIR"])
-assert not folder.is_relative_to(root)
-report = {"toolReady": False, "checks": []}
-try:
-    tool = root / "missing-tool.exe" if "--broken-tool" in sys.argv else sys.executable
-    subprocess.run([str(tool), "-B", "-c", "pass"], check=True, capture_output=True)
-    report["toolReady"] = True
-    if "--skipped" in sys.argv:
-        report["checks"].append({"name": "personal greeting", "status": "skipped"})
-    else:
+if "--broken-tool" in sys.argv:
+    subprocess.run([str(root / "missing-tool.exe")], check=True)
+class Greeting(unittest.TestCase):
+    @unittest.skipIf("--skipped" in sys.argv or ("--skip-green" in sys.argv and (root / "greet.py").exists()), "review deferred")
+    def test_greeting(self):
         for name in (["Ada", "Grace"] if "--more" in sys.argv else ["Ada"]):
             print("Checking personal greeting", name, flush=True)
             result = subprocess.run([sys.executable, "-B", str(root / "greet.py"), name], capture_output=True, text=True)
-            ok = result.returncode == 0 and result.stdout == f"Hello, {name}!\n"
-            report["checks"].append({"name": "greet " + name, "status": "passed" if ok else "failed"})
-            if not ok:
-                print(repr(result.stdout) + result.stderr, file=sys.stderr)
+            self.assertEqual((result.returncode, result.stdout), (0, f"Hello, {name}!\n"), result.stderr)
         if "--usage" in sys.argv:
             result = subprocess.run([sys.executable, "-B", str(root / "greet.py")], capture_output=True, text=True)
-            ok = result.returncode == 2 and "Usage:" in result.stdout
-            report["checks"].append({"name": "missing name usage", "status": "passed" if ok else "failed"})
-            if not ok:
-                print(result.stderr, file=sys.stderr)
-except OSError as error:
-    print(error, file=sys.stderr)
-finally:
-    (folder / "execution.json").write_text(json.dumps(report))
-raise SystemExit(0 if report["toolReady"] and all(c["status"] != "failed" for c in report["checks"]) else 1)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("Usage:", result.stdout)
+unittest.main(argv=[sys.argv[0]])
 '''
 PRODUCT = 'import sys\nprint(f"Hello, {sys.argv[1]}!")\n'
 GUIDE = "Try it yourself\nRun python -B greet.py Ada; expect Hello, Ada!\nTry a different name too.\n"
-GUIDE_TEST = r'''import json, os
+GUIDE_TEST = r'''
 from pathlib import Path
-ok = "python -B greet.py" in Path("TRY.txt").read_text()
-Path(os.environ["SELDON_EVIDENCE_DIR"], "execution.json").write_text(json.dumps({"toolReady": True,
-    "checks": [{"name": "guide instructions", "status": "passed" if ok else "failed"}]}))
-raise SystemExit(0 if ok else 1)
+assert "python -B greet.py" in Path("TRY.txt").read_text()
 '''
 
 
@@ -72,26 +57,34 @@ def scripted_plan():
 CASES = ["none", "native-transport", "owner", "free-form", "stale-decision", "revise-B", "shell-command", "missing-plan-tool",
          "product-executable", "broken-tool", "all-skipped", "malformed-fixed", "malformed-exhausted",
          "review-gap", "plan-new-test", "repair-bound", "atomic-invalid", "evidence-gap", "uncertain-empty", "uncertain-twice",
-         "local-fault", "implementation-fault", "guide-gap", "RED-gap", "scope-change", "discovery", "new-contract"]
-SCOPED_CASES = ["parallel", "conflict", "change", "killed", "publication", "uncertain", "check-repair", "reply", "ignored"]
-PROMPT_SIZES = {}
+         "local-fault", "implementation-fault", "guide-gap", "RED-gap", "scope-change", "discovery", "new-contract",
+         "vacuous", "passes-absent", "skipped-green", "manual-review"]
+SCOPED_CASES = ["publication", "reply", "killed", "uncertain", "check-repair", "change", "parallel", "conflict", "ignored"]
 
 
 def clean_core_golden(root):
     """The repository golden entry runs this same driver, with no alternate proof."""
-    for fault in CASES:
-        folder = root / fault
+    def journey(function, case):
+        folder = root / case
         folder.mkdir(parents=True)
-        test_journey_delivers_tested_demonstrated_candidate(folder, fault)
-    for mode in SCOPED_CASES:
-        folder = root / mode
-        folder.mkdir()
-        test_scoped_units_deliver_and_recover(folder, mode)
+        started = time.monotonic()
+        try:
+            function(folder, case)
+        finally:
+            print(f"clean-core {case}: {time.monotonic() - started:.2f}s", flush=True)
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = [pool.submit(journey, function, case)
+                   for function, cases in ((scoped_journey, SCOPED_CASES), (greeting_journey, CASES)) for case in cases]
+        for future in futures:
+            future.result()
 
 
 @pytest.mark.fast
-@pytest.mark.parametrize("fault", CASES)
-def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
+def test_clean_core_golden(tmp_path):
+    clean_core_golden(tmp_path)
+
+
+def greeting_journey(tmp_path, fault):
     """Exercise real storage, processes, ownership and integration through C.
 
     Guide-only repair catches lost unchanged-input credit; initial success has one candidate.
@@ -106,6 +99,12 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
     Native transport catches lost stdin/output/provenance; sidecar-only recording cannot.
     Discovery catches lost upward information; a worker without discoveries cannot.
     A new accepted requirement/test/file catches an unamendable writer contract; unchanged scopes cannot.
+    Vacuous/nonchallenging checks catch false RED from exit code alone; the broken-tool
+    twin has a distinct execution failure. Skipping after implementation catches false
+    GREEN that initial all-skipped cannot. Source supplied to the judge is the real
+    worker output, not a mock inventory; these journeys script semantic decisions only.
+    A manual-review exit prevents GREEN even with correct product code; its test
+    source must be reviewed at RED before a product writer inherits that blocker.
     """
     calls, tasks, purposes = Counter(), Counter(), Counter()
     requests, timeline, worker_roots, malformed = [], [], [], []
@@ -124,7 +123,6 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
         nonlocal gap_sent
         kind, facts, context = question["kind"], question["facts"], question["context"]
         bodies = [f["boundedContent"] for f in facts.values() if isinstance(f["boundedContent"], dict)]
-        PROMPT_SIZES[kind] = max(PROMPT_SIZES.get(kind, 0), len(json.dumps(question).encode()))
         if "exactFix" not in context:
             calls[kind] += 1
         answer = {"why": "The supplied facts support this semantic decision", "citations": list(facts)}
@@ -148,8 +146,8 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
             if fault in ("shell-command", "missing-plan-tool") and "exactFix" not in context:
                 answer["edits"][2]["typedBody"]["command"] = ([f"& '{sys.executable}' '-B' 'check_greeting.py'"]
                     if fault == "shell-command" else [str(tmp_path / "absent.exe")])
-            if fault in ("broken-tool", "all-skipped"):
-                answer["edits"][2]["typedBody"]["command"].append("--broken-tool" if fault == "broken-tool" else "--skipped")
+            if fault in ("broken-tool", "all-skipped", "skipped-green"):
+                answer["edits"][2]["typedBody"]["command"].append({"broken-tool": "--broken-tool", "all-skipped": "--skipped", "skipped-green": "--skip-green"}[fault])
             if fault == "product-executable":
                 answer["productFiles"].append("product-python.exe")
                 answer["testFiles"].append("check_guide.py")
@@ -223,6 +221,14 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
                 writer_failures.append(detail)
             if task == "tests":
                 content = {"check_greeting.py": PRODUCT_TEST}
+                if fault == "none":
+                    # The semantic assertion must survive the old 8 KiB source projection.
+                    content["check_greeting.py"] = "#" + " source context" * 650 + "\n" + PRODUCT_TEST
+                if fault in ("vacuous", "passes-absent"):
+                    content["check_greeting.py"] = 'raise SystemExit(' + ("1" if fault == "vacuous" else "0") + ')\n'
+                if fault == "manual-review":
+                    content["check_greeting.py"] = PRODUCT_TEST.replace('unittest.main(argv=[sys.argv[0]])',
+                        'unittest.main(argv=[sys.argv[0]], exit=False)\nprint("visual review skipped")\nraise SystemExit(1)')
                 if "check_usage.py" in assignment["ownedPaths"]:
                     content["check_usage.py"] = PRODUCT_TEST.replace('(["Ada", "Grace"] if "--more" in sys.argv else ["Ada"])', '["Ada"]').replace('if "--usage" in sys.argv:', 'if True:')
                 if fault == "product-executable":
@@ -259,13 +265,31 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
             obs = [b for b in bodies if "outputRefs" in b]
             assert all(b["applies"] and b["executionUsable"] for b in obs)
             if purpose == "RED":
-                assert any(b["failed"] for b in obs)
                 if purposes[purpose] == 1:
-                    assert any(b["products"].get("greet.py") is None for b in obs)
+                    assert all(b["productAbsent"] and b["products"].get("greet.py") is None for b in obs)
+            for observation in obs:
+                assert observation["testSources"]
+                for path, source in observation["testSources"].items():
+                    assert source == (loop.project / path).read_text()
             answer.update(verdict="satisfied", gaps=[], assessments=[
                 {"target": t, "satisfied": True, "why": "Actual interaction challenges/establishes this obligation"}
                 for t in context["assessments"]])
             gap = None
+            invalid = fault in ("broken-tool", "all-skipped", "vacuous", "passes-absent", "manual-review") or (fault == "skipped-green" and purpose == "GREEN")
+            if invalid:
+                output = "\n".join(b["stdout"] + b["stderr"] for b in obs)
+                if fault == "broken-tool":
+                    assert "missing-tool.exe" in output and all(b["exitCode"] != 0 for b in obs)
+                elif fault in ("all-skipped", "skipped-green"):
+                    assert "OK (skipped=1)" in output and all(b["exitCode"] == 0 for b in obs)
+                elif fault == "manual-review":
+                    assert "visual review skipped" in output and all(b["exitCode"] == 1 for b in obs)
+                else:
+                    assert all(b["testSources"]["check_greeting.py"] == f'raise SystemExit({1 if fault == "vacuous" else 0})\n' for b in obs)
+                return json.dumps({"answer": {"verdict": "uncertain", "why": "No executed obligation assertion: tooling failure, skipped or empty check",
+                    "citations": list(facts), "neededFacts": [{"target": "n3", "question": "Supply an automated check that actually challenges the greeting"}]}})
+            if purpose == "RED":
+                assert any(b["failed"] for b in obs)
             if fault == "new-contract" and purpose == "demo" and not gap_sent:
                 result = subprocess.run([sys.executable, "-B", "greet.py"], cwd=loop.project, capture_output=True, text=True)
                 assert result.returncode != 2 or "Usage:" not in result.stdout
@@ -320,6 +344,8 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
     recorder = Codex(tmp_path / "calls", {**setup, "codexCommand": command})
 
     def recorded_provider(question):
+        if fault not in ("none", "native-transport"):
+            return provider(question)
         if fault == "native-transport":
             native.with_suffix(".reply").write_text(provider(question), encoding="utf-8")
             return recorder(question)  # Execute the offline CLI twin, never Codex or a real provider.
@@ -343,7 +369,8 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
     observations = [(ref, b) for ref, k, b in rows if k == "observation" and not b["purpose"].startswith("local:")]
     outcome = next(b for _, k, b in reversed(rows) if k == "outcome")
     loop.store.db.close()
-    incomplete = fault in ("stale-decision", "broken-tool", "all-skipped", "malformed-exhausted", "repair-bound", "atomic-invalid", "uncertain-empty", "uncertain-twice")
+    incomplete = fault in ("stale-decision", "broken-tool", "all-skipped", "malformed-exhausted", "repair-bound", "atomic-invalid", "uncertain-empty", "uncertain-twice", "vacuous", "passes-absent", "skipped-green", "manual-review")
+    assert not list(loop.project.rglob("execution.json"))
     assert cursor["state"] == persisted["state"] == ("INCOMPLETE" if incomplete else "ACCEPTED" if fault == "owner" else "SCRIPTED_C"), outcome
     assert not tasks["guide"]
     assert calls["DECIDE"] == (1 if fault == "free-form" else 0)
@@ -356,10 +383,10 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
         assert all(all(field in json.dumps(q["facts"]) for field in ("unexpected", "users", "size")) for q in malformed[1:])
     if incomplete:
         assert not outcome["accepted"] and not outcome["verification_complete"] and outcome["nextAction"]
-        if fault in ("broken-tool", "all-skipped"):
-            assert not purposes["RED"] and not tasks["build"]
-            local = [b for _, k, b in rows if k == "observation"]
-            assert local and all(not b["toolReady"] if fault == "broken-tool" else all(c["status"] == "skipped" for c in b["checks"]) for b in local)
+        if fault in ("broken-tool", "all-skipped", "vacuous", "passes-absent", "skipped-green", "manual-review"):
+            assert purposes["RED"] == 1 and tasks["tests"] == 1
+            assert tasks["build"] == (1 if fault == "skipped-green" else 0)
+            assert not any(k == "judgment" and b["satisfied"] and b["purpose"] == ("GREEN" if fault == "skipped-green" else "RED") for _, k, b in rows)
         if fault == "atomic-invalid":
             assert revisions == 1 and "wrong trace target kind" in outcome["reason"]
         if fault == "repair-bound":
@@ -368,8 +395,8 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
     assert outcome["accepted"] == (fault == "owner") and outcome["verification_complete"]
     assert all(root.is_dir() and (root / ".git").is_file() for root in worker_roots)
     red = observations[0][1]
-    assert red["purpose"] == "RED" and red["executionStarted"] and red["toolReady"] and red["exitCode"] != 0
-    assert red["products"]["greet.py"] is None and red["checks"][0]["status"] == "failed"
+    assert red["purpose"] == "RED" and red["executionStarted"] and red["exitCode"] != 0
+    assert red["products"]["greet.py"] is None
     assert demo_reuse
     subject = requests[-1]["subject"]
     assert subject["candidate"] == cursor["candidate"]
@@ -400,7 +427,7 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
         assert len(observations) == 3 and calls["PLAN"] == 1
     if fault == "plan-new-test":
         assert revisions == 2 and len(observations) == 4 and purposes["RED"] == 1
-        assert any(c["name"] == "greet Grace" for _, b in observations for c in b["checks"])
+        assert any("Checking personal greeting Grace" in b["stdout"] for _, b in observations)
     if fault == "discovery":
         discovery = next(r for r, k, b in rows if k == "discovery")
         assert discovery in next(r for r in requests if r["gate"] == "check-in")["subject"]["proposedDeferrals"]
@@ -417,7 +444,7 @@ def test_journey_delivers_tested_demonstrated_candidate(tmp_path, fault):
 
 
 # Real command checks for independent scopes and their integrated consumer.
-SCOPED_CHECK = r'''import json, os, subprocess, sys, time
+SCOPED_CHECK = r'''import os, subprocess, sys, time
 from pathlib import Path
 name, expected, control, mode = sys.argv[1:]
 root = Path.cwd()
@@ -427,8 +454,6 @@ if mode == "killed" and name == "b.py" and (root / name).exists() and root.name.
     time.sleep(30)
 result = subprocess.run([sys.executable, "-B", name], capture_output=True, text=True)
 ok = result.returncode == 0 and result.stdout.strip() == expected
-Path(os.environ["SELDON_EVIDENCE_DIR"], "execution.json").write_text(json.dumps({"toolReady": True,
-    "checks": [{"name": name + " output", "status": "passed" if ok else "failed"}]}))
 print(result.stdout + result.stderr)
 raise SystemExit(0 if ok else 1)
 '''
@@ -464,6 +489,10 @@ def scoped_run(root, mode, reopen=False):
                 scopes.append({"requirements": [r], "tests": [t], "testFiles": [f"check_{name}.py"],
                     "productFiles": [name + ".py", *(["shared.txt"] if mode == "conflict" and i < 2 else []), *([".gitignore", "dist/index.html"] if mode == "ignored" and i == 0 else [])],
                     "dependencies": ["1", "2", "3"] if i == 3 else []})
+            if mode in ("reply", "publication"):
+                # These faults need one unit; the other journeys prove scheduling/dependencies.
+                scopes = [{key: [value for scope in scopes for value in scope[key]]
+                           for key in ("requirements", "tests", "testFiles", "productFiles")} | {"dependencies": []}]
             answer.update(edits=edits, units=scopes)
         elif kind == "REVIEW":
             answer.update(verdict="adequate", gaps=[])
@@ -494,10 +523,12 @@ def scoped_run(root, mode, reopen=False):
                 if path.startswith("check_"):
                     content[path] = SCOPED_CHECK
                     if mode == "check-repair" and path == "check_a.py" and turn > 1:
-                        content[path] = content[path].replace('Path(os.environ["SELDON_EVIDENCE_DIR"]',
-                            'variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], capture_output=True, text=True)\nok = ok and variant.returncode == 0 and variant.stdout.strip() == "Alpha2"\nPath(os.environ["SELDON_EVIDENCE_DIR"]')
+                        content[path] = content[path].replace('print(result.stdout + result.stderr)',
+                            'variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], capture_output=True, text=True)\nok = ok and variant.returncode == 0 and variant.stdout.strip() == "Alpha2"\nprint(result.stdout + result.stderr)')
                 elif path in ("a.py", "b.py", "c.py"):
-                    req = document["nodes"][loop.store.units()[context["unit"]]["contract"]["requirements"][0]]["body"]["obligation"]
+                    check = next(document["nodes"][t]["body"] for t in assignment["checks"]
+                                 if document["nodes"][t]["body"]["command"][3] == path)
+                    req = document["nodes"][check["requirements"][0]]["body"]["obligation"]
                     content[path] = "print(" + repr(req.removeprefix("Output ")) + ")\n"
                     if mode == "check-repair" and path == "a.py" and turn > 1:
                         content[path] = 'import sys\nprint("Alpha2" if "--variant" in sys.argv else "Alpha")\n'
@@ -509,11 +540,16 @@ def scoped_run(root, mode, reopen=False):
                     content[path] = "Try it yourself: python -B app.py; observe all three outputs.\n"
                 else:
                     content[path] = "Shared ownership is serialized.\n"
-            # Real processes author files and spend enough time to distinguish overlap from serial scheduling.
+            # A real rendezvous proves overlap without depending on machine speed.
             writer = 'import json, os, sys, time\nfrom pathlib import Path\ndata=json.loads(sys.argv[1])\n'
+            if mode == "parallel" and context["task"] == "build" and any(p in content for p in ("a.py", "b.py", "c.py")):
+                marker = root / ("ready-" + context["unit"])
+                writer += (f'Path({str(marker)!r}).write_text("ready")\n'
+                    f'deadline = time.monotonic() + 20\nwhile len(list(Path({str(root)!r}).glob("ready-*"))) < 3 and time.monotonic() < deadline:\n    time.sleep(0.01)\n'
+                    f'assert len(list(Path({str(root)!r}).glob("ready-*"))) == 3, "Independent writers never overlapped"\n')
             if mode == "uncertain" and "b.py" in content:
                 writer += f'Path({str(root / "kill-ready")!r}).write_text(str(os.getpid()))\ntime.sleep(30)\n'
-            writer += 'time.sleep(0.65)\nfor name, source in data.items():\n    Path(name).parent.mkdir(parents=True, exist_ok=True)\n    Path(name).write_text(source, encoding="utf-8")\n'
+            writer += 'for name, source in data.items():\n    Path(name).parent.mkdir(parents=True, exist_ok=True)\n    Path(name).write_text(source, encoding="utf-8")\n'
             result = work.execute([sys.executable, "-B", "-c", writer, json.dumps(content)], worker)
             assert result["exitCode"] == 0 and result["cleanupVerified"], result
             observed = work.files(worker)
@@ -558,7 +594,7 @@ def scoped_crash_child(root, mode):
 
         def crash_after_file(source, target):
             replace(source, target)
-            if Path(target) == Path(root) / "product" / "TRY.txt":
+            if Path(target) == Path(root) / "product" / "a.py":
                 os._exit(77)
         work.os.replace = crash_after_file
     if mode == "reply":
@@ -576,9 +612,7 @@ def scoped_crash_child(root, mode):
     scoped_run(Path(root), mode)
 
 
-@pytest.mark.fast
-@pytest.mark.parametrize("mode", SCOPED_CASES)
-def test_scoped_units_deliver_and_recover(tmp_path, mode):
+def scoped_journey(tmp_path, mode):
     """C12/C18/C23: independent scopes compose through C using real processes.
 
     Recorded overlap catches a serial scheduler; shared-file output catches concurrent
@@ -677,7 +711,8 @@ def test_scoped_units_deliver_and_recover(tmp_path, mode):
     units = loop.store.units()
     rows = loop.store.records()
     assert all(not u.get("waiting") for u in units.values())
-    assert len(units) == 4 and all({"tests", "build"} <= set(u["results"]) for u in units.values())
+    assert len(units) == (1 if mode in ("reply", "publication") else 4)
+    assert all({"tests", "build"} <= set(u["results"]) for u in units.values())
     result = subprocess.run([sys.executable, "-B", "app.py"], cwd=loop.project, capture_output=True, text=True)
     assert result.returncode == 0 and result.stdout.strip() == ("Alpha2|Beta|Gamma" if mode == "change" else "Alpha|Beta|Gamma")
     assert "Try it yourself" in (loop.project / "TRY.txt").read_text()
@@ -727,8 +762,9 @@ def test_scoped_units_deliver_and_recover(tmp_path, mode):
         for entry in launches:
             assert after_launches.count(entry) == 1
         assert not loop.store.cursor().get("publication")
+    parents = {revision: ancestry for revision, *ancestry in
+               (line.split() for line in work.git(loop.project, "rev-list", "--parents", "--all").splitlines())}
     for _, kind, body in rows:
         if kind == "integration":
-            assert work.git(loop.project, "cat-file", "-t", body["baseRevision"]) == "commit"
-            assert work.git(loop.project, "rev-parse", body["revision"] + "^") == body["baseRevision"]
+            assert body["baseRevision"] in parents and parents[body["revision"]] == [body["baseRevision"]]
     loop.store.db.close()

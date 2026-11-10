@@ -39,7 +39,7 @@ class Execution:
         with self.store.transaction():
             attempt = self._attempt("work", unit=ref, phase=phase, startedAt=time.time(), authorization=cursor["B"])
             assignment_ref = self.store.record("assignment", {**assignment, "unit": ref, "phase": phase,
-                "attempt": attempt, "checks": checks, "executionReport": evidence.REPORT,
+                "attempt": attempt, "checks": checks,
                 "scratch": str(self.scratch), "authorization": cursor["B"]})
             unit.pop("waiting", None)
             unit["active"] = {"assignment": assignment_ref, "attempt": attempt, "phase": phase, "status": "running"}
@@ -61,7 +61,7 @@ class Execution:
                 answer, result = invocation["answer"], active.pop("report")
             else:
                 call = self._call(cursor, "WORK", [cursor["plan"], assignment_ref, *feedback], task=phase, unit=ref,
-                                  goal=("The product does not exist yet, so done means these checks really execute and fail for that reason; that failure is the goal, not a blocker."
+                                  goal=("Write automated checks of the accepted obligations; execute them against the baseline. Product failures are expected feedback."
                                         if phase == "tests" else "Make the checks pass and the product beautiful."))
                 answer = call["answer"]
                 with self.store.transaction():
@@ -77,7 +77,7 @@ class Execution:
             retained = self._green_facts(cursor, local_candidate)
             checks = {r: t for r, t in assignment["checks"].items()
                       if not any(o["test"] == r and o["applies"] and o["passed"] for o in retained.values())}
-            local = evidence.observe(root, checks, self.scratch)
+            local = evidence.observe(root, checks, self.scratch) if phase == "build" else []
             if any(not o["cleanupVerified"] for o in local):
                 raise ValueError("Local command cleanup unverified; stop before further effects")
             with self.store.transaction():

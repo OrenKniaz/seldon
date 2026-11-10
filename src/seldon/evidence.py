@@ -1,14 +1,11 @@
 """C14/C15/C26: ordinary bounded commands, raw observations, exact candidates."""
 
 import os
-import json
 import uuid
 from pathlib import Path
 
 from .processes import execute
 from .store import digest
-
-REPORT = {"toolReady": True, "checks": [{"name": "actual runner check", "status": "passed|failed|skipped"}]}
 
 
 def observe(project, declarations, scratch):
@@ -21,16 +18,8 @@ def observe(project, declarations, scratch):
             command = [str((project / command[0]).resolve()), *command[1:]]
         result = execute(command, project, env={**os.environ,
                          "SELDON_EVIDENCE_DIR": str(folder)})
-        try:
-            supplied = json.loads((folder / "execution.json").read_text(encoding="utf-8"))
-            report = {key: supplied[key] for key in ("toolReady", "checks")}
-            if (type(report["toolReady"]) is not bool or not isinstance(report["checks"], list)
-                    or any(not isinstance(c["name"], str) or not c["name"] or c["status"] not in ("passed", "failed", "skipped") for c in report["checks"])):
-                raise ValueError("Invalid execution report")
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            report = {"toolReady": False, "checks": [], "reportError": str(error)}
         results.append({"test": ref, "command": body["command"], "cwd": str(project),
-            "requirements": body["requirements"], "testIdentity": digest(body), **result, **report,
+            "requirements": body["requirements"], "testIdentity": digest(body), **result,
             "evidenceFiles": [str(p) for p in folder.rglob("*") if p.is_file()]})
         if not result["cleanupVerified"]:
             break
@@ -58,6 +47,7 @@ def save(store, attempt, purpose, candidate, results, document):
         units = store.units()
         scope_identities = {r: [digest(scopes[r]), units[r].get("checkGeneration", 0)] for r in owners}
         body.update(attempt=attempt, purpose=purpose, candidate=candidate, inputs=inputs, obligations=obligations, scopes=scope_identities,
+                    testPaths=sorted({p for r in owners for p in scopes[r]["testPaths"]}),
                     products={p: store.read(candidate)["files"].get(p) for p in products},
                     outputRefs=[store.artifact(result[s], attempt) for s in ("stdout", "stderr")],
                     artifactRefs=[store.artifact(Path(p).read_bytes(), attempt)
@@ -80,12 +70,14 @@ def facts(store, refs, candidate, document):
         applies = applies and all(r in document["nodes"] and r in units and
             [digest(document["nodes"][r]["body"]), units[r].get("checkGeneration", 0)] == identity
             for r, identity in body["scopes"].items())
-        statuses = [c["status"] for c in body["checks"]]
         usable = (body["executionStarted"] and body["cleanupVerified"] and not body["timedOut"]
-                  and body["exitCode"] is not None and body["toolReady"] and any(s != "skipped" for s in statuses))
+                  and body["exitCode"] is not None)
         result[ref] = {**body, "applies": applies, "inputsByteIdentical": applies,
-            "executionUsable": usable, "passed": usable and body["exitCode"] == 0 and all(s == "passed" for s in statuses),
-            "failed": usable and body["exitCode"] != 0 and "failed" in statuses}
+            "productAbsent": bool(body["products"]) and all(h is None for h in body["products"].values()),
+            "testSources": {p: (store.root / "artifacts" / body["inputs"][p]).read_text(encoding="utf-8", errors="replace")
+                            for p in body["testPaths"] if body["inputs"].get(p) is not None},
+            "executionUsable": usable, "passed": usable and body["exitCode"] == 0,
+            "failed": usable and body["exitCode"] != 0}
     return result
 
 

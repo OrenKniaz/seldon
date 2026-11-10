@@ -35,9 +35,6 @@ class Verification:
                     fault = self.store.record("seldon_fault", {"fault": "VERIFICATION_NOT_EXECUTED",
                         "observations": cursor["observationScope"]})
                     self._incomplete(cursor, fault)
-                elif not evidence.ready(facts, purpose):
-                    fault = self.store.record("execution_failure", {"observations": cursor["observationScope"]})
-                    self._repair(cursor, fault, purpose, task="tests" if purpose == "RED" else "build")
                 else:
                     self._next(cursor, "JUDGE", cursor["observationScope"])
         elif state == "JUDGE":
@@ -67,7 +64,7 @@ class Verification:
             call = self._call(cursor, "JUDGE", refs, purpose=purpose, assessments=inventory)
             answer = call["answer"]
             assessments = answer["assessments"]
-            satisfied = (answer["verdict"] == "satisfied" and not answer["gaps"]
+            satisfied = (evidence.ready(observed, purpose) and answer["verdict"] == "satisfied" and not answer["gaps"]
                          and all(a["satisfied"] for a in assessments))
             with self.store.transaction():
                 result = self._answer(call)
