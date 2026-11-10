@@ -22,7 +22,7 @@ PROMPTS = {
     "PLAN": "What product work and semantic checks deliver the accepted vision and quality bar most simply? "
             "Describe features, requirements, tests and file scopes. "
             "Commands are argv [executable, argument, ...], never shell strings. "
-            "Each independently buildable piece is its own unit; dependencies are unit indices, and a unit's checks use only its own and its dependencies' files. CODE owns IDs and scheduling.",
+            "Each independently buildable piece is its own unit; dependencies are 1-based positions of other units in the list, and a unit's checks use only its own and its dependencies' files. CODE owns IDs and scheduling.",
     "REPAIR": "What minimal product edits resolve the supplied cause and actual command output (last 4 KiB per stream)? "
               "Amend product semantics and existing unit contracts together, including local requirement/test links and owned files. "
               "CODE owns identities, scheduling and waves.",

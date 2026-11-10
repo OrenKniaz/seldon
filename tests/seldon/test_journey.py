@@ -553,7 +553,7 @@ def scoped_run(root, mode, reopen=False):
                     edits[-2]["typedBody"]["contract"] += "; --variant outputs Alpha2"
                 scopes.append({"requirements": [r], "tests": [t], "testFiles": [f"check_{name}.py"],
                     "productFiles": [name + ".py", *(["shared.txt"] if mode == "conflict" and i < 2 else []), *([".gitignore", "dist/index.html"] if mode == "ignored" and i == 0 else [])],
-                    "dependencies": ["1", "2", "3"] if i == 3 and mode != "dependency" else []})
+                    "dependencies": [1, 2, 3] if i == 3 and mode != "dependency" else []})
             if mode in ("reply", "publication"):
                 # These faults need one unit; the other journeys prove scheduling/dependencies.
                 scopes = [{key: [value for scope in scopes for value in scope[key]]

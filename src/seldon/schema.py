@@ -75,7 +75,9 @@ def answer_schema(kind, facts, context):
         payload = obj(edits=array({"anyOf": edits}, 1))
         if kind == "PLAN":
             scope = obj(requirements=array(link, 1), tests=array(link, 1),
-                productFiles=array(TEXT, 1), testFiles=array(TEXT, 1), dependencies=REFS)
+                productFiles=array(TEXT, 1), testFiles=array(TEXT, 1),
+                dependencies=array({"type": "integer", "minimum": 1, "maximum": 32,
+                                    "description": "1-based position of another unit in this units list"}))
             payload = obj(**payload["properties"], units=array(scope, 1))
     for field in ("gaps", "discoveries", "neededFacts"):
         if field in payload["properties"]:
@@ -115,10 +117,12 @@ def validation_errors(value, contract, path="answer", root=None):
         return [] if [] in branches else [error for branch in branches for error in branch]
     kind = contract["type"]
     expected = {"object": dict, "array": list, "string": str,
-                "boolean": bool, "null": type(None)}[kind]
+                "boolean": bool, "null": type(None), "integer": int}[kind]
     if type(value) is not expected:
         return [f"{path}: expected {kind}"]
     errors = []
+    if kind == "integer" and not contract.get("minimum", value) <= value <= contract.get("maximum", value):
+        errors.append(f"{path}: out of range")
     if kind == "object":
         fields = contract["properties"]
         errors += [f"{path}.{key}: required field missing" for key in fields.keys() - value.keys()]
