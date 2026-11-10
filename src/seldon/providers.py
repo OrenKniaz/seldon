@@ -11,9 +11,17 @@ from pathlib import Path
 from .processes import execute
 from .store import encode
 
-ROLES = {role: {"provider": "codex", "model": "gpt-6.1-sol", "effort": effort}
-         for role, effort in {"planner": "medium", "reviewer": "medium", "worker": "medium",
-                              "judge": "medium", "build": "high", "demo": "high", "decider": "low"}.items()}
+ROLES = {role: {"provider": "codex", "model": "gpt-6.1-sol", "effort": effort, "timeout": timeout}
+         for role, (effort, timeout) in {"planner": ("medium", 180), "reviewer": ("medium", 180),
+             "worker": ("medium", 600), "judge": ("medium", 180), "build": ("high", 900),
+             "demo": ("high", 300), "decider": ("low", 90)}.items()}
+
+
+class ProviderFailure(RuntimeError):
+    """C18/C20: native failure and observed cleanup govern fresh-call recovery."""
+    def __init__(self, reason, transient, cleanup_verified, receipt=None):
+        super().__init__(reason)
+        self.transient, self.cleanup_verified, self.receipt = transient, cleanup_verified, receipt
 
 
 def role_for(kind, context):
@@ -76,9 +84,12 @@ def terminal_answer(output):
 
 
 class Codex:
-    def __init__(self, root, setup, timeout=600):
+    def __init__(self, root, setup, timeout=None):
         self.root, self.setup, self.timeout = Path(root), setup, timeout
         self.root.mkdir()
+
+    def timeout_for(self, kind, context):
+        return self.timeout if self.timeout is not None else self.setup["providers"][role_for(kind, context)]["timeout"]
 
     def prepare(self, question):
         if not self.setup["codexCommand"]:
@@ -126,22 +137,43 @@ class Codex:
             command.append(f"--image={attached}")
         command += ["-"]
         metadata = {"command": command, "commandLine": subprocess.list2cmdline(command),
-                    "cwd": str(cwd), "timeout": self.timeout,
+                    "cwd": str(cwd), "timeout": self.timeout_for(question["kind"], question["context"]),
                     "role": role, "provider": config}
         (folder / "invocation.json").write_text(encode(metadata), encoding="utf-8")
         return folder, metadata
 
     def __call__(self, question):
         folder, invocation = self.prepare(question)
-        result = execute(invocation["command"], invocation["cwd"], self.timeout,
+        result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
                          folder / "prompt.txt")
         for stream in ("stdout", "stderr"):
             (folder / (stream + ".bin")).write_bytes(result[stream])
         receipt = {k: v for k, v in result.items() if k not in ("stdout", "stderr")}
+        receipt.update(role=invocation["role"], timeout=invocation["timeout"])
         (folder / "result.json").write_text(encode(receipt), encoding="utf-8")
-        if result["exitCode"] != 0 or not result["cleanupVerified"]:
-            raise RuntimeError(f"Codex invocation failed at {folder}: {encode(receipt)}; "
-                               + result["stderr"].decode("utf-8", errors="replace"))
-        raw = terminal_answer(result["stdout"].decode("utf-8", errors="replace"))
+        output = result["stdout"].decode("utf-8", errors="replace")
+        diagnostics = output + "\n" + result["stderr"].decode("utf-8", errors="replace")
+        try:
+            if result["timedOut"] or not result["cleanupVerified"]:
+                raise RuntimeError("Provider timed out" if result["timedOut"] else "Provider cleanup unverified")
+            raw = terminal_answer(output)
+            if result["exitCode"] != 0:
+                from .schema import validate
+                validate(json.loads(raw), question["schema"])
+        except (RuntimeError, ValueError) as error:
+            native_errors = [result["stderr"].decode("utf-8", errors="replace")]
+            for line in output.splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("type") in ("turn.failed", "error"):
+                    native_errors.append(encode(event))
+            denied = any(word in "\n".join(native_errors).lower() for word in (
+                "unauthorized", "unauthenticated", "authentication", "not authenticated", "not logged in",
+                "invalid_api_key", "forbidden", "log in", "login", "http 401", "http 403",
+                "permission_denied", "permission denied", "access denied", "approval denied", "operation not permitted"))
+            raise ProviderFailure(f"Codex invocation failed at {folder}: {error}; {encode(receipt)}; {diagnostics}",
+                not denied, result["cleanupVerified"], str(folder / "result.json")) from error
         (folder / "answer.txt").write_text(raw, encoding="utf-8")
         return raw

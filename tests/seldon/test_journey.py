@@ -59,8 +59,9 @@ CASES = ["none", "native-transport", "owner", "free-form", "stale-decision", "re
          "product-executable", "broken-tool", "all-skipped", "malformed-fixed", "malformed-exhausted",
          "review-gap", "plan-new-test", "repair-bound", "atomic-invalid", "evidence-gap", "uncertain-empty", "uncertain-twice",
          "local-fault", "implementation-fault", "guide-gap", "RED-gap", "scope-change", "discovery", "new-contract",
-         "vacuous", "passes-absent", "skipped-green", "manual-review"]
-SCOPED_CASES = ["publication", "reply", "killed", "uncertain", "check-repair", "change", "parallel", "conflict", "ignored"]
+         "vacuous", "passes-absent", "skipped-green", "manual-review",
+         "provider-timeout-always", "provider-crash", "provider-auth", "provider-permission", "worker-timeout"]
+SCOPED_CASES = ["publication", "reply", "killed", "uncertain", "check-repair", "change", "parallel", "conflict", "ignored", "dependency"]
 
 
 def clean_core_golden(root):
@@ -97,7 +98,8 @@ def greeting_journey(tmp_path, fault):
     Product-executable and malformed argv catch tool/output confusion at real planning.
     Review/scope/invalid twins protect atomic authorized edits; success cannot expose these.
     Added-test repair catches stranded ownership; editing an existing check cannot.
-    Native transport catches lost stdin/output/provenance; sidecar-only recording cannot.
+    Native transport catches lost stdin/output/provenance and rejected valid answers
+    on nonzero exit; sidecar-only recording cannot.
     Discovery catches lost upward information; a worker without discoveries cannot.
     A new accepted requirement/test/file catches an unamendable writer contract; unchanged scopes cannot.
     Vacuous/nonchallenging checks catch false RED from exit code alone; the broken-tool
@@ -107,6 +109,10 @@ def greeting_journey(tmp_path, fault):
     A manual-review exit prevents GREEN even with correct product code; its test
     source must be reviewed at RED before a product writer inherits that blocker.
     One greeting unit through C catches accidental decomposition/ceremony growth.
+    Native failure twins protect fresh retries of unchanged facts and honest exhaustion;
+    successful transport and malformed JSON never exercise a failed process lifetime.
+    Worker timeout leaves a child holding a writer lock: the retry must acquire it,
+    catching concurrent surviving writers that a question-only timeout cannot expose.
     """
     calls, tasks, purposes = Counter(), Counter(), Counter()
     requests, timeline, worker_roots, malformed = [], [], [], []
@@ -335,18 +341,49 @@ def greeting_journey(tmp_path, fault):
                 "choice": "revise" if fault == "revise-B" and request["gate"] == "B" and not calls["REPAIR"] else "approve"}
 
     command = ["offline-question-recorder"]
-    if fault == "native-transport":
+    provider_fault = fault.startswith("provider-") or fault == "worker-timeout"
+    if fault == "native-transport" or provider_fault:
         native = tmp_path / "offline_native.py"
-        native.write_text('import json, sys\nfrom pathlib import Path\n'
+        lock_source = ('import os, time\nfrom pathlib import Path\n'
+            f'lock = Path({str(tmp_path / "writer.lock")!r}).open("a+b")\n'
+            'lock.write(b"0"); lock.flush(); lock.seek(0)\n'
+            'if os.name == "nt":\n    import msvcrt\n    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)\n'
+            'else:\n    import fcntl\n    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n')
+        child_ready = f'Path({str(tmp_path / "child-ready")!r}).write_text("writer locked")\ntime.sleep(30)\n'
+        native.write_text('import json, sys, subprocess, time, os\nfrom pathlib import Path\n'
             'q = json.loads(sys.stdin.read().splitlines()[-1])\n'
             'assert q["facts"] and q["kind"]\n'
+            + (f'control = Path({str(tmp_path)!r})\nmode = {fault!r}\n'
+            'attempt = len(list(control.glob("native-question-*.json"))) + 1\n'
+            '(control / f"native-question-{attempt}.json").write_text(json.dumps(q))\n'
+            'if mode == "worker-timeout":\n'
+            f'    lock_source = {lock_source!r}\n'
+            '    if attempt == 1:\n'
+            f'        subprocess.Popen([sys.executable, "-B", "-c", lock_source + {child_ready!r}])\n'
+            '        while not (control / "child-ready").exists():\n            time.sleep(0.01)\n'
+            '    else:\n        exec(lock_source)\n'
+            'if mode == "provider-auth":\n    sys.stderr.write("Authentication failed: log in to Codex\\n"); sys.exit(1)\n'
+            'if mode == "provider-permission":\n    sys.stderr.write("Permission denied by native provider\\n"); sys.exit(1)\n'
+            'if mode == "provider-crash" and attempt == 1:\n    os._exit(17)\n'
+            'if mode == "provider-timeout-always" or (mode == "worker-timeout" and attempt == 1):\n'
+            '    time.sleep(30)\n' if provider_fault else '') +
             'reply = Path(__file__).with_suffix(".reply").read_text(encoding="utf-8")\n'
             'print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":reply}}))\n'
-            'print(json.dumps({"type":"turn.completed"}))\n', encoding="utf-8")
+            'print(json.dumps({"type":"turn.completed"}))\n'
+            + ('' if provider_fault else 'sys.exit(9 if q["kind"] == "PLAN" else 0)\n'), encoding="utf-8")
         command = [sys.executable, "-B", str(native)]
+    if provider_fault:
+        setup["providers"]["worker" if fault == "worker-timeout" else "planner"]["timeout"] = 2
     recorder = Codex(tmp_path / "calls", {**setup, "codexCommand": command})
 
     def recorded_provider(question):
+        if provider_fault:
+            selected = question["kind"] == ("WORK" if fault == "worker-timeout" else "PLAN")
+            if selected and (fault != "worker-timeout" or question["context"]["task"] == "tests"):
+                if not native.with_suffix(".reply").exists():
+                    native.with_suffix(".reply").write_text(provider(question), encoding="utf-8")
+                return recorder(question)
+            return provider(question)
         if fault not in ("none", "native-transport"):
             return provider(question)
         if fault == "native-transport":
@@ -363,6 +400,7 @@ def greeting_journey(tmp_path, fault):
         (folder / "answer.txt").write_text(reply, encoding="utf-8")
         return reply
 
+    recorded_provider.timeout_for = recorder.timeout_for
     loop = Loop(tmp_path / "product", tmp_path / "workers", "Make a command that greets a supplied name", setup, recorded_provider, user)
     cursor = loop.run()
     rows = loop.store.records()
@@ -372,14 +410,33 @@ def greeting_journey(tmp_path, fault):
     observations = [(ref, b) for ref, k, b in rows if k == "observation" and not b["purpose"].startswith("local:")]
     outcome = next(b for _, k, b in reversed(rows) if k == "outcome")
     loop.store.db.close()
-    incomplete = fault in ("stale-decision", "broken-tool", "all-skipped", "malformed-exhausted", "repair-bound", "atomic-invalid", "uncertain-empty", "uncertain-twice", "vacuous", "passes-absent", "skipped-green", "manual-review")
+    incomplete = fault in ("stale-decision", "broken-tool", "all-skipped", "malformed-exhausted", "repair-bound", "atomic-invalid", "uncertain-empty", "uncertain-twice", "vacuous", "passes-absent", "skipped-green", "manual-review", "provider-timeout-always", "provider-auth", "provider-permission")
     assert not list(loop.project.rglob("execution.json"))
     assert cursor["state"] == persisted["state"] == ("INCOMPLETE" if incomplete else "ACCEPTED" if fault == "owner" else "SCRIPTED_C"), outcome
     assert not tasks["guide"]
     assert calls["DECIDE"] == (1 if fault == "free-form" else 0)
     if fault == "native-transport":
         results = [json.loads(p.read_text()) for p in (tmp_path / "calls").glob("*/result.json")]
-        assert len(results) == sum(calls.values()) and all(r["executionStarted"] and r["cleanupVerified"] and r["exitCode"] == 0 for r in results)
+        assert len(results) == sum(calls.values()) and all(r["executionStarted"] and r["cleanupVerified"] and r["exitCode"] in (0, 9) for r in results)
+        assert sum(r["exitCode"] == 9 for r in results) == 1
+    if provider_fault:
+        native_questions = [json.loads(p.read_text()) for p in sorted(tmp_path.glob("native-question-*.json"))]
+        count = 3 if fault == "provider-timeout-always" else 1 if fault in ("provider-auth", "provider-permission") else 2
+        assert len(native_questions) == count and all(q == native_questions[0] for q in native_questions)
+        role = "worker" if fault == "worker-timeout" else "planner"
+        attempts = {r: b for r, k, b in rows if k == "attempt" and b["operation"] == ("WORK" if fault == "worker-timeout" else "PLAN")}
+        assert len(attempts) == count + (1 if fault == "worker-timeout" else 0)  # Later build is a separate question.
+        retried = [b for b in attempts.values() if b.get("retryOf")]
+        assert len(retried) == count - 1
+        assert all(records[b["question"]] == records[attempts[b["retryOf"]]["question"]] for b in retried)
+        results = [json.loads(p.read_text()) for p in (tmp_path / "calls").glob("*/result.json")]
+        assert len(results) == count and all(r["cleanupVerified"] and r["timeout"] == 2 and r["role"] == role for r in results)
+        failures = [b for _, k, b in rows if k == "provider_failure"]
+        assert len(failures) == count - (0 if incomplete else 1)
+        if fault == "provider-timeout-always":
+            assert "timed out" in outcome["reason"] and "timeout" in outcome["reason"]
+        if fault in ("provider-auth", "provider-permission"):
+            assert not failures[0]["transient"] and ("Authentication failed" if fault == "provider-auth" else "Permission denied") in outcome["reason"]
     if malformed:
         assert len(malformed) == 3
         assert all(all(q["facts"][r] == f for r, f in malformed[0]["facts"].items()) for q in malformed[1:])
@@ -477,12 +534,16 @@ def scoped_run(root, mode, reopen=False):
         answer = {"why": "The assigned obligations are covered by actual command interactions", "citations": list(facts)}
         bodies = [f["boundedContent"] for f in facts.values() if isinstance(f["boundedContent"], dict)]
         if kind == "ALIGN":
-            answer.update(size="tiny", understanding="Three independent commands composed into one application", users=["CLI users"],
-                scopeIn=["A, B and C output and their composition"], scopeOut=[], improvements=[],
+            answer.update(size="tiny", understanding="A producer command composed by a dependent application" if mode == "dependency" else "Three independent commands composed into one application", users=["CLI users"],
+                scopeIn=["A output and its composition" if mode == "dependency" else "A, B and C output and their composition"], scopeOut=[], improvements=[],
                 quality=[{"criterion": "Clear composed output", "verification": "Run the integrated application"}], unknowns=[])
         elif kind == "PLAN":
             edits, scopes = [], []
             for i, (name, expected) in enumerate((("a", "Alpha"), ("b", "Beta"), ("c", "Gamma"), ("app", "Alpha|Beta|Gamma"))):
+                if mode == "dependency":
+                    if i in (1, 2):
+                        continue
+                    expected = "Alpha"
                 f, r, t = (f"new:{3*i+j}" for j in (1, 2, 3))
                 edits.extend([
                     {"kind": "feature", "targetHandle": f, "typedBody": {"story": "Run " + name, "acceptance": "Observe " + expected, "vision": ["vision"]}},
@@ -492,7 +553,7 @@ def scoped_run(root, mode, reopen=False):
                     edits[-2]["typedBody"]["contract"] += "; --variant outputs Alpha2"
                 scopes.append({"requirements": [r], "tests": [t], "testFiles": [f"check_{name}.py"],
                     "productFiles": [name + ".py", *(["shared.txt"] if mode == "conflict" and i < 2 else []), *([".gitignore", "dist/index.html"] if mode == "ignored" and i == 0 else [])],
-                    "dependencies": ["1", "2", "3"] if i == 3 else []})
+                    "dependencies": ["1", "2", "3"] if i == 3 and mode != "dependency" else []})
             if mode in ("reply", "publication"):
                 # These faults need one unit; the other journeys prove scheduling/dependencies.
                 scopes = [{key: [value for scope in scopes for value in scope[key]]
@@ -522,6 +583,16 @@ def scoped_run(root, mode, reopen=False):
             document = loop.store.plan(loop.store.cursor()["revision"])
             launched = [json.loads(line) for line in launch_log.read_text().splitlines()]
             turn = sum(row["unit"] == context["unit"] and row["phase"] == context["task"] for row in launched)
+            if mode == "dependency" and context["task"] == "build" and "app.py" in assignment["ownedPaths"] and turn == 1:
+                try:
+                    (worker / "a.py").read_text()
+                except FileNotFoundError as error:
+                    (root / "dependency-blocked").write_text("release the independent writer")
+                    answer.update(outcome="blocked", summary="The composition check needs a missing input",
+                        artifactPaths=[], discoveries=[{"cause": "plan", "target": Path(error.filename).name,
+                            "correction": "Declare the file owner as a prerequisite"}])
+                    return json.dumps({"answer": answer})
+                pytest.fail("The missing-dependency fault was not exercised")
             content = {}
             for path in assignment["ownedPaths"]:
                 if path.startswith("check_"):
@@ -537,15 +608,19 @@ def scoped_run(root, mode, reopen=False):
                     if mode == "check-repair" and path == "a.py" and turn > 1:
                         content[path] = 'import sys\nprint("Alpha2" if "--variant" in sys.argv else "Alpha")\n'
                 elif path == "app.py":
-                    content[path] = 'import subprocess, sys\nprint("|".join(subprocess.check_output([sys.executable, "-B", name + ".py"], text=True).strip() for name in ("a", "b", "c")))\n'
+                    names = ("a",) if mode == "dependency" else ("a", "b", "c")
+                    content[path] = f'import subprocess, sys\nprint("|".join(subprocess.check_output([sys.executable, "-B", name + ".py"], text=True).strip() for name in {names!r}))\n'
                 elif path == ".gitignore":
                     content[path] = "dist/\n"
                 elif path == "TRY.txt":
-                    content[path] = "Try it yourself: python -B app.py; observe all three outputs.\n"
+                    content[path] = "Try it yourself: python -B app.py; observe " + ("Alpha.\n" if mode == "dependency" else "all three outputs.\n")
                 else:
                     content[path] = "Shared ownership is serialized.\n"
             # A real rendezvous proves overlap without depending on machine speed.
             writer = 'import json, os, sys, time\nfrom pathlib import Path\ndata=json.loads(sys.argv[1])\n'
+            if mode == "dependency" and context["task"] == "build" and "a.py" in content:
+                writer += (f'deadline = time.monotonic() + 20\nwhile not Path({str(root / "dependency-blocked")!r}).exists() and time.monotonic() < deadline:\n    time.sleep(0.01)\n'
+                    f'assert Path({str(root / "dependency-blocked")!r}).exists(), "Consumer was not scheduled independently"\n')
             if mode == "parallel" and context["task"] == "build" and any(p in content for p in ("a.py", "b.py", "c.py")):
                 marker = root / ("ready-" + context["unit"])
                 writer += (f'Path({str(marker)!r}).write_text("ready")\n'
@@ -584,7 +659,7 @@ def scoped_run(root, mode, reopen=False):
         loop = Loop.reopen(root / "product", provider, user)
     else:
         setup = {"providers": deepcopy(ROLES), "interpreter": sys.executable, "userOrigin": "scripted journey", "scriptedUser": True}
-        loop = Loop(root / "product", root / "workers", "Compose three independent commands", setup, provider, user)
+        loop = Loop(root / "product", root / "workers", "Compose a producer command" if mode == "dependency" else "Compose three independent commands", setup, provider, user)
     cursor = loop.run()
     return loop, cursor
 
@@ -628,6 +703,8 @@ def scoped_journey(tmp_path, mode):
     edit cannot expose that path. Reply/report death catches lost durable terminal work;
     post-report death misses it. Ignored outputs catch HEAD/candidate divergence that
     ordinary files cannot expose.
+    Missing composition input catches undeclared dependency repair and rescheduling;
+    the parallel journey starts with a complete graph and cannot catch that defect.
     """
     import os
     import time
@@ -716,17 +793,17 @@ def scoped_journey(tmp_path, mode):
     units = loop.store.units()
     rows = loop.store.records()
     assert all(not u.get("waiting") for u in units.values())
-    assert len(units) == (1 if mode in ("reply", "publication") else 4)
+    assert len(units) == (1 if mode in ("reply", "publication") else 2 if mode == "dependency" else 4)
     assert all({"tests", "build"} <= set(u["results"]) for u in units.values())
     result = subprocess.run([sys.executable, "-B", "app.py"], cwd=loop.project, capture_output=True, text=True)
-    assert result.returncode == 0 and result.stdout.strip() == ("Alpha2|Beta|Gamma" if mode == "change" else "Alpha|Beta|Gamma")
+    assert result.returncode == 0 and result.stdout.strip() == ("Alpha2|Beta|Gamma" if mode == "change" else "Alpha" if mode == "dependency" else "Alpha|Beta|Gamma")
     assert "Try it yourself" in (loop.project / "TRY.txt").read_text()
     assignments = {r: b for r, k, b in rows if k == "assignment"}
     attempts = {r: b for r, k, b in rows if k == "attempt" and b["operation"] == "work"}
     endings = {b["attempt"]: b for _, k, b in rows if k == "writer_end"}
     intervals = [(a["unit"], set(a["ownedPaths"]), attempts[a["attempt"]]["startedAt"], endings[a["attempt"]]["finishedAt"])
                  for a in assignments.values() if a["phase"] == "build"]
-    independent = list(units)[:3]
+    independent = list(units)[:-1]
     overlapping = [(a, b) for a in intervals for b in intervals if a[0] < b[0] and max(a[2], b[2]) < min(a[3], b[3])]
     if mode == "parallel":
         assert all(any(a[0] == ref or b[0] == ref for a, b in overlapping) for ref in independent)
@@ -736,6 +813,13 @@ def scoped_journey(tmp_path, mode):
         assert all(not a[1].intersection(b[1]) for a, b in overlapping)
         assert any(k == "unit_wait" and "shared.txt" in b["reason"].get("files", []) for _, k, b in rows)
         assert (loop.project / "shared.txt").read_text() == "Shared ownership is serialized.\n"
+    if mode == "dependency":
+        assert units[list(units)[0]]["contract"]["dependencies"] == []
+        assert set(units[list(units)[-1]]["contract"]["dependencies"]) == set(independent)
+        assert sum(k == "plan_defect" for _, k, _ in rows) == 1
+        assert sum(k == "repair_proposal" for _, k, _ in rows) == 1
+        assert [b["gate"] for _, k, b in rows if k == "decision_request"] == ["A", "B", "check-in", "C"]
+        assert not any(u.get("active") for u in units.values())
     if mode == "check-repair":
         variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], cwd=loop.project, capture_output=True, text=True)
         assert variant.returncode == 0 and variant.stdout.strip() == "Alpha2"

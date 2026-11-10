@@ -3,7 +3,7 @@
 import time
 from pathlib import Path
 from . import evidence, plan, questions
-from .providers import role_for
+from .providers import ProviderFailure, role_for
 
 
 class Inference:
@@ -47,7 +47,7 @@ class Inference:
                 context["handles"] = context["assessments"]
         if kind == "WORK":
             context["handles"] = list(allowed)
-            context["paths"] = scope["ownedPaths"]
+            context["paths"] = list(plan.file_owners(self.store.plan(cursor["revision"])))
         sources = {ref: ref for ref in facts}
         for handle, path in (self.setup.get("factFiles", {}) if kind not in ("ALIGN", "DECIDE") else {}).items():
             facts[handle], sources[handle] = {"path": path}, cursor["kickoff"]
@@ -65,15 +65,36 @@ class Inference:
         facts = _facts if _facts is not None else {ref: {"sourceRecord": sources[ref], "revision": cursor["revision"],
                 "boundedContent": body} for ref, body in facts.items()}
         question = questions.build(kind, facts, context)
-        with self.store.transaction():
-            question_ref = self.store.record("question", question)
-            attempt = self.store.record("attempt", {"operation": kind, "question": question_ref,
-                                                     "provider": self.setup["providers"][role],
-                                                     "deadline": time.time() + getattr(self.provider, "timeout", 30)})
-            if kind == "WORK":
-                unit = self.store.units()[context["unit"]]
-                unit["active"]["invocation"] = attempt
-                self.store.unit(context["unit"], unit)
+        question_ref = attempt = None
+        def invoke(question):
+            nonlocal question_ref, attempt
+            previous = None
+            for recovery in range(3):
+                timeout = (self.provider.timeout_for(kind, context) if hasattr(self.provider, "timeout_for")
+                           else self.setup["providers"][role].get("timeout", 30))
+                with self.store.transaction():
+                    question_ref = self.store.record("question", question)
+                    attempt = self.store.record("attempt", {"operation": kind, "question": question_ref,
+                        "provider": self.setup["providers"][role], "timeout": timeout,
+                        "deadline": time.time() + timeout, "retryOf": previous})
+                    if kind == "WORK":
+                        unit = self.store.units()[context["unit"]]
+                        unit["active"]["invocation"] = attempt
+                        self.store.unit(context["unit"], unit)
+                try:
+                    return self.provider(question)
+                except ProviderFailure as error:
+                    with self.store.transaction():
+                        failure = self.store.record("provider_failure", {"attempt": attempt,
+                            "reason": str(error), "transient": error.transient,
+                            "cleanupVerified": error.cleanup_verified, "receipt": error.receipt})
+                        self.store.record("attempt_end", {"attempt": attempt, "result": failure, "finishedAt": time.time()})
+                    if not error.transient or not error.cleanup_verified:
+                        raise
+                    if recovery == 2:
+                        raise ProviderFailure(f"{kind}: two fresh retries exhausted; {error}",
+                                              True, True, error.receipt) from error
+                    previous = attempt
         def record(body):
             with self.store.transaction():
                 return self.store.record("provider_reply", {**body, "attempt": attempt, "finishedAt": time.time()})
@@ -85,7 +106,7 @@ class Inference:
                     "kind": "vision", "body": plan.vision_body(self.store.read(cursor["vision"])["answer"])}}}, answer["edits"])
             if kind == "JUDGE" and sorted(a["target"] for a in answer["assessments"]) != sorted(context["assessments"]):
                 raise ValueError("Judge must assess the exact requested inventory once")
-        answer = questions.ask(self.provider, question, record, check)
+        answer = questions.ask(invoke, question, record, check)
         invocation = {"question": question_ref, "attempt": attempt, "answer": answer,
                       "provider": self.setup["providers"][role]}
         needs = answer.get("neededFacts", []) if answer.get("verdict") == "uncertain" else [

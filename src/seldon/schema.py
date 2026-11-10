@@ -87,6 +87,12 @@ def answer_schema(kind, facts, context):
     if kind == "JUDGE":
         payload["properties"]["assessments"]["items"]["properties"]["target"] = choice(*context["assessments"])
     variants = [payload, uncertain]
+    if kind == "WORK":
+        blocked = deepcopy(payload)
+        payload["properties"]["outcome"] = choice("done")
+        blocked["properties"]["outcome"] = choice("blocked")
+        blocked["properties"]["discoveries"]["minItems"] = 1
+        variants = [payload, blocked, uncertain]
     contract = obj(answer={"anyOf": [obj(**p["properties"], why=TEXT, citations=array(choice(*facts), 1)) for p in variants]})
     if kind in ("PLAN", "REPAIR"):
         contract["$defs"] = {"link": choice(*handles, *slots)}

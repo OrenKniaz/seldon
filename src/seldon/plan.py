@@ -152,6 +152,22 @@ def select(plan, kind):
     return {ref: node["body"] for ref, node in plan["nodes"].items() if node["kind"] == kind}
 
 
+def file_owners(document):
+    owners = {}
+    for ref, bead in select(document, "bead").items():
+        for path in bead["ownedPaths"]:
+            owners.setdefault(path, []).append(ref)
+    return owners
+
+
+def prerequisites(document, ref):
+    beads = select(document, "bead")
+    found = {ref}
+    while (expanded := found | {d for r in found for d in beads[r]["dependencies"]}) != found:
+        found = expanded
+    return found
+
+
 def subject(gate, **bindings):
     body = {"gate": gate, **bindings}
     return {**body, "digest": digest(body)}

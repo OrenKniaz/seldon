@@ -165,12 +165,13 @@ class Loop(Inference, Decisions, Verification, Execution):
         elif state == "REPAIR":
             cause, origin = cursor["repairCause"], cursor["repairOrigin"]
             refs = [cursor["vision"], cause] + ([cursor["plan"]] if cursor.get("plan") else [])
-            call = self._call(cursor, "REPAIR", refs)
+            dependency_edits = self.store.read(cause).get("dependencyEdits")
+            call = self._call(cursor, "REPAIR", refs) if dependency_edits is None else None
             before = document or {"nodes": {"vision": {"kind": "vision",
                 "body": plan.vision_body(self.store.read(cursor["vision"])["answer"])}}}
-            after = plan.apply(before, call["answer"]["edits"])
+            after = plan.apply(before, dependency_edits if dependency_edits is not None else call["answer"]["edits"])
             with self.store.transaction():
-                source = self._answer(call)
+                source = self._answer(call) if call else cause
                 proposal = self.store.record("repair_proposal", {"cause": cause,
                     "preimage": cursor["revision"], "source": source,
                     "before": before, "after": after, "origin": origin})

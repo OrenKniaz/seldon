@@ -34,12 +34,16 @@ class Execution:
         if cursor.get("repairPaths"):
             owned = sorted(set(owned).intersection(cursor["repairPaths"])) or owned
         assignment = work.admit(self.project, self.scratch, owned)
-        checks = {r: t for r, t in plan.select(self.store.plan(cursor["revision"]), "test").items()
+        document = self.store.plan(cursor["revision"])
+        checks = {r: t for r, t in plan.select(document, "test").items()
                   if r in contract["tests"] and (t["stage"] == "walkthrough" if owned == ["TRY.txt"] else phase == "build" or t["stage"] == "verification")}
         with self.store.transaction():
             attempt = self._attempt("work", unit=ref, phase=phase, startedAt=time.time(), authorization=cursor["B"])
             assignment_ref = self.store.record("assignment", {**assignment, "unit": ref, "phase": phase,
                 "attempt": attempt, "checks": checks,
+                "fileOwners": plan.file_owners(document),
+                "checkPaths": sorted({p for r in plan.prerequisites(document, ref)
+                                      for p in plan.select(document, "bead")[r]["ownedPaths"]}),
                 "scratch": str(self.scratch), "authorization": cursor["B"]})
             unit.pop("waiting", None)
             unit["active"] = {"assignment": assignment_ref, "attempt": attempt, "phase": phase, "status": "running"}
@@ -72,6 +76,16 @@ class Execution:
                     self.store.unit(ref, unit)
                     self.store.record("writer_end", {"attempt": active["attempt"], "report": result, "finishedAt": time.time()})
             if answer["outcome"] != "done":
+                missing = {owner for gap in answer["discoveries"]
+                           if gap["cause"] == "plan" and gap["target"] not in assignment["checkPaths"]
+                           for owner in assignment["fileOwners"].get(gap["target"], [])
+                           if owner not in plan.prerequisites(document, ref)}
+                if missing:
+                    with self.store.transaction():
+                        defect = self.store.record("plan_defect", {"unit": ref, "report": result,
+                            "missingDependencies": sorted(missing), "discoveries": answer["discoveries"]})
+                        self.store.record("attempt_end", {"attempt": active["attempt"], "result": defect})
+                    return defect
                 raise ValueError(encode(answer))
             local_candidate = self._candidate(root)
             retained = self._green_facts(cursor, local_candidate)
@@ -145,12 +159,15 @@ class Execution:
             raise ValueError("Delivered candidate changed outside integration")
         contracts = plan.select(document, "bead")
         running = {}
+        defects = []
         capacity = min(4, os.cpu_count() or 1)
         # All SQLite transitions have one writer lock; provider calls and real checks overlap.
         with ThreadPoolExecutor(max_workers=capacity) as pool:
-            while set(contracts) - self._finished(phase):
+            while running or (not defects and set(contracts) - self._finished(phase)):
                 busy = {p for r in running.values() for p in self.store.read(self.store.units()[r]["active"]["assignment"])["ownedPaths"]}
                 for ref, contract in contracts.items():
+                    if defects:
+                        break  # Drain existing writers before changing their plan.
                     if ref in self._finished(phase) or ref in running.values():
                         continue
                     unit = self.store.units()[ref]
@@ -182,7 +199,27 @@ class Execution:
                 done, _ = wait(running, return_when=FIRST_COMPLETED)
                 for future in done:
                     ref = running.pop(future)
-                    self._publish_result(cursor, ref, future.result())
+                    result = future.result()
+                    if "missingDependencies" in self.store.read(result):
+                        with self.store.transaction():
+                            unit = self.store.units()[ref]
+                            unit.pop("active")
+                            self.store.unit(ref, unit)
+                        defects.append(result)
+                    else:
+                        self._publish_result(cursor, ref, result)
+        if defects:
+            edits = {}
+            for defect in defects:
+                body = self.store.read(defect)
+                ref = body["unit"]
+                contract = edits.setdefault(ref, {**contracts[ref], "dependencies": list(contracts[ref]["dependencies"])})
+                contract["dependencies"] = sorted(set(contract["dependencies"]) | set(body["missingDependencies"]))
+            with self.store.transaction():
+                cause = self.store.record("dependency_repair", {"defects": defects, "dependencyEdits": [
+                    {"kind": "bead", "targetHandle": ref, "typedBody": body} for ref, body in edits.items()]})
+                self._repair(cursor, cause, "dependencies")
+            return
         cursor["purpose"] = "RED" if phase == "tests" else "GREEN"
         if phase == "build" and self._green_ready(cursor):
             cursor["purpose"] = "demo" if cursor.get("checkin") else "GREEN"
