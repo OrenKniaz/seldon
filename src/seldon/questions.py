@@ -42,7 +42,7 @@ JUDGMENTS = {"RED": "Review the actual test source against its accepted obligati
                     "The subject is the test's meaningfulness, not evidence of product behavior. "
                     "Obligations declared already satisfied must remain green.",
              "GREEN": "Does the observed check establish its promised behavior?",
-             "demo": "Does the demonstrated product meet the accepted quality bar, without stubs, mocks or missing behavior, and have a usable try-it guide? Inspect the actual UI screenshots."}
+             "demo": "Does the supplied evidence establish the requested behavior, completeness and quality obligations? Inspect supplied UI screenshots."}
 
 
 EXAMPLES = {
@@ -60,7 +60,7 @@ EXAMPLES = {
         {"kind": "test", "targetHandle": "new:3", "typedBody": {
             "purpose": "Exercise the interaction", "stage": "verification", "command": [sys.executable, "-B", "tests/check.py"],
             "requiredEnvironment": ["Configured verification tool"], "expectedEvidence": "Observed result", "requirements": ["new:2"]}},
-    ], "units": [{"requirements": ["new:2"], "tests": ["new:3"],
+    ], "units": [{"requirements": ["new:2"],
                   "productFiles": ["index.html"], "testFiles": ["tests/check.py"], "dependencies": []}]},
     "REVIEW": {"verdict": "adequate", "gaps": []},
     "WORK": {"outcome": "done", "summary": "Completed the assigned changes",
@@ -103,9 +103,27 @@ def build(kind, facts, context):
     validate(uncertain, contract)
     question = {"kind": kind, "prompt": PROMPTS[kind] + (" " + JUDGMENTS[context["purpose"]] if kind == "JUDGE" else ""), "facts": facts, "context": context,
                 "schema": contract, "examples": [example, uncertain]}
-    if len(encode(question).encode("utf-8")) > 65536:
-        raise ValueError("Question exceeds 64 KiB; split its coverage before asking")
+    if len(encode(question).encode("utf-8")) > (24576 if kind == "JUDGE" else 65536):
+        raise OverflowError("Question needs coverage pages")
     return question
+
+
+def pages(facts):
+    """Keep small context intact while covering every byte of larger facts."""
+    shared = {r: f for r, f in facts.items() if not r.startswith("artifact:")}
+    if len(encode(shared).encode("utf-8")) > 6144:
+        shared = {}
+    for ref, fact in facts.items():
+        if ref in shared:
+            continue
+        raw = encode(fact["boundedContent"])
+        offset = 0
+        for index in range(0, len(raw), 1024):
+            part = raw[index:index + 1024]
+            end = offset + len(part.encode("utf-8"))
+            yield ({**shared, ref: {**fact, "boundedContent": {"contentPart": part}}},
+                   {"fact": ref, "start": offset, "end": end, "totalBytes": len(raw.encode("utf-8"))})
+            offset = end
 
 
 def ask(provider, question, record, check=lambda answer: None):

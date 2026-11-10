@@ -29,7 +29,7 @@ BODIES = {
                 requirements=array(TEXT, 1)),
     "bead": obj(instructions=TEXT, testPaths=array(TEXT, 1),
                 ownedPaths=array(TEXT, 1), dependencies=REFS,
-                requirements=array(TEXT, 1), tests=array(TEXT, 1)),
+                requirements=array(TEXT, 1)),
     "wave": obj(goal=TEXT, beads=array(TEXT, 1)),
 }
 GAP = obj(target=TEXT, correction=TEXT)
@@ -74,7 +74,7 @@ def answer_schema(kind, facts, context):
             obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(link))]
         payload = obj(edits=array({"anyOf": edits}, 1))
         if kind == "PLAN":
-            scope = obj(requirements=array(link, 1), tests=array(link, 1),
+            scope = obj(requirements=array(link, 1),
                 productFiles=array(TEXT, 1), testFiles=array(TEXT, 1),
                 dependencies=array({"type": "integer", "minimum": 1, "maximum": 32,
                                     "description": "1-based position of another unit in this units list"}))

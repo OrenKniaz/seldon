@@ -26,6 +26,7 @@ class Verification:
             if not self._current_candidate(cursor["candidate"]):
                 raise ValueError("Observation changed the delivered candidate")
             with self.store.transaction():
+                cursor.pop("judging", None)
                 cursor["observationScope"] = evidence.save(
                     self.store, attempt, purpose, cursor["candidate"], results, document)
                 self.store.record("attempt_end", {
@@ -39,14 +40,6 @@ class Verification:
                     self._next(cursor, "JUDGE", cursor["observationScope"])
         elif state == "JUDGE":
             purpose = cursor["purpose"]
-            quality = document["nodes"]["vision"]["body"]["quality"]
-            inventory = ([ref for ref, body in plan.select(document, "test").items()
-                          if body["stage"] == "verification" and (purpose != "RED" or ref in {self.store.read(r)["test"] for r in cursor["observationScope"]})] if purpose != "demo" else
-                         [*plan.select(document, "requirement"),
-                          "noStubsMocksMissing",
-                          *[f"quality:{i}" for i, _ in enumerate(quality, 1)]])
-            if purpose == "demo":
-                inventory += ["tryItGuide"]
             facts = self._green_facts(cursor) if purpose != "RED" else {}
             retained = list(facts)
             if purpose == "demo" and not self._green_ready(cursor):
@@ -59,24 +52,54 @@ class Verification:
             packet = self.store.record("execution_facts", {"candidate": cursor["candidate"],
                 "reusedEvidence": retained, "coverage": coverage,
                 "traceComplete": purpose == "demo" and set(plan.select(document, "requirement")) <= set(coverage)})
-            refs = [cursor["plan"], cursor["candidate"], packet, *cursor["observationScope"], *retained,
+            units = plan.select(document, "bead")
+            tests = plan.select(document, "test")
+            groups = {r: {"requirements": b["requirements"], "tests": [t for t in tests if plan.test_units(document, t) == {r}]}
+                      for r, b in units.items()} if purpose != "demo" else {}
+            groups["integration"] = {"requirements": [], "tests": [t for t in tests if
+                (tests[t]["stage"] == "walkthrough" if purpose == "demo" else len(plan.test_units(document, t)) > 1)]}
+            subjects = []
+            for unit, scope in groups.items():
+                targets = ([*scope["requirements"], "noStubsMocksMissing"] if purpose == "GREEN" and unit != "integration" else
+                           [t for t in scope["tests"] if any(o["test"] == t for o in observed.values())])
+                if purpose == "demo":
+                    targets = ["tryItGuide", *[f"quality:{i}" for i in range(1, len(document["nodes"]["vision"]["body"]["quality"]) + 1)]]
+                if targets:
+                    subjects.append((unit, scope, targets))
+            completed = cursor.setdefault("judging", [])
+            unit, scope, targets = subjects[len(completed)]
+            local = {r: o for r, o in observed.items() if o["test"] in scope["tests"] or
+                     (purpose == "GREEN" and set(o["requirements"]).intersection(scope["requirements"]))}
+            scope = {"tests": sorted({o["test"] for o in local.values()}), "requirements": scope["requirements"] or
+                     sorted({r for o in local.values() for r in o["requirements"]})}
+            if purpose == "demo":
+                packet_body = self.store.read(packet)
+                packet_body["artifactRefs"] = sorted({a for o in observed.values() if o["purpose"] == "demo" for a in o["artifactRefs"]})
+                packet = self.store.record("execution_facts", packet_body)
+            refs = [cursor["plan"], cursor["candidate"], packet, *local,
+                    *(completed if unit == "integration" else []),
                     *(self._judgments("GREEN") if purpose == "demo" else [])]
-            call = self._call(cursor, "JUDGE", refs, purpose=purpose, assessments=inventory)
+            call = self._call(cursor, "JUDGE", refs, purpose=purpose, assessments=targets,
+                              coverage={"unit": unit, "obligations": targets}, **scope)
             answer = call["answer"]
-            assessments = answer["assessments"]
-            satisfied = (evidence.ready(observed, purpose) and answer["verdict"] == "satisfied" and not answer["gaps"]
-                         and all(a["satisfied"] for a in assessments))
+            satisfied = (evidence.ready(observed, purpose) and (purpose == "RED" or evidence.ready(local, purpose))
+                         and answer["verdict"] == "satisfied" and not answer["gaps"] and all(a["satisfied"] for a in answer["assessments"]))
             with self.store.transaction():
-                result = self._answer(call)
-                judgment = self.store.record("judgment", {"answer": result, "purpose": purpose,
-                    "candidate": cursor["candidate"], "observations": cursor["observationScope"],
-                    "satisfied": satisfied})
+                judgment = self.store.record("judgment", {"answer": self._answer(call), "purpose": purpose,
+                    "coverage": {"unit": unit, "obligations": targets},
+                    "candidate": cursor["candidate"], "observations": list(local), "satisfied": satisfied})
                 cursor["judgments"].append(judgment)
-                for ref, unit in self.store.units().items():
-                    local = [r for r in cursor["observationScope"] if self.store.read(r)["test"] in unit["contract"]["tests"]]
-                    if local:
-                        unit.setdefault("evidence", {})[purpose] = {"judgment": judgment, "observations": local}
-                        self.store.unit(ref, unit)
+                completed.append(judgment)
+                owner = next(reversed(units)) if unit == "integration" else unit
+                record = self.store.units()[owner]
+                prior = record.get("evidence", {}).get(purpose, {}).get("observations", []) if unit == "integration" else []
+                record.setdefault("evidence", {})[purpose] = {"judgment": judgment, "observations": list(dict.fromkeys([*prior, *local]))}
+                self.store.unit(owner, record)
+                if satisfied and len(completed) < len(subjects):
+                    self._next(cursor, "JUDGE", judgment)
+                    return
+                cursor.pop("judging")
+            with self.store.transaction():
                 if not satisfied:
                     self._repair(cursor, judgment, purpose)
                 elif purpose == "RED":

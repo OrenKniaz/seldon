@@ -12,22 +12,19 @@ class Inference:
         refs = list(dict.fromkeys(([cursor["kickoff"]] if kind in ("ALIGN", "PLAN", "WORK") else []) + refs))
         facts = {ref: self.store.read(ref) for ref in refs}
         facts.update({b["request"]: self.store.read(b["request"]) for b in list(facts.values()) if "words" in b and "request" in b})
-        if kind == "JUDGE":
-            observations = evidence.facts(self.store, [r for r, b in facts.items() if "outputRefs" in b],
-                                          cursor["candidate"], self.store.plan(cursor["revision"]))
-            facts.update({r: {k: v for k, v in body.items() if k not in ("inputs", "obligations", "testIdentity", "scopes")}
-                          for r, body in observations.items()})
-        if cursor.get("plan") in facts:
-            nodes = self.store.plan(cursor["revision"])["nodes"]
-            facts[cursor["plan"]] = {"document": {"nodes": {r: n for r, n in nodes.items()
-                if (n["kind"] not in ("bead", "wave") and (kind != "JUDGE" or n["kind"] != "test" or
-                    context["purpose"] == "demo" or n["body"]["stage"] == "verification")) or
-                (kind == "WORK" and r == context["unit"]) or (kind == "REPAIR" and n["kind"] == "bead")}}}
+        document = self.store.plan(cursor["revision"]) if cursor["revision"] else {"nodes": {}}
+        nodes = document["nodes"]
+        allowed = set(nodes)
+        if kind in ("WORK", "JUDGE"):
+            scope = self.store.units()[context["unit"]]["contract"] if kind == "WORK" else context
+            allowed = {"vision", *scope["requirements"], *scope["tests"]}
+            allowed.update(f for r in scope["requirements"] for f in nodes[r]["body"]["features"])
             if kind == "WORK":
-                scope = self.store.units()[context["unit"]]["contract"]
-                allowed = {"vision", context["unit"], *scope["requirements"], *scope["tests"]}
-                allowed.update(f for r in scope["requirements"] for f in nodes[r]["body"]["features"])
-                facts[cursor["plan"]]["document"]["nodes"] = {r: n for r, n in nodes.items() if r in allowed}
+                allowed.add(context["unit"])
+        if cursor.get("plan") in facts:
+            facts[cursor["plan"]] = {"document": {"nodes": {r: n for r, n in nodes.items() if r in allowed and
+                (n["kind"] not in ("bead", "wave") or (kind == "WORK" and r == context["unit"]) or
+                 (kind == "REPAIR" and n["kind"] == "bead"))}}}
             facts.pop(cursor["vision"], None)
         if cursor["kickoff"] in facts:
             facts[cursor["kickoff"]] = ({"words": facts[cursor["kickoff"]]["words"], "capabilities": self.setup} if kind == "ALIGN" else
@@ -37,17 +34,27 @@ class Inference:
         if kind == "WORK" and cursor.get("repairCause"):
             facts[cursor["repairCause"]] = self.store.read(cursor["repairCause"])
         if kind in ("PLAN", "REPAIR", "REVIEW", "JUDGE", "WORK"):
-            context["handles"] = [r for r, n in self.store.plan(cursor["revision"])["nodes"].items()
-                                  if n["kind"] != "wave" and (n["kind"] != "bead" or kind == "REPAIR")] if cursor["revision"] else ["vision"]
+            context["handles"] = [r for r in allowed if nodes[r]["kind"] != "wave" and
+                                  (nodes[r]["kind"] != "bead" or kind == "REPAIR")] if nodes else ["vision"]
+            context["paths"] = list(plan.file_owners(document))
             if kind == "REPAIR":
-                context["units"] = list(plan.select(self.store.plan(cursor["revision"]), "bead")) if cursor["revision"] else []
-            context["paths"] = [p for b in plan.select(self.store.plan(cursor["revision"]), "bead").values()
-                                for p in b["testPaths" if kind == "JUDGE" and context["purpose"] == "RED" else "ownedPaths"]] if cursor["revision"] else []
-            if kind == "JUDGE" and context["purpose"] == "RED":
-                context["handles"] = context["assessments"]
-        if kind == "WORK":
-            context["handles"] = list(allowed)
-            context["paths"] = list(plan.file_owners(self.store.plan(cursor["revision"])))
+                context["units"] = list(plan.select(document, "bead"))
+        if kind == "JUDGE":
+            observations = evidence.facts(self.store, [r for r, b in facts.items() if "outputRefs" in b], cursor["candidate"], document)
+            paths = {p for o in observations.values() for p in (o["testPaths"] if context["purpose"] in ("RED", "demo") else o["inputs"])}
+            unit = context["coverage"]["unit"]
+            if unit != "integration":
+                own = set(self.store.units()[unit]["contract"]["ownedPaths"])
+                paths &= own | {p for o in observations.values() for p in o["testPaths"]}
+            if "tryItGuide" in context["assessments"]:
+                paths.add("TRY.txt")
+            context["paths"] = sorted(paths)
+            if context["purpose"] == "demo":
+                context.update(handles=[r for r, n in nodes.items() if n["kind"] not in ("bead", "wave")], paths=list(plan.file_owners(document)))
+            facts[cursor["candidate"]] = {"files": {p: h for p, h in facts[cursor["candidate"]]["files"].items() if p in paths}}
+            facts.update({r: {k: v for k, v in body.items() if k not in
+                ("inputs", "obligations", "testIdentity", "scopes", "testSources")}
+                for r, body in observations.items()})
         sources = {ref: ref for ref in facts}
         for handle, path in (self.setup.get("factFiles", {}) if kind not in ("ALIGN", "DECIDE") else {}).items():
             facts[handle], sources[handle] = {"path": path}, cursor["kickoff"]
@@ -56,15 +63,39 @@ class Inference:
                 body.pop("subject", None)
             if isinstance(body.get("answer"), str):
                 body["answer"] = self.store.read(body["answer"])["answer"]
-            for key in body.get("artifactRefs", []) + ([] if kind == "JUDGE" and context["purpose"] == "RED" else list(body.get("files", {}).values())):
+            for key in ([] if kind == "JUDGE" and context["purpose"] == "RED" else body.get("artifactRefs", [])) + list(body.get("files", {}).values()):
                 content = (self.store.root / "artifacts" / key).read_bytes()
-                facts[f"artifact:{key}"] = ({"imagePath": str(self.store.root / "artifacts" / key),
-                    "instruction": "This actual browser screenshot is attached to the question; look at it to judge visual quality"}
-                    if content.startswith((b"\x89PNG", b"\xff\xd8")) else content[:8192].decode("utf-8", errors="replace"))
+                if content.startswith((b"\x89PNG", b"\xff\xd8")):
+                    body = {"imagePath": str(self.store.root / "artifacts" / key)}
+                else:
+                    try:
+                        body = content.decode("utf-8")
+                    except UnicodeDecodeError:
+                        body = {"artifactPath": str(self.store.root / "artifacts" / key), "bytes": len(content)}
+                facts[f"artifact:{key}"] = body
                 sources[f"artifact:{key}"] = ref
         facts = _facts if _facts is not None else {ref: {"sourceRecord": sources[ref], "revision": cursor["revision"],
                 "boundedContent": body} for ref, body in facts.items()}
-        question = questions.build(kind, facts, context)
+        try:
+            if kind == "JUDGE" and len(context["assessments"]) > 4:
+                raise OverflowError("Page the obligation inventory")
+            question = questions.build(kind, facts, context)
+        except OverflowError:
+            if kind != "JUDGE" or "evidenceCoverage" in context:
+                raise
+            targets = context["assessments"]
+            parts = ((facts, {"assessments": targets[i:i + 4], "coverage": {
+                "unit": context["coverage"]["unit"], "obligations": targets[i:i + 4]}})
+                for i in range(0, len(targets), 4)) if len(targets) > 4 else (
+                (page, {"evidenceCoverage": coverage}) for page, coverage in questions.pages(facts))
+            pages = []
+            for page, extra in parts:
+                call = self._call(cursor, kind, refs, _facts=page, **{**context, **extra})
+                pages.append(self._answer(call))
+                if call["answer"]["verdict"] != "satisfied" or call["answer"]["gaps"] or not all(a["satisfied"] for a in call["answer"]["assessments"]):
+                    return {"pages": pages, "answer": call["answer"]}
+            return {"pages": pages, "answer": {**call["answer"], "citations": pages,
+                "assessments": [{"target": t, "satisfied": True, "why": "Established by all recorded coverage pages"} for t in targets]}}
         question_ref = attempt = None
         def invoke(question):
             nonlocal question_ref, attempt
@@ -129,17 +160,18 @@ class Inference:
 
     def _answer(self, invocation):
         ref = self.store.record("answer", invocation)
-        self.store.record("attempt_end", {"attempt": invocation["attempt"], "result": ref})
+        if "attempt" in invocation:
+            self.store.record("attempt_end", {"attempt": invocation["attempt"], "result": ref})
         return ref
 
     def _recover_call(self, attempt):
-        replies = [b for _, _, b in self.store.records("provider_reply") if b["attempt"] == attempt]
+        replies = [b for _, _, b in self.store.records("provider_reply") if b.get("attempt") == attempt]
         if not replies or replies[-1]["errors"]:
             return None
         invocation = self.store.read(attempt)
         import json
         answer = json.loads(replies[-1]["rawAnswer"])["answer"]
-        recorded = [r for r, _, b in self.store.records("answer") if b["attempt"] == attempt]
+        recorded = [r for r, _, b in self.store.records("answer") if b.get("attempt") == attempt]
         report = recorded[-1] if recorded else self._answer({"attempt": attempt, "answer": answer,
             "question": invocation["question"], "provider": invocation["provider"]})
         return report, replies[-1]["finishedAt"]

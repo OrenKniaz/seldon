@@ -213,7 +213,7 @@ class Execution:
             for defect in defects:
                 body = self.store.read(defect)
                 ref = body["unit"]
-                contract = edits.setdefault(ref, {**contracts[ref], "dependencies": list(contracts[ref]["dependencies"])})
+                contract = edits.setdefault(ref, {**document["nodes"][ref]["body"], "dependencies": list(contracts[ref]["dependencies"])})
                 contract["dependencies"] = sorted(set(contract["dependencies"]) | set(body["missingDependencies"]))
             with self.store.transaction():
                 cause = self.store.record("dependency_repair", {"defects": defects, "dependencyEdits": [
