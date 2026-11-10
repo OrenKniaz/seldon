@@ -19,6 +19,8 @@ DREAM = ('Build a tiny web page with one Play button. When I click Play, the pag
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("slot", type=Path, help="new slot folder under C:/seldon/tests/core1")
     parser.add_argument("--dry-run", action="store_true", help="prepare ALIGN; never launch Codex")
