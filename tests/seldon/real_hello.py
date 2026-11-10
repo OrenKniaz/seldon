@@ -22,13 +22,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("slot", type=Path, help="new slot folder under C:/seldon/tests/core1")
     parser.add_argument("--dry-run", action="store_true", help="prepare ALIGN; never launch Codex")
+    parser.add_argument("--dream-file", type=Path, help="dream text instead of hello-world")
     args = parser.parse_args()
     slot = args.slot.resolve()
     if not slot.is_relative_to(Path("C:/seldon/tests/core1").resolve()):
         parser.error("slot must be under C:/seldon/tests/core1")
     slot.mkdir(parents=True)
     try:
-        return run(slot, args.dry_run)
+        return run(slot, args.dry_run, args.dream_file.read_text("utf-8").strip() if args.dream_file else DREAM)
     finally:
         # A diagnostic must never replace the delivery result or its exception.
         try:
@@ -38,7 +39,7 @@ def main():
             print(f"Dev-run report failed: {error}", file=sys.stderr)
 
 
-def run(slot, dry_run):
+def run(slot, dry_run, dream=DREAM):
     temp = slot / "temp"
     temp.mkdir()
     for key in ("TEMP", "TMP", "TMPDIR"):
@@ -59,7 +60,7 @@ def run(slot, dry_run):
         print(json.dumps({"scriptedDecision": request}, ensure_ascii=False), flush=True)
         return {"request": request["request"], "subject": request["subject"]["digest"], "choice": "approve"}
 
-    loop = Loop(slot / "product", slot / "workers", DREAM, setup, provider, yes)
+    loop = Loop(slot / "product", slot / "workers", dream, setup, provider, yes)
     try:
         if dry_run:
             from seldon.questions import build
