@@ -51,7 +51,8 @@ def scripted_plan():
         put("test", 3, purpose="Exercise a supplied name", stage="verification",
             command=[sys.executable, "-B", "check_greeting.py"], requiredEnvironment=["Python"],
             expectedEvidence="Actual CLI output", requirements=["new:2"])],
-        "productFiles": ["greet.py"], "testFiles": ["check_greeting.py"]}
+        "units": [{"requirements": ["new:2"], "tests": ["new:3"],
+                   "productFiles": ["greet.py"], "testFiles": ["check_greeting.py"], "dependencies": []}]}
 
 
 CASES = ["none", "native-transport", "owner", "free-form", "stale-decision", "revise-B", "shell-command", "missing-plan-tool",
@@ -105,6 +106,7 @@ def greeting_journey(tmp_path, fault):
     worker output, not a mock inventory; these journeys script semantic decisions only.
     A manual-review exit prevents GREEN even with correct product code; its test
     source must be reviewed at RED before a product writer inherits that blocker.
+    One greeting unit through C catches accidental decomposition/ceremony growth.
     """
     calls, tasks, purposes = Counter(), Counter(), Counter()
     requests, timeline, worker_roots, malformed = [], [], [], []
@@ -149,8 +151,9 @@ def greeting_journey(tmp_path, fault):
             if fault in ("broken-tool", "all-skipped", "skipped-green"):
                 answer["edits"][2]["typedBody"]["command"].append({"broken-tool": "--broken-tool", "all-skipped": "--skipped", "skipped-green": "--skip-green"}[fault])
             if fault == "product-executable":
-                answer["productFiles"].append("product-python.exe")
-                answer["testFiles"].append("check_guide.py")
+                answer["units"][0]["productFiles"].append("product-python.exe")
+                answer["units"][0]["testFiles"].append("check_guide.py")
+                answer["units"][0]["tests"].append("new:4")
                 answer["edits"].append({"kind": "test", "targetHandle": "new:4", "typedBody": {
                     "purpose": "Read the guide using the delivered executable", "stage": "walkthrough",
                     "command": ["./product-python.exe", "-B", "check_guide.py"], "requiredEnvironment": [],
@@ -406,6 +409,7 @@ def greeting_journey(tmp_path, fault):
     result = subprocess.run([sys.executable, "-B", "greet.py", "Grace"], cwd=loop.project, capture_output=True, text=True)
     assert result.returncode == 0 and result.stdout == "Hello, Grace!\n"
     if fault == "none":
+        assert len({b["unit"] for _, k, b in rows if k == "assignment"}) == 1
         assert timeline == ["A", "B", "tests", "build", "check-in", "C"] and not calls["REPAIR"]
         assert len(observations) == 2  # No cloned functional walkthrough.
         from tests.seldon.run_report import report
@@ -473,7 +477,7 @@ def scoped_run(root, mode, reopen=False):
         answer = {"why": "The assigned obligations are covered by actual command interactions", "citations": list(facts)}
         bodies = [f["boundedContent"] for f in facts.values() if isinstance(f["boundedContent"], dict)]
         if kind == "ALIGN":
-            answer.update(size="small", understanding="Three independent commands composed into one application", users=["CLI users"],
+            answer.update(size="tiny", understanding="Three independent commands composed into one application", users=["CLI users"],
                 scopeIn=["A, B and C output and their composition"], scopeOut=[], improvements=[],
                 quality=[{"criterion": "Clear composed output", "verification": "Run the integrated application"}], unknowns=[])
         elif kind == "PLAN":
@@ -615,6 +619,7 @@ def scoped_crash_child(root, mode):
 def scoped_journey(tmp_path, mode):
     """C12/C18/C23: independent scopes compose through C using real processes.
 
+    Tiny sizing must still allow independent pieces; the greeting cannot expose that ban.
     Recorded overlap catches a serial scheduler; shared-file output catches concurrent
     ownership. Changing A catches blanket invalidation that the tiny journey misses.
     Killing during verification/publication catches lost finished work and half candidates;

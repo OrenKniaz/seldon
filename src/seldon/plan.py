@@ -28,10 +28,7 @@ def vision_body(answer):
 def create(vision, answer):
     vision = vision_body(vision)
     edits = list(answer["edits"])
-    requirements = [e["targetHandle"] for e in edits if e["kind"] == "requirement"]
-    tests = [e["targetHandle"] for e in edits if e["kind"] == "test"]
-    scopes = answer.get("units", [{"requirements": requirements, "tests": tests,
-        "productFiles": answer.get("productFiles", []), "testFiles": answer.get("testFiles", []), "dependencies": []}])
+    scopes = answer["units"]
     for index, scope in enumerate(scopes, 1):
         edits.append({"kind": "bead", "targetHandle": f"workflow:{index}", "typedBody": {
             "ownedPaths": [*scope["testFiles"], *scope["productFiles"], *(["TRY.txt"] if index == len(scopes) else [])],

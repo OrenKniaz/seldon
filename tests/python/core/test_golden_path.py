@@ -5533,6 +5533,7 @@ def test_golden_path(tmp_path, request, surface):
     alive during judgment. This client submits meaning only. Observe both worker
     process exits, answer the immutable execution request after MCP death, then
     require one Build and one bound C without repeating Contracts.
+    Clean-core journeys prove one greeting unit and independent tiny-plan concurrency through C.
     """
     from tests.python.core.mcp_planner_support import LoopClient
 

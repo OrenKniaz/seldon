@@ -19,10 +19,10 @@ PROMPTS = {
              "A product with a user interface states one distinctive visual direction as a quality criterion.",
     "DECIDE": "Interpret the supplied verbatim words about this exact displayed subject. "
               "For revise, state the requested change in why.",
-    "PLAN": "What product work and semantic checks deliver the accepted vision, by the simplest design that reaches its quality bar? "
-            "Describe features, requirements, executable tests and their file scopes. "
-            "Commands are argv: [executable, argument, ...], never PowerShell or shell strings. "
-            "For multiple units, decompose semantic scopes and dependency indices; CODE assigns durable identities and schedules work.",
+    "PLAN": "What product work and semantic checks deliver the accepted vision and quality bar most simply? "
+            "Describe features, requirements, tests and file scopes. "
+            "Commands are argv [executable, argument, ...], never shell strings. "
+            "Each independently buildable piece is its own unit; dependencies are unit indices. CODE owns IDs and scheduling.",
     "REPAIR": "What minimal product edits resolve the supplied cause and actual command output (last 4 KiB per stream)? "
               "Amend product semantics and existing unit contracts together, including local requirement/test links and owned files. "
               "CODE owns identities, scheduling and waves.",
@@ -60,7 +60,8 @@ EXAMPLES = {
         {"kind": "test", "targetHandle": "new:3", "typedBody": {
             "purpose": "Exercise the interaction", "stage": "verification", "command": [sys.executable, "-B", "tests/check.py"],
             "requiredEnvironment": ["Configured verification tool"], "expectedEvidence": "Observed result", "requirements": ["new:2"]}},
-    ], "productFiles": ["index.html"], "testFiles": ["tests/check.py"]},
+    ], "units": [{"requirements": ["new:2"], "tests": ["new:3"],
+                  "productFiles": ["index.html"], "testFiles": ["tests/check.py"], "dependencies": []}]},
     "REVIEW": {"verdict": "adequate", "gaps": []},
     "WORK": {"outcome": "done", "summary": "Completed the assigned changes",
              "artifactPaths": [], "discoveries": []},
@@ -78,9 +79,6 @@ def build(kind, facts, context):
     contract = answer_schema(kind, facts, context)
     ref = next(iter(facts))
     example = deepcopy(EXAMPLES.get(kind, EXAMPLES["PLAN"]))
-    if kind == "PLAN" and context.get("size", "tiny") != "tiny":
-        example = {"edits": example["edits"], "units": [{"requirements": ["new:2"], "tests": ["new:3"],
-            "productFiles": example["productFiles"], "testFiles": example["testFiles"], "dependencies": []}]}
     if kind == "REPAIR":
         nodes = next((f["boundedContent"]["document"]["nodes"] for f in facts.values()
                       if "document" in f["boundedContent"]), {})

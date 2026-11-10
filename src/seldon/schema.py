@@ -51,6 +51,7 @@ def answer_schema(kind, facts, context):
     from copy import deepcopy
     handles = list(context.get("handles", {}))
     slots = [f"new:{i}" for i in range(1, 33)]
+    link = {"$ref": "#/$defs/link"}
     targets = list(dict.fromkeys([*facts, *handles, *context.get("assessments", []), *context.get("paths", [])]))
     reference = choice(*targets)
     need = obj(target=reference, question=TEXT)
@@ -67,19 +68,15 @@ def answer_schema(kind, facts, context):
             body = deepcopy(body)
             from .plan import LINKS
             for relation in LINKS.get(node_kind, {}):
-                body["properties"][relation]["items"] = choice(*handles, *slots)
-            targets_for_kind = context.get("units", []) if node_kind == "bead" else [*handles, *slots]
-            puts.append(obj(kind=choice(node_kind), targetHandle=choice(*targets_for_kind), typedBody=body))
+                body["properties"][relation]["items"] = link
+            puts.append(obj(kind=choice(node_kind), targetHandle=choice(*context["units"]) if node_kind == "bead" else link, typedBody=body))
         edits = puts if kind == "PLAN" else [*puts,
-            obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(choice(*handles, *slots)))]
+            obj(op=choice("Retire"), targetHandle=choice(*handles), replacementHandles=array(link))]
         payload = obj(edits=array({"anyOf": edits}, 1))
         if kind == "PLAN":
-            if context.get("size", "tiny") == "tiny":
-                payload = obj(**payload["properties"], productFiles=array(TEXT, 1), testFiles=array(TEXT, 1))
-            else:
-                scope = obj(requirements=array(choice(*handles, *slots), 1), tests=array(choice(*handles, *slots), 1),
-                    productFiles=array(TEXT, 1), testFiles=array(TEXT, 1), dependencies=REFS)
-                payload = obj(**payload["properties"], units=array(scope, 1))
+            scope = obj(requirements=array(link, 1), tests=array(link, 1),
+                productFiles=array(TEXT, 1), testFiles=array(TEXT, 1), dependencies=REFS)
+            payload = obj(**payload["properties"], units=array(scope, 1))
     for field in ("gaps", "discoveries", "neededFacts"):
         if field in payload["properties"]:
             payload["properties"][field]["items"]["properties"]["target"] = reference
@@ -90,8 +87,10 @@ def answer_schema(kind, facts, context):
     if kind == "JUDGE":
         payload["properties"]["assessments"]["items"]["properties"]["target"] = choice(*context["assessments"])
     variants = [payload, uncertain]
-    return obj(answer={"anyOf": [obj(**p["properties"], why=TEXT, citations=array(choice(*facts), 1))
-                                  for p in variants]})
+    contract = obj(answer={"anyOf": [obj(**p["properties"], why=TEXT, citations=array(choice(*facts), 1)) for p in variants]})
+    if kind in ("PLAN", "REPAIR"):
+        contract["$defs"] = {"link": choice(*handles, *slots)}
+    return contract
 
 
 def validate(value, contract, path="answer"):
@@ -101,9 +100,12 @@ def validate(value, contract, path="answer"):
         raise ValueError("\n".join(errors))
 
 
-def validation_errors(value, contract, path="answer"):
+def validation_errors(value, contract, path="answer", root=None):
+    root = root or contract
+    if "$ref" in contract:
+        contract = root["$defs"][contract["$ref"].removeprefix("#/$defs/")]
     if "anyOf" in contract:
-        branches = [validation_errors(value, child, path) for child in contract["anyOf"]]
+        branches = [validation_errors(value, child, path, root) for child in contract["anyOf"]]
         return [] if [] in branches else [error for branch in branches for error in branch]
     kind = contract["type"]
     expected = {"object": dict, "array": list, "string": str,
@@ -116,12 +118,12 @@ def validation_errors(value, contract, path="answer"):
         errors += [f"{path}.{key}: required field missing" for key in fields.keys() - value.keys()]
         errors += [f"{path}.{key}: unexpected field" for key in value.keys() - fields.keys()]
         for key in fields.keys() & value.keys():
-            errors += validation_errors(value[key], fields[key], f"{path}.{key}")
+            errors += validation_errors(value[key], fields[key], f"{path}.{key}", root)
     elif kind == "array":
         if not contract["minItems"] <= len(value) <= contract["maxItems"]:
             errors.append(f"{path}: invalid array length")
         for index, child in enumerate(value):
-            errors += validation_errors(child, contract["items"], f"{path}[{index}]")
+            errors += validation_errors(child, contract["items"], f"{path}[{index}]", root)
     elif kind == "string":
         if "enum" in contract and value not in contract["enum"]:
             errors.append(f"{path}: expected one of {contract['enum']}")

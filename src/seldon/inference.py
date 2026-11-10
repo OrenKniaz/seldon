@@ -9,8 +9,6 @@ from .providers import role_for
 class Inference:
     def _call(self, cursor, kind, refs, _facts=None, **context):
         role = role_for(kind, context)
-        if kind == "PLAN":
-            context["size"] = self.store.read(cursor["vision"])["answer"]["size"]
         refs = list(dict.fromkeys(([cursor["kickoff"]] if kind in ("ALIGN", "PLAN", "WORK") else []) + refs))
         facts = {ref: self.store.read(ref) for ref in refs}
         facts.update({b["request"]: self.store.read(b["request"]) for b in list(facts.values()) if "words" in b and "request" in b})
