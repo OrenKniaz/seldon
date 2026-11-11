@@ -1,5 +1,6 @@
-# SELDON CHARTER v1.3 — the hard goal
+# SELDON CHARTER v1.4 — the hard goal
 
+> **Status: RATIFIED v1.4 by Oren, 2026-11-11 ("you can drop them").** Adds the goal in plain words to §1 and removes the report boilerplate and the weekly audit from §7 (sprint rule: one-person startup, no ceremonies). `BLUEPRINT.md` sits directly under this charter. v1.3 text below stands.
 > **Status: RATIFIED v1.3 by Oren, 2026-11-09 (choice delegated to CC: "Your choice I'm ok with either"). Adds the clean-code rule to I9; nothing else changed. v1.2 text below stands.**
 > **Status: RATIFIED v1.2 by Oren, 2026-11-07 ("yes I ratify v1.2"). Binding; supersedes v1.1 (2026-11-04) and v1.0.** v1.2 adds: Seldon calls the LLM (C1, C20, I10) and the LLM-or-code design rule (§6). `AGENTS.md` line 1 points here; every brief cites C#/I#.
 > **Only Oren changes this document.** CC/DOT may propose edits with reasons. North Stars, plans, specs, spikes and briefs sit *below* it, must trace to it, and never replace it.
@@ -10,6 +11,8 @@
 North Stars v1→v4 were each rewritten around the latest direction change, and each rewrite silently lost parts of the core. The 10-27 semantic-v1 spike cut test nodes, parallel beads and waves "temporarily"; it became the main path and nobody restored the cuts. **CC approved those limits and missed the regression.** This charter is **additive and stable**. New direction is added here, or registered as a time-boxed Deviation (§8). A core piece is never dropped implicitly.
 
 ## 1. The goal
+**In plain words (Oren, 2026-11-11): Seldon is the best option for using agents to create dreams. That is the goal.** Any particular dream or app we build along the way (hello-world, Foundation, ShelfLife, the ANC system) is only confirmation that Seldon works. It is never the goal itself, and Seldon is never shaped around one of them.
+
 **Seldon turns a person's dream into a real, working product.** It serves both non-technical people and developers/teams, on new and existing codebases. A dream is any software product of any size, including software for hardware control, DSP, audio sensors, auto-tuning music, ANC and testing audio algorithms.
 
 Seldon is the user's **cofounder, friend and competitor**: it improves the dream (what to build *and* how), breaks it down the way a high-quality software team does (V-model traceability), gets the user's acceptance at the points that matter, and builds concurrently with AI workers. It proves at the end that **the actual dream was built**: not stubs, not mocks, not missing features.
@@ -71,10 +74,8 @@ Re-implementing provider sandbox/chat/permissions/security · being a security p
 Retros and the improvement pipeline (amendments to Seldon itself, lessons from its own runs) are dev-process tools for Oren while building Seldon, not end-user features. Planning friction, time and cost are measured here as dev metrics, never as product machinery. Proof = the ladder L0→L3 (no promotion with blockers) + the ShelfLife fight vs plain Codex + Oren's own real project. Semantic tests only (golden/E2E/ladder). Budgets and efficiency metrics are measured here, not in the product. Legacy mode: harvest its good parts (graph, waves, concurrency) into the one model, then delete it. The reset plan is re-derived from this charter and approved by Oren. **Design-point rule (v1.2):** every design point records LLM-or-CODE with one-line pros/cons. Default: code = structure, LLM = meaning. Simplest design first: deletion beats new machinery, and a tangle means ask why.
 
 ## 7. How everyone uses this
-- **Briefs** cite the C#/I# they serve.
-- **Reports** open with `CHARTER: serves C# — violates no I# (or uses DV#)`, and `TRIAGE:` for blockers.
+- **Briefs and reports** are short: what changed, what was proven, what is not. They name a C#/I# only when one is at stake. No boilerplate lines.
 - **Reviewers** reject anything that drops or weakens a C# or breaks an I# without a ratified edit or a live Deviation.
-- **CC** sends Oren a weekly 1-page audit: C1–C26 × present/partial/missing + evidence, open Deviations, drift alerts.
 - **Deviations:** CC may open one (owner, expiry ≤ 7 days, restore plan) and notifies Oren the same day; Oren may veto. At expiry: restore, or Oren ratifies a charter change.
 
 ## 8. Deviation register (registered 2026-11-04 by CC, Oren notified the same day; expiry 7 days; DV2/3/5/6/8/9 re-dated by Oren 2026-11-05 to 2026-11-18, conditional on 2a landing + a real ShelfLife run within 24h and 2b/2d running in parallel; restore stages from the Oren-approved reset plan `work/ladder/design-review/astra-reset-1.md`)

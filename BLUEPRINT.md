@@ -8,6 +8,8 @@
 
 ## 1. The target
 
+**The goal, in Oren's plain words (charter §1): Seldon is the best option for using agents to create dreams.** Every dream we run, from hello-world to the ANC system, is confirmation that Seldon works. None of them is the goal, and no rule here may be bent to make one particular dream pass.
+
 The design target is the **large dream**: many features across several areas, built over several waves by many workers, in a run that lasts hours or days.
 Oren, 2026-11-11: *hello-world is only the minimal task for testing our code; the real test is a very complicated app built in one shot, where a single worker does not give a good result.*
 
@@ -123,7 +125,7 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 ## 7. Proof and working rules for builders
 
-**P1. Rungs.** L0 hello-world is a smoke test and proves nothing about the design. L1 Foundation: three or more concurrent units with a shared contract. L2 ShelfLife. L3 a named large dream needing at least 3 areas, 3 waves and 12 units. L4 Oren's real project. No promotion with blockers (charter §6).
+**P1. Rungs are confirmation, not goals.** L0 hello-world is a smoke test and proves nothing about the design. L1 Foundation: three or more concurrent units with a shared contract. L2 ShelfLife. L3 a named large dream needing at least 3 areas, 3 waves and 12 units. L4 Oren's real project. No promotion with blockers (charter §6).
 
 **P2. Scale is tested without an LLM on every change:** a synthetic scripted journey of 50 units in 5 waves proves scheduling, isolation, bounded questions and reopen. Scripted journeys are never evidence about LLM behaviour.
 
@@ -142,7 +144,7 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 ## 8. Ratified decisions (Oren, 2026-11-11)
 
 1. **R9's reading of C14 is confirmed:** code proves, per unit, that the tests fail without the work and pass with it. Writing tests in a separate session is Seldon's choice (C13).
-2. **The L3 dream is the ANC system:** active noise cancellation on this PC with the Andiamo interface, accelerometer and microphone inputs, hardware driver control, performance simulation, data recording with a local storage server, real-time ANC, and code for the ADSP-21569 evaluation board if PC latency is not good enough. Brief: `work/ladder/L3-DREAM-ANC.md` in the dev workspace.
+2. **The L3 confirmation dream is the ANC system:** active noise cancellation on this PC with the Andiamo interface, accelerometer and microphone inputs, hardware driver control, performance simulation, data recording with a local storage server, real-time ANC, and code for the ADSP-21569 evaluation board if PC latency is not good enough. Brief: `work/ladder/L3-DREAM-ANC.md` in the dev workspace.
 3. **Who builds Seldon:**
 
 | Role | Who |
