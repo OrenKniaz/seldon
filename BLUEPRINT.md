@@ -1,7 +1,8 @@
-# SELDON BLUEPRINT v1 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.1 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
+> **v1.1 (Oren, 2026-11-11, "Ok, with your suggestions"):** five refinements from outside evidence: planning per area, flow review, fixup units, worker handoffs, constraints in guides. Notes: `work/ladder/design-review/research-2026-11-11.md`.
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -51,14 +52,14 @@ Execution adds: Attempt, Patch (a commit), Observation, Judgment, Integration, D
 **Run.** `ALIGN → A → ARCHITECT (areas, contracts, decisions, wave outline) → DETAIL wave 1 → REVIEW → B →` per wave `[EXECUTE → WAVE-VERIFY → STEER → CHECK-IN → DETAIL next wave] → VALIDATE (whole dream, feature by feature) → DEMO → C`.
 B approves the architecture, the wave outline and wave 1. Later waves are Seldon's to detail; a change to accepted scope goes to the user (C16).
 
-**Wave.** Units run concurrently as the graph, scopes and machine allow, each waiting with a shown reason (C12). The wave ends when its units are integrated and WAVE-VERIFY passes on one commit: every check in the product so far, the wave's cross-unit checks, and real-path proof for each surface touched (C26).
+**Wave.** Units run concurrently as the graph, scopes and machine allow, each waiting with a shown reason (C12). The wave ends when its units are integrated and WAVE-VERIFY passes on one commit: every check in the product so far, the wave's cross-unit checks, and real-path proof for each surface touched (C26). A **flow review** then has a judge trace each user flow across the contracts it crosses, on the integrated product. A WAVE-VERIFY failure becomes a small **fixup unit** owned by the failing scope; integration itself never waits on the whole suite.
 
 **Unit.**
 
 | State | Who | What |
 |---|---|---|
 | READY | code | Dependencies integrated, consumed contracts available, scope free. |
-| WORKING | one worker session | Writes checks and product inside its scope, runs them, inspects its own results. |
+| WORKING | one worker session | Writes checks and product inside its scope, runs them, inspects its own results. Returns its patch with a handoff: notes, concerns, deviations, findings. These reach the planner at STEER (C10, C16). |
 | PROVING | code | Diff stays in scope. `establishes` checks fail on the unit's base without its product changes and pass with them. `preserves` checks pass both times. |
 | JUDGING | LLM, this unit only | Are the checks meaningful for these requirements? Any stub, mock or missing behaviour? |
 | INTEGRATING | code | Merge into the wave candidate; affected checks rerun on the new commit. |
@@ -68,7 +69,11 @@ A failure in PROVING, JUDGING or INTEGRATING returns the unit to its own worker 
 
 ### 3.3 Planning is progressive
 
-Plan the horizon, detail the next wave. ARCHITECT fixes areas, contracts and an outline of waves. DETAIL writes the units of one wave only, reading the product as it exists at that moment. Wave 1 of any dream with more than one unit is the **skeleton**: the thinnest product that runs end to end, with the contracts made real and the test harness in place.
+Plan the horizon, detail the next wave. ARCHITECT fixes areas, contracts and an outline of waves. DETAIL writes the units of one wave only, reading the product as it exists at that moment.
+
+**Planning fans out by area, and code does the fan-out.** The user gives one vision to one planner. ALIGN and ARCHITECT are each one bounded call: ARCHITECT names the areas, the contracts between them and the wave outline, and writes no units. For DETAIL, code asks one planning question per area, in parallel. Each call sees only the relevant part of the vision, its own area, the contracts it touches and the product as it exists there, and writes that area's units and checks. Code merges the answers into the one plan and checks links, scopes and dependencies. A need between two areas that no contract covers goes back to ARCHITECT as a contract gap. An area too large for one question is split into sub-areas the same way. No LLM spawns or schedules another (C1); the user still sees one plan and one B.
+
+ Wave 1 of any dream with more than one unit is the **skeleton**: the thinnest product that runs end to end, with the contracts made real and the test harness in place.
 
 ## 4. Binding rules
 
@@ -96,7 +101,7 @@ Each rule names its check and the real failure it prevents. A change that breaks
 
 **R11. Explicit state.** Run, wave and unit states and their legal transitions are declared in one table. State records are typed; no free-form keys. Every state has an exit for success, failure, uncertainty and crash (I5). Killing the process in any state and reopening continues without redoing finished units (C23). *Prevents:* a 30-key cursor dictionary; the implicit state machines found on 11-07.
 
-**R12. Questions are briefs.** Plain language, one subject, labelled facts, one decision, a strict schema, one realistic example. No internal ids beyond the handles the answer must use; no digests or receipts. Guides state principles. A fix for one observed answer goes into the schema, the facts or the code, never into a new prompt sentence. *Prevents:* judges asking for "the remaining r17 content"; prompts that are a history of patches.
+**R12. Questions are briefs.** Plain language, one subject, labelled facts, one decision, a strict schema, one realistic example. No internal ids beyond the handles the answer must use; no digests or receipts. Guides state principles, and constraints beat instructions ("no TODOs, no partial implementations"); a concrete range beats "many". A fix for one observed answer goes into the schema, the facts or the code, never into a new prompt sentence. *Prevents:* judges asking for "the remaining r17 content"; prompts that are a history of patches.
 
 **R13. Roles from one table.** Strongest model for architecture, planning and judgment; cross-provider review where available, honestly labelled (C11); provider failures recover twice, then steer (C18).
 
@@ -117,8 +122,8 @@ Each milestone lands only with its exit met. Hello-world stays green throughout 
 | Milestone | Builds | Exit |
 |---|---|---|
 | **M1 Unit loop** | State tables (R11); unit lifecycle; RED and GREEN by code on commits (R9); scopes (R6); Git integration; deletions of §5. Still one wave. | 50-unit synthetic journey green, with one failing unit isolated and a kill-and-reopen. Real Foundation with concurrent workers: 8 clean of 10. |
-| **M2 Contracts and skeleton** | Area, Contract, Decision; ARCHITECT; skeleton wave; WAVE-VERIFY; briefs (R12). | Foundation with a shared page contract: 8 of 10. ShelfLife reaches C in at least 3 of 5, scoring at least as high as a plain agent on the same oracle. |
-| **M3 Waves** | Progressive DETAIL; STEER; check-in; next wave from the existing product; unit steering. | The L3 dream reaches C with three or more waves; a mid-wave kill resumes. |
+| **M2 Contracts and skeleton** | Area, Contract, Decision; ARCHITECT; skeleton wave; WAVE-VERIFY with flow review and fixup units; briefs (R12). | Foundation with a shared page contract: 8 of 10. ShelfLife reaches C in at least 3 of 5, scoring at least as high as a plain agent on the same oracle. |
+| **M3 Waves** | Progressive DETAIL with one planning call per area; worker handoffs into STEER; check-in; next wave from the existing product; unit steering. | The L3 dream reaches C with three or more waves; a mid-wave kill resumes. |
 | **M4 Front door** | Chat front door and run control (C20, C25); cross-provider review (C11); size shown to the user (C5). | Oren runs L3 himself and gives a real C. |
 
 Later pieces attach at one named place each: research (C7) as a unit kind; open-loop work (C22) as a wave whose exit is a metric; memory and mail (C19) as records; onboarding a foreign codebase (C24) as R10's mapping on a repository we did not build.
