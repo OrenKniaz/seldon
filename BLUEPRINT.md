@@ -1,9 +1,10 @@
-# SELDON BLUEPRINT v1.2 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.3 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
 > **v1.1 (Oren, 2026-11-11, "Ok, with your suggestions"):** five refinements from outside evidence: planning per area, flow review, fixup units, worker handoffs, constraints in guides. Notes: `work/ladder/design-review/research-2026-11-11.md`.
 > **v1.2 (Oren, 2026-11-11, "You own decisions like m1/m2, I trust you"):** the lead owns milestone order and exits. The rules of §4 and §7 still change only with Oren. First use: the Foundation 8-of-10 exit moved from M1 to M2, where contracts exist.
+> **v1.3 (Oren, 2026-11-11):** Astra takes control when Claude has no usage; every new failure opens a ticket (P9).
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -145,6 +146,8 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 **P7. A stable rig.** Real runs execute on a machine that cannot sleep, and every run is resumable (R11).
 
+**P9. Every failure is a ticket.** Whoever finds a new failure (lead, executor, Astra) adds it to `work/ladder/TICKETS.json` the same day: severity, type (design, code or idea), direction to solve, evidence. A ticket closes only when its fix is landed on main and validated by the run or journey that showed the failure; the closing entry names the commit and that evidence. The lead's dashboard reads this file.
+
 **P8. No ceremony.** Briefs and reports are short and say only what changed, what was proven and what is not. No boilerplate lines, no status documents nobody reads, no review rounds without a named risk.
 
 ## 8. Ratified decisions (Oren, 2026-11-11)
@@ -155,6 +158,6 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 | Role | Who |
 |---|---|
-| Lead: owner (P6), design decisions, milestone order and exits | Fable while it has usage; otherwise Opus 5.5 |
+| Lead: owner (P6), design decisions, milestone order and exits | Fable while it has usage; otherwise Opus 5.5; when Claude has no usage, Astra, until Claude is back |
 | Orchestrator | Fable at medium effort while it has usage; otherwise Opus 5.5 at medium |
 | Executors | Sol 6.1 or Terra 6.1, effort chosen by the orchestrator per task |
