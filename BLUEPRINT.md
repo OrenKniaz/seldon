@@ -1,8 +1,9 @@
-# SELDON BLUEPRINT v1.1 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.2 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
 > **v1.1 (Oren, 2026-11-11, "Ok, with your suggestions"):** five refinements from outside evidence: planning per area, flow review, fixup units, worker handoffs, constraints in guides. Notes: `work/ladder/design-review/research-2026-11-11.md`.
+> **v1.2 (Oren, 2026-11-11, "You own decisions like m1/m2, I trust you"):** the lead owns milestone order and exits. The rules of §4 and §7 still change only with Oren. First use: the Foundation 8-of-10 exit moved from M1 to M2, where contracts exist.
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -121,7 +122,7 @@ Each milestone lands only with its exit met. Hello-world stays green throughout 
 
 | Milestone | Builds | Exit |
 |---|---|---|
-| **M1 Unit loop** | State tables (R11); unit lifecycle; RED and GREEN by code on commits (R9); scopes (R6); Git integration; deletions of §5. Still one wave. | 50-unit synthetic journey green, with one failing unit isolated and a kill-and-reopen. Real Foundation with concurrent workers: 8 clean of 10. |
+| **M1 Unit loop** | State tables (R11); unit lifecycle; RED and GREEN by code on commits (R9); scopes (R6); Git integration; deletions of §5. Still one wave. | 50-unit synthetic journey green, with one failing unit isolated and a kill-and-reopen. Real hello-world: 8 clean of 10. Real Foundation runs its units concurrently, and every failure is local and correctly named. |
 | **M2 Contracts and skeleton** | Area, Contract, Decision; ARCHITECT; skeleton wave; WAVE-VERIFY with flow review and fixup units; briefs (R12). | Foundation with a shared page contract: 8 of 10. ShelfLife reaches C in at least 3 of 5, scoring at least as high as a plain agent on the same oracle. |
 | **M3 Waves** | Progressive DETAIL with one planning call per area; worker handoffs into STEER; check-in; next wave from the existing product; unit steering. | The L3 dream reaches C with three or more waves; a mid-wave kill resumes. |
 | **M4 Front door** | Chat front door and run control (C20, C25); cross-provider review (C11); size shown to the user (C5). | Oren runs L3 himself and gives a real C. |
@@ -154,6 +155,6 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 | Role | Who |
 |---|---|
-| Owner (P6) | Fable while it has usage; otherwise Opus 5.5 |
+| Lead: owner (P6), design decisions, milestone order and exits | Fable while it has usage; otherwise Opus 5.5 |
 | Orchestrator | Fable at medium effort while it has usage; otherwise Opus 5.5 at medium |
 | Executors | Sol 6.1 or Terra 6.1, effort chosen by the orchestrator per task |

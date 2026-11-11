@@ -1,5 +1,6 @@
-# SELDON CHARTER v1.4 — the hard goal
+# SELDON CHARTER v1.5 — the hard goal
 
+> **Status: RATIFIED v1.5 by Oren, 2026-11-11 ("make sure your new plan breakdown is part of charter/blueprint").** Adds planning by area to §4. v1.4 text below stands.
 > **Status: RATIFIED v1.4 by Oren, 2026-11-11 ("you can drop them").** Adds the goal in plain words to §1 and removes the report boilerplate and the weekly audit from §7 (sprint rule: one-person startup, no ceremonies). `BLUEPRINT.md` sits directly under this charter. v1.3 text below stands.
 > **Status: RATIFIED v1.3 by Oren, 2026-11-09 (choice delegated to CC: "Your choice I'm ok with either"). Adds the clean-code rule to I9; nothing else changed. v1.2 text below stands.**
 > **Status: RATIFIED v1.2 by Oren, 2026-11-07 ("yes I ratify v1.2"). Binding; supersedes v1.1 (2026-11-04) and v1.0.** v1.2 adds: Seldon calls the LLM (C1, C20, I10) and the LLM-or-code design rule (§6). `AGENTS.md` line 1 points here; every brief cites C#/I#.
@@ -66,6 +67,8 @@ Seldon is the user's **cofounder, friend and competitor**: it improves the dream
 
 ## 4. The journey (the size router collapses steps for small dreams)
 Align (size routed) → Expand → **A: understanding + Vision Lock** → Research (if unknowns) → Spec (features, stories, requirements, architecture, contracts, planned tests) → Wave + bead plan → multi-model plan review → **B: plan approval** → per wave: tests-first RED → parallel beads in worktrees → integrate → semantic tests GREEN → steer → **check-in** → next wave → real-dream validation (trace complete, no stubs, UX bar) → repair waves if needed → live demo + try-it guide → **C: acceptance**.
+
+**Planning fans out by area (v1.5).** The user gives one vision to one planner. That planner fixes the architecture: the areas, the contracts between them and the outline of waves. Code then asks one planning question per area, in parallel, each seeing only its own area, its contracts and the product as it exists there, and merges the answers into the one plan the user approves at B. No LLM spawns or schedules another (C1). Detail: `BLUEPRINT.md` 3.3.
 
 ## 5. Non-goals
 Re-implementing provider sandbox/chat/permissions/security · being a security product · budgets in v1 · unit tests · planner-written code · fixed ceremony counts as rules (counts are defaults) · general user memory · a cockpit with decisions.
