@@ -3,7 +3,7 @@
 import json
 
 from . import architecture, gitwork, obligations, plan
-from .schema import answer_schema, validate
+from .schema import SOURCE_TARGETS, answer_schema, validate
 from .store import encode
 
 # Owner decision: ALIGN improves craft within scope, with observable quality and a distinctive UI direction.
@@ -31,14 +31,17 @@ JUDGMENT_LEEWAY = (
     "commitments are fine; reject one only by citing the accepted obligation or material consequence "
     "it breaks.")
 
+UNIT_EVIDENCE = (
+    "The unit JUDGE receives only observations from this unit's local checks at T and P. "
+    "For visual requirements, those checks save screenshots in SELDON_EVIDENCE_DIR at each "
+    "observable state needed for judgment. Wave screenshots are available only after integration.")
+
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
              + ALIGN_DESIGN,
     "PLAN": "What product work is needed in addition to the supplied delivery work? Plan its features, "
             "areas, contracts, decisions, requirements, semantic checks and scoped units. "
-            "Trace each accepted quality criterion by its "
-            "1-based position to its checks and evidence level in quality: unit for source or facts "
-            "only visible in its files; product for integrated behaviour observations or screenshots. "
+            "Trace each accepted quality criterion by its 1-based position to its checks in quality. "
             "Dependencies, contract endpoints, obligation owners and the skeleton set "
             "are 1-based unit positions. "
             "Commands are argv. CODE assigns checks from requirement ownership. "
@@ -47,7 +50,7 @@ PROMPTS = {
     "REPAIR": "What corrected plan resolves the named review gap while preserving the approved vision? "
               "Return the complete corrected plan; it will be reviewed again before B.",
     "REVIEW": "Does this plan deliver the accepted vision and quality bar? Review every criterion's "
-              "evidence level and check coverage against Trace coverage. Name concrete gaps only.",
+              "check coverage against Trace coverage. Name concrete gaps only.",
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
             "run its checks and refine before returning. Meet the accepted quality bar.",
@@ -58,9 +61,6 @@ PROMPTS = {
              "check failed on T or wave start because the required PRODUCT behavior was absent, and "
              "every preserves check exercised existing behavior on its baseline. A missing product can "
              "demonstrate RED; a missing check helper or broken test environment cannot. "
-             "For each unit quality target, judge whether it holds in this unit's own source. "
-             "A structural criterion spanning units applies locally: this unit owns its responsibility "
-             "and depends on no sibling files without a declared dependency. "
              "Exit codes are CODE facts; interpret their meaning. A no on any obligation is a gap. "
              + JUDGMENT_LEEWAY,
     "DEMO": "Does this requirement's demonstrated behavior meet its obligation "
@@ -87,7 +87,9 @@ def bounded_unit(question):
     return question
 
 
-def build(kind, facts, targets=(), execution=None, images=(), unit_criteria=()):
+def build(kind, facts, targets=(), execution=None, images=()):
+    if kind == "JUDGE":
+        targets = [*targets, *SOURCE_TARGETS]
     if kind == "ALIGN":
         facts = {**facts, "Design guidance used by UI workers": CRAFT}
     if kind in ("PLAN", "REPAIR", "REVIEW"):
@@ -103,20 +105,15 @@ def build(kind, facts, targets=(), execution=None, images=(), unit_criteria=()):
             "one unit owns its source file. An establishes check must fail on the unit base or, if "
             "already passing there, on the wave-start product with the same check sources. It must "
             "pass at P. A preserves check must pass on the unit base and P with the current check "
-            "sources."), "Judge coverage": {
-            "Unit JUDGE": "Its own requirements and traced unit quality criteria, its checks, product "
+            "sources."), "Unit evidence": UNIT_EVIDENCE, "Judge coverage": {
+            "Unit JUDGE": "Its own requirements and standing source obligations, its checks, product "
                           "files at P, its T..P diff, outputs and screenshots. "
                           "No sibling or whole-product files.",
             "DEMO": "One requirement's behaviour: traced checks, final observations, screenshots and "
-                    "each reached unit's JUDGE verdict and commit, with CODE confirming its scope unchanged.",
+                    "a CODE summary of reached unit source verdicts and unchanged scope trees.",
             "PRODUCT": "One criterion's behaviour: traced checks, final observations, screenshots and "
-                       "each reached unit's JUDGE verdict and commit, with CODE confirming its "
-                       "scope unchanged.",
-            "Scope rule": "The planner marks each criterion unit or product. Source and facts only "
-                          "visible in unit files are unit criteria, judged in each traced unit's own "
-                          "source; cross-unit structure applies per unit until contracts and flow "
-                          "review exist. Integrated behaviour is product. REVIEW checks the marking "
-                          "and every reached owner using Trace coverage. Missing an owner is a gap."}}
+                       "a CODE summary of reached unit source verdicts and unchanged scope trees."}}
+
     if kind == "REVIEW":
         facts = {**facts, "Trace coverage": plan.coverage(facts["Plan"])}
     if kind in ("PLAN", "REPAIR"):
@@ -132,21 +129,21 @@ def build(kind, facts, targets=(), execution=None, images=(), unit_criteria=()):
         "DECIDE": {"choice": "approve"},
         "WORK": {"outcome": "done", "summary": "Implemented and ran the assigned checks", "discoveries": []},
         "JUDGE": {"verdict": "satisfied", "gaps": [],
-                  "assessments": assessments(targets, unit_criteria=unit_criteria)},
+                  "assessments": assessments(targets)},
         "DEMO": {"verdict": "satisfied", "gaps": [], "assessments": assessments(targets, final=True)},
         "PRODUCT": {"verdict": "satisfied", "gaps": [], "assessments": assessments(targets, final=True)},
     }[kind]
     example["why"] = "The observed interaction and check sources support this answer"
-    schema = answer_schema(kind, targets, unit_criteria)
+    schema = answer_schema(kind, targets)
     validate({"answer": example}, schema)
     return bounded_unit({"kind": kind, "prompt": PROMPTS[kind] + (" " + CRAFT if kind == "WORK" else ""),
             "facts": facts, "targets": list(targets), "schema": schema,
             "examples": [{"answer": example}], "execution": execution or {}, "images": list(images)})
 
 
-def assessments(targets, *, final=False, unit_criteria=()):
+def assessments(targets, *, final=False):
     return [{"target": target, "meaningful": True, "noStubsMocksMissing": True,
-             **({} if final or target in unit_criteria else
+             **({} if final or target in SOURCE_TARGETS else
                 {"exercisedAtP": True, "baselineDemonstrated": True}),
              "why": "The real interaction asserts the required observable behavior"} for target in targets]
 
@@ -167,7 +164,7 @@ def example_plan():
         "units": [{"scope": ["greeting/**"], "checkPaths": ["greeting/check.py"],
                    "requirements": ["new:r"], "dependencies": [], "instructions": "Implement the greeting",
                    "area": "new:a", "provides": [], "consumes": [], "reads": []}], "skeleton": [],
-        "quality": [{"criterion": 1, "level": "product", "checks": ["new:c"]}]}
+        "quality": [{"criterion": 1, "checks": ["new:c"]}]}
 
 
 def labelled(facts):
@@ -201,7 +198,8 @@ def work_brief(store, ref):
     checks = plan.assigned(document)[ref]
     facts = {"Unit": contract["instructions"], "Write scope": contract["scope"],
              "Check paths": contract["checkPaths"], "Requirements": requirements, "Checks": checks,
-             "Quality bar": document["nodes"]["vision"]["body"]["quality"]}
+             "Quality bar": document["nodes"]["vision"]["body"]["quality"],
+             "Unit evidence": UNIT_EVIDENCE}
     facts.update(agreement_facts(document, ref))
     if items := obligations.for_area(document, contract["area"]):
         owned = {r: o for r, o in items.items() if o["owner"] == ref}
@@ -245,7 +243,6 @@ def judge_brief(store, ref, commit=None, observations=None):
     root = store.root.parent if commit else unit.worktree
     commit = commit or unit.P
     requirements = requirement_facts(document, contract["requirements"])
-    quality = plan.unit_criteria(document, ref)
     sources = gitwork.blobs(root, commit, [*contract["scope"], *contract["checkPaths"]])
     checks, product = {}, {}
     for path, content in sources.items():
@@ -256,10 +253,13 @@ def judge_brief(store, ref, commit=None, observations=None):
                 product[path] = content.decode("utf-8")
             except UnicodeDecodeError:
                 pass
-    facts = {"Requirements": requirements, "Unit quality": quality, "Checks": plan.assigned(document)[ref],
+    facts = {"Unit responsibility": contract["instructions"],
+             "Declared dependency scopes": [plan.select(document, "unit")[r]["scope"]
+                                            for r in plan.prerequisites(document, ref)],
+             "Requirements": requirements, "Checks": plan.assigned(document)[ref],
              "Checkout coverage": "Other units' files are outside this judgment; behaviour across units "
                                   "is proven at wave verify. This judgment covers only this unit's "
-                                  "requirements against this unit's checks at P and its unit quality.",
+                                  "requirements against this unit's checks at P and its source obligations.",
              "Check sources": checks,
              # The unit's whole product source at P: a rebased rework can leave the T..P diff empty (T-86).
              "Product files at P": product,
@@ -267,7 +267,7 @@ def judge_brief(store, ref, commit=None, observations=None):
                                             "--no-renames", unit.T, commit, "--", *contract["scope"]),
              "Observations": observed(store, observations if observations is not None else unit.observations)}
     facts.update(agreement_facts(document, ref))
-    return build("JUDGE", facts, [*requirements, *quality], unit_criteria=quality,
+    return build("JUDGE", facts, requirements,
                  images=images(store, observations if observations is not None else unit.observations))
 
 

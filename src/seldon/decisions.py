@@ -1,6 +1,5 @@
-"""C8/C11/C21/I6; R11/R12: subject-bound approvals, plan repair and reviewed criterion levels."""
+"""C8/C11/C21/I6; R11/R12: subject-bound approvals, plan repair."""
 
-from copy import deepcopy
 from dataclasses import replace
 
 from . import inference, questions
@@ -43,14 +42,15 @@ def decide(store, provider, user):
             "words": raw, "interpretation": interpretation, "scripted": scripted})
         fields = {"A": "A", "B": "B", "CHECK-IN": "checkin"}
         if cursor.state in fields:
-            event = "approve-final" if cursor.state == "B" and cursor.finalCommit else "approve"
-            advance(store, event, approval, decision=None, **{fields[cursor.state]: approval},
-                    **({"pendingJudge": None} if event == "approve-final" else {}))
+            advance(store, "approve", approval, decision=None, **{fields[cursor.state]: approval})
         elif cursor.state == "C":
             from .run import eligible
+            from .judgment import not_judged
             eligible(store)
+            deferred = not_judged(store)
             outcome = store.record("outcome", {"accepted": not scripted, "scriptedUser": scripted,
-                "verification_complete": True, "candidate": cursor.candidate, "approval": approval,
+                "verification_complete": not bool(deferred), "notJudged": deferred,
+                "candidate": cursor.candidate, "approval": approval,
                 "reason": "Scripted C, not owner acceptance" if scripted else "User accepted the demo commit",
                 "nextAction": None, "failed": [], "blocked": []})
             advance(store, "scripted" if scripted else "approve", outcome, decision=None)
@@ -61,8 +61,7 @@ def decide(store, provider, user):
 def repair(store, provider):
     from . import plan
     cursor = store.cursor()
-    marking = store.read(cursor.pendingJudge) if cursor.pendingJudge else None
-    if cursor.B and not marking:
+    if cursor.B:
         raise ValueError("Post-B plan steering is deferred to M3")
     if cursor.repairs >= 3:
         raise ValueError("Three pre-B plan repairs exhausted: " + cursor.failure)
@@ -70,12 +69,6 @@ def repair(store, provider):
 
     def check(answer):
         document = plan.create(vision, answer)
-        if marking:
-            expected = deepcopy(store.plan(cursor.revision))
-            expected["nodes"][marking["subject"]]["body"]["level"] = "unit"
-            if plan.add_guide(document) != expected:
-                raise ValueError("Only the named criterion's level may change to unit; "
-                                 "preserve the approved plan")
         if plan.add_guide(document) == store.plan(cursor.revision):
             raise ValueError("Repair changes nothing; resolve the named review gap")
 
@@ -89,5 +82,4 @@ def repair(store, provider):
     with store.transaction():
         revision = store.revision(document, cursor.revision)
         advance(store, "repaired", result, revision=revision, repairs=cursor.repairs + 1,
-                review=None, decision=None, requestedChange=None,
-                **({"B": None} if marking else {}))
+                review=None, decision=None, requestedChange=None)

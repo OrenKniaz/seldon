@@ -145,7 +145,7 @@ def run_unit(store, provider, ref):
                                                             store.cursor().scratch)})
                     else:
                         result, answer = inference.call(store, provider, questions.judge_brief(store, ref))
-                        if not questions.satisfied(answer):
+                        if answer["verdict"] != "not judged" and not questions.satisfied(answer):
                             raise ValueError("Judgment gap: " + str(answer))
                         result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,
                             "source": result, "scopeTree": gitwork.scope_tree(

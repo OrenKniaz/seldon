@@ -50,15 +50,13 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
         raise ValueError("Judge evidence requires every traced check on the final commit")
     owned = owners(document, kind, subject)
     trees = trees if trees is not None else scope_trees(store, owned)
-    verdicts = []
+    satisfied = 0
     for ref in owned:
         verdict = store.read(store.unit(ref).judgment)
-        commit = verdict["commit"]
         unchanged = verdict["scopeTree"] == trees[ref]
         if not unchanged:
             raise ValueError(f"{ref} needs its unit JUDGE on the changed scope before final judgment")
-        verdicts.append({"unit": ref, "verdict": verdict.get("answer", {}).get("verdict", "guide written"),
-                         "commit": commit, "scopeFilesUnchangedSinceVerdict": unchanged})
+        satisfied += int(verdict.get("answer", {}).get("verdict") == "satisfied")
     final = questions.observed(store, refs)
     for item, ref in zip(final, refs):
         body = store.read(ref)
@@ -68,7 +66,11 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
     obligation = ({k: v for k, v in body.items() if k != "features"} if kind == "DEMO" else
                   {k: body[k] for k in ("criterion", "verification")})
     facts = {"Subject": obligation, "Checks": checks, "Final observations": final,
-             "Unit verdicts": verdicts,
+             "Source judgment": ("source judged at every reached unit: "
+                                 f"{satisfied} of {len(set(owned) - {'guide'})} satisfied, "
+                                 "scope trees unchanged since those verdicts"),
+             "Source availability": "Source is judged at the unit; source text is unavailable "
+                                    "after integration.",
              "Reader's starting directory": str(store.root.parent.resolve())}
     artifacts = {}
     outputs = [item[key] for item in final for key in ("stdout", "stderr")]
@@ -94,22 +96,36 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
         return question
     # Requests are semantic text. Code supplies only named facts already owned by this subject,
     # without guessing their meaning or duplicating outputs, artifacts or verdict rows (T-79).
-    facts = {**facts, "Source availability":
-             "Not available after integration: source is judged at the unit; see Unit verdicts.",
-             "Requested facts": [{"request": item, "observations": list(checks),
-                                  "screenshots": images, "unitVerdicts": list(owned)} for item in resolve]}
+    facts = {**facts, "Requested facts": [{"request": item, "observations": list(checks),
+                                  "screenshots": images} for item in resolve]}
     reask = questions.build(kind, facts, [subject], images=images)
     if len(encode(reask).encode("utf-8")) > 2 * len(encode(question).encode("utf-8")):
         raise questions.MissingFacts("Requested facts exceed twice the original subject brief")
     return reask
 
 
+def ready(answer):
+    # DV6: deferred judgment is visible at C; it is never satisfaction.
+    return questions.satisfied(answer, final=True) or answer["verdict"] == "not judged"
+
+
+def not_judged(store):
+    cursor = store.cursor()
+    return {v["subject"]: "not judged: " + "; ".join(dict.fromkeys(v["answer"]["neededFacts"]))
+            for v in ([store.read(r) for r in [*cursor.requirementVerdicts, *cursor.qualityVerdicts]]
+                      + [{"subject": ref, "answer": store.read(row.judgment).get("answer", {})}
+                         for ref, row in store.units().items() if row.judgment])
+            if v["answer"].get("verdict") == "not judged"}
+
+
 def combined(verdicts):
-    passed = all(questions.satisfied(v["answer"], final=True) for v in verdicts)
-    return {"verdict": "satisfied" if passed else "gap",
-            "gaps": [g for v in verdicts for g in v["answer"]["gaps"]],
-            "assessments": [a for v in verdicts for a in v["answer"]["assessments"]],
-            "why": "AND of the recorded subject verdicts"}
+    answers = [v["answer"] for v in verdicts]
+    return {"verdict": ("gap" if not all(ready(a) for a in answers) else
+                        "not judged" if any(a["verdict"] == "not judged" for a in answers) else "satisfied"),
+            "gaps": [g for a in answers for g in a["gaps"]],
+            "assessments": [item for a in answers for item in a["assessments"]],
+            "neededFacts": [fact for a in answers for fact in a.get("neededFacts", [])],
+            "why": "Combined recorded subject verdicts; unresolved facts remain not judged (DV6)"}
 
 
 def fixup(store, kind, subject, result, answer, affected=None):
@@ -141,37 +157,6 @@ def save(store, kind, subject, result, answer, trees):
         store.cursor(replace(cursor, **{field: getattr(cursor, field) + [ref]}, pendingJudge=None))
 
 
-def plan_gap(store, kind, subject, result, answer):
-    document = store.plan(store.cursor().revision)
-    if (kind != "PRODUCT" or subject not in plan.select(document, "criterion")
-            or answer.get("evidenceLevel") != "unit"):
-        raise questions.MissingFacts("Final judge lacks facts: " + str(answer))
-    with store.transaction():
-        gap = store.record("plan_gap", {"subject": subject, "kind": kind, "source": result,
-            "answer": answer, "correction": "Mark this criterion unit; its evidence needs unit judgment"})
-        advance(store, "plan-gap", gap, pendingJudge=gap, failure=str(store.read(gap)))
-
-
-def unit_quality(store, subject, trees):
-    document = store.plan(store.cursor().revision)
-    sources, assessments = [], []
-    for ref in owners(document, "PRODUCT", subject):
-        source = store.unit(ref).judgment
-        verdict = store.read(source)
-        assessment, = [a for a in verdict["answer"]["assessments"] if a["target"] == subject]
-        sources.append(source)
-        assessments.append(assessment)
-    passed = bool(assessments) and all(a["meaningful"] and a["noStubsMocksMissing"] for a in assessments)
-    answer = {"verdict": "satisfied" if passed else "gap", "gaps": [],
-              "assessments": [{"target": subject, "meaningful": passed, "noStubsMocksMissing": passed,
-                               "why": "AND of the reached unit quality assessments"}],
-              "why": "Source quality is judged only at its owning units"}
-    if not passed:
-        raise ValueError("Unit quality needs every reached unit's satisfied criterion verdict")
-    result = store.record("unit_quality", {"subject": subject, "sources": sources, "answer": answer})
-    save(store, "PRODUCT", subject, result, answer, trees)
-
-
 def step(store, provider):
     cursor = store.cursor()
     kind = "DEMO" if cursor.state.startswith("DEMO") else "PRODUCT"
@@ -185,16 +170,17 @@ def step(store, provider):
     for ref, unit in plan.select(document, "unit").items():
         row = store.unit(ref)
         verdict = store.read(row.judgment) if row.judgment else None
-        targets = set(unit["requirements"]) | set(plan.unit_criteria(document, ref))
+        targets = set(unit["requirements"]) | (set(questions.SOURCE_TARGETS) if ref != "guide" else set())
         assessed = ({a["target"] for a in verdict.get("answer", {}).get("assessments", [])}
                     if verdict else set())
-        if verdict and verdict["scopeTree"] == trees[ref] and targets <= assessed:
+        if (verdict and verdict["scopeTree"] == trees[ref]
+                and (targets <= assessed or verdict.get("answer", {}).get("verdict") == "not judged")):
             continue
         refs = [r for r in cursor.finalObservations if store.read(r)["unit"] == ref]
         evidence = [r for r in row.observations if store.read(r)["purpose"] != "P"] + refs
         result, answer = inference.call(store, provider, questions.judge_brief(
             store, ref, cursor.candidate, evidence))
-        if not questions.satisfied(answer):
+        if answer["verdict"] != "not judged" and not questions.satisfied(answer):
             fixup(store, kind, ref, result, answer, {ref: unit})
             return
         result = store.record("unit_verdict", {"commit": cursor.candidate, "scopeTree": trees[ref],
@@ -212,13 +198,11 @@ def step(store, provider):
             question = brief(store, kind, subject, resolve=pending["answer"]["neededFacts"], trees=trees)
             result, answer = inference.call(store, provider, question, max_bytes=2 * pending["questionBytes"])
         except questions.MissingFacts as error:
-            plan_gap(store, kind, subject, pending["source"], {**pending["answer"],
-                                                          "neededFacts": [str(error)]})
-            return
+            result = pending["source"]
+            answer = {**pending["answer"], "why": pending["answer"]["why"] + "; " + str(error)}
         if answer["verdict"] == "uncertain":
-            plan_gap(store, kind, subject, result, answer)
-            return
-        if not questions.satisfied(answer, final=True):
+            answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
+        if not ready(answer):
             fixup(store, kind, subject, result, answer)
             return
         with store.transaction():
@@ -228,9 +212,6 @@ def step(store, provider):
     done = {store.read(r)["subject"] for r in getattr(cursor, field)}
     for subject in subjects(document, kind):
         if subject in done:
-            continue
-        if kind == "PRODUCT" and subjects(document, kind)[subject].get("level") == "unit":
-            unit_quality(store, subject, trees)
             continue
         question = brief(store, kind, subject, trees=trees)
         refs = [r for r in cursor.finalObservations

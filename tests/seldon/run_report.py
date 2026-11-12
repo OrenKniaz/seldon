@@ -60,6 +60,12 @@ def report(slot):
              f"Repairs {repairs}; retries {retries}; interrupted units {interruptions}; "
              f"gaps {gaps}; uncertain {uncertain}; flags {flags}."]
     lines += [f"{ref}: {row['state']}; {row['failure']}" for ref, row in units.items() if row["failure"]]
+    by_ref = {ref: body for ref, _, body in records}
+    deferred = [by_ref[ref] for ref in cursor["requirementVerdicts"] + cursor["qualityVerdicts"]]
+    deferred += [{"subject": ref, "answer": by_ref[u["judgment"]].get("answer", {})}
+                 for ref, u in units.items() if u["judgment"]]
+    lines += [v["subject"] + ": not judged: " + "; ".join(dict.fromkeys(v["answer"]["neededFacts"])) + " (DV6)"
+              for v in deferred if v["answer"].get("verdict") == "not judged"]
     counts = Counter(q["kind"] for q in questions)
     sizes = {kind: max(len(encode(q).encode("utf-8")) for q in questions if q["kind"] == kind)
              for kind in counts}

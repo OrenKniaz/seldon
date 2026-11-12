@@ -10,11 +10,12 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from seldon import gitwork, judgment, plan, questions
+from seldon import gitwork, judgment, plan, proof, questions
 from seldon.providers import Codex, ProviderFailure, ROLES
 from seldon.run import Run
 from seldon.store import RunRow, Store, UnitRow, encode
@@ -113,8 +114,8 @@ def planned(count, mode):
                 "owner": 3, "closingRequirement": "new:r003"}})
     return {"edits": edits, "units": scopes, "skeleton": list(range(1, count + 1)) if count > 1 else [],
             "quality": [
-        {"criterion": 1, "level": "product", "checks": [selected]},
-        {"criterion": 2, "level": "unit" if mode in ("single1", "scale50") else "product",
+        {"criterion": 1, "checks": [selected]},
+        {"criterion": 2,
          "checks": [selected]}]}
 
 
@@ -206,12 +207,18 @@ else:
                    f"    evidence.joinpath('stderr.txt').write_text('diagnostic {value}')\n"
                    f"    print('diagnostic {value}', file=__import__('sys').stderr)\n"
                    "print(Path.cwd())\n")
-    if mode in ("single1", "scale50", "traced-evidence"):
+    if mode in ("single1", "scale50", "traced-evidence", "visual-unit"):
         source += ("if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
                    "    Path(os.environ['SELDON_EVIDENCE_DIR'], 'observed.png').write_bytes(\n"
                    "        __import__('base64').b64decode(\n"
                    "            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'\n"
                    "            'AAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII='))\n")
+    if mode == "visual-unit":
+        split = source.index("if os.environ.get('SELDON_EVIDENCE_DIR'):")
+        capture = source[split:].replace("'observed.png'", "'baseline.png' if not Path('unit-001/value.txt').exists() else 'candidate.png'")
+        capture = capture.replace("ASUVORK5CYII='))", "ASUVORK5CYII=') + "
+                                  "(b'baseline' if not Path('unit-001/value.txt').exists() else b'candidate'))")
+        source = "from pathlib import Path\nimport os\n" + capture + source[:split]
     if name == "unit-001" and turn == 1:
         if mode in ("scope", "fresh"):
             Path("rogue.txt").write_text("unowned output")
@@ -283,7 +290,11 @@ else:
             "assert '|'.join(Path(f'unit-{i:03}/value.txt').read_text() for i in (1,2,3))"
             " == 'value-001|value-002|value-003'\nprint('composed three values')\n")
     for check in facts["Checks"].values():
-        subprocess.run(check["command"], capture_output=True)
+        try:
+            subprocess.run(check["command"], capture_output=True,
+                           timeout=2 if mode == "check-deadline" else None)
+        except subprocess.TimeoutExpired:
+            pass  # The deliberate deadline fault remains for Seldon's independent observer to reject.
 answer = {"answer":{"outcome":"done","summary":"Wrote product and checks and ran them",
                     "discoveries":[],"why":"The scoped delivery is ready for independent proof"}}
 if ((mode == "schema-fix" and name == "unit-001"
@@ -323,10 +334,13 @@ class Scripted:
         kind = q["kind"]
         if kind == "ALIGN":
             answer = dict(VISION)
-            if self.mode in ("unit-quality", "single1", "scale50"):
+            if self.mode in ("mixed-criterion", "single1", "scale50"):
                 answer["quality"] = [VISION["quality"][0], {
-                    "criterion": "Each value module owns its persistence without sibling dependencies",
-                    "verification": "Inspect this unit's files"}]
+                    "criterion": "Each value module owns its persistence and keeps working when a sibling is absent",
+                    "verification": "Observe each value independently"}]
+            if self.mode == "mixed-criterion":
+                answer["quality"][1] = json.loads(Path(__file__).with_name(
+                    "recorded_judge_minimal.json").read_text("utf-8"))["criterion"]
             if self.mode == "review-repair":
                 answer["quality"] = [VISION["quality"][0], {
                     "criterion": "unit-001/value.txt and unit-002/value.txt each persist their own value",
@@ -337,16 +351,8 @@ class Scripted:
                                      VISION["quality"][1]]
         elif kind in ("PLAN", "REPAIR"):
             answer = planned(self.count, self.mode)
-            if self.mode == "unit-quality":
-                answer["quality"][1].update(level="unit", checks=["new:c001", "new:c002"])
-            if self.mode in ("product-source-unresolved", "product-source-oversize",
-                             "product-source-review-gap") and kind == "REPAIR":
-                answer["quality"][0]["level"] = "unit"
-                if self.mode == "product-source-unresolved" and "Exact corrections" not in q["facts"]:
-                    answer["units"][0]["instructions"] += "; unrelated planner rewrite"
-                if (self.mode == "product-source-review-gap"
-                        and q["facts"]["Plan"]["nodes"]["quality:001"]["body"]["level"] == "unit"):
-                    answer["units"][0]["instructions"] += "; unrelated planner rewrite"
+            if self.mode == "mixed-criterion":
+                answer["quality"][1]["checks"] = ["new:c001", "new:c002"]
             if self.mode == "plan-overlap":
                 corrections = q["facts"].get("Exact corrections", [])
                 if not corrections:
@@ -363,10 +369,6 @@ class Scripted:
                 fault(answer)
         elif kind == "REVIEW":
             answer = {"verdict": "adequate", "gaps": []}
-            if (self.mode == "product-source-review-gap"
-                    and q["facts"]["Plan"]["nodes"]["quality:001"]["body"]["level"] == "unit"):
-                answer = {"verdict": "gap", "gaps": [{"target": "u001",
-                          "correction": "Rewrite this unit's instructions during marking correction"}]}
             if self.mode == "review-repair":
                 coverage = q["facts"]["Trace coverage"]["quality:002"]
                 if set(coverage["units"]) != {"u001", "u002"}:
@@ -376,22 +378,27 @@ class Scripted:
         elif kind == "DECIDE":
             answer = {"choice": "revise" if q["facts"]["User's words"].startswith("Revise") else "approve"}
         elif kind in ("JUDGE", "DEMO", "PRODUCT"):
-            if kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n002"]:
+            if kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n002", *questions.SOURCE_TARGETS]:
                 raise ProviderFailure("Judge transport unavailable", True, True)
-            if (kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n005"]
-                    and (self.slot / "turn-unit-002").read_text() == "1"):
+            if (kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n005", *questions.SOURCE_TARGETS]
+                    and (self.slot / "turn-unit-002").read_text() == "1"
+                    or kind == "JUDGE" and self.mode == "unit-uncertain"):
                 return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                     "Clarify the local assertion for this value"],
                     "why": "A semantic fact needs clarification"}})
             answer = {"verdict": "satisfied", "gaps": [],
-                      "assessments": questions.assessments(q["targets"], final=kind != "JUDGE",
-                          unit_criteria=q["facts"].get("Unit quality", {}))}
+                      "assessments": questions.assessments(q["targets"], final=kind != "JUDGE")}
             if kind in ("DEMO", "PRODUCT"):
                 assert len(q["targets"]) == 1
                 facts = q["facts"]
                 assert "Files on the delivered revision" not in facts and "Check source paths" not in facts
-                reached = {v["unit"] for v in facts["Unit verdicts"]}
-                assert all(v["scopeFilesUnchangedSinceVerdict"] for v in facts["Unit verdicts"])
+                reached = {"guide"} if q["targets"] == ["tryItGuide"] else {
+                    f"u{int(o['command'][-1].split('/')[0].split('-')[-1]):03}"
+                    for o in facts["Final observations"] if o["command"][-1].startswith("unit-")}
+                summary = facts["Source judgment"]
+                assert "satisfied" in summary
+                assert "scope trees unchanged" in summary
+                assert "source is judged at the unit" in facts["Source availability"].lower().lower()
                 if q["targets"] == ["tryItGuide"]:
                     guide = facts["Guide file"]
                     assert "Try it yourself" in guide["text"] and len(guide["commit"]) == 40
@@ -410,7 +417,7 @@ class Scripted:
                     assert {o["stdout"].strip() for o in facts["Final observations"]} == {
                         "observed value-001", "observed value-002"}
                 elif self.mode == "parallel" and kind == "DEMO" and q["targets"] == ["n002"]:
-                    assert reached == {"u001", "u002", "u004"}
+                    assert "3 of 3 satisfied" in summary
                 elif self.mode in ("single1", "scale50", "traced-evidence"):
                     expected = ("002" if kind == "PRODUCT" and self.mode == "traced-evidence" else
                                 next(iter(reached))[-3:])
@@ -434,6 +441,9 @@ class Scripted:
                     assert output and all(t.strip() == "observed value-001" for t in output)
                     answer["assessments"][0].update(meaningful=False,
                         why="The stored value was read, but there is no browser observation")
+                if kind == "DEMO" and self.mode == "demo-facts-unavailable" and q["targets"] == ["n002"]:
+                    return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
+                        "The missing manual observation of the demonstrated interaction"], "why": "Not observed"}})
                 prefix = kind.lower()
                 is_subject = q["targets"] == (["n002"] if kind == "DEMO" else ["quality:001"])
                 if is_subject and (self.mode == prefix + "-uncertain"
@@ -441,36 +451,36 @@ class Scripted:
                     if "Requested facts" not in facts:
                         return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                             "Did this check execute on the delivered commit with verified cleanup?"],
-                            "evidenceLevel": "product",
                             "why": "Need the actual execution facts"}})
                     actual, = facts["Final observations"]
                     assert actual["executionStarted"] and actual["cleanupVerified"]
                     assert actual["ranOnDeliveredRevision"]
                 if (kind == "PRODUCT" and is_subject
                         and self.mode in ("product-source-resolved", "product-source-unresolved",
-                                          "product-source-oversize", "product-facts-unavailable",
-                                          "product-source-review-gap")):
+                                          "product-source-oversize", "product-facts-unavailable")):
                     if "Requested facts" in facts:
-                        assert "source is judged at the unit" in facts["Source availability"]
-                        assert facts["Unit verdicts"][0]["verdict"] == "satisfied"
+                        assert "source is judged at the unit" in facts["Source availability"].lower()
+                        assert "satisfied" in facts["Source judgment"]
                     if "Requested facts" not in facts or self.mode != "product-source-resolved":
                         return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                             "Supply the script sources to inspect module ownership"] *
                             (100 if self.mode == "product-source-oversize" else 1),
-                            "evidenceLevel": ("product" if self.mode == "product-facts-unavailable"
-                                              else "unit"),
                             "why": "The criterion needs source inspection"}})
                 if is_subject and self.mode in (prefix + "-gap", prefix + "-unresolved"):
                     if any("interaction blocked" in o["stdout"] for o in facts["Final observations"]):
                         if self.mode.endswith("-unresolved") and "Requested facts" not in facts:
                             return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                                 "Demonstrate that the interaction is ready, not blocked"],
-                                "evidenceLevel": "product",
-                                "why": "The observed interaction remains unresolved"}})
+                                    "why": "The observed interaction remains unresolved"}})
                         answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
                             "correction": "The interaction is blocked; make it ready and assert it "
                                           "in the check"}])
             if kind == "JUDGE":
+                if self.mode == "visual-unit":
+                    observations = q["facts"]["Observations"]
+                    assert {o["purpose"] for o in observations} == {"T", "P"}
+                    assert len(q["images"]) == 2
+                    assert all(Path(p).read_bytes().startswith(b"\x89PNG") for p in q["images"])
                 assert "other units' files" in q["facts"]["Checkout coverage"].lower()
                 sources = q["facts"]["Check sources"]
                 assert sources, "Judge needs actual check sources"
@@ -479,7 +489,7 @@ class Scripted:
                 assert product and not set(product) & set(sources), product
                 assert all(p.split("/")[0] == next(iter(sources)).split("/")[0] for p in product), product
                 if self.mode == "review-repair" and q["targets"]:
-                    directory = "unit-001" if q["targets"] == ["n002"] else "unit-002"
+                    directory = "unit-001" if q["targets"] == ["n002", *questions.SOURCE_TARGETS] else "unit-002"
                     assert set(sources) == {directory + "/check.py"}
                     sibling = "unit-002" if directory == "unit-001" else "unit-001"
                     assert sibling not in q["facts"]["Product changes"]
@@ -548,8 +558,9 @@ def records_and_skeleton_journey(slot):
 
     Open obligations block C until final requirement verdicts; an unrelated guide repair must preserve
     closure. A text-only contract repair revokes consumers even with unchanged scope trees, which the
-    source-change journey misses. Prepared REPAIR uses the canonical writer, review/B and reopen;
-    this lane adds no steering or contract-amendment entry. Reuse this delivery for all three outcomes.
+    source-change journey misses. Prepared REPAIR uses the canonical writer, review/B and reopen,
+    then the ordinary EXECUTE/WAVE-VERIFY/CHECK-IN path. This catches stale proof reuse after a
+    changed agreement, which a source-change fixup cannot expose. No extra repair entry is added.
     """
     from dataclasses import replace
     from seldon import obligations
@@ -569,6 +580,9 @@ def records_and_skeleton_journey(slot):
         assert not obligations.remaining(run.store)
         before = run.store.units()
         observations = run.store.records("observation")
+        checks_before = {run.store.read(r)["check"] for r in run.store.cursor().finalObservations}
+        candidate_before = run.store.cursor().candidate
+        checkins_before = sum(b["gate"] == "CHECK-IN" for _, _, b in run.store.records("decision_request"))
         retained = run.store.cursor().requirementVerdicts[0]
 
         def correct(answer):
@@ -585,11 +599,23 @@ def records_and_skeleton_journey(slot):
                    for u in ("u002", "u003"))
         run.close()
         run = Run.reopen(slot / "product", provider, approve)
-        while run.store.cursor().state != "PRODUCT-JUDGE":
+        while run.store.cursor().state != "B":
+            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
             run.step()
+        assert run.step() == "EXECUTE"
+        assert run.step() == "WAVE-VERIFY"
+        assert run.step() == "CHECK-IN"
+        fresh = run.store.records("observation")[len(observations):]
+        assert {b["check"] for _, _, b in fresh} == checks_before
+        assert len(fresh) == len(checks_before)
+        assert all(b["purpose"] == "final" and b["commit"] == run.store.cursor().candidate
+                   for _, _, b in fresh)
+        assert run.step() == "DEMO-JUDGE"
+        assert sum(b["gate"] == "CHECK-IN" for _, _, b in run.store.records("decision_request")) == \
+            checkins_before + 1
+        assert run.step() == "PRODUCT-JUDGE"
         after = run.store.units()
         assert retained in run.store.cursor().requirementVerdicts
-        assert run.store.records("observation") == observations
         assert after["u001"].judgment == before["u001"].judgment
         assert all(after[u].judgment != before[u].judgment for u in ("u002", "u003"))
         assert all(after[u].P == before[u].P and after[u].recoveries == 0 for u in before)
@@ -599,6 +625,10 @@ def records_and_skeleton_journey(slot):
         assert len(changed) == 2
         assert not obligations.remaining(run.store)
         assert run.store.unit("guide").recoveries == 1
+        assert cursor.candidate != candidate_before
+        final = [run.store.read(r) for r in cursor.finalObservations]
+        assert {b["check"] for b in final} == checks_before
+        assert all(b["commit"] == cursor.candidate and b["exitCode"] == 0 for b in final)
         assert all(run.store.read(r)["commit"] == cursor.candidate for r in cursor.requirementVerdicts)
         for kind in ("WORK", "JUDGE"):
             briefs = [b["facts"] for _, k, b in rows if k == "question" and b["kind"] == kind
@@ -642,7 +672,8 @@ def finish(run):
     units = run.store.units()
     outcome = run.store.records("outcome")[-1][2]
     assert cursor.state == "SCRIPTED_C", outcome
-    assert not outcome["accepted"] and outcome["verification_complete"]
+    assert not outcome["accepted"]
+    assert outcome["verification_complete"] == (not judgment.not_judged(run.store))
     assert all(u.state == "DONE" for u in units.values())
     assert len([b for _, k, b in rows if k == "product_verdict"]) == 1
     final_questions = [b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]
@@ -650,11 +681,6 @@ def finish(run):
     for subject, body in plan.select(run.store.plan(cursor.revision), "criterion").items():
         verdict, = [run.store.read(r) for r in cursor.qualityVerdicts
                     if run.store.read(r)["subject"] == subject]
-        if body["level"] == "unit":
-            folded = run.store.read(verdict["source"])
-            assert folded["sources"] == [run.store.unit(ref).judgment for ref in
-                                         judgment.owners(run.store.plan(cursor.revision), "PRODUCT", subject)]
-            continue
         initial = [q for q in final_questions if "Requested facts" not in q["facts"]
                    and all(o["commit"] == verdict["commit"] for o in q["facts"]["Final observations"])]
         assert sum(q["targets"] == [subject] for q in initial) == 1
@@ -731,16 +757,16 @@ def stale_scope_journey(slot):
             _, rows, units = finish(run)
         assert units["u001"].recoveries == 1 and units["u002"].recoveries == 0
         judgments = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
-                     and b["targets"] == ["n002"]]
+                     and b["targets"] == ["n002", *questions.SOURCE_TARGETS]]
         assert len(judgments) == 3
         assert "lost assertion" in judgments[1]["facts"]["Check sources"]["unit-001/check.py"]
         assert "unit-002" not in judgments[1]["facts"]["Product changes"]
         sibling = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
-                   and b["targets"] == ["n005"]]
+                   and b["targets"] == ["n005", *questions.SOURCE_TARGETS]]
         assert len(sibling) == 2 and "integration annotation" in sibling[1]["facts"]["Check sources"][
             "unit-002/check.py"]
         final = next(b for _, k, b in rows if k == "question" and b["kind"] == "DEMO")
-        assert final["facts"]["Unit verdicts"][0]["scopeFilesUnchangedSinceVerdict"]
+        assert "scope trees unchanged" in final["facts"]["Source judgment"]
     finally:
         run.close()
 
@@ -801,14 +827,14 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             units = run.store.units()
             assert cursor.state == "INCOMPLETE" and units["u001"].state == "FAILED"
             assert units["u001"].recoveries == (2 if mode == "check-deadline" else 0)
-            assert units["u002"].state == ("FAILED" if mode == "judge-provider" else "DONE")
+            assert units["u002"].state == "DONE"
             assert (slot / "turn-unit-001").read_text() == ("3" if mode == "check-deadline" else "1")
             assert result["nextAction"] == "Resolve the named failure, then start a fresh run."
             if mode == "judge-provider":
                 assert len(run.store.records("provider_failure")) == 3
                 assert "Judge transport unavailable" in units["u001"].failure
                 assert units["u002"].recoveries == 0 and (slot / "turn-unit-002").read_text() == "1"
-                assert "Unresolved facts" in units["u002"].failure
+                assert run.store.read(units["u002"].judgment)["answer"]["verdict"] == "not judged"
             elif mode == "native-denied":
                 failures = run.store.records("provider_failure")
                 assert len(failures) == 1 and failures[0][2]["transient"] is False
@@ -851,51 +877,28 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 run.step()
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
-        if mode == "product-source-unresolved":
-            while run.store.cursor().state != "REPAIR":
-                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
-                run.step()
-            run.close()
-            run = Run.reopen(slot / "product", provider, approve)
-        if mode in ("product-facts-unavailable", "product-source-review-gap"):
-            cursor = run.run()
-            assert cursor.state == "INCOMPLETE"
-            assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
-            assert not run.store.records("fixup")
-            if mode == "product-facts-unavailable":
-                assert not run.store.records("plan_gap")
-            else:
-                original = Store(seed / "product")
-                try:
-                    expected = original.plan(original.cursor().revision)
-                    expected["nodes"]["quality:001"]["body"]["level"] = "unit"
-                    assert run.store.plan(cursor.revision) == expected
-                finally:
-                    original.close()
-                assert "Only the named criterion's level" in run.store.records("outcome")[-1][2]["reason"]
-            return
         cursor, rows, units = finish(run)
-        if mode in ("unit-quality", "product-source-resolved", "product-source-unresolved",
-                    "product-source-oversize"):
-            assert not run.store.records("fixup")
+        if mode in ("mixed-criterion", "product-source-resolved", "product-source-unresolved",
+                    "product-source-oversize", "product-facts-unavailable", "demo-facts-unavailable",
+                    "unit-uncertain"):
+            assert not run.store.records("fixup") and cursor.repairs == 0
             assert all(u.recoveries == 0 for u in units.values())
-            assert all((slot / f"turn-unit-{i:03}").read_text() == "1" for i in (1, 2))
             local = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"]
-            if mode == "unit-quality":
-                assert sum("quality:002" in q["targets"] for q in local) == 2
-                assert not any(b["targets"] == ["quality:002"] for _, k, b in rows
-                               if k == "question" and b["kind"] == "PRODUCT")
-            if mode in ("product-source-unresolved", "product-source-oversize"):
-                assert any("quality:001" in q["targets"] for q in local)
-                assert run.store.records("plan_gap") and cursor.repairs == 1
-                original = Store(seed / "product")
-                try:
-                    assert len(run.store.records("observation")) == len(original.records("observation"))
-                finally:
-                    original.close()
-                if mode == "product-source-unresolved":
-                    assert any("Only the named criterion's level" in error for _, _, reply in
-                               run.store.records("provider_reply") for error in reply["errors"])
+            assert all(not any(t.startswith("quality:") for t in q["targets"]) for q in local)
+            if mode == "mixed-criterion":
+                assert any(b["targets"] == ["quality:002"] for _, k, b in rows
+                           if k == "question" and b["kind"] == "PRODUCT")
+            if mode in ("product-source-unresolved", "product-source-oversize", "product-facts-unavailable",
+                        "demo-facts-unavailable", "unit-uncertain"):
+                target = ("n002" if mode == "demo-facts-unavailable" else
+                          "u001" if mode == "unit-uncertain" else "quality:001")
+                assert target in judgment.not_judged(run.store)
+                c, = [b for _, _, b in run.store.records("decision_request") if b["gate"] == "C"]
+                assert c["subject"]["notJudged"] == judgment.not_judged(run.store)
+                assert c["subject"]["deviation"] == "DV6"
+                assert not run.store.records("outcome")[-1][2]["verification_complete"]
+                from tests.seldon.run_report import report
+                assert target + ": not judged:" in report(slot)[0]
         reasks = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
         if mode == "product-source-oversize":
             assert not reasks, "An oversized FACTS question must never reach the provider"
@@ -1010,6 +1013,9 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                           if k == "question" and b["kind"] == kind)
                  for kind in ("WORK", "JUDGE", "DEMO", "PRODUCT")}
         if mode in ("single1", "scale50"):
+            sizes["same-unit JUDGE"] = max(len(encode(b).encode("utf-8")) for _, k, b in rows
+                if k == "question" and b["kind"] == "JUDGE"
+                and "unit-001/check.py" in b["facts"]["Check sources"])
             sizes["re-ask"] = max(len(encode(q).encode()) for q in reasks)
         if mode in ("single1", "scale50"):
             final = [run.store.read(r) for r in cursor.finalObservations]
@@ -1164,7 +1170,7 @@ def test_clean_core_golden(tmp_path):
     refusing checks that are green before any product work. Product quality is judged exactly once,
     separate from feature requirements, preventing demands for global quality from one feature.
     A configured short check deadline times out a real command; a fixed 30-second observer would
-    wrongly integrate it. Missing unit judge facts fail locally without reworking a correct worker.
+    wrongly integrate it. Missing unit judge facts remain not judged without reworking a correct worker.
     Windows native Access-is-denied wording must stop after one call; generic transport faults
     otherwise retry a denied operation and the successful native journey never exposes it.
     Subject traces include unit verdicts, supplemental JSON artifacts
@@ -1184,16 +1190,13 @@ def test_clean_core_golden(tmp_path):
     Guide command/path faults catch guide prose passing without execution. A docs-only semantic fix
     preserves all other final verdicts; the old all-verdict reset is invisible in pre-final failures.
     Lost/annotated integration scopes exercise both outcomes of the owning unit's renewed JUDGE.
-    Unit quality reaches each traced owner's source judgment and never PRODUCT; existing behavioural
-    criteria cannot catch source demands causing worker rework. Source-request twins resolve from unit
-    facts or correct the plan marking after review, without worker/check reruns. FACTS payload bounds
-    catch raw execution records duplicating outputs that first-ask size tests alone cannot detect.
-    An oversized request must correct its source marking before sending; normal small requests cannot
-    expose a missing size guard. Typed missing behavioural facts withhold C without guessing source
-    meaning from their text, protecting the boundary the source-request success twins do not exercise.
-    Reopening the plan gap retains its correction; rejecting an unrelated planner rewrite protects
-    the new post-B marking boundary that pre-B repairs and a compliant planner cannot exercise.
-    A later REVIEW gap retains the same restriction: clearing B must not reopen general plan edits.
+    A visual unit retains its own T and P screenshots in its JUDGE; final-only image checks
+    cannot catch a producer that leaves local source judgment without its observation images.
+    Mixed source/behaviour criteria reach PRODUCT unchanged without a placement review or rework;
+    classification success twins previously hid mixed prose that had no legal marking. Persistent
+    uncertainty in a criterion, requirement or unit reaches C as not judged with verification
+    incomplete; a success-only final subject cannot expose false unit failure. A gap repairs only its
+    owner. FACTS requests remain bounded to twice the first ask, including oversize requests.
     Shared-page contracts reach provider and consumer briefs; undeclared reads and broken ownership
     are refused at PLAN. Skeleton obligations need final requirement verdicts and retain closure
     across an unrelated docs repair. Text-only contract repair/reopen renews only consumer judges;
@@ -1255,16 +1258,111 @@ def recorded_judgment_journey(root):
         store.close()
 
 
+def recorded_minimal_journey(root):
+    """Replay c01's real visual requirement through Git -> observer -> JUDGE with local Edge images.
+
+    Its original local producer saved none; detector-only fixtures miss that cause. The corrected
+    local check captures its own desktop/mobile/focus views, never the wave's screenshots. c02's
+    accepted mixed sentence stays intact in its PRODUCT brief, rather than being reclassified.
+    """
+    recording = json.loads(Path(__file__).with_name("recorded_judge_minimal.json").read_text("utf-8"))
+    original = recording["question"]
+    assert not original["images"]
+    root.mkdir()
+    scratch = root / "scratch"
+    scratch.mkdir()
+    project = root / "product"
+    project.mkdir()
+    base = gitwork.init(project)
+    sources = dict(original["facts"]["Check sources"])
+    capture = ""
+    for name, commands in (("desktop", ""), ("mobile", "await page.setViewportSize({width:375,height:812});"),
+                           ("focus", "await page.locator('button').first().focus();")):
+        capture += (commands + "await page.screenshot({path:require('node:path').join("
+                    f"process.env.SELDON_EVIDENCE_DIR,'{name}.png'),fullPage:true}});\n")
+    sources["checks/page/local.cjs"] = sources["checks/page/local.cjs"].replace(
+        "  await assertGeometry(page);", "  await assertGeometry(page);\n" + capture)
+    for path, text in sources.items():
+        target = project / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    gitwork.git(project, "add", "--all")
+    T = gitwork.commit(project, gitwork.git(project, "write-tree"), base)
+    for path, text in original["facts"]["Product files at P"].items():
+        (project / path).write_text(text, encoding="utf-8")
+    gitwork.git(project, "add", "--all")
+    P = gitwork.commit(project, gitwork.git(project, "write-tree"), T)
+    gitwork.git(project, "update-ref", "HEAD", P)
+    answer = questions.example_plan()
+    requirement, = original["facts"]["Requirements"].values()
+    answer["edits"][1]["typedBody"] = {**requirement, "features": ["new:f"]}
+    check, = original["facts"]["Checks"].values()
+    answer["edits"][2]["typedBody"] = {**check, "requirements": ["new:r"]}
+    scope = ["index.html", "styles.css", "checks/page/**"]
+    answer["edits"][3]["typedBody"]["scope"] = scope
+    answer["units"][0].update(scope=scope, checkPaths=["checks/page/**"], instructions="Own the shared page")
+    vision = {**VISION, "quality": [recording["criterion"]]}
+    document = plan.create(vision, answer)
+    store = Store(project)
+    try:
+        kickoff = store.record("kickoff", {"setup": {"providers": ROLES}})
+        store.cursor(RunRow(kickoff=kickoff, scratch=str(scratch), revision=store.revision(document),
+                            candidate=P, finalCommit=P))
+        checks = plan.assigned(document)["u001"]
+        gitwork.checkout(project, T)
+        red = proof.observe(store, project, T, checks, "T", "u001")
+        gitwork.checkout(project, P)
+        tree = gitwork.scope_tree(project, P, scope, scratch)
+        green = proof.observe(store, project, P, checks, "P", "u001", tree)
+        assert not proof.failures(store, red, red=True) and not proof.failures(store, green)
+        store.unit("u001", UnitRow(state="DONE", worktree=str(project), T=T, P=P, observations=red + green))
+        question = questions.judge_brief(store, "u001")
+        assert len(question["images"]) == 3
+        assert question["facts"]["Requirements"]["n002"] == requirement
+        assert all(Path(p).read_bytes().startswith(b"\x89PNG") for p in question["images"])
+        assert not any(t.startswith("quality:") for t in question["targets"])
+        verdict = store.record("unit_verdict", {"commit": P, "scopeTree": tree,
+            "answer": {"verdict": "satisfied"}})
+        store.unit("u001", replace(store.unit("u001"), judgment=verdict))
+        store.cursor(replace(store.cursor(), finalObservations=green))
+        product = judgment.brief(store, "PRODUCT", "quality:001")
+        assert product["facts"]["Subject"] == recording["criterion"]
+        assert len(product["images"]) == 3 and "Product files at P" not in product["facts"]
+        expanded = deepcopy(document)
+        expanded["nodes"]["n004"]["body"]["scope"] = ["**"]
+        for number in range(2, 51):
+            r, c = f"r{number}", f"c{number}"
+            expanded["nodes"][r] = {"kind": "requirement", "body": {
+                **document["nodes"]["n002"]["body"], "obligation": f"Independent value {number}"}}
+            expanded["nodes"][c] = {"kind": "check", "body": {
+                **document["nodes"]["n003"]["body"], "requirements": [r]}}
+            expanded["nodes"][f"u{number:03}"] = {"kind": "unit", "body": {
+                **document["nodes"]["u001"]["body"], "requirements": [r],
+                "scope": [f"unit-{number}/**"], "checkPaths": [f"unit-{number}/check.py"]}}
+        expanded["skeleton"] = list(plan.select(expanded, "unit"))
+        plan.validate(expanded)
+        store.cursor(replace(store.cursor(), revision=store.revision(expanded)))
+        assert questions.judge_brief(store, "u001") == question
+        assert judgment.brief(store, "PRODUCT", "quality:001") == product
+        print("P10 recorded c01 JUDGE: " + str(len(encode(original).encode())) + " -> "
+              + str(len(encode(question).encode())) + " bytes; 0 -> 3 local images; c02 PRODUCT: "
+              + str(len(encode(product).encode())) + " bytes; identical at 1/50 units", flush=True)
+        return {"JUDGE": len(encode(question).encode()), "PRODUCT": len(encode(product).encode())}
+    finally:
+        store.close()
+
+
 def clean_core_golden(root):
     root.mkdir(parents=True)
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(root)
     began = time.monotonic()
     recorded_judgment_journey(root / "recorded-judgment")
+    recorded_sizes = recorded_minimal_journey(root / "recorded-minimal")
     prepared = {"demo-uncertain", "product-uncertain", "demo-gap", "product-gap",
                 "demo-unresolved", "product-unresolved", "guide-gap",
                 "product-source-resolved", "product-source-unresolved", "product-source-oversize",
-                "product-facts-unavailable", "product-source-review-gap"}
+                "product-facts-unavailable", "demo-facts-unavailable"}
     modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
              ("timeout", 1),
              ("exhaust", 4), ("parallel", 4), ("review-repair", 2), ("final-rework", 2),
@@ -1274,9 +1372,8 @@ def clean_core_golden(root):
     modes.extend([("traced-evidence", 2), ("demo-uncertain", 2), ("product-uncertain", 2),
                   ("demo-gap", 2), ("product-gap", 2), ("demo-unresolved", 2), ("product-unresolved", 2),
                   ("guide-gap", 2), ("guide-command", 1), ("guide-path", 1), ("guide-format", 1)])
-    modes.extend([("unit-quality", 2), ("product-source-resolved", 2), ("product-source-unresolved", 2)])
+    modes.extend([("unit-uncertain", 1), ("demo-facts-unavailable", 2), ("visual-unit", 1), ("mixed-criterion", 2), ("product-source-resolved", 2), ("product-source-unresolved", 2)])
     modes.extend([("product-source-oversize", 2), ("product-facts-unavailable", 2)])
-    modes.append(("product-source-review-gap", 2))
 
     def run_case(item):
         mode, count = item
@@ -1290,7 +1387,7 @@ def clean_core_golden(root):
     for mode in ("kill-work", "kill-fresh", "kill-invalid", "kill-blocked", "kill-report",
                  "kill-proof", "kill-intent", "kill-apply"):
         modes.append((mode, 2))
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         baseline_task = pool.submit(simple_journey, root / "single1", "single1")
         admission_task = pool.submit(admission_journey, root / "admission")
         stale_task = pool.submit(stale_scope_journey, root / "stale-scope")
@@ -1314,6 +1411,12 @@ def clean_core_golden(root):
     start = time.monotonic()
     scale = simple_journey(root / "scale50", "scale50", 50)
     scale_seconds = time.monotonic() - start
+    print(f"M1 executed question bytes {baseline} -> {scale}", flush=True)
+    # The required real replay is part of the measured corpus, with exact 1/50 equality above.
+    # Independent u001 is also compared directly; consumer topology is distinct subject data.
+    for kind, size in recorded_sizes.items():
+        baseline[kind] = max(baseline[kind], size)
+        scale[kind] = max(scale[kind], size)
     assert all(scale[kind] <= baseline[kind] for kind in baseline), (baseline, scale)
     print(f"M1 scale50: {scale_seconds:.2f}s; question bytes {baseline} -> {scale}", flush=True)
     # Target is 60 s on a quiet machine; fail only well above it so host load does not block (T-77).

@@ -1,0 +1,293 @@
+{
+  "origins": {
+    "question": "C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\calls\\call-fa813d5d6f824a3cb2077009856b7d73\\question.json",
+    "criterion": "foundation-59d3a56-c02 first plan vision quality[1]"
+  },
+  "criterion": {
+    "criterion": "Each button and its message are owned by a separate script, with no dependence on either sibling script.",
+    "verification": "Inspect the three script files, then use Playwright to omit each script in turn and verify that the other two interactions still work."
+  },
+  "question": {
+    "examples": [
+      {
+        "answer": {
+          "assessments": [
+            {
+              "baselineDemonstrated": true,
+              "exercisedAtP": true,
+              "meaningful": true,
+              "noStubsMocksMissing": true,
+              "target": "n006",
+              "why": "The real interaction asserts the required observable behavior"
+            },
+            {
+              "meaningful": true,
+              "noStubsMocksMissing": true,
+              "target": "quality:002",
+              "why": "The real interaction asserts the required observable behavior"
+            }
+          ],
+          "gaps": [],
+          "verdict": "satisfied",
+          "why": "The observed interaction and check sources support this answer"
+        }
+      }
+    ],
+    "execution": {},
+    "facts": {
+      "Check sources": {
+        "checks/page/README.md": "# Foundation page unit\n\nOutcome: n006 supplies the shared offline page, accessible DOM contract and\nmidnight-blue presentation. Owned surfaces are `index.html`, `styles.css` and\n`checks/page/**`. Sibling scripts/checks and the final guide unit, including\n`docs/try-it.md` and its instructions, were not changed. No provider, installation,\nserver, commit or global configuration change was used.\n\n## Run the checks\n\nFrom the product/worktree root:\n\n```powershell\n& 'C:\\nvm4w\\nodejs\\node.EXE' checks/page/local.cjs\n& 'C:\\nvm4w\\nodejs\\node.EXE' checks/page/product.cjs\n```\n\nThe second command requires the supplied writable `SELDON_EVIDENCE_DIR`.\nBoth use the supplied Playwright Core and Edge, navigate to the actual\n`file://` product and close Edge in `finally`, including on failure.\n`support.cjs` contains only shared check helpers and expected contract values;\nit neither supplies interaction handlers nor injects product results. There\nare no page fixtures or source-reading tests.\n\n| Check | Protected behaviour and realistic failure | Why the other evidence misses it |\n| --- | --- | --- |\n| n010 / `local.cjs` | With page JavaScript disabled, the real page has its title, heading, six ordered unique IDs, native accessible controls, empty exposed live regions, exact deferred script declarations and an applied local stylesheet. Catches broken ARIA targets, a missing declaration and unloaded CSS. | Script fixtures never load this page. Executing scripts can change the initial DOM, so n011 alone does not isolate the page's declarations. Dormant resource references still require the separate source judgment below. |\n| n011 / `product.cjs` | The actual integrated page loads only the page, stylesheet and three scripts. Desktop clicks reveal each exact result independently and retain all results; repeat use is idempotent. On a fresh 375px page, natural Tab order, every focus state, Enter and Space on every control, repeated activation, exposed results, equal side-by-side geometry and absence of overflow are verified. Requests, failures, console/page errors, dialogs, popups and navigations are observed before navigation. Catches missing or crossed wiring, premature results, lost siblings, failed native keyboard activation and mobile overflow. | Standalone script checks prove only isolated pieces, and n010 disables page JavaScript. Only the canonical integrated producer-to-consumer path proves offline composition. |\n\n## Observed base and candidate\n\nDate: 2026-11-12. Worktree:\n`worker-19acc9014eb74da991e48f044b88653a`.\nUnit base / wave-start product: `dd4675a0a68e975ee7f01ee92031b4f09d50fbc9`.\nIt contained the three supplied script units but no `index.html` or `styles.css`.\n\nThe completed check sources were run before adding the page. Both exited 1 at\nactual file navigation with `net::ERR_FILE_NOT_FOUND`, and both printed\n`{\"edgeClosed\":true}`. After adding the page and stylesheet, the exact same\ncheck sources each exited 0 with `passed:true` and `edgeClosed:true`.\n\nRaw observations:\n\n- `results/local-base.txt` and `results/product-base.txt`: failing base runs.\n- `results/local-candidate.txt` and `results/product-candidate.txt`: passing candidate runs.\n- `results/check-hashes-before.json` and `results/check-hashes-after.json`: identical SHA-256 values before and after the page edit.\n\n| Check source | SHA-256 on both runs |\n| --- | --- |\n| `local.cjs` | `5745DE57FBB70923E965B687060FC0672FC9A517FC9F46BA09080922993315B2` |\n| `product.cjs` | `1F0D164B47BBAB22E71B0D6AD5F057535C49A74370ABDC6C4825FE79CA5E9F25` |\n| `support.cjs` | `653AAE1D1AF35E0C16D2F32C3A8D34D383008C1EAC7999DF3F616249F9355182` |\n\nThe existing standalone script evidence was reused; sibling checks were not\nrerun. Their isolated success is not counted as integrated product proof.\n\n## Mandatory criterion 2 page-owned source judgment\n\nThe implementing agent directly read all of the final `index.html` and\n`styles.css`, separately from runtime checking. This judgment is limited to\npage-owned source and makes no new judgment about sibling script internals.\nIt is not a fresh independent REVIEW.\n\n| Source | Inspected SHA-256 |\n| --- | --- |\n| `index.html` | `DF414B70F67F5D422CC7D72756A2E79E47B6F635A8556FAE7AF91D1F2B7195F9` |\n| `styles.css` | `9E592C802AEE5ABAE62AD3BC49576AB478AD7234443B6BFF2809F076B320A65D` |\n\n| Judgment | Pass | Direct inspection basis |\n| --- | --- | --- |\n| Exact six agreed IDs, unique and ordered | true | `hello-button`, `hello-message`, `name-button`, `name-message`, `foundation-button`, `foundation-message` are the only IDs, in that document order. |\n| Title and heading | true | The title and sole h1 both contain exactly `Foundation`; the document declares English and a device-width viewport. |\n| Native, named controls and correct region ownership | true | Three `button` elements explicitly declare `type=\"button\"`. Their visible names are `Play greeting`, `Play introduction`, `Play Foundation`; each `aria-controls` names its adjacent owned message ID. |\n| Initially empty, always-present exposed messages | true | Each empty p has `role=\"status\"`, a distinct accessible label, `aria-live=\"polite\"`, and `aria-atomic=\"true\"`. There is no hidden/inert/aria-hidden setting on any region or ancestor and no CSS hiding rule. Only decorative numbers, play symbols and the end mark are aria-hidden. |\n| Exact deferred local scripts, once each | true | The only script elements are `<script src=\"scripts/hello.js\" defer></script>`, `<script src=\"scripts/name.js\" defer></script>` and `<script src=\"scripts/foundation.js\" defer></script>`, in that order. They are ordinary classic scripts with no inline code or async attribute. |\n| Exclusively local resources | true | The only other resource declaration is `href=\"styles.css\"`. There are no remote URLs, resource hints, embedded documents, media sources, form targets or navigation links. CSS has no resource URLs. |\n| No external fonts, imports or dependencies | true | Georgia and Arial are platform font names with generic fallbacks. No font-face, font download, CSS import, JavaScript import, module loader, library reference or dependency appears in either page-owned source file. |\n| No inline interaction handlers | true | No on-event attributes, JavaScript URLs or inline scripts occur. CSS owns only presentation; the page delegates interaction through the three declared script resources. |\n| Accepted presentation | true | CSS defines midnight `#0b1c30`, ivory `#fff4dc`, amber `#ffc45c`, Georgia headings, Arial controls, square borders, equal three-column grid, wrapping messages, a separated 3px amber focus-visible outline and a reduced-motion override for the brief color transition. |\n| Excluded product features absent | true | No audio, navigation, persistence, reset control or runtime infrastructure is declared. |\n\n**Unit source judgment: PASS.** This establishes page declarations and local\nresource discipline. The actual passing n011 run independently establishes\noffline integration; this source judgment does not substitute for n011.\n\n## Observed visual result and saved evidence\n\nAll seven screenshots were opened and visually inspected after the passing\nintegrated run. At 1280Ã—900, the large left-aligned Georgia title and three\nevenly spaced channels establish the midnight/ivory/amber direction. At\n375Ã—812, the controls remain side by side, their names wrap readably, and all\nthree revealed messages fit their own columns. Each mobile focus screenshot\nshows a conspicuous amber outline separated from the control border; it is\nunclipped and leaves the label readable. Initial and revealed states preserve\nthe same layout rhythm. Final appearance and visible-focus acceptance remain\nSeldon's judgment from these actual Edge images.\n\nSaved under the execution environment's `SELDON_EVIDENCE_DIR`:\n\n- `page-desktop-initial.png`, `page-desktop-revealed.png`.\n- `page-mobile-initial.png`, `page-mobile-revealed.png`.\n- `page-mobile-focus-hello.png`, `page-mobile-focus-name.png`, `page-mobile-focus-foundation.png`.\n- `page-desktop-accessibility.json`, `page-mobile-accessibility.json`: actual Chromium accessibility trees with exposed named controls, polite atomic statuses and revealed text.\n- `page-product-observations.json`: initial/final measured geometry and all observed resource requests, errors, dialogs, popups and navigations for both viewports.\n\nThe product observations show exactly five local-file requests per page, no\nrequest failures, no HTTP(S) resources, no console/page errors, no dialogs or\npopups, and only the initial file navigation. Desktop and mobile exact independent\nreveals, retained results, keyboard operation and accessibility exposure passed.\n\n## Encountered issue / disposition\n\nThe wave-start product lacked the shared page, so both checks failed at real\nfile navigation. Owner: this page unit. Disposition: resolved by the two product\nfiles; the unchanged checks now pass. No unresolved page-unit blocker was\nobserved. The guide unit remains for its supplied owner and instructions.\n",
+        "checks/page/local.cjs": "'use strict';\n\nconst { assert, fileURL, pieces, withBrowser, observe, assertOffline, assertRegions, assertAccessibility, assertGeometry } = require('./support.cjs');\n\n// n010 protects the page-owned DOM and applied stylesheet in actual Edge with\n// page JavaScript disabled. It catches malformed ID/ARIA relationships, wrong\n// declarations and an unloaded stylesheet. Sibling fixture checks never load\n// this page; n011 cannot isolate its initial contract from script side effects.\n// Dormant resource declarations are judged separately by direct source review.\nwithBrowser(async browser => {\n  const context = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 1280, height: 900 } });\n  const page = await context.newPage();\n  const record = observe(page);\n  await page.goto(fileURL('index.html'), { waitUntil: 'load' });\n  assert.equal(await page.title(), 'Foundation', 'exact document title');\n  assert.equal(await page.getByRole('heading', { level: 1, name: 'Foundation', exact: true }).count(), 1, 'one Foundation heading');\n  assert.equal(await page.locator('html').getAttribute('lang'), 'en', 'document language');\n  assert.equal(await page.locator('button').count(), 3, 'only the three named controls');\n  const ids = await page.locator('[id]').evaluateAll(elements => elements.map(element => element.id));\n  assert.deepEqual(ids, pieces.flatMap(piece => [`${piece.key}-button`, `${piece.key}-message`]), 'six unique agreed IDs, in order');\n  for (const piece of pieces) {\n    const button = page.getByRole('button', { name: piece.name, exact: true });\n    assert.equal(await button.count(), 1, 'distinct accessible control name');\n    assert.deepEqual(await button.evaluate(element => ({ tag: element.tagName, type: element.getAttribute('type'), controls: element.getAttribute('aria-controls') })),\n      { tag: 'BUTTON', type: 'button', controls: `${piece.key}-message` }, 'native button targets its own message');\n    const region = page.locator(`#${piece.key}-message`);\n    assert.equal(await region.getAttribute('aria-live'), 'polite');\n    assert.equal(await region.getAttribute('aria-atomic'), 'true');\n    assert.equal(await region.isVisible(), true, 'empty region remains rendered');\n  }\n  await assertRegions(page, ['', '', '']);\n  await assertAccessibility(page, ['', '', '']);\n  const declarations = await page.locator('script').evaluateAll(elements => elements.map(element => ({\n    src: element.getAttribute('src'), defer: element.defer, async: element.async,\n    type: element.getAttribute('type'), inline: element.textContent,\n  })));\n  assert.deepEqual(declarations, pieces.map(piece => ({ src: piece.script, defer: true, async: false, type: null, inline: '' })), 'exact three local deferred classic scripts, once each in order');\n  assert.deepEqual(await page.locator('link[rel=\"stylesheet\"]').evaluateAll(elements => elements.map(element => element.getAttribute('href'))), ['styles.css'], 'local stylesheet declaration');\n  const styles = await page.evaluate(() => ({\n    background: getComputedStyle(document.body).backgroundColor,\n    color: getComputedStyle(document.body).color,\n    heading: getComputedStyle(document.querySelector('h1')).fontFamily,\n    buttons: [...document.querySelectorAll('button')].map(element => ({ font: getComputedStyle(element).fontFamily, radius: getComputedStyle(element).borderRadius })),\n    triangles: [...document.querySelectorAll('.play-symbol')].map(element => ({ hidden: element.getAttribute('aria-hidden'), color: getComputedStyle(element).color })),\n    sheets: [...document.styleSheets].map(sheet => sheet.href),\n  }));\n  assert.equal(styles.background, 'rgb(11, 28, 48)', 'applied midnight blue background');\n  assert.equal(styles.color, 'rgb(255, 244, 220)', 'applied ivory lettering');\n  assert.match(styles.heading, /^Georgia\\b/, 'applied Georgia heading');\n  assert.deepEqual(styles.buttons, pieces.map(() => ({ font: 'Arial, sans-serif', radius: '0px' })), 'applied Arial controls and squared edges');\n  assert.deepEqual(styles.triangles, pieces.map(() => ({ hidden: 'true', color: 'rgb(255, 196, 92)' })), 'three amber decorative play triangles');\n  assert.deepEqual(styles.sheets, [fileURL('styles.css')], 'actual stylesheet is loaded');\n  await assertGeometry(page);\n  assertOffline(record, ['index.html', 'styles.css']);\n  console.log(JSON.stringify({ check: 'n010', passed: true, pageJavaScriptEnabled: false, sourceJudgmentIncluded: false, siblingScriptsExecuted: false }));\n}).catch(error => { console.error(error); process.exitCode = 1; });\n",
+        "checks/page/product.cjs": "'use strict';\n\nconst fs = require('node:fs/promises');\nconst { assert, path, fileURL, pieces, withBrowser, observe, assertOffline, assertRegions, assertAccessibility, assertGeometry } = require('./support.cjs');\n\n// n011 protects real offline composition at its strongest boundary: the actual\n// integrated file page. It catches missing/miswired scripts, premature results,\n// cross-piece interference, lost results, keyboard failures and responsive\n// overflow. Standalone script fixtures and the JS-disabled n010 cannot prove\n// this composition. Screenshots support a separate human appearance judgment.\nasync function main() {\n  assert.ok(process.env.SELDON_EVIDENCE_DIR, 'SELDON_EVIDENCE_DIR is required for product evidence');\n  const evidence = process.env.SELDON_EVIDENCE_DIR;\n  await fs.mkdir(evidence, { recursive: true });\n  await withBrowser(async browser => {\n    const observations = [];\n    for (const [size, width, height] of [['desktop', 1280, 900], ['mobile', 375, 812]]) {\n      const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce' });\n      const page = await context.newPage();\n      const record = observe(page); // all observers are attached before navigation\n      await page.goto(fileURL('index.html'), { waitUntil: 'load' });\n      assert.equal(await page.title(), 'Foundation');\n      assert.equal(await page.getByRole('heading', { name: 'Foundation', level: 1, exact: true }).count(), 1);\n      const expected = ['', '', ''];\n      await assertRegions(page, expected);\n      await assertAccessibility(page, expected);\n      const initialGeometry = await assertGeometry(page);\n      await page.screenshot({ path: path.join(evidence, `page-${size}-initial.png`), fullPage: true });\n      const unchangedButtons = await page.locator('button').evaluateAll(elements => elements.map(element => element.outerHTML));\n\n      for (let i = 0; i < pieces.length; i++) {\n        const button = page.getByRole('button', { name: pieces[i].name, exact: true });\n        if (size === 'desktop') {\n          await button.click();\n        } else {\n          // A fresh mobile page starts with no pointer/focus intervention. Each\n          // Tab must reach the next named control; screenshots retain that state.\n          await page.keyboard.press('Tab');\n          assert.equal(await button.evaluate(element => document.activeElement === element), true, 'natural Tab order reaches every named control');\n          assert.equal(await button.evaluate(element => element.matches(':focus-visible')), true, 'keyboard focus is visible');\n          const focus = await button.evaluate(element => {\n            const style = getComputedStyle(element);\n            return { style: style.outlineStyle, width: parseFloat(style.outlineWidth), offset: parseFloat(style.outlineOffset), color: style.outlineColor };\n          });\n          assert.equal(focus.style, 'solid');\n          assert.ok(focus.width >= 3 && focus.offset >= 3, 'clear focus outline has separation and thickness');\n          assert.equal(focus.color, 'rgb(255, 196, 92)', 'amber focus contrasts with midnight');\n          await page.screenshot({ path: path.join(evidence, `page-mobile-focus-${pieces[i].key}.png`), fullPage: true });\n          await page.keyboard.press(i === 1 ? 'Space' : 'Enter');\n        }\n        expected[i] = pieces[i].text;\n        await assertRegions(page, expected);\n        await assertGeometry(page);\n        if (size === 'mobile') {\n          // Exercise both native keys on every control, including repeat use.\n          for (const key of ['Enter', 'Space']) {\n            await page.keyboard.press(key);\n            await assertRegions(page, expected);\n          }\n        }\n      }\n      if (size === 'desktop') {\n        for (const piece of pieces) {\n          await page.getByRole('button', { name: piece.name, exact: true }).click();\n          await assertRegions(page, expected);\n        }\n      }\n      assert.deepEqual(await page.locator('button').evaluateAll(elements => elements.map(element => element.outerHTML)), unchangedButtons, 'reveals retain the original controls and relationships');\n      const finalGeometry = await assertGeometry(page);\n      const accessibility = await assertAccessibility(page, expected);\n      await page.screenshot({ path: path.join(evidence, `page-${size}-revealed.png`), fullPage: true });\n      assertOffline(record, ['index.html', 'styles.css', ...pieces.map(piece => piece.script)]);\n      assert.equal(page.url(), fileURL('index.html'), 'page remains at the actual local product');\n      assert.equal(context.pages().length, 1, 'no extra browsing surfaces');\n      await fs.writeFile(path.join(evidence, `page-${size}-accessibility.json`), JSON.stringify(accessibility, null, 2));\n      observations.push({ size, viewport: { width, height }, initialGeometry, finalGeometry, ...record });\n      await context.close();\n    }\n    await fs.writeFile(path.join(evidence, 'page-product-observations.json'), JSON.stringify({\n      check: 'n011', passed: true, actualFilePage: true, independentExactReveals: true,\n      retainedResults: true, nativeEnterAndSpace: true, repeatedActivation: true,\n      accessibilityExposure: true, offlineIntegration: true, observations,\n      appearanceJudgedByAssertions: false,\n    }, null, 2));\n    console.log(JSON.stringify({ check: 'n011', passed: true, offlineIntegration: true, desktopAnd375px: true,\n      exactIndependentReveals: true, nativeKeyboardAndRepeat: true, accessibilityExposure: true, evidence }));\n  });\n}\n\nmain().catch(error => { console.error(error); process.exitCode = 1; });\n",
+        "checks/page/results/check-hashes-after.json": "[\r\n  {\r\n    \"Path\": \"C:\\\\seldon\\\\tests\\\\m1\\\\foundation-59d3a56-c01\\\\workers\\\\worker-19acc9014eb74da991e48f044b88653a\\\\checks\\\\page\\\\local.cjs\",\r\n    \"Hash\": \"5745DE57FBB70923E965B687060FC0672FC9A517FC9F46BA09080922993315B2\"\r\n  },\r\n  {\r\n    \"Path\": \"C:\\\\seldon\\\\tests\\\\m1\\\\foundation-59d3a56-c01\\\\workers\\\\worker-19acc9014eb74da991e48f044b88653a\\\\checks\\\\page\\\\product.cjs\",\r\n    \"Hash\": \"1F0D164B47BBAB22E71B0D6AD5F057535C49A74370ABDC6C4825FE79CA5E9F25\"\r\n  },\r\n  {\r\n    \"Path\": \"C:\\\\seldon\\\\tests\\\\m1\\\\foundation-59d3a56-c01\\\\workers\\\\worker-19acc9014eb74da991e48f044b88653a\\\\checks\\\\page\\\\support.cjs\",\r\n    \"Hash\": \"653AAE1D1AF35E0C16D2F32C3A8D34D383008C1EAC7999DF3F616249F9355182\"\r\n  }\r\n]\r\n",
+        "checks/page/results/check-hashes-before.json": "[\r\n  {\r\n    \"Path\": \"C:\\\\seldon\\\\tests\\\\m1\\\\foundation-59d3a56-c01\\\\workers\\\\worker-19acc9014eb74da991e48f044b88653a\\\\checks\\\\page\\\\local.cjs\",\r\n    \"Hash\": \"5745DE57FBB70923E965B687060FC0672FC9A517FC9F46BA09080922993315B2\"\r\n  },\r\n  {\r\n    \"Path\": \"C:\\\\seldon\\\\tests\\\\m1\\\\foundation-59d3a56-c01\\\\workers\\\\worker-19acc9014eb74da991e48f044b88653a\\\\checks\\\\page\\\\product.cjs\",\r\n    \"Hash\": \"1F0D164B47BBAB22E71B0D6AD5F057535C49A74370ABDC6C4825FE79CA5E9F25\"\r\n  },\r\n  {\r\n    \"Path\": \"C:\\\\seldon\\\\tests\\\\m1\\\\foundation-59d3a56-c01\\\\workers\\\\worker-19acc9014eb74da991e48f044b88653a\\\\checks\\\\page\\\\support.cjs\",\r\n    \"Hash\": \"653AAE1D1AF35E0C16D2F32C3A8D34D383008C1EAC7999DF3F616249F9355182\"\r\n  }\r\n]\r\n",
+        "checks/page/results/local-base.txt": "{\"edgeClosed\":true}\r\npage.goto: net::ERR_FILE_NOT_FOUND at file:///C:/seldon/tests/m1/foundation-59d3a56-c01/workers/worker-19acc9014eb74da991e48f044b88653a/index.html\r\nCall log:\r\n  - navigating to \"file:///C:/seldon/tests/m1/foundation-59d3a56-c01/workers/worker-19acc9014eb74da991e48f044b88653a/index.html\", waiting until \"load\"\r\n\r\n    at C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\workers\\worker-19acc9014eb74da991e48f044b88653a\\checks\\page\\local.cjs:14:14\r\n    at async withBrowser (C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\workers\\worker-19acc9014eb74da991e48f044b88653a\\checks\\page\\support.cjs:23:5) {\r\n  name: 'Error'\r\n}\r\n",
+        "checks/page/results/local-candidate.txt": "{\"check\":\"n010\",\"passed\":true,\"pageJavaScriptEnabled\":false,\"sourceJudgmentIncluded\":false,\"siblingScriptsExecuted\":false}\r\n{\"edgeClosed\":true}\r\n",
+        "checks/page/results/product-base.txt": "{\"edgeClosed\":true}\r\npage.goto: net::ERR_FILE_NOT_FOUND at file:///C:/seldon/tests/m1/foundation-59d3a56-c01/workers/worker-19acc9014eb74da991e48f044b88653a/index.html\r\nCall log:\r\n  - navigating to \"file:///C:/seldon/tests/m1/foundation-59d3a56-c01/workers/worker-19acc9014eb74da991e48f044b88653a/index.html\", waiting until \"load\"\r\n\r\n    at C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\workers\\worker-19acc9014eb74da991e48f044b88653a\\checks\\page\\product.cjs:21:18\r\n    at async withBrowser (C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\workers\\worker-19acc9014eb74da991e48f044b88653a\\checks\\page\\support.cjs:23:5)\r\n    at async main (C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\workers\\worker-19acc9014eb74da991e48f044b88653a\\checks\\page\\product.cjs:15:3) {\r\n  name: 'Error'\r\n}\r\n",
+        "checks/page/results/product-candidate.txt": "{\"check\":\"n011\",\"passed\":true,\"offlineIntegration\":true,\"desktopAnd375px\":true,\"exactIndependentReveals\":true,\"nativeKeyboardAndRepeat\":true,\"accessibilityExposure\":true,\"evidence\":\"C:\\\\seldon\\\\tests\\\\m1\\\\foundation-59d3a56-c01\\\\browser-evidence\"}\r\n{\"edgeClosed\":true}\r\n",
+        "checks/page/support.cjs": "'use strict';\n\nconst assert = require('node:assert/strict');\nconst path = require('node:path');\nconst { pathToFileURL } = require('node:url');\nconst { chromium } = require('C:\\\\Users\\\\oren\\\\codex-harness\\\\ui\\\\node_modules\\\\.pnpm\\\\playwright-core@1.59.1\\\\node_modules\\\\playwright-core');\n\nconst root = path.resolve(__dirname, '../..');\nconst fileURL = relative => pathToFileURL(path.join(root, relative)).href;\nconst pieces = [\n  { key: 'hello', name: 'Play greeting', region: 'Greeting message', text: 'Hello, world!', script: 'scripts/hello.js' },\n  { key: 'name', name: 'Play introduction', region: 'Introduction message', text: 'My name is Seldon', script: 'scripts/name.js' },\n  { key: 'foundation', name: 'Play Foundation', region: 'Foundation message', text: 'This is the Foundation', script: 'scripts/foundation.js' },\n];\n\nasync function withBrowser(run) {\n  const browser = await chromium.launch({\n    headless: true,\n    executablePath: 'C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe',\n    timeout: 15000,\n  });\n  try {\n    await run(browser);\n  } finally {\n    await browser.close();\n    console.log(JSON.stringify({ edgeClosed: true }));\n  }\n}\n\nfunction observe(page) {\n  const record = { requests: [], failedRequests: [], errors: [], dialogs: [], navigations: [], popups: [] };\n  page.setDefaultTimeout(5000);\n  page.setDefaultNavigationTimeout(10000);\n  page.on('request', request => record.requests.push(request.url()));\n  page.on('requestfailed', request => record.failedRequests.push({ url: request.url(), failure: request.failure() }));\n  page.on('pageerror', error => record.errors.push(error.message));\n  page.on('console', message => { if (message.type() === 'error') record.errors.push(message.text()); });\n  page.on('dialog', async dialog => {\n    record.dialogs.push({ type: dialog.type(), message: dialog.message() });\n    await dialog.dismiss();\n  });\n  page.on('framenavigated', frame => record.navigations.push(frame.url()));\n  page.on('popup', popup => record.popups.push(popup.url()));\n  return record;\n}\n\nfunction assertOffline(record, expectedResources) {\n  assert.deepEqual(record.errors, [], 'no console errors or page errors');\n  assert.deepEqual(record.failedRequests, [], 'all local resources load successfully');\n  assert.deepEqual(record.dialogs, [], 'activation opens no dialogs');\n  assert.deepEqual(record.popups, [], 'activation opens no additional pages');\n  assert.deepEqual(record.navigations, [fileURL('index.html')], 'only the initial file navigation occurs');\n  assert.deepEqual([...record.requests].sort(), expectedResources.map(fileURL).sort(), 'only the exact local product resources load, once each');\n}\n\nasync function assertRegions(page, expected) {\n  const actual = [];\n  for (const piece of pieces) actual.push(await page.locator(`#${piece.key}-message`).textContent());\n  assert.deepEqual(actual, expected, 'exact independent messages; unchanged siblings and retained prior results');\n  for (let i = 0; i < pieces.length; i++) {\n    if (expected[i]) {\n      assert.equal(await page.getByText(expected[i], { exact: true }).count(), 1, 'one inline instance of each revealed message');\n      assert.equal(await page.locator(`#${pieces[i].key}-message`).isVisible(), true, 'revealed text is visible');\n    } else {\n      assert.equal(await page.getByText(pieces[i].text, { exact: true }).count(), 0, 'unplayed message text is absent');\n    }\n  }\n}\n\nasync function assertAccessibility(page, expected) {\n  const session = await page.context().newCDPSession(page);\n  try {\n    const { nodes } = await session.send('Accessibility.getFullAXTree');\n    for (let i = 0; i < pieces.length; i++) {\n      const piece = pieces[i];\n      const button = nodes.filter(node => !node.ignored && node.role?.value === 'button' && node.name?.value === piece.name);\n      assert.equal(button.length, 1, `accessible native control: ${piece.name}`);\n      const regions = nodes.filter(node => !node.ignored && node.role?.value === 'status' && node.name?.value === piece.region);\n      assert.equal(regions.length, 1, `always-exposed message region: ${piece.region}`);\n      const properties = Object.fromEntries(regions[0].properties.map(property => [property.name, property.value.value]));\n      assert.equal(properties.live, 'polite', 'accessibility tree exposes polite announcements');\n      assert.equal(properties.atomic, true, 'accessibility tree exposes atomic announcements');\n      if (expected[i]) {\n        const descendants = new Set(regions[0].childIds || []);\n        let textExposed = false;\n        for (const node of nodes) {\n          if (descendants.has(node.nodeId)) {\n            if (!node.ignored && node.name?.value === expected[i]) textExposed = true;\n            for (const id of node.childIds || []) descendants.add(id);\n          }\n        }\n        assert.equal(textExposed, true, 'exact revealed message is exposed beneath its own accessible status');\n      }\n    }\n    return nodes;\n  } finally {\n    await session.detach();\n  }\n}\n\nasync function assertGeometry(page) {\n  const geometry = await page.evaluate(() => ({\n    viewport: innerWidth,\n    documentWidth: document.documentElement.scrollWidth,\n    bodyWidth: document.body.scrollWidth,\n    buttons: [...document.querySelectorAll('button')].map(element => {\n      const r = element.getBoundingClientRect();\n      return { left: r.left, right: r.right, top: r.top, width: r.width, height: r.height };\n    }),\n    messages: [...document.querySelectorAll('[role=\"status\"]')].map(element => {\n      const r = element.getBoundingClientRect();\n      return { left: r.left, right: r.right, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth };\n    }),\n  }));\n  assert.equal(geometry.buttons.length, 3, 'three controls');\n  assert.ok(geometry.documentWidth <= geometry.viewport && geometry.bodyWidth <= geometry.viewport, 'no horizontal page overflow');\n  for (let i = 0; i < 3; i++) {\n    const b = geometry.buttons[i];\n    assert.ok(Math.abs(b.top - geometry.buttons[0].top) < 1, 'all controls share a row');\n    assert.ok(Math.abs(b.width - geometry.buttons[0].width) < 1, 'three equally wide controls');\n    assert.ok(b.left >= 0 && b.right <= geometry.viewport, 'control stays inside viewport');\n    assert.ok(b.width >= 44 && b.height >= 44, 'control has a usable touch target');\n    if (i) assert.ok(b.left > geometry.buttons[i - 1].right, 'controls have ordered, separated columns');\n    const m = geometry.messages[i];\n    assert.ok(m.left >= 0 && m.right <= geometry.viewport && m.scrollWidth <= m.clientWidth, 'message wraps without horizontal overflow');\n  }\n  return geometry;\n}\n\nmodule.exports = { assert, path, fileURL, pieces, withBrowser, observe, assertOffline, assertRegions, assertAccessibility, assertGeometry };\n"
+      },
+      "Checkout coverage": "Other units' files are outside this judgment; behaviour across units is proven at wave verify. This judgment covers only this unit's requirements against this unit's checks at P and its unit quality.",
+      "Checks": {
+        "n010": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/page/local.cjs"
+          ],
+          "expectedEvidence": "Passing assertions against actual index.html and styles.css in Edge with page JavaScript disabled: title, heading, native named buttons, unique agreed IDs, aria-controls relationships, exposed polite atomic message regions, exact deferred local script references and applied fonts and palette. Separately, the traced page unit judge inspects its HTML and CSS for correct declarations, exclusively local resources, no external fonts or imports, no dependencies and no inline interaction handlers. This local check does not execute sibling scripts.",
+          "mode": "establishes",
+          "purpose": "Protect the page-owned DOM and styling contract against malformed relationships, missing declarations and an unloaded stylesheet. Script fixtures do not exercise this page; dormant resource declarations require source inspection, not merely runtime observation.",
+          "requiredEnvironment": [
+            "Node.js",
+            "Playwright Core at C:\\Users\\oren\\codex-harness\\ui\\node_modules\\.pnpm\\playwright-core@1.59.1\\node_modules\\playwright-core",
+            "Edge at C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+          ],
+          "requirements": [
+            "n006"
+          ]
+        }
+      },
+      "Observations": [
+        {
+          "check": "n010",
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/page/local.cjs"
+          ],
+          "exitCode": 1,
+          "purpose": "T",
+          "requirements": [
+            "n006"
+          ],
+          "stderr": "page.goto: net::ERR_FILE_NOT_FOUND at file:///C:/seldon/tests/m1/foundation-59d3a56-c01/workers/worker-19acc9014eb74da991e48f044b88653a/index.html\nCall log:\n\u001b[2m  - navigating to \"file:///C:/seldon/tests/m1/foundation-59d3a56-c01/workers/worker-19acc9014eb74da991e48f044b88653a/index.html\", waiting until \"load\"\u001b[22m\n\n    at C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\workers\\worker-19acc9014eb74da991e48f044b88653a\\checks\\page\\local.cjs:14:14\n    at async withBrowser (C:\\seldon\\tests\\m1\\foundation-59d3a56-c01\\workers\\worker-19acc9014eb74da991e48f044b88653a\\checks\\page\\support.cjs:23:5) {\n  name: 'Error'\n}\n",
+          "stdout": "{\"edgeClosed\":true}\n"
+        },
+        {
+          "check": "n010",
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/page/local.cjs"
+          ],
+          "exitCode": 0,
+          "purpose": "P",
+          "requirements": [
+            "n006"
+          ],
+          "stderr": "",
+          "stdout": "{\"check\":\"n010\",\"passed\":true,\"pageJavaScriptEnabled\":false,\"sourceJudgmentIncluded\":false,\"siblingScriptsExecuted\":false}\n{\"edgeClosed\":true}\n"
+        }
+      ],
+      "Product changes": "diff --git a/index.html b/index.html\nnew file mode 100644\nindex 0000000..cbb0f03\n--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,64 @@\n+<!doctype html>\n+<html lang=\"en\">\n+<head>\n+  <meta charset=\"utf-8\">\n+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n+  <meta name=\"color-scheme\" content=\"dark\">\n+  <title>Foundation</title>\n+  <link rel=\"stylesheet\" href=\"styles.css\">\n+  <script src=\"scripts/hello.js\" defer></script>\n+  <script src=\"scripts/name.js\" defer></script>\n+  <script src=\"scripts/foundation.js\" defer></script>\n+</head>\n+<body>\n+  <main class=\"console\">\n+    <header class=\"masthead\">\n+      <p>A small beginning</p>\n+      <p>Three signals / 01â€“03</p>\n+    </header>\n+\n+    <div class=\"introduction\">\n+      <p class=\"eyebrow\">The signal starts here</p>\n+      <h1>Foundation</h1>\n+      <p class=\"lead\">Three messages. Choose where to begin.</p>\n+    </div>\n+\n+    <div class=\"channels\">\n+      <section class=\"channel\" aria-label=\"Greeting\">\n+        <p class=\"channel-number\" aria-hidden=\"true\">01</p>\n+        <h2>Greeting</h2>\n+        <button id=\"hello-button\" type=\"button\" aria-controls=\"hello-message\">\n+          <span class=\"play-symbol\" aria-hidden=\"true\">â–¶</span>\n+          <span>Play greeting</span>\n+        </button>\n+        <p id=\"hello-message\" class=\"message\" role=\"status\" aria-label=\"Greeting message\" aria-live=\"polite\" aria-atomic=\"true\"></p>\n+      </section>\n+\n+      <section class=\"channel\" aria-label=\"Introduction\">\n+        <p class=\"channel-number\" aria-hidden=\"true\">02</p>\n+        <h2>Introduction</h2>\n+        <button id=\"name-button\" type=\"button\" aria-controls=\"name-message\">\n+          <span class=\"play-symbol\" aria-hidden=\"true\">â–¶</span>\n+          <span>Play introduction</span>\n+        </button>\n+        <p id=\"name-message\" class=\"message\" role=\"status\" aria-label=\"Introduction message\" aria-live=\"polite\" aria-atomic=\"true\"></p>\n+      </section>\n+\n+      <section class=\"channel\" aria-label=\"Foundation\">\n+        <p class=\"channel-number\" aria-hidden=\"true\">03</p>\n+        <h2>Foundation</h2>\n+        <button id=\"foundation-button\" type=\"button\" aria-controls=\"foundation-message\">\n+          <span class=\"play-symbol\" aria-hidden=\"true\">â–¶</span>\n+          <span>Play Foundation</span>\n+        </button>\n+        <p id=\"foundation-message\" class=\"message\" role=\"status\" aria-label=\"Foundation message\" aria-live=\"polite\" aria-atomic=\"true\"></p>\n+      </section>\n+    </div>\n+\n+    <footer>\n+      <p>Press play to reveal a message.<br>Each one stays with you.</p>\n+      <span class=\"end-mark\" aria-hidden=\"true\">F.</span>\n+    </footer>\n+  </main>\n+</body>\n+</html>\ndiff --git a/styles.css b/styles.css\nnew file mode 100644\nindex 0000000..5c7a2f2\n--- /dev/null\n+++ b/styles.css\n@@ -0,0 +1,240 @@\n+:root {\n+  color-scheme: dark;\n+  --midnight: #0b1c30;\n+  --ivory: #fff4dc;\n+  --amber: #ffc45c;\n+}\n+\n+* {\n+  box-sizing: border-box;\n+}\n+\n+body {\n+  margin: 0;\n+  background: var(--midnight);\n+  color: var(--ivory);\n+  font-family: Arial, sans-serif;\n+  line-height: 1.5;\n+}\n+\n+.console {\n+  width: min(1120px, calc(100% - 112px));\n+  margin-inline: auto;\n+}\n+\n+.masthead {\n+  display: flex;\n+  justify-content: space-between;\n+  gap: 24px;\n+  padding-block: 28px 22px;\n+  border-bottom: 1px solid var(--ivory);\n+  font-size: 11px;\n+  letter-spacing: 0.15em;\n+  text-transform: uppercase;\n+}\n+\n+p {\n+  margin: 0;\n+}\n+\n+.introduction {\n+  padding-block: 76px 64px;\n+}\n+\n+.eyebrow {\n+  margin-bottom: 14px;\n+  color: var(--amber);\n+  font-size: 12px;\n+  letter-spacing: 0.14em;\n+  text-transform: uppercase;\n+}\n+\n+h1,\n+h2 {\n+  margin: 0;\n+  font-family: Georgia, serif;\n+  font-weight: 400;\n+}\n+\n+h1 {\n+  font-size: clamp(64px, 8vw, 112px);\n+  line-height: 1.08;\n+  letter-spacing: -0.045em;\n+}\n+\n+.lead {\n+  margin-top: 24px;\n+  font-size: 19px;\n+}\n+\n+.channels {\n+  display: grid;\n+  grid-template-columns: repeat(3, minmax(0, 1fr));\n+  gap: 32px;\n+}\n+\n+.channel {\n+  min-width: 0;\n+  border-top: 2px solid var(--amber);\n+  padding-top: 18px;\n+}\n+\n+.channel-number {\n+  color: var(--amber);\n+  font-size: 12px;\n+  letter-spacing: 0.12em;\n+}\n+\n+h2 {\n+  margin-block: 14px 26px;\n+  font-size: 30px;\n+  line-height: 1.2;\n+}\n+\n+button {\n+  display: flex;\n+  align-items: center;\n+  gap: 18px;\n+  width: 100%;\n+  min-height: 76px;\n+  padding: 20px;\n+  border: 1px solid var(--amber);\n+  border-radius: 0;\n+  background: #142c44;\n+  color: var(--ivory);\n+  font-family: Arial, sans-serif;\n+  font-size: 16px;\n+  line-height: 1.35;\n+  text-align: left;\n+  cursor: pointer;\n+  transition: background-color 120ms linear;\n+}\n+\n+button:hover {\n+  background: #213f5b;\n+}\n+\n+button:active {\n+  background: var(--midnight);\n+}\n+\n+button:focus-visible {\n+  outline: 3px solid var(--amber);\n+  outline-offset: 4px;\n+  background: #213f5b;\n+}\n+\n+.play-symbol {\n+  flex: none;\n+  color: var(--amber);\n+  font-size: 19px;\n+  line-height: 1;\n+}\n+\n+.message {\n+  min-height: 88px;\n+  padding-top: 24px;\n+  overflow-wrap: anywhere;\n+  font-size: 19px;\n+  line-height: 1.5;\n+}\n+\n+footer {\n+  display: flex;\n+  align-items: center;\n+  justify-content: space-between;\n+  gap: 24px;\n+  margin-top: 44px;\n+  padding-block: 24px 32px;\n+  border-top: 1px solid var(--ivory);\n+  font-size: 13px;\n+  line-height: 1.6;\n+}\n+\n+.end-mark {\n+  color: var(--amber);\n+  font-family: Georgia, serif;\n+  font-size: 32px;\n+  line-height: 1;\n+}\n+\n+@media (max-width: 700px) {\n+  .console {\n+    width: calc(100% - 40px);\n+  }\n+\n+  .masthead {\n+    gap: 12px;\n+    padding-block: 22px 18px;\n+    font-size: 9px;\n+    letter-spacing: 0.08em;\n+  }\n+\n+  .introduction {\n+    padding-block: 56px 44px;\n+  }\n+\n+  .eyebrow {\n+    font-size: 10px;\n+    letter-spacing: 0.12em;\n+  }\n+\n+  h1 {\n+    font-size: clamp(44px, 14vw, 80px);\n+  }\n+\n+  .lead {\n+    max-width: 270px;\n+    margin-top: 20px;\n+    font-size: 16px;\n+  }\n+\n+  .channels {\n+    gap: 12px;\n+  }\n+\n+  .channel {\n+    padding-top: 14px;\n+  }\n+\n+  .channel-number {\n+    font-size: 11px;\n+  }\n+\n+  h2 {\n+    margin-block: 12px 22px;\n+    font-size: clamp(16px, 4.6vw, 25px);\n+  }\n+\n+  button {\n+    flex-direction: column;\n+    align-items: flex-start;\n+    justify-content: flex-start;\n+    gap: 14px;\n+    min-height: 112px;\n+    padding: 14px 9px;\n+    font-size: 14px;\n+    overflow-wrap: anywhere;\n+  }\n+\n+  .play-symbol {\n+    font-size: 17px;\n+  }\n+\n+  .message {\n+    min-height: 112px;\n+    padding-top: 22px;\n+    font-size: 16px;\n+  }\n+\n+  footer {\n+    margin-top: 30px;\n+    font-size: 12px;\n+  }\n+}\n+\n+@media (prefers-reduced-motion: reduce) {\n+  button {\n+    transition: none;\n+  }\n+}",
+      "Product files at P": {
+        "index.html": "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <meta name=\"color-scheme\" content=\"dark\">\n  <title>Foundation</title>\n  <link rel=\"stylesheet\" href=\"styles.css\">\n  <script src=\"scripts/hello.js\" defer></script>\n  <script src=\"scripts/name.js\" defer></script>\n  <script src=\"scripts/foundation.js\" defer></script>\n</head>\n<body>\n  <main class=\"console\">\n    <header class=\"masthead\">\n      <p>A small beginning</p>\n      <p>Three signals / 01â€“03</p>\n    </header>\n\n    <div class=\"introduction\">\n      <p class=\"eyebrow\">The signal starts here</p>\n      <h1>Foundation</h1>\n      <p class=\"lead\">Three messages. Choose where to begin.</p>\n    </div>\n\n    <div class=\"channels\">\n      <section class=\"channel\" aria-label=\"Greeting\">\n        <p class=\"channel-number\" aria-hidden=\"true\">01</p>\n        <h2>Greeting</h2>\n        <button id=\"hello-button\" type=\"button\" aria-controls=\"hello-message\">\n          <span class=\"play-symbol\" aria-hidden=\"true\">â–¶</span>\n          <span>Play greeting</span>\n        </button>\n        <p id=\"hello-message\" class=\"message\" role=\"status\" aria-label=\"Greeting message\" aria-live=\"polite\" aria-atomic=\"true\"></p>\n      </section>\n\n      <section class=\"channel\" aria-label=\"Introduction\">\n        <p class=\"channel-number\" aria-hidden=\"true\">02</p>\n        <h2>Introduction</h2>\n        <button id=\"name-button\" type=\"button\" aria-controls=\"name-message\">\n          <span class=\"play-symbol\" aria-hidden=\"true\">â–¶</span>\n          <span>Play introduction</span>\n        </button>\n        <p id=\"name-message\" class=\"message\" role=\"status\" aria-label=\"Introduction message\" aria-live=\"polite\" aria-atomic=\"true\"></p>\n      </section>\n\n      <section class=\"channel\" aria-label=\"Foundation\">\n        <p class=\"channel-number\" aria-hidden=\"true\">03</p>\n        <h2>Foundation</h2>\n        <button id=\"foundation-button\" type=\"button\" aria-controls=\"foundation-message\">\n          <span class=\"play-symbol\" aria-hidden=\"true\">â–¶</span>\n          <span>Play Foundation</span>\n        </button>\n        <p id=\"foundation-message\" class=\"message\" role=\"status\" aria-label=\"Foundation message\" aria-live=\"polite\" aria-atomic=\"true\"></p>\n      </section>\n    </div>\n\n    <footer>\n      <p>Press play to reveal a message.<br>Each one stays with you.</p>\n      <span class=\"end-mark\" aria-hidden=\"true\">F.</span>\n    </footer>\n  </main>\n</body>\n</html>\n",
+        "styles.css": ":root {\n  color-scheme: dark;\n  --midnight: #0b1c30;\n  --ivory: #fff4dc;\n  --amber: #ffc45c;\n}\n\n* {\n  box-sizing: border-box;\n}\n\nbody {\n  margin: 0;\n  background: var(--midnight);\n  color: var(--ivory);\n  font-family: Arial, sans-serif;\n  line-height: 1.5;\n}\n\n.console {\n  width: min(1120px, calc(100% - 112px));\n  margin-inline: auto;\n}\n\n.masthead {\n  display: flex;\n  justify-content: space-between;\n  gap: 24px;\n  padding-block: 28px 22px;\n  border-bottom: 1px solid var(--ivory);\n  font-size: 11px;\n  letter-spacing: 0.15em;\n  text-transform: uppercase;\n}\n\np {\n  margin: 0;\n}\n\n.introduction {\n  padding-block: 76px 64px;\n}\n\n.eyebrow {\n  margin-bottom: 14px;\n  color: var(--amber);\n  font-size: 12px;\n  letter-spacing: 0.14em;\n  text-transform: uppercase;\n}\n\nh1,\nh2 {\n  margin: 0;\n  font-family: Georgia, serif;\n  font-weight: 400;\n}\n\nh1 {\n  font-size: clamp(64px, 8vw, 112px);\n  line-height: 1.08;\n  letter-spacing: -0.045em;\n}\n\n.lead {\n  margin-top: 24px;\n  font-size: 19px;\n}\n\n.channels {\n  display: grid;\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n  gap: 32px;\n}\n\n.channel {\n  min-width: 0;\n  border-top: 2px solid var(--amber);\n  padding-top: 18px;\n}\n\n.channel-number {\n  color: var(--amber);\n  font-size: 12px;\n  letter-spacing: 0.12em;\n}\n\nh2 {\n  margin-block: 14px 26px;\n  font-size: 30px;\n  line-height: 1.2;\n}\n\nbutton {\n  display: flex;\n  align-items: center;\n  gap: 18px;\n  width: 100%;\n  min-height: 76px;\n  padding: 20px;\n  border: 1px solid var(--amber);\n  border-radius: 0;\n  background: #142c44;\n  color: var(--ivory);\n  font-family: Arial, sans-serif;\n  font-size: 16px;\n  line-height: 1.35;\n  text-align: left;\n  cursor: pointer;\n  transition: background-color 120ms linear;\n}\n\nbutton:hover {\n  background: #213f5b;\n}\n\nbutton:active {\n  background: var(--midnight);\n}\n\nbutton:focus-visible {\n  outline: 3px solid var(--amber);\n  outline-offset: 4px;\n  background: #213f5b;\n}\n\n.play-symbol {\n  flex: none;\n  color: var(--amber);\n  font-size: 19px;\n  line-height: 1;\n}\n\n.message {\n  min-height: 88px;\n  padding-top: 24px;\n  overflow-wrap: anywhere;\n  font-size: 19px;\n  line-height: 1.5;\n}\n\nfooter {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 24px;\n  margin-top: 44px;\n  padding-block: 24px 32px;\n  border-top: 1px solid var(--ivory);\n  font-size: 13px;\n  line-height: 1.6;\n}\n\n.end-mark {\n  color: var(--amber);\n  font-family: Georgia, serif;\n  font-size: 32px;\n  line-height: 1;\n}\n\n@media (max-width: 700px) {\n  .console {\n    width: calc(100% - 40px);\n  }\n\n  .masthead {\n    gap: 12px;\n    padding-block: 22px 18px;\n    font-size: 9px;\n    letter-spacing: 0.08em;\n  }\n\n  .introduction {\n    padding-block: 56px 44px;\n  }\n\n  .eyebrow {\n    font-size: 10px;\n    letter-spacing: 0.12em;\n  }\n\n  h1 {\n    font-size: clamp(44px, 14vw, 80px);\n  }\n\n  .lead {\n    max-width: 270px;\n    margin-top: 20px;\n    font-size: 16px;\n  }\n\n  .channels {\n    gap: 12px;\n  }\n\n  .channel {\n    padding-top: 14px;\n  }\n\n  .channel-number {\n    font-size: 11px;\n  }\n\n  h2 {\n    margin-block: 12px 22px;\n    font-size: clamp(16px, 4.6vw, 25px);\n  }\n\n  button {\n    flex-direction: column;\n    align-items: flex-start;\n    justify-content: flex-start;\n    gap: 14px;\n    min-height: 112px;\n    padding: 14px 9px;\n    font-size: 14px;\n    overflow-wrap: anywhere;\n  }\n\n  .play-symbol {\n    font-size: 17px;\n  }\n\n  .message {\n    min-height: 112px;\n    padding-top: 22px;\n    font-size: 16px;\n  }\n\n  footer {\n    margin-top: 30px;\n    font-size: 12px;\n  }\n}\n\n@media (prefers-reduced-motion: reduce) {\n  button {\n    transition: none;\n  }\n}\n"
+      },
+      "Requirements": {
+        "n006": {
+          "contract": "index.html has title and heading Foundation and loads scripts/hello.js, scripts/name.js and scripts/foundation.js once each with defer. It supplies their six agreed IDs in that order. Buttons are native type=button controls named \"Play greeting\", \"Play introduction\" and \"Play Foundation\". Each button's aria-controls identifies its initially empty, always-present message region with aria-live=\"polite\" and aria-atomic=\"true\"; regions are not hidden from assistive technology. The actual file:// page integrates the three pieces without network resources, browser errors, dependencies or a server. Controls remain side by side and messages readable at desktop and 375px widths without horizontal overflow. Native Enter and Space activation works and keyboard focus is visibly apparent.",
+          "design": "Own index.html and styles.css. Use midnight blue, ivory lettering, amber aria-hidden play triangles, Georgia headings, Arial controls, squared edges and generous spacing. Use three equal columns, wrapping text and a clear focus indicator. Reference only local product resources. No inline interaction handlers, external fonts, audio, navigation, persistence, reset controls or runtime infrastructure.",
+          "obligation": "Provide the shared presentation and DOM contract, then integrate the pieces into the accessible offline page. Judge page declarations and resources locally; prove offline composition on the integrated product."
+        }
+      },
+      "Unit quality": {
+        "quality:002": {
+          "criterion": "One static page integrates three independent script files, each owning only its button and message, with no dependencies or server.",
+          "verification": "Inspect the page and script ownership; open locally in Edge and verify all three interactions work with no HTTP requests or browser errors."
+        }
+      }
+    },
+    "images": [],
+    "kind": "JUDGE",
+    "prompt": "For each requirement: are its checks meaningful; did they actually exercise the requirement at P (not skipped, not empty, not asserting nothing); is anything a stub, mock or missing? Read the check sources, RED output at T or wave start, passing P output and screenshots. For each requirement set baselineDemonstrated only if every establishes check failed on T or wave start because the required PRODUCT behavior was absent, and every preserves check exercised existing behavior on its baseline. A missing product can demonstrate RED; a missing check helper or broken test environment cannot. For each unit quality target, judge whether it holds in this unit's own source. A structural criterion spanning units applies locally: this unit owns its responsibility and depends on no sibling files without a declared dependency. Exit codes are CODE facts; interpret their meaning. A no on any obligation is a gap. Unrequested improvements that support the accepted experience and keep its meaning, constraints and commitments are fine; reject one only by citing the accepted obligation or material consequence it breaks.",
+    "schema": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "assessments": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "baselineDemonstrated": {
+                            "type": "boolean"
+                          },
+                          "exercisedAtP": {
+                            "type": "boolean"
+                          },
+                          "meaningful": {
+                            "type": "boolean"
+                          },
+                          "noStubsMocksMissing": {
+                            "type": "boolean"
+                          },
+                          "target": {
+                            "enum": [
+                              "n006"
+                            ],
+                            "type": "string"
+                          },
+                          "why": {
+                            "maxLength": 8192,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "meaningful",
+                          "noStubsMocksMissing",
+                          "why",
+                          "exercisedAtP",
+                          "baselineDemonstrated"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "meaningful": {
+                            "type": "boolean"
+                          },
+                          "noStubsMocksMissing": {
+                            "type": "boolean"
+                          },
+                          "target": {
+                            "enum": [
+                              "quality:002"
+                            ],
+                            "type": "string"
+                          },
+                          "why": {
+                            "maxLength": 8192,
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "target",
+                          "meaningful",
+                          "noStubsMocksMissing",
+                          "why"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "gaps": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "correction": {
+                        "maxLength": 8192,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "target": {
+                        "maxLength": 8192,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "target",
+                      "correction"
+                    ],
+                    "type": "object"
+                  },
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "verdict": {
+                  "enum": [
+                    "satisfied",
+                    "gap"
+                  ],
+                  "type": "string"
+                },
+                "why": {
+                  "maxLength": 8192,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "verdict",
+                "assessments",
+                "gaps",
+                "why"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "neededFacts": {
+                  "items": {
+                    "maxLength": 8192,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "verdict": {
+                  "enum": [
+                    "uncertain"
+                  ],
+                  "type": "string"
+                },
+                "why": {
+                  "maxLength": 8192,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "verdict",
+                "neededFacts",
+                "why"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "type": "object"
+    },
+    "targets": [
+      "n006",
+      "quality:002"
+    ]
+  }
+}

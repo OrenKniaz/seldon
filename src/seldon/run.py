@@ -38,15 +38,14 @@ def eligible(store):
         if ({r["subject"] for r in rows} != set(judgment.subjects(document, kind))
                 or len(rows) != len(judgment.subjects(document, kind))
                 or not all(judgment.current(r, trees)
-                           and questions.satisfied(r["answer"], final=True) for r in rows)):
-            raise ValueError("C requires every final subject's satisfied verdict")
+                           and judgment.ready(r["answer"]) for r in rows)):
+            raise ValueError("C requires each final subject satisfied or explicitly not judged")
     if ({v["feature"] for v in verdicts} != set(plan.select(document, "feature"))
-            or not all(v["commit"] == cursor.candidate and questions.satisfied(v["answer"], final=True)
+            or not all(v["commit"] == cursor.candidate and judgment.ready(v["answer"])
                        for v in verdicts)):
         raise ValueError("C requires a satisfied final verdict for every feature")
     product = store.read(cursor.productVerdict) if cursor.productVerdict else None
-    if not product or product["commit"] != cursor.candidate or not questions.satisfied(product["answer"],
-                                                                                      final=True):
+    if not product or product["commit"] != cursor.candidate or not judgment.ready(product["answer"]):
         raise ValueError("C requires satisfied product quality and try-it guide on the final commit")
     gitwork.unchanged(store.root.parent, cursor.candidate)
 
@@ -172,7 +171,9 @@ class Run:
                            {"revision": cursor.revision, "plan": store.plan(cursor.revision),
                             "review": store.read(cursor.review)} if state == "B" else
                            {"commit": cursor.candidate,
-                            "units": {r: u.state for r, u in store.units().items()}})
+                            "units": {r: u.state for r, u in store.units().items()},
+                            **({"notJudged": judgment.not_judged(store), "deviation": "DV6"}
+                               if state == "C" else {})})
                 decisions.request(store, state, subject)
             decisions.decide(store, self.provider, self.user)
         elif state == "PLAN":

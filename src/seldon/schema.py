@@ -49,20 +49,28 @@ PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
                            provides=REFS, consumes=REFS, reads=REFS), 1),
            skeleton=array(POSITION),
            quality=array(obj(criterion={"type": "integer", "minimum": 1},
-                             level=choice("unit", "product"), checks=array(TEXT, 1)), 1))
+                             checks=array(TEXT, 1)), 1))
 
 
-def answer_schema(kind, targets=(), unit_criteria=()):
+# Fixed source obligations are assessed by every product unit JUDGE, independently of criteria.
+SOURCE_TARGETS = (
+    "No stubs, mocks or missing behaviour in this unit",
+    "Meaningful tests for this unit's requirements",
+    "This unit owns its stated responsibility",
+    "No reliance on sibling files without a declared contract or dependency",
+)
+
+
+def answer_schema(kind, targets=()):
     flag = {"type": "boolean"}
     assessment = obj(target=choice(*targets) if targets else TEXT, meaningful=flag,
                      noStubsMocksMissing=flag, why=TEXT)
     if kind == "JUDGE":
         requirement = obj(**{**assessment["properties"],
-                             "target": choice(*(t for t in targets if t not in unit_criteria))},
+                             "target": choice(*(t for t in targets if t not in SOURCE_TARGETS))},
                           exercisedAtP=flag, baselineDemonstrated=flag)
-        assessment = ({"anyOf": [requirement, obj(**{**assessment["properties"],
-                                                   "target": choice(*unit_criteria)})]}
-                      if unit_criteria else requirement)
+        assessment = {"anyOf": [requirement, obj(**{**assessment["properties"],
+                                                   "target": choice(*SOURCE_TARGETS)})]}
     payload = {
         "ALIGN": VISION, "PLAN": PLAN, "REPAIR": PLAN,
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
@@ -72,8 +80,7 @@ def answer_schema(kind, targets=(), unit_criteria=()):
         "DEMO": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
     }[kind]
-    uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1),
-                    **({"evidenceLevel": choice("unit", "product")} if kind in ("DEMO", "PRODUCT") else {}))
+    uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
     return obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in (payload, uncertain)]})
 
 

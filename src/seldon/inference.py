@@ -61,12 +61,23 @@ def call(store, provider, question, unit=None, check=lambda answer: None, max_by
         if kind in ("JUDGE", "DEMO", "PRODUCT"):
             if sorted(a["target"] for a in answer["assessments"]) != sorted(question["targets"]):
                 raise ValueError("Assess the exact requested subjects, each once")
+        if answer.get("verdict") == "satisfied" and not questions.satisfied(answer, final=kind != "JUDGE"):
+            raise ValueError("A negative assessment requires a gap verdict and correction: " + str(answer))
         check(answer)
 
     answer = questions.ask(invoke, question, recorded, validate)
     with store.transaction():
         result = store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit, "answer": answer})
         store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
-    if answer.get("verdict") == "uncertain" and kind not in ("DEMO", "PRODUCT"):
+    if answer.get("verdict") == "uncertain" and kind == "JUDGE":
+        if "Requested facts" not in question["facts"]:
+            limit = 2 * len(encode(question).encode("utf-8"))
+            reask = {**question, "facts": {**question["facts"], "Requested facts": answer["neededFacts"]}}
+            try:
+                return call(store, provider, reask, unit, check, limit)
+            except (questions.MissingFacts, questions.UnitTooLarge) as error:
+                answer = {**answer, "why": answer["why"] + "; " + str(error)}
+        answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
+    elif answer.get("verdict") == "uncertain" and kind not in ("DEMO", "PRODUCT"):
         raise questions.MissingFacts("Unresolved facts: " + "; ".join(answer["neededFacts"]))
     return result, answer
