@@ -3,7 +3,7 @@
 from dataclasses import replace
 from pathlib import Path
 
-from . import gitwork, inference, plan, proof, questions, units
+from . import gitwork, guide, inference, plan, proof, questions, units
 from .states import advance
 
 
@@ -15,8 +15,9 @@ def subjects(document, kind):
         "verification": plan.GUIDE_WORK, "checks": []}}
 
 
-def trace(document, kind, subject):
-    return {} if subject == "tryItGuide" else plan.traced_checks(document, subject)
+def trace(document, kind, subject, store=None):
+    return (guide.checks(store.root.parent) if store else {}) if subject == "tryItGuide" else \
+        plan.traced_checks(document, subject)
 
 
 def owners(document, kind, subject):
@@ -25,20 +26,39 @@ def owners(document, kind, subject):
     return plan.traced_units(document, trace(document, kind, subject))
 
 
-def brief(store, kind, subject, *, resolve=None):
+def scope_trees(store, owned):
+    cursor = store.cursor()
+    trees = {b["unit"]: b["scopeTree"] for r in cursor.finalObservations for b in [store.read(r)]
+             if b["unit"] in owned and b["commit"] == cursor.candidate}
+    if set(trees) != set(owned):
+        raise ValueError("Every reached unit needs its scope tree observed on the final commit")
+    return trees
+
+
+def current(verdict, trees):
+    return verdict["scopeTrees"] == {r: trees[r] for r in verdict["scopeTrees"]}
+
+
+def brief(store, kind, subject, *, resolve=None, trees=None):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
-    checks = trace(document, kind, subject)
+    checks = trace(document, kind, subject, store)
     refs = [r for r in cursor.finalObservations if store.read(r)["check"] in checks]
     if (cursor.finalCommit != cursor.candidate or {store.read(r)["check"] for r in refs} != set(checks)
             or any(store.read(r)["commit"] != cursor.finalCommit for r in refs)):
         raise ValueError("Judge evidence requires every traced check on the final commit")
     owned = owners(document, kind, subject)
     scopes = [p for u in owned.values() for p in u["scope"]]
-    patterns = [p for u in owned.values() for p in u["checkPaths"]]
-    # Scope ownership is the existing file trace; include helpers, not just command arguments.
-    files = gitwork.sources(store.root.parent, cursor.finalCommit, scopes, details=True)
-    sources = [p for p in files if plan.matches(p, patterns)]
+    trees = trees if trees is not None else scope_trees(store, owned)
+    verdicts = []
+    for ref in owned:
+        verdict = store.read(store.unit(ref).judgment)
+        commit = verdict["commit"]
+        unchanged = verdict["scopeTree"] == trees[ref]
+        if not unchanged:
+            raise ValueError(f"{ref} needs its unit JUDGE on the changed scope before final judgment")
+        verdicts.append({"unit": ref, "verdict": verdict.get("answer", {}).get("verdict", "guide written"),
+                         "commit": commit, "scopeFilesUnchangedSinceVerdict": unchanged})
     final = questions.observed(store, refs)
     for item, ref in zip(final, refs):
         body = store.read(ref)
@@ -47,7 +67,7 @@ def brief(store, kind, subject, *, resolve=None):
     obligation = ({k: v for k, v in body.items() if k != "features"} if kind == "DEMO" else
                   {k: body[k] for k in ("criterion", "verification")})
     facts = {"Subject": obligation, "Checks": checks, "Final observations": final,
-             "Check source paths": sources, "Files on the delivered revision": files,
+             "Unit verdicts": verdicts,
              "Reader's starting directory": str(store.root.parent.resolve())}
     artifacts = {}
     outputs = [item[key] for item in final for key in ("stdout", "stderr")]
@@ -65,16 +85,17 @@ def brief(store, kind, subject, *, resolve=None):
         facts["Check artifacts"] = artifacts
     if subject == "tryItGuide":
         facts["Guide file"] = {"path": plan.GUIDE_PATH, "commit": cursor.finalCommit,
-                               **{k: v for k, v in files.get(
-                                   plan.GUIDE_PATH, {"present": False, "bytes": 0}).items() if k != "text"}}
+                               "text": gitwork.git(store.root.parent, "show",
+                                                   f"{cursor.finalCommit}:{plan.GUIDE_PATH}")}
     if resolve is not None:
         # Rehydrate authoritative records through the same subject trace, never semantic keyword matching.
         facts["Requested facts"] = resolve
         facts["Code-established execution facts"] = [
-            {k: v for k, v in store.read(r).items() if k not in ("stdout", "stderr")} for r in refs]
+            {k: v for k, v in store.read(r).items() if k not in ("stdout", "stderr", "scopeTree")}
+            for r in refs]
         facts["Code-established coverage"] = {
             "commit": cursor.finalCommit, "checksPassed": not proof.failures(store, refs),
-            "scopes": scopes, "trackedFiles": list(files)}
+            "scopes": scopes}
     return questions.build(kind, facts, [subject], images=questions.images(store, refs))
 
 
@@ -86,10 +107,10 @@ def combined(verdicts):
             "why": "AND of the recorded subject verdicts"}
 
 
-def fixup(store, kind, subject, result, answer):
+def fixup(store, kind, subject, result, answer, affected=None):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
-    affected = owners(document, kind, subject)
+    affected = owners(document, kind, subject) if affected is None else affected
     failure = str(answer)
     with store.transaction():
         cause = store.record("fixup", {"subject": subject, "kind": kind, "source": result,
@@ -101,16 +122,17 @@ def fixup(store, kind, subject, result, answer):
             store.unit(ref, replace(row, base=cursor.candidate))
             units.recover(store, ref, failure)
         advance(store, "gap", cause, pendingJudge=None, finalCommit=None, finalObservations=[],
-                requirementVerdicts=[], qualityVerdicts=[], demoVerdicts=[], productVerdict=None,
+                demoVerdicts=[], productVerdict=None,
                 checkin=None, decision=None)
 
 
-def save(store, kind, subject, result, answer):
+def save(store, kind, subject, result, answer, trees):
     field = "requirementVerdicts" if kind == "DEMO" else "qualityVerdicts"
     with store.transaction():
         cursor = store.cursor()
         ref = store.record("subject_verdict", {"subject": subject, "kind": kind,
-            "commit": cursor.candidate, "answer": answer, "source": result})
+            "commit": cursor.candidate, "answer": answer, "source": result,
+            "scopeTrees": {r: trees[r] for r in owners(store.plan(cursor.revision), kind, subject)}})
         store.cursor(replace(cursor, **{field: getattr(cursor, field) + [ref]}, pendingJudge=None))
 
 
@@ -123,25 +145,46 @@ def step(store, provider):
     if (approved["revision"] != cursor.revision or approved["plan"] != document
             or approved["review"] != store.read(cursor.review)):
         raise ValueError("Final judgment requires B for this exact plan and review")
+    trees = scope_trees(store, plan.select(document, "unit"))
+    for ref, unit in plan.select(document, "unit").items():
+        row = store.unit(ref)
+        verdict = store.read(row.judgment)
+        if verdict["scopeTree"] == trees[ref]:
+            continue
+        refs = [r for r in cursor.finalObservations if store.read(r)["unit"] == ref]
+        evidence = [r for r in row.observations if store.read(r)["purpose"] != "P"] + refs
+        result, answer = inference.call(store, provider, questions.judge_brief(
+            store, ref, cursor.candidate, evidence))
+        if not questions.satisfied(answer):
+            fixup(store, kind, ref, result, answer, {ref: unit})
+            return
+        result = store.record("unit_verdict", {"commit": cursor.candidate, "scopeTree": trees[ref],
+                                               "answer": answer, "source": result})
+        with store.transaction():
+            store.unit(ref, replace(row, judgment=result))
+    with store.transaction():
+        cursor = replace(cursor, **{f: [r for r in getattr(cursor, f) if current(store.read(r), trees)]
+                                    for f in ("requirementVerdicts", "qualityVerdicts")})
+        store.cursor(cursor)
     if cursor.pendingJudge:
         pending = store.read(cursor.pendingJudge)
         subject = pending["subject"]
-        question = brief(store, kind, subject, resolve=pending["answer"]["neededFacts"])
+        question = brief(store, kind, subject, resolve=pending["answer"]["neededFacts"], trees=trees)
         result, answer = inference.call(store, provider, question)
         if not questions.satisfied(answer, final=True):
             fixup(store, kind, subject, result, answer)
             return
         with store.transaction():
-            save(store, kind, subject, result, answer)
+            save(store, kind, subject, result, answer, trees)
             advance(store, "resolved", result)
         return
     done = {store.read(r)["subject"] for r in getattr(cursor, field)}
     for subject in subjects(document, kind):
         if subject in done:
             continue
-        question = brief(store, kind, subject)
+        question = brief(store, kind, subject, trees=trees)
         refs = [r for r in cursor.finalObservations
-                if store.read(r)["check"] in trace(document, kind, subject)]
+                if store.read(r)["check"] in trace(document, kind, subject, store)]
         failed = proof.failures(store, refs)
         if failed:
             answer = {"verdict": "gap", "gaps": [{"target": subject, "correction": proof.explain(failed)}],
@@ -159,7 +202,7 @@ def step(store, provider):
         if not questions.satisfied(answer, final=True):
             fixup(store, kind, subject, result, answer)
             return
-        save(store, kind, subject, result, answer)
+        save(store, kind, subject, result, answer, trees)
     cursor = store.cursor()
     verdicts = [store.read(r) for r in getattr(cursor, field)]
     with store.transaction():

@@ -76,6 +76,18 @@ def sources(root, revision, patterns, named=None, *, details=False):
     return result
 
 
+def scope_tree(root, revision, patterns, scratch):
+    """Git's tree identity for the owned paths, preserving modes, deletions and names."""
+    entries = git(root, "ls-tree", "-rz", revision, binary=True).split(b"\0")
+    entries = [e for e in entries if e and matches(e.split(b"\t", 1)[1].decode("utf-8"), patterns)]
+    env = {"GIT_INDEX_FILE": str(Path(scratch) / ("index-" + uuid.uuid4().hex))}
+    if entries:
+        git(root, "update-index", "-z", "--index-info", data=b"\0".join(entries) + b"\0", env=env)
+    else:
+        git(root, "read-tree", "--empty", env=env)
+    return git(root, "write-tree", env=env)
+
+
 def snapshots(root, base, scope, check_paths, scratch):
     root = Path(root)
     # Include ignored new files too: the observed worktree, not the worker's declared file list.

@@ -63,7 +63,10 @@ def report(slot):
     counts = Counter(q["kind"] for q in questions)
     sizes = {kind: max(len(encode(q).encode("utf-8")) for q in questions if q["kind"] == kind)
              for kind in counts}
+    final = [q for q in questions if q["kind"] in ("DEMO", "PRODUCT")]
+    final_bytes = sum(len(encode(q).encode("utf-8")) for q in final)
     lines += ["Calls: " + encode(counts), "Largest questions (bytes): " + encode(sizes),
+              f"Final judgment: {len(final)} calls; {final_bytes} bytes.",
               f"Final commit: {cursor['finalCommit']}; observed checks: {len(cursor['finalObservations'])}.",
               "Usage is unknown unless recorded in native result/stream artifacts."]
     for _, kind, body in records:

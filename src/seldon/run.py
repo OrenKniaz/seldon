@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, gitwork, inference, judgment, plan, proof, questions, scheduler, units
+from . import decisions, gitwork, guide, inference, judgment, plan, proof, questions, scheduler, units
 from .states import advance
 from .store import RunRow, Store, UnitRow
 
@@ -19,18 +19,19 @@ def eligible(store):
             or any(u.state != "DONE" for u in store.units().values())):
         raise ValueError("C requires every unit DONE and final integrated proof after check-in")
     observations = [store.read(r) for r in cursor.finalObservations]
-    checks = set(plan.select(document, "check"))
+    checks = set(plan.select(document, "check")) | set(guide.checks(store.root.parent))
     green = {o["check"] for o in observations if o["commit"] == cursor.candidate and o["exitCode"] == 0}
     covered = {r for o in observations if o["check"] in green for r in o["requirements"]}
     if (checks != green or set(plan.select(document, "requirement")) - covered
             or proof.failures(store, cursor.finalObservations)):
         raise ValueError("Every requirement and check needs passing execution on the final commit")
     verdicts = [store.read(r) for r in cursor.demoVerdicts]
+    trees = judgment.scope_trees(store, plan.select(document, "unit"))
     for kind, refs in (("DEMO", cursor.requirementVerdicts), ("PRODUCT", cursor.qualityVerdicts)):
         rows = [store.read(r) for r in refs]
         if ({r["subject"] for r in rows} != set(judgment.subjects(document, kind))
                 or len(rows) != len(judgment.subjects(document, kind))
-                or not all(r["commit"] == cursor.candidate
+                or not all(judgment.current(r, trees)
                            and questions.satisfied(r["answer"], final=True) for r in rows)):
             raise ValueError("C requires every final subject's satisfied verdict")
     if ({v["feature"] for v in verdicts} != set(plan.select(document, "feature"))
@@ -62,7 +63,18 @@ def wave_verify(store, capacity):
     def observe_unit(ref):
         try:
             checks = assignments[ref]
-            return ref, proof.observe(store, store.root.parent, cursor.candidate, checks, "final", ref)
+            if ref == "guide":
+                try:
+                    checks = guide.checks(store.root.parent)
+                except ValueError as error:
+                    row = store.unit(ref)
+                    gitwork.checkout(row.worktree, cursor.candidate)
+                    store.unit(ref, replace(row, base=cursor.candidate))
+                    units.recover(store, ref, str(error))
+                    return ref, []
+            tree = gitwork.scope_tree(store.root.parent, cursor.candidate,
+                                      plan.select(document, "unit")[ref]["scope"], cursor.scratch)
+            return ref, proof.observe(store, store.root.parent, cursor.candidate, checks, "final", ref, tree)
         finally:
             store.close()
 
@@ -72,6 +84,9 @@ def wave_verify(store, capacity):
     observations = [r for _, refs in results for r in refs] + wave
     rework = False
     for ref, refs in results:
+        if store.unit(ref).state != "DONE":
+            rework = True
+            continue
         bad = proof.failures(store, refs)
         if bad:
             row = store.unit(ref)
@@ -86,7 +101,7 @@ def wave_verify(store, capacity):
         advance(store, "rework" if rework else "passed", observations,
                 finalCommit=None if rework else cursor.candidate,
                 finalObservations=[] if rework else observations, demoVerdicts=[], productVerdict=None,
-                requirementVerdicts=[], qualityVerdicts=[], pendingJudge=None)
+                pendingJudge=None)
 
 
 class Run:

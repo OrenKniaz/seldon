@@ -39,11 +39,10 @@ PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
 
 def answer_schema(kind, targets=()):
     flag = {"type": "boolean"}
-    path_field = "exercisedOnFinalUserPath" if kind in ("DEMO", "PRODUCT") else "exercisedAtP"
     assessment = obj(target=choice(*targets) if targets else TEXT, meaningful=flag,
-                     noStubsMocksMissing=flag, why=TEXT, **{path_field: flag})
+                     noStubsMocksMissing=flag, why=TEXT)
     if kind == "JUDGE":
-        assessment = obj(**assessment["properties"], baselineDemonstrated=flag)
+        assessment = obj(**assessment["properties"], exercisedAtP=flag, baselineDemonstrated=flag)
     payload = {
         "ALIGN": VISION, "PLAN": PLAN, "REPAIR": PLAN,
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),

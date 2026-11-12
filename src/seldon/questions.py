@@ -58,7 +58,7 @@ PROMPTS = {
              "Exit codes are CODE facts; interpret their meaning. A no on any obligation is a gap. "
              + JUDGMENT_LEEWAY,
     "DEMO": "Does this requirement's demonstrated behavior meet its obligation "
-            "without stubs, mocks or missing behavior? Inspect final observations, files and screenshots. "
+            "without stubs, mocks or missing behavior? Inspect final observations and screenshots. "
             "Identify the real user path and the observed evidence that exercised it "
             "(a browser interaction for a UI). " + JUDGMENT_LEEWAY,
     "PRODUCT": "Does this quality criterion hold in the delivered experience? "
@@ -96,10 +96,11 @@ def build(kind, facts, targets=(), execution=None, images=()):
             "sources."), "Judge coverage": {
             "Unit JUDGE": "Its own requirements, its checks, its T..P diff, outputs and screenshots. "
                           "No sibling or whole-product files.",
-            "DEMO": "One requirement with its traced checks, observations, screenshots and the files "
-                    "of every unit reached by those checks.",
-            "PRODUCT": "One criterion with its traced checks, observations, screenshots and the files "
-                       "of every unit reached by those checks.",
+            "DEMO": "One requirement's behaviour: traced checks, final observations, screenshots and "
+                    "each reached unit's JUDGE verdict and commit, with CODE confirming its scope unchanged.",
+            "PRODUCT": "One criterion's behaviour: traced checks, final observations, screenshots and "
+                       "each reached unit's JUDGE verdict and commit, with CODE confirming its "
+                       "scope unchanged.",
             "Scope rule": "A property is judged at the level whose scope owns every file it speaks "
                           "about. Trace coverage lists the units reached by each requirement and "
                           "criterion. Missing an owner is a gap on that trace."}}
@@ -130,9 +131,8 @@ def build(kind, facts, targets=(), execution=None, images=()):
 
 
 def assessments(targets, *, final=False):
-    exercise = "exercisedOnFinalUserPath" if final else "exercisedAtP"
-    return [{"target": target, "meaningful": True, exercise: True, "noStubsMocksMissing": True,
-             **({} if final else {"baselineDemonstrated": True}),
+    return [{"target": target, "meaningful": True, "noStubsMocksMissing": True,
+             **({} if final else {"exercisedAtP": True, "baselineDemonstrated": True}),
              "why": "The real interaction asserts the required observable behavior"} for target in targets]
 
 
@@ -206,20 +206,23 @@ def images(store, refs):
                              if Path(p).read_bytes().startswith((b"\x89PNG", b"\xff\xd8"))))
 
 
-def judge_brief(store, ref):
+def judge_brief(store, ref, commit=None, observations=None):
     unit = store.unit(ref)
     document = store.plan(store.cursor().revision)
     contract = plan.select(document, "unit")[ref]
+    root = store.root.parent if commit else unit.worktree
+    commit = commit or unit.P
     requirements = requirement_facts(document, contract["requirements"])
     facts = {"Requirements": requirements, "Checks": plan.assigned(document)[ref],
-             "Checkout coverage": "Other units' files are not in this checkout; behaviour across units "
+             "Checkout coverage": "Other units' files are outside this judgment; behaviour across units "
                                   "is proven at wave verify. This judgment covers only this unit's "
                                   "requirements against this unit's checks at P.",
-             "Check sources": gitwork.sources(unit.worktree, unit.P, contract["checkPaths"]),
-             "Product changes": gitwork.git(unit.worktree, "diff", "--no-ext-diff", "--no-textconv",
-                                            "--no-renames", unit.T, unit.P),
-             "Observations": observed(store, unit.observations)}
-    return build("JUDGE", facts, requirements, images=images(store, unit.observations))
+             "Check sources": gitwork.sources(root, commit, contract["checkPaths"]),
+             "Product changes": gitwork.git(root, "diff", "--no-ext-diff", "--no-textconv",
+                                            "--no-renames", unit.T, commit, "--", *contract["scope"]),
+             "Observations": observed(store, observations if observations is not None else unit.observations)}
+    return build("JUDGE", facts, requirements,
+                 images=images(store, observations if observations is not None else unit.observations))
 
 
 def ask(provider, question, record, check=lambda answer: None):
@@ -248,8 +251,7 @@ def ask(provider, question, record, check=lambda answer: None):
 
 
 def satisfied(answer, *, final=False):
-    exercise = "exercisedOnFinalUserPath" if final else "exercisedAtP"
     return (answer.get("verdict") == "satisfied" and not answer["gaps"]
-            and all((final or a.get("baselineDemonstrated") is True) and a["meaningful"]
-                    and a.get(exercise) is True and a["noStubsMocksMissing"]
+            and all((final or (a.get("baselineDemonstrated") is True and a.get("exercisedAtP") is True))
+                    and a["meaningful"] and a["noStubsMocksMissing"]
                     for a in answer["assessments"]))

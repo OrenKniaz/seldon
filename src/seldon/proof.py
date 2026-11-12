@@ -13,7 +13,7 @@ class UncertainCleanup(RuntimeError):
     pass
 
 
-def observe(store, root, commit, declarations, purpose, unit=None):
+def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
     observations = []
     setup = store.read(store.cursor().kickoff)["setup"]
     timeout = setup.get("providers", {}).get("check", ROLES["check"])["timeout"]
@@ -31,6 +31,8 @@ def observe(store, root, commit, declarations, purpose, unit=None):
         body.update(check=ref, unit=unit, commit=commit, purpose=purpose,
                     requirements=check["requirements"], command=check["command"], cwd=str(root),
                     evidenceFiles=files)
+        if scope_tree is not None:
+            body["scopeTree"] = scope_tree
         with store.transaction():
             observations.append(store.record("observation", body))
         if not result["cleanupVerified"]:

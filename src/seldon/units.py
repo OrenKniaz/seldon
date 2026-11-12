@@ -140,11 +140,16 @@ def run_unit(store, provider, ref):
                     if ref == "guide":
                         if not gitwork.git(unit.worktree, "show", f"{unit.P}:{plan.GUIDE_PATH}").strip():
                             raise ValueError("Write the try-it guide for the integrated product")
-                        result = store.record("guide_written", {"commit": unit.P, "path": plan.GUIDE_PATH})
+                        result = store.record("guide_written", {"commit": unit.P, "path": plan.GUIDE_PATH,
+                            "scopeTree": gitwork.scope_tree(unit.worktree, unit.P, contract["scope"],
+                                                            store.cursor().scratch)})
                     else:
                         result, answer = inference.call(store, provider, questions.judge_brief(store, ref))
                         if not questions.satisfied(answer):
                             raise ValueError("Judgment gap: " + str(answer))
+                        result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,
+                            "source": result, "scopeTree": gitwork.scope_tree(
+                                unit.worktree, unit.P, contract["scope"], store.cursor().scratch)})
                     advance(store, "approved", result, unit=ref, judgment=result)
                 elif unit.state == "INTEGRATING":
                     integrate(store, ref, checks)

@@ -8,7 +8,11 @@ from .schema import BODIES, PLAN, VISION, validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_WORK = ("Write the try-it guide for the integrated product. Give exact project-relative steps "
-              "from the delivered product folder, the expected results and the user's real interaction.")
+              "from the delivered product folder, the expected results and the user's real interaction. "
+              "Put every named path in a Markdown link to its project-relative path. Put every command, "
+              "if the product has any that finish on their own, in an argv fenced block containing a "
+              "JSON string array, in execution order. "
+              "Use prose for expected results and manual interactions.")
 
 
 def safe_path(value):

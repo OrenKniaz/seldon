@@ -16,7 +16,7 @@ import pytest
 from seldon import gitwork, judgment, plan, questions
 from seldon.providers import Codex, ProviderFailure, ROLES
 from seldon.run import Run
-from seldon.store import RunRow, Store, encode
+from seldon.store import RunRow, Store, UnitRow, encode
 
 VISION = {"size": "tiny", "understanding": "Read named values", "users": ["CLI user"],
           "scopeIn": ["Named values"], "scopeOut": [], "improvements": [],
@@ -131,7 +131,19 @@ if mode == "parallel" and name in ("unit-001", "unit-002", "unit-003"):
 if guide:
     path = Path(facts["Guide path"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("Try it yourself\nRun python -B unit-001/check.py and observe value-001.\n")
+    command = [sys.executable, "-B", "unit-001/check.py"]
+    if mode == "guide-command" and turn == 1:
+        command = [sys.executable, "-B", "-c", "raise SystemExit(7)"]
+    linked = "unit-001/absent.txt" if mode == "guide-path" and turn == 1 else "unit-001/check.py"
+    note = "Clarify the expected result" if mode == "guide-gap" and turn == 1 else "Observe value-001"
+    if mode == "final-rework":
+        note = "Observe final-compatible value"
+    path.write_text("Try it yourself\nRead [the value check](" + linked + ").\n"
+                    + "```argv\n" + json.dumps(command) + "\n```\n" + note + "\n")
+    if mode == "guide-format" and turn == 1:
+        # A shell-string command is refused; commands must be argv arrays (guide.py).
+        path.write_text("Try it yourself: read [the value](unit-001/value.txt).\n"
+                        "```sh\npython unit-001/check.py\n```\n")
 else:
     number = int(name.split("-")[1])
     Path(name).mkdir(exist_ok=True)
@@ -191,10 +203,17 @@ else:
             value = "value-001-final"
     if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved") and number == 1:
         Path(name, "interaction.txt").write_text("ready" if turn > 1 else "blocked")
+        source += f"print('interaction', Path('{name}/interaction.txt').read_text())\n"
         if turn > 1:
             source += f"assert Path('{name}/interaction.txt').read_text() == 'ready'\n"
     Path(name, "check.py").write_text(source)
     Path(name, "value.txt").write_text(value)
+    if mode in ("single1", "scale50"):
+        recorded = json.loads((slot / "recorded-judgment.json").read_text("utf-8"))["files"]
+        Path(name, "index.html").write_text(recorded["index.html"])
+        Path(name, "styles.css").write_text(recorded["styles.css"])
+        comments = "\n".join("# " + line for line in recorded["checks/shell.cjs"].splitlines())
+        Path(name, "check.py").write_text(comments + "\n" + source)
     if mode == "wave-start" and name == "unit-002":
         Path(name, "check.py").write_text(
             "from pathlib import Path\nassert Path('unit-001/value.txt').read_text()=='value-001'\n"
@@ -298,25 +317,31 @@ class Scripted:
             if kind in ("DEMO", "PRODUCT"):
                 assert len(q["targets"]) == 1
                 facts = q["facts"]
-                files = facts["Files on the delivered revision"]
+                assert "Files on the delivered revision" not in facts and "Check source paths" not in facts
+                reached = {v["unit"] for v in facts["Unit verdicts"]}
+                assert all(v["scopeFilesUnchangedSinceVerdict"] for v in facts["Unit verdicts"])
                 if q["targets"] == ["tryItGuide"]:
                     guide = facts["Guide file"]
-                    assert guide["present"] and guide["bytes"] > 0 and len(guide["commit"]) == 40
-                    assert "Try it yourself" in files[guide["path"]]["text"]
-                    assert "text" not in guide
-                    assert list(files) == [plan.GUIDE_PATH] and not q["images"]
+                    assert "Try it yourself" in guide["text"] and len(guide["commit"]) == 40
+                    assert reached == {"guide"}
+                    assert len(facts["Final observations"]) == 2
+                    assert all(o["exitCode"] == 0 for o in facts["Final observations"])
+                    expected = "observed final-compatible value" if self.mode == "final-rework" else \
+                        "observed value-001"
+                    assert expected in facts["Final observations"][-1]["stdout"]
+                    if self.mode == "guide-gap" and "Clarify the expected result" in guide["text"]:
+                        answer.update(verdict="gap", gaps=[{"target": "tryItGuide",
+                            "correction": "Explain that the command prints observed value-001"}])
                 elif self.mode == "review-repair" and q["targets"] == ["quality:002"]:
-                    assert {p: b["text"] for p, b in files.items() if p.endswith("value.txt")} == {
-                        "unit-001/value.txt": "value-001", "unit-002/value.txt": "value-002"}
+                    assert reached == {"u001", "u002"}
+                    assert {o["stdout"].strip() for o in facts["Final observations"]} == {
+                        "observed value-001", "observed value-002"}
                 elif self.mode == "parallel" and kind == "DEMO" and q["targets"] == ["n002"]:
-                    assert {p.split("/")[0] for p in files} == {"unit-001", "unit-002", "unit-004"}
+                    assert reached == {"u001", "u002", "u004"}
                 elif self.mode in ("single1", "scale50", "traced-evidence"):
                     expected = ("002" if kind == "PRODUCT" and self.mode == "traced-evidence" else
-                                next(p.split("/")[0][-3:] for p in files))
-                    helper = {f"unit-{expected}/helper.py"} if self.mode == "traced-evidence" else set()
-                    assert set(files) == {f"unit-{expected}/check.py", f"unit-{expected}/value.txt"} | helper
-                    assert files[f"unit-{expected}/value.txt"]["text"] == f"value-{expected}"
-                    assert set(facts["Check source paths"]) == {f"unit-{expected}/check.py"} | helper
+                                next(iter(reached))[-3:])
+                    assert reached == {"u" + expected}
                     assert len(facts["Final observations"]) == len(q["images"]) == 1
                     observation = facts["Final observations"][0]
                     assert observation["command"][-1] == f"unit-{expected}/check.py"
@@ -334,7 +359,7 @@ class Scripted:
                 if kind == "PRODUCT" and self.mode == "user-path" and q["targets"] != ["tryItGuide"]:
                     output = [o["stdout"] for o in facts["Final observations"]]
                     assert output and all(t.strip() == "observed value-001" for t in output)
-                    answer["assessments"][0].update(exercisedOnFinalUserPath=False,
+                    answer["assessments"][0].update(meaningful=False,
                         why="The stored value was read, but there is no browser observation")
                 prefix = kind.lower()
                 is_subject = q["targets"] == (["n002"] if kind == "DEMO" else ["quality:001"])
@@ -348,8 +373,7 @@ class Scripted:
                     assert actual["commit"] == facts["Code-established coverage"]["commit"]
                     assert facts["Code-established coverage"]["checksPassed"]
                 if is_subject and self.mode in (prefix + "-gap", prefix + "-unresolved"):
-                    interaction = files.get("unit-001/interaction.txt", {})
-                    if interaction.get("text") == "blocked":
+                    if any("interaction blocked" in o["stdout"] for o in facts["Final observations"]):
                         if self.mode.endswith("-unresolved"):
                             return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                                 "Demonstrate that the interaction is ready, not blocked"],
@@ -371,6 +395,9 @@ class Scripted:
                     answer["assessments"][0]["exercisedAtP"] = False
                     answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
                         "correction": "The check skipped its assertion at P; exercise the real requirement"}])
+                if self.mode == "stale-scope" and any("lost assertion" in s for s in sources.values()):
+                    answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                        "correction": "Integration lost the assertion; restore the persisted-value check"}])
         answer["why"] = "The supplied facts support this semantic answer"
         return json.dumps({"answer": answer})
 
@@ -383,6 +410,8 @@ def prepare(slot, mode, count):
     slot.mkdir(parents=True)
     (slot / "mode").write_text(mode)
     (slot / "native.py").write_text(NATIVE, encoding="utf-8")
+    if mode in ("single1", "scale50"):
+        shutil.copyfile(Path(__file__).with_name("recorded_judgment.json"), slot / "recorded-judgment.json")
     # Unmodified WORK reply from real-lead-37/calls/call-1f443145374a4d80b31136b7ebf9e4c0/answer.txt.
     # Its removed fields must receive exact schema corrections, not fabricated compatibility credit.
     shutil.copyfile(Path(__file__).with_name("recorded_work.json"), slot / "recorded-work.json")
@@ -414,9 +443,11 @@ def finish(run):
     assert len([b for _, k, b in rows if k == "product_verdict"]) == 1
     final_questions = [b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]
     assert all(len(q["targets"]) == 1 for q in final_questions)
-    initial = [q for q in final_questions if "Requested facts" not in q["facts"]
-               and all(o["commit"] == cursor.candidate for o in q["facts"]["Final observations"])]
     for subject in plan.select(run.store.plan(cursor.revision), "criterion"):
+        verdict, = [run.store.read(r) for r in cursor.qualityVerdicts
+                    if run.store.read(r)["subject"] == subject]
+        initial = [q for q in final_questions if "Requested facts" not in q["facts"]
+                   and all(o["commit"] == verdict["commit"] for o in q["facts"]["Final observations"])]
         assert sum(q["targets"] == [subject] for q in initial) == 1
     observations = [b for _, kind, b in rows if kind == "observation"]
     for obs in observations:
@@ -450,6 +481,53 @@ def admission_journey(slot):
         failures = [b for _, kind, b in rows if kind == "unit_failure"]
         assert len(failures) == 1 and failures[0]["state"] == "READY"
         assert "occupied" in failures[0]["failure"] and units["u001"].recoveries == 1
+    finally:
+        run.close()
+
+
+def stale_scope_journey(slot):
+    """A merge losing a check assertion must reach its unit JUDGE before DEMO.
+
+    Ordinary disjoint merges keep the unit's scope intact and never challenge a stale unit verdict.
+    """
+    from unittest.mock import patch
+
+    run, _ = prepare(slot, "stale-scope", 2)
+    integrate = gitwork.integrated
+    injected = set()
+
+    def lost_assertion(project, scratch, base, product, current):
+        commit = integrate(project, scratch, base, product, current)
+        for number in (1, 2):
+            path = f"unit-{number:03}/check.py"
+            if number in injected or path not in gitwork.paths(project, commit):
+                continue
+            injected.add(number)
+            env = {"GIT_INDEX_FILE": str(slot / "fault-index")}
+            gitwork.git(project, "read-tree", commit, env=env)
+            source = (b"# lost assertion\nprint('observed value-001')\n" if number == 1 else
+                      b"# integration annotation\n" + gitwork.git(project, "show", f"{commit}:{path}",
+                                                                 binary=True))
+            blob = gitwork.git(project, "hash-object", "-w", "--stdin", data=source)
+            gitwork.git(project, "update-index", "--cacheinfo", f"100644,{blob},{path}", env=env)
+            commit = gitwork.commit(project, gitwork.git(project, "write-tree", env=env), commit)
+        return commit
+
+    try:
+        with patch.object(gitwork, "integrated", lost_assertion):
+            _, rows, units = finish(run)
+        assert units["u001"].recoveries == 1 and units["u002"].recoveries == 0
+        judgments = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
+                     and b["targets"] == ["n002"]]
+        assert len(judgments) == 3
+        assert "lost assertion" in judgments[1]["facts"]["Check sources"]["unit-001/check.py"]
+        assert "unit-002" not in judgments[1]["facts"]["Product changes"]
+        sibling = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
+                   and b["targets"] == ["n005"]]
+        assert len(sibling) == 2 and "integration annotation" in sibling[1]["facts"]["Check sources"][
+            "unit-002/check.py"]
+        final = next(b for _, k, b in rows if k == "question" and b["kind"] == "DEMO")
+        assert final["facts"]["Unit verdicts"][0]["scopeFilesUnchangedSinceVerdict"]
     finally:
         run.close()
 
@@ -489,7 +567,7 @@ def simple_journey(slot, mode, count=1):
             cursor = run.run()
             outcome = run.store.records("outcome")[-1][2]
             assert cursor.state == "INCOMPLETE" and not outcome["verification_complete"]
-            assert "exercisedOnFinalUserPath" in outcome["reason"]
+            assert "there is no browser observation" in outcome["reason"]
             assert not any(b["gate"] == "C" for _, _, b in run.store.records("decision_request"))
             return
         if mode == "exhaust":
@@ -567,6 +645,14 @@ def simple_journey(slot, mode, count=1):
             if mode.endswith("-unresolved"):
                 retries = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
                 assert len(retries) == 1
+        if mode in ("guide-gap", "guide-command", "guide-path", "guide-format"):
+            assert units["guide"].recoveries == 1 and units["u001"].recoveries == 0
+            assert (slot / "turn-docs").read_text() == "2"
+            assert len([b for _, k, b in rows if k == "question" and b["kind"] == "DEMO"]) == count
+            assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"
+                        and b["targets"] != ["tryItGuide"]]) == 2
+            assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"
+                        and b["targets"] == ["tryItGuide"]]) == (2 if mode == "guide-gap" else 1)
         if mode == "user-revise":
             aligns = [b for _, _, b in run.store.records("question") if b["kind"] == "ALIGN"]
             assert len(aligns) == 2
@@ -600,9 +686,14 @@ def simple_journey(slot, mode, count=1):
         if mode in ("single1", "scale50"):
             final = [run.store.read(r) for r in cursor.finalObservations]
             demos = [b for _, k, b in rows if k == "question" and b["kind"] == "DEMO"]
+            final = [o for o in final if o["unit"] != "guide"]
             assert len(final) == count and len(demos) == count
             assert {o["check"] for q in demos for o in q["facts"]["Final observations"]} == {
                 o["check"] for o in final}
+        from tests.seldon.run_report import report
+        output, _ = report(slot)
+        print(mode + ": " + next(line for line in output.splitlines() if line.startswith("Final judgment:")),
+              flush=True)
         return sizes
     finally:
         run.close()
@@ -748,19 +839,23 @@ def test_clean_core_golden(tmp_path):
     wrongly integrate it. Judge uncertainty still returns only its own unit to its worker.
     Windows native Access-is-denied wording must stop after one call; generic transport faults
     otherwise retry a denied operation and the successful native journey never exposes it.
-    Subject traces include the final shipped files, imported check helpers, supplemental JSON artifacts
+    Subject traces include unit verdicts, supplemental JSON artifacts
     and delivered-folder observations; a standalone check and stdout alone cannot expose lost evidence.
     Artifact overlap with stdout/stderr is sent once, while output truncated by the observer must
     retain its full artifact; small supplemental-only evidence cannot catch either regression.
     Every criterion needs its own PRODUCT verdict, even when all its checks passed. A trace naming two
     units but reaching one must repair before B; success-only review cannot catch unavailable files.
-    Final cross-unit requirements include every traced owner; unit judges retain only their own files.
+    Final cross-unit requirements include every traced owner's verdict; only unit judges read source.
     Uncertainty twins prove a store fact resolves without rework; persistent uncertainty and real gaps
     must repair an actual blocked interaction through its original owner, preserving unrelated DONE work.
     Existing success-only journeys cannot expose the old all-DONE/INCOMPLETE failure or false satisfaction.
-    One versus fifty compares DEMO and PRODUCT too, with multiple requirements per feature to expose
+    One versus fifty uses real Foundation source sizes and compares DEMO and PRODUCT too,
+    with multiple requirements per feature to expose
     feature-wide evidence growth that one-requirement-per-feature plans cannot catch.
     Reopening a terminal failure preserves state and records; interrupted recovery cannot prove this.
+    Guide command/path faults catch guide prose passing without execution. A docs-only semantic fix
+    preserves all other final verdicts; the old all-verdict reset is invisible in pre-final failures.
+    Lost/annotated integration scopes exercise both outcomes of the owning unit's renewed JUDGE.
     """
     clean_core_golden(tmp_path / "suite")
 
@@ -769,7 +864,7 @@ def recorded_judgment_journey(root):
     """Real Foundation sources catch duplicate payload growth hidden by the tiny scripted files.
 
     Replay Git -> canonical Store -> final briefs, retaining the recorded supplemental JSON that
-    stdout does not contain. A size reduction must preserve all source and supplemental text.
+    stdout does not contain. A size reduction must preserve behaviour evidence while removing source.
     """
     recording = json.loads(Path(__file__).with_name("recorded_judgment.json").read_text("utf-8"))
     root.mkdir()
@@ -783,25 +878,32 @@ def recorded_judgment_journey(root):
     gitwork.git(root, "update-ref", "HEAD", commit)
     store = Store(root)
     try:
+        scratch = root.parent / (root.name + "-scratch")
+        scratch.mkdir()
         revision = store.revision(recording["plan"])
         artifacts = {p: store.artifact(text.encode("utf-8"), "recording")
                      for p, text in recording["artifacts"].items()}
         artifacts.update({p: store.artifact(base64.b64decode(data), "recording")
                           for p, data in recording["images"].items()})
         refs = [store.record("observation", {**body, "commit": commit, "cwd": str(root),
+                    "scopeTree": gitwork.scope_tree(root, commit, plan.select(
+                        recording["plan"], "unit")[body["unit"]]["scope"], scratch),
                     "evidenceFiles": [artifacts[p] for p in body["evidenceFiles"]]})
                 for body in recording["observations"].values()]
-        store.cursor(RunRow(revision=revision, candidate=commit, finalCommit=commit,
+        store.cursor(RunRow(revision=revision, candidate=commit, finalCommit=commit, scratch=str(scratch),
                             finalObservations=refs))
+        for ref, unit in plan.select(recording["plan"], "unit").items():
+            verdict = store.record("unit_verdict", {"commit": commit, "answer": {"verdict": "satisfied"},
+                "scopeTree": gitwork.scope_tree(root, commit, unit["scope"], scratch)})
+            store.unit(ref, UnitRow(state="DONE", P=commit, judgment=verdict))
         for case in recording["cases"]:
             question = judgment.brief(store, case["kind"], case["subject"])
             size = len(encode(question).encode("utf-8"))
             assert size < case["maxBytes"], (case["kind"], size, case["beforeBytes"])
             facts = question["facts"]
             assert question["images"] == [artifacts[p] for p in recording["images"]]
-            for path, source in facts["Files on the delivered revision"].items():
-                assert source["text"] == recording["files"][path]
-                assert encode(facts).count(encode(source["text"])[1:-1]) == 1
+            assert "Files on the delivered revision" not in facts and "Check source paths" not in facts
+            assert all(encode(source)[1:-1] not in encode(facts) for source in recording["files"].values())
             for artifact in facts["Check artifacts"].values():
                 if "text" in artifact:
                     assert artifact["text"] in recording["artifacts"].values()
@@ -818,6 +920,7 @@ def clean_core_golden(root):
     recorded_judgment_journey(root / "recorded-judgment")
     baseline = simple_journey(root / "single1", "single1")
     admission_journey(root / "admission")
+    stale_scope_journey(root / "stale-scope")
     modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
              ("timeout", 1),
              ("exhaust", 4), ("parallel", 4), ("review-repair", 2), ("final-rework", 2),
@@ -825,7 +928,8 @@ def clean_core_golden(root):
              ("big-source", 2), ("big-product", 2), ("user-revise", 1), ("wave-start", 2),
              ("native-denied", 2)]
     modes.extend([("traced-evidence", 2), ("demo-uncertain", 1), ("product-uncertain", 1),
-                  ("demo-gap", 2), ("product-gap", 2), ("demo-unresolved", 2), ("product-unresolved", 2)])
+                  ("demo-gap", 2), ("product-gap", 2), ("demo-unresolved", 2), ("product-unresolved", 2),
+                  ("guide-gap", 2), ("guide-command", 1), ("guide-path", 1), ("guide-format", 1)])
 
     def run_case(item):
         mode, count = item
