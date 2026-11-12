@@ -112,10 +112,14 @@ def review(store, feature, source, answer, *, reasked=False):
         verdict = store.record("feature_verdict", {
             "feature": feature, "commit": cursor.candidate, "answer": answer,
             "source": source, "scopeTrees": trees})
-        gaps = ([{"subject": feature, "kind": "flow", "commit": cursor.candidate,
-                  "units": list(trees), "correction": "; ".join(g["correction"] for g in answer["gaps"]),
-                  "source": verdict}]
-                if answer["verdict"] == "gap" else [])
+        corrections = {}
+        for gap in answer["gaps"]:
+            corrections.setdefault(gap["target"], []).append(gap["correction"])
+        document = store.plan(cursor.revision)
+        gaps = [{"subject": feature, "kind": "flow", "commit": cursor.candidate,
+                 "units": list(plan.traced_units(document, plan.traced_checks(document, requirement))),
+                 "correction": "; ".join(items), "source": verdict}
+                for requirement, items in corrections.items()]
     return {"verdict": verdict, "pending": None, "gaps": gaps}
 
 
