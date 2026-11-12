@@ -213,11 +213,23 @@ def judge_brief(store, ref, commit=None, observations=None):
     root = store.root.parent if commit else unit.worktree
     commit = commit or unit.P
     requirements = requirement_facts(document, contract["requirements"])
+    sources = gitwork.blobs(root, commit, [*contract["scope"], *contract["checkPaths"]])
+    checks, product = {}, {}
+    for path, content in sources.items():
+        if plan.matches(path, contract["checkPaths"]):
+            checks[path] = content.decode("utf-8", errors="replace")
+        elif plan.matches(path, contract["scope"]):
+            try:
+                product[path] = content.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
     facts = {"Requirements": requirements, "Checks": plan.assigned(document)[ref],
              "Checkout coverage": "Other units' files are outside this judgment; behaviour across units "
                                   "is proven at wave verify. This judgment covers only this unit's "
                                   "requirements against this unit's checks at P.",
-             "Check sources": gitwork.sources(root, commit, contract["checkPaths"]),
+             "Check sources": checks,
+             # The unit's whole product source at P: a rebased rework can leave the T..P diff empty (T-86).
+             "Product files at P": product,
              "Product changes": gitwork.git(root, "diff", "--no-ext-diff", "--no-textconv",
                                             "--no-renames", unit.T, commit, "--", *contract["scope"]),
              "Observations": observed(store, observations if observations is not None else unit.observations)}

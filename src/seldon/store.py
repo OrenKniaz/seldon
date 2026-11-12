@@ -9,6 +9,7 @@ import types
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
+from functools import lru_cache
 from typing import get_args, get_origin, get_type_hints
 
 
@@ -62,6 +63,11 @@ class UnitRow:
     waiting: str = ""
 
 
+@lru_cache(maxsize=None)
+def row_hints(model):
+    return get_type_hints(model)
+
+
 def checked(value, model):
     if type(value) is not model:
         raise ValueError(f"Expected {model.__name__}")
@@ -74,13 +80,13 @@ def checked(value, model):
             return type(item) is list and all(matches(child, get_args(hint)[0]) for child in item)
         return type(item) is hint
 
-    for name, hint in get_type_hints(model).items():
+    for name, hint in row_hints(model).items():
         if not matches(getattr(value, name), hint):
             raise ValueError(f"{model.__name__}.{name}: expected {hint}")
     from .states import RUN, UNIT
     if value.state not in (RUN if model is RunRow else UNIT):
         raise ValueError(f"Unknown {model.__name__} state: {value.state}")
-    return encode(asdict(value))
+    return value
 
 
 def decoded(body, model):
@@ -144,7 +150,7 @@ class Store:
     def unit(self, ref, value=None):
         if value is not None:
             self.db.execute("INSERT INTO unit VALUES (?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
-                            (ref, checked(value, UnitRow)))
+                            (ref, encode(asdict(checked(value, UnitRow)))))
         row = self.db.execute("SELECT body FROM unit WHERE id=?", (ref,)).fetchone()
         return decoded(row[0], UnitRow) if row else None
 
@@ -152,7 +158,7 @@ class Store:
         if value is not None:
             self.db.execute("INSERT INTO run VALUES(1,?) "
                             "ON CONFLICT(id) DO UPDATE SET cursor=excluded.cursor",
-                            (checked(value, RunRow),))
+                            (encode(asdict(checked(value, RunRow))),))
         row = self.db.execute("SELECT cursor FROM run WHERE id=1").fetchone()
         return decoded(row[0], RunRow) if row else None
 

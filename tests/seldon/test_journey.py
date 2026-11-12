@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -38,7 +39,7 @@ def planned(count, mode):
                 "contract": f"Read value-{i:03}", "features": [f]}},
             {"kind": "check", "targetHandle": c, "typedBody": {
                 "purpose": f"Read value {i:03}", "mode": "establishes",
-                "command": [sys.executable, "-B", f"{directory}/check.py"],
+                "command": [sys.executable, "-S", "-B", f"{directory}/check.py"],
                 "requiredEnvironment": ["Python"], "expectedEvidence": "Actual persisted value",
                 "requirements": [r]}}])
         deps = []
@@ -60,11 +61,11 @@ def planned(count, mode):
         edits[10]["typedBody"]["obligation"] += "; preserve dependency value-001"
         edits.append({"kind": "check", "targetHandle": "new:wave", "typedBody": {
             "purpose": "Read the three integrated values together", "mode": "preserves",
-            "command": [sys.executable, "-B", "unit-004/compose.py"], "requiredEnvironment": ["Python"],
+            "command": [sys.executable, "-S", "-B", "unit-004/compose.py"], "requiredEnvironment": ["Python"],
             "expectedEvidence": "All independent values together", "requirements": ["new:r001", "new:r002"]}})
         edits.append({"kind": "check", "targetHandle": "new:preserve", "typedBody": {
             "purpose": "Preserve the integrated dependency value", "mode": "preserves",
-            "command": [sys.executable, "-B", "-c",
+            "command": [sys.executable, "-S", "-B", "-c",
                         "from pathlib import Path; "
                         "assert Path('unit-001/value.txt').read_text()=='value-001'"],
             "requiredEnvironment": ["Python"], "expectedEvidence": "Existing dependency is unchanged",
@@ -73,7 +74,7 @@ def planned(count, mode):
         edits[1]["typedBody"]["obligation"] += "; preserve the claimed existing value"
         edits.append({"kind": "check", "targetHandle": "new:preserve", "typedBody": {
             "purpose": "Preserve the claimed existing value", "mode": "preserves",
-            "command": [sys.executable, "-B", "unit-001/check.py"],
+            "command": [sys.executable, "-S", "-B", "unit-001/check.py"],
             "requiredEnvironment": ["Python"], "expectedEvidence": "A value already present at base",
             "requirements": ["new:r001"]}})
     if mode == "scale50":
@@ -132,12 +133,14 @@ if guide:
     path = Path(facts["Guide path"])
     path.parent.mkdir(parents=True, exist_ok=True)
     # Like a real guide, the walkthrough step writes an output folder where it runs (T-84).
-    command = [sys.executable, "-B", "-c", "import os, subprocess, sys; os.makedirs('guide-output', exist_ok=True); "
-               "sys.exit(subprocess.call([sys.executable, '-B', 'unit-001/check.py']))"]
+    command = [sys.executable, "-S", "-B", "-c", "import os, subprocess, sys; "
+               "os.makedirs('guide-output', exist_ok=True); "
+               "sys.exit(subprocess.call([sys.executable, '-S', '-B', 'unit-001/check.py']))"]
     if mode == "guide-command" and turn == 1:
-        command = [sys.executable, "-B", "-c", "raise SystemExit(7)"]
+        command = [sys.executable, "-S", "-B", "-c", "raise SystemExit(7)"]
     linked = "unit-001/absent.txt" if mode == "guide-path" and turn == 1 else "unit-001/check.py"
-    note = "Clarify the expected result" if mode == "guide-gap" and turn == 1 else "Observe value-001"
+    note = "Clarify the expected result" if mode in ("guide-gap", "final-seed") and turn == 1 else \
+        "Observe value-001"
     if mode == "final-rework":
         note = "Observe final-compatible value"
     path.write_text("Try it yourself\nRead [the value check](" + linked + ").\n"
@@ -195,6 +198,11 @@ else:
                   "    (control/'kill-ready').write_text(str(os.getpid()))\n"
                   "    time.sleep(30)\n" + source)
     if mode == "final-rework" and name == "unit-001":
+        retired = Path(name, "retired value.bin")
+        if turn == 1:
+            retired.write_bytes(b"\0retired")
+        else:
+            retired.unlink(missing_ok=True)
         source = ("from pathlib import Path\n"
                   "if Path('unit-002/value.txt').exists():\n"
                   "    assert Path('unit-001/value.txt').read_text() == 'value-001-final'\n"
@@ -203,7 +211,8 @@ else:
                   "print('observed final-compatible value')\n")
         if turn > 1:
             value = "value-001-final"
-    if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved") and number == 1:
+    if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved", "final-seed") \
+            and number == 1:
         Path(name, "interaction.txt").write_text("ready" if turn > 1 else "blocked")
         source += f"print('interaction', Path('{name}/interaction.txt').read_text())\n"
         if turn > 1:
@@ -254,7 +263,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":0,"output_toke
 class Scripted:
     def __init__(self, slot, mode, count):
         self.slot, self.mode, self.count = Path(slot), mode, count
-        self.setup = {"providers": deepcopy(ROLES), "codexCommand": [sys.executable, "-B",
+        self.setup = {"providers": deepcopy(ROLES), "codexCommand": [sys.executable, "-S", "-B",
             str(self.slot / "native.py"), str(self.slot)], "scriptedUser": True,
             "userOrigin": "scripted journey", "python": {"path": sys.executable}}
         self.native = Codex(self.slot / "calls", self.setup)
@@ -387,6 +396,10 @@ class Scripted:
                 assert "other units' files" in q["facts"]["Checkout coverage"].lower()
                 sources = q["facts"]["Check sources"]
                 assert sources, "Judge needs actual check sources"
+                # Every unit judgment, rework included, sees its own whole product source at P (T-86).
+                product = q["facts"]["Product files at P"]
+                assert product and not set(product) & set(sources), product
+                assert all(p.split("/")[0] == next(iter(sources)).split("/")[0] for p in product), product
                 if self.mode == "review-repair" and q["targets"]:
                     directory = "unit-001" if q["targets"] == ["n002"] else "unit-002"
                     assert set(sources) == {directory + "/check.py"}
@@ -471,6 +484,8 @@ def admission_journey(slot):
     admit = gitwork.admit
 
     def try_admit(project, scratch, base):
+        if Path(project) != run.project:
+            return admit(project, scratch, base)
         target = occupied if occupied.exists() else scratch
         try:
             return admit(project, target, base)
@@ -500,6 +515,8 @@ def stale_scope_journey(slot):
 
     def lost_assertion(project, scratch, base, product, current):
         commit = integrate(project, scratch, base, product, current)
+        if Path(project) != run.project:
+            return commit
         for number in (1, 2):
             path = f"unit-{number:03}/check.py"
             if number in injected or path not in gitwork.paths(project, commit):
@@ -534,8 +551,55 @@ def stale_scope_journey(slot):
         run.close()
 
 
-def simple_journey(slot, mode, count=1):
-    run, provider = prepare(slot, mode, count)
+def final_seed(slot):
+    """One actual scripted delivery supplies final-judge faults with real Git and proof records."""
+    run, _ = prepare(slot, "final-seed", 2)
+    try:
+        while run.store.cursor().state != "DEMO-JUDGE":
+            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            run.step()
+    finally:
+        run.close()
+    return slot
+
+
+def copy_final(seed, slot, mode):
+    """Relocate a closed store and all its Git worktrees; only path prefixes change in its history."""
+    shutil.copytree(seed, slot, copy_function=shutil.copyfile)
+    prefixes = [(str(seed.resolve()), str(slot.resolve())),
+                (seed.resolve().as_posix(), slot.resolve().as_posix())]
+
+    def relocate(value):
+        if isinstance(value, str):
+            for old, new in prefixes:
+                value = value.replace(old, new)
+            return value
+        if isinstance(value, list):
+            return [relocate(v) for v in value]
+        if isinstance(value, dict):
+            return {relocate(k): relocate(v) for k, v in value.items()}
+        return value
+
+    with sqlite3.connect(slot / "product/.seldon/state.sqlite3") as db:
+        for table, column in (("run", "cursor"), ("unit", "body"), ("record", "body"),
+                              ("plan_revision", "document")):
+            for row, body in db.execute(f"SELECT rowid,{column} FROM {table}").fetchall():
+                db.execute(f"UPDATE {table} SET {column}=? WHERE rowid=?",
+                           (encode(relocate(json.loads(body))), row))
+    # Git's links and the scripted provider's recorded launches also contain absolute paths.
+    for path in slot.rglob("*"):
+        if path.is_file() and (path.suffix in (".json", ".jsonl") or path.name in (".git", "gitdir")):
+            text = path.read_text("utf-8")
+            for old, new in prefixes:
+                text = text.replace(encode(old)[1:-1], encode(new)[1:-1]).replace(old, new)
+            path.write_text(text, encoding="utf-8")
+    (slot / "mode").write_text(mode)
+    provider = Scripted(slot, mode, 2)
+    return Run.reopen(slot / "product", provider, approve), provider
+
+
+def simple_journey(slot, mode, count=1, *, seed=None):
+    run, provider = copy_final(seed, slot, mode) if seed else prepare(slot, mode, count)
     try:
         if mode in ("judge-provider", "big-source", "big-product", "check-deadline", "native-denied"):
             cursor = run.run()
@@ -617,6 +681,14 @@ def simple_journey(slot, mode, count=1):
             if mode == "skipped":
                 assert any(k == "unit_failure" and "skipped its assertion" in b["failure"]
                            for _, k, b in rows)
+        if mode == "final-rework":
+            patches = [b for _, k, b in rows if k == "patch" and b["unit"] == "u001"]
+            # A rework deletes a real binary path containing a space. T must retain the old product;
+            # P and delivery must contain the deletion. Text-only additions miss both regressions.
+            for commit in (patches[0]["P"], patches[-1]["T"]):
+                assert gitwork.git(run.project, "show", f"{commit}:unit-001/retired value.bin",
+                                   binary=True) == b"\0retired"
+            assert not (run.project / "unit-001/retired value.bin").exists()
         if mode == "parallel":
             launches = [json.loads((slot / f"launch-unit-{i:03}.jsonl").read_text().splitlines()[0])
                         for i in (1, 2, 3)]
@@ -920,16 +992,15 @@ def clean_core_golden(root):
         os.environ[key] = str(root)
     began = time.monotonic()
     recorded_judgment_journey(root / "recorded-judgment")
-    baseline = simple_journey(root / "single1", "single1")
-    admission_journey(root / "admission")
-    stale_scope_journey(root / "stale-scope")
+    prepared = {"demo-uncertain", "product-uncertain", "demo-gap", "product-gap",
+                "demo-unresolved", "product-unresolved", "guide-gap"}
     modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
              ("timeout", 1),
              ("exhaust", 4), ("parallel", 4), ("review-repair", 2), ("final-rework", 2),
              ("schema-fix", 1), ("plan-overlap", 2), ("user-path", 1), ("judge-provider", 2),
              ("big-source", 2), ("big-product", 2), ("user-revise", 1), ("wave-start", 2),
              ("native-denied", 2)]
-    modes.extend([("traced-evidence", 2), ("demo-uncertain", 1), ("product-uncertain", 1),
+    modes.extend([("traced-evidence", 2), ("demo-uncertain", 2), ("product-uncertain", 2),
                   ("demo-gap", 2), ("product-gap", 2), ("demo-unresolved", 2), ("product-unresolved", 2),
                   ("guide-gap", 2), ("guide-command", 1), ("guide-path", 1), ("guide-format", 1)])
 
@@ -939,14 +1010,31 @@ def clean_core_golden(root):
         if mode.startswith("kill-"):
             crash_journey(root / mode, mode)
         else:
-            simple_journey(root / mode, mode, count)
+            simple_journey(root / mode, mode, count, seed=seed_task.result() if mode in prepared else None)
         print(f"M1 {mode}: {time.monotonic() - start:.2f}s", flush=True)
 
     for mode in ("kill-work", "kill-fresh", "kill-invalid", "kill-blocked", "kill-report",
                  "kill-proof", "kill-intent", "kill-apply"):
         modes.append((mode, 2))
     with ThreadPoolExecutor(max_workers=4) as pool:
+        baseline_task = pool.submit(simple_journey, root / "single1", "single1")
+        admission_task = pool.submit(admission_journey, root / "admission")
+        stale_task = pool.submit(stale_scope_journey, root / "stale-scope")
+        seed_task = pool.submit(final_seed, root / "final-seed")
         list(pool.map(run_case, modes))
+        baseline = baseline_task.result()
+        admission_task.result()
+        stale_task.result()
+        seed = seed_task.result()
+    # A copied fault must never mutate its shared seed through an old store/Git/provider path.
+    store = Store(seed / "product")
+    try:
+        assert store.cursor().state == "DEMO-JUDGE"
+        gitwork.unchanged(seed / "product", store.cursor().candidate)
+        assert all((seed / name).read_text() == "1" for name in
+                   ("turn-unit-001", "turn-unit-002", "turn-docs"))
+    finally:
+        store.close()
     start = time.monotonic()
     scale = simple_journey(root / "scale50", "scale50", 50)
     scale_seconds = time.monotonic() - start
