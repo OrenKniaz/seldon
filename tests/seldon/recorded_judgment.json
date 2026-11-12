@@ -1,0 +1,497 @@
+{
+  "source": "C:\\seldon\\tests\\m1\\foundation-230667c-c01",
+  "plan": {
+    "nodes": {
+      "guide": {
+        "body": {
+          "checkPaths": [
+            "docs/try-it.md"
+          ],
+          "dependencies": [
+            "u001",
+            "u002",
+            "u003",
+            "u004",
+            "u005"
+          ],
+          "instructions": "Write the try-it guide for the integrated product. Give exact project-relative steps from the delivered product folder, the expected results and the user's real interaction.",
+          "requirements": [],
+          "scope": [
+            "docs/try-it.md"
+          ]
+        },
+        "kind": "unit"
+      },
+      "n001": {
+        "body": {
+          "acceptance": "Opening index.html directly from disk presents Foundation and three side-by-side Play controls at desktop and mobile sizes, without external dependencies or horizontal overflow.",
+          "story": "As a visitor, I can open a small, accessible Foundation page with a restrained mission-control visual direction.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n002": {
+        "body": {
+          "acceptance": "Each native button reveals its exact message directly beneath itself. Repeated activation is idempotent, siblings remain unchanged, and removing any component script does not disable the others.",
+          "story": "As a visitor, I can independently reveal each of the three messages using a pointer or keyboard.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n003": {
+        "body": {
+          "contract": "index.html supplies the Foundation document title and heading, three native buttons with distinct accessible names, and three initially empty, hidden message targets beneath their respective controls. Use IDs hello-button/hello-message, name-button/name-message and foundation-button/foundation-message. Each message target sits inside its own persistent polite live region. Classic deferred scripts reference scripts/hello.js, scripts/name.js and scripts/foundation.js.",
+          "design": "Use index.html and styles.css only for shared structure and styling. Provide an ink-black canvas, warm-white Georgia heading, Arial labels, sharp amber Play triangles, crisp rectangular controls and visible keyboard focus. Keep three evenly spaced columns at both 1280×800 and 390×844; allow message text to wrap within its column. Avoid nested cards, downloaded assets and fonts.",
+          "features": [
+            "n001",
+            "n002"
+          ],
+          "obligation": "Provide the responsive, accessible static shell and stable ownership boundaries for three independent components."
+        },
+        "kind": "requirement"
+      },
+      "n004": {
+        "body": {
+          "contract": "Activating hello-button by pointer, Enter or Space makes hello-message visible with exactly \"Hello, world!\". Repeated activation leaves one copy visible. Only this component's message is changed.",
+          "design": "scripts/hello.js attaches a click handler to its native button and updates only its own target. Depend only on the shell's DOM contract; do not import, call or require sibling scripts. Do not toggle visibility off.",
+          "features": [
+            "n002"
+          ],
+          "obligation": "Own and implement the first button/message pair in its own script."
+        },
+        "kind": "requirement"
+      },
+      "n005": {
+        "body": {
+          "contract": "Activating name-button by pointer, Enter or Space makes name-message visible with exactly \"My name is Seldon\". Repeated activation leaves one copy visible. Only this component's message is changed.",
+          "design": "scripts/name.js attaches a click handler to its native button and updates only its own target. Depend only on the shell's DOM contract; do not import, call or require sibling scripts. Do not toggle visibility off.",
+          "features": [
+            "n002"
+          ],
+          "obligation": "Own and implement the second button/message pair in its own script."
+        },
+        "kind": "requirement"
+      },
+      "n006": {
+        "body": {
+          "contract": "Activating foundation-button by pointer, Enter or Space makes foundation-message visible with exactly \"This is the Foundation\". Repeated activation leaves one copy visible. Only this component's message is changed.",
+          "design": "scripts/foundation.js attaches a click handler to its native button and updates only its own target. Depend only on the shell's DOM contract; do not import, call or require sibling scripts. Do not toggle visibility off.",
+          "features": [
+            "n002"
+          ],
+          "obligation": "Own and implement the third button/message pair in its own script."
+        },
+        "kind": "requirement"
+      },
+      "n007": {
+        "body": {
+          "contract": "The delivered index.html works via file URL with all network requests denied, without page errors, dialogs or navigation. Sequential activation preserves each sibling's current state and the control layout. With each component script omitted in turn, its message stays hidden and both remaining components still reveal their exact messages without errors.",
+          "design": "Keep the delivered product to static HTML, CSS and three independent classic scripts. Verify the canonical page in the supplied Edge runtime. Collect actual screenshots for Seldon's visual judgment; do not introduce a server, dependency manifest, build step or shared component runtime.",
+          "features": [
+            "n001",
+            "n002"
+          ],
+          "obligation": "Prove the assembled product's offline operation and script-failure isolation."
+        },
+        "kind": "requirement"
+      },
+      "n008": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/shell.cjs"
+          ],
+          "expectedEvidence": "Passing assertions for title, heading, native button roles, unique accessible names, initially hidden messages, persistent polite live regions, tab order and visible focus. At both required viewport sizes, assert ordered side-by-side control bounds, readable computed contrast, message placement and no horizontal overflow; save real screenshots in SELDON_EVIDENCE_DIR.",
+          "mode": "establishes",
+          "purpose": "Protect the actual shell's accessibility and responsive layout against unnamed controls, missing focus treatment and a mobile row that overflows. Component behavior checks do not cover these shell responsibilities. Inspect computed styles and rendered geometry rather than source text.",
+          "requiredEnvironment": [
+            "Supplied Node executable",
+            "Supplied playwright-core package and Edge executable",
+            "Writable SELDON_EVIDENCE_DIR"
+          ],
+          "requirements": [
+            "n003"
+          ]
+        },
+        "kind": "check"
+      },
+      "n009": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/hello.cjs"
+          ],
+          "expectedEvidence": "On the canonical file page with only hello.js enabled, fresh-page pointer, Enter and Space cases each reveal exactly Hello, world!; repeated activation leaves one visible copy and the sibling targets unchanged.",
+          "mode": "establishes",
+          "purpose": "Protect the first component against wrong copy, toggle behavior, duplicate insertion and keyboard-only failures. Shell checks cannot establish component behavior; the integrated check focuses on composition and isolation rather than repeating input-method cases.",
+          "requiredEnvironment": [
+            "Supplied Node executable",
+            "Supplied playwright-core package and Edge executable"
+          ],
+          "requirements": [
+            "n004"
+          ]
+        },
+        "kind": "check"
+      },
+      "n010": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/name.cjs"
+          ],
+          "expectedEvidence": "On the canonical file page with only name.js enabled, fresh-page pointer, Enter and Space cases each reveal exactly My name is Seldon; repeated activation leaves one visible copy and the sibling targets unchanged.",
+          "mode": "establishes",
+          "purpose": "Protect the second independently authored component against wrong copy, toggle behavior, duplicate insertion and keyboard-only failures. Neither shell checks nor another component's tests exercise this script.",
+          "requiredEnvironment": [
+            "Supplied Node executable",
+            "Supplied playwright-core package and Edge executable"
+          ],
+          "requirements": [
+            "n005"
+          ]
+        },
+        "kind": "check"
+      },
+      "n011": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/foundation.cjs"
+          ],
+          "expectedEvidence": "On the canonical file page with only foundation.js enabled, fresh-page pointer, Enter and Space cases each reveal exactly This is the Foundation; repeated activation leaves one visible copy and the sibling targets unchanged.",
+          "mode": "establishes",
+          "purpose": "Protect the third independently authored component against wrong copy, toggle behavior, duplicate insertion and keyboard-only failures. Neither shell checks nor another component's tests exercise this script.",
+          "requiredEnvironment": [
+            "Supplied Node executable",
+            "Supplied playwright-core package and Edge executable"
+          ],
+          "requirements": [
+            "n006"
+          ]
+        },
+        "kind": "check"
+      },
+      "n012": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/integration.cjs"
+          ],
+          "expectedEvidence": "The real file URL loads with zero attempted network requests, page errors, failed local resources, dialogs or navigation. Sequential activation changes only the intended target and preserves control bounds. Three omission cases each leave the omitted message hidden while both remaining components work. Save initial and fully revealed Edge screenshots at 1280×800 and 390×844 in SELDON_EVIDENCE_DIR.",
+          "mode": "establishes",
+          "purpose": "Catch composition-only defects such as shared global collisions, sibling resets, external resource dependence and hidden script coupling. Isolated component checks cannot expose interactions between simultaneously loaded scripts or prove the assembled offline page.",
+          "requiredEnvironment": [
+            "Supplied Node executable",
+            "Supplied playwright-core package and Edge executable",
+            "Writable SELDON_EVIDENCE_DIR"
+          ],
+          "requirements": [
+            "n007"
+          ]
+        },
+        "kind": "check"
+      },
+      "quality:001": {
+        "body": {
+          "checks": [
+            "n008",
+            "n012"
+          ],
+          "criterion": "Distinctive visual direction: an ink-black canvas, warm-white Georgia headline, Arial control labels, and sharp amber Play triangles; three evenly spaced pieces with readable contrast and no nested cards.",
+          "judgment": true,
+          "verification": "Inspect actual Edge screenshots at 1280×800 and 390×844; confirm the visual direction, readable labels, side-by-side controls and no horizontal overflow."
+        },
+        "kind": "criterion"
+      },
+      "quality:002": {
+        "body": {
+          "checks": [
+            "n009",
+            "n010",
+            "n011",
+            "n012"
+          ],
+          "criterion": "Each Play button reveals only its exact associated message: \"Hello, world!\", \"My name is Seldon\", or \"This is the Foundation\". Repeated activation leaves the message visible without duplicates.",
+          "judgment": false,
+          "verification": "Using supplied Playwright and Edge, open the local HTML file, activate each button independently and in sequence, and assert exact messages and unchanged sibling state."
+        },
+        "kind": "criterion"
+      },
+      "quality:003": {
+        "body": {
+          "checks": [
+            "n008",
+            "n009",
+            "n010",
+            "n011"
+          ],
+          "criterion": "All three controls are native buttons with distinct accessible names, visible keyboard focus, and Enter/Space activation; revealed messages are available to assistive technology.",
+          "judgment": false,
+          "verification": "Use Playwright to inspect button names and live-region markup, tab through all controls, and verify both keyboard activation methods reveal the correct messages."
+        },
+        "kind": "criterion"
+      },
+      "quality:004": {
+        "body": {
+          "checks": [
+            "n009",
+            "n010",
+            "n011",
+            "n012"
+          ],
+          "criterion": "The page works directly from disk without a server, network access or external dependencies. Each button/message pair is owned by a separate script with no sibling-script dependency.",
+          "judgment": false,
+          "verification": "Open the file URL in Edge with network requests blocked and check for errors; omit each component script in turn in the browser test and confirm the other two still work. Inspect script ownership for separate component logic."
+        },
+        "kind": "criterion"
+      },
+      "u001": {
+        "body": {
+          "checkPaths": [
+            "checks/shell.cjs"
+          ],
+          "dependencies": [],
+          "instructions": "Implement only the shared page shell and styling, including the agreed component IDs and deferred script references. Author the shell check against the actual file page using the supplied Playwright package and Edge. When component files are not yet integrated, deliberately fulfill only their three script requests with empty bodies so the shell can be checked without fixtures replacing its DOM. Do not author component logic. Save screenshots, close the browser on success or failure, and keep focus/style assertions automated.",
+          "requirements": [
+            "n003"
+          ],
+          "scope": [
+            "index.html",
+            "styles.css",
+            "checks/shell.cjs"
+          ]
+        },
+        "kind": "unit"
+      },
+      "u002": {
+        "body": {
+          "checkPaths": [
+            "checks/hello.cjs"
+          ],
+          "dependencies": [
+            "u001"
+          ],
+          "instructions": "Implement the first component using only its agreed DOM targets. Author a standalone check that opens the canonical index.html and suppresses only the other two script requests with empty bodies. Exercise this real script, not a fixture implementation. Use the supplied runtime, block network access and close the browser reliably. Do not edit the shell or sibling scripts.",
+          "requirements": [
+            "n004"
+          ],
+          "scope": [
+            "scripts/hello.js",
+            "checks/hello.cjs"
+          ]
+        },
+        "kind": "unit"
+      },
+      "u003": {
+        "body": {
+          "checkPaths": [
+            "checks/name.cjs"
+          ],
+          "dependencies": [
+            "u001"
+          ],
+          "instructions": "Implement the second component using only its agreed DOM targets. Author a standalone check that opens the canonical index.html and suppresses only the other two script requests with empty bodies. Exercise this real script, not a fixture implementation. Use the supplied runtime, block network access and close the browser reliably. Do not edit the shell or sibling scripts.",
+          "requirements": [
+            "n005"
+          ],
+          "scope": [
+            "scripts/name.js",
+            "checks/name.cjs"
+          ]
+        },
+        "kind": "unit"
+      },
+      "u004": {
+        "body": {
+          "checkPaths": [
+            "checks/foundation.cjs"
+          ],
+          "dependencies": [
+            "u001"
+          ],
+          "instructions": "Implement the third component using only its agreed DOM targets. Author a standalone check that opens the canonical index.html and suppresses only the other two script requests with empty bodies. Exercise this real script, not a fixture implementation. Use the supplied runtime, block network access and close the browser reliably. Do not edit the shell or sibling scripts.",
+          "requirements": [
+            "n006"
+          ],
+          "scope": [
+            "scripts/foundation.js",
+            "checks/foundation.cjs"
+          ]
+        },
+        "kind": "unit"
+      },
+      "u005": {
+        "body": {
+          "checkPaths": [
+            "checks/integration.cjs"
+          ],
+          "dependencies": [
+            "u002",
+            "u003",
+            "u004"
+          ],
+          "instructions": "Author and run the integrated browser check against the delivered index.html and real component scripts. Deny and record every HTTP(S) request; do not run a server. For omission cases, fulfill exactly one script request with an empty body without changing product files. Check sequential sibling-state preservation and stable control positions, and capture initial/revealed screenshots at both required sizes. Use the supplied absolute Playwright package and Edge paths, resolve the page relative to the check file, and close the browser reliably. Return product defects to their existing owners rather than editing outside this scope. No manual or visual approval may be required for command completion. The supplied Seldon guide unit remains responsible for docs/try-it.md.",
+          "requirements": [
+            "n007"
+          ],
+          "scope": [
+            "checks/integration.cjs"
+          ]
+        },
+        "kind": "unit"
+      },
+      "vision": {
+        "body": {
+          "improvements": [
+            "Reveal each message directly beneath its own button without dialogs, navigation or disturbing the other pieces.",
+            "Use a restrained mission-control aesthetic with crisp rectangular Play controls and a clear Foundation title."
+          ],
+          "quality": [
+            {
+              "criterion": "Distinctive visual direction: an ink-black canvas, warm-white Georgia headline, Arial control labels, and sharp amber Play triangles; three evenly spaced pieces with readable contrast and no nested cards.",
+              "verification": "Inspect actual Edge screenshots at 1280×800 and 390×844; confirm the visual direction, readable labels, side-by-side controls and no horizontal overflow."
+            },
+            {
+              "criterion": "Each Play button reveals only its exact associated message: \"Hello, world!\", \"My name is Seldon\", or \"This is the Foundation\". Repeated activation leaves the message visible without duplicates.",
+              "verification": "Using supplied Playwright and Edge, open the local HTML file, activate each button independently and in sequence, and assert exact messages and unchanged sibling state."
+            },
+            {
+              "criterion": "All three controls are native buttons with distinct accessible names, visible keyboard focus, and Enter/Space activation; revealed messages are available to assistive technology.",
+              "verification": "Use Playwright to inspect button names and live-region markup, tab through all controls, and verify both keyboard activation methods reveal the correct messages."
+            },
+            {
+              "criterion": "The page works directly from disk without a server, network access or external dependencies. Each button/message pair is owned by a separate script with no sibling-script dependency.",
+              "verification": "Open the file URL in Edge with network requests blocked and check for errors; omit each component script in turn in the browser test and confirm the other two still work. Inspect script ownership for separate component logic."
+            }
+          ],
+          "scopeIn": [
+            "One static page titled Foundation with three side-by-side Play-style buttons and initially hidden, independent inline messages.",
+            "Three separate component script files, each owning one button and its message; shared page layout and styling.",
+            "Responsive spacing, accessible keyboard interaction, and verification using the supplied local Edge runtime."
+          ],
+          "scopeOut": [
+            "Server, accounts, dependencies, downloaded assets or fonts.",
+            "Audio playback, pause/stop behavior, navigation, persistence or additional content."
+          ],
+          "size": "small",
+          "understanding": "Build a polished, dependency-free Foundation page where three independently implemented Play controls each reveal their specified message.",
+          "unknowns": [],
+          "users": [
+            "Visitors opening the page locally with a mouse, touch or keyboard."
+          ]
+        },
+        "kind": "vision"
+      }
+    }
+  },
+  "files": {
+    "checks/integration.cjs": "'use strict';\n\n// Protects composition against shared globals, sibling resets, layout shifts,\n// external resources and script coupling. Isolated component checks cannot\n// expose interactions between all three real scripts or one absent sibling.\nconst assert = require('node:assert/strict');\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst { pathToFileURL } = require('node:url');\nconst { chromium } = require('C:\\\\Users\\\\oren\\\\codex-harness\\\\ui\\\\node_modules\\\\.pnpm\\\\playwright-core@1.59.1\\\\node_modules\\\\playwright-core');\n\nconst root = path.resolve(__dirname, '..');\nconst fileURL = relative => pathToFileURL(path.join(root, relative)).href;\nconst pageURL = fileURL('index.html');\nconst evidence = process.env.SELDON_EVIDENCE_DIR;\nassert.ok(evidence, 'SELDON_EVIDENCE_DIR must identify a writable evidence directory');\nfs.mkdirSync(evidence, { recursive: true });\n\nconst components = [\n  { id: 'hello', name: 'Play hello', text: 'Hello, world!' },\n  { id: 'name', name: 'Play introduction', text: 'My name is Seldon' },\n  { id: 'foundation', name: 'Play Foundation', text: 'This is the Foundation' },\n];\nconst report = { passed: false, pageURL, cases: [] };\n\nasync function snapshot(page) {\n  return page.evaluate(ids => {\n    const bounds = node => {\n      const { x, y, width, height } = node.getBoundingClientRect();\n      return { x, y, width, height };\n    };\n    return {\n      overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth,\n      pieces: ids.map(id => {\n        const message = document.getElementById(`${id}-message`);\n        const button = document.getElementById(`${id}-button`);\n        const style = getComputedStyle(message);\n        return {\n          id, hidden: message.hidden, text: message.textContent,\n          visible: message.getClientRects().length > 0 && style.visibility === 'visible',\n          count: document.querySelectorAll(`[id=\"${id}-message\"]`).length,\n          button: bounds(button), message: bounds(message),\n          exposed: !message.closest('[hidden], [aria-hidden=\"true\"]'),\n        };\n      }),\n    };\n  }, components.map(component => component.id));\n}\n\nfunction verifyState(state, revealed, original, viewport, label) {\n  assert.equal(state.overflow, false, `${label}: no horizontal overflow`);\n  for (const [i, piece] of state.pieces.entries()) {\n    const expected = revealed.has(piece.id);\n    assert.equal(piece.count, 1, `${label}: one ${piece.id} target`);\n    assert.equal(piece.hidden, !expected, `${label}: ${piece.id} hidden state`);\n    assert.equal(piece.visible, expected, `${label}: ${piece.id} rendered state`);\n    assert.equal(piece.text, expected ? components[i].text : '', `${label}: exact ${piece.id} text`);\n    if (expected) {\n      assert.ok(piece.exposed, `${label}: ${piece.id} accessible to assistive technology`);\n      assert.ok(piece.message.x >= 0 && piece.message.x + piece.message.width <= viewport.width + 0.5,\n        `${label}: ${piece.id} message fits horizontally`);\n      assert.ok(piece.message.y >= 0 && piece.message.y + piece.message.height <= viewport.height + 0.5,\n        `${label}: ${piece.id} message fits screenshot`);\n    }\n    for (const axis of ['x', 'y', 'width', 'height']) {\n      assert.ok(Math.abs(piece.button[axis] - original.pieces[i].button[axis]) < 0.5,\n        `${label}: ${piece.id} control ${axis} stays fixed`);\n    }\n  }\n}\n\nasync function bodyOutside(page, target) {\n  return page.evaluate(id => {\n    const body = document.body.cloneNode(true);\n    body.querySelector(`#${id}-message`).replaceWith(document.createComment('activation target'));\n    return body.innerHTML;\n  }, target);\n}\n\nasync function checkCase(browser, viewport, omitted = null) {\n  const label = `${viewport.width}x${viewport.height}-${omitted ? `omit-${omitted}` : 'complete'}`;\n  const result = {\n    label, omitted, passed: false, networkRequests: [], pageErrors: [], consoleErrors: [],\n    failedResources: [], dialogs: [], navigations: [], popups: [], substitutions: [],\n    requests: [], screenshots: [], activations: [],\n  };\n  report.cases.push(result);\n  const context = await browser.newContext({ viewport, reducedMotion: 'reduce', serviceWorkers: 'block' });\n  let page;\n  try {\n    context.setDefaultTimeout(10000);\n    context.setDefaultNavigationTimeout(10000);\n    const allowedResources = [pageURL, fileURL('styles.css'), ...components.map(c => fileURL(`scripts/${c.id}.js`))];\n    const omittedURL = omitted ? fileURL(`scripts/${omitted}.js`) : null;\n    let admittedDocument = false;\n    context.on('request', request => {\n      const url = request.url();\n      result.requests.push({ url, type: request.resourceType() });\n      if (/^https?:/i.test(url)) result.networkRequests.push({ url, method: request.method() });\n    });\n    context.on('requestfailed', request => {\n      result.failedResources.push({ url: request.url(), error: request.failure()?.errorText });\n    });\n    context.on('response', response => {\n      if (response.status() >= 400) result.failedResources.push({ url: response.url(), status: response.status() });\n    });\n    await context.route('**/*', async route => {\n      const request = route.request();\n      const url = request.url();\n      // Every HTTP(S) attempt is recorded by the request listener and denied.\n      if (/^https?:/i.test(url)) return route.abort('blockedbyclient');\n      if (request.isNavigationRequest()) {\n        if (url !== pageURL || admittedDocument) return route.abort('blockedbyclient');\n        admittedDocument = true;\n      }\n      if (url === omittedURL) {\n        result.substitutions.push(url);\n        assert.equal(result.substitutions.length, 1, `${label}: replace exactly one script request`);\n        return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });\n      }\n      return route.continue();\n    });\n    page = await context.newPage();\n    const observePage = observed => {\n      observed.on('pageerror', error => result.pageErrors.push(error.message));\n      observed.on('console', message => {\n        if (message.type() === 'error') result.consoleErrors.push(message.text());\n      });\n      observed.on('dialog', async dialog => {\n        result.dialogs.push({ type: dialog.type(), message: dialog.message() });\n        await dialog.dismiss();\n      });\n      observed.on('framenavigated', frame => result.navigations.push(frame.url()));\n    };\n    observePage(page);\n    context.on('page', popup => {\n      result.popups.push(popup.url());\n      observePage(popup);\n    });\n    await page.goto(pageURL, { waitUntil: 'load' });\n    assert.equal(page.url(), pageURL, `${label}: canonical file URL`);\n    assert.equal(await page.getByRole('button').count(), 3, `${label}: three native controls`);\n    for (const component of components) {\n      const button = page.getByRole('button', { name: component.name, exact: true });\n      assert.equal(await button.count(), 1, `${label}: distinct ${component.id} accessible name`);\n      assert.equal(await button.evaluate(node => node.tagName), 'BUTTON');\n      assert.equal(await button.getAttribute('aria-controls'), `${component.id}-message`);\n      const region = page.locator(`#${component.id}-message`).locator('..');\n      assert.equal(await region.getAttribute('aria-live'), 'polite');\n      assert.equal(await region.getAttribute('aria-atomic'), 'true');\n    }\n    const scripts = await page.locator('script').evaluateAll(nodes => nodes.map(node => ({\n      src: node.src, type: node.type, inline: node.textContent.trim(),\n    })));\n    assert.deepEqual(scripts, components.map(c => ({ src: fileURL(`scripts/${c.id}.js`), type: '', inline: '' })),\n      `${label}: actual three classic component scripts`);\n    const initial = await snapshot(page);\n    result.initialControls = initial.pieces.map(piece => piece.button);\n    const revealed = new Set();\n    verifyState(initial, revealed, initial, viewport, label);\n    for (let i = 0; i < initial.pieces.length; i++) {\n      const control = initial.pieces[i].button;\n      assert.ok(control.x >= 0 && control.x + control.width <= viewport.width + 0.5 &&\n        control.y >= 0 && control.y + control.height <= viewport.height, `${label}: control in viewport`);\n      assert.ok(control.width >= 44 && control.height >= 44, `${label}: usable target`);\n      if (i) {\n        const previous = initial.pieces[i - 1].button;\n        assert.ok(control.x > previous.x + previous.width, `${label}: side-by-side controls`);\n        assert.ok(Math.abs(control.y - previous.y) < 0.5, `${label}: aligned controls`);\n        assert.ok(Math.abs(control.width - previous.width) < 0.5, `${label}: equal control widths`);\n      }\n    }\n    const [a, b, c] = initial.pieces.map(piece => piece.button);\n    assert.ok(Math.abs((b.x - a.x - a.width) - (c.x - b.x - b.width)) < 0.5,\n      `${label}: even spacing`);\n    if (!omitted) {\n      const filename = `integration-${viewport.width}x${viewport.height}-initial.png`;\n      await page.screenshot({ path: path.join(evidence, filename) });\n      result.screenshots.push(filename);\n    }\n\n    // A non-DOM activation order and a repeated reverse pass exercise both\n    // hidden and revealed sibling states, catching resets and duplicate text.\n    for (const id of ['name', 'hello', 'foundation', 'foundation', 'hello', 'name']) {\n      const before = await bodyOutside(page, id);\n      await page.getByRole('button', { name: components.find(c => c.id === id).name, exact: true }).click();\n      if (id !== omitted) revealed.add(id);\n      verifyState(await snapshot(page), revealed, initial, viewport, `${label} after ${id}`);\n      assert.equal(await bodyOutside(page, id), before, `${label}: ${id} changes only its message`);\n      result.activations.push(id);\n    }\n    if (!omitted) {\n      const filename = `integration-${viewport.width}x${viewport.height}-revealed.png`;\n      await page.screenshot({ path: path.join(evidence, filename) });\n      result.screenshots.push(filename);\n    }\n    assert.deepEqual(result.substitutions, omitted ? [omittedURL] : [], `${label}: only the designated omission`);\n    assert.deepEqual(result.requests.map(request => request.url).sort(), [...allowedResources].sort(),\n      `${label}: HTML, CSS and each real script requested exactly once; no extra resources`);\n    assert.deepEqual(result.networkRequests, [], `${label}: zero attempted HTTP(S) requests`);\n    assert.deepEqual(result.failedResources, [], `${label}: no failed resources`);\n    assert.deepEqual(result.pageErrors, [], `${label}: no page errors`);\n    assert.deepEqual(result.consoleErrors, [], `${label}: no console errors`);\n    assert.deepEqual(result.dialogs, [], `${label}: no dialogs`);\n    assert.deepEqual(result.navigations, [pageURL], `${label}: only initial document navigation`);\n    assert.deepEqual(result.popups, [], `${label}: no popup navigation`);\n    result.passed = true;\n    console.log(`PASS ${label}: six sequential activations, exact sibling state, fixed controls, offline isolation`);\n  } catch (error) {\n    result.error = error.stack || String(error);\n    if (page && !page.isClosed()) {\n      const filename = `integration-${label}-failure.png`;\n      await page.screenshot({ path: path.join(evidence, filename) }).then(() => result.screenshots.push(filename)).catch(() => {});\n    }\n    throw error;\n  } finally {\n    await context.close();\n  }\n}\n\n(async () => {\n  let browser;\n  try {\n    browser = await chromium.launch({\n      headless: true,\n      executablePath: 'C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe',\n    });\n    report.browserVersion = browser.version();\n    for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {\n      await checkCase(browser, viewport);\n    }\n    for (const component of components) await checkCase(browser, { width: 1280, height: 800 }, component.id);\n    report.passed = true;\n  } finally {\n    try {\n      if (browser) await browser.close();\n    } finally {\n      fs.writeFileSync(path.join(evidence, 'integration-results.json'), `${JSON.stringify(report, null, 2)}\\n`);\n    }\n  }\n})().catch(error => { console.error(error); process.exitCode = 1; });\n",
+    "checks/shell.cjs": "'use strict';\n\n// Protects the real file-page shell against unnamed controls, absent keyboard\n// focus and overflowing mobile columns. Component checks do not cover this\n// shared layout. No component behavior is supplied or credited by this check.\nconst assert = require('node:assert/strict');\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst { pathToFileURL } = require('node:url');\nconst { chromium } = require('C:\\\\Users\\\\oren\\\\codex-harness\\\\ui\\\\node_modules\\\\.pnpm\\\\playwright-core@1.59.1\\\\node_modules\\\\playwright-core');\n\nconst root = path.resolve(__dirname, '..');\nconst evidence = process.env.SELDON_EVIDENCE_DIR;\nassert.ok(evidence, 'SELDON_EVIDENCE_DIR must identify a writable evidence directory');\nfs.mkdirSync(evidence, { recursive: true });\nconst components = [\n  { id: 'hello', name: 'Play hello', script: 'hello.js' },\n  { id: 'name', name: 'Play introduction', script: 'name.js' },\n  { id: 'foundation', name: 'Play Foundation', script: 'foundation.js' },\n];\nconst scripts = new Map(components.map(({ script }) => {\n  const filename = path.join(root, 'scripts', script);\n  return [pathToFileURL(filename).href.toLowerCase(), { filename, requests: 0, stubbed: !fs.existsSync(filename) }];\n}));\n\nasync function checkViewport(browser, viewport) {\n  const context = await browser.newContext({ viewport, reducedMotion: 'reduce' });\n  const page = await context.newPage();\n  const errors = [];\n  const network = [];\n  const label = `${viewport.width}x${viewport.height}`;\n  page.on('pageerror', error => errors.push(error.message));\n  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });\n  await context.route('**/*', async route => {\n    const url = route.request().url();\n    const component = scripts.get(url.toLowerCase());\n    if (component) {\n      component.requests++;\n      if (component.stubbed) {\n        // The only substituted requests: absent component scripts, empty bodies.\n        return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });\n      }\n    }\n    if (/^https?:/i.test(url)) {\n      network.push(url);\n      return route.abort();\n    }\n    return route.continue();\n  });\n\n  try {\n    await page.goto(pathToFileURL(path.join(root, 'index.html')).href, { waitUntil: 'load' });\n    assert.equal(await page.title(), 'Foundation');\n    assert.equal(await page.getByRole('heading', { level: 1, name: 'Foundation', exact: true }).count(), 1);\n    assert.equal(await page.getByRole('button').count(), 3);\n    for (const component of components) {\n      const button = page.getByRole('button', { name: component.name, exact: true });\n      assert.equal(await button.count(), 1, `${component.id}: unique accessible button name`);\n      assert.equal(await button.getAttribute('id'), `${component.id}-button`);\n      assert.equal(await button.evaluate(node => node.tagName), 'BUTTON');\n      assert.equal(await button.getAttribute('type'), 'button');\n      assert.equal(await button.getAttribute('aria-controls'), `${component.id}-message`);\n    }\n\n    const shell = await page.evaluate(() => {\n      const rect = node => {\n        const { x, y, width, height, right, bottom } = node.getBoundingClientRect();\n        return { x, y, width, height, right, bottom };\n      };\n      const rgb = color => color.match(/[\\d.]+/g).slice(0, 3).map(Number);\n      const luminance = color => rgb(color).map(value => {\n        const channel = value / 255;\n        return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;\n      }).reduce((sum, value, i) => sum + value * [0.2126, 0.7152, 0.0722][i], 0);\n      const contrast = (a, b) => {\n        const values = [luminance(a), luminance(b)].sort((x, y) => y - x);\n        return (values[0] + 0.05) / (values[1] + 0.05);\n      };\n      const canvas = getComputedStyle(document.body).backgroundColor;\n      const heading = document.querySelector('h1');\n      const range = document.createRange();\n      range.selectNodeContents(heading);\n      const textBounds = rect(range);\n      return {\n        canvas,\n        headingFont: getComputedStyle(heading).fontFamily,\n        headingBounds: textBounds,\n        headingContrast: contrast(getComputedStyle(heading).color, canvas),\n        overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth,\n        scripts: Array.from(document.scripts, script => ({\n          source: script.getAttribute('src'), defer: script.defer, async: script.async, type: script.type,\n        })),\n        pieces: ['hello', 'name', 'foundation'].map(id => {\n          const button = document.getElementById(`${id}-button`);\n          const message = document.getElementById(`${id}-message`);\n          const region = message.parentElement;\n          const buttonStyle = getComputedStyle(button);\n          const messageStyle = getComputedStyle(message);\n          const headingStyle = getComputedStyle(button.parentElement.querySelector('h2'));\n          const iconStyle = getComputedStyle(button.querySelector('.play-icon'));\n          const regionStyle = getComputedStyle(region);\n          return {\n            id, button: rect(button), region: rect(region),\n            hidden: message.hidden, messageCount: document.querySelectorAll(`#${id}-message`).length,\n            empty: message.textContent === '', display: messageStyle.display,\n            regionLive: region.getAttribute('aria-live'), regionHidden: region.hidden,\n            regionVisible: regionStyle.display !== 'none' && regionStyle.visibility === 'visible',\n            regionContainsOnlyOwnMessage: region.querySelectorAll('p').length === 1,\n            regionFollowsButton: button.nextElementSibling === region,\n            regionHasHiddenAncestor: Boolean(region.closest('[hidden], [aria-hidden=\"true\"]')),\n            buttonContrast: contrast(buttonStyle.color, buttonStyle.backgroundColor),\n            borderContrast: contrast(buttonStyle.borderTopColor, buttonStyle.backgroundColor),\n            messageContrast: contrast(messageStyle.color, canvas),\n            titleContrast: contrast(headingStyle.color, canvas),\n            iconContrast: contrast(iconStyle.borderLeftColor, buttonStyle.backgroundColor),\n            buttonFont: buttonStyle.fontFamily, radius: buttonStyle.borderRadius,\n            fontSize: parseFloat(messageStyle.fontSize), wrap: messageStyle.overflowWrap,\n            whiteSpace: messageStyle.whiteSpace, transition: buttonStyle.transitionDuration,\n          };\n        }),\n      };\n    });\n\n    assert.equal(shell.canvas, 'rgb(16, 16, 16)', 'ink-black canvas');\n    assert.match(shell.headingFont, /^Georgia\\b/, 'offline Georgia headline');\n    assert.ok(shell.headingBounds.x >= 0 && shell.headingBounds.right <= viewport.width, 'heading fits viewport');\n    assert.ok(shell.headingContrast >= 4.5, 'readable headline contrast');\n    assert.equal(shell.overflow, false, 'no horizontal page overflow');\n    assert.deepEqual(shell.scripts, components.map(({ script }) => ({\n      source: `scripts/${script}`, defer: true, async: false, type: '',\n    })), 'three independent classic deferred script references');\n\n    const pieces = shell.pieces;\n    for (const piece of pieces) {\n      assert.equal(piece.messageCount, 1, `${piece.id}: unique message target`);\n      assert.ok(piece.empty && piece.hidden && piece.display === 'none', `${piece.id}: initially empty and hidden`);\n      assert.equal(piece.regionLive, 'polite', `${piece.id}: persistent polite live region`);\n      assert.ok(!piece.regionHidden && piece.regionVisible && !piece.regionHasHiddenAncestor, `${piece.id}: live region stays rendered`);\n      assert.ok(piece.regionContainsOnlyOwnMessage && piece.regionFollowsButton, `${piece.id}: owns its message beneath its control`);\n      assert.ok(piece.region.y >= piece.button.bottom, `${piece.id}: message region below button`);\n      assert.ok(Math.abs(piece.region.x - piece.button.x) < 1 && Math.abs(piece.region.width - piece.button.width) < 1, `${piece.id}: message stays in column`);\n      assert.ok(piece.button.x >= 0 && piece.button.right <= viewport.width, `${piece.id}: control inside viewport`);\n      assert.ok(piece.button.width >= 44 && piece.button.height >= 44, `${piece.id}: usable target size`);\n      assert.match(piece.buttonFont, /^Arial\\b/, `${piece.id}: Arial label`);\n      assert.equal(piece.radius, '0px', `${piece.id}: crisp rectangular control`);\n      assert.ok(piece.fontSize >= 16 && piece.wrap === 'anywhere' && piece.whiteSpace === 'normal', `${piece.id}: readable wrapping messages`);\n      for (const key of ['buttonContrast', 'messageContrast', 'titleContrast']) {\n        assert.ok(piece[key] >= 4.5, `${piece.id}: ${key} meets 4.5:1`);\n      }\n      assert.ok(piece.iconContrast >= 3 && piece.borderContrast >= 3, `${piece.id}: visible amber icon and boundary`);\n      assert.equal(piece.transition, '0s', `${piece.id}: honors reduced motion`);\n    }\n    for (let i = 1; i < pieces.length; i++) {\n      assert.ok(pieces[i].button.x > pieces[i - 1].button.right, 'ordered side-by-side controls');\n      assert.ok(Math.abs(pieces[i].button.y - pieces[0].button.y) < 1, 'aligned control row');\n      assert.ok(Math.abs(pieces[i].button.width - pieces[0].button.width) < 1, 'equal column widths');\n    }\n    const gaps = [pieces[1].button.x - pieces[0].button.right, pieces[2].button.x - pieces[1].button.right];\n    assert.ok(Math.abs(gaps[0] - gaps[1]) < 1, 'even column spacing');\n    await page.screenshot({ path: path.join(evidence, `shell-${label}.png`), fullPage: true });\n\n    for (const component of components) {\n      await page.keyboard.press('Tab');\n      const focus = await page.evaluate(() => {\n        const node = document.activeElement;\n        const style = getComputedStyle(node);\n        return {\n          id: node.id, visible: node.matches(':focus-visible'),\n          outline: style.outlineStyle, width: parseFloat(style.outlineWidth),\n          offset: parseFloat(style.outlineOffset), color: style.outlineColor,\n        };\n      });\n      assert.equal(focus.id, `${component.id}-button`, 'natural tab order');\n      assert.ok(focus.visible && focus.outline === 'solid' && focus.width >= 3 && focus.offset >= 3, 'visible keyboard focus');\n      assert.equal(focus.color, 'rgb(255, 244, 223)', 'warm-white high-contrast focus ring');\n    }\n    await page.screenshot({ path: path.join(evidence, `shell-focus-${label}.png`), fullPage: true });\n    assert.deepEqual(network, [], 'page makes no network requests');\n    assert.deepEqual(errors, [], 'page has no browser errors');\n    console.log(`PASS shell ${label}: accessibility, focus, contrast, layout, offline load`);\n  } catch (error) {\n    await page.screenshot({ path: path.join(evidence, `shell-failure-${label}.png`), fullPage: true }).catch(() => {});\n    throw error;\n  } finally {\n    await context.close();\n  }\n}\n\n(async () => {\n  let browser;\n  try {\n    browser = await chromium.launch({\n      headless: true,\n      executablePath: 'C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe',\n    });\n    for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {\n      await checkViewport(browser, viewport);\n    }\n    for (const [url, script] of scripts) {\n      assert.equal(script.requests, 2, `each viewport requested ${url}`);\n    }\n    console.log(`Component scripts fulfilled empty only when absent: ${[...scripts.values()].filter(script => script.stubbed).length}/3`);\n  } finally {\n    if (browser) await browser.close();\n  }\n})().catch(error => { console.error(error); process.exitCode = 1; });\n",
+    "index.html": "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>Foundation</title>\n    <link rel=\"stylesheet\" href=\"styles.css\">\n    <script defer src=\"scripts/hello.js\"></script>\n    <script defer src=\"scripts/name.js\"></script>\n    <script defer src=\"scripts/foundation.js\"></script>\n  </head>\n  <body>\n    <main>\n      <header class=\"masthead\">\n        <p class=\"eyebrow\">A beginning in three parts</p>\n        <h1>Foundation</h1>\n      </header>\n\n      <div class=\"signals\">\n        <section class=\"signal\" aria-labelledby=\"hello-heading\">\n          <p class=\"number\" aria-hidden=\"true\">01</p>\n          <h2 id=\"hello-heading\">Hello</h2>\n          <button id=\"hello-button\" type=\"button\" aria-label=\"Play hello\" aria-controls=\"hello-message\">\n            <span class=\"play-icon\" aria-hidden=\"true\"></span>\n            <span>Play</span>\n          </button>\n          <div class=\"announcement\" aria-live=\"polite\" aria-atomic=\"true\">\n            <p id=\"hello-message\" class=\"message\" hidden></p>\n          </div>\n        </section>\n\n        <section class=\"signal\" aria-labelledby=\"name-heading\">\n          <p class=\"number\" aria-hidden=\"true\">02</p>\n          <h2 id=\"name-heading\">Seldon</h2>\n          <button id=\"name-button\" type=\"button\" aria-label=\"Play introduction\" aria-controls=\"name-message\">\n            <span class=\"play-icon\" aria-hidden=\"true\"></span>\n            <span>Play</span>\n          </button>\n          <div class=\"announcement\" aria-live=\"polite\" aria-atomic=\"true\">\n            <p id=\"name-message\" class=\"message\" hidden></p>\n          </div>\n        </section>\n\n        <section class=\"signal\" aria-labelledby=\"foundation-heading\">\n          <p class=\"number\" aria-hidden=\"true\">03</p>\n          <h2 id=\"foundation-heading\">Foundation</h2>\n          <button id=\"foundation-button\" type=\"button\" aria-label=\"Play Foundation\" aria-controls=\"foundation-message\">\n            <span class=\"play-icon\" aria-hidden=\"true\"></span>\n            <span>Play</span>\n          </button>\n          <div class=\"announcement\" aria-live=\"polite\" aria-atomic=\"true\">\n            <p id=\"foundation-message\" class=\"message\" hidden></p>\n          </div>\n        </section>\n      </div>\n    </main>\n  </body>\n</html>\n",
+    "styles.css": ":root {\n  color-scheme: dark;\n  --ink: #101010;\n  --paper: #fff4df;\n  --amber: #ffbb46;\n  background: var(--ink);\n  color: var(--paper);\n  font-family: Arial, sans-serif;\n}\n\n* { box-sizing: border-box; }\n\nbody {\n  margin: 0;\n  min-height: 100vh;\n  background: var(--ink);\n}\n\nmain {\n  width: min(100%, 1280px);\n  margin-inline: auto;\n  padding: 76px 80px 48px;\n}\n\n.masthead { margin-bottom: 108px; }\n\n.eyebrow {\n  margin: 0 0 24px;\n  font-size: 12px;\n  font-weight: 700;\n  letter-spacing: 0.16em;\n  text-transform: uppercase;\n}\n\nh1 {\n  margin: 0;\n  font-family: Georgia, serif;\n  font-size: clamp(60px, 10vw, 128px);\n  font-weight: 400;\n  letter-spacing: -0.055em;\n  line-height: 1.05;\n}\n\n.signals {\n  display: grid;\n  grid-template-columns: repeat(3, minmax(0, 1fr));\n  gap: 32px;\n}\n\n.signal {\n  min-width: 0;\n  border-top: 1px solid var(--paper);\n  padding-top: 18px;\n}\n\n.number {\n  margin: 0 0 28px;\n  color: var(--amber);\n  font-size: 12px;\n  letter-spacing: 0.08em;\n}\n\nh2 {\n  margin: 0 0 24px;\n  font-size: 28px;\n  font-weight: 400;\n  letter-spacing: -0.025em;\n  line-height: 1.2;\n}\n\nbutton {\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  gap: 18px;\n  width: 100%;\n  min-height: 96px;\n  padding: 20px 12px;\n  border: 1px solid var(--amber);\n  border-radius: 0;\n  background: var(--ink);\n  color: var(--paper);\n  font: 400 18px/1.2 Arial, sans-serif;\n  cursor: pointer;\n  transition: background-color 120ms linear;\n}\n\n.play-icon {\n  display: block;\n  flex: 0 0 auto;\n  width: 0;\n  height: 0;\n  border-top: 12px solid transparent;\n  border-bottom: 12px solid transparent;\n  border-left: 20px solid var(--amber);\n}\n\nbutton:hover { background: #282015; }\nbutton:active { background: #392b17; }\n\nbutton:focus-visible {\n  outline: 3px solid var(--paper);\n  outline-offset: 5px;\n}\n\n.announcement {\n  min-height: 96px;\n  padding-top: 24px;\n}\n\n.message {\n  margin: 0;\n  font-size: 18px;\n  line-height: 1.5;\n  overflow-wrap: anywhere;\n}\n\n[hidden] { display: none !important; }\n\n@media (max-width: 600px) {\n  main { padding: 56px 18px 32px; }\n  .masthead { margin-bottom: 84px; }\n  .eyebrow { font-size: 10px; letter-spacing: 0.12em; }\n  .signals { gap: 14px; }\n  .number { margin-bottom: 24px; }\n  h2 { font-size: 17px; margin-bottom: 20px; }\n  button { flex-direction: column; gap: 12px; min-height: 104px; font-size: 16px; }\n  .announcement { padding-top: 20px; }\n  .message { font-size: 16px; }\n}\n\n@media (prefers-reduced-motion: reduce) {\n  button { transition: none; }\n}\n"
+  },
+  "artifacts": {
+    "C:\\seldon\\tests\\m1\\foundation-230667c-c01\\product\\.seldon\\artifacts\\d2c93c805d51103cced73ac5dcf4bc15b09de8b7cc3b4d023496c0e1ee5805c8": "{\n  \"passed\": true,\n  \"pageURL\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\",\n  \"cases\": [\n    {\n      \"label\": \"1280x800-complete\",\n      \"omitted\": null,\n      \"passed\": true,\n      \"networkRequests\": [],\n      \"pageErrors\": [],\n      \"consoleErrors\": [],\n      \"failedResources\": [],\n      \"dialogs\": [],\n      \"navigations\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\"\n      ],\n      \"popups\": [],\n      \"substitutions\": [],\n      \"requests\": [\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\",\n          \"type\": \"document\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/styles.css\",\n          \"type\": \"stylesheet\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/hello.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/name.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/foundation.js\",\n          \"type\": \"script\"\n        }\n      ],\n      \"screenshots\": [\n        \"integration-1280x800-initial.png\",\n        \"integration-1280x800-revealed.png\"\n      ],\n      \"activations\": [\n        \"name\",\n        \"hello\",\n        \"foundation\",\n        \"foundation\",\n        \"hello\",\n        \"name\"\n      ],\n      \"initialControls\": [\n        {\n          \"x\": 80,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 464,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 848,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        }\n      ]\n    },\n    {\n      \"label\": \"390x844-complete\",\n      \"omitted\": null,\n      \"passed\": true,\n      \"networkRequests\": [],\n      \"pageErrors\": [],\n      \"consoleErrors\": [],\n      \"failedResources\": [],\n      \"dialogs\": [],\n      \"navigations\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\"\n      ],\n      \"popups\": [],\n      \"substitutions\": [],\n      \"requests\": [\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\",\n          \"type\": \"document\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/styles.css\",\n          \"type\": \"stylesheet\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/hello.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/name.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/foundation.js\",\n          \"type\": \"script\"\n        }\n      ],\n      \"screenshots\": [\n        \"integration-390x844-initial.png\",\n        \"integration-390x844-revealed.png\"\n      ],\n      \"activations\": [\n        \"name\",\n        \"hello\",\n        \"foundation\",\n        \"foundation\",\n        \"hello\",\n        \"name\"\n      ],\n      \"initialControls\": [\n        {\n          \"x\": 18,\n          \"y\": 335.390625,\n          \"width\": 108.65625,\n          \"height\": 104\n        },\n        {\n          \"x\": 140.65625,\n          \"y\": 335.390625,\n          \"width\": 108.671875,\n          \"height\": 104\n        },\n        {\n          \"x\": 263.328125,\n          \"y\": 335.390625,\n          \"width\": 108.65625,\n          \"height\": 104\n        }\n      ]\n    },\n    {\n      \"label\": \"1280x800-omit-hello\",\n      \"omitted\": \"hello\",\n      \"passed\": true,\n      \"networkRequests\": [],\n      \"pageErrors\": [],\n      \"consoleErrors\": [],\n      \"failedResources\": [],\n      \"dialogs\": [],\n      \"navigations\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\"\n      ],\n      \"popups\": [],\n      \"substitutions\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/hello.js\"\n      ],\n      \"requests\": [\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\",\n          \"type\": \"document\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/styles.css\",\n          \"type\": \"stylesheet\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/hello.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/name.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/foundation.js\",\n          \"type\": \"script\"\n        }\n      ],\n      \"screenshots\": [],\n      \"activations\": [\n        \"name\",\n        \"hello\",\n        \"foundation\",\n        \"foundation\",\n        \"hello\",\n        \"name\"\n      ],\n      \"initialControls\": [\n        {\n          \"x\": 80,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 464,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 848,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        }\n      ]\n    },\n    {\n      \"label\": \"1280x800-omit-name\",\n      \"omitted\": \"name\",\n      \"passed\": true,\n      \"networkRequests\": [],\n      \"pageErrors\": [],\n      \"consoleErrors\": [],\n      \"failedResources\": [],\n      \"dialogs\": [],\n      \"navigations\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\"\n      ],\n      \"popups\": [],\n      \"substitutions\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/name.js\"\n      ],\n      \"requests\": [\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\",\n          \"type\": \"document\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/styles.css\",\n          \"type\": \"stylesheet\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/hello.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/name.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/foundation.js\",\n          \"type\": \"script\"\n        }\n      ],\n      \"screenshots\": [],\n      \"activations\": [\n        \"name\",\n        \"hello\",\n        \"foundation\",\n        \"foundation\",\n        \"hello\",\n        \"name\"\n      ],\n      \"initialControls\": [\n        {\n          \"x\": 80,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 464,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 848,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        }\n      ]\n    },\n    {\n      \"label\": \"1280x800-omit-foundation\",\n      \"omitted\": \"foundation\",\n      \"passed\": true,\n      \"networkRequests\": [],\n      \"pageErrors\": [],\n      \"consoleErrors\": [],\n      \"failedResources\": [],\n      \"dialogs\": [],\n      \"navigations\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\"\n      ],\n      \"popups\": [],\n      \"substitutions\": [\n        \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/foundation.js\"\n      ],\n      \"requests\": [\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/index.html\",\n          \"type\": \"document\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/styles.css\",\n          \"type\": \"stylesheet\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/hello.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/name.js\",\n          \"type\": \"script\"\n        },\n        {\n          \"url\": \"file:///C:/seldon/tests/m1/foundation-230667c-c01/product/scripts/foundation.js\",\n          \"type\": \"script\"\n        }\n      ],\n      \"screenshots\": [],\n      \"activations\": [\n        \"name\",\n        \"hello\",\n        \"foundation\",\n        \"foundation\",\n        \"hello\",\n        \"name\"\n      ],\n      \"initialControls\": [\n        {\n          \"x\": 80,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 464,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        },\n        {\n          \"x\": 848,\n          \"y\": 474.984375,\n          \"width\": 352,\n          \"height\": 96\n        }\n      ]\n    }\n  ],\n  \"browserVersion\": \"157.0.4341.42\"\n}\n"
+  },
+  "observations": {
+    "n012": {
+      "check": "n012",
+      "cleanupVerified": true,
+      "command": [
+        "C:\\nvm4w\\nodejs\\node.EXE",
+        "checks/integration.cjs"
+      ],
+      "commit": "319b05e4a29ec448974df3a92847ec570e93f2b3",
+      "cwd": "C:\\seldon\\tests\\m1\\foundation-230667c-c01\\product",
+      "evidenceFiles": [
+        "C:\\seldon\\tests\\m1\\foundation-230667c-c01\\product\\.seldon\\artifacts\\d2c93c805d51103cced73ac5dcf4bc15b09de8b7cc3b4d023496c0e1ee5805c8",
+        "C:\\seldon\\tests\\m1\\foundation-230667c-c01\\product\\.seldon\\artifacts\\1e9ba49797d9f26713c0645a9217926a9f44a6b65a9400f760c71be7379b154f"
+      ],
+      "executionStarted": true,
+      "exitCode": 0,
+      "processControl": {
+        "activeProcessesAfterTeardown": 0,
+        "activeProcessesBeforeTeardown": 2,
+        "backend": "windows-job",
+        "bootstrapImage": "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+        "bootstrapPid": 33372,
+        "membershipVerifiedBeforePayload": true,
+        "payloadPid": 48656,
+        "payloadReleased": true,
+        "payloadReturnCode": 0,
+        "quiescenceVerified": true,
+        "teardownStarted": true
+      },
+      "purpose": "final",
+      "requirements": [
+        "n007"
+      ],
+      "seconds": 6.125,
+      "stderr": "",
+      "stdout": "PASS 1280x800-complete: six sequential activations, exact sibling state, fixed controls, offline isolation\nPASS 390x844-complete: six sequential activations, exact sibling state, fixed controls, offline isolation\nPASS 1280x800-omit-hello: six sequential activations, exact sibling state, fixed controls, offline isolation\nPASS 1280x800-omit-name: six sequential activations, exact sibling state, fixed controls, offline isolation\nPASS 1280x800-omit-foundation: six sequential activations, exact sibling state, fixed controls, offline isolation\n",
+      "timedOut": false,
+      "unit": "u005"
+    },
+    "n008": {
+      "check": "n008",
+      "cleanupVerified": true,
+      "command": [
+        "C:\\nvm4w\\nodejs\\node.EXE",
+        "checks/shell.cjs"
+      ],
+      "commit": "319b05e4a29ec448974df3a92847ec570e93f2b3",
+      "cwd": "C:\\seldon\\tests\\m1\\foundation-230667c-c01\\product",
+      "evidenceFiles": [
+        "C:\\seldon\\tests\\m1\\foundation-230667c-c01\\product\\.seldon\\artifacts\\1e9ba49797d9f26713c0645a9217926a9f44a6b65a9400f760c71be7379b154f"
+      ],
+      "executionStarted": true,
+      "exitCode": 0,
+      "processControl": {
+        "activeProcessesAfterTeardown": 0,
+        "activeProcessesBeforeTeardown": 2,
+        "backend": "windows-job",
+        "bootstrapImage": "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+        "bootstrapPid": 35616,
+        "membershipVerifiedBeforePayload": true,
+        "payloadPid": 5056,
+        "payloadReleased": true,
+        "payloadReturnCode": 0,
+        "quiescenceVerified": true,
+        "teardownStarted": true
+      },
+      "purpose": "final",
+      "requirements": [
+        "n003"
+      ],
+      "seconds": 5.905999999959022,
+      "stderr": "",
+      "stdout": "PASS shell 1280x800: accessibility, focus, contrast, layout, offline load\nPASS shell 390x844: accessibility, focus, contrast, layout, offline load\nComponent scripts fulfilled empty only when absent: 0/3\n",
+      "timedOut": false,
+      "unit": "u001"
+    }
+  },
+  "cases": [
+    {
+      "call": "call-40a2250d898741b4a24b05cc37880cf7",
+      "kind": "DEMO",
+      "subject": "n007",
+      "beforeBytes": 41656,
+      "maxBytes": 30000
+    },
+    {
+      "call": "call-8c793a69b1ba40879e13363e2b031609",
+      "kind": "PRODUCT",
+      "subject": "quality:001",
+      "beforeBytes": 72882,
+      "maxBytes": 49000
+    }
+  ],
+  "images": {
+    "C:\\seldon\\tests\\m1\\foundation-230667c-c01\\product\\.seldon\\artifacts\\1e9ba49797d9f26713c0645a9217926a9f44a6b65a9400f760c71be7379b154f": "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AACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMfdnMywAAEABJREFUAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAoiAAAwAAEAUBGAAAgCgIwAAAAERBAAYAACAKAjAAAABREIABAACIggAMAABAFARgAAAAolAqiczCWWMTgE2pWvuApDDpf4C86H+AbaWw+5+iZrsqVaokAAAAUNKZAg0AAEAUBGAAAACiIAADAAAQBQEYAACAKAjAAAAAREEABgAAIAoCMAAAAFEQgAEAAIiCAAwAAEAUBGAAAACiIAADAAAQBQEYAACAKAjAAAAAREEABgAAIAoCMAAAAFEQgAEAAIiCAAwAAEAUBGAAAACiIAADAAAQhTgD8M6jnmyxMHz13b3bRvc9cFuLGVeWSwAKxSb7n3LP9c2+MY9+CaAgbHr8E0Y+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"
+  }
+}

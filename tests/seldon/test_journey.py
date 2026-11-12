@@ -1,5 +1,6 @@
 """C8/C12/C14/C18/C23; R2/R6-R9/R11: scripted semantics, real Git, SQLite and processes."""
 
+import base64
 import json
 import os
 import shutil
@@ -12,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from seldon import gitwork, plan, questions
+from seldon import gitwork, judgment, plan, questions
 from seldon.providers import Codex, ProviderFailure, ROLES
 from seldon.run import Run
-from seldon.store import Store, encode
+from seldon.store import RunRow, Store, encode
 
 VISION = {"size": "tiny", "understanding": "Read named values", "users": ["CLI user"],
           "scopeIn": ["Named values"], "scopeOut": [], "improvements": [],
@@ -144,9 +145,17 @@ else:
             "from pathlib import Path\ndef read_value(path):\n    return Path(path).read_text()\n")
         source = "from helper import read_value\n" + source.replace(
             f"Path('{name}/value.txt').read_text()", f"read_value('{name}/value.txt')")
-        source += ("print(Path.cwd())\n"
-                   "if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
-                   f"    Path(os.environ['SELDON_EVIDENCE_DIR'], 'value.json').write_text('\"{value}\"')\n")
+        source += ("if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
+                   "    evidence = Path(os.environ['SELDON_EVIDENCE_DIR'])\n"
+                   f"    evidence.joinpath('value.json').write_text('\"{value}\"')\n"
+                   "    full = 'long observation ' * 400\n"
+                   "    evidence.joinpath('full.txt').write_text(full)\n"
+                   "    print(full)\n"
+                   f"    evidence.joinpath('stdout.txt').write_text('observed {value}')\n"
+                   f"    print('observed {value}')\n"
+                   f"    evidence.joinpath('stderr.txt').write_text('diagnostic {value}')\n"
+                   f"    print('diagnostic {value}', file=__import__('sys').stderr)\n"
+                   "print(Path.cwd())\n")
     if mode in ("single1", "scale50", "traced-evidence"):
         source += ("if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
                    "    Path(os.environ['SELDON_EVIDENCE_DIR'], 'observed.png').write_bytes(\n"
@@ -288,7 +297,8 @@ class Scripted:
                 if q["targets"] == ["tryItGuide"]:
                     guide = facts["Guide file"]
                     assert guide["present"] and guide["bytes"] > 0 and len(guide["commit"]) == 40
-                    assert "Try it yourself" in guide["text"]
+                    assert "Try it yourself" in files[guide["path"]]["text"]
+                    assert "text" not in guide
                     assert list(files) == [plan.GUIDE_PATH] and not q["images"]
                 elif self.mode in ("single1", "scale50", "traced-evidence"):
                     expected = ("002" if kind == "PRODUCT" and self.mode == "traced-evidence" else
@@ -296,15 +306,21 @@ class Scripted:
                     helper = {f"unit-{expected}/helper.py"} if self.mode == "traced-evidence" else set()
                     assert set(files) == {f"unit-{expected}/check.py", f"unit-{expected}/value.txt"} | helper
                     assert files[f"unit-{expected}/value.txt"]["text"] == f"value-{expected}"
-                    assert set(facts["Final check sources"]) == {f"unit-{expected}/check.py"} | helper
+                    assert set(facts["Check source paths"]) == {f"unit-{expected}/check.py"} | helper
                     assert len(facts["Final observations"]) == len(q["images"]) == 1
                     observation = facts["Final observations"][0]
                     assert observation["command"][-1] == f"unit-{expected}/check.py"
                     assert observation["ranOnDeliveredRevision"] and len(observation["commit"]) == 40
                     if self.mode == "traced-evidence":
                         assert Path(observation["stdout"].splitlines()[-1]) == self.slot / "product"
-                        artifact, = [a for a in facts["Check artifacts"].values() if "text" in a]
-                        assert json.loads(artifact["text"]) == f"value-{expected}"
+                        artifacts = list(facts["Check artifacts"].values())
+                        texts = [a["text"] for a in artifacts if "text" in a]
+                        assert set(texts) == {f'"value-{expected}"', 'long observation ' * 400}
+                        assert len(artifacts) == 5  # JSON, full output, stdout, stderr, screenshot.
+                        assert all(a["bytes"] > 0 and a["commit"] == observation["commit"]
+                                   for a in artifacts)
+                        assert f"observed value-{expected}" in observation["stdout"]
+                        assert f"diagnostic value-{expected}" in observation["stderr"]
                 if kind == "PRODUCT" and self.mode == "user-path" and q["targets"] != ["tryItGuide"]:
                     output = [o["stdout"] for o in facts["Final observations"]]
                     assert output and all(t.strip() == "observed value-001" for t in output)
@@ -713,6 +729,8 @@ def test_clean_core_golden(tmp_path):
     otherwise retry a denied operation and the successful native journey never exposes it.
     Subject traces include the final shipped files, imported check helpers, supplemental JSON artifacts
     and delivered-folder observations; a standalone check and stdout alone cannot expose lost evidence.
+    Artifact overlap with stdout/stderr is sent once, while output truncated by the observer must
+    retain its full artifact; small supplemental-only evidence cannot catch either regression.
     Non-first criterion coverage catches a first-check guess, while deterministic quality must need no call.
     Uncertainty twins prove a store fact resolves without rework; persistent uncertainty and real gaps
     must repair an actual blocked interaction through its original owner, preserving unrelated DONE work.
@@ -724,11 +742,57 @@ def test_clean_core_golden(tmp_path):
     clean_core_golden(tmp_path / "suite")
 
 
+def recorded_judgment_journey(root):
+    """Real Foundation sources catch duplicate payload growth hidden by the tiny scripted files.
+
+    Replay Git -> canonical Store -> final briefs, retaining the recorded supplemental JSON that
+    stdout does not contain. A size reduction must preserve all source and supplemental text.
+    """
+    recording = json.loads(Path(__file__).with_name("recorded_judgment.json").read_text("utf-8"))
+    root.mkdir()
+    gitwork.init(root)
+    for path, text in recording["files"].items():
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(text.encode("utf-8"))
+    gitwork.git(root, "add", "--all")
+    commit = gitwork.commit(root, gitwork.git(root, "write-tree"))
+    gitwork.git(root, "update-ref", "HEAD", commit)
+    store = Store(root)
+    try:
+        revision = store.revision(recording["plan"])
+        artifacts = {p: store.artifact(text.encode("utf-8"), "recording")
+                     for p, text in recording["artifacts"].items()}
+        artifacts.update({p: store.artifact(base64.b64decode(data), "recording")
+                          for p, data in recording["images"].items()})
+        refs = [store.record("observation", {**body, "commit": commit, "cwd": str(root),
+                    "evidenceFiles": [artifacts[p] for p in body["evidenceFiles"]]})
+                for body in recording["observations"].values()]
+        store.cursor(RunRow(revision=revision, candidate=commit, finalCommit=commit,
+                            finalObservations=refs))
+        for case in recording["cases"]:
+            question = judgment.brief(store, case["kind"], case["subject"])
+            size = len(encode(question).encode("utf-8"))
+            assert size < case["maxBytes"], (case["kind"], size, case["beforeBytes"])
+            facts = question["facts"]
+            assert question["images"] == [artifacts[p] for p in recording["images"]]
+            for path, source in facts["Files on the delivered revision"].items():
+                assert source["text"] == recording["files"][path]
+                assert encode(facts).count(encode(source["text"])[1:-1]) == 1
+            for artifact in facts["Check artifacts"].values():
+                if "text" in artifact:
+                    assert artifact["text"] in recording["artifacts"].values()
+            print(f"M1 recorded {case['kind']}: {case['beforeBytes']} -> {size} bytes", flush=True)
+    finally:
+        store.close()
+
+
 def clean_core_golden(root):
     root.mkdir(parents=True)
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(root)
     began = time.monotonic()
+    recorded_judgment_journey(root / "recorded-judgment")
     baseline = simple_journey(root / "single1", "single1")
     admission_journey(root / "admission")
     modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),

@@ -47,7 +47,7 @@ def brief(store, kind, subject, *, resolve=None):
     patterns = [p for u in owned.values() for p in u["checkPaths"]]
     # Scope ownership is the existing file trace; include helpers, not just command arguments.
     files = gitwork.sources(store.root.parent, cursor.finalCommit, scopes, details=True)
-    sources = {p: f["text"] for p, f in files.items() if "text" in f and plan.matches(p, patterns)}
+    sources = [p for p in files if plan.matches(p, patterns)]
     final = questions.observed(store, refs)
     for item, ref in zip(final, refs):
         body = store.read(ref)
@@ -56,26 +56,31 @@ def brief(store, kind, subject, *, resolve=None):
     obligation = ({k: v for k, v in body.items() if k != "features"} if kind == "DEMO" else
                   {k: body[k] for k in ("criterion", "verification")})
     facts = {"Subject": obligation, "Checks": checks, "Final observations": final,
-             "Final check sources": sources, "Files on the delivered revision": files,
+             "Check source paths": sources, "Files on the delivered revision": files,
              "Reader's starting directory": str(store.root.parent.resolve())}
     artifacts = {}
+    outputs = [item[key] for item in final for key in ("stdout", "stderr")]
     for ref in refs:
         for path in store.read(ref)["evidenceFiles"]:
             content = Path(path).read_bytes()
             artifacts[path] = {"bytes": len(content), "commit": cursor.finalCommit}
             try:
-                artifacts[path]["text"] = content.decode("utf-8")
+                text = content.decode("utf-8")
+                if not any(text in output for output in outputs):
+                    artifacts[path]["text"] = text
             except UnicodeDecodeError:
                 pass
     if artifacts:
         facts["Check artifacts"] = artifacts
     if subject == "tryItGuide":
         facts["Guide file"] = {"path": plan.GUIDE_PATH, "commit": cursor.finalCommit,
-                               **files.get(plan.GUIDE_PATH, {"present": False, "bytes": 0})}
+                               **{k: v for k, v in files.get(
+                                   plan.GUIDE_PATH, {"present": False, "bytes": 0}).items() if k != "text"}}
     if resolve is not None:
         # Rehydrate authoritative records through the same subject trace, never semantic keyword matching.
         facts["Requested facts"] = resolve
-        facts["Code-established execution facts"] = [store.read(r) for r in refs]
+        facts["Code-established execution facts"] = [
+            {k: v for k, v in store.read(r).items() if k not in ("stdout", "stderr")} for r in refs]
         facts["Code-established coverage"] = {
             "commit": cursor.finalCommit, "checksPassed": not proof.failures(store, refs),
             "scopes": scopes, "trackedFiles": list(files)}

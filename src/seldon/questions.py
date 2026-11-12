@@ -193,8 +193,8 @@ def observed(store, refs):
 
 def images(store, refs):
     from pathlib import Path
-    return [p for ref in refs for p in store.read(ref)["evidenceFiles"]
-            if Path(p).read_bytes().startswith((b"\x89PNG", b"\xff\xd8"))]
+    return list(dict.fromkeys(p for ref in refs for p in store.read(ref)["evidenceFiles"]
+                             if Path(p).read_bytes().startswith((b"\x89PNG", b"\xff\xd8"))))
 
 
 def judge_brief(store, ref):
