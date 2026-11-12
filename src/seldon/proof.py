@@ -101,8 +101,12 @@ def prove(store, ref, contract, checks):
                      and not failures(store, [r])}
         start_red = []
         if passing_T:
-            start = gitwork.check_commit(root, store.cursor().waveStart, unit.P,
-                                         contract["checkPaths"], store.cursor().scratch)
+            # A RED baseline removes product only, never check machinery: every unit's check sources
+            # as they stand at T, so a helper owned by a sibling unit is present (T-104).
+            mechanics = [p for u in plan.select(store.plan(store.cursor().revision), "unit").values()
+                         for p in u["checkPaths"]]
+            start = gitwork.check_commit(root, store.cursor().waveStart, unit.T,
+                                         mechanics, store.cursor().scratch)
             store.record("proof_base", {"unit": ref, "commit": start, "waveStart": store.cursor().waveStart,
                                         "product": unit.P})
             gitwork.checkout(root, start)

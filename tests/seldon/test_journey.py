@@ -261,8 +261,11 @@ else:
         comments = "\n".join("# " + line for line in recorded["checks/shell.cjs"].splitlines())
         Path(name, "check.py").write_text(comments + "\n" + source)
     if mode == "wave-start" and name == "unit-002":
+        # The check also needs a sibling's check helper (unit-001/check.py), like a shared support.cjs (T-104).
         Path(name, "check.py").write_text(
-            "from pathlib import Path\nassert Path('unit-001/value.txt').read_text()=='value-001'\n"
+            "from pathlib import Path\n"
+            "if not Path('unit-001/check.py').exists(): raise SystemExit('sibling check helper missing')\n"
+            "assert Path('unit-001/value.txt').read_text()=='value-001'\n"
             "print('observed dependency value-001')\n")
     if mode in ("records", "records-guide-gap"):
         if name == "unit-001":
@@ -999,6 +1002,8 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             observed = [b for _, _, b in run.store.records("observation") if b["unit"] == "u002"]
             assert any(b["purpose"] == "T" and b["exitCode"] == 0 for b in observed)
             assert any(b["purpose"] == "wave-start" and b["exitCode"] != 0 for b in observed)
+            # RED on the baseline comes from missing product, never from missing check machinery.
+            assert not any(b["purpose"] == "wave-start" and "helper missing" in b["stderr"] for b in observed)
             assert units["u002"].recoveries == 0
         if mode == "schema-fix":
             launches = [json.loads(line) for line in

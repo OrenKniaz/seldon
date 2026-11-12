@@ -103,7 +103,9 @@ def build(kind, facts, targets=(), execution=None, images=()):
             "in that checkout before integration. "
             "A check covering requirements from different units runs on the integrated product; "
             "one unit owns its source file. An establishes check must fail on the unit base or, if "
-            "already passing there, on the wave-start product with the same check sources. It must "
+            "already passing there, on the wave-start product with every unit's check sources and "
+            "helpers as they stand at the unit base; shared check mechanics (helpers, fixtures, test "
+            "config) belong in a unit's checkPaths, never in product scope. It must "
             "pass at P. A preserves check must pass on the unit base and P with the current check "
             "sources."), "Unit evidence": UNIT_EVIDENCE, "Judge coverage": {
             "Unit JUDGE": "Its own requirements and standing source obligations, its checks, product "
