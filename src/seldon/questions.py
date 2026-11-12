@@ -36,8 +36,7 @@ PROMPTS = {
              + ALIGN_DESIGN,
     "PLAN": "What product work is needed in addition to the supplied delivery work? Plan its features, "
             "requirements, semantic checks and scoped units. Trace each accepted quality criterion by its "
-            "1-based position to its checks in quality. Set judgment true only for taste or usability "
-            "that passing checks cannot decide; REVIEW checks this choice. "
+            "1-based position to its checks in quality. "
             "Dependencies are 1-based unit positions. "
             "Commands are argv. CODE assigns checks from requirement ownership. "
             "Checks are automated commands that never wait on manual or visual review; "
@@ -45,7 +44,7 @@ PROMPTS = {
     "REPAIR": "What corrected plan resolves the named review gap while preserving the approved vision? "
               "Return the complete corrected plan; it will be reviewed again before B.",
     "REVIEW": "Does this plan deliver the accepted vision and quality bar? Review every criterion's "
-              "check coverage and whether it requires taste or usability judgment. Name concrete gaps only.",
+              "check coverage. Name concrete gaps only.",
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
             "run its checks and refine before returning. Meet the accepted quality bar.",
@@ -94,8 +93,18 @@ def build(kind, facts, targets=(), execution=None, images=()):
             "one unit owns its source file. An establishes check must fail on the unit base or, if "
             "already passing there, on the wave-start product with the same check sources. It must "
             "pass at P. A preserves check must pass on the unit base and P with the current check "
-            "sources. The final feature judge sees the check sources, command output and screenshots "
-            "from the integrated revision.")}
+            "sources."), "Judge coverage": {
+            "Unit JUDGE": "Its own requirements, its checks, its T..P diff, outputs and screenshots. "
+                          "No sibling or whole-product files.",
+            "DEMO": "One requirement with its traced checks, observations, screenshots and the files "
+                    "of every unit reached by those checks.",
+            "PRODUCT": "One criterion with its traced checks, observations, screenshots and the files "
+                       "of every unit reached by those checks.",
+            "Scope rule": "A property is judged at the level whose scope owns every file it speaks "
+                          "about. Trace coverage lists the units reached by each requirement and "
+                          "criterion. Missing an owner is a gap on that trace."}}
+    if kind == "REVIEW":
+        facts = {**facts, "Trace coverage": plan.coverage(facts["Plan"])}
     if kind in ("PLAN", "REPAIR"):
         facts = {**facts, "Delivery work supplied by Seldon after the product units": {
             "path": plan.GUIDE_PATH, "work": plan.GUIDE_WORK, "owner": "Seldon's final guide unit"}}
@@ -140,7 +149,7 @@ def example_plan():
             "expectedEvidence": "Actual stdout", "requirements": ["new:r"]}}],
         "units": [{"scope": ["greeting/**"], "checkPaths": ["greeting/check.py"],
                    "requirements": ["new:r"], "dependencies": [], "instructions": "Implement the greeting"}],
-        "quality": [{"criterion": 1, "checks": ["new:c"], "judgment": False}]}
+        "quality": [{"criterion": 1, "checks": ["new:c"]}]}
 
 
 def labelled(facts):

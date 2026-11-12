@@ -84,8 +84,8 @@ def planned(count, mode):
                  int(e["targetHandle"][-3:]) % 5 == 1]
     selected = "new:c002" if mode == "traced-evidence" else "new:c001"
     return {"edits": edits, "units": scopes, "quality": [
-        {"criterion": 1, "checks": [selected], "judgment": True},
-        {"criterion": 2, "checks": [selected], "judgment": False}]}
+        {"criterion": 1, "checks": [selected]},
+        {"criterion": 2, "checks": [selected]}]}
 
 
 NATIVE = r'''
@@ -253,6 +253,10 @@ class Scripted:
         kind = q["kind"]
         if kind == "ALIGN":
             answer = dict(VISION)
+            if self.mode == "review-repair":
+                answer["quality"] = [VISION["quality"][0], {
+                    "criterion": "unit-001/value.txt and unit-002/value.txt each persist their own value",
+                    "verification": "Read both delivered value files"}]
             if self.mode == "user-path":
                 answer["quality"] = [{"criterion": "Read the value in the browser",
                                       "verification": "Open the page and display the saved value"},
@@ -267,17 +271,18 @@ class Scripted:
                 elif len(corrections) == 1:
                     answer["edits"][2]["typedBody"]["requirements"].append("new:r002")
             if self.mode == "review-repair" and kind == "REPAIR":
-                answer["edits"][1]["typedBody"]["obligation"] += "; accept the exact named value"
+                answer["quality"][1]["checks"] = ["new:c001", "new:c002"]
             if self.mode == "user-revise" and kind == "REPAIR":
                 assert q["facts"]["Requested change"] == "Revise the plan: describe the exact stored value."
                 answer["edits"][1]["typedBody"]["obligation"] += "; exact stored value requested by user"
         elif kind == "REVIEW":
-            first = not (self.slot / "reviewed").exists()
-            (self.slot / "reviewed").write_text("reviewed")
             answer = {"verdict": "adequate", "gaps": []}
-            if first and self.mode == "review-repair":
-                answer = {"verdict": "gap", "gaps": [
-                    {"target": "n002", "correction": "Clarify exact value"}]}
+            if self.mode == "review-repair":
+                coverage = q["facts"]["Trace coverage"]["quality:002"]
+                if set(coverage["units"]) != {"u001", "u002"}:
+                    answer = {"verdict": "gap", "gaps": [{"target": "quality:002",
+                        "correction": "The criterion names both value files but its trace reaches only "
+                                      "unit-001; trace the checks of both owners"}]}
         elif kind == "DECIDE":
             answer = {"choice": "revise" if q["facts"]["User's words"].startswith("Revise") else "approve"}
         elif kind in ("JUDGE", "DEMO", "PRODUCT"):
@@ -300,6 +305,11 @@ class Scripted:
                     assert "Try it yourself" in files[guide["path"]]["text"]
                     assert "text" not in guide
                     assert list(files) == [plan.GUIDE_PATH] and not q["images"]
+                elif self.mode == "review-repair" and q["targets"] == ["quality:002"]:
+                    assert {p: b["text"] for p, b in files.items() if p.endswith("value.txt")} == {
+                        "unit-001/value.txt": "value-001", "unit-002/value.txt": "value-002"}
+                elif self.mode == "parallel" and kind == "DEMO" and q["targets"] == ["n002"]:
+                    assert {p.split("/")[0] for p in files} == {"unit-001", "unit-002", "unit-004"}
                 elif self.mode in ("single1", "scale50", "traced-evidence"):
                     expected = ("002" if kind == "PRODUCT" and self.mode == "traced-evidence" else
                                 next(p.split("/")[0][-3:] for p in files))
@@ -351,6 +361,11 @@ class Scripted:
                 assert "other units' files" in q["facts"]["Checkout coverage"].lower()
                 sources = q["facts"]["Check sources"]
                 assert sources, "Judge needs actual check sources"
+                if self.mode == "review-repair" and q["targets"]:
+                    directory = "unit-001" if q["targets"] == ["n002"] else "unit-002"
+                    assert set(sources) == {directory + "/check.py"}
+                    sibling = "unit-002" if directory == "unit-001" else "unit-001"
+                    assert sibling not in q["facts"]["Product changes"]
                 if any("SKIP_AT_P" in source for source in sources.values()):
                     assert all(o["exitCode"] == 0 for o in q["facts"]["Observations"] if o["purpose"] == "P")
                     answer["assessments"][0]["exercisedAtP"] = False
@@ -399,7 +414,10 @@ def finish(run):
     assert len([b for _, k, b in rows if k == "product_verdict"]) == 1
     final_questions = [b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]
     assert all(len(q["targets"]) == 1 for q in final_questions)
-    assert all(q["targets"] != ["quality:002"] for q in final_questions)
+    initial = [q for q in final_questions if "Requested facts" not in q["facts"]
+               and all(o["commit"] == cursor.candidate for o in q["facts"]["Final observations"])]
+    for subject in plan.select(run.store.plan(cursor.revision), "criterion"):
+        assert sum(q["targets"] == [subject] for q in initial) == 1
     observations = [b for _, kind, b in rows if kind == "observation"]
     for obs in observations:
         assert obs["executionStarted"] and obs["cleanupVerified"] and not obs["timedOut"]
@@ -531,6 +549,9 @@ def simple_journey(slot, mode, count=1):
                        for _, k, b in rows)
         if mode == "review-repair":
             assert cursor.repairs == 1 and len(run.store.records("approval")) == 4
+            reviews = [b["answer"] for _, _, b in run.store.records("answer") if b["kind"] == "REVIEW"]
+            assert reviews[0]["gaps"][0]["target"] == "quality:002"
+            assert reviews[1]["verdict"] == "adequate"
         if mode in ("demo-uncertain", "product-uncertain"):
             assert not run.store.records("fixup")
             assert all(u.recoveries == 0 for u in units.values())
@@ -731,7 +752,9 @@ def test_clean_core_golden(tmp_path):
     and delivered-folder observations; a standalone check and stdout alone cannot expose lost evidence.
     Artifact overlap with stdout/stderr is sent once, while output truncated by the observer must
     retain its full artifact; small supplemental-only evidence cannot catch either regression.
-    Non-first criterion coverage catches a first-check guess, while deterministic quality must need no call.
+    Every criterion needs its own PRODUCT verdict, even when all its checks passed. A trace naming two
+    units but reaching one must repair before B; success-only review cannot catch unavailable files.
+    Final cross-unit requirements include every traced owner; unit judges retain only their own files.
     Uncertainty twins prove a store fact resolves without rework; persistent uncertainty and real gaps
     must repair an actual blocked interaction through its original owner, preserving unrelated DONE work.
     Existing success-only journeys cannot expose the old all-DONE/INCOMPLETE failure or false satisfaction.
@@ -797,7 +820,7 @@ def clean_core_golden(root):
     admission_journey(root / "admission")
     modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
              ("timeout", 1),
-             ("exhaust", 4), ("parallel", 4), ("review-repair", 1), ("final-rework", 2),
+             ("exhaust", 4), ("parallel", 4), ("review-repair", 2), ("final-rework", 2),
              ("schema-fix", 1), ("plan-overlap", 2), ("user-path", 1), ("judge-provider", 2),
              ("big-source", 2), ("big-product", 2), ("user-revise", 1), ("wave-start", 2),
              ("native-denied", 2)]

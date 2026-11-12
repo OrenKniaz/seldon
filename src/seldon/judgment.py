@@ -12,23 +12,17 @@ def subjects(document, kind):
         return plan.select(document, "requirement")
     return {**plan.select(document, "criterion"), "tryItGuide": {
         "criterion": "The try-it guide is usable from the delivered directory",
-        "verification": plan.GUIDE_WORK, "checks": [], "judgment": True}}
+        "verification": plan.GUIDE_WORK, "checks": []}}
 
 
 def trace(document, kind, subject):
-    checks = plan.select(document, "check")
-    if kind == "DEMO":
-        return {r: c for r, c in checks.items() if subject in c["requirements"]}
-    return {r: checks[r] for r in subjects(document, kind)[subject]["checks"]}
+    return {} if subject == "tryItGuide" else plan.traced_checks(document, subject)
 
 
 def owners(document, kind, subject):
     if subject == "tryItGuide":
         return {"guide": plan.select(document, "unit")["guide"]}
-    requirements = ({subject} if kind == "DEMO" else
-                    {r for c in trace(document, kind, subject).values() for r in c["requirements"]})
-    return {r: u for r, u in plan.select(document, "unit").items()
-            if requirements.intersection(u["requirements"])}
+    return plan.traced_units(document, trace(document, kind, subject))
 
 
 def brief(store, kind, subject, *, resolve=None):
@@ -40,9 +34,6 @@ def brief(store, kind, subject, *, resolve=None):
             or any(store.read(r)["commit"] != cursor.finalCommit for r in refs)):
         raise ValueError("Judge evidence requires every traced check on the final commit")
     owned = owners(document, kind, subject)
-    arguments = [arg for c in checks.values() for arg in c["command"]]
-    owned.update({r: u for r, u in plan.select(document, "unit").items()
-                  if any(plan.matches(a, u["checkPaths"]) for a in arguments)})
     scopes = [p for u in owned.values() for p in u["scope"]]
     patterns = [p for u in owned.values() for p in u["checkPaths"]]
     # Scope ownership is the existing file trace; include helpers, not just command arguments.
@@ -145,20 +136,18 @@ def step(store, provider):
             advance(store, "resolved", result)
         return
     done = {store.read(r)["subject"] for r in getattr(cursor, field)}
-    for subject, body in subjects(document, kind).items():
+    for subject in subjects(document, kind):
         if subject in done:
             continue
         question = brief(store, kind, subject)
-        if kind == "PRODUCT" and not body["judgment"]:
-            refs = [r for r in cursor.finalObservations
-                    if store.read(r)["check"] in trace(document, kind, subject)]
-            passed = not proof.failures(store, refs)
-            answer = {"verdict": "satisfied" if passed else "gap", "gaps": [],
-                      "assessments": questions.assessments([subject], final=True),
-                      "why": "Every traced check passed on the final commit; "
-                             "plan/review require no taste judgment"}
-            result = store.record("code_quality", {"subject": subject, "observations": refs,
-                                                 "commit": cursor.candidate, "answer": answer})
+        refs = [r for r in cursor.finalObservations
+                if store.read(r)["check"] in trace(document, kind, subject)]
+        failed = proof.failures(store, refs)
+        if failed:
+            answer = {"verdict": "gap", "gaps": [{"target": subject, "correction": proof.explain(failed)}],
+                      "assessments": [], "why": "A traced check failed on the final commit"}
+            result = store.record("check_gap", {"subject": subject, "observations": refs,
+                                              "commit": cursor.candidate, "answer": answer})
         else:
             result, answer = inference.call(store, provider, question)
         if answer["verdict"] == "uncertain":

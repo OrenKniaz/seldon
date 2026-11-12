@@ -60,6 +60,27 @@ def assigned(document):
     return result
 
 
+def traced_checks(document, subject):
+    checks = select(document, "check")
+    body = document["nodes"][subject]["body"]
+    return ({r: checks[r] for r in body["checks"]} if "checks" in body else
+            {r: c for r, c in checks.items() if subject in c["requirements"]})
+
+
+def traced_units(document, checks):
+    requirements = {r for c in checks.values() for r in c["requirements"]}
+    arguments = [a for c in checks.values() for a in c["command"]]
+    return {r: u for r, u in select(document, "unit").items()
+            if requirements.intersection(u["requirements"])
+            or any(matches(a, u["checkPaths"]) for a in arguments)}
+
+
+def coverage(document):
+    return {r: {"checks": list(checks), "units": list(traced_units(document, checks))}
+            for r in {**select(document, "requirement"), **select(document, "criterion")}
+            for checks in [traced_checks(document, r)]}
+
+
 def create(vision, answer):
     validate_schema({k: v for k, v in answer.items() if k != "why"}, PLAN)
     vision = {field: vision[field] for field in VISION["properties"]}
@@ -84,7 +105,7 @@ def create(vision, answer):
     for item in answer["quality"]:
         index = item["criterion"]
         nodes[f"quality:{index:03}"] = {"kind": "criterion", "body": {
-            **quality[index - 1], "judgment": item["judgment"],
+            **quality[index - 1],
             "checks": [handles.get(r, r) for r in item["checks"]]}}
     validate(document)
     return document
@@ -138,6 +159,7 @@ def validate(document):
                 raise ValueError(f"Scope ownership overlaps: {ref} {unit['scope']} and "
                                  f"{other} {owner['scope']}; assign disjoint subtrees or literal paths")
     tuple(TopologicalSorter({r: b["dependencies"] for r, b in units.items()}).static_order())
+    return coverage(document)
 
 
 def add_guide(document):

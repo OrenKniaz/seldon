@@ -34,8 +34,7 @@ PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
                                   for kind, body in BODIES.items() if kind != "unit"]}, 1),
            units=array(obj(scope=array(TEXT, 1), checkPaths=array(TEXT, 1), requirements=array(TEXT, 1),
                            dependencies=array({"type": "integer", "minimum": 1}), instructions=TEXT), 1),
-           quality=array(obj(criterion={"type": "integer", "minimum": 1}, checks=array(TEXT, 1),
-                             judgment={"type": "boolean"}), 1))
+           quality=array(obj(criterion={"type": "integer", "minimum": 1}, checks=array(TEXT, 1)), 1))
 
 
 def answer_schema(kind, targets=()):
