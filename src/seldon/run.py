@@ -4,8 +4,22 @@ import os
 from pathlib import Path
 
 from . import (
-    decisions, fixups, flow_review, gitwork, guide, inference, judgment, obligations, plan, proof,
-    questions, scheduler, units, wave_verify,
+    architecture,
+    decisions,
+    detail,
+    fixups,
+    flow_review,
+    gitwork,
+    guide,
+    inference,
+    judgment,
+    obligations,
+    plan,
+    proof,
+    questions,
+    scheduler,
+    units,
+    wave_verify,
 )
 from .states import advance
 from .store import RunRow, Store, UnitRow
@@ -123,16 +137,19 @@ class Run:
                                if state == "C" else {})})
                 decisions.request(store, state, subject)
             decisions.decide(store, self.provider, self.user)
-        elif state == "PLAN":
+        elif state == "ARCHITECT":
             vision = store.read(cursor.vision)["answer"]
-            result, answer = inference.call(store, self.provider, questions.build("PLAN", {
-                "Original request": kickoff["words"], "Approved vision": vision,
-                "Runtime": questions.runtime(kickoff["setup"])}),
-                check=lambda answer: plan.create(vision, answer))
-            document = plan.add_guide(plan.create(vision, answer))
+            gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
+            result, answer = inference.call(store, self.provider,
+                questions.architect_brief(vision, gaps[-1]["gap"] if gaps else None),
+                check=lambda a: architecture.outline(a, vision))
+            document = {"architecture": {k: v for k, v in answer.items() if k != "why"},
+                        "nodes": {"vision": {"kind": "vision", "body": vision}}}
             with store.transaction():
-                revision = store.revision(document)
-                advance(store, "planned", result, revision=revision)
+                revision = store.revision(document, cursor.revision)
+                advance(store, "outlined", result, revision=revision)
+        elif state == "DETAIL":
+            detail.step(store, self.provider, self.capacity)
         elif state == "REVIEW":
             result, answer = inference.call(store, self.provider, questions.build("REVIEW", {
                 "Original request": kickoff["words"], "Approved vision": store.read(cursor.vision)["answer"],

@@ -6,8 +6,9 @@ from dataclasses import replace
 RUN = {
     "NEW": {"start": "ALIGN"},
     "ALIGN": {"aligned": "A", "fail": "INCOMPLETE"},
-    "A": {"approve": "PLAN", "revise": "ALIGN", "fail": "INCOMPLETE"},
-    "PLAN": {"planned": "REVIEW", "fail": "INCOMPLETE"},
+    "A": {"approve": "ARCHITECT", "revise": "ALIGN", "fail": "INCOMPLETE"},
+    "ARCHITECT": {"outlined": "DETAIL", "fail": "INCOMPLETE"},
+    "DETAIL": {"detailed": "REVIEW", "contract-gap": "ARCHITECT", "fail": "INCOMPLETE"},
     "REVIEW": {"adequate": "B", "gap": "REPAIR", "fail": "INCOMPLETE"},
     "REPAIR": {"repaired": "REVIEW", "fail": "INCOMPLETE"},
     "B": {"approve": "EXECUTE", "revise": "REPAIR", "fail": "INCOMPLETE"},

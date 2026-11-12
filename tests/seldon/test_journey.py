@@ -330,6 +330,9 @@ class Scripted:
 
     def __call__(self, q):
         kind = q["kind"]
+        if kind in ("ARCHITECT", "DETAIL"):
+            from test_architect import retained_area_answer
+            return retained_area_answer(self, q)
         if kind == "ALIGN":
             answer = dict(VISION)
             if self.mode in ("mixed-criterion", "single1", "scale50"):
@@ -522,7 +525,7 @@ def approve(request):
     ("missing-endpoint", "existing provider"),
     ("unbound-consumer", "every named consumer"),
     ("area-escape", "inside its named area"),
-    ("missing-skeleton", "every product unit"),
+    ("architecture-units", "unexpected field"),
     ("wrong-closing-owner", "owner and its closing requirement"),
 ])
 def test_plan_refuses_broken_agreements(tmp_path, fault, fix):
@@ -544,12 +547,13 @@ def test_plan_refuses_broken_agreements(tmp_path, fault, fix):
             answer["units"][1]["consumes"] = []
         elif fault == "area-escape":
             next(e["typedBody"] for e in answer["edits"] if e["kind"] == "area")["scope"] = ["else/**"]
-        elif fault == "missing-skeleton":
-            answer["skeleton"] = [1]
         else:
             next(e["typedBody"] for e in answer["edits"] if e["kind"] == "obligation")["owner"] = 2
 
-    provider.plan_fault = corrupt
+    if fault == "architecture-units":
+        provider.architecture_fault = lambda answer: answer.update(units=[])
+    else:
+        provider.plan_fault = corrupt
     try:
         assert run.run().state == "INCOMPLETE"
         assert fix in run.store.records("outcome")[-1][2]["reason"]
@@ -1871,6 +1875,8 @@ def recorded_artifact_journey(root):
 
 
 def clean_core_golden(root):
+    from .test_architect import architect_journeys
+
     root.mkdir(parents=True)
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(root)
@@ -1913,11 +1919,13 @@ def clean_core_golden(root):
         stale_task = pool.submit(stale_scope_journey, root / "stale-scope")
         seed_task = pool.submit(final_seed, root / "final-seed")
         records_task = pool.submit(records_and_skeleton_journey, root / "records")
+        architect_task = pool.submit(architect_journeys, root / "architect")
         list(pool.map(run_case, modes))
         baseline = baseline_task.result()
         admission_task.result()
         stale_task.result()
         records_task.result()
+        architect_task.result()
         seed = seed_task.result()
     # A copied fault must never mutate its shared seed through an old store/Git/provider path.
     store = Store(seed / "product")

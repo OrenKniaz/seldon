@@ -1,6 +1,14 @@
 """C9/C10/C12; R4/R6: canonical endpoints, ownership and bounded agreement projections."""
 
+from copy import deepcopy
+
 from . import plan
+from .schema import ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT
+from .schema import validate as validate_schema
+
+
+class ContractGap(ValueError):
+    pass
 
 
 def endpoint(unit, contract):
@@ -51,9 +59,9 @@ def validate(document):
                 raise ValueError(f"{ref}: name each existing contract once in {field}")
         for path in unit["reads"]:
             plan.safe_path(path)
-            if plan.prefix(path) != path:
+            if "*" in path or "?" in path:
                 raise ValueError(f"{ref}: reads must name a concrete file: {path}")
-            owners = [r for r, u in units.items() if plan.matches(path, u["scope"])]
+            owners = [r for r, u in units.items() if path in u["scope"] or plan.matches(path, u["scope"])]
             if len(owners) != 1:
                 raise ValueError(f"{ref}: {path} needs one planned file owner")
             owner, = owners
@@ -65,3 +73,121 @@ def stale_consumers(before, after):
     old, new = (plan.select(d, "contract") for d in (before, after))
     return {u for r in old.keys() | new.keys() if old.get(r) != new.get(r)
             for c in (old.get(r), new.get(r)) if c for u in c["consumers"]}
+
+
+def index(items):
+    result = {item["handle"]: item for item in items}
+    if len(result) != len(items):
+        raise ValueError("Give each area or contract a distinct handle")
+    return result
+
+
+def commitments(vision):
+    return {f"{field}:{i}": value for field in ("scopeIn", "improvements", "quality")
+            for i, value in enumerate(vision[field], 1)}
+
+
+def outline(answer, vision=None):
+    validate_schema({k: v for k, v in answer.items() if k != "why"}, ARCHITECT)
+    areas, contracts = index(answer["areas"]), index(answer["contracts"])
+    assigned = {r for a in areas.values() for r in a["commitments"]}
+    if vision is not None and assigned != set(commitments(vision)):
+        raise ValueError("Assign every accepted commitment to an area, using its supplied handle")
+    if areas.keys() & contracts.keys():
+        raise ValueError("Area and contract handles must be distinct")
+    for ref, area in areas.items():
+        for path in area["scope"]:
+            plan.safe_path(path)
+        for other, sibling in areas.items():
+            if ref < other and plan.overlaps(area["scope"], sibling["scope"]):
+                raise ValueError("Areas need disjoint write scopes")
+    for ref, contract in contracts.items():
+        readers = contract["consumers"]
+        if (contract["provider"] not in areas or set(readers) - areas.keys()
+                or contract["provider"] in readers or len(set(readers)) != len(readers)):
+            raise ValueError(f"{ref}: name one existing provider area and distinct existing consumer areas")
+    if any(set(d["areas"]) - areas.keys() for d in answer["decisions"]):
+        raise ValueError("Decisions must name existing areas")
+    return areas, contracts
+
+
+def local_plan(area, contracts, answer):
+    """Check ownership before merging; canonical trace validation runs on the merged document."""
+    validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_PLAN)
+    handles = {e["targetHandle"]: e["kind"] for e in answer["edits"]}
+    if len(handles) != len(answer["edits"]):
+        raise ValueError("Each local record needs a distinct handle")
+    relations = {"requirement": ("features", "feature"), "check": ("requirements", "requirement")}
+    for edit in answer["edits"]:
+        if edit["kind"] in relations:
+            field, kind = relations[edit["kind"]]
+            if any(handles.get(r) != kind and not (
+                    kind == "requirement" and r in contracts
+                    and endpoint(area["handle"], contracts[r]) == "consumer")
+                   for r in edit["typedBody"][field]):
+                raise ValueError(f"Local {field} must name this area's {kind} handles")
+        if edit["kind"] == "obligation":
+            item = edit["typedBody"]
+            if (item["owner"] > len(answer["units"])
+                    or handles.get(item["closingRequirement"]) != "requirement"):
+                raise ValueError("An obligation needs a local owner and its closing requirement")
+    for unit in answer["units"]:
+        if not all(any(plan.contains(s, p) for s in area["scope"]) for p in unit["scope"]):
+            raise ValueError("Keep unit scopes inside its named area scopes")
+        if any(handles.get(r) != "requirement" for r in unit["requirements"]):
+            raise ValueError("Units must own local requirement handles")
+        for dep in unit["dependencies"]:
+            if isinstance(dep, int):
+                if dep > len(answer["units"]):
+                    raise ValueError("Dependencies must name local unit positions")
+            else:
+                plan.safe_path(dep)
+                if "*" in dep or "?" in dep:
+                    raise ValueError("A file prerequisite must name a concrete file")
+        for field, side in (("provides", "provider"), ("consumes", "consumer")):
+            for ref in unit[field]:
+                if ref not in contracts or endpoint(area["handle"], contracts[ref]) != side:
+                    raise ValueError(f"{ref}: bind one provider and its agreed consumer endpoints; "
+                                     "report a contract gap")
+    for quality in answer["quality"]:
+        if any(handles.get(r) != "check" for r in quality["checks"]):
+            raise ValueError("Quality coverage must name local checks")
+
+
+def subdivision(parent, answer, known_contracts):
+    validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_SPLIT)
+    children = index(answer["subareas"])
+    if {r for c in children.values() for r in c["commitments"]} != set(parent["commitments"]):
+        raise ValueError("Sub-areas must cover the parent's commitments exactly")
+    if children.keys() & (known_contracts.keys() | {parent["handle"]}):
+        raise ValueError("Sub-areas need new distinct handles")
+    # A split must narrow every child's ownership, preserving every parent path scope.
+    for child in children.values():
+        if (child["scope"] == parent["scope"] or not all(
+                any(plan.contains(s, p) for s in parent["scope"]) for p in child["scope"])):
+            raise ValueError("Sub-area scopes must narrow the parent area")
+    local = {"areas": answer["subareas"], "contracts": answer["contracts"],
+             "decisions": [], "waves": [{"goal": "Detail the parent responsibility"}]}
+    outline(local)
+    if index(answer["contracts"]).keys() & known_contracts.keys():
+        raise ValueError("Each new contract needs a distinct handle")
+    return children
+
+
+def expand(architecture, parent, answer):
+    """Preserve parent agreements across a split; merge resolves the unique implementing unit."""
+    result = deepcopy(architecture)
+    children = subdivision(parent, answer, index(result["contracts"]))
+    if children.keys() & index(result["areas"]).keys():
+        raise ValueError("Sub-area handles must be distinct from existing areas")
+    result["areas"] = [a for a in result["areas"] if a["handle"] != parent["handle"]]
+    result["areas"].extend(children.values())
+    # Parent endpoint membership is retained explicitly, never inferred from source or prose.
+    for child in result["areas"]:
+        if child["handle"] in children:
+            child["ancestors"] = [*parent.get("ancestors", []), parent["handle"]]
+    result["contracts"].extend(answer["contracts"])
+    for decision in result["decisions"]:
+        if parent["handle"] in decision["areas"]:
+            decision["areas"] = [a for a in decision["areas"] if a != parent["handle"]] + list(children)
+    return result

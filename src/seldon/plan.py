@@ -126,6 +126,110 @@ def create(vision, answer):
     return document
 
 
+def merge(vision, architecture, leaves):
+    """CODE assigns global handles, unit positions, contract endpoints and skeleton membership."""
+    from . import architecture as owner
+
+    edits, units, quality = [], [], {}
+    endpoints, file_dependencies, feature_handles, deferred_checks = {}, {}, {}, []
+    emitted = set()
+    for area, answer in leaves:
+        relevant = {r: c for r, c in owner.index(architecture["contracts"]).items()
+                    if any(owner.endpoint(a, c) for a in [area["handle"], *area.get("ancestors", [])])}
+        # An inherited endpoint is still an explicit agreement with the parent responsibility.
+        local_contracts = {r: {**c,
+            "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
+            "consumers": [area["handle"] if a in area.get("ancestors", []) else a for a in c["consumers"]]}
+            for r, c in relevant.items()}
+        owner.local_plan(area, local_contracts, answer)
+        offset = len(units)
+        handles = {e["targetHandle"]: f"{area['handle']}/{e['targetHandle']}" for e in answer["edits"]}
+        # Equal feature records with the same proposed handle are one story across areas.
+        # Different stories may freely reuse a local handle; no semantic text matching is used.
+        for edit in answer["edits"]:
+            if edit["kind"] == "feature":
+                ref = edit["targetHandle"]
+                prior = feature_handles.setdefault(ref, [])
+                shared = next((h for body, h in prior if body == edit["typedBody"]), None)
+                if shared:
+                    handles[ref] = shared
+                else:
+                    prior.append((edit["typedBody"], handles[ref]))
+        for edit in answer["edits"]:
+            if handles[edit["targetHandle"]] in emitted:
+                continue
+            emitted.add(handles[edit["targetHandle"]])
+            body = dict(edit["typedBody"])
+            relation = {"requirement": "features", "check": "requirements"}.get(edit["kind"])
+            if relation:
+                refs = body[relation]
+                body[relation] = [handles[r] for r in refs if r in handles]
+                if edit["kind"] == "check":
+                    deferred_checks.append((body, [r for r in refs if r not in handles]))
+            if edit["kind"] == "obligation":
+                body.update(owner=body["owner"] + offset,
+                            closingRequirement=handles[body["closingRequirement"]])
+            edits.append({**edit, "targetHandle": handles[edit["targetHandle"]], "typedBody": body})
+        for unit in answer["units"]:
+            position = len(units) + 1
+            file_dependencies[position] = [d for d in unit["dependencies"] if isinstance(d, str)]
+            units.append({**unit, "area": area["handle"],
+                          "requirements": [handles[r] for r in unit["requirements"]],
+                          "dependencies": [d + offset for d in unit["dependencies"] if isinstance(d, int)]})
+            for side in ("provides", "consumes"):
+                for ref in unit[side]:
+                    endpoints.setdefault(ref, {"provides": [], "consumes": []})[side].append(
+                        (position, {area["handle"], *area.get("ancestors", [])}))
+        for item in answer["quality"]:
+            quality.setdefault(item["criterion"], []).extend(handles[r] for r in item["checks"])
+    if set(a["handle"] for a, _ in leaves) != set(owner.index(architecture["areas"])):
+        raise ValueError("Detail every area exactly once")
+    for area in architecture["areas"]:
+        edits.append({"kind": "area", "targetHandle": area["handle"], "typedBody": {
+            k: area[k] for k in ("responsibility", "scope")}})
+    for contract in architecture["contracts"]:
+        bound = endpoints.get(contract["handle"], {"provides": [], "consumes": []})
+        if (len(bound["provides"]) != 1 or not bound["consumes"]
+                or {c for _, areas in bound["consumes"] for c in contract["consumers"] if c in areas}
+                != set(contract["consumers"])):
+            raise ValueError(f"{contract['handle']}: bind exactly one provider and every named consumer")
+        edits.append({"kind": "contract", "targetHandle": contract["handle"], "typedBody": {
+            "kind": contract["kind"], "text": contract["text"],
+            "provider": bound["provides"][0][0], "consumers": [p for p, _ in bound["consumes"]]}})
+    for i, decision in enumerate(architecture["decisions"]):
+        edits.append({"kind": "decision", "targetHandle": f"architecture-decision:{i}",
+                      "typedBody": decision})
+    providers = {e["targetHandle"]: e["typedBody"]["provider"] for e in edits if e["kind"] == "contract"}
+    for check, refs in deferred_checks:
+        check["requirements"] = list(dict.fromkeys([*check["requirements"],
+            *(r for contract in refs for r in units[providers[contract] - 1]["requirements"])]))
+    for position, paths in file_dependencies.items():
+        for path in paths:
+            writers = [i for i, u in enumerate(units, 1) if path in u["scope"] or matches(path, u["scope"])]
+            if len(writers) != 1 or writers[0] == position:
+                raise ValueError(f"{path}: a file prerequisite needs one other planned writer")
+            deps = units[position - 1]["dependencies"]
+            if writers[0] not in deps:
+                deps.append(writers[0])
+    for unit in units:
+        for path in unit["reads"]:
+            owners = [(i, u) for i, u in enumerate(units, 1)
+                      if path in u["scope"] or matches(path, u["scope"])]
+            if len(owners) == 1:
+                other, writer = owners[0]
+                if (writer["area"] != unit["area"] and other not in unit["dependencies"] and not any(
+                        e["kind"] == "contract" and e["targetHandle"] in unit["consumes"]
+                        and e["typedBody"]["provider"] == other for e in edits)):
+                    raise owner.ContractGap(
+                        f"{unit['area']} reading {path} needs a contract with {writer['area']}")
+    document = create(vision, {"edits": edits, "units": units,
+        "skeleton": list(range(1, len(units) + 1)) if len(units) > 1 else [],
+        "quality": [{"criterion": c, "checks": list(dict.fromkeys(checks))}
+                    for c, checks in quality.items()]})
+    document["architecture"] = architecture
+    return document
+
+
 def validate(document):
     nodes = document["nodes"]
     validate_schema(nodes["vision"]["body"], VISION)

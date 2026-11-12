@@ -39,6 +39,21 @@ UNIT_EVIDENCE = (
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
              + ALIGN_DESIGN,
+    "ARCHITECT": "What areas, agreements, decisions and wave goals deliver the accepted vision? "
+                 "Assign every supplied commitment handle to an area; name disjoint area scopes "
+                 "and one provider area for each contract. "
+                 "Return architecture only: no features, requirements, checks or units.",
+    "DETAIL": "What features, requirements, semantic checks and units deliver this area? "
+              "Keep work inside its scope and bind provided and consumed contracts by handle. "
+              "A cross-area check names its local requirements and the consumed contract handles; "
+              "code links those contracts' provider requirements. "
+              "Dependencies are local 1-based unit positions or exact prerequisite file paths; "
+              "obligation owners are local 1-based unit positions. "
+              "Trace quality criteria by their supplied 1-based positions. Commands are argv. "
+              "Checks run automatically; Seldon judges visual quality from saved screenshots. "
+              "If the answer exceeds the small list bounds, return subdivide with narrower sub-areas "
+              "covering this responsibility and their contracts. If an agreement is missing, "
+              "return contract_gap and the need; do not invent an agreement.",
     "PLAN": "What product work is needed in addition to the supplied delivery work? Plan its features, "
             "areas, contracts, decisions, requirements, semantic checks and scoped units. "
             "Trace each accepted quality criterion by its 1-based position to its checks in quality. "
@@ -84,6 +99,8 @@ class MissingFacts(ValueError):
 def bounded_unit(question):
     if question["kind"] in ("WORK", "JUDGE") and len(encode(question).encode("utf-8")) > 65536:
         raise UnitTooLarge("unit too large to judge; split it")
+    if question["kind"] in ("ARCHITECT", "DETAIL") and len(encode(question).encode("utf-8")) > 65536:
+        raise UnitTooLarge("Planning subject exceeds 65536 bytes; narrow its accepted area")
     return question
 
 
@@ -92,7 +109,7 @@ def build(kind, facts, targets=(), execution=None, images=()):
         targets = [*targets, *SOURCE_TARGETS]
     if kind == "ALIGN":
         facts = {**facts, "Design guidance used by UI workers": CRAFT}
-    if kind in ("PLAN", "REPAIR", "REVIEW"):
+    if kind in ("PLAN", "DETAIL", "REPAIR", "REVIEW"):
         facts = {**facts, "How the plan executes": (
             "Each unit has one worker and a separate checkout. Disjoint units can run concurrently "
             "once their dependencies are integrated. Files assigned to the same unit share one worker. "
@@ -118,7 +135,7 @@ def build(kind, facts, targets=(), execution=None, images=()):
 
     if kind == "REVIEW":
         facts = {**facts, "Trace coverage": plan.coverage(facts["Plan"])}
-    if kind in ("PLAN", "REPAIR"):
+    if kind in ("PLAN", "DETAIL", "REPAIR"):
         facts = {**facts, "Delivery work supplied by Seldon after the product units": {
             "path": plan.GUIDE_PATH, "work": plan.GUIDE_WORK, "owner": "Seldon's final guide unit"}}
     example = {
@@ -127,6 +144,7 @@ def build(kind, facts, targets=(), execution=None, images=()):
                   "quality": [{"criterion": "Clear output", "verification": "Run with a name"}],
                   "unknowns": []},
         "PLAN": example_plan(), "REPAIR": example_plan(),
+        "ARCHITECT": example_architecture(), "DETAIL": example_detail(),
         "REVIEW": {"verdict": "adequate", "gaps": []},
         "DECIDE": {"choice": "approve"},
         "WORK": {"outcome": "done", "summary": "Implemented and ran the assigned checks", "discoveries": []},
@@ -167,6 +185,50 @@ def example_plan():
                    "requirements": ["new:r"], "dependencies": [], "instructions": "Implement the greeting",
                    "area": "new:a", "provides": [], "consumes": [], "reads": []}], "skeleton": [],
         "quality": [{"criterion": 1, "checks": ["new:c"]}]}
+
+
+def example_architecture():
+    return {"areas": [{"handle": "greeting", "responsibility": "Deliver greetings", "scope": ["greeting/**"],
+                       "commitments": ["scopeIn:1", "quality:1"]}],
+            "contracts": [], "decisions": [], "waves": [{"goal": "Deliver a complete greeting"}]}
+
+
+def example_detail():
+    example = example_plan()
+    return {"verdict": "planned", "edits": [e for e in example["edits"] if e["kind"] != "area"],
+            "units": [{k: v for k, v in u.items() if k != "area"} for u in example["units"]],
+            "quality": example["quality"]}
+
+
+def architect_brief(vision, gap=None):
+    facts = {"Approved vision": {k: v for k, v in vision.items() if k != "why"},
+             "Commitment handles": architecture.commitments(vision)}
+    if gap:
+        facts["Contract gap"] = gap
+    return build("ARCHITECT", facts)
+
+
+def detail_brief(store, outline, area):
+    cursor = store.cursor()
+    vision = store.read(cursor.vision)["answer"]
+    participants = [area["handle"], *area.get("ancestors", [])]
+    contracts = {c["handle"]: c for c in outline["contracts"]
+                 if any(architecture.endpoint(a, c) for a in participants)}
+    listing = gitwork.git(store.root.parent, "ls-tree", "-r", "--name-only", cursor.candidate).splitlines()
+    files = [p for p in listing if plan.matches(p, area["scope"])]
+    goals = architecture.commitments(vision)
+    facts = {"Approved scope": {"scopeIn": [goals[r] for r in area["commitments"]
+                                           if not r.startswith("quality:")],
+                               "scopeOut": vision["scopeOut"], "quality": vision["quality"]},
+             "Area": {k: area[k] for k in ("handle", "responsibility", "scope")},
+             "Contracts": {r: {"kind": c["kind"], "text": c["text"],
+                              "side": "provider" if c["provider"] in participants else "consumer"}
+                           for r, c in contracts.items()},
+             "Decisions": [{k: d[k] for k in ("choice", "reason")} for d in outline["decisions"]
+                           if area["handle"] in d["areas"]],
+             "Product in this area": {"files": files[:64], "additionalFiles": max(0, len(files) - 64)},
+             "Runtime": runtime(store.read(cursor.kickoff)["setup"])}
+    return build("DETAIL", facts)
 
 
 def labelled(facts):

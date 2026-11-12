@@ -14,6 +14,10 @@ def choice(*values):
     return {"type": "string", "enum": list(values)}
 
 
+def small(item, minimum=0, maximum=12):
+    return {**array(item, minimum), "maxItems": maximum}
+
+
 TEXT = {"type": "string", "minLength": 1, "maxLength": 8192}
 REFS = array(TEXT)
 VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT,
@@ -51,6 +55,38 @@ PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
            quality=array(obj(criterion={"type": "integer", "minimum": 1},
                              checks=array(TEXT, 1)), 1))
 
+# Architecture names areas, never work units. DETAIL owns only its local records.
+AREA = obj(handle=TEXT, responsibility=TEXT, scope=small(TEXT, 1), commitments=small(TEXT, 1))
+AREA_CONTRACT = obj(handle=TEXT, **{**BODIES["contract"]["properties"], "consumers": small(TEXT, 1)})
+ARCHITECT = obj(areas=small(AREA, 1), contracts=small(AREA_CONTRACT, maximum=24),
+                decisions=small(BODIES["decision"]), waves=small(obj(goal=TEXT), 1, 8))
+DETAIL_PLAN = obj(verdict=choice("planned"),
+    edits=small({"anyOf": [obj(kind=choice(k), targetHandle=TEXT, typedBody=PLAN_BODIES[k])
+                           for k in ("feature", "requirement", "check", "obligation")]}, 1, 48),
+    units=small(obj(**{k: (small({"anyOf": [POSITION, TEXT]}) if k == "dependencies" else v)
+                      for k, v in PLAN["properties"]["units"]["items"]["properties"].items()
+                      if k != "area"}), 1),
+    quality=small(obj(criterion=POSITION, checks=small(TEXT, 1))))
+DETAIL_SPLIT = obj(verdict=choice("subdivide"), subareas=small(AREA, 2),
+                   contracts=small(AREA_CONTRACT, maximum=24))
+DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
+
+
+def bounded(contract):
+    """Planning lists and text stay small, including nested trace links and argv."""
+    if isinstance(contract, dict):
+        result = {k: bounded(v) for k, v in contract.items()}
+        if result.get("type") == "array":
+            result.setdefault("maxItems", 12)
+        if result.get("type") == "string" and "maxLength" in result:
+            result["maxLength"] = min(2048, result["maxLength"])
+        return result
+    return [bounded(v) for v in contract] if isinstance(contract, list) else contract
+
+
+ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT, DETAIL_GAP = (
+    bounded(s) for s in (ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT, DETAIL_GAP))
+
 
 # Fixed source obligations are assessed by every product unit JUDGE, independently of criteria.
 SOURCE_TARGETS = (
@@ -72,7 +108,8 @@ def answer_schema(kind, targets=()):
         assessment = {"anyOf": [requirement, obj(**{**assessment["properties"],
                                                    "target": choice(*SOURCE_TARGETS)})]}
     payload = {
-        "ALIGN": VISION, "PLAN": PLAN, "REPAIR": PLAN,
+        "ALIGN": VISION, "PLAN": PLAN, "REPAIR": PLAN, "ARCHITECT": ARCHITECT,
+        "DETAIL": DETAIL_PLAN,
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
         "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT, discoveries=array(GAP)),
@@ -81,7 +118,10 @@ def answer_schema(kind, targets=()):
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
     }[kind]
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
-    return obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in (payload, uncertain)]})
+    alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP, uncertain) if kind == "DETAIL"
+                    else (payload, uncertain))
+    result = obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
+    return bounded(result) if kind in ("ARCHITECT", "DETAIL") else result
 
 
 def validate(value, contract, path="answer"):
@@ -108,6 +148,8 @@ def validation_errors(value, contract, path="answer"):
     elif kind == "array":
         if len(value) < contract.get("minItems", 0):
             errors.append(f"{path}: too few items")
+        if len(value) > contract.get("maxItems", len(value)):
+            errors.append(f"{path}: too many items; subdivide this area")
         for index, child in enumerate(value):
             errors += validation_errors(child, contract["items"], f"{path}[{index}]")
     elif kind == "string":
