@@ -1,5 +1,6 @@
-"""C8/C11/C21/I6; R11/R12: explicit subject-bound approvals and pre-B-only plan repair."""
+"""C8/C11/C21/I6; R11/R12: subject-bound approvals, plan repair and reviewed criterion levels."""
 
+from copy import deepcopy
 from dataclasses import replace
 
 from . import inference, questions
@@ -42,7 +43,9 @@ def decide(store, provider, user):
             "words": raw, "interpretation": interpretation, "scripted": scripted})
         fields = {"A": "A", "B": "B", "CHECK-IN": "checkin"}
         if cursor.state in fields:
-            advance(store, "approve", approval, decision=None, **{fields[cursor.state]: approval})
+            event = "approve-final" if cursor.state == "B" and cursor.finalCommit else "approve"
+            advance(store, event, approval, decision=None, **{fields[cursor.state]: approval},
+                    **({"pendingJudge": None} if event == "approve-final" else {}))
         elif cursor.state == "C":
             from .run import eligible
             eligible(store)
@@ -58,7 +61,8 @@ def decide(store, provider, user):
 def repair(store, provider):
     from . import plan
     cursor = store.cursor()
-    if cursor.B:
+    marking = store.read(cursor.pendingJudge) if cursor.pendingJudge else None
+    if cursor.B and not marking:
         raise ValueError("Post-B plan steering is deferred to M3")
     if cursor.repairs >= 3:
         raise ValueError("Three pre-B plan repairs exhausted: " + cursor.failure)
@@ -66,6 +70,12 @@ def repair(store, provider):
 
     def check(answer):
         document = plan.create(vision, answer)
+        if marking:
+            expected = deepcopy(store.plan(cursor.revision))
+            expected["nodes"][marking["subject"]]["body"]["level"] = "unit"
+            if plan.add_guide(document) != expected:
+                raise ValueError("Only the named criterion's level may change to unit; "
+                                 "preserve the approved plan")
         if plan.add_guide(document) == store.plan(cursor.revision):
             raise ValueError("Repair changes nothing; resolve the named review gap")
 
@@ -79,4 +89,5 @@ def repair(store, provider):
     with store.transaction():
         revision = store.revision(document, cursor.revision)
         advance(store, "repaired", result, revision=revision, repairs=cursor.repairs + 1,
-                review=None, decision=None, requestedChange=None)
+                review=None, decision=None, requestedChange=None,
+                **({"B": None} if marking else {}))

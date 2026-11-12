@@ -5,6 +5,7 @@ from pathlib import Path
 
 from . import gitwork, guide, inference, plan, proof, questions, units
 from .states import advance
+from .store import encode
 
 
 def subjects(document, kind):
@@ -48,7 +49,6 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
             or any(store.read(r)["commit"] != cursor.finalCommit for r in refs)):
         raise ValueError("Judge evidence requires every traced check on the final commit")
     owned = owners(document, kind, subject)
-    scopes = [p for u in owned.values() for p in u["scope"]]
     trees = trees if trees is not None else scope_trees(store, owned)
     verdicts = []
     for ref in owned:
@@ -62,7 +62,8 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
     final = questions.observed(store, refs)
     for item, ref in zip(final, refs):
         body = store.read(ref)
-        item.update(workingDirectory=body["cwd"], commit=body["commit"], ranOnDeliveredRevision=True)
+        item.update(workingDirectory=body["cwd"], commit=body["commit"], ranOnDeliveredRevision=True,
+                    **{k: body[k] for k in ("executionStarted", "cleanupVerified", "timedOut")})
     body = subjects(document, kind)[subject]
     obligation = ({k: v for k, v in body.items() if k != "features"} if kind == "DEMO" else
                   {k: body[k] for k in ("criterion", "verification")})
@@ -87,16 +88,20 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
         facts["Guide file"] = {"path": plan.GUIDE_PATH, "commit": cursor.finalCommit,
                                "text": gitwork.git(store.root.parent, "show",
                                                    f"{cursor.finalCommit}:{plan.GUIDE_PATH}")}
-    if resolve is not None:
-        # Rehydrate authoritative records through the same subject trace, never semantic keyword matching.
-        facts["Requested facts"] = resolve
-        facts["Code-established execution facts"] = [
-            {k: v for k, v in store.read(r).items() if k not in ("stdout", "stderr", "scopeTree")}
-            for r in refs]
-        facts["Code-established coverage"] = {
-            "commit": cursor.finalCommit, "checksPassed": not proof.failures(store, refs),
-            "scopes": scopes}
-    return questions.build(kind, facts, [subject], images=questions.images(store, refs))
+    images = questions.images(store, refs)
+    question = questions.build(kind, facts, [subject], images=images)
+    if resolve is None:
+        return question
+    # Requests are semantic text. Code supplies only named facts already owned by this subject,
+    # without guessing their meaning or duplicating outputs, artifacts or verdict rows (T-79).
+    facts = {**facts, "Source availability":
+             "Not available after integration: source is judged at the unit; see Unit verdicts.",
+             "Requested facts": [{"request": item, "observations": list(checks),
+                                  "screenshots": images, "unitVerdicts": list(owned)} for item in resolve]}
+    reask = questions.build(kind, facts, [subject], images=images)
+    if len(encode(reask).encode("utf-8")) > 2 * len(encode(question).encode("utf-8")):
+        raise questions.MissingFacts("Requested facts exceed twice the original subject brief")
+    return reask
 
 
 def combined(verdicts):
@@ -136,6 +141,37 @@ def save(store, kind, subject, result, answer, trees):
         store.cursor(replace(cursor, **{field: getattr(cursor, field) + [ref]}, pendingJudge=None))
 
 
+def plan_gap(store, kind, subject, result, answer):
+    document = store.plan(store.cursor().revision)
+    if (kind != "PRODUCT" or subject not in plan.select(document, "criterion")
+            or answer.get("evidenceLevel") != "unit"):
+        raise questions.MissingFacts("Final judge lacks facts: " + str(answer))
+    with store.transaction():
+        gap = store.record("plan_gap", {"subject": subject, "kind": kind, "source": result,
+            "answer": answer, "correction": "Mark this criterion unit; its evidence needs unit judgment"})
+        advance(store, "plan-gap", gap, pendingJudge=gap, failure=str(store.read(gap)))
+
+
+def unit_quality(store, subject, trees):
+    document = store.plan(store.cursor().revision)
+    sources, assessments = [], []
+    for ref in owners(document, "PRODUCT", subject):
+        source = store.unit(ref).judgment
+        verdict = store.read(source)
+        assessment, = [a for a in verdict["answer"]["assessments"] if a["target"] == subject]
+        sources.append(source)
+        assessments.append(assessment)
+    passed = bool(assessments) and all(a["meaningful"] and a["noStubsMocksMissing"] for a in assessments)
+    answer = {"verdict": "satisfied" if passed else "gap", "gaps": [],
+              "assessments": [{"target": subject, "meaningful": passed, "noStubsMocksMissing": passed,
+                               "why": "AND of the reached unit quality assessments"}],
+              "why": "Source quality is judged only at its owning units"}
+    if not passed:
+        raise ValueError("Unit quality needs every reached unit's satisfied criterion verdict")
+    result = store.record("unit_quality", {"subject": subject, "sources": sources, "answer": answer})
+    save(store, "PRODUCT", subject, result, answer, trees)
+
+
 def step(store, provider):
     cursor = store.cursor()
     kind = "DEMO" if cursor.state.startswith("DEMO") else "PRODUCT"
@@ -149,7 +185,9 @@ def step(store, provider):
     for ref, unit in plan.select(document, "unit").items():
         row = store.unit(ref)
         verdict = store.read(row.judgment)
-        if verdict["scopeTree"] == trees[ref]:
+        targets = set(unit["requirements"]) | set(plan.unit_criteria(document, ref))
+        assessed = {a["target"] for a in verdict.get("answer", {}).get("assessments", [])}
+        if verdict["scopeTree"] == trees[ref] and targets <= assessed:
             continue
         refs = [r for r in cursor.finalObservations if store.read(r)["unit"] == ref]
         evidence = [r for r in row.observations if store.read(r)["purpose"] != "P"] + refs
@@ -169,8 +207,16 @@ def step(store, provider):
     if cursor.pendingJudge:
         pending = store.read(cursor.pendingJudge)
         subject = pending["subject"]
-        question = brief(store, kind, subject, resolve=pending["answer"]["neededFacts"], trees=trees)
-        result, answer = inference.call(store, provider, question)
+        try:
+            question = brief(store, kind, subject, resolve=pending["answer"]["neededFacts"], trees=trees)
+            result, answer = inference.call(store, provider, question, max_bytes=2 * pending["questionBytes"])
+        except questions.MissingFacts as error:
+            plan_gap(store, kind, subject, pending["source"], {**pending["answer"],
+                                                          "neededFacts": [str(error)]})
+            return
+        if answer["verdict"] == "uncertain":
+            plan_gap(store, kind, subject, result, answer)
+            return
         if not questions.satisfied(answer, final=True):
             fixup(store, kind, subject, result, answer)
             return
@@ -181,6 +227,9 @@ def step(store, provider):
     done = {store.read(r)["subject"] for r in getattr(cursor, field)}
     for subject in subjects(document, kind):
         if subject in done:
+            continue
+        if kind == "PRODUCT" and subjects(document, kind)[subject].get("level") == "unit":
+            unit_quality(store, subject, trees)
             continue
         question = brief(store, kind, subject, trees=trees)
         refs = [r for r in cursor.finalObservations
@@ -196,7 +245,8 @@ def step(store, provider):
         if answer["verdict"] == "uncertain":
             with store.transaction():
                 pending = store.record("judge_uncertain", {"subject": subject, "kind": kind,
-                    "commit": cursor.candidate, "source": result, "answer": answer})
+                    "commit": cursor.candidate, "source": result, "answer": answer,
+                    "questionBytes": len(encode(question).encode("utf-8"))})
                 advance(store, "uncertain", result, pendingJudge=pending)
             return
         if not questions.satisfied(answer, final=True):

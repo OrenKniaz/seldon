@@ -85,8 +85,9 @@ def planned(count, mode):
                  int(e["targetHandle"][-3:]) % 5 == 1]
     selected = "new:c002" if mode == "traced-evidence" else "new:c001"
     return {"edits": edits, "units": scopes, "quality": [
-        {"criterion": 1, "checks": [selected]},
-        {"criterion": 2, "checks": [selected]}]}
+        {"criterion": 1, "level": "product", "checks": [selected]},
+        {"criterion": 2, "level": "unit" if mode in ("single1", "scale50") else "product",
+         "checks": [selected]}]}
 
 
 NATIVE = r'''
@@ -283,6 +284,10 @@ class Scripted:
         kind = q["kind"]
         if kind == "ALIGN":
             answer = dict(VISION)
+            if self.mode in ("unit-quality", "single1", "scale50"):
+                answer["quality"] = [VISION["quality"][0], {
+                    "criterion": "Each value module owns its persistence without sibling dependencies",
+                    "verification": "Inspect this unit's files"}]
             if self.mode == "review-repair":
                 answer["quality"] = [VISION["quality"][0], {
                     "criterion": "unit-001/value.txt and unit-002/value.txt each persist their own value",
@@ -293,6 +298,16 @@ class Scripted:
                                      VISION["quality"][1]]
         elif kind in ("PLAN", "REPAIR"):
             answer = planned(self.count, self.mode)
+            if self.mode == "unit-quality":
+                answer["quality"][1].update(level="unit", checks=["new:c001", "new:c002"])
+            if self.mode in ("product-source-unresolved", "product-source-oversize",
+                             "product-source-review-gap") and kind == "REPAIR":
+                answer["quality"][0]["level"] = "unit"
+                if self.mode == "product-source-unresolved" and "Exact corrections" not in q["facts"]:
+                    answer["units"][0]["instructions"] += "; unrelated planner rewrite"
+                if (self.mode == "product-source-review-gap"
+                        and q["facts"]["Plan"]["nodes"]["quality:001"]["body"]["level"] == "unit"):
+                    answer["units"][0]["instructions"] += "; unrelated planner rewrite"
             if self.mode == "plan-overlap":
                 corrections = q["facts"].get("Exact corrections", [])
                 if not corrections:
@@ -307,6 +322,10 @@ class Scripted:
                 answer["edits"][1]["typedBody"]["obligation"] += "; exact stored value requested by user"
         elif kind == "REVIEW":
             answer = {"verdict": "adequate", "gaps": []}
+            if (self.mode == "product-source-review-gap"
+                    and q["facts"]["Plan"]["nodes"]["quality:001"]["body"]["level"] == "unit"):
+                answer = {"verdict": "gap", "gaps": [{"target": "u001",
+                          "correction": "Rewrite this unit's instructions during marking correction"}]}
             if self.mode == "review-repair":
                 coverage = q["facts"]["Trace coverage"]["quality:002"]
                 if set(coverage["units"]) != {"u001", "u002"}:
@@ -324,7 +343,8 @@ class Scripted:
                     "Clarify the local assertion for this value"],
                     "why": "A semantic fact needs clarification"}})
             answer = {"verdict": "satisfied", "gaps": [],
-                      "assessments": questions.assessments(q["targets"], final=kind != "JUDGE")}
+                      "assessments": questions.assessments(q["targets"], final=kind != "JUDGE",
+                          unit_criteria=q["facts"].get("Unit quality", {}))}
             if kind in ("DEMO", "PRODUCT"):
                 assert len(q["targets"]) == 1
                 facts = q["facts"]
@@ -374,20 +394,36 @@ class Scripted:
                         why="The stored value was read, but there is no browser observation")
                 prefix = kind.lower()
                 is_subject = q["targets"] == (["n002"] if kind == "DEMO" else ["quality:001"])
-                if is_subject and self.mode == prefix + "-uncertain":
+                if is_subject and (self.mode == prefix + "-uncertain"
+                                   or kind == "PRODUCT" and self.mode in ("single1", "scale50")):
                     if "Requested facts" not in facts:
                         return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                             "Did this check execute on the delivered commit with verified cleanup?"],
+                            "evidenceLevel": "product",
                             "why": "Need the actual execution facts"}})
-                    actual, = facts["Code-established execution facts"]
+                    actual, = facts["Final observations"]
                     assert actual["executionStarted"] and actual["cleanupVerified"]
-                    assert actual["commit"] == facts["Code-established coverage"]["commit"]
-                    assert facts["Code-established coverage"]["checksPassed"]
+                    assert actual["ranOnDeliveredRevision"]
+                if (kind == "PRODUCT" and is_subject
+                        and self.mode in ("product-source-resolved", "product-source-unresolved",
+                                          "product-source-oversize", "product-facts-unavailable",
+                                          "product-source-review-gap")):
+                    if "Requested facts" in facts:
+                        assert "source is judged at the unit" in facts["Source availability"]
+                        assert facts["Unit verdicts"][0]["verdict"] == "satisfied"
+                    if "Requested facts" not in facts or self.mode != "product-source-resolved":
+                        return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
+                            "Supply the script sources to inspect module ownership"] *
+                            (100 if self.mode == "product-source-oversize" else 1),
+                            "evidenceLevel": ("product" if self.mode == "product-facts-unavailable"
+                                              else "unit"),
+                            "why": "The criterion needs source inspection"}})
                 if is_subject and self.mode in (prefix + "-gap", prefix + "-unresolved"):
                     if any("interaction blocked" in o["stdout"] for o in facts["Final observations"]):
-                        if self.mode.endswith("-unresolved"):
+                        if self.mode.endswith("-unresolved") and "Requested facts" not in facts:
                             return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                                 "Demonstrate that the interaction is ready, not blocked"],
+                                "evidenceLevel": "product",
                                 "why": "The observed interaction remains unresolved"}})
                         answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
                             "correction": "The interaction is blocked; make it ready and assert it "
@@ -458,9 +494,14 @@ def finish(run):
     assert len([b for _, k, b in rows if k == "product_verdict"]) == 1
     final_questions = [b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]
     assert all(len(q["targets"]) == 1 for q in final_questions)
-    for subject in plan.select(run.store.plan(cursor.revision), "criterion"):
+    for subject, body in plan.select(run.store.plan(cursor.revision), "criterion").items():
         verdict, = [run.store.read(r) for r in cursor.qualityVerdicts
                     if run.store.read(r)["subject"] == subject]
+        if body["level"] == "unit":
+            folded = run.store.read(verdict["source"])
+            assert folded["sources"] == [run.store.unit(ref).judgment for ref in
+                                         judgment.owners(run.store.plan(cursor.revision), "PRODUCT", subject)]
+            continue
         initial = [q for q in final_questions if "Requested facts" not in q["facts"]
                    and all(o["commit"] == verdict["commit"] for o in q["facts"]["Final observations"])]
         assert sum(q["targets"] == [subject] for q in initial) == 1
@@ -607,13 +648,14 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             units = run.store.units()
             assert cursor.state == "INCOMPLETE" and units["u001"].state == "FAILED"
             assert units["u001"].recoveries == (2 if mode == "check-deadline" else 0)
-            assert units["u002"].state == "DONE"
+            assert units["u002"].state == ("FAILED" if mode == "judge-provider" else "DONE")
             assert (slot / "turn-unit-001").read_text() == ("3" if mode == "check-deadline" else "1")
             assert result["nextAction"] == "Resolve the named failure, then start a fresh run."
             if mode == "judge-provider":
                 assert len(run.store.records("provider_failure")) == 3
                 assert "Judge transport unavailable" in units["u001"].failure
-                assert units["u002"].recoveries == 1 and (slot / "turn-unit-002").read_text() == "2"
+                assert units["u002"].recoveries == 0 and (slot / "turn-unit-002").read_text() == "1"
+                assert "Unresolved facts" in units["u002"].failure
             elif mode == "native-denied":
                 failures = run.store.records("provider_failure")
                 assert len(failures) == 1 and failures[0][2]["transient"] is False
@@ -656,7 +698,59 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 run.step()
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
+        if mode == "product-source-unresolved":
+            while run.store.cursor().state != "REPAIR":
+                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                run.step()
+            run.close()
+            run = Run.reopen(slot / "product", provider, approve)
+        if mode in ("product-facts-unavailable", "product-source-review-gap"):
+            cursor = run.run()
+            assert cursor.state == "INCOMPLETE"
+            assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
+            assert not run.store.records("fixup")
+            if mode == "product-facts-unavailable":
+                assert not run.store.records("plan_gap")
+            else:
+                original = Store(seed / "product")
+                try:
+                    expected = original.plan(original.cursor().revision)
+                    expected["nodes"]["quality:001"]["body"]["level"] = "unit"
+                    assert run.store.plan(cursor.revision) == expected
+                finally:
+                    original.close()
+                assert "Only the named criterion's level" in run.store.records("outcome")[-1][2]["reason"]
+            return
         cursor, rows, units = finish(run)
+        if mode in ("unit-quality", "product-source-resolved", "product-source-unresolved",
+                    "product-source-oversize"):
+            assert not run.store.records("fixup")
+            assert all(u.recoveries == 0 for u in units.values())
+            assert all((slot / f"turn-unit-{i:03}").read_text() == "1" for i in (1, 2))
+            local = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"]
+            if mode == "unit-quality":
+                assert sum("quality:002" in q["targets"] for q in local) == 2
+                assert not any(b["targets"] == ["quality:002"] for _, k, b in rows
+                               if k == "question" and b["kind"] == "PRODUCT")
+            if mode in ("product-source-unresolved", "product-source-oversize"):
+                assert any("quality:001" in q["targets"] for q in local)
+                assert run.store.records("plan_gap") and cursor.repairs == 1
+                original = Store(seed / "product")
+                try:
+                    assert len(run.store.records("observation")) == len(original.records("observation"))
+                finally:
+                    original.close()
+                if mode == "product-source-unresolved":
+                    assert any("Only the named criterion's level" in error for _, _, reply in
+                               run.store.records("provider_reply") for error in reply["errors"])
+        reasks = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
+        if mode == "product-source-oversize":
+            assert not reasks, "An oversized FACTS question must never reach the provider"
+        for q in reasks:
+            first = next(b for _, k, b in rows if k == "question" and b["kind"] == q["kind"]
+                         and b["targets"] == q["targets"] and "Requested facts" not in b["facts"])
+            assert len(encode(q).encode()) <= 2 * len(encode(first).encode())
+            assert "Code-established execution facts" not in q["facts"]
         if mode == "timeout":
             failures = run.store.records("provider_failure")
             assert len(failures) == 1 and units["u001"].recoveries == 1
@@ -757,6 +851,8 @@ def simple_journey(slot, mode, count=1, *, seed=None):
         sizes = {kind: max(len(encode(b).encode("utf-8")) for _, k, b in rows
                           if k == "question" and b["kind"] == kind)
                  for kind in ("WORK", "JUDGE", "DEMO", "PRODUCT")}
+        if mode in ("single1", "scale50"):
+            sizes["re-ask"] = max(len(encode(q).encode()) for q in reasks)
         if mode in ("single1", "scale50"):
             final = [run.store.read(r) for r in cursor.finalObservations]
             demos = [b for _, k, b in rows if k == "question" and b["kind"] == "DEMO"]
@@ -910,14 +1006,14 @@ def test_clean_core_golden(tmp_path):
     refusing checks that are green before any product work. Product quality is judged exactly once,
     separate from feature requirements, preventing demands for global quality from one feature.
     A configured short check deadline times out a real command; a fixed 30-second observer would
-    wrongly integrate it. Judge uncertainty still returns only its own unit to its worker.
+    wrongly integrate it. Missing unit judge facts fail locally without reworking a correct worker.
     Windows native Access-is-denied wording must stop after one call; generic transport faults
     otherwise retry a denied operation and the successful native journey never exposes it.
     Subject traces include unit verdicts, supplemental JSON artifacts
     and delivered-folder observations; a standalone check and stdout alone cannot expose lost evidence.
     Artifact overlap with stdout/stderr is sent once, while output truncated by the observer must
     retain its full artifact; small supplemental-only evidence cannot catch either regression.
-    Every criterion needs its own PRODUCT verdict, even when all its checks passed. A trace naming two
+    Every product criterion needs its own PRODUCT verdict, even when all its checks passed. A trace naming two
     units but reaching one must repair before B; success-only review cannot catch unavailable files.
     Final cross-unit requirements include every traced owner's verdict; only unit judges read source.
     Uncertainty twins prove a store fact resolves without rework; persistent uncertainty and real gaps
@@ -930,6 +1026,16 @@ def test_clean_core_golden(tmp_path):
     Guide command/path faults catch guide prose passing without execution. A docs-only semantic fix
     preserves all other final verdicts; the old all-verdict reset is invisible in pre-final failures.
     Lost/annotated integration scopes exercise both outcomes of the owning unit's renewed JUDGE.
+    Unit quality reaches each traced owner's source judgment and never PRODUCT; existing behavioural
+    criteria cannot catch source demands causing worker rework. Source-request twins resolve from unit
+    facts or correct the plan marking after review, without worker/check reruns. FACTS payload bounds
+    catch raw execution records duplicating outputs that first-ask size tests alone cannot detect.
+    An oversized request must correct its source marking before sending; normal small requests cannot
+    expose a missing size guard. Typed missing behavioural facts withhold C without guessing source
+    meaning from their text, protecting the boundary the source-request success twins do not exercise.
+    Reopening the plan gap retains its correction; rejecting an unrelated planner rewrite protects
+    the new post-B marking boundary that pre-B repairs and a compliant planner cannot exercise.
+    A later REVIEW gap retains the same restriction: clearing B must not reopen general plan edits.
     """
     clean_core_golden(tmp_path / "suite")
 
@@ -993,7 +1099,9 @@ def clean_core_golden(root):
     began = time.monotonic()
     recorded_judgment_journey(root / "recorded-judgment")
     prepared = {"demo-uncertain", "product-uncertain", "demo-gap", "product-gap",
-                "demo-unresolved", "product-unresolved", "guide-gap"}
+                "demo-unresolved", "product-unresolved", "guide-gap",
+                "product-source-resolved", "product-source-unresolved", "product-source-oversize",
+                "product-facts-unavailable", "product-source-review-gap"}
     modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
              ("timeout", 1),
              ("exhaust", 4), ("parallel", 4), ("review-repair", 2), ("final-rework", 2),
@@ -1003,6 +1111,9 @@ def clean_core_golden(root):
     modes.extend([("traced-evidence", 2), ("demo-uncertain", 2), ("product-uncertain", 2),
                   ("demo-gap", 2), ("product-gap", 2), ("demo-unresolved", 2), ("product-unresolved", 2),
                   ("guide-gap", 2), ("guide-command", 1), ("guide-path", 1), ("guide-format", 1)])
+    modes.extend([("unit-quality", 2), ("product-source-resolved", 2), ("product-source-unresolved", 2)])
+    modes.extend([("product-source-oversize", 2), ("product-facts-unavailable", 2)])
+    modes.append(("product-source-review-gap", 2))
 
     def run_case(item):
         mode, count = item

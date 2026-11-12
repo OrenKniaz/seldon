@@ -5,9 +5,10 @@ from dataclasses import replace
 
 from . import questions
 from .providers import ProviderFailure, role_for
+from .store import encode
 
 
-def call(store, provider, question, unit=None, check=lambda answer: None):
+def call(store, provider, question, unit=None, check=lambda answer: None, max_bytes=None):
     setup = store.read(store.cursor().kickoff)["setup"]
     kind = question["kind"]
     role = role_for(kind, {})
@@ -15,6 +16,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None):
 
     def invoke(current):
         nonlocal attempt
+        if max_bytes is not None and len(encode(current).encode("utf-8")) > max_bytes:
+            raise questions.MissingFacts("FACTS corrections exceed twice the original subject brief")
         if unit:
             current = {**current, "execution": {**current["execution"], "session": store.unit(unit).thread}}
         previous = None
@@ -65,5 +68,5 @@ def call(store, provider, question, unit=None, check=lambda answer: None):
         result = store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit, "answer": answer})
         store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
     if answer.get("verdict") == "uncertain" and kind not in ("DEMO", "PRODUCT"):
-        raise ValueError("Unresolved facts: " + "; ".join(answer["neededFacts"]))
+        raise questions.MissingFacts("Unresolved facts: " + "; ".join(answer["neededFacts"]))
     return result, answer

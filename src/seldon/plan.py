@@ -80,9 +80,17 @@ def traced_units(document, checks):
 
 
 def coverage(document):
-    return {r: {"checks": list(checks), "units": list(traced_units(document, checks))}
+    return {r: {"checks": list(checks), "units": list(traced_units(document, checks)),
+                **({"level": document["nodes"][r]["body"]["level"]}
+                   if document["nodes"][r]["kind"] == "criterion" else {})}
             for r in {**select(document, "requirement"), **select(document, "criterion")}
             for checks in [traced_checks(document, r)]}
+
+
+def unit_criteria(document, ref):
+    return {r: {k: body[k] for k in ("criterion", "verification")}
+            for r, body in select(document, "criterion").items()
+            if body["level"] == "unit" and ref in traced_units(document, traced_checks(document, r))}
 
 
 def create(vision, answer):
@@ -110,6 +118,7 @@ def create(vision, answer):
         index = item["criterion"]
         nodes[f"quality:{index:03}"] = {"kind": "criterion", "body": {
             **quality[index - 1],
+            "level": item["level"],
             "checks": [handles.get(r, r) for r in item["checks"]]}}
     validate(document)
     return document
@@ -125,6 +134,7 @@ def validate(document):
             continue
         kind, body = node["kind"], node["body"]
         if kind == "criterion":
+            validate_schema(body["level"], {"type": "string", "enum": ["unit", "product"]}, ref + ".level")
             if not body["checks"] or any(nodes.get(c, {}).get("kind") != "check" for c in body["checks"]):
                 raise ValueError(f"{ref}: quality must trace to existing checks")
             continue
