@@ -1,859 +1,769 @@
-"""C2/C8/C14–C16/C26: offline journeys; only provider semantics are scripted."""
+"""C8/C12/C14/C18/C23; R2/R6-R9/R11: scripted semantics, real Git, SQLite and processes."""
 
-import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
-from collections import Counter
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
-from seldon.loop import Loop
-from seldon.providers import Codex, ROLES
+from seldon import gitwork, plan, questions
+from seldon.providers import Codex, ProviderFailure, ROLES
+from seldon.run import Run
+from seldon.store import Store, encode
 
-PRODUCT_TEST = r'''import subprocess, sys, unittest
+VISION = {"size": "tiny", "understanding": "Read named values", "users": ["CLI user"],
+          "scopeIn": ["Named values"], "scopeOut": [], "improvements": [],
+          "quality": [{"criterion": "Clear output", "verification": "Run the real checks"}], "unknowns": []}
+
+
+def planned(count, mode):
+    edits, scopes = [], []
+    for i in range(1, count + 1):
+        f, r, c = (f"new:{kind}{i:03}" for kind in "frc")
+        directory = f"unit-{i:03}"
+        edits.extend([
+            {"kind": "feature", "targetHandle": f, "typedBody": {
+                "story": f"Read value {i:03}", "acceptance": f"Observe value-{i:03}"}},
+            {"kind": "requirement", "targetHandle": r, "typedBody": {
+                "obligation": f"Read value-{i:03} from persistent storage", "design": "One named value file",
+                "contract": f"Read value-{i:03}", "features": [f]}},
+            {"kind": "check", "targetHandle": c, "typedBody": {
+                "purpose": f"Read value {i:03}", "mode": "establishes",
+                "command": [sys.executable, "-B", f"{directory}/check.py"],
+                "requiredEnvironment": ["Python"], "expectedEvidence": "Actual persisted value",
+                "requirements": [r]}}])
+        deps = []
+        if i == 2 and (mode.startswith("kill") or mode in ("exhaust", "final-rework", "wave-start")):
+            deps = [1]
+        if mode == "parallel" and i == 4:
+            deps = [1, 2, 3]
+        if mode == "scale50":
+            deps = [i - 1] if i % 5 != 1 else []
+            if i % 10 == 0:
+                deps = sorted({i - 1, i - 5})
+        scopes.append({"scope": [directory + "/**"], "checkPaths": [directory + "/check.py"],
+                       "requirements": [r], "dependencies": deps, "instructions": f"Deliver value {i:03}"})
+        if mode == "parallel" and i == 4:
+            scopes[-1]["checkPaths"] = [directory + "/*.py"]
+    if mode == "wave-start":
+        edits[4]["typedBody"]["obligation"] = "Read the dependency's value-001"
+    if mode == "parallel":
+        edits[10]["typedBody"]["obligation"] += "; preserve dependency value-001"
+        edits.append({"kind": "check", "targetHandle": "new:wave", "typedBody": {
+            "purpose": "Read the three integrated values together", "mode": "preserves",
+            "command": [sys.executable, "-B", "unit-004/compose.py"], "requiredEnvironment": ["Python"],
+            "expectedEvidence": "All independent values together", "requirements": ["new:r001", "new:r002"]}})
+        edits.append({"kind": "check", "targetHandle": "new:preserve", "typedBody": {
+            "purpose": "Preserve the integrated dependency value", "mode": "preserves",
+            "command": [sys.executable, "-B", "-c",
+                        "from pathlib import Path; "
+                        "assert Path('unit-001/value.txt').read_text()=='value-001'"],
+            "requiredEnvironment": ["Python"], "expectedEvidence": "Existing dependency is unchanged",
+            "requirements": ["new:r004"]}})
+    if mode == "exhaust":
+        edits[1]["typedBody"]["obligation"] += "; preserve the claimed existing value"
+        edits.append({"kind": "check", "targetHandle": "new:preserve", "typedBody": {
+            "purpose": "Preserve the claimed existing value", "mode": "preserves",
+            "command": [sys.executable, "-B", "unit-001/check.py"],
+            "requiredEnvironment": ["Python"], "expectedEvidence": "A value already present at base",
+            "requirements": ["new:r001"]}})
+    return {"edits": edits, "units": scopes}
+
+
+NATIVE = r'''
+import json, os, subprocess, sys, time, uuid
 from pathlib import Path
-root = Path(__file__).resolve().parent
-if "--broken-tool" in sys.argv:
-    subprocess.run([str(root / "missing-tool.exe")], check=True)
-class Greeting(unittest.TestCase):
-    @unittest.skipIf("--skipped" in sys.argv or ("--skip-green" in sys.argv and (root / "greet.py").exists()), "review deferred")
-    def test_greeting(self):
-        for name in (["Ada", "Grace"] if "--more" in sys.argv else ["Ada"]):
-            print("Checking personal greeting", name, flush=True)
-            result = subprocess.run([sys.executable, "-B", str(root / "greet.py"), name], capture_output=True, text=True)
-            self.assertEqual((result.returncode, result.stdout), (0, f"Hello, {name}!\n"), result.stderr)
-        if "--usage" in sys.argv:
-            result = subprocess.run([sys.executable, "-B", str(root / "greet.py")], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn("Usage:", result.stdout)
-unittest.main(argv=[sys.argv[0]])
+slot = Path(sys.argv[1])
+args = sys.argv[2:]
+schema = Path(args[args.index("--output-schema") + 1])
+q = json.loads(schema.with_name("question.json").read_text("utf-8"))
+facts = q["facts"]
+mode = (slot / "mode").read_text()
+scope = facts["Write scope"][0]
+name = scope.split("/")[0]
+guide = "Guide path" in facts
+counter = slot / ("turn-" + name)
+turn = int(counter.read_text()) + 1 if counter.exists() else 1
+if mode in ("fresh", "kill-fresh") and "resume" in args:
+    print(json.dumps({"type": "error", "message": "session not found"}), flush=True)
+    sys.exit(1)
+counter.write_text(str(turn))
+thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4())
+print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
+with (slot / ("launch-" + name + ".jsonl")).open("a") as log:
+    log.write(json.dumps({"turn": turn, "thread": thread, "resumed": "resume" in args,
+                          "start": time.time(), "facts": facts}) + "\n")
+if name == "unit-001" and mode == "timeout" and not any((slot / "calls").glob("*/result.json")):
+    time.sleep(30)
+if name == "unit-001" and mode == "native-denied":
+    sys.stderr.write("Error: failed to initialize in-process app-server client: "
+                     "Access is denied. (os error 5)\n")
+    sys.exit(1)
+if name == "unit-002" and mode in ("kill-work", "kill-fresh") and not (slot / "resume").exists():
+    Path(name).mkdir(exist_ok=True)
+    Path(name, "partial.txt").write_text("partial work retained across controller death")
+    (slot / "kill-ready").write_text(str(os.getpid()))
+    time.sleep(30)
+if mode == "parallel" and name in ("unit-001", "unit-002", "unit-003"):
+    (slot / ("ready-" + name)).write_text("ready")
+    deadline = time.monotonic() + 15
+    while len(list(slot.glob("ready-*"))) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(list(slot.glob("ready-*"))) == 3, "Independent workers never overlapped"
+if guide:
+    path = Path(facts["Guide path"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("Try it yourself\nRun python -B unit-001/check.py and observe value-001.\n")
+else:
+    number = int(name.split("-")[1])
+    Path(name).mkdir(exist_ok=True)
+    value = f"value-{number:03}"
+    source = ("from pathlib import Path\n"
+              "import os\n"
+              f"assert Path('{name}/value.txt').read_text() == '{value}'\n"
+              f"print('observed {value}')\n")
+    if mode == "walkthrough":
+        source += "print(Path.cwd())\n"
+    if mode in ("single1", "scale50", "walkthrough", "walkthrough-refuse"):
+        source += ("if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
+                   "    Path(os.environ['SELDON_EVIDENCE_DIR'], 'observed.png').write_bytes(\n"
+                   "        __import__('base64').b64decode(\n"
+                   "            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'\n"
+                   "            'AAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII='))\n")
+    if name == "unit-001" and turn == 1:
+        if mode in ("scope", "fresh"):
+            Path("rogue.txt").write_text("unowned output")
+        if mode == "false-red":
+            source = "print('empty check')\n"
+        if mode == "skipped":
+            source = ("from pathlib import Path\nimport sys\n# SKIP_AT_P\n"
+                      f"if Path('{name}/value.txt').exists():\n    print('skipped'); sys.exit(0)\n"
+                      + source)
+    if turn > 1 and Path("rogue.txt").exists():
+        assert "rogue.txt" in facts["Exact failure"]
+        Path("rogue.txt").unlink()
+    if name == "unit-002" and mode == "kill-proof":
+        source = ("import os, time\nfrom pathlib import Path\n"
+                  f"control=Path({str(slot)!r})\n"
+                  "if os.environ.get('SELDON_EVIDENCE_DIR') and not (control/'resume').exists():\n"
+                  "    (control/'kill-ready').write_text(str(os.getpid()))\n"
+                  "    time.sleep(30)\n" + source)
+    if mode == "final-rework" and name == "unit-001":
+        source = ("from pathlib import Path\n"
+                  "if Path('unit-002/value.txt').exists():\n"
+                  "    assert Path('unit-001/value.txt').read_text() == 'value-001-final'\n"
+                  "else:\n"
+                  "    assert Path('unit-001/value.txt').read_text() == 'value-001'\n"
+                  "print('observed final-compatible value')\n")
+        if turn > 1:
+            value = "value-001-final"
+    Path(name, "check.py").write_text(source)
+    Path(name, "value.txt").write_text(value)
+    if mode == "wave-start" and name == "unit-002":
+        Path(name, "check.py").write_text(
+            "from pathlib import Path\nassert Path('unit-001/value.txt').read_text()=='value-001'\n"
+            "print('observed dependency value-001')\n")
+    if mode == "check-deadline" and name == "unit-001":
+        Path(name, "check.py").write_text("import time\ntime.sleep(8)\n" + source)
+    if name == "unit-001" and mode == "big-source":
+        Path(name, "check.py").write_text("#" + "large source " * 6000 + "\n" + source)
+    if name == "unit-001" and mode == "big-product":
+        Path(name, "details.txt").write_text("large product " * 6000)
+    if mode == "parallel" and name == "unit-004":
+        wave_checks = list(facts["Wave checks to write in this scope"].values())
+        assert len(wave_checks) == 1 and wave_checks[0]["command"][-1] == "unit-004/compose.py"
+        Path(name, "compose.py").write_text(
+            "from pathlib import Path\n"
+            "assert '|'.join(Path(f'unit-{i:03}/value.txt').read_text() for i in (1,2,3))"
+            " == 'value-001|value-002|value-003'\nprint('composed three values')\n")
+    for check in facts["Checks"].values():
+        subprocess.run(check["command"], capture_output=True)
+answer = {"answer":{"outcome":"done","summary":"Wrote product and checks and ran them",
+                    "discoveries":[],"why":"The scoped delivery is ready for independent proof"}}
+if ((mode == "schema-fix" and name == "unit-001"
+     or mode == "kill-invalid" and name == "unit-002") and turn == 1):
+    answer = json.loads((slot / "recorded-work.json").read_text("utf-8"))
+if mode == "kill-blocked" and name == "unit-002" and turn == 1:
+    answer["answer"]["outcome"] = "blocked"
+    answer["answer"]["discoveries"] = [{"target":"unit-002", "correction":"Need another worker turn"}]
+if mode == "kill-report" and name == "unit-002":
+    answer["answer"]["discoveries"] = [{"target":"unit-002", "correction":"Retain this successful discovery"}]
+print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(answer)}}),
+      flush=True)
+print(json.dumps({"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}), flush=True)
 '''
-PRODUCT = 'import sys\nprint(f"Hello, {sys.argv[1]}!")\n'
-GUIDE = "Try it yourself\nRun python -B greet.py Ada; expect Hello, Ada!\nTry a different name too.\n"
-GUIDE_TEST = r'''
-from pathlib import Path
-assert "python -B greet.py" in Path("TRY.txt").read_text()
-'''
 
 
-def scripted_plan():
-    def put(kind, slot, **body):
-        return {"kind": kind, "targetHandle": "new:" + str(slot), "typedBody": body}
-    return {"edits": [
-        put("feature", 1, story="Receive a personal greeting", acceptance="A supplied name is greeted", vision=["vision"]),
-        put("requirement", 2, obligation="Greet the supplied name on stdout", design="One name argument",
-            contract="name -> Hello, <name>! newline", features=["new:1"]),
-        put("test", 3, purpose="Exercise a supplied name", stage="verification",
-            command=[sys.executable, "-B", "check_greeting.py"], requiredEnvironment=["Python"],
-            expectedEvidence="Actual CLI output", requirements=["new:2"])],
-        "units": [{"requirements": ["new:2"], "tests": ["new:3"],
-                   "productFiles": ["greet.py"], "testFiles": ["check_greeting.py"], "dependencies": []}]}
+class Scripted:
+    def __init__(self, slot, mode, count):
+        self.slot, self.mode, self.count = Path(slot), mode, count
+        self.setup = {"providers": deepcopy(ROLES), "codexCommand": [sys.executable, "-B",
+            str(self.slot / "native.py"), str(self.slot)], "scriptedUser": True,
+            "userOrigin": "scripted journey", "python": {"path": sys.executable}}
+        self.native = Codex(self.slot / "calls", self.setup)
+
+    def timeout_for(self, kind, context):
+        if kind == "WORK" and self.mode == "timeout" and not any((self.slot / "calls").glob("*/result.json")):
+            return 0.35
+        return 30
+
+    def invoke(self, question, started):
+        if question["kind"] == "WORK":
+            self.native.timeout = self.timeout_for("WORK", {})
+            return self.native.invoke(question, started)
+        return self(question), None
+
+    def __call__(self, q):
+        kind = q["kind"]
+        if kind == "ALIGN":
+            answer = dict(VISION)
+            if self.mode == "user-path":
+                answer["quality"] = [{"criterion": "Read the value in the browser",
+                                      "verification": "Open the page and display the saved value"}]
+        elif kind in ("PLAN", "REPAIR"):
+            answer = planned(self.count, self.mode)
+            if self.mode == "plan-overlap":
+                corrections = q["facts"].get("Exact corrections", [])
+                if not corrections:
+                    for unit in answer["units"]:
+                        unit.update(scope=["shared/**"], checkPaths=["shared/check.py"])
+                elif len(corrections) == 1:
+                    answer["edits"][2]["typedBody"]["requirements"].append("new:r002")
+            if self.mode == "review-repair" and kind == "REPAIR":
+                answer["edits"][1]["typedBody"]["obligation"] += "; accept the exact named value"
+            if self.mode == "user-revise" and kind == "REPAIR":
+                assert q["facts"]["Requested change"] == "Revise the plan: describe the exact stored value."
+                answer["edits"][1]["typedBody"]["obligation"] += "; exact stored value requested by user"
+        elif kind == "REVIEW":
+            first = not (self.slot / "reviewed").exists()
+            (self.slot / "reviewed").write_text("reviewed")
+            checks = plan.select(q["facts"]["Plan"], "check")
+            purpose = "Read value 002" if self.mode == "walkthrough" else "Read value 001"
+            selected = next(ref for ref, body in checks.items() if body["purpose"] == purpose)
+            answer = {"verdict": "adequate", "gaps": [], "integratedWalkthrough": selected, "inspections": []}
+            if self.mode in ("single1", "scale50", "walkthrough", "walkthrough-missing"):
+                answer["inspections"] = [{"check": r, "path": f"unit-{i:03}/value.txt", "show": "text"}
+                                         for i, r in enumerate(checks, 1)]
+            if self.mode == "walkthrough-missing":
+                answer["inspections"][0]["path"] = "unit-001/missing.txt"
+            if self.mode in ("walkthrough", "walkthrough-refuse"):
+                if self.mode == "walkthrough-refuse" or not q["facts"].get("Exact corrections"):
+                    answer["integratedWalkthrough"] = "n001"  # A feature is not a check.
+                elif len(q["facts"]["Exact corrections"]) == 1:
+                    answer["inspections"][0]["path"] = "unit-002/value.txt"
+            if first and self.mode == "review-repair":
+                answer = {"verdict": "gap", "integratedWalkthrough": "", "inspections": [], "gaps": [
+                    {"target": "n002", "correction": "Clarify exact value"}]}
+        elif kind == "DECIDE":
+            answer = {"choice": "revise" if q["facts"]["User's words"].startswith("Revise") else "approve"}
+        elif kind in ("JUDGE", "DEMO", "PRODUCT"):
+            if kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n002"]:
+                raise ProviderFailure("Judge transport unavailable", True, True)
+            if (kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n005"]
+                    and (self.slot / "turn-unit-002").read_text() == "1"):
+                return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
+                    "Clarify the local assertion for this value"],
+                    "why": "A semantic fact needs clarification"}})
+            answer = {"verdict": "satisfied", "gaps": [],
+                      "assessments": questions.assessments(q["targets"], final=kind != "JUDGE")}
+            if kind == "DEMO":
+                assert "Quality bar" not in q["facts"] and "Try-it guide" not in q["facts"]
+            if kind == "PRODUCT" and self.mode == "user-path":
+                # The underlying storage check really passed. Its stdout documents only that read.
+                output = [o["stdout"] for o in q["facts"]["Final observations"]]
+                assert output and all(s.strip() == "observed value-001" for s in output)
+                for assessment in answer["assessments"]:
+                    assessment.update(exercisedOnFinalUserPath=bool(q["images"]),
+                                      why="The stored value was read, but there is no browser observation")
+            if kind == "PRODUCT" and self.mode in ("single1", "scale50", "walkthrough"):
+                facts = q["facts"]
+                expected = "unit-002/check.py" if self.mode == "walkthrough" else "unit-001/check.py"
+                assert set(facts["Final check sources"]) == {expected}
+                source = facts["Final check sources"][expected]
+                assert "observed value-" in source and "SELDON_EVIDENCE_DIR" in source
+                assert len(facts["Final observations"]) == len(q["images"]) == 1
+                observation = facts["Final observations"][0]
+                assert observation["command"][-1] == expected
+                assert observation["check"] == facts["Integrated walkthrough"]["check"]
+                assert observation["ranOnDeliveredRevision"] and len(observation["commit"]) == 40
+                assert Path(observation["workingDirectory"], expected).is_file()
+                assert "Try it yourself" in facts["Try-it guide"]
+            if kind == "JUDGE":
+                assert "other units' files" in q["facts"]["Checkout coverage"].lower()
+                sources = q["facts"]["Check sources"]
+                assert sources, "Judge needs actual check sources"
+                if any("SKIP_AT_P" in source for source in sources.values()):
+                    assert all(o["exitCode"] == 0 for o in q["facts"]["Observations"] if o["purpose"] == "P")
+                    answer["assessments"][0]["exercisedAtP"] = False
+                    answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                        "correction": "The check skipped its assertion at P; exercise the real requirement"}])
+        answer["why"] = "The supplied facts support this semantic answer"
+        return json.dumps({"answer": answer})
 
 
-CASES = ["none", "native-transport", "owner", "free-form", "stale-decision", "revise-B", "shell-command", "missing-plan-tool",
-         "product-executable", "broken-tool", "all-skipped", "malformed-fixed", "malformed-exhausted",
-         "review-gap", "plan-new-test", "repair-bound", "atomic-invalid", "evidence-gap", "uncertain-empty", "uncertain-twice",
-         "local-fault", "implementation-fault", "guide-gap", "RED-gap", "scope-change", "discovery", "new-contract",
-         "vacuous", "passes-absent", "skipped-green", "manual-review",
-         "provider-timeout-always", "provider-crash", "provider-auth", "provider-permission", "worker-timeout"]
-SCOPED_CASES = ["publication", "reply", "killed", "uncertain", "check-repair", "change", "parallel", "conflict", "ignored", "dependency"]
+def approve(request):
+    return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
 
 
-def clean_core_golden(root):
-    """The repository golden entry runs this same driver, with no alternate proof."""
-    def journey(function, case):
-        folder = root / case
-        folder.mkdir(parents=True)
-        started = time.monotonic()
+def prepare(slot, mode, count):
+    slot.mkdir(parents=True)
+    (slot / "mode").write_text(mode)
+    (slot / "native.py").write_text(NATIVE, encoding="utf-8")
+    # Unmodified WORK reply from real-lead-37/calls/call-1f443145374a4d80b31136b7ebf9e4c0/answer.txt.
+    # Its removed fields must receive exact schema corrections, not fabricated compatibility credit.
+    shutil.copyfile(Path(__file__).with_name("recorded_work.json"), slot / "recorded-work.json")
+    provider = Scripted(slot, mode, count)
+    if mode == "check-deadline":
+        provider.setup["providers"]["check"]["timeout"] = 2
+    decisions = set()
+
+    def user(request):
+        gate = request["gate"]
+        if mode == "user-revise" and gate in ("A", "B") and gate not in decisions:
+            decisions.add(gate)
+            return ("Revise the dream: describe the exact observable value." if gate == "A" else
+                    "Revise the plan: describe the exact stored value.")
+        return approve(request)
+
+    return Run(slot / "product", slot / "workers", "Read named values", provider.setup,
+               provider, user, capacity=6), provider
+
+
+def finish(run):
+    cursor = run.run()
+    rows = run.store.records()
+    units = run.store.units()
+    outcome = run.store.records("outcome")[-1][2]
+    assert cursor.state == "SCRIPTED_C", outcome
+    assert not outcome["accepted"] and outcome["verification_complete"]
+    assert all(u.state == "DONE" for u in units.values())
+    assert len([b for _, k, b in rows if k == "product_verdict"]) == 1
+    assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]) == 1
+    observations = [b for _, kind, b in rows if kind == "observation"]
+    for obs in observations:
+        assert obs["executionStarted"] and obs["cleanupVerified"] and not obs["timedOut"]
+    revisions = sorted({o["commit"] for o in observations})
+    checked = gitwork.git(run.project, "cat-file", "--batch-check",
+                          data=("\n".join(revisions) + "\n").encode()).splitlines()
+    assert len(checked) == len(revisions) and all(row.split()[1] == "commit" for row in checked)
+    assert (run.project / plan.GUIDE_PATH).is_file()
+    return cursor, rows, units
+
+
+def admission_journey(slot):
+    from unittest.mock import patch
+
+    run, _ = prepare(slot, "admission", 1)
+    occupied = slot / "occupied"
+    occupied.write_text("This path is a file; Git cannot create a worker directory here.")
+    admit = gitwork.admit
+
+    def try_admit(project, scratch, base):
+        target = occupied if occupied.exists() else scratch
         try:
-            function(folder, case)
+            return admit(project, target, base)
         finally:
-            print(f"clean-core {case}: {time.monotonic() - started:.2f}s", flush=True)
-    with ThreadPoolExecutor(max_workers=12) as pool:
-        futures = [pool.submit(journey, function, case)
-                   for function, cases in ((scoped_journey, SCOPED_CASES), (greeting_journey, CASES)) for case in cases]
-        for future in futures:
-            future.result()
+            occupied.unlink(missing_ok=True)
+
+    try:
+        with patch.object(gitwork, "admit", try_admit):
+            _, rows, units = finish(run)
+        failures = [b for _, kind, b in rows if kind == "unit_failure"]
+        assert len(failures) == 1 and failures[0]["state"] == "READY"
+        assert "occupied" in failures[0]["failure"] and units["u001"].recoveries == 1
+    finally:
+        run.close()
+
+
+def simple_journey(slot, mode, count=1):
+    run, provider = prepare(slot, mode, count)
+    try:
+        if mode == "legacy-approved":
+            from dataclasses import replace
+            from seldon import decisions
+
+            while run.store.cursor().state != "B":
+                run.step()
+            # Seed a historical approved subject, before REVIEW had a selection field.
+            cursor = run.store.cursor()
+            review = deepcopy(run.store.read(cursor.review))
+            del review["answer"]["integratedWalkthrough"]
+            del review["answer"]["inspections"]
+            with run.store.transaction():
+                review_ref = run.store.record("answer", review)
+                run.store.cursor(replace(cursor, review=review_ref))
+            # The old review is approved through the real subject-bound decision producer.
+            decisions.request(run.store, "B", {"revision": cursor.revision,
+                                               "plan": run.store.plan(cursor.revision), "review": review})
+            decisions.decide(run.store, provider, approve)
+            approval = run.store.read(run.store.cursor().B)
+            run.close()
+            run = Run.reopen(slot / "product", provider, approve)
+        if mode == "walkthrough-refuse":
+            cursor = run.run()
+            assert cursor.state == "INCOMPLETE" and not cursor.B
+            errors = [error for _, _, b in run.store.records("provider_reply") for error in b["errors"]]
+            assert len(errors) == 3 and all("canonical check handle" in e for e in errors)
+            assert not any(b["gate"] == "B" for _, _, b in run.store.records("decision_request"))
+            return
+        if mode in ("judge-provider", "big-source", "big-product", "check-deadline", "native-denied"):
+            cursor = run.run()
+            result = run.store.records("outcome")[-1][2]
+            units = run.store.units()
+            assert cursor.state == "INCOMPLETE" and units["u001"].state == "FAILED"
+            assert units["u001"].recoveries == (2 if mode == "check-deadline" else 0)
+            assert units["u002"].state == "DONE"
+            assert (slot / "turn-unit-001").read_text() == ("3" if mode == "check-deadline" else "1")
+            assert result["nextAction"] == "Resolve the named failure, then start a fresh run."
+            if mode == "judge-provider":
+                assert len(run.store.records("provider_failure")) == 3
+                assert "Judge transport unavailable" in units["u001"].failure
+                assert units["u002"].recoveries == 1 and (slot / "turn-unit-002").read_text() == "2"
+            elif mode == "native-denied":
+                failures = run.store.records("provider_failure")
+                assert len(failures) == 1 and failures[0][2]["transient"] is False
+                assert "Access is denied" in units["u001"].failure
+            elif mode == "check-deadline":
+                assert any(b["unit"] == "u001" and b["timedOut"] and b["executionStarted"]
+                           and b["cleanupVerified"] for _, _, b in run.store.records("observation"))
+            else:
+                assert units["u001"].failure == "unit too large to judge; split it"
+            before = run.store.records()
+            run.close()
+            run = Run.reopen(slot / "product", provider, approve)
+            assert run.run() == cursor
+            assert run.store.units() == units and run.store.records() == before
+            return
+        if mode == "walkthrough-missing":
+            cursor = run.run()
+            outcome = run.store.records("outcome")[-1][2]
+            assert cursor.state == "INCOMPLETE" and "unit-001/missing.txt" in outcome["reason"]
+            assert all(u.state == "DONE" for u in run.store.units().values())
+            return
+        if mode == "user-path":
+            cursor = run.run()
+            outcome = run.store.records("outcome")[-1][2]
+            assert cursor.state == "INCOMPLETE" and not outcome["verification_complete"]
+            assert "exercisedOnFinalUserPath" in outcome["reason"]
+            assert not any(b["gate"] == "C" for _, _, b in run.store.records("decision_request"))
+            return
+        if mode == "exhaust":
+            cursor = run.run()
+            outcome = run.store.records("outcome")[-1][2]
+            assert cursor.state == "INCOMPLETE" and not outcome["accepted"]
+            rows = run.store.units()
+            assert rows["u001"].state == "FAILED" and rows["u001"].recoveries == 2
+            assert rows["u002"].state == "BLOCKED" and rows["guide"].state == "BLOCKED"
+            assert rows["u003"].state == rows["u004"].state == "DONE"
+            assert "u001" in outcome["failed"] and "u002" in outcome["blocked"]
+            assert (slot / "turn-unit-001").read_text() == "3"
+            assert "'purpose': 'base'" in outcome["failed"]["u001"]
+            return
+        cursor, rows, units = finish(run)
+        if mode == "timeout":
+            failures = run.store.records("provider_failure")
+            assert len(failures) == 1 and units["u001"].recoveries == 1
+            failure = failures[0][2]
+            assert failure["cleanupVerified"] and "timed out" in failure["reason"]
+        if mode in ("scope", "fresh", "false-red", "skipped", "final-rework"):
+            assert units["u001"].recoveries == 1
+            assert (slot / "turn-unit-001").read_text() == "2"
+            launches = [json.loads(line) for line in
+                        (slot / "launch-unit-001.jsonl").read_text().splitlines()]
+            assert launches[1]["facts"]["Exact failure"]
+            assert "Current patch" in launches[1]["facts"]
+            if mode != "fresh":
+                assert launches[1]["resumed"] and launches[0]["thread"] == launches[1]["thread"]
+            else:
+                assert not launches[1]["resumed"] and run.store.records("resume_unavailable")
+            if mode in ("scope", "fresh"):
+                assert "rogue.txt" in launches[1]["facts"]["Exact failure"]
+                assert not (run.project / "rogue.txt").exists()
+            if mode == "false-red":
+                assert any(k == "unit_failure" and "'exitCode': 0" in b["failure"] for _, k, b in rows)
+            if mode == "skipped":
+                assert any(k == "unit_failure" and "skipped its assertion" in b["failure"]
+                           for _, k, b in rows)
+        if mode == "parallel":
+            launches = [json.loads((slot / f"launch-unit-{i:03}.jsonl").read_text().splitlines()[0])
+                        for i in (1, 2, 3)]
+            endings = [b["finishedAt"] for _, k, b in rows if k == "writer_end" and b["unit"] in
+                       ("u001", "u002", "u003")]
+            assert max(x["start"] for x in launches) < min(endings)
+            assert any(k == "unit_wait" and "Dependencies" in b["reason"] for _, k, b in rows)
+            assert any(k == "observation" and b["unit"] is None and b["exitCode"] == 0 for _, k, b in rows)
+            assert any(k == "observation" and b["purpose"] == "base" and b["exitCode"] == 0
+                       for _, k, b in rows)
+        if mode == "review-repair":
+            assert cursor.repairs == 1 and len(run.store.records("approval")) == 4
+        if mode == "walkthrough":
+            approval = run.store.read(cursor.B)
+            assert approval["subject"]["review"]["answer"]["integratedWalkthrough"] == "n006"
+            finals = [run.store.read(r) for r in cursor.finalObservations]
+            walkthrough, = [o for o in finals if o["check"] == "n006"]
+            assert Path(walkthrough["stdout"].splitlines()[-1]) == run.project.resolve()
+            assert walkthrough["unit"] == "u002"
+            errors = [error for _, _, b in run.store.records("provider_reply") for error in b["errors"]]
+            assert len(errors) == 2 and "canonical check handle" in errors[0] and "owned" in errors[1]
+            finals = [b for _, k, b in rows if k == "question" and b["kind"] in ("PRODUCT", "DEMO")]
+            for q in finals:
+                expected = "001" if q["kind"] == "DEMO" and "n002" in q["targets"] else "002"
+                files = q["facts"]["Inspected files on the delivered revision"]
+                assert list(files) == [f"unit-{expected}/value.txt"]
+                assert files[f"unit-{expected}/value.txt"]["text"] == f"value-{expected}"
+        if mode == "legacy-approved":
+            product = next(b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT")
+            assert "Legacy approved review" in product["facts"]
+            assert "Integrated walkthrough" not in product["facts"]
+            assert {o["check"] for o in product["facts"]["Final observations"]} == {
+                run.store.read(r)["check"] for r in cursor.finalObservations}
+            assert len(product["facts"]["Final observations"]) == count
+            assert run.store.read(cursor.B)["subject"] == approval["subject"]
+        if mode == "user-revise":
+            aligns = [b for _, _, b in run.store.records("question") if b["kind"] == "ALIGN"]
+            assert len(aligns) == 2
+            assert aligns[1]["facts"]["Requested change"] == (
+                "Revise the dream: describe the exact observable value.")
+            assert cursor.repairs == 1
+        if mode == "wave-start":
+            observed = [b for _, _, b in run.store.records("observation") if b["unit"] == "u002"]
+            assert any(b["purpose"] == "T" and b["exitCode"] == 0 for b in observed)
+            assert any(b["purpose"] == "wave-start" and b["exitCode"] != 0 for b in observed)
+            assert units["u002"].recoveries == 0
+        if mode == "schema-fix":
+            launches = [json.loads(line) for line in
+                        (slot / "launch-unit-001.jsonl").read_text().splitlines()]
+            assert len(launches) == 2 and launches[1]["resumed"]
+            assert launches[0]["thread"] == launches[1]["thread"]
+            assert "artifactPaths" in encode(launches[1]["facts"]["Exact corrections"])
+            assert "citations" in encode(launches[1]["facts"]["Exact corrections"])
+            assert units["u001"].recoveries == 0
+        if mode == "plan-overlap":
+            errors = [error for _, _, b in run.store.records("provider_reply") for error in b["errors"]]
+            assert any("Scope ownership overlaps" in e for e in errors)
+            assert any("local semantic check" in e and "Read value-001" in e for e in errors)
+        if mode == "single1":
+            from tests.seldon.run_report import report
+            output, row = report(slot)
+            assert row[3] == "SCRIPTED_C" and len(row) == 16 and "accepted=False" in output
+        sizes = {kind: max(len(encode(b).encode("utf-8")) for _, k, b in rows
+                          if k == "question" and b["kind"] == kind)
+                 for kind in ("WORK", "JUDGE", "PRODUCT")}
+        if mode in ("single1", "scale50"):
+            product = next(b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT")
+            final = [run.store.read(r) for r in cursor.finalObservations]
+            demos = [b for _, k, b in rows if k == "question" and b["kind"] == "DEMO"]
+            assert len(final) == count and len(demos) == count
+            assert {o["check"] for q in demos for o in q["facts"]["Final observations"]} == {
+                o["check"] for o in final}
+            assert len(product["facts"]["Final observations"]) == len(product["images"]) == 1
+        return sizes
+    finally:
+        run.close()
+
+
+def child_main(slot, mode):
+    run, _ = prepare(slot, mode, 2)
+    if mode in ("kill-invalid", "kill-blocked", "kill-report"):
+        invoke = Codex.invoke
+
+        def recorded(provider, question, started):
+            result = invoke(provider, question, started)
+            if question["facts"]["Write scope"] == ["unit-002/**"]:
+                (slot / "kill-ready").write_text(str(os.getpid()))
+                time.sleep(30)
+            return result
+        Codex.invoke = recorded
+    if mode in ("kill-intent", "kill-apply"):
+        original = gitwork.publish
+
+        def interrupted(project, store):
+            cursor = store.cursor()
+            intent = store.read(cursor.publication) if cursor.publication else {}
+            if intent.get("unit") == "u002" and not (slot / "resume").exists():
+                if mode == "kill-apply":
+                    gitwork.checkout(project, intent["commit"])
+                (slot / "kill-ready").write_text(str(os.getpid()))
+                time.sleep(30)
+            return original(project, store)
+        gitwork.publish = interrupted
+    cursor = run.run()
+    assert cursor.state == "SCRIPTED_C", run.store.records("outcome")
+
+
+def crash_journey(slot, mode):
+    slot.parent.mkdir(parents=True, exist_ok=True)
+    log = slot.parent / (slot.name + ".log")
+    with log.open("wb") as output:
+        child = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()),
+                                  "--child", str(slot), mode], stdout=output, stderr=output)
+        try:
+            deadline = time.monotonic() + 40
+            while not (slot / "kill-ready").exists():
+                assert child.poll() is None, log.read_text()
+                assert time.monotonic() < deadline, "No requested crash boundary: " + log.read_text()
+                time.sleep(0.02)
+            store = Store(slot / "product")
+            before = store.units()
+            assert before["u001"].state == "DONE"
+            assert before["u002"].state == {"kill-work": "WORKING", "kill-fresh": "WORKING",
+                                            "kill-invalid": "WORKING", "kill-blocked": "WORKING",
+                                            "kill-report": "WORKING",
+                                            "kill-proof": "PROVING",
+                                            "kill-intent": "INTEGRATING", "kill-apply": "INTEGRATING"}[mode]
+            with pytest.raises(ValueError, match="Another controller"):
+                Run.reopen(slot / "product", lambda q: None, approve)
+            store.db.close()
+            handle = None
+            if os.name == "nt":
+                import ctypes
+                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel.OpenProcess.restype = ctypes.c_void_p
+                kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+                kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+                handle = kernel.OpenProcess(0x100000, False, int((slot / "kill-ready").read_text()))
+                assert handle, "Cannot observe the owned command's terminal state"
+            child.kill()
+            child.wait(10)
+            if handle:
+                try:
+                    assert kernel.WaitForSingleObject(handle, 5000) == 0, "Old command survived controller"
+                finally:
+                    kernel.CloseHandle(handle)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(10)
+    (slot / "resume").write_text("Reopen the exact same run")
+    provider = Scripted(slot, mode, 2)
+    run = Run.reopen(slot / "product", provider, approve)
+    try:
+        _, _, after = finish(run)
+        assert after["u001"] == before["u001"]
+        assert (slot / "turn-unit-001").read_text() == "1"
+        retried = mode in ("kill-work", "kill-fresh", "kill-invalid", "kill-blocked")
+        assert (slot / "turn-unit-002").read_text() == ("2" if retried else "1")
+        if mode in ("kill-work", "kill-fresh"):
+            launches = [json.loads(line) for line in
+                        (slot / "launch-unit-002.jsonl").read_text().splitlines()]
+            assert "partial.txt" in launches[1]["facts"]["Current patch"]
+            assert "interrupted WORKING" in launches[1]["facts"]["Exact failure"]
+            if mode == "kill-work":
+                assert launches[1]["resumed"] and launches[1]["thread"] == launches[0]["thread"]
+                from tests.seldon.run_report import report
+                assert report(slot)[1][13] == 1, "A recovered interruption must count as a red flag"
+            else:
+                assert not launches[1]["resumed"]
+                assert "session not found" in launches[1]["facts"]["Exact failure"]
+        if mode == "kill-blocked":
+            launch = json.loads((slot / "launch-unit-002.jsonl").read_text().splitlines()[1])
+            assert "Worker could not complete" in launch["facts"]["Exact failure"]
+        if mode == "kill-report":
+            assert any(b["correction"] == "Retain this successful discovery"
+                       for _, _, b in run.store.records("discovery"))
+        assert run.store.cursor().publication is None
+    finally:
+        run.close()
 
 
 @pytest.mark.fast
-def test_clean_core_golden(tmp_path):
-    clean_core_golden(tmp_path)
+def test_clean_core_golden():
+    """One-unit C protects the actual approved delivery path; parallel/fan-in catches serialization.
 
-
-def greeting_journey(tmp_path, fault):
-    """Exercise real storage, processes, ownership and integration through C.
-
-    Guide-only repair catches lost unchanged-input credit; initial success has one candidate.
-    Broken-tool/skipped twins catch false RED; missing-product execution cannot.
-    Evidence gaps catch forced edits; local/integrated semantic faults catch misrouted
-    failures that successful workers cannot expose. Extra-name execution discovers a
-    hardcoded implementation despite green planned checks. Bound owner/scripted replies
-    catch needless interpretation and false owner acceptance; free words need semantics.
-    Product-executable and malformed argv catch tool/output confusion at real planning.
-    Review/scope/invalid twins protect atomic authorized edits; success cannot expose these.
-    Added-test repair catches stranded ownership; editing an existing check cannot.
-    Native transport catches lost stdin/output/provenance and rejected valid answers
-    on nonzero exit; sidecar-only recording cannot.
-    Discovery catches lost upward information; a worker without discoveries cannot.
-    A new accepted requirement/test/file catches an unamendable writer contract; unchanged scopes cannot.
-    Vacuous/nonchallenging checks catch false RED from exit code alone; the broken-tool
-    twin has a distinct execution failure. Skipping after implementation catches false
-    GREEN that initial all-skipped cannot. Source supplied to the judge is the real
-    worker output, not a mock inventory; these journeys script semantic decisions only.
-    A manual-review exit prevents GREEN even with correct product code; its test
-    source must be reviewed at RED before a product writer inherits that blocker.
-    One greeting unit through C catches accidental decomposition/ceremony growth.
-    Native failure twins protect fresh retries of unchanged facts and honest exhaustion;
-    successful transport and malformed JSON never exercise a failed process lifetime.
-    Worker timeout leaves a child holding a writer lock: the retry must acquire it,
-    catching concurrent surviving writers that a question-only timeout cannot expose.
+    Scope and false-RED recoveries catch accepted unowned output and unchallenging checks that
+    success cannot expose. Skipped-at-P proves JUDGING refuses green exit codes without assertions.
+    Exhaustion catches a global failure stopping unrelated units, absent in recoverable faults.
+    Kills in WORKING/PROVING/intent/apply catch lost session identity, repeated DONE work and
+    half-published candidates; ordinary exception recovery cannot exercise OS death.
+    Native timeout catches an abandoned call that clean replies do not; fresh fallback catches a
+    missing provider session. Final rework catches unit checks broken by later integration.
+    Fifty chained/fan-in units catch whole-plan WORK/JUDGE briefs and scheduler stalls that L0 misses.
+    Review repair catches execution before a newly reviewed B, outside post-B unit repair.
+    Overlapping plans catch competing durable owners; runtime disjoint scopes cannot expose that.
+    The same journey corrects a disjoint plan whose only proof for one owner runs after integration.
+    Scope checking alone lets this plan reach B with no evidence available at unit judgment.
+    Schema-fix and crash-fallback twins protect session continuity and partial patch context that
+    valid WORK replies and a provider with available resume do not exercise.
+    Retained invalid/blocked/successful reports protect ordinary outcome and discovery handling
+    after OS death; interrupted in-flight calls have no report to reconcile.
+    Exhaustion also refuses a false preserves claim that is GREEN at P but failed at base;
+    the parallel consumer retains a genuinely existing dependency, protecting the success path.
+    A storage check can pass without demonstrating the accepted browser path. A final negative
+    assessment must withhold C even when the judge's overall verdict and all commands are green.
+    A transient Git worktree admission failure must preserve its cause and retry before WORKING.
+    Faults after admission already have a worktree and cannot catch an illegal READY recovery.
+    Judge transport exhaustion fails locally without resuming a correct worker. Oversized check
+    sources and product patches refuse the complete brief rather than silently dropping assertions.
+    Verbatim A/B revisions protect user intent that schema-valid approval alone cannot preserve.
+    A dependency may satisfy a check at T; wave-start RED prevents needless rework while still
+    refusing checks that are green before any product work. Product quality is judged exactly once,
+    separate from feature requirements, preventing demands for global quality from one feature.
+    A configured short check deadline times out a real command; a fixed 30-second observer would
+    wrongly integrate it. Judge uncertainty still returns only its own unit to its worker.
+    Windows native Access-is-denied wording must stop after one call; generic transport faults
+    otherwise retry a denied operation and the successful native journey never exposes it.
+    Non-first walkthrough selection and invalid-reference correction protect the approved subject;
+    a one-check success cannot expose first-check guesses or admission of a feature as a check.
+    One versus fifty retains equal walkthrough images/source/output while covering every feature,
+    catching a product-sized PRODUCT brief without weakening the effective observation workload.
+    Historical B retains its full projection; fresh reviews cannot silently replace that subject.
+    The real walkthrough prints its working directory: an equal-revision worker checkout can pass
+    the same command while leaving the guide's delivered-folder instructions unexercised.
+    A passed command cannot establish a missing declared artifact. The final reader must see its
+    check's actual shipped files; two owners expose leaks that a one-file walkthrough cannot.
+    Reopening a terminal failure preserves state and records; interrupted recovery cannot prove this.
     """
-    calls, tasks, purposes = Counter(), Counter(), Counter()
-    requests, timeline, worker_roots, malformed = [], [], [], []
-    local_failures, writer_failures, demo_reuse = [], [], []
-    gap_sent = False
-    provider_configs = {role: dict(config) for role, config in ROLES.items()}
-    setup = {"providers": provider_configs, "interpreter": sys.executable,
-             "userOrigin": "owner conversation" if fault == "owner" else "scripted journey",
-             "scriptedUser": fault != "owner"}
-    if fault in ("evidence-gap", "uncertain-twice"):
-        note = tmp_path / "verification.txt"
-        note.write_text("Python subprocess verification is available", encoding="utf-8")
-        setup["factFiles"] = {"setup:verification": str(note)}
-
-    def provider(question):
-        nonlocal gap_sent
-        kind, facts, context = question["kind"], question["facts"], question["context"]
-        bodies = [f["boundedContent"] for f in facts.values() if isinstance(f["boundedContent"], dict)]
-        if "exactFix" not in context:
-            calls[kind] += 1
-        answer = {"why": "The supplied facts support this semantic decision", "citations": list(facts)}
-        if kind == "ALIGN":
-            assert next(b for b in bodies if "words" in b)["capabilities"]["interpreter"] == sys.executable
-            answer.update(size="tiny", understanding="A personal greeting command", users=["Terminal users"],
-                scopeIn=["Greet a supplied name"], scopeOut=["UI"], improvements=[],
-                quality=[{"criterion": "Clear output and usable guide", "verification": "Run the CLI and follow its guide"}], unknowns=[])
-            if fault.startswith("malformed"):
-                malformed.append(question)
-                if fault == "malformed-exhausted" or len(malformed) <= 2:
-                    answer.update(size="invalid", users=False, unexpected=True)
-        elif kind == "DECIDE":
-            assert fault == "free-form" and context["gate"] == "C"
-            words = next(b for b in bodies if "words" in b)
-            assert words["words"] == "Looks good, approve this version."
-            assert facts[words["request"]]["boundedContent"]["subject"] == requests[-1]["subject"]
-            answer.update(choice="approve")
-        elif kind == "PLAN":
-            answer.update(scripted_plan())
-            if fault in ("shell-command", "missing-plan-tool") and "exactFix" not in context:
-                answer["edits"][2]["typedBody"]["command"] = ([f"& '{sys.executable}' '-B' 'check_greeting.py'"]
-                    if fault == "shell-command" else [str(tmp_path / "absent.exe")])
-            if fault in ("broken-tool", "all-skipped", "skipped-green"):
-                answer["edits"][2]["typedBody"]["command"].append({"broken-tool": "--broken-tool", "all-skipped": "--skipped", "skipped-green": "--skip-green"}[fault])
-            if fault == "product-executable":
-                answer["units"][0]["productFiles"].append("product-python.exe")
-                answer["units"][0]["testFiles"].append("check_guide.py")
-                answer["units"][0]["tests"].append("new:4")
-                answer["edits"].append({"kind": "test", "targetHandle": "new:4", "typedBody": {
-                    "purpose": "Read the guide using the delivered executable", "stage": "walkthrough",
-                    "command": ["./product-python.exe", "-B", "check_guide.py"], "requiredEnvironment": [],
-                    "expectedEvidence": "Guide instructions are readable", "requirements": ["new:2"]}})
-        elif kind == "REVIEW":
-            answer.update(verdict="adequate", gaps=[])
-            if fault in ("review-gap", "plan-new-test", "repair-bound", "atomic-invalid") and (calls[kind] == 1 or fault == "repair-bound"):
-                answer.update(verdict="gap", gaps=[{"target": "n2", "correction": "Clarify the promised input behavior"}])
-            if fault in ("uncertain-empty", "uncertain-twice"):
-                answer = {"verdict": "uncertain", "why": "Need installed verification capability", "citations": list(facts),
-                    "neededFacts": [{"target": "setup:verification" if fault == "uncertain-twice" else next(iter(facts)),
-                                     "question": "Which verification tools are available?"}]}
-        elif kind == "REPAIR":
-            nodes = next(b["document"]["nodes"] for b in bodies if "document" in b)
-            target = "n3" if fault == "RED-gap" else "n2"
-            body = deepcopy(nodes[target]["body"])
-            if target == "n3":
-                body["command"].append("--more")
-            else:
-                body["obligation"] += "; support every supplied name" + str(calls[kind])
-            answer["edits"] = [{"kind": nodes[target]["kind"], "targetHandle": target, "typedBody": body}]
-            if fault == "plan-new-test":
-                test = deepcopy(nodes["n3"]["body"])
-                test["purpose"] = "Challenge hardcoded names with a second input"
-                test["command"].append("--more")
-                unit = deepcopy(nodes["n4"]["body"])
-                unit["tests"].append("new:1")
-                answer["edits"] = [{"kind": "test", "targetHandle": "new:1", "typedBody": test},
-                    {"kind": "bead", "targetHandle": "n4", "typedBody": unit}]
-            if fault == "scope-change":
-                body["obligation"] += "; missing name prints usage and exits 2"
-                test = deepcopy(nodes["n3"]["body"])
-                test["command"].append("--usage")
-                answer["edits"].append({"kind": "test", "targetHandle": "n3", "typedBody": test})
-            if fault == "new-contract":
-                unit = deepcopy(nodes["n4"]["body"])
-                unit["requirements"].append("new:1")
-                unit["tests"].append("new:2")
-                unit["ownedPaths"] += ["check_usage.py", "usage.py"]
-                unit["testPaths"].append("check_usage.py")
-                answer["edits"] = [
-                    {"kind": "requirement", "targetHandle": "new:1", "typedBody": {"obligation": "A missing name prints usage and exits 2",
-                        "design": "A separate usage helper", "contract": "No name -> usage and exit 2", "features": ["n1"]}},
-                    {"kind": "test", "targetHandle": "new:2", "typedBody": {"purpose": "Exercise the missing-name path", "stage": "verification",
-                        "command": [sys.executable, "-B", "check_usage.py"], "requiredEnvironment": ["Python"],
-                        "expectedEvidence": "Actual usage output and exit status", "requirements": ["new:1"]}},
-                    {"kind": "bead", "targetHandle": "n4", "typedBody": unit}]
-            if fault == "atomic-invalid":
-                answer["edits"].append({"op": "Retire", "targetHandle": "n1", "replacementHandles": ["n2"]})
-        elif kind == "IMPACT":
-            answer.update(verdict="scope_change" if fault in ("scope-change", "new-contract") else "within_scope")
-        elif kind == "WORK":
-            task = context["task"]
-            timeline.append(task)
-            tasks[task] += 1
-            assignment = next(b for b in bodies if "worktree" in b)
-            root = Path(assignment["worktree"])
-            worker_roots.append(root)
-            observed_failures = [b for b in bodies if "exitCode" in b and b["exitCode"] != 0]
-            if task == "build" and fault == "local-fault" and tasks[task] == 2:
-                assert any("Wrong greeting" in b["stderr"] for b in observed_failures)
-                local_failures.extend(observed_failures)
-                assert root == worker_roots[-2]  # Refine the same assignment before returning it.
-            if task == "build" and fault == "implementation-fault" and tasks[task] == 2:
-                failure = next(b for b in bodies if b.get("purpose") == "demo")
-                detail = failure["answer"]
-                assert "Hello, Ada!" in detail["gaps"][0]["correction"]
-                writer_failures.append(detail)
-            if task == "tests":
-                content = {"check_greeting.py": PRODUCT_TEST}
-                if fault == "none":
-                    # The semantic assertion must survive the old 8 KiB source projection.
-                    content["check_greeting.py"] = "#" + " source context" * 650 + "\n" + PRODUCT_TEST
-                if fault in ("vacuous", "passes-absent"):
-                    content["check_greeting.py"] = 'raise SystemExit(' + ("1" if fault == "vacuous" else "0") + ')\n'
-                if fault == "manual-review":
-                    content["check_greeting.py"] = PRODUCT_TEST.replace('unittest.main(argv=[sys.argv[0]])',
-                        'unittest.main(argv=[sys.argv[0]], exit=False)\nprint("visual review skipped")\nraise SystemExit(1)')
-                if "check_usage.py" in assignment["ownedPaths"]:
-                    content["check_usage.py"] = PRODUCT_TEST.replace('(["Ada", "Grace"] if "--more" in sys.argv else ["Ada"])', '["Ada"]').replace('if "--usage" in sys.argv:', 'if True:')
-                if fault == "product-executable":
-                    content["check_guide.py"] = GUIDE_TEST
-            else:
-                content = {"greet.py": PRODUCT, "TRY.txt": GUIDE}
-                if "usage.py" in assignment["ownedPaths"]:
-                    content["usage.py"] = 'def missing_name():\n    print("Usage: greet.py NAME")\n    raise SystemExit(2)\n'
-                    content["greet.py"] = 'import sys\nif len(sys.argv) < 2:\n    from usage import missing_name\n    missing_name()\nprint(f"Hello, {sys.argv[1]}!")\n'
-                if fault == "local-fault" and tasks[task] == 1:
-                    content["greet.py"] = 'print("Wrong greeting")\n'
-                if fault == "implementation-fault" and tasks[task] == 1:
-                    content["greet.py"] = 'print("Hello, Ada!")\n'
-                if fault == "guide-gap" and tasks[task] == 1:
-                    content.pop("TRY.txt")
-                if fault == "product-executable":
-                    content["product-python.exe"] = Path(sys._base_executable).read_bytes()
-                if fault == "scope-change" and calls["REPAIR"]:
-                    content["greet.py"] = 'import sys\nif len(sys.argv) < 2:\n    print("Usage: greet.py NAME")\n    raise SystemExit(2)\nprint(f"Hello, {sys.argv[1]}!")\n'
-            changed = []
-            for name, data in content.items():
-                data = data if isinstance(data, bytes) else data.encode()
-                path = root / name
-                if not path.exists() or path.read_bytes() != data:
-                    path.write_bytes(data)
-                baseline = assignment["baseline"]["files"].get(name)
-                if baseline != hashlib.sha256(data).hexdigest():
-                    changed.append(name)
-            discoveries = [{"cause": "plan", "target": "n2", "correction": "Consider localized greetings in a future scope"}] if fault == "discovery" and task == "build" else []
-            answer.update(outcome="done", summary="Assigned delivery ready for local checking", artifactPaths=changed, discoveries=discoveries)
-        elif kind == "JUDGE":
-            purpose = context["purpose"]
-            purposes[purpose] += 1
-            obs = [b for b in bodies if "outputRefs" in b]
-            assert all(b["applies"] and b["executionUsable"] for b in obs)
-            if purpose == "RED":
-                if purposes[purpose] == 1:
-                    assert all(b["productAbsent"] and b["products"].get("greet.py") is None for b in obs)
-            for observation in obs:
-                assert observation["testSources"]
-                for path, source in observation["testSources"].items():
-                    assert source == (loop.project / path).read_text()
-            answer.update(verdict="satisfied", gaps=[], assessments=[
-                {"target": t, "satisfied": True, "why": "Actual interaction challenges/establishes this obligation"}
-                for t in context["assessments"]])
-            gap = None
-            invalid = fault in ("broken-tool", "all-skipped", "vacuous", "passes-absent", "manual-review") or (fault == "skipped-green" and purpose == "GREEN")
-            if invalid:
-                output = "\n".join(b["stdout"] + b["stderr"] for b in obs)
-                if fault == "broken-tool":
-                    assert "missing-tool.exe" in output and all(b["exitCode"] != 0 for b in obs)
-                elif fault in ("all-skipped", "skipped-green"):
-                    assert "OK (skipped=1)" in output and all(b["exitCode"] == 0 for b in obs)
-                elif fault == "manual-review":
-                    assert "visual review skipped" in output and all(b["exitCode"] == 1 for b in obs)
-                else:
-                    assert all(b["testSources"]["check_greeting.py"] == f'raise SystemExit({1 if fault == "vacuous" else 0})\n' for b in obs)
-                return json.dumps({"answer": {"verdict": "uncertain", "why": "No executed obligation assertion: tooling failure, skipped or empty check",
-                    "citations": list(facts), "neededFacts": [{"target": "n3", "question": "Supply an automated check that actually challenges the greeting"}]}})
-            if purpose == "RED":
-                assert any(b["failed"] for b in obs)
-            if fault == "new-contract" and purpose == "demo" and not gap_sent:
-                result = subprocess.run([sys.executable, "-B", "greet.py"], cwd=loop.project, capture_output=True, text=True)
-                assert result.returncode != 2 or "Usage:" not in result.stdout
-                gap = ("plan", "n2", "Accept a missing-name usage requirement, semantic test and helper file")
-            if fault == "RED-gap" and purpose == "RED" and not gap_sent:
-                gap = ("plan", "n3", "Exercise more than one supplied name")
-            if fault == "scope-change" and purpose == "GREEN" and not gap_sent:
-                gap = ("plan", "n2", "Clarify support for every supplied name")
-            if fault == "evidence-gap" and purpose == "demo":
-                note = facts["setup:verification"]["boundedContent"]
-                if isinstance(note, dict):
-                    gap = ("evidence", "setup:verification", "Read the available verification capability")
-                else:
-                    assert note == "Python subprocess verification is available"
-            if fault == "implementation-fault" and purpose == "demo":
-                result = subprocess.run([sys.executable, "-B", "greet.py", "Grace"], cwd=loop.project, capture_output=True, text=True)
-                if result.stdout != "Hello, Grace!\n":
-                    gap = ("implementation", "greet.py", "Grace incorrectly produced " + repr(result.stdout))
-            if purpose == "demo" and not (loop.project / "TRY.txt").is_file():
-                gap = ("implementation", "TRY.txt", "Deliver the missing try-it guide")
-            if gap:
-                gap_sent = True
-                answer.update(verdict="gap", gaps=[dict(zip(("cause", "target", "correction"), gap))])
-            if purpose == "demo":
-                packet = next(b for b in bodies if "traceComplete" in b)
-                assert packet["traceComplete"] and packet["reusedEvidence"]
-                green = next(b for b in bodies if b.get("purpose") == "GREEN" and "satisfied" in b)
-                assert green["satisfied"]
-                demo_reuse.extend(b for b in obs if b["purpose"] == "GREEN" and b["inputsByteIdentical"])
-        return json.dumps({"answer": answer})
-
-    def user(request):
-        requests.append(request)
-        if fault == "new-contract" and request["gate"] == "scope":
-            assert not (loop.project / "usage.py").exists()
-        timeline.append(request["gate"])
-        if fault == "free-form" and request["gate"] == "C":
-            return "Looks good, approve this version."
-        return {"request": request["request"], "subject": "stale" if fault == "stale-decision" and request["gate"] == "C" else request["subject"]["digest"],
-                "choice": "revise" if fault == "revise-B" and request["gate"] == "B" and not calls["REPAIR"] else "approve"}
-
-    command = ["offline-question-recorder"]
-    provider_fault = fault.startswith("provider-") or fault == "worker-timeout"
-    if fault == "native-transport" or provider_fault:
-        native = tmp_path / "offline_native.py"
-        lock_source = ('import os, time\nfrom pathlib import Path\n'
-            f'lock = Path({str(tmp_path / "writer.lock")!r}).open("a+b")\n'
-            'lock.write(b"0"); lock.flush(); lock.seek(0)\n'
-            'if os.name == "nt":\n    import msvcrt\n    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)\n'
-            'else:\n    import fcntl\n    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n')
-        child_ready = f'Path({str(tmp_path / "child-ready")!r}).write_text("writer locked")\ntime.sleep(30)\n'
-        native.write_text('import json, sys, subprocess, time, os\nfrom pathlib import Path\n'
-            'q = json.loads(sys.stdin.read().splitlines()[-1])\n'
-            'assert q["facts"] and q["kind"]\n'
-            + (f'control = Path({str(tmp_path)!r})\nmode = {fault!r}\n'
-            'attempt = len(list(control.glob("native-question-*.json"))) + 1\n'
-            '(control / f"native-question-{attempt}.json").write_text(json.dumps(q))\n'
-            'if mode == "worker-timeout":\n'
-            f'    lock_source = {lock_source!r}\n'
-            '    if attempt == 1:\n'
-            f'        subprocess.Popen([sys.executable, "-B", "-c", lock_source + {child_ready!r}])\n'
-            '        while not (control / "child-ready").exists():\n            time.sleep(0.01)\n'
-            '    else:\n        exec(lock_source)\n'
-            'if mode == "provider-auth":\n    sys.stderr.write("Authentication failed: log in to Codex\\n"); sys.exit(1)\n'
-            'if mode == "provider-permission":\n    sys.stderr.write("Permission denied by native provider\\n"); sys.exit(1)\n'
-            'if mode == "provider-crash" and attempt == 1:\n    os._exit(17)\n'
-            'if mode == "provider-timeout-always" or (mode == "worker-timeout" and attempt == 1):\n'
-            '    time.sleep(30)\n' if provider_fault else '') +
-            'reply = Path(__file__).with_suffix(".reply").read_text(encoding="utf-8")\n'
-            'print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":reply}}))\n'
-            'print(json.dumps({"type":"turn.completed"}))\n'
-            + ('' if provider_fault else 'sys.exit(9 if q["kind"] == "PLAN" else 0)\n'), encoding="utf-8")
-        command = [sys.executable, "-B", str(native)]
-    if provider_fault:
-        setup["providers"]["worker" if fault == "worker-timeout" else "planner"]["timeout"] = 2
-    recorder = Codex(tmp_path / "calls", {**setup, "codexCommand": command})
-
-    def recorded_provider(question):
-        if provider_fault:
-            selected = question["kind"] == ("WORK" if fault == "worker-timeout" else "PLAN")
-            if selected and (fault != "worker-timeout" or question["context"]["task"] == "tests"):
-                if not native.with_suffix(".reply").exists():
-                    native.with_suffix(".reply").write_text(provider(question), encoding="utf-8")
-                return recorder(question)
-            return provider(question)
-        if fault not in ("none", "native-transport"):
-            return provider(question)
-        if fault == "native-transport":
-            native.with_suffix(".reply").write_text(provider(question), encoding="utf-8")
-            return recorder(question)  # Execute the offline CLI twin, never Codex or a real provider.
-        folder, invocation = recorder.prepare(question)  # Real sidecar producer; never launch a provider.
-        config = invocation["provider"]
-        argv = invocation["command"]
-        assert argv[argv.index("--model") + 1] == config["model"]
-        assert 'model_reasoning_effort=' + json.dumps(config["effort"]) in argv
-        expected = "high" if invocation["role"] in ("build", "demo") else "low" if question["kind"] == "DECIDE" else "medium"
-        assert config["effort"] == expected
-        reply = provider(question)
-        (folder / "answer.txt").write_text(reply, encoding="utf-8")
-        return reply
-
-    recorded_provider.timeout_for = recorder.timeout_for
-    loop = Loop(tmp_path / "product", tmp_path / "workers", "Make a command that greets a supplied name", setup, recorded_provider, user)
-    cursor = loop.run()
-    rows = loop.store.records()
-    revisions = loop.store.db.execute("SELECT count(*) FROM plan_revision").fetchone()[0]
-    persisted = loop.store.cursor()
-    records = {ref: body for ref, _, body in rows}
-    observations = [(ref, b) for ref, k, b in rows if k == "observation" and not b["purpose"].startswith("local:")]
-    outcome = next(b for _, k, b in reversed(rows) if k == "outcome")
-    loop.store.db.close()
-    incomplete = fault in ("stale-decision", "broken-tool", "all-skipped", "malformed-exhausted", "repair-bound", "atomic-invalid", "uncertain-empty", "uncertain-twice", "vacuous", "passes-absent", "skipped-green", "manual-review", "provider-timeout-always", "provider-auth", "provider-permission")
-    assert not list(loop.project.rglob("execution.json"))
-    assert cursor["state"] == persisted["state"] == ("INCOMPLETE" if incomplete else "ACCEPTED" if fault == "owner" else "SCRIPTED_C"), outcome
-    assert not tasks["guide"]
-    assert calls["DECIDE"] == (1 if fault == "free-form" else 0)
-    if fault == "native-transport":
-        results = [json.loads(p.read_text()) for p in (tmp_path / "calls").glob("*/result.json")]
-        assert len(results) == sum(calls.values()) and all(r["executionStarted"] and r["cleanupVerified"] and r["exitCode"] in (0, 9) for r in results)
-        assert sum(r["exitCode"] == 9 for r in results) == 1
-    if provider_fault:
-        native_questions = [json.loads(p.read_text()) for p in sorted(tmp_path.glob("native-question-*.json"))]
-        count = 3 if fault == "provider-timeout-always" else 1 if fault in ("provider-auth", "provider-permission") else 2
-        assert len(native_questions) == count and all(q == native_questions[0] for q in native_questions)
-        role = "worker" if fault == "worker-timeout" else "planner"
-        attempts = {r: b for r, k, b in rows if k == "attempt" and b["operation"] == ("WORK" if fault == "worker-timeout" else "PLAN")}
-        assert len(attempts) == count + (1 if fault == "worker-timeout" else 0)  # Later build is a separate question.
-        retried = [b for b in attempts.values() if b.get("retryOf")]
-        assert len(retried) == count - 1
-        assert all(records[b["question"]] == records[attempts[b["retryOf"]]["question"]] for b in retried)
-        results = [json.loads(p.read_text()) for p in (tmp_path / "calls").glob("*/result.json")]
-        assert len(results) == count and all(r["cleanupVerified"] and r["timeout"] == 2 and r["role"] == role for r in results)
-        failures = [b for _, k, b in rows if k == "provider_failure"]
-        assert len(failures) == count - (0 if incomplete else 1)
-        if fault == "provider-timeout-always":
-            assert "timed out" in outcome["reason"] and "timeout" in outcome["reason"]
-        if fault in ("provider-auth", "provider-permission"):
-            assert not failures[0]["transient"] and ("Authentication failed" if fault == "provider-auth" else "Permission denied") in outcome["reason"]
-    if malformed:
-        assert len(malformed) == 3
-        assert all(all(q["facts"][r] == f for r, f in malformed[0]["facts"].items()) for q in malformed[1:])
-        assert all(all(field in json.dumps(q["facts"]) for field in ("unexpected", "users", "size")) for q in malformed[1:])
-    if incomplete:
-        assert not outcome["accepted"] and not outcome["verification_complete"] and outcome["nextAction"]
-        if fault in ("broken-tool", "all-skipped", "vacuous", "passes-absent", "skipped-green", "manual-review"):
-            assert purposes["RED"] == 1 and tasks["tests"] == 1
-            assert tasks["build"] == (1 if fault == "skipped-green" else 0)
-            assert not any(k == "judgment" and b["satisfied"] and b["purpose"] == ("GREEN" if fault == "skipped-green" else "RED") for _, k, b in rows)
-        if fault == "atomic-invalid":
-            assert revisions == 1 and "wrong trace target kind" in outcome["reason"]
-        if fault == "repair-bound":
-            assert calls["REPAIR"] == 3 and "Three repairs exhausted" in outcome["reason"]
-        return
-    assert outcome["accepted"] == (fault == "owner") and outcome["verification_complete"]
-    assert all(root.is_dir() and (root / ".git").is_file() for root in worker_roots)
-    red = observations[0][1]
-    assert red["purpose"] == "RED" and red["executionStarted"] and red["exitCode"] != 0
-    assert red["products"]["greet.py"] is None
-    assert demo_reuse
-    subject = requests[-1]["subject"]
-    assert subject["candidate"] == cursor["candidate"]
-    assert records[subject["candidate"]]["files"] == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in loop.project.iterdir() if p.is_file()}
-    assert all(records[r]["satisfied"] for r in subject["judgments"])
-    assert "Try it yourself" in (loop.project / "TRY.txt").read_text()
-    result = subprocess.run([sys.executable, "-B", "greet.py", "Grace"], cwd=loop.project, capture_output=True, text=True)
-    assert result.returncode == 0 and result.stdout == "Hello, Grace!\n"
-    if fault == "none":
-        assert len({b["unit"] for _, k, b in rows if k == "assignment"}) == 1
-        assert timeline == ["A", "B", "tests", "build", "check-in", "C"] and not calls["REPAIR"]
-        assert len(observations) == 2  # No cloned functional walkthrough.
-        from tests.seldon.run_report import report
-        text, summary = report(tmp_path)
-        assert "RED FLAGS: 0 events" in text and summary[3] == "SCRIPTED_C"
-    if fault in ("evidence-gap", "implementation-fault", "local-fault", "guide-gap"):
-        assert not calls["REPAIR"] and revisions == 1
-    if fault == "evidence-gap":
-        assert tasks == {"tests": 1, "build": 1} and any(k == "fact_gather" for _, k, _ in rows)
-    if fault == "local-fault":
-        assert local_failures and tasks["build"] == 2
-    if fault == "implementation-fault":
-        assert writer_failures and tasks["build"] == 2 and tasks["tests"] == 1
-    if fault == "guide-gap":
-        assert purposes["GREEN"] == 1 and purposes["demo"] == 2 and tasks["build"] == 2
-        assert demo_reuse[-1]["candidate"] != cursor["candidate"]
-        assert [b["changedPaths"] for _, k, b in rows if k == "integration"][-1] == ["TRY.txt"]
-    if fault == "product-executable":
-        assert len(observations) == 3 and calls["PLAN"] == 1
-    if fault == "plan-new-test":
-        assert revisions == 2 and len(observations) == 4 and purposes["RED"] == 1
-        assert any("Checking personal greeting Grace" in b["stdout"] for _, b in observations)
-    if fault == "discovery":
-        discovery = next(r for r, k, b in rows if k == "discovery")
-        assert discovery in next(r for r in requests if r["gate"] == "check-in")["subject"]["proposedDeferrals"]
-        assert any(k == "disposition" and b["discovery"] == discovery and b["disposition"] == "deferred" and b["authority"] for _, k, b in rows)
-    if fault == "scope-change":
-        assert any(r["gate"] == "scope" for r in requests) and any(k == "authorization" for _, k, _ in rows)
-
-    if fault == "new-contract":
-        assert any(r["gate"] == "scope" for r in requests)
-        result = subprocess.run([sys.executable, "-B", "greet.py"], cwd=loop.project, capture_output=True, text=True)
-        assert result.returncode == 2 and "Usage:" in result.stdout
-        assert (loop.project / "usage.py").is_file()
-        assert any(b["purpose"] == "RED" and b["exitCode"] != 0 and "check_usage.py" in b["command"] for _, b in observations)
+    clean_core_golden(Path("C:/seldon/tests/m1") / ("suite-" + uuid.uuid4().hex[:10]))
 
 
-# Real command checks for independent scopes and their integrated consumer.
-SCOPED_CHECK = r'''import os, subprocess, sys, time
-from pathlib import Path
-name, expected, control, mode = sys.argv[1:]
-root = Path.cwd()
-control = Path(control)
-if mode == "killed" and name == "b.py" and (root / name).exists() and root.name.startswith("worker-") and not (control / "resume").exists():
-    (control / "kill-ready").write_text(str(os.getpid()))
-    time.sleep(30)
-result = subprocess.run([sys.executable, "-B", name], capture_output=True, text=True)
-ok = result.returncode == 0 and result.stdout.strip() == expected
-print(result.stdout + result.stderr)
-raise SystemExit(0 if ok else 1)
-'''
+def clean_core_golden(root):
+    root.mkdir(parents=True)
+    for key in ("TEMP", "TMP", "TMPDIR"):
+        os.environ[key] = str(root)
+    began = time.monotonic()
+    baseline = simple_journey(root / "single1", "single1")
+    admission_journey(root / "admission")
+    modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
+             ("timeout", 1),
+             ("exhaust", 4), ("parallel", 4), ("review-repair", 1), ("final-rework", 2),
+             ("schema-fix", 1), ("plan-overlap", 2), ("user-path", 1), ("judge-provider", 2),
+             ("big-source", 2), ("big-product", 2), ("user-revise", 1), ("wave-start", 2),
+             ("native-denied", 2)]
+    modes.extend([("walkthrough", 2), ("walkthrough-refuse", 1)])
+    modes.append(("walkthrough-missing", 1))
+
+    def run_case(item):
+        mode, count = item
+        start = time.monotonic()
+        if mode.startswith("kill-"):
+            crash_journey(root / mode, mode)
+        else:
+            simple_journey(root / mode, mode, count)
+        print(f"M1 {mode}: {time.monotonic() - start:.2f}s", flush=True)
+
+    for mode in ("kill-work", "kill-fresh", "kill-invalid", "kill-blocked", "kill-report",
+                 "kill-proof", "kill-intent", "kill-apply"):
+        modes.append((mode, 2))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(run_case, modes))
+    start = time.monotonic()
+    scale = simple_journey(root / "scale50", "scale50", 50)
+    scale_seconds = time.monotonic() - start
+    assert all(scale[kind] <= baseline[kind] for kind in baseline), (baseline, scale)
+    print(f"M1 scale50: {scale_seconds:.2f}s; question bytes {baseline} -> {scale}", flush=True)
+    assert scale_seconds < 60, f"50-unit target exceeded: {scale_seconds:.2f}s"
+    seconds = time.monotonic() - began
+    print(f"M1 suite: {seconds:.2f}s; artifacts {root}", flush=True)
+    assert seconds < 180
 
 
-def scoped_run(root, mode, reopen=False):
-    """Script semantic replies; run actual worker processes, commands, Git and SQLite."""
-    from seldon import work
-    root = Path(root)
-    launch_log = root / "launches.jsonl"
-    changed_once = False
-    loop = None
-
-    def provider(question):
-        nonlocal changed_once
-        kind, context, facts = question["kind"], question["context"], question["facts"]
-        answer = {"why": "The assigned obligations are covered by actual command interactions", "citations": list(facts)}
-        bodies = [f["boundedContent"] for f in facts.values() if isinstance(f["boundedContent"], dict)]
-        if kind == "ALIGN":
-            answer.update(size="tiny", understanding="A producer command composed by a dependent application" if mode == "dependency" else "Three independent commands composed into one application", users=["CLI users"],
-                scopeIn=["A output and its composition" if mode == "dependency" else "A, B and C output and their composition"], scopeOut=[], improvements=[],
-                quality=[{"criterion": "Clear composed output", "verification": "Run the integrated application"}], unknowns=[])
-        elif kind == "PLAN":
-            edits, scopes = [], []
-            for i, (name, expected) in enumerate((("a", "Alpha"), ("b", "Beta"), ("c", "Gamma"), ("app", "Alpha|Beta|Gamma"))):
-                if mode == "dependency":
-                    if i in (1, 2):
-                        continue
-                    expected = "Alpha"
-                f, r, t = (f"new:{3*i+j}" for j in (1, 2, 3))
-                edits.extend([
-                    {"kind": "feature", "targetHandle": f, "typedBody": {"story": "Run " + name, "acceptance": "Observe " + expected, "vision": ["vision"]}},
-                    {"kind": "requirement", "targetHandle": r, "typedBody": {"obligation": "Output " + expected, "design": "Independent command" if i < 3 else "Compose the three commands", "contract": "stdout " + expected, "features": [f]}},
-                    {"kind": "test", "targetHandle": t, "typedBody": {"purpose": "Exercise " + name, "stage": "verification", "command": [sys.executable, "-B", f"check_{name}.py", name + ".py", expected, str(root), mode], "requiredEnvironment": ["Python"], "expectedEvidence": "Actual process output", "requirements": [r]}}])
-                if mode == "check-repair" and name == "a":
-                    edits[-2]["typedBody"]["contract"] += "; --variant outputs Alpha2"
-                scopes.append({"requirements": [r], "tests": [t], "testFiles": [f"check_{name}.py"],
-                    "productFiles": [name + ".py", *(["shared.txt"] if mode == "conflict" and i < 2 else []), *([".gitignore", "dist/index.html"] if mode == "ignored" and i == 0 else [])],
-                    "dependencies": [1, 2, 3] if i == 3 and mode != "dependency" else []})
-            if mode in ("reply", "publication"):
-                # These faults need one unit; the other journeys prove scheduling/dependencies.
-                scopes = [{key: [value for scope in scopes for value in scope[key]]
-                           for key in ("requirements", "tests", "testFiles", "productFiles")} | {"dependencies": []}]
-            answer.update(edits=edits, units=scopes)
-        elif kind == "REVIEW":
-            answer.update(verdict="adequate", gaps=[])
-        elif kind == "IMPACT":
-            answer.update(verdict="within_scope")
-        elif kind == "REPAIR":
-            nodes = next(b["document"]["nodes"] for b in bodies if "document" in b)
-            requirement = deepcopy(nodes["n2"]["body"])
-            requirement["obligation"] = "Output Alpha2"
-            requirement["contract"] = "stdout Alpha2"
-            check = deepcopy(nodes["n3"]["body"])
-            check["command"][4] = "Alpha2"
-            integrated = deepcopy(nodes["n12"]["body"])
-            integrated["command"][4] = "Alpha2|Beta|Gamma"
-            answer["edits"] = [{"kind": "requirement", "targetHandle": "n2", "typedBody": requirement},
-                {"kind": "test", "targetHandle": "n3", "typedBody": check},
-                {"kind": "test", "targetHandle": "n12", "typedBody": integrated}]
-        elif kind == "WORK":
-            assignment = next(b for b in bodies if "worktree" in b)
-            worker = Path(assignment["worktree"])
-            with launch_log.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps({"unit": context["unit"], "phase": context["task"], "worktree": str(worker)}) + "\n")
-            document = loop.store.plan(loop.store.cursor()["revision"])
-            launched = [json.loads(line) for line in launch_log.read_text().splitlines()]
-            turn = sum(row["unit"] == context["unit"] and row["phase"] == context["task"] for row in launched)
-            if mode == "dependency" and context["task"] == "build" and "app.py" in assignment["ownedPaths"] and turn == 1:
-                try:
-                    (worker / "a.py").read_text()
-                except FileNotFoundError as error:
-                    (root / "dependency-blocked").write_text("release the independent writer")
-                    answer.update(outcome="blocked", summary="The composition check needs a missing input",
-                        artifactPaths=[], discoveries=[{"cause": "plan", "target": Path(error.filename).name,
-                            "correction": "Declare the file owner as a prerequisite"}])
-                    return json.dumps({"answer": answer})
-                pytest.fail("The missing-dependency fault was not exercised")
-            content = {}
-            for path in assignment["ownedPaths"]:
-                if path.startswith("check_"):
-                    content[path] = SCOPED_CHECK
-                    if mode == "check-repair" and path == "check_a.py" and turn > 1:
-                        content[path] = content[path].replace('print(result.stdout + result.stderr)',
-                            'variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], capture_output=True, text=True)\nok = ok and variant.returncode == 0 and variant.stdout.strip() == "Alpha2"\nprint(result.stdout + result.stderr)')
-                elif path in ("a.py", "b.py", "c.py"):
-                    check = next(document["nodes"][t]["body"] for t in assignment["checks"]
-                                 if document["nodes"][t]["body"]["command"][3] == path)
-                    req = document["nodes"][check["requirements"][0]]["body"]["obligation"]
-                    content[path] = "print(" + repr(req.removeprefix("Output ")) + ")\n"
-                    if mode == "check-repair" and path == "a.py" and turn > 1:
-                        content[path] = 'import sys\nprint("Alpha2" if "--variant" in sys.argv else "Alpha")\n'
-                elif path == "app.py":
-                    names = ("a",) if mode == "dependency" else ("a", "b", "c")
-                    content[path] = f'import subprocess, sys\nprint("|".join(subprocess.check_output([sys.executable, "-B", name + ".py"], text=True).strip() for name in {names!r}))\n'
-                elif path == ".gitignore":
-                    content[path] = "dist/\n"
-                elif path == "TRY.txt":
-                    content[path] = "Try it yourself: python -B app.py; observe " + ("Alpha.\n" if mode == "dependency" else "all three outputs.\n")
-                else:
-                    content[path] = "Shared ownership is serialized.\n"
-            # A real rendezvous proves overlap without depending on machine speed.
-            writer = 'import json, os, sys, time\nfrom pathlib import Path\ndata=json.loads(sys.argv[1])\n'
-            if mode == "dependency" and context["task"] == "build" and "a.py" in content:
-                writer += (f'deadline = time.monotonic() + 20\nwhile not Path({str(root / "dependency-blocked")!r}).exists() and time.monotonic() < deadline:\n    time.sleep(0.01)\n'
-                    f'assert Path({str(root / "dependency-blocked")!r}).exists(), "Consumer was not scheduled independently"\n')
-            if mode == "parallel" and context["task"] == "build" and any(p in content for p in ("a.py", "b.py", "c.py")):
-                marker = root / ("ready-" + context["unit"])
-                writer += (f'Path({str(marker)!r}).write_text("ready")\n'
-                    f'deadline = time.monotonic() + 20\nwhile len(list(Path({str(root)!r}).glob("ready-*"))) < 3 and time.monotonic() < deadline:\n    time.sleep(0.01)\n'
-                    f'assert len(list(Path({str(root)!r}).glob("ready-*"))) == 3, "Independent writers never overlapped"\n')
-            if mode == "uncertain" and "b.py" in content:
-                writer += f'Path({str(root / "kill-ready")!r}).write_text(str(os.getpid()))\ntime.sleep(30)\n'
-            writer += 'for name, source in data.items():\n    Path(name).parent.mkdir(parents=True, exist_ok=True)\n    Path(name).write_text(source, encoding="utf-8")\n'
-            result = work.execute([sys.executable, "-B", "-c", writer, json.dumps(content)], worker)
-            assert result["exitCode"] == 0 and result["cleanupVerified"], result
-            observed = work.files(worker)
-            paths = [p for p, data in observed.items() if assignment["baseline"]["files"].get(p) != hashlib.sha256(data).hexdigest()]
-            answer.update(outcome="done", summary="Scoped delivery checked by its declared command", artifactPaths=paths, discoveries=[])
-        elif kind == "JUDGE":
-            observed = [b for b in bodies if "outputRefs" in b]
-            assert observed and all(b["applies"] and b["executionUsable"] for b in observed)
-            if context["purpose"] == "RED":
-                assert any(b["failed"] for b in observed)
-            else:
-                assert all(b["passed"] for b in observed)
-            answer.update(verdict="satisfied", gaps=[], assessments=[{"target": r, "satisfied": True, "why": "The executed process establishes its observable contract"} for r in context["assessments"]])
-            if mode == "check-repair" and context["purpose"] == "demo" and not changed_once:
-                variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], cwd=loop.project, capture_output=True, text=True)
-                assert variant.stdout.strip() != "Alpha2"
-                changed_once = True
-                answer.update(verdict="gap", gaps=[{"cause": "implementation", "target": "check_a.py", "correction": "Exercise the accepted variant output too"}])
-            if mode == "change" and context["purpose"] == "demo" and not changed_once:
-                changed_once = True
-                answer.update(verdict="gap", gaps=[{"cause": "plan", "target": "n2", "correction": "Change the A output to Alpha2 within the same composition"}])
-        return json.dumps({"answer": answer})
-
-    def user(request):
-        return {"request": request["request"], "subject": request["subject"]["digest"], "choice": "approve"}
-
-    if reopen:
-        loop = Loop.reopen(root / "product", provider, user)
-    else:
-        setup = {"providers": deepcopy(ROLES), "interpreter": sys.executable, "userOrigin": "scripted journey", "scriptedUser": True}
-        loop = Loop(root / "product", root / "workers", "Compose a producer command" if mode == "dependency" else "Compose three independent commands", setup, provider, user)
-    cursor = loop.run()
-    return loop, cursor
-
-
-def scoped_crash_child(root, mode):
-    """Fault injection exits the actual controller after its first published file."""
-    if mode == "publication":
-        import os
-        from seldon import work
-        replace = os.replace
-
-        def crash_after_file(source, target):
-            replace(source, target)
-            if Path(target) == Path(root) / "product" / "a.py":
-                os._exit(77)
-        work.os.replace = crash_after_file
-    if mode == "reply":
-        import os
-        from seldon import questions
-        ask = questions.ask
-
-        def crash_after_reply(provider, question, record, check):
-            answer = ask(provider, question, record, check)
-            if question["kind"] == "WORK" and question["context"]["task"] == "build" and any(
-                    "app.py" in f["boundedContent"].get("ownedPaths", []) for f in question["facts"].values() if isinstance(f["boundedContent"], dict)):
-                os._exit(78)
-            return answer
-        questions.ask = crash_after_reply
-    scoped_run(Path(root), mode)
-
-
-def scoped_journey(tmp_path, mode):
-    """C12/C18/C23: independent scopes compose through C using real processes.
-
-    Tiny sizing must still allow independent pieces; the greeting cannot expose that ban.
-    Recorded overlap catches a serial scheduler; shared-file output catches concurrent
-    ownership. Changing A catches blanket invalidation that the tiny journey misses.
-    Killing during verification/publication catches lost finished work and half candidates;
-    killing an unreported writer catches unsafe relaunch, absent in clean exits.
-    A repaired check must establish new RED while other scopes retain credit; a plan
-    edit cannot expose that path. Reply/report death catches lost durable terminal work;
-    post-report death misses it. Ignored outputs catch HEAD/candidate divergence that
-    ordinary files cannot expose.
-    Missing composition input catches undeclared dependency repair and rescheduling;
-    the parallel journey starts with a complete graph and cannot catch that defect.
-    """
-    import os
-    import time
-    from seldon.store import Store
-    from seldon import evidence, work
-
-    before = None
-    if mode in ("killed", "publication", "uncertain", "reply"):
-        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"), "PYTHONDONTWRITEBYTECODE": "1"}
-        code = "from tests.seldon.test_journey import scoped_crash_child; import sys; scoped_crash_child(sys.argv[1],sys.argv[2])"
-        log = tmp_path / "child.log"
-        with log.open("wb") as output:
-            child = subprocess.Popen([sys.executable, "-B", "-c", code, str(tmp_path), mode], env=env, stdout=output, stderr=subprocess.STDOUT)
-            try:
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline:
-                    if mode in ("publication", "reply") and child.poll() is not None:
-                        assert child.returncode == (77 if mode == "publication" else 78), log.read_text()
-                        break
-                    if (tmp_path / "kill-ready").exists():
-                        store = Store(tmp_path / "product")
-                        finished = [r for r, u in store.units().items() if "build" in u["results"]]
-                        store.db.close()
-                        if finished:
-                            with pytest.raises(ValueError, match="Another controller"):
-                                Loop.reopen(tmp_path / "product", lambda q: pytest.fail("Live run must not launch"), lambda q: None)
-                            child.kill()
-                            child.wait(10)
-                            break
-                    assert child.poll() is None, log.read_text()
-                    time.sleep(0.02)
-                else:
-                    pytest.fail("Controller never reached the requested real fault boundary: " + log.read_text())
-            finally:
-                if child.poll() is None:
-                    child.kill()
-                    child.wait(10)
-        if mode in ("killed", "uncertain") and os.name == "nt":
-            import ctypes
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.OpenProcess.restype = ctypes.c_void_p
-            kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-            kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-            handle = kernel.OpenProcess(0x100000, False, int((tmp_path / "kill-ready").read_text()))
-            if not handle:
-                assert ctypes.get_last_error() == 87, "Command liveness could not be verified"
-            else:
-                try:
-                    assert kernel.WaitForSingleObject(handle, 5000) == 0, "Killed controller left its command alive"
-                finally:
-                    kernel.CloseHandle(handle)
-        store = Store(tmp_path / "product")
-        before = store.units()
-        publication = store.cursor().get("publication")
-        if mode == "reply":
-            pending = next(u["active"] for u in before.values() if u.get("active"))
-            assert not pending.get("report") and not pending.get("work")
-            assert any(b["attempt"] == pending["invocation"] and not b["errors"] for _, _, b in store.records("provider_reply"))
-        if mode == "publication":
-            assert publication
-            old = store.read(store.cursor()["candidate"])
-            assert old != work.candidate(work.files(tmp_path / "product"))  # A partial publication is never credited.
-        store.db.close()
-        launches = (tmp_path / "launches.jsonl").read_text().splitlines()
-        (tmp_path / "resume").write_text("Resume checks; never rerun a completed writer")
-        loop, cursor = scoped_run(tmp_path, mode, reopen=True)
-        if mode == "uncertain":
-            assert cursor["state"] == "INCOMPLETE"
-            assert any(u.get("active", {}).get("status") == "uncertain" for u in loop.store.units().values())
-            assert launches == (tmp_path / "launches.jsonl").read_text().splitlines()
-            loop.store.db.close()
-            return
-    else:
-        loop, cursor = scoped_run(tmp_path, mode)
-    if mode == "ignored":
-        assert cursor["state"] == "INCOMPLETE"
-        reason = loop.store.records("outcome")[-1][2]["reason"]
-        assert "Commit/manifest mismatch" in reason and "dist/index.html" in reason
-        assert not (loop.project / "dist/index.html").exists()
-        assert loop.store.read(cursor["candidate"]) == work.candidate(work.files(loop.project))
-        assert not any(json.loads(line)["phase"] == "build" and json.loads(line)["unit"] == list(loop.store.units())[-1]
-                       for line in (tmp_path / "launches.jsonl").read_text().splitlines())
-        loop.store.db.close()
-        return
-    assert cursor["state"] == "SCRIPTED_C", loop.store.records("outcome")
-    units = loop.store.units()
-    rows = loop.store.records()
-    assert all(not u.get("waiting") for u in units.values())
-    assert len(units) == (1 if mode in ("reply", "publication") else 2 if mode == "dependency" else 4)
-    assert all({"tests", "build"} <= set(u["results"]) for u in units.values())
-    result = subprocess.run([sys.executable, "-B", "app.py"], cwd=loop.project, capture_output=True, text=True)
-    assert result.returncode == 0 and result.stdout.strip() == ("Alpha2|Beta|Gamma" if mode == "change" else "Alpha" if mode == "dependency" else "Alpha|Beta|Gamma")
-    assert "Try it yourself" in (loop.project / "TRY.txt").read_text()
-    assignments = {r: b for r, k, b in rows if k == "assignment"}
-    attempts = {r: b for r, k, b in rows if k == "attempt" and b["operation"] == "work"}
-    endings = {b["attempt"]: b for _, k, b in rows if k == "writer_end"}
-    intervals = [(a["unit"], set(a["ownedPaths"]), attempts[a["attempt"]]["startedAt"], endings[a["attempt"]]["finishedAt"])
-                 for a in assignments.values() if a["phase"] == "build"]
-    independent = list(units)[:-1]
-    overlapping = [(a, b) for a in intervals for b in intervals if a[0] < b[0] and max(a[2], b[2]) < min(a[3], b[3])]
-    if mode == "parallel":
-        assert all(any(a[0] == ref or b[0] == ref for a, b in overlapping) for ref in independent)
-        assert all(not a[1].intersection(b[1]) for a, b in overlapping)
-        assert all(len(u["contract"]["requirements"]) == len(u["contract"]["tests"]) == 1 for u in units.values())
-    if mode == "conflict":
-        assert all(not a[1].intersection(b[1]) for a, b in overlapping)
-        assert any(k == "unit_wait" and "shared.txt" in b["reason"].get("files", []) for _, k, b in rows)
-        assert (loop.project / "shared.txt").read_text() == "Shared ownership is serialized.\n"
-    if mode == "dependency":
-        assert units[list(units)[0]]["contract"]["dependencies"] == []
-        assert set(units[list(units)[-1]]["contract"]["dependencies"]) == set(independent)
-        assert sum(k == "plan_defect" for _, k, _ in rows) == 1
-        assert sum(k == "repair_proposal" for _, k, _ in rows) == 1
-        assert [b["gate"] for _, k, b in rows if k == "decision_request"] == ["A", "B", "check-in", "C"]
-        assert not any(u.get("active") for u in units.values())
-    if mode == "check-repair":
-        variant = subprocess.run([sys.executable, "-B", "a.py", "--variant"], cwd=loop.project, capture_output=True, text=True)
-        assert variant.returncode == 0 and variant.stdout.strip() == "Alpha2"
-        assert sum(k == "judgment" and b["purpose"] == "RED" and b["satisfied"] for _, k, b in rows) == 2
-        for ref in list(units)[1:3]:
-            assert len(units[ref]["attempts"]) == 2
-            for test in units[ref]["contract"]["tests"]:
-                assert sum(k == "observation" and b["purpose"] == "GREEN" and b["test"] == test for _, k, b in rows) == 1
-        assert not any(k == "repair_proposal" for _, k, b in rows)
-    if mode == "reply":
-        assert any(k == "recovery" and b.get("report") for _, k, b in rows)
-    if mode == "change":
-        invalidations = [b["unit"] for _, k, b in rows if k == "invalidation"]
-        assert set(invalidations) == {list(units)[0], list(units)[3]}
-        for ref in list(units)[1:3]:
-            assert len(units[ref]["attempts"]) == 2  # No repeated work for unaffected obligations.
-            green = units[ref]["evidence"]["GREEN"]
-            assert not green.get("stale")
-            assert all(o["applies"] for o in evidence.facts(loop.store, green["observations"], cursor["candidate"], loop.store.plan(cursor["revision"])).values())
-        old_a = next(b for _, k, b in rows if k == "observation" and b["purpose"] == "GREEN" and b["test"] == "n3")
-        old_ref = next(r for r, k, b in rows if k == "observation" and b == old_a)
-        assert not evidence.facts(loop.store, [old_ref], cursor["candidate"], loop.store.plan(cursor["revision"]))[old_ref]["applies"]
-    if before:
-        for ref, previous in before.items():
-            if "build" in previous["results"]:
-                assert units[ref]["results"] == previous["results"] and units[ref]["attempts"] == previous["attempts"]
-        assert not any(u.get("active") for u in units.values())
-        after_launches = (tmp_path / "launches.jsonl").read_text().splitlines()
-        for entry in launches:
-            assert after_launches.count(entry) == 1
-        assert not loop.store.cursor().get("publication")
-    parents = {revision: ancestry for revision, *ancestry in
-               (line.split() for line in work.git(loop.project, "rev-list", "--parents", "--all").splitlines())}
-    for _, kind, body in rows:
-        if kind == "integration":
-            assert body["baseRevision"] in parents and parents[body["revision"]] == [body["baseRevision"]]
-    loop.store.db.close()
+if __name__ == "__main__":
+    assert sys.argv[1] == "--child"
+    child_main(Path(sys.argv[2]), sys.argv[3])

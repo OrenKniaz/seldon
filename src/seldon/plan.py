@@ -1,173 +1,139 @@
-"""C9/C21/I6: one typed plan, trace coverage, and canonical approval subjects."""
+"""C9/C12/I6/I7; R6/R14: scoped unit ownership and CODE-assigned check coverage."""
 
+import fnmatch
+from graphlib import TopologicalSorter
 from pathlib import PurePosixPath
-import shutil
 
-from .store import digest
+from .schema import BODIES, PLAN, VISION, validate as validate_schema
 
-LINKS = {"feature": {"vision": "vision"}, "requirement": {"features": "feature"},
-         "test": {"requirements": "requirement"},
-         "bead": {"requirements": "requirement", "tests": "test", "dependencies": "bead"},
-         "wave": {"beads": "bead"}}
+GUIDE_PATH = "docs/try-it.md"
+GUIDE_WORK = ("Write the try-it guide for the integrated product. Give exact project-relative steps "
+              "from the delivered product folder, the expected results and the user's real interaction.")
 
 
 def safe_path(value):
     path = PurePosixPath(value)
     if (not value or "\\" in value or ":" in value or path.is_absolute()
-            or any(part in ("..", ".git", ".seldon") for part in path.parts)
-            or path.as_posix() != value):
-        raise ValueError(f"Use a project-relative product file path: {value!r}")
+            or path.as_posix() != value
+            or any(p in ("..", ".git", ".seldon") or p.endswith((".", " ")) for p in path.parts)):
+        raise ValueError(f"Use a project-relative path or pattern: {value!r}")
     return value
 
 
-def vision_body(answer):
-    from .schema import VISION
-    return {field: answer[field] for field in VISION["properties"]}
+def matches(path, patterns):
+    # ** spans directories; a directory's /** includes its complete subtree.
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
-def create(vision, answer):
-    vision = vision_body(vision)
-    edits = list(answer["edits"])
-    scopes = answer["units"]
-    for index, scope in enumerate(scopes, 1):
-        edits.append({"kind": "bead", "targetHandle": f"workflow:{index}", "typedBody": {
-            "ownedPaths": [*scope["testFiles"], *scope["productFiles"], *(["TRY.txt"] if index == len(scopes) else [])],
-            "testPaths": scope["testFiles"], "dependencies": [f"workflow:{int(d)}" for d in scope["dependencies"]],
-            "requirements": scope["requirements"], "tests": scope["tests"],
-            "instructions": "Deliver these obligations and semantic checks; final delivery includes TRY.txt with reproduction instructions."}})
-    edits.append({"kind": "wave", "targetHandle": "workflow:wave", "typedBody": {
-        "goal": "Deliver the accepted product", "beads": [f"workflow:{i}" for i in range(1, len(scopes) + 1)]}})
-    return apply({"nodes": {"vision": {"kind": "vision", "body": vision}}}, edits)
+def prefix(pattern):
+    index = next((i for i, char in enumerate(pattern) if char in "*?["), len(pattern))
+    return pattern[:index]
 
 
-def apply(document, edits):
-    """Apply one batch to a copy, then validate its complete graph before publication."""
-    from copy import deepcopy
-    nodes = deepcopy(document["nodes"])
-    replacements = {}
-    slots = list(dict.fromkeys(e["targetHandle"] for e in edits if e.get("op", "Put") == "Put"
-                               and e["targetHandle"].startswith(("new:", "workflow:"))))
-    maximum = document.get("nextHandle", max([int(ref[1:]) for ref in nodes if ref.startswith("n")] or [0]) + 1) - 1
-    handles = {slot: f"n{maximum + i}" for i, slot in enumerate(slots, 1)}
-    edits = deepcopy(edits)
-    for edit in edits:
-        if "replacementHandles" in edit:
-            edit["replacementHandles"] = [handles.get(ref, ref) for ref in edit["replacementHandles"]]
-        if "typedBody" in edit:
-            for relation in LINKS.get(edit["kind"], {}):
-                edit["typedBody"][relation] = [handles.get(ref, ref) for ref in edit["typedBody"][relation]]
-        ref = handles.get(edit["targetHandle"], edit["targetHandle"])
-        operation = edit.get("op", "Put")
-        if operation == "Retire":
-            if ref == "vision":
-                raise ValueError("Vision cannot be retired")
-            del nodes[ref]
-            replacements[ref] = edit["replacementHandles"]
-        else:
-            nodes[ref] = {"kind": edit["kind"], "body": deepcopy(edit["typedBody"])}
-    for node in nodes.values():
-        for relation, kind in LINKS.get(node["kind"], {}).items():
-            links = node["body"][relation]
-            node["body"][relation] = list(dict.fromkeys(
-                target for ref in links
-                for target in replacements.get(ref, [ref])))
-    if edits and nodes == document["nodes"]:
-        raise ValueError("Repair changes nothing; unresolved gap requires a concrete edit")
-    result = {"nodes": nodes, "nextHandle": maximum + len(slots) + 1}
-    validate(result)
+def contains(outer, inner):
+    return outer == inner or (outer.endswith("/**") and inner.startswith(outer[:-2]))
+
+
+def overlaps(left, right):
+    # Conservative for general glob intersections: never admit potentially shared paths.
+    def intersect(a, b):
+        if prefix(a) == a:
+            return matches(a, [b])
+        if prefix(b) == b:
+            return matches(b, [a])
+        return prefix(a).startswith(prefix(b)) or prefix(b).startswith(prefix(a))
+    return any(intersect(a, b) for a in left for b in right)
+
+
+def select(document, kind):
+    return {ref: n["body"] for ref, n in document["nodes"].items() if n["kind"] == kind}
+
+
+def assigned(document):
+    owners = {r: u for r, u in select(document, "unit").items()}
+    result = {r: {} for r in owners}
+    result[None] = {}
+    for ref, check in select(document, "check").items():
+        local = [r for r, unit in owners.items()
+                 if set(check["requirements"]) <= set(unit["requirements"])]
+        result[local[0] if local else None][ref] = check
     return result
 
 
-def affected(before, after, roots=()):
-    changed = {ref for ref in before["nodes"].keys() | after["nodes"].keys()
-               if before["nodes"].get(ref) != after["nodes"].get(ref)}
-    changed.update(roots)
-    while True:
-        downstream = {ref for ref, node in after["nodes"].items()
-                      if any(changed.intersection(node["body"][relation])
-                             for relation in LINKS.get(node["kind"], {}))}
-        if downstream <= changed:
-            return changed
-        changed |= downstream
+def create(vision, answer):
+    validate_schema({k: v for k, v in answer.items() if k != "why"}, PLAN)
+    vision = {field: vision[field] for field in VISION["properties"]}
+    nodes = {"vision": {"kind": "vision", "body": vision}}
+    handles = {e["targetHandle"]: f"n{i:03}" for i, e in enumerate(answer["edits"], 1)}
+    if len(handles) != len(answer["edits"]):
+        raise ValueError("Each planned record needs its own handle")
+    relations = {"feature": "vision", "requirement": "features", "check": "requirements"}
+    for edit in answer["edits"]:
+        body = dict(edit["typedBody"])
+        relation = relations[edit["kind"]]
+        body[relation] = ["vision"] if relation == "vision" else [handles.get(r, r) for r in body[relation]]
+        nodes[handles[edit["targetHandle"]]] = {"kind": edit["kind"], "body": body}
+    for i, unit in enumerate(answer["units"], 1):
+        nodes[f"u{i:03}"] = {"kind": "unit", "body": {**unit,
+            "requirements": [handles.get(r, r) for r in unit["requirements"]],
+            "dependencies": [f"u{d:03}" for d in unit["dependencies"]]}}
+    document = {"nodes": nodes}
+    validate(document)
+    return document
 
 
-def validate(plan):
-    nodes = plan["nodes"]
-    errors = []
-    if nodes.get("vision", {}).get("kind") != "vision" or any(
-            ref != "vision" and node["kind"] == "vision" for ref, node in nodes.items()):
-        errors.append("Exactly one CODE-owned vision handle is required")
-    from .schema import BODIES, VISION, validation_errors
+def validate(document):
+    nodes = document["nodes"]
+    validate_schema(nodes["vision"]["body"], VISION)
+    relation_types = {"feature": ("vision", "vision"), "requirement": ("features", "feature"),
+                      "check": ("requirements", "requirement"), "unit": ("requirements", "requirement")}
     for ref, node in nodes.items():
-        errors.extend(validation_errors(node["body"], VISION if node["kind"] == "vision" else BODIES[node["kind"]], ref))
-    if errors:
-        raise ValueError("\n".join(errors))
-    if set(nodes) == {"vision"}:
-        return
-    for node in nodes.values():
-        for relation, target_kind in LINKS.get(node["kind"], {}).items():
-            if any(ref not in nodes or nodes[ref]["kind"] != target_kind for ref in node["body"][relation]):
-                errors.append(f"{relation}: wrong trace target kind")
-    for kind in ("feature", "requirement", "test", "bead", "wave"):
-        if not select(plan, kind):
-            errors.append(f"Plan needs {kind} records")
-    products = {p for b in select(plan, "bead").values() for p in b["ownedPaths"] if p not in b["testPaths"]}
-    for ref, test in select(plan, "test").items():
-        executable = test["command"][0]
-        if executable.replace("\\", "/").removeprefix("./") not in products and not shutil.which(executable):
-            errors.append(f"{ref}.command[0] must name an installed verification tool or a declared product output: {executable!r}; put each argument in its own element.")
-    features, requirements, tests, beads = (
-        select(plan, k) for k in ("feature", "requirement", "test", "bead"))
-    for targets, owners, relation in ((features, requirements, "features"),
-                                      (requirements, tests, "requirements"),
-                                      (tests, beads, "tests")):
-        covered = {ref for body in owners.values() for ref in body[relation]}
-        if not targets.keys() <= covered:
-            errors.append(f"Uncovered trace records: {targets.keys() - covered}")
-    if not any(test["stage"] == "verification" for test in tests.values()):
-        errors.append("Plan requires verification commands")
-    if set(beads) != {
-            r for w in select(plan, "wave").values() for r in w["beads"]}:
-        errors.append("Waves must cover all product work")
-    for ref, bead in beads.items():
-        if not set(bead["testPaths"]) <= set(bead["ownedPaths"]):
-            errors.append("Unit test paths must be owned")
-        if not set(bead["requirements"]) >= {r for t in bead["tests"] if t in tests for r in tests[t]["requirements"]}:
-            errors.append("Unit checks must refer to its own obligations")
-        for path in bead["ownedPaths"]:
-            try:
-                safe_path(path)
-            except ValueError as error:
-                errors.append(str(error))
-    from graphlib import TopologicalSorter, CycleError
-    try:
-        tuple(TopologicalSorter({r: b["dependencies"] for r, b in beads.items()}).static_order())
-    except CycleError:
-        errors.append("Cyclic bead dependencies")
-    if errors:
-        raise ValueError("\n".join(dict.fromkeys(errors)))
+        if ref == "vision":
+            continue
+        kind, body = node["kind"], node["body"]
+        validate_schema(body, BODIES[kind], ref)
+        relation, target_kind = relation_types[kind]
+        if any(nodes.get(r, {}).get("kind") != target_kind for r in body[relation]):
+            raise ValueError(f"{ref}.{relation}: wrong trace target kind")
+    features, requirements, checks, units = (
+        select(document, k) for k in ("feature", "requirement", "check", "unit"))
+    if not all((features, requirements, checks, units)):
+        raise ValueError("Plan requires features, requirements, checks and units")
+    by_unit = assigned(document)
+    uncovered = []
+    for ref in requirements:
+        owners = [u for u, body in units.items() if ref in body["requirements"]]
+        if len(owners) != 1:
+            raise ValueError(f"{ref}: needs exactly one unit owner, found {owners}")
+        if not any(ref in c["requirements"] for c in by_unit[owners[0]].values()):
+            uncovered.append(requirements[ref]["obligation"])
+    if uncovered:
+        raise ValueError(f"Unit judgment needs a local semantic check for {sorted(uncovered)}. "
+                         "A check spanning owners runs only after the units integrate.")
+    if set(features) - {f for r in requirements.values() for f in r["features"]}:
+        raise ValueError("Every feature needs a requirement")
+    for ref, unit in units.items():
+        for pattern in [*unit["scope"], *unit["checkPaths"]]:
+            safe_path(pattern)
+        if not all(any(contains(s, c) for s in unit["scope"]) for c in unit["checkPaths"]):
+            raise ValueError(f"{ref}: checkPaths must be inside scope")
+        if any(d not in units or d == ref for d in unit["dependencies"]):
+            raise ValueError(f"{ref}: unknown or self dependency")
+        if overlaps(unit["scope"], [GUIDE_PATH]):
+            raise ValueError(f"{ref}: {GUIDE_PATH} belongs to the CODE-created last unit")
+        for other, owner in units.items():
+            if ref < other and overlaps(unit["scope"], owner["scope"]):
+                raise ValueError(f"Scope ownership overlaps: {ref} {unit['scope']} and "
+                                 f"{other} {owner['scope']}; assign disjoint subtrees or literal paths")
+    tuple(TopologicalSorter({r: b["dependencies"] for r, b in units.items()}).static_order())
 
 
-def select(plan, kind):
-    return {ref: node["body"] for ref, node in plan["nodes"].items() if node["kind"] == kind}
-
-
-def file_owners(document):
-    owners = {}
-    for ref, bead in select(document, "bead").items():
-        for path in bead["ownedPaths"]:
-            owners.setdefault(path, []).append(ref)
-    return owners
-
-
-def prerequisites(document, ref):
-    beads = select(document, "bead")
-    found = {ref}
-    while (expanded := found | {d for r in found for d in beads[r]["dependencies"]}) != found:
-        found = expanded
-    return found
-
-
-def subject(gate, **bindings):
-    body = {"gate": gate, **bindings}
-    return {**body, "digest": digest(body)}
+def add_guide(document):
+    # Scheduling creates the unit; its worker writes the user-facing instructions.
+    from copy import deepcopy
+    result = deepcopy(document)
+    result["nodes"]["guide"] = {"kind": "unit", "body": {
+        "scope": [GUIDE_PATH], "checkPaths": [GUIDE_PATH], "requirements": [],
+        "dependencies": list(select(document, "unit")),
+        "instructions": GUIDE_WORK}}
+    return result

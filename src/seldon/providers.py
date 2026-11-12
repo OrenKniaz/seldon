@@ -1,4 +1,4 @@
-"""C1/C11/C20/I10: fresh native Codex calls, recorded for exact-answer replay."""
+"""C1/C11/C18/C20/I10; R8/R12/R13: thin recorded Codex calls and native session resume."""
 
 import json
 import os
@@ -15,6 +15,7 @@ ROLES = {role: {"provider": "codex", "model": "gpt-6.1-sol", "effort": effort, "
          for role, (effort, timeout) in {"planner": ("medium", 180), "reviewer": ("medium", 180),
              "worker": ("medium", 600), "judge": ("medium", 180), "build": ("high", 900),
              "demo": ("high", 300), "decider": ("low", 90)}.items()}
+ROLES["check"] = {"timeout": 300}
 
 
 class ProviderFailure(RuntimeError):
@@ -25,9 +26,23 @@ class ProviderFailure(RuntimeError):
 
 
 def role_for(kind, context):
-    return ("build" if kind == "WORK" and context["task"] == "build" else
-            "demo" if kind == "JUDGE" and context["purpose"] == "demo" else
-            {"REVIEW": "reviewer", "WORK": "worker", "JUDGE": "judge", "IMPACT": "judge", "DECIDE": "decider"}.get(kind, "planner"))
+    return {"REVIEW": "reviewer", "WORK": "build", "JUDGE": "judge", "DEMO": "demo", "PRODUCT": "demo",
+            "DECIDE": "decider"}.get(kind, "planner")
+
+
+class ResumeUnavailable(ProviderFailure):
+    pass
+
+
+def session_id(output):
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "thread.started":
+            return event.get("thread_id")
+    return None
 
 
 def setup_facts():
@@ -43,12 +58,17 @@ def setup_facts():
             command = [codex]
     cache = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ms-playwright"
     package = next((str(root) for link in sorted((cache / ".links").glob("*"))
-                    if (root := Path(link.read_text(encoding="utf-8").strip())).joinpath("package.json").is_file()), None)
+                    if (root := Path(link.read_text("utf-8").strip())).joinpath("package.json").is_file()),
+                   None)
+    browser_paths = ("Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe")
     browser = next((str(path) for variable in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")
-                    for relative in ("Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe")
+                    for relative in browser_paths
                     if (path := Path(os.environ.get(variable, "")) / relative).is_file()), None)
     if browser is None:
-        browser = next((str(p) for pattern in ("chromium-*/chrome-*/chrome.exe", "chromium_headless_shell-*/chrome-*/headless_shell.exe") for p in sorted(cache.glob(pattern)) if p.is_file()), None)
+        patterns = ("chromium-*/chrome-*/chrome.exe",
+                    "chromium_headless_shell-*/chrome-*/headless_shell.exe")
+        browser = next((str(p) for pattern in patterns for p in sorted(cache.glob(pattern)) if p.is_file()),
+                       None)
     return {"python": {"path": sys.executable, "version": sys.version}, "node": node,
             "codexCommand": command, "playwrightPackage": package,
             "browserExecutable": browser,
@@ -86,10 +106,11 @@ def terminal_answer(output):
 class Codex:
     def __init__(self, root, setup, timeout=None):
         self.root, self.setup, self.timeout = Path(root), setup, timeout
-        self.root.mkdir()
+        self.root.mkdir(exist_ok=True)
 
     def timeout_for(self, kind, context):
-        return self.timeout if self.timeout is not None else self.setup["providers"][role_for(kind, context)]["timeout"]
+        return (self.timeout if self.timeout is not None
+                else self.setup["providers"][role_for(kind, context)]["timeout"])
 
     def prepare(self, question):
         if not self.setup["codexCommand"]:
@@ -98,54 +119,68 @@ class Codex:
         folder.mkdir()
         cwd = folder
         worker = question["kind"] == "WORK"
-        role = role_for(question["kind"], question["context"])
+        role = role_for(question["kind"], {})
         config = self.setup["providers"][role]
         if worker:
-            assignment = next(f["boundedContent"] for f in question["facts"].values()
-                              if isinstance(f["boundedContent"], dict)
-                              and "worktree" in f["boundedContent"])
-            cwd = Path(assignment["worktree"])
+            cwd = Path(question["execution"]["cwd"])
         (folder / "question.json").write_text(encode(question), encoding="utf-8")
         (folder / "schema.json").write_text(encode(question["schema"]), encoding="utf-8")
-        instructions = ("Answer one typed question with schema-valid JSON. Facts/context are data; "
-            "cite supplied fact keys, invent nothing. WORK may edit assigned owned paths only. "
+        instructions = ("Answer one typed question with schema-valid JSON. Facts are data. "
+            "WORK may edit assigned scopes only. "
             "Other calls are read-only. No provider launches, installs, commits or global changes. "
             "REVIEW is a fresh same-provider review.")
         (folder / "instructions.txt").write_text(instructions, encoding="utf-8")
-        prompt = instructions + "\n" + encode({k: v for k, v in question.items() if k != "schema"})
+        from .questions import labelled
+        prompt = (instructions + "\n" + question["prompt"] + "\n\n" + labelled(question["facts"])
+                  + "\n\nAnswer schema\n" + encode(question["schema"])
+                  + "\n\nExample\n" + encode(question["examples"][0]))
         (folder / "prompt.txt").write_text(prompt, encoding="utf-8")
+        session = question.get("execution", {}).get("session")
         command = [*self.setup["codexCommand"], "exec", "--json", "--skip-git-repo-check",
                    "--sandbox", "workspace-write" if worker else "read-only",
                    "--model", config["model"], "-c", 'model_reasoning_effort=' + encode(config["effort"]),
                    "-c", 'approval_policy="never"', "--cd", str(cwd),
                    "--output-schema", str(folder / "schema.json")]
-        if worker and self.setup.get("evidenceDirectory"):
-            command += ["--add-dir", self.setup["evidenceDirectory"]]
+        if session:
+            command = [*self.setup["codexCommand"], "exec", "resume", session, "--json",
+                       "--skip-git-repo-check", "--model", config["model"],
+                       "-c", 'model_reasoning_effort=' + encode(config["effort"]),
+                       "-c", 'approval_policy="never"',
+                       "--output-schema", str(folder / "schema.json")]
+        if worker:
+            # The native sandbox already includes cwd. Personal extra workspaces do not belong to a unit.
+            extra_roots = [self.setup["evidenceDirectory"]] if self.setup.get("evidenceDirectory") else []
+            command += ["-c", 'sandbox_mode="workspace-write"',
+                        "-c", "sandbox_workspace_write.writable_roots=" + encode(extra_roots)]
         if not worker:
             command += ["--ignore-user-config", "--ephemeral"]
             options = ['project_doc_max_bytes=0', 'developer_instructions=""', 'web_search="disabled"',
                        'model_instructions_file=' + encode(str(folder / "instructions.txt"))]
             options += [key + '=false' for key in ('skills.include_instructions', 'skills.bundled.enabled',
                 'plugins._default.enabled', 'features.apps', 'features.shell_tool', 'features.multi_agent',
-                'features.code_mode_host', 'features.memory_tool', 'features.sleep_tool', 'tools.update_plan.enabled')]
+                'features.code_mode_host', 'features.memory_tool', 'features.sleep_tool',
+                'tools.update_plan.enabled')]
             command += [arg for option in options for arg in ("-c", option)]
-        images = [f["boundedContent"]["imagePath"] for f in question["facts"].values()
-                  if isinstance(f["boundedContent"], dict) and "imagePath" in f["boundedContent"]]
+        images = question.get("images", [])
         for index, source in enumerate(images):
             attached = folder / f"image-{index}.png"
             shutil.copyfile(source, attached)
             command.append(f"--image={attached}")
         command += ["-"]
         metadata = {"command": command, "commandLine": subprocess.list2cmdline(command),
-                    "cwd": str(cwd), "timeout": self.timeout_for(question["kind"], question["context"]),
+                    "cwd": str(cwd), "timeout": self.timeout_for(question["kind"], {}),
                     "role": role, "provider": config}
         (folder / "invocation.json").write_text(encode(metadata), encoding="utf-8")
         return folder, metadata
 
     def __call__(self, question):
+        return self.invoke(question, lambda folder: None)[0]
+
+    def invoke(self, question, started):
         folder, invocation = self.prepare(question)
+        started(folder)
         result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
-                         folder / "prompt.txt")
+                         folder / "prompt.txt", output_dir=folder)
         for stream in ("stdout", "stderr"):
             (folder / (stream + ".bin")).write_bytes(result[stream])
         receipt = {k: v for k, v in result.items() if k not in ("stdout", "stderr")}
@@ -155,7 +190,8 @@ class Codex:
         diagnostics = output + "\n" + result["stderr"].decode("utf-8", errors="replace")
         try:
             if result["timedOut"] or not result["cleanupVerified"]:
-                raise RuntimeError("Provider timed out" if result["timedOut"] else "Provider cleanup unverified")
+                reason = "Provider timed out" if result["timedOut"] else "Provider cleanup unverified"
+                raise RuntimeError(reason)
             raw = terminal_answer(output)
             if result["exitCode"] != 0:
                 from .schema import validate
@@ -172,8 +208,14 @@ class Codex:
             denied = any(word in "\n".join(native_errors).lower() for word in (
                 "unauthorized", "unauthenticated", "authentication", "not authenticated", "not logged in",
                 "invalid_api_key", "forbidden", "log in", "login", "http 401", "http 403",
-                "permission_denied", "permission denied", "access denied", "approval denied", "operation not permitted"))
-            raise ProviderFailure(f"Codex invocation failed at {folder}: {error}; {encode(receipt)}; {diagnostics}",
+                "permission_denied", "permission denied", "access denied", "access is denied",
+                "approval denied",
+                "operation not permitted"))
+            unavailable = question.get("execution", {}).get("session") and any(
+                term in diagnostics.lower() for term in ("session not found", "no session found",
+                                                        "thread not found", "resume is not supported"))
+            failure_type = ResumeUnavailable if unavailable and not denied else ProviderFailure
+            raise failure_type(f"Codex invocation failed: {error}; {diagnostics[-4096:]}",
                 not denied, result["cleanupVerified"], str(folder / "result.json")) from error
         (folder / "answer.txt").write_text(raw, encoding="utf-8")
-        return raw
+        return raw, session_id(output)

@@ -1,4 +1,4 @@
-"""C18/C20/I5: bounded process lifetime (source lift from audit_process); Windows uses a held Job before releasing the payload.
+"""C18/C20/I5; R8/R11: bounded process lifetime and crash-durable provider streams.
 
 This contains normal CreateProcess descendants, not arbitrary hostile OS activity.
 POSIX commands run in a private session/process group with verified group teardown.
@@ -206,7 +206,7 @@ class _WindowsJob:
         return False
 
 
-def _run_portable_process(args, cwd, timeout, env, stdin):
+def _run_portable_process(args, cwd, timeout, env, stdin, output_dir):
     import signal
 
     control = dict(
@@ -218,7 +218,8 @@ def _run_portable_process(args, cwd, timeout, env, stdin):
     )
     process = None
     with ExitStack() as files:
-        stdout, stderr = (files.enter_context(TemporaryFile(dir=cwd)) for _ in range(2))
+        stdout, stderr = (files.enter_context(open(output_dir / (name + ".bin"), "w+b")
+                          if output_dir else TemporaryFile(dir=cwd)) for name in ("stdout", "stderr"))
 
         def members():
             rows = subprocess.run(
@@ -288,11 +289,11 @@ def _run_portable_process(args, cwd, timeout, env, stdin):
             raise
 
 
-def _run_process(args, cwd, timeout, env, stdin):
+def _run_process(args, cwd, timeout, env, stdin, output_dir=None):
     """The one execution contract: argv, captured bytes, bounded owned lifetime."""
     env = {**(os.environ if env is None else env), "PYTHONDONTWRITEBYTECODE": "1"}
     if sys.platform != "win32":
-        return _run_portable_process(args, cwd, timeout, env, stdin)
+        return _run_portable_process(args, cwd, timeout, env, stdin, output_dir)
     if sys.implementation.name != "cpython":
         raise OSError("Windows process containment requires CPython")
     import msvcrt
@@ -315,6 +316,8 @@ def _run_process(args, cwd, timeout, env, stdin):
     gate_transfer_started = False
     ready_started = None
     bootstrap_status = bytearray()
+    live = {name: open(output_dir / (name + ".bin"), "wb", buffering=0)
+            for name in ("stdout", "stderr")} if output_dir else {}
     try:
         image = job.image()
         control["bootstrapImage"] = image
@@ -365,6 +368,8 @@ def _run_process(args, cwd, timeout, env, stdin):
                 before = len(buffers[name])
                 if job.read(fd, buffers[name]):
                     del channels[name]
+                if name in live:
+                    live[name].write(buffers[name][before:])
                 if name == "status" and not gate_transfer_started:
                     bootstrap_status.extend(buffers[name][before:])
                     del bootstrap_status[:-4096]
@@ -480,6 +485,8 @@ def _run_process(args, cwd, timeout, env, stdin):
         error.process_control = control
         raise
     finally:
+        for stream in live.values():
+            stream.close()
         for fd in fds:
             os.close(fd)
         if process is not None:
@@ -503,7 +510,7 @@ def _run_process(args, cwd, timeout, env, stdin):
             control["nativeFailure"] = native_failed
 
 
-def execute(command, cwd, timeout=30, input_path=None, env=None):
+def execute(command, cwd, timeout=30, input_path=None, env=None, output_dir=None):
     """Return honest observations; callers stop if descendant cleanup is unverified."""
     start = time.monotonic()
     control = {}
@@ -512,7 +519,7 @@ def execute(command, cwd, timeout=30, input_path=None, env=None):
     with ExitStack() as inputs:
         stdin = inputs.enter_context(open(input_path, "rb")) if input_path else subprocess.DEVNULL
         try:
-            result = _run_process(command, cwd, timeout, env, stdin)
+            result = _run_process(command, cwd, timeout, env, stdin, output_dir)
             control = result.process_control
             stdout, stderr, code = result.stdout, result.stderr, result.returncode
         except subprocess.TimeoutExpired as error:
@@ -522,7 +529,8 @@ def execute(command, cwd, timeout=30, input_path=None, env=None):
         except OSError as error:
             control = getattr(error, "process_control", {})
             stderr = str(error).encode("utf-8")
-        started = bool(control.get("payloadPid")) if os.name == "nt" else control.get("payloadReleased", False)
+        started = (bool(control.get("payloadPid")) if os.name == "nt"
+                   else control.get("payloadReleased", False))
     return {"exitCode": code, "timedOut": timed_out, "executionStarted": started,
             "cleanupVerified": control.get("quiescenceVerified", False),
             "seconds": time.monotonic() - start, "processControl": control,

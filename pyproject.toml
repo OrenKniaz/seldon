@@ -22,7 +22,7 @@ status_server = "codex_harness.core.status_server:main"
 dev = ["pytest==8.4.2", "ruff==0.11.13"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/codex_harness"]
+packages = ["src/codex_harness", "src/seldon"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --import-mode=importlib"

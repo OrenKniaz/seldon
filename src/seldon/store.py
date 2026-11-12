@@ -1,20 +1,92 @@
-"""C4/C23/I6: immutable canonical records and an atomic run cursor in SQLite."""
+"""C4/C23/I6; R11/R14: typed durable cursors and immutable canonical records."""
 
 import hashlib
 import json
 import os
-import uuid
 import sqlite3
 import threading
+import types
+import uuid
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field, fields
+from typing import get_args, get_origin, get_type_hints
 
 
 def encode(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def digest(value):
-    return hashlib.sha256(encode(value).encode("utf-8")).hexdigest()
+@dataclass(frozen=True)
+class RunRow:
+    state: str = "NEW"
+    kickoff: str = ""
+    scratch: str = ""
+    candidate: str = ""
+    waveStart: str = ""
+    revision: int | None = None
+    vision: str | None = None
+    review: str | None = None
+    decision: str | None = None
+    requestedChange: str | None = None
+    A: str | None = None
+    B: str | None = None
+    checkin: str | None = None
+    repairs: int = 0
+    failure: str = ""
+    publication: str | None = None
+    finalCommit: str | None = None
+    finalObservations: list[str] = field(default_factory=list)
+    demoVerdicts: list[str] = field(default_factory=list)
+    productVerdict: str | None = None
+
+
+@dataclass(frozen=True)
+class UnitRow:
+    state: str = "NEW"
+    base: str | None = None
+    worktree: str | None = None
+    T: str | None = None
+    P: str | None = None
+    thread: str | None = None
+    callFolder: str | None = None
+    callAttempt: str | None = None
+    report: str | None = None
+    recoveries: int = 0
+    failure: str = ""
+    observations: list[str] = field(default_factory=list)
+    judgment: str | None = None
+    integrated: str | None = None
+    waiting: str = ""
+
+
+def checked(value, model):
+    if type(value) is not model:
+        raise ValueError(f"Expected {model.__name__}")
+
+    def matches(item, hint):
+        origin = get_origin(hint)
+        if origin is types.UnionType:
+            return any(matches(item, branch) for branch in get_args(hint))
+        if origin is list:
+            return type(item) is list and all(matches(child, get_args(hint)[0]) for child in item)
+        return type(item) is hint
+
+    for name, hint in get_type_hints(model).items():
+        if not matches(getattr(value, name), hint):
+            raise ValueError(f"{model.__name__}.{name}: expected {hint}")
+    from .states import RUN, UNIT
+    if value.state not in (RUN if model is RunRow else UNIT):
+        raise ValueError(f"Unknown {model.__name__} state: {value.state}")
+    return encode(asdict(value))
+
+
+def decoded(body, model):
+    value = json.loads(body)
+    if set(value) != {f.name for f in fields(model)}:
+        raise ValueError(f"Stored {model.__name__} has unknown or missing fields")
+    result = model(**value)
+    checked(result, model)
+    return result
 
 
 class Store:
@@ -24,16 +96,28 @@ class Store:
         (self.root / "artifacts").mkdir(exist_ok=True)
         self._local = threading.local()
         self._lock = threading.RLock()
+        self.integration_lock = threading.RLock()
+        self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS run (id INTEGER PRIMARY KEY CHECK(id=1), cursor TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS plan_revision (id INTEGER PRIMARY KEY, parent INTEGER,
-                                        digest TEXT NOT NULL, document TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS record (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS artifact (digest TEXT PRIMARY KEY, location TEXT NOT NULL,
-                                   producer TEXT NOT NULL, media_type TEXT NOT NULL);
+                                                      document TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS record
+                (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS unit (id TEXT PRIMARY KEY, body TEXT NOT NULL);
         """)
-        self.db.commit()
+
+    @property
+    def db(self):
+        if not hasattr(self._local, "db"):
+            self._local.db = sqlite3.connect(self.root / "state.sqlite3", isolation_level=None, timeout=30)
+            self._local.db.execute("PRAGMA synchronous=FULL")
+        return self._local.db
+
+    def close(self):
+        if hasattr(self._local, "db"):
+            self._local.db.close()
+            del self._local.db
 
     @contextmanager
     def transaction(self):
@@ -50,22 +134,29 @@ class Store:
                     self.db.rollback()
                 raise
 
-    @property
-    def db(self):
-        if not hasattr(self._local, "db"):
-            self._local.db = sqlite3.connect(self.root / "state.sqlite3", isolation_level=None, timeout=30)
-        return self._local.db
-
     def units(self):
-        return {ref: json.loads(body) for ref, body in self.db.execute("SELECT id,body FROM unit ORDER BY rowid")}
+        return {ref: decoded(body, UnitRow) for ref, body in
+                self.db.execute("SELECT id,body FROM unit ORDER BY rowid")}
 
-    def unit(self, ref, body):
-        self.db.execute("INSERT INTO unit VALUES (?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
-                        (ref, encode(body)))
+    def unit(self, ref, value=None):
+        if value is not None:
+            self.db.execute("INSERT INTO unit VALUES (?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                            (ref, checked(value, UnitRow)))
+        row = self.db.execute("SELECT body FROM unit WHERE id=?", (ref,)).fetchone()
+        return decoded(row[0], UnitRow) if row else None
+
+    def cursor(self, value=None):
+        if value is not None:
+            self.db.execute("INSERT INTO run VALUES(1,?) "
+                            "ON CONFLICT(id) DO UPDATE SET cursor=excluded.cursor",
+                            (checked(value, RunRow),))
+        row = self.db.execute("SELECT cursor FROM run WHERE id=1").fetchone()
+        return decoded(row[0], RunRow) if row else None
 
     def record(self, kind, body):
-        row = self.db.execute("INSERT INTO record(kind,body) VALUES (?,?)", (kind, encode(body)))
-        return f"r{row.lastrowid}"
+        with self._lock:
+            row = self.db.execute("INSERT INTO record(kind,body) VALUES (?,?)", (kind, encode(body)))
+            return f"r{row.lastrowid}"
 
     def read(self, ref):
         row = self.db.execute("SELECT body FROM record WHERE id=?", (int(ref[1:]),)).fetchone()
@@ -74,41 +165,33 @@ class Store:
         return json.loads(row[0])
 
     def records(self, kind=None):
-        rows = self.db.execute("SELECT id,kind,body FROM record ORDER BY id").fetchall()
-        return [(f"r{i}", k, json.loads(body)) for i, k, body in rows if kind is None or k == kind]
-
-    def cursor(self, value=None):
-        if value is not None:
-            self.db.execute("INSERT INTO run VALUES(1,?) ON CONFLICT(id) DO UPDATE SET cursor=?",
-                            (encode(value), encode(value)))
-        row = self.db.execute("SELECT cursor FROM run WHERE id=1").fetchone()
-        return json.loads(row[0]) if row else None
+        query = "SELECT id,kind,body FROM record"
+        args = ()
+        if kind is not None:
+            query += " WHERE kind=?"
+            args = (kind,)
+        return [(f"r{i}", k, json.loads(b)) for i, k, b in self.db.execute(query + " ORDER BY id", args)]
 
     def revision(self, document, parent=None):
-        row = self.db.execute("INSERT INTO plan_revision(parent,digest,document) VALUES (?,?,?)",
-                              (parent, digest(document), encode(document)))
+        row = self.db.execute("INSERT INTO plan_revision(parent,document) VALUES (?,?)",
+                              (parent, encode(document)))
         return row.lastrowid
 
     def plan(self, revision):
-        row = self.db.execute(
-            "SELECT document FROM plan_revision WHERE id=?", (revision,)).fetchone()
+        row = self.db.execute("SELECT document FROM plan_revision WHERE id=?", (revision,)).fetchone()
         return json.loads(row[0])
 
-    def artifact(self, content, producer, media_type="text/plain"):
+    def artifact(self, content, producer):
         key = hashlib.sha256(content).hexdigest()
-        location = f"artifacts/{key}"
-        path = self.root / location
+        path = self.root / "artifacts" / key
         with self._lock:
             if not path.exists():
                 temporary = path.with_name(key + "-" + uuid.uuid4().hex)
                 temporary.write_bytes(content)
                 os.replace(temporary, path)
-            self.db.execute("INSERT OR IGNORE INTO artifact VALUES (?,?,?,?)",
-                            (key, location, producer, media_type))
-        return key
+        return str(path)
 
     def claim_controller(self):
-        """C23/I6: reopening cannot race a surviving controller."""
         lease = (self.root / "controller.lock").open("a+b")
         if lease.tell() == 0:
             lease.write(b"0")
