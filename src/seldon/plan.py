@@ -35,7 +35,7 @@ def prefix(pattern):
 
 
 def contains(outer, inner):
-    return outer == inner or (outer.endswith("/**") and inner.startswith(outer[:-2]))
+    return outer == "**" or outer == inner or (outer.endswith("/**") and inner.startswith(outer[:-2]))
 
 
 def overlaps(left, right):
@@ -100,17 +100,28 @@ def create(vision, answer):
     handles = {e["targetHandle"]: f"n{i:03}" for i, e in enumerate(answer["edits"], 1)}
     if len(handles) != len(answer["edits"]):
         raise ValueError("Each planned record needs its own handle")
-    relations = {"feature": "vision", "requirement": "features", "check": "requirements"}
+    relations = {"feature": "vision", "requirement": "features", "check": "requirements", "decision": "areas"}
     for edit in answer["edits"]:
         body = dict(edit["typedBody"])
-        relation = relations[edit["kind"]]
-        body[relation] = ["vision"] if relation == "vision" else [handles.get(r, r) for r in body[relation]]
+        relation = relations.get(edit["kind"])
+        if relation:
+            body[relation] = (["vision"] if relation == "vision" else
+                              [handles.get(r, r) for r in body[relation]])
+        if edit["kind"] == "contract":
+            body.update(provider=f"u{body['provider']:03}",
+                        consumers=[f"u{r:03}" for r in body["consumers"]])
+        if edit["kind"] == "obligation":
+            body.update(owner=f"u{body['owner']:03}",
+                        closingRequirement=handles.get(body["closingRequirement"], body["closingRequirement"]))
         nodes[handles[edit["targetHandle"]]] = {"kind": edit["kind"], "body": body}
     for i, unit in enumerate(answer["units"], 1):
         nodes[f"u{i:03}"] = {"kind": "unit", "body": {**unit,
             "requirements": [handles.get(r, r) for r in unit["requirements"]],
+            "area": handles.get(unit["area"], unit["area"]),
+            "provides": [handles.get(r, r) for r in unit["provides"]],
+            "consumes": [handles.get(r, r) for r in unit["consumes"]],
             "dependencies": [f"u{d:03}" for d in unit["dependencies"]]}}
-    document = {"nodes": nodes}
+    document = {"nodes": nodes, "skeleton": [f"u{r:03}" for r in answer["skeleton"]]}
     quality = vision["quality"]
     if sorted(q["criterion"] for q in answer["quality"]) != list(range(1, len(quality) + 1)):
         raise ValueError("Trace every accepted quality criterion exactly once")
@@ -139,9 +150,10 @@ def validate(document):
                 raise ValueError(f"{ref}: quality must trace to existing checks")
             continue
         validate_schema(body, BODIES[kind], ref)
-        relation, target_kind = relation_types[kind]
-        if any(nodes.get(r, {}).get("kind") != target_kind for r in body[relation]):
-            raise ValueError(f"{ref}.{relation}: wrong trace target kind")
+        if kind in relation_types:
+            relation, target_kind = relation_types[kind]
+            if any(nodes.get(r, {}).get("kind") != target_kind for r in body[relation]):
+                raise ValueError(f"{ref}.{relation}: wrong trace target kind")
     features, requirements, checks, units = (
         select(document, k) for k in ("feature", "requirement", "check", "unit"))
     if not all((features, requirements, checks, units)):
@@ -166,22 +178,35 @@ def validate(document):
             raise ValueError(f"{ref}: checkPaths must be inside scope")
         if any(d not in units or d == ref for d in unit["dependencies"]):
             raise ValueError(f"{ref}: unknown or self dependency")
-        if overlaps(unit["scope"], [GUIDE_PATH]):
+        if ref != "guide" and overlaps(unit["scope"], [GUIDE_PATH]):
             raise ValueError(f"{ref}: {GUIDE_PATH} belongs to the CODE-created last unit")
         for other, owner in units.items():
             if ref < other and overlaps(unit["scope"], owner["scope"]):
                 raise ValueError(f"Scope ownership overlaps: {ref} {unit['scope']} and "
                                  f"{other} {owner['scope']}; assign disjoint subtrees or literal paths")
-    tuple(TopologicalSorter({r: b["dependencies"] for r, b in units.items()}).static_order())
+    from . import architecture, obligations
+    architecture.validate(document)
+    obligations.validate(document)
+    # A contract's provider is a scheduling prerequisite, even without a redundant dependency edge.
+    tuple(TopologicalSorter({r: prerequisites(document, r) for r in units}).static_order())
     return coverage(document)
+
+
+def prerequisites(document, ref):
+    unit = select(document, "unit")[ref]
+    contracts = select(document, "contract")
+    return list(dict.fromkeys([*unit["dependencies"], *(contracts[c]["provider"] for c in unit["consumes"])]))
 
 
 def add_guide(document):
     # Scheduling creates the unit; its worker writes the user-facing instructions.
     from copy import deepcopy
     result = deepcopy(document)
+    area = next(iter(select(result, "area")))
+    result["nodes"][area]["body"]["scope"].append(GUIDE_PATH)
     result["nodes"]["guide"] = {"kind": "unit", "body": {
         "scope": [GUIDE_PATH], "checkPaths": [GUIDE_PATH], "requirements": [],
+        "area": area, "provides": [], "consumes": [], "reads": [],
         "dependencies": list(select(document, "unit")),
         "instructions": GUIDE_WORK}}
     return result

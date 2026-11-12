@@ -8,7 +8,8 @@ from .states import advance
 
 
 def execute(store, provider, capacity):
-    contracts = plan.select(store.plan(store.cursor().revision), "unit")
+    document = store.plan(store.cursor().revision)
+    contracts = plan.select(document, "unit")
     running = {}
     with ThreadPoolExecutor(max_workers=capacity) as pool:
         while True:
@@ -17,7 +18,7 @@ def execute(store, provider, capacity):
             for ref, row in rows.items():
                 if ref in running.values() or row.state in ("DONE", "FAILED", "BLOCKED"):
                     continue
-                deps = contracts[ref]["dependencies"]
+                deps = plan.prerequisites(document, ref)
                 failed = [d for d in deps if rows[d].state in ("FAILED", "BLOCKED")]
                 if failed:
                     reason = "; ".join(f"{d}: {rows[d].state}: {rows[d].failure}" for d in failed)

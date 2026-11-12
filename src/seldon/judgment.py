@@ -184,10 +184,11 @@ def step(store, provider):
     trees = scope_trees(store, plan.select(document, "unit"))
     for ref, unit in plan.select(document, "unit").items():
         row = store.unit(ref)
-        verdict = store.read(row.judgment)
+        verdict = store.read(row.judgment) if row.judgment else None
         targets = set(unit["requirements"]) | set(plan.unit_criteria(document, ref))
-        assessed = {a["target"] for a in verdict.get("answer", {}).get("assessments", [])}
-        if verdict["scopeTree"] == trees[ref] and targets <= assessed:
+        assessed = ({a["target"] for a in verdict.get("answer", {}).get("assessments", [])}
+                    if verdict else set())
+        if verdict and verdict["scopeTree"] == trees[ref] and targets <= assessed:
             continue
         refs = [r for r in cursor.finalObservations if store.read(r)["unit"] == ref]
         evidence = [r for r in row.observations if store.read(r)["purpose"] != "P"] + refs
@@ -257,6 +258,14 @@ def step(store, provider):
     verdicts = [store.read(r) for r in getattr(cursor, field)]
     with store.transaction():
         if kind == "DEMO":
+            # Unchanged scope-tree verdicts are reusable, but obligation closure binds to this final commit.
+            current_refs = []
+            for ref in cursor.requirementVerdicts:
+                row = store.read(ref)
+                current_refs.append(ref if row["commit"] == cursor.candidate else store.record(
+                    "subject_verdict", {**row, "commit": cursor.candidate, "reusedFrom": ref}))
+            cursor = replace(cursor, requirementVerdicts=current_refs)
+            store.cursor(cursor)
             refs = []
             for feature in plan.select(document, "feature"):
                 requirements = {r for r, b in plan.select(document, "requirement").items()

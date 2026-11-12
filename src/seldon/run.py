@@ -5,7 +5,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, gitwork, guide, inference, judgment, plan, proof, questions, scheduler, units
+from . import (
+    decisions, gitwork, guide, inference, judgment, obligations, plan, proof, questions, scheduler, units,
+)
 from .states import advance
 from .store import RunRow, Store, UnitRow
 
@@ -25,6 +27,10 @@ def eligible(store):
     if (checks != green or set(plan.select(document, "requirement")) - covered
             or proof.failures(store, cursor.finalObservations)):
         raise ValueError("Every requirement and check needs passing execution on the final commit")
+    if pending := obligations.remaining(store):
+        raise ValueError(f"Close open skeleton obligations with final-commit requirement verdicts: {pending}")
+    if any(not row.judgment for row in store.units().values()):
+        raise ValueError("C requires current unit judgments after contract changes")
     verdicts = [store.read(r) for r in cursor.demoVerdicts]
     trees = judgment.scope_trees(store, plan.select(document, "unit"))
     for kind, refs in (("DEMO", cursor.requirementVerdicts), ("PRODUCT", cursor.qualityVerdicts)):

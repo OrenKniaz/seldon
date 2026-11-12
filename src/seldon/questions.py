@@ -2,7 +2,7 @@
 
 import json
 
-from . import gitwork, plan
+from . import architecture, gitwork, obligations, plan
 from .schema import answer_schema, validate
 from .store import encode
 
@@ -35,10 +35,12 @@ PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
              + ALIGN_DESIGN,
     "PLAN": "What product work is needed in addition to the supplied delivery work? Plan its features, "
-            "requirements, semantic checks and scoped units. Trace each accepted quality criterion by its "
+            "areas, contracts, decisions, requirements, semantic checks and scoped units. "
+            "Trace each accepted quality criterion by its "
             "1-based position to its checks and evidence level in quality: unit for source or facts "
             "only visible in its files; product for integrated behaviour observations or screenshots. "
-            "Dependencies are 1-based unit positions. "
+            "Dependencies, contract endpoints, obligation owners and the skeleton set "
+            "are 1-based unit positions. "
             "Commands are argv. CODE assigns checks from requirement ownership. "
             "Checks are automated commands that never wait on manual or visual review; "
             "visual quality is judged by Seldon from real screenshots.",
@@ -159,9 +161,12 @@ def example_plan():
         {"kind": "check", "targetHandle": "new:c", "typedBody": {
             "purpose": "Run the greeting command", "mode": "establishes",
             "command": ["python", "-B", "greeting/check.py"], "requiredEnvironment": ["Python"],
-            "expectedEvidence": "Actual stdout", "requirements": ["new:r"]}}],
+            "expectedEvidence": "Actual stdout", "requirements": ["new:r"]}},
+        {"kind": "area", "targetHandle": "new:a", "typedBody": {
+            "responsibility": "Deliver greetings", "scope": ["greeting/**"]}}],
         "units": [{"scope": ["greeting/**"], "checkPaths": ["greeting/check.py"],
-                   "requirements": ["new:r"], "dependencies": [], "instructions": "Implement the greeting"}],
+                   "requirements": ["new:r"], "dependencies": [], "instructions": "Implement the greeting",
+                   "area": "new:a", "provides": [], "consumes": [], "reads": []}], "skeleton": [],
         "quality": [{"criterion": 1, "level": "product", "checks": ["new:c"]}]}
 
 
@@ -179,6 +184,15 @@ def requirement_facts(document, refs):
     return {r: {k: v for k, v in document["nodes"][r]["body"].items() if k != "features"} for r in refs}
 
 
+def agreement_facts(document, ref):
+    # Endpoints and adjacent units stay in the plan; this question needs only its own agreements.
+    contracts = architecture.contracts_for(document, ref)
+    return {label: {r: {k: c[k] for k in ("kind", "text")} for r, c in contracts.items()
+                    if architecture.endpoint(ref, c) == side}
+            for label, side in (("Contracts provided", "provider"), ("Contracts consumed", "consumer"))
+            if any(architecture.endpoint(ref, c) == side for c in contracts.values())}
+
+
 def work_brief(store, ref):
     unit = store.unit(ref)
     document = store.plan(store.cursor().revision)
@@ -188,6 +202,11 @@ def work_brief(store, ref):
     facts = {"Unit": contract["instructions"], "Write scope": contract["scope"],
              "Check paths": contract["checkPaths"], "Requirements": requirements, "Checks": checks,
              "Quality bar": document["nodes"]["vision"]["body"]["quality"]}
+    facts.update(agreement_facts(document, ref))
+    if items := obligations.for_area(document, contract["area"]):
+        owned = {r: o for r, o in items.items() if o["owner"] == ref}
+        if owned:
+            facts["Skeleton obligations owned here"] = owned
     wave_checks = {r: c for r, c in plan.assigned(document)[None].items()
                    if any(plan.matches(arg, contract["scope"]) for arg in c["command"])}
     if wave_checks:
@@ -247,6 +266,7 @@ def judge_brief(store, ref, commit=None, observations=None):
              "Product changes": gitwork.git(root, "diff", "--no-ext-diff", "--no-textconv",
                                             "--no-renames", unit.T, commit, "--", *contract["scope"]),
              "Observations": observed(store, observations if observations is not None else unit.observations)}
+    facts.update(agreement_facts(document, ref))
     return build("JUDGE", facts, [*requirements, *quality], unit_criteria=quality,
                  images=images(store, observations if observations is not None else unit.observations))
 

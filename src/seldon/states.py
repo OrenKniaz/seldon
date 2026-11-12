@@ -10,7 +10,7 @@ RUN = {
     "PLAN": {"planned": "REVIEW", "fail": "INCOMPLETE"},
     "REVIEW": {"adequate": "B", "gap": "REPAIR", "fail": "INCOMPLETE"},
     "REPAIR": {"repaired": "REVIEW", "fail": "INCOMPLETE"},
-    "B": {"approve": "EXECUTE", "approve-final": "PRODUCT-JUDGE",
+    "B": {"approve": "EXECUTE", "approve-final": "DEMO-JUDGE",
           "revise": "REPAIR", "fail": "INCOMPLETE"},
     "EXECUTE": {"finished": "WAVE-VERIFY", "fail": "INCOMPLETE"},
     "WAVE-VERIFY": {"passed": "CHECK-IN", "rework": "EXECUTE", "fail": "INCOMPLETE"},

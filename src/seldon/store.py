@@ -8,7 +8,7 @@ import threading
 import types
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from functools import lru_cache
 from typing import get_args, get_origin, get_type_hints
 
@@ -182,9 +182,25 @@ class Store:
         return [(f"r{i}", k, json.loads(b)) for i, k, b in self.db.execute(query + " ORDER BY id", args)]
 
     def revision(self, document, parent=None):
-        row = self.db.execute("INSERT INTO plan_revision(parent,document) VALUES (?,?)",
-                              (parent, encode(document)))
-        return row.lastrowid
+        from . import architecture, judgment
+        with self.transaction():
+            row = self.db.execute("INSERT INTO plan_revision(parent,document) VALUES (?,?)",
+                                  (parent, encode(document)))
+            if parent is not None:
+                affected = architecture.stale_consumers(self.plan(parent), document) & self.units().keys()
+                if affected:
+                    cursor = self.cursor()
+                    self.record("contract_change", {"revision": row.lastrowid, "parent": parent,
+                                                    "consumers": sorted(affected)})
+                    for ref in affected:
+                        self.unit(ref, replace(self.unit(ref), judgment=None))
+                    fields = {}
+                    for field in ("requirementVerdicts", "qualityVerdicts"):
+                        fields[field] = [r for r in getattr(cursor, field) if not affected.intersection(
+                            judgment.owners(document, self.read(r)["kind"], self.read(r)["subject"]))]
+                    self.cursor(replace(cursor, **fields, demoVerdicts=[], productVerdict=None,
+                                        pendingJudge=None))
+            return row.lastrowid
 
     def plan(self, revision):
         row = self.db.execute("SELECT document FROM plan_revision WHERE id=?", (revision,)).fetchone()

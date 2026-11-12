@@ -20,20 +20,34 @@ VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT
              users=array(TEXT, 1), scopeIn=array(TEXT, 1), scopeOut=REFS, improvements=REFS,
              quality=array(obj(criterion=TEXT, verification=TEXT), 1), unknowns=REFS)
 FEATURE = obj(story=TEXT, acceptance=TEXT)
+POSITION = {"type": "integer", "minimum": 1}
 BODIES = {
+    "area": obj(responsibility=TEXT, scope=array(TEXT, 1)),
+    "contract": obj(
+        kind=choice("api", "schema", "file-format", "shared-type", "ui-structure", "command-line"),
+        text=TEXT, provider=TEXT, consumers=array(TEXT, 1)),
+    "decision": obj(choice=TEXT, reason=TEXT, origin=choice("architecture", "research", "user"),
+                    areas=array(TEXT, 1)),
+    "obligation": obj(what=TEXT, owner=TEXT, closingRequirement=TEXT),
     "feature": obj(**FEATURE["properties"], vision=array(choice("vision"), 1)),
     "requirement": obj(obligation=TEXT, design=TEXT, contract=TEXT, features=array(TEXT, 1)),
     "check": obj(purpose=TEXT, mode=choice("establishes", "preserves"), command=array(TEXT, 1),
                  requiredEnvironment=REFS, expectedEvidence=TEXT, requirements=array(TEXT, 1)),
     "unit": obj(instructions=TEXT, scope=array(TEXT, 1), checkPaths=array(TEXT, 1),
-                requirements=array(TEXT, 1), dependencies=REFS),
+                requirements=REFS, dependencies=REFS, area=TEXT, provides=REFS, consumes=REFS, reads=REFS),
 }
 GAP = obj(target=TEXT, correction=TEXT)
+PLAN_BODIES = {**BODIES, "feature": FEATURE,
+               "contract": obj(**{**BODIES["contract"]["properties"],
+                                  "provider": POSITION, "consumers": array(POSITION, 1)}),
+               "obligation": obj(what=TEXT, owner=POSITION, closingRequirement=TEXT)}
 PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
-                                     typedBody=FEATURE if kind == "feature" else body)
-                                  for kind, body in BODIES.items() if kind != "unit"]}, 1),
+                                     typedBody=body)
+                                  for kind, body in PLAN_BODIES.items() if kind != "unit"]}, 1),
            units=array(obj(scope=array(TEXT, 1), checkPaths=array(TEXT, 1), requirements=array(TEXT, 1),
-                           dependencies=array({"type": "integer", "minimum": 1}), instructions=TEXT), 1),
+                           dependencies=array(POSITION), instructions=TEXT, area=TEXT,
+                           provides=REFS, consumes=REFS, reads=REFS), 1),
+           skeleton=array(POSITION),
            quality=array(obj(criterion={"type": "integer", "minimum": 1},
                              level=choice("unit", "product"), checks=array(TEXT, 1)), 1))
 

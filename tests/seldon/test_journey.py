@@ -84,7 +84,35 @@ def planned(count, mode):
         edits = [e for e in edits if e["kind"] != "feature" or
                  int(e["targetHandle"][-3:]) % 5 == 1]
     selected = "new:c002" if mode == "traced-evidence" else "new:c001"
-    return {"edits": edits, "units": scopes, "quality": [
+    edits.append({"kind": "area", "targetHandle": "new:area", "typedBody": {
+        "responsibility": "Deliver named values", "scope": ["**"]}})
+    for unit in scopes:
+        unit.update(area="new:area", provides=[], consumes=[], reads=[])
+    if mode == "wave-start":
+        scopes[1]["reads"] = ["unit-001/value.txt"]
+    if mode == "parallel":
+        scopes[3]["reads"] = [f"unit-{i:03}/value.txt" for i in (1, 2, 3)]
+    if count > 1 and mode in ("records", "records-guide-gap", "scale50"):
+        provider = 49 if mode == "scale50" else 1
+        consumers = [50] if mode == "scale50" else [2, 3]
+        edits.append({"kind": "contract", "targetHandle": "new:page", "typedBody": {
+            "kind": "file-format" if mode == "scale50" else "ui-structure",
+            "text": "UTF-8 value-NNN." if mode == "scale50" else "Shared page exposes a named content slot.",
+            "provider": provider, "consumers": consumers}})
+        scopes[provider - 1]["provides"] = ["new:page"]
+        for number in consumers:
+            scopes[number - 1]["consumes"] = ["new:page"]
+            scopes[number - 1]["reads"] = [f"unit-{provider:03}/value.txt" if mode == "scale50"
+                                           else "unit-001/page.json"]
+        edits.append({"kind": "decision", "targetHandle": "new:decision", "typedBody": {
+            "choice": "Use one shared page", "reason": "Consumers agree on the content slot",
+            "origin": "architecture", "areas": ["new:area"]}})
+        if mode in ("records", "records-guide-gap"):
+            edits.append({"kind": "obligation", "targetHandle": "new:placeholder", "typedBody": {
+                "what": "Replace the skeleton's third content slot with its persistent value",
+                "owner": 3, "closingRequirement": "new:r003"}})
+    return {"edits": edits, "units": scopes, "skeleton": list(range(1, count + 1)) if count > 1 else [],
+            "quality": [
         {"criterion": 1, "level": "product", "checks": [selected]},
         {"criterion": 2, "level": "unit" if mode in ("single1", "scale50") else "product",
          "checks": [selected]}]}
@@ -140,7 +168,8 @@ if guide:
     if mode == "guide-command" and turn == 1:
         command = [sys.executable, "-S", "-B", "-c", "raise SystemExit(7)"]
     linked = "unit-001/absent.txt" if mode == "guide-path" and turn == 1 else "unit-001/check.py"
-    note = "Clarify the expected result" if mode in ("guide-gap", "final-seed") and turn == 1 else \
+    note = "Clarify the expected result" if mode in ("guide-gap", "final-seed", "records-guide-gap") \
+        and turn == 1 else \
         "Observe value-001"
     if mode == "final-rework":
         note = "Observe final-compatible value"
@@ -154,6 +183,9 @@ else:
     number = int(name.split("-")[1])
     Path(name).mkdir(exist_ok=True)
     value = f"value-{number:03}"
+    if mode == "scale50" and facts.get("Contracts consumed"):
+        # A build-time consumer uses the existing file-format contract without growing its runtime check.
+        value = 'value-' + f"{int(Path('unit-049/value.txt').read_text().split('-')[1]) + 1:03}"
     source = ("from pathlib import Path\n"
               "import os\n"
               f"assert Path('{name}/value.txt').read_text() == '{value}'\n"
@@ -230,6 +262,13 @@ else:
         Path(name, "check.py").write_text(
             "from pathlib import Path\nassert Path('unit-001/value.txt').read_text()=='value-001'\n"
             "print('observed dependency value-001')\n")
+    if mode in ("records", "records-guide-gap"):
+        if name == "unit-001":
+            Path(name, "page.json").write_text('{"slot": "content"}')
+        if facts.get("Contracts consumed"):
+            with Path(name, "check.py").open("a") as check:
+                check.write("import json\nassert json.loads(Path('unit-001/page.json').read_text())"
+                            "['slot']=='content'\nprint('shared page slot content')\n")
     if mode == "check-deadline" and name == "unit-001":
         Path(name, "check.py").write_text("import time\ntime.sleep(8)\n" + source)
     if name == "unit-001" and mode == "big-source":
@@ -320,6 +359,8 @@ class Scripted:
             if self.mode == "user-revise" and kind == "REPAIR":
                 assert q["facts"]["Requested change"] == "Revise the plan: describe the exact stored value."
                 answer["edits"][1]["typedBody"]["obligation"] += "; exact stored value requested by user"
+            if fault := getattr(self, "plan_fault", None):
+                fault(answer)
         elif kind == "REVIEW":
             answer = {"verdict": "adequate", "gaps": []}
             if (self.mode == "product-source-review-gap"
@@ -360,7 +401,8 @@ class Scripted:
                     expected = "observed final-compatible value" if self.mode == "final-rework" else \
                         "observed value-001"
                     assert any(expected in o["stdout"] for o in facts["Final observations"])
-                    if self.mode == "guide-gap" and "Clarify the expected result" in guide["text"]:
+                    if self.mode in ("guide-gap", "records-guide-gap") \
+                            and "Clarify the expected result" in guide["text"]:
                         answer.update(verdict="gap", gaps=[{"target": "tryItGuide",
                             "correction": "Explain that the command prints observed value-001"}])
                 elif self.mode == "review-repair" and q["targets"] == ["quality:002"]:
@@ -455,6 +497,117 @@ class Scripted:
 
 def approve(request):
     return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("fault,fix", [
+    ("unlinked-read", "needs a contract"),
+    ("duplicate-provider", "one provider"),
+    ("missing-endpoint", "existing provider"),
+    ("unbound-consumer", "every named consumer"),
+    ("area-escape", "inside its named area"),
+    ("missing-skeleton", "every product unit"),
+    ("wrong-closing-owner", "owner and its closing requirement"),
+])
+def test_plan_refuses_broken_agreements(tmp_path, fault, fix):
+    """Refuse an unsafe PLAN before B or WORK; runtime disjoint scopes miss undeclared file reads,
+    multiple interface writers, dangling endpoints, escaped areas and unclosable placeholders.
+    """
+    run, provider = prepare(tmp_path / fault, "records", 3)
+
+    def corrupt(answer):
+        contract = next(e["typedBody"] for e in answer["edits"] if e["kind"] == "contract")
+        if fault == "unlinked-read":
+            contract["consumers"] = [3]
+            answer["units"][1]["consumes"] = []
+        elif fault == "duplicate-provider":
+            answer["units"][1]["provides"] = ["new:page"]
+        elif fault == "missing-endpoint":
+            contract["provider"] = 4
+        elif fault == "unbound-consumer":
+            answer["units"][1]["consumes"] = []
+        elif fault == "area-escape":
+            next(e["typedBody"] for e in answer["edits"] if e["kind"] == "area")["scope"] = ["else/**"]
+        elif fault == "missing-skeleton":
+            answer["skeleton"] = [1]
+        else:
+            next(e["typedBody"] for e in answer["edits"] if e["kind"] == "obligation")["owner"] = 2
+
+    provider.plan_fault = corrupt
+    try:
+        assert run.run().state == "INCOMPLETE"
+        assert fix in run.store.records("outcome")[-1][2]["reason"]
+        assert not run.store.units()
+        assert {b["gate"] for _, _, b in run.store.records("decision_request")} == {"A"}
+    finally:
+        run.close()
+
+
+def records_and_skeleton_journey(slot):
+    """Shared-page consumers receive the agreement and exercise it; isolated units miss lost briefs.
+
+    Open obligations block C until final requirement verdicts; an unrelated guide repair must preserve
+    closure. A text-only contract repair revokes consumers even with unchanged scope trees, which the
+    source-change journey misses. Prepared REPAIR uses the canonical writer, review/B and reopen;
+    this lane adds no steering or contract-amendment entry. Reuse this delivery for all three outcomes.
+    """
+    from dataclasses import replace
+    from seldon import obligations
+    from seldon.run import eligible
+
+    began = time.monotonic()
+    run, provider = prepare(slot, "records-guide-gap", 3)
+    try:
+        while run.store.cursor().state != "DEMO-JUDGE":
+            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            run.step()
+        assert obligations.remaining(run.store)
+        with pytest.raises(ValueError, match="open skeleton obligations"):
+            eligible(run.store)
+        run.step()
+        assert run.store.cursor().state == "PRODUCT-JUDGE"
+        assert not obligations.remaining(run.store)
+        before = run.store.units()
+        observations = run.store.records("observation")
+        retained = run.store.cursor().requirementVerdicts[0]
+
+        def correct(answer):
+            next(e["typedBody"] for e in answer["edits"] if e["kind"] == "contract")["text"] += \
+                " Its slot is named content."
+
+        provider.plan_fault = correct
+        # Seed only the existing REPAIR entry; review and exact-plan B remain mandatory.
+        run.store.cursor(replace(run.store.cursor(), state="REPAIR", B=None,
+                                 failure="Clarify the shared page agreement"))
+        run.step()
+        assert run.store.unit("u001").judgment == before["u001"].judgment
+        assert all(run.store.unit(u).state == "DONE" and run.store.unit(u).judgment is None
+                   for u in ("u002", "u003"))
+        run.close()
+        run = Run.reopen(slot / "product", provider, approve)
+        while run.store.cursor().state != "PRODUCT-JUDGE":
+            run.step()
+        after = run.store.units()
+        assert retained in run.store.cursor().requirementVerdicts
+        assert run.store.records("observation") == observations
+        assert after["u001"].judgment == before["u001"].judgment
+        assert all(after[u].judgment != before[u].judgment for u in ("u002", "u003"))
+        assert all(after[u].P == before[u].P and after[u].recoveries == 0 for u in before)
+        cursor, rows, _ = finish(run)
+        changed = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
+                   and "Its slot is named content." in encode(b["facts"])]
+        assert len(changed) == 2
+        assert not obligations.remaining(run.store)
+        assert run.store.unit("guide").recoveries == 1
+        assert all(run.store.read(r)["commit"] == cursor.candidate for r in cursor.requirementVerdicts)
+        for kind in ("WORK", "JUDGE"):
+            briefs = [b["facts"] for _, k, b in rows if k == "question" and b["kind"] == kind
+                      and "Guide path" not in b["facts"]]
+            assert all("Shared page exposes a named content slot." in encode(b) for b in briefs)
+        assert len(plan.select(run.store.plan(cursor.revision), "area")) == 1
+        print(f"M2 records, obligations, contract repair/reopen: {time.monotonic() - began:.2f}s", flush=True)
+    finally:
+        run.close()
 
 
 def prepare(slot, mode, count):
@@ -845,6 +998,11 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert any("Scope ownership overlaps" in e for e in errors)
             assert any("local semantic check" in e and "Read value-001" in e for e in errors)
         if mode == "single1":
+            document = run.store.plan(cursor.revision)
+            assert len(plan.select(document, "area")) == 1
+            assert len(plan.select(document, "unit")) == 2  # One product unit plus CODE's delivery guide.
+            assert not document["skeleton"] and not plan.select(document, "contract")
+            assert not plan.select(document, "obligation")
             from tests.seldon.run_report import report
             output, row = report(slot)
             assert row[3] == "SCRIPTED_C" and len(row) == 16 and "accepted=False" in output
@@ -1036,6 +1194,11 @@ def test_clean_core_golden(tmp_path):
     Reopening the plan gap retains its correction; rejecting an unrelated planner rewrite protects
     the new post-B marking boundary that pre-B repairs and a compliant planner cannot exercise.
     A later REVIEW gap retains the same restriction: clearing B must not reopen general plan edits.
+    Shared-page contracts reach provider and consumer briefs; undeclared reads and broken ownership
+    are refused at PLAN. Skeleton obligations need final requirement verdicts and retain closure
+    across an unrelated docs repair. Text-only contract repair/reopen renews only consumer judges;
+    unchanged scope trees alone cannot expose this stale evidence. Scale retains an actual build-time
+    file-format contract while comparing the same local sources at one and fifty units.
     """
     clean_core_golden(tmp_path / "suite")
 
@@ -1132,10 +1295,12 @@ def clean_core_golden(root):
         admission_task = pool.submit(admission_journey, root / "admission")
         stale_task = pool.submit(stale_scope_journey, root / "stale-scope")
         seed_task = pool.submit(final_seed, root / "final-seed")
+        records_task = pool.submit(records_and_skeleton_journey, root / "records")
         list(pool.map(run_case, modes))
         baseline = baseline_task.result()
         admission_task.result()
         stale_task.result()
+        records_task.result()
         seed = seed_task.result()
     # A copied fault must never mutate its shared seed through an old store/Git/provider path.
     store = Store(seed / "product")
