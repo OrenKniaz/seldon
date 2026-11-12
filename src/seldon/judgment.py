@@ -81,7 +81,7 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
             try:
                 text = content.decode("utf-8")
                 if not any(text in output for output in outputs):
-                    artifacts[path]["text"] = text
+                    artifacts[path]["text"] = content[-4096:].decode("utf-8", errors="replace")
             except UnicodeDecodeError:
                 pass
     if artifacts:

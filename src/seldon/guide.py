@@ -1,9 +1,10 @@
 """C8/C15/I1; R9: execute the guide's declared paths and argv steps from delivery."""
 
 import json
+import posixpath
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import plan
 
@@ -13,9 +14,11 @@ def checks(root):
     paths = list(dict.fromkeys(re.findall(r"\[[^\]]*\]\(([^)]+)\)", text)))
     blocks = re.findall(r"^```([^\n]*)\n(.*?)^```\s*$", text, re.MULTILINE | re.DOTALL)
     if not paths:
-        raise ValueError("The guide must link its project-relative paths")
+        raise ValueError("The guide must link paths relative to the guide file")
+    paths = [plan.safe_path(posixpath.normpath(posixpath.join(
+        str(PurePosixPath(plan.GUIDE_PATH).parent), path))) for path in paths]
     for path in paths:
-        plan.safe_path(path)
+        (Path(root) / path).resolve().relative_to(Path(root).resolve())
     commands = []
     for language, block in blocks:
         if language.strip() != "argv":
