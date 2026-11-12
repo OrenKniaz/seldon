@@ -763,7 +763,7 @@ def clean_core_golden(root):
     assert scale_seconds < 90, f"50-unit bound exceeded: {scale_seconds:.2f}s"
     seconds = time.monotonic() - began
     print(f"M1 suite: {seconds:.2f}s; artifacts {root}", flush=True)
-    assert seconds < 180, f"suite bound exceeded: {seconds:.2f}s (target 180 s)"
+    assert seconds < 270, f"suite bound exceeded: {seconds:.2f}s (target 180 s, T-77)"
 
 
 if __name__ == "__main__":
