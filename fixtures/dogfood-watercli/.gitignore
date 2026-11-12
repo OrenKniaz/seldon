@@ -1,4 +1,0 @@
-# Local planning authority and provider transcripts are not fixture source.
-.codex-harness/
-__pycache__/
-*.pyc
