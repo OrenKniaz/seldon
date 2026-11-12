@@ -1,10 +1,11 @@
-# SELDON BLUEPRINT v1.3 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.4 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
 > **v1.1 (Oren, 2026-11-11, "Ok, with your suggestions"):** five refinements from outside evidence: planning per area, flow review, fixup units, worker handoffs, constraints in guides. Notes: `work/ladder/design-review/research-2026-11-11.md`.
 > **v1.2 (Oren, 2026-11-11, "You own decisions like m1/m2, I trust you"):** the lead owns milestone order and exits. The rules of §4 and §7 still change only with Oren. First use: the Foundation 8-of-10 exit moved from M1 to M2, where contracts exist.
 > **v1.3 (Oren, 2026-11-11):** Astra takes control when Claude has no usage; every new failure opens a ticket (P9).
+> **v1.4 (Oren, 2026-11-12, "you can ratify"):** eleven changes from two independent bird's-eye reviews (Fable, Astra) after four judgment redesigns in one day: source is judged once at the unit (R2, §8.4); real-question size checks (R2); local re-ask (R7); reuse only on git ids (R9); no judge execution booleans (R12); flow review is the only cross-unit judge (§3.2); M2 contents and order; milestone cohorts and an earlier fight (P4, P5); review trigger (P10); roles (§8.3). Merged notes: `work/ladder/RECOMMENDATIONS.json` in the dev workspace.
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -54,7 +55,7 @@ Execution adds: Attempt, Patch (a commit), Observation, Judgment, Integration, D
 **Run.** `ALIGN → A → ARCHITECT (areas, contracts, decisions, wave outline) → DETAIL wave 1 → REVIEW → B →` per wave `[EXECUTE → WAVE-VERIFY → STEER → CHECK-IN → DETAIL next wave] → VALIDATE (whole dream, feature by feature) → DEMO → C`.
 B approves the architecture, the wave outline and wave 1. Later waves are Seldon's to detail; a change to accepted scope goes to the user (C16).
 
-**Wave.** Units run concurrently as the graph, scopes and machine allow, each waiting with a shown reason (C12). The wave ends when its units are integrated and WAVE-VERIFY passes on one commit: every check in the product so far, the wave's cross-unit checks, and real-path proof for each surface touched (C26). A **flow review** then has a judge trace each user flow across the contracts it crosses, on the integrated product. A WAVE-VERIFY failure becomes a small **fixup unit** owned by the failing scope; integration itself never waits on the whole suite.
+**Wave.** Units run concurrently as the graph, scopes and machine allow, each waiting with a shown reason (C12). The wave ends when its units are integrated and WAVE-VERIFY passes on one commit: every check in the product so far, the wave's cross-unit checks, and real-path proof for each surface touched (C26). A **flow review** then has a judge trace each user flow across the contracts it crosses, on the integrated product. Flow review is the only cross-unit judge: its subject is one user flow plus the contracts it crosses, and it replaces the M1 stand-in of a DEMO and PRODUCT judgment after the wave. A WAVE-VERIFY failure becomes a small **fixup unit** owned by the failing scope; integration itself never waits on the whole suite.
 
 **Unit.**
 
@@ -83,7 +84,7 @@ Each rule names its check and the real failure it prevents. A change that breaks
 
 **R1. One machine, sized by data.** No size branches in structure; tiny is 1 area, 1 wave, 1 unit. *Check:* hello-world and the 50-unit synthetic journey take the same code path. *Prevents:* the tiny-only plan shape that hid concurrency (core8).
 
-**R2. No call is sized by the product.** A question's facts are bounded by its subject: one unit, one feature, one contract, one wave summary. Product-wide conclusions are computed by code from per-item verdicts. *Check:* the largest question is the same size at 1 and at 50 units. *Prevents:* the 87–97 KB judge questions (f7, f9) and the 1.5M-character request (round 33).
+**R2. No call is sized by the product.** A question's facts are bounded by its subject: one unit, one feature, one contract, one wave summary. Product-wide conclusions are computed by code from per-item verdicts. Source text is judged once, at the unit that owns it; questions after integration carry behaviour (observations, screenshots, contract text, one verdict row per unit), never file text. *Check:* the largest question is the same size at 1 and at 50 units, measured on recorded real questions as well as the scripted journey, and each run reports its total judgment calls and bytes. *Prevents:* the 87–97 KB judge questions (f7, f9), the 1.5M-character request (round 33), and final judges re-reading every unit's files (66–86 KB, T-82).
 
 **R3. No single-call plan.** Any list an LLM must write is small and bounded; code splits a larger subject into more questions with recorded coverage. *Prevents:* the 32-slot plan ceiling; five PLAN calls and 519 s for three buttons (f7).
 
@@ -93,17 +94,17 @@ Each rule names its check and the real failure it prevents. A change that breaks
 
 **R6. Scopes, not file lists.** A unit owns path scopes and may create files inside them. A shared file has one named owner. Code enforces scope from the observed diff. *Prevents:* plans rejected over exact file lists (f8); a planner cannot know every file of a large app in advance.
 
-**R7. Failure is local.** No global phases. One unit's failed proof or doubtful verdict never stops an unrelated unit. *Check:* in a journey with one failing unit of N, the other N−1 integrate. *Prevents:* one RED verdict ending the whole run (rounds 31–33; runs 9, 24).
+**R7. Failure is local.** No global phases. One unit's failed proof or doubtful verdict never stops an unrelated unit. A final-judgment gap clears and re-asks only the subjects whose owning units changed. *Check:* in a journey with one failing unit of N, the other N−1 integrate. *Prevents:* one RED verdict ending the whole run (rounds 31–33; runs 9, 24).
 
 **R8. A worker is a whole agent session for a whole unit.** Seldon never steps inside it. Rework resumes the same session when the provider allows; otherwise a fresh session gets the brief, the patch and the failure. A separate test worker is used only when Seldon decides (C13). *Prevents:* two cold sessions per unit, which doubled cost and lost context.
 
-**R9. Code proves, the judge interprets.** RED and GREEN are established by code running ordinary commands on exact commits. The judge answers only what code cannot: meaning and quality. Evidence binds to a commit id; when the commit changes, the checks run again. No evidence-reuse identity schemes. *Prevents:* judges refusing valid evidence (run 12), evidence split across questions (runs 34, 35), unschedulable steps (f11, f12).
+**R9. Code proves, the judge interprets.** RED and GREEN are established by code running ordinary commands on exact commits. The judge answers only what code cannot: meaning and quality. Evidence binds to a commit id; when the commit changes, the checks run again. No evidence-reuse identity schemes: reuse of a verdict may key only on git commit or tree ids of the owner's scope, never a homemade fact hash. *Prevents:* judges refusing valid evidence (run 12), evidence split across questions (runs 34, 35), unschedulable steps (f11, f12).
 
 **R10. Every wave ends integrated, running and proven, and the next wave is planned from the product as it exists.** Wave N+1 is brownfield work on our own product, so mapping existing code (C24) is this same capability, built once.
 
 **R11. Explicit state.** Run, wave and unit states and their legal transitions are declared in one table. State records are typed; no free-form keys. Every state has an exit for success, failure, uncertainty and crash (I5). Killing the process in any state and reopening continues without redoing finished units (C23). *Prevents:* a 30-key cursor dictionary; the implicit state machines found on 11-07.
 
-**R12. Questions are briefs.** Plain language, one subject, labelled facts, one decision, a strict schema, one realistic example. No internal ids beyond the handles the answer must use; no digests or receipts. Guides state principles, and constraints beat instructions ("no TODOs, no partial implementations"); a concrete range beats "many". A fix for one observed answer goes into the schema, the facts or the code, never into a new prompt sentence. *Prevents:* judges asking for "the remaining r17 content"; prompts that are a history of patches.
+**R12. Questions are briefs.** Plain language, one subject, labelled facts, one decision, a strict schema, one realistic example. No internal ids beyond the handles the answer must use; no digests or receipts. Guides state principles, and constraints beat instructions ("no TODOs, no partial implementations"); a concrete range beats "many". A fix for one observed answer goes into the schema, the facts or the code, never into a new prompt sentence. A judge answers only what it can observe in its facts; whether something ran is a code fact, never a judge boolean. *Prevents:* judges asking for "the remaining r17 content"; prompts that are a history of patches; a try-it guide passing on its own prose (T-83).
 
 **R13. Roles from one table.** Strongest model for architecture, planning and judgment; cross-provider review where available, honestly labelled (C11); provider failures recover twice, then steer (C18).
 
@@ -124,8 +125,8 @@ Each milestone lands only with its exit met. Hello-world stays green throughout 
 | Milestone | Builds | Exit |
 |---|---|---|
 | **M1 Unit loop** | State tables (R11); unit lifecycle; RED and GREEN by code on commits (R9); scopes (R6); Git integration; deletions of §5. Still one wave. | 50-unit synthetic journey green, with one failing unit isolated and a kill-and-reopen. Real hello-world: 8 clean of 10. Real Foundation runs its units concurrently, and every failure is local and correctly named. |
-| **M2 Contracts and skeleton** | Area, Contract, Decision; ARCHITECT; skeleton wave; WAVE-VERIFY with flow review and fixup units; briefs (R12). | Foundation with a shared page contract: 8 of 10. ShelfLife reaches C in at least 3 of 5, scoring at least as high as a plain agent on the same oracle. |
-| **M3 Waves** | Progressive DETAIL with one planning call per area; worker handoffs into STEER; check-in; next wave from the existing product; unit steering. | The L3 dream reaches C with three or more waves; a mid-wave kill resumes. |
+| **M2 Contracts and skeleton** | In this order: Area, Contract, Decision records and the skeleton wave; then WAVE-VERIFY with flow review (replacing the M1 DEMO/PRODUCT judgment) and fixup units; then ARCHITECT, per-area DETAIL and a bounded per-area REVIEW; briefs (R12). | Foundation with a shared page contract: 8 of 10. ShelfLife reaches C in at least 3 of 5, scoring at least as high as a plain agent on the same oracle. |
+| **M3 Waves** | Progressive DETAIL of later waves; worker handoffs into STEER; check-in; next wave from the existing product; unit steering. | The L3 dream reaches C with three or more waves; a mid-wave kill resumes. |
 | **M4 Front door** | Chat front door and run control (C20, C25); cross-provider review (C11); size shown to the user (C5). | Oren runs L3 himself and gives a real C. |
 
 Later pieces attach at one named place each: research (C7) as a unit kind; open-loop work (C22) as a wave whose exit is a metric; memory and mail (C19) as records; onboarding a foreign codebase (C24) as R10's mapping on a repository we did not build.
@@ -138,9 +139,9 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 **P3. Recorded real answers replay** as regression on every change.
 
-**P4. Numbers, not adjectives.** A claim states clean runs of N. Promotion to the next rung needs 8 clean of 10. No self-scored percentages.
+**P4. Numbers, not adjectives.** A claim states clean runs of N. A milestone exit is its named cohort (§6) run on one named candidate commit. During repair, repeat a real run only to settle a stated uncertainty. No self-scored percentages.
 
-**P5. The fight at the right rung.** From L2 up, each milestone also runs the same dream through one plain agent, scored by the same black-box oracle. Seldon's claim is higher quality at size; L3 is where it must be shown.
+**P5. The fight at the right rung.** From the first ShelfLife attempt on, each milestone also runs the same dream through one plain agent, scored by the same black-box oracle; the fight does not wait for a Foundation cohort. Seldon's claim is higher quality at size; L3 is where it must be shown.
 
 **P6. One owner.** One named lead reads every line that lands in `src/seldon`. One change per landing. Nothing lands over a REJECT. No patch silently drops earlier behaviour.
 
@@ -150,6 +151,8 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 **P8. No ceremony.** Briefs and reports are short and say only what changed, what was proven and what is not. No boilerplate lines, no status documents nobody reads, no review rounds without a named risk.
 
+**P10. Step back on repeat design faults.** A second DESIGN ticket in the same module within a day stops new lanes there and triggers one bird's-eye review of the shape before any third fix.
+
 ## 8. Ratified decisions (Oren, 2026-11-11)
 
 1. **R9's reading of C14 is confirmed:** code proves, per unit, that the tests fail without the work and pass with it. Writing tests in a separate session is Seldon's choice (C13).
@@ -158,6 +161,9 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 | Role | Who |
 |---|---|
-| Lead: owner (P6), design decisions, milestone order and exits | Fable while it has usage; otherwise Opus 5.5; when Claude has no usage, Astra, until Claude is back |
-| Orchestrator | Fable at medium effort while it has usage; otherwise Opus 5.5 at medium |
+| Lead: owner (P6), design decisions, milestone order and exits | Opus 5.5 (Oren, 2026-11-12); when Claude has no usage, Astra, until Claude is back |
+| Orchestrator | Opus 5.5 at medium |
+| Design consult | Fable, one-shot, when a failure is unclear (bug or design, and the right fix) and for P10 reviews |
 | Executors | Sol 6.1 or Terra 6.1, effort chosen by the orchestrator per task |
+
+4. **Reading of C15 (Oren, 2026-11-12):** the no-stubs, mocks or missing check is the unit JUDGE verdict bound to the unit's commit. Code confirms the unit's scope files are unchanged in the integrated commit, or the changed unit is judged again by its own unit JUDGE. Judges after integration see behaviour, not source (R2).

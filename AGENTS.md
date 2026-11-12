@@ -2,7 +2,7 @@
 
 **CHARTER.md is the binding goal (ratified by Oren 2026-11-04) and outranks every other document.** Read it before any work. Briefs and reports are short and carry no boilerplate lines; name a C#/I# only when one is at stake. Never drop or weaken a core piece without a ratified charter edit or a registered Deviation. North Stars and older plans are background only. Preserve unrelated owning contracts and constraints. Scope current changes to their concrete assignment.
 
-**BLUEPRINT.md (ratified by Oren 2026-11-11) is binding directly under the charter.** It fixes the shape of the machine for large dreams: rules R1-R14, working rules P1-P8, milestones M1-M4. Read it second. New work goes in `src/seldon`; its first gate is `tests/seldon`. Keep briefs and reports short (P8).
+**BLUEPRINT.md (ratified by Oren 2026-11-11) is binding directly under the charter.** It fixes the shape of the machine for large dreams: rules R1-R14, working rules P1-P10, milestones M1-M4. Read it second. New work goes in `src/seldon`; its first gate is `tests/seldon`. Keep briefs and reports short (P8).
 
 Keep one writer per owned source surface. Do not introduce bypass flags or a new confinement framework, weaken assertions or acceptance, treat mocks as completion, or add cockpit mutation controls. Keep durable plan truth, provenance, confirmation and candidate-bound evidence intact.
 

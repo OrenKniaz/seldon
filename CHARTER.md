@@ -1,5 +1,6 @@
-# SELDON CHARTER v1.5 — the hard goal
+# SELDON CHARTER v1.6 — the hard goal
 
+> **Status: RATIFIED v1.6 by Oren, 2026-11-12 ("you can ratify").** Rewords C5 to match Blueprint R1 and updates the §8 register after the old core was deleted. v1.5 text below stands.
 > **Status: RATIFIED v1.5 by Oren, 2026-11-11 ("make sure your new plan breakdown is part of charter/blueprint").** Adds planning by area to §4. v1.4 text below stands.
 > **Status: RATIFIED v1.4 by Oren, 2026-11-11 ("you can drop them").** Adds the goal in plain words to §1 and removes the report boilerplate and the weekly audit from §7 (sprint rule: one-person startup, no ceremonies). `BLUEPRINT.md` sits directly under this charter. v1.3 text below stands.
 > **Status: RATIFIED v1.3 by Oren, 2026-11-09 (choice delegated to CC: "Your choice I'm ok with either"). Adds the clean-code rule to I9; nothing else changed. v1.2 text below stands.**
@@ -30,7 +31,7 @@ Seldon is the user's **cofounder, friend and competitor**: it improves the dream
 | C2 | **Determinism first** | Whatever can be a tool, function, class, schema or store is one, not LLM reasoning. | no LLM call does a function's job |
 | C3 | **The LLM owns semantics** | It creates and judges meaning: intent, quality, test meaningfulness, "is this the dream". | every semantic decision has a recorded verdict |
 | C4 | **Structured LLM output** | Typed records with IDs and links, plus a free-text rationale (the WHY). Never open text as the store. The store is whatever is most efficient in time and tokens. Malformed structure: 2 exact-fix retries, then judge/steer. | outputs are schema-valid records |
-| C5 | **Size router** | The planner judges dream size at Align (tiny/small/medium/large) and shows it to the user, who may override. It collapses trace levels, reviews and waves for small dreams. | a hello-world uses a slim process |
+| C5 | **Size router** | The planner judges dream size at Align (tiny/small/medium/large) and shows it to the user, who may override. Size changes the data (areas, waves, units), never the machine (Blueprint R1). | a hello-world runs as 1 area, 1 wave, 1 unit on the same path as a large dream |
 | C6 | **Improve the dream (the heart)** | Expansion in micro (quality within scope) and macro (what to build). Pushes back like a cofounder. Ends in a **Vision Lock** with a quality bar covering, where relevant: UX/visual, performance, maintainability, architecture, observability and failure behavior. "It works" is not enough. | accepted upgrades visible in the trace |
 | C7 | **Research when unknown** | On Seldon's own judgment, showing why. Criteria → explore/invent → measure → the user decides → replan. Pre-B prototypes only with user approval and a clear reason; they never build the product. | research decisions carry evidence |
 | C8 | **User decisions** | **A** = understanding + Vision Lock · **B** = plan approval · **per-wave check-in** · **C** = acceptance, after a live demo/walkthrough + a try-it-yourself guide. Seldon recommends; the user decides in their own words. **No budget in v1** (budgets are a dev-process metric only). | exactly these touches, plus real research choices |
@@ -84,13 +85,13 @@ Retros and the improvement pipeline (amendments to Seldon itself, lessons from i
 ## 8. Deviation register (registered 2026-11-04 by CC, Oren notified the same day; expiry 7 days; DV2/3/5/6/8/9 re-dated by Oren 2026-11-05 to 2026-11-18, conditional on 2a landing + a real ShelfLife run within 24h and 2b/2d running in parallel; restore stages from the Oren-approved reset plan `work/ladder/design-review/astra-reset-1.md`)
 | ID | Breaks | What | Owner | Expires | Restore by |
 |---|---|---|---|---|---|
-| DV1 | C9, I7 | semantic-v1 has no test nodes in the trace graph | CC | 2026-11-11 | Stage 1a |
-| DV2 | C12, I7 | semantic-v1: exactly 2 serial beads, max_parallel=1 | CC | 2026-11-18 | Stage 3a |
-| DV3 | C17 | semantic-v1 rejects waves; waves only in legacy mode | CC | 2026-11-18 | Stage 3b |
-| DV4 | I1, I3, C14 | closed scenario vocabulary; stub-marker RED; AST test audit | CC | 2026-11-11 | Stages 1c+2a |
-| DV5 | C1, C16 | the planner choreographs transitions; steering is advisory heuristics | CC | 2026-11-18 | Stages 2c+3b |
-| DV6 | C15 | no full-dream completeness check (finite scenarios only) | CC | 2026-11-18 | Stage 4a |
-| DV7 | C11 | "two reviewers" can be the same model tuple, with no label | CC | 2026-11-11 | Stage 2a |
-| DV8 | C8 | B/review/call budgets exist in the product (v1 has no budget) | CC | 2026-11-18 | Stage 2b (budgets deleted 2026-11-05; closes after real-run proof) |
-| DV9 | — | two execution models (legacy + semantic) coexist | CC | 2026-11-18 | Stage 3d |
+| DV1 | C9, I7 | semantic-v1 has no test nodes in the trace graph | CC | 2026-11-11 | **CLOSED 2026-11-12:** old core deleted (9dd3d20); the new plan has check nodes traced to requirements |
+| DV2 | C12, I7 | semantic-v1: exactly 2 serial beads, max_parallel=1 | CC | 2026-11-18 | **CLOSED 2026-11-12:** units run concurrently; three workers overlapped in real Foundation runs on e5a4ead |
+| DV3 | C17 | new core runs one wave only | Lead | Blueprint M3 | **RE-REGISTERED 2026-11-12** for the new core; waves are Blueprint M3 |
+| DV4 | I1, I3, C14 | closed scenario vocabulary; stub-marker RED; AST test audit | CC | 2026-11-11 | **CLOSED 2026-11-12:** old core deleted; RED and GREEN are proven by code on commits (Blueprint R9) |
+| DV5 | C1, C16 | new core has no unit steering or STEER step yet | Lead | Blueprint M3 | **RE-REGISTERED 2026-11-12** for the new core; the old planner choreography is gone with the old core |
+| DV6 | C15 | no full-dream completeness check (VALIDATE) yet; M1 uses a DEMO/PRODUCT judgment stand-in | Lead | Blueprint M2 | **RE-REGISTERED 2026-11-12**; flow review in M2, VALIDATE with waves |
+| DV7 | C11 | "two reviewers" can be the same model tuple, with no label | CC | 2026-11-11 | **CLOSED 2026-11-12:** every call records its independence label ("fresh same-provider call"); cross-provider review stays M4 |
+| DV8 | C8 | B/review/call budgets exist in the product (v1 has no budget) | CC | 2026-11-18 | **CLOSED 2026-11-12:** old core deleted; the new core has no budgets |
+| DV9 | — | two execution models (legacy + semantic) coexist | CC | 2026-11-18 | **CLOSED 2026-11-12:** old core deleted (9dd3d20); one execution model |
 | DV10 | I4, I6, I2, C11 | pending (not open) findings do not hold publication/C (pre-existing at efc4a25; registered by CC 2026-11-05, Oren notified; re-split gap half restored by Stage 2a) | CC | 2026-11-08 | **RESTORED 2026-11-05 by lane 2a2** |
