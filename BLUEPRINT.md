@@ -1,4 +1,4 @@
-# SELDON BLUEPRINT v1.4 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.5 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
@@ -6,6 +6,7 @@
 > **v1.2 (Oren, 2026-11-11, "You own decisions like m1/m2, I trust you"):** the lead owns milestone order and exits. The rules of §4 and §7 still change only with Oren. First use: the Foundation 8-of-10 exit moved from M1 to M2, where contracts exist.
 > **v1.3 (Oren, 2026-11-11):** Astra takes control when Claude has no usage; every new failure opens a ticket (P9).
 > **v1.4 (Oren, 2026-11-12, "you can ratify"):** eleven changes from two independent bird's-eye reviews (Fable, Astra) after four judgment redesigns in one day: source is judged once at the unit (R2, §8.4); real-question size checks (R2); local re-ask (R7); reuse only on git ids (R9); no judge execution booleans (R12); flow review is the only cross-unit judge (§3.2); M2 contents and order; milestone cohorts and an earlier fight (P4, P5); review trigger (P10); roles (§8.3). Merged notes: `work/ladder/RECOMMENDATIONS.json` in the dev workspace.
+> **v1.5 (Oren, 2026-11-12, "ok, you can ratify"):** wave-start RED in the unit table (PROVING): a check an earlier unit of the same wave already satisfies must fail on the wave's start commit. The lead's M1 decision, ratified (T-76).
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -63,7 +64,7 @@ B approves the architecture, the wave outline and wave 1. Later waves are Seldon
 |---|---|---|
 | READY | code | Dependencies integrated, consumed contracts available, scope free. |
 | WORKING | one worker session | Writes checks and product inside its scope, runs them, inspects its own results. Returns its patch with a handoff: notes, concerns, deviations, findings. These reach the planner at STEER (C10, C16). |
-| PROVING | code | Diff stays in scope. `establishes` checks fail on the unit's base without its product changes and pass with them. `preserves` checks pass both times. |
+| PROVING | code | Diff stays in scope. `establishes` checks fail on the unit's base without its product changes, or, if an earlier unit of the same wave already makes them pass there, fail on the wave's start commit; they pass with them. `preserves` checks pass both times. |
 | JUDGING | LLM, this unit only | Are the checks meaningful for these requirements? Any stub, mock or missing behaviour? |
 | INTEGRATING | code | Merge into the wave candidate; affected checks rerun on the new commit. |
 | DONE | | |
