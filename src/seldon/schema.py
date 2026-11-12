@@ -33,7 +33,9 @@ PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
                                      typedBody=FEATURE if kind == "feature" else body)
                                   for kind, body in BODIES.items() if kind != "unit"]}, 1),
            units=array(obj(scope=array(TEXT, 1), checkPaths=array(TEXT, 1), requirements=array(TEXT, 1),
-                           dependencies=array({"type": "integer", "minimum": 1}), instructions=TEXT), 1))
+                           dependencies=array({"type": "integer", "minimum": 1}), instructions=TEXT), 1),
+           quality=array(obj(criterion={"type": "integer", "minimum": 1}, checks=array(TEXT, 1),
+                             judgment={"type": "boolean"}), 1))
 
 
 def answer_schema(kind, targets=()):
@@ -46,9 +48,7 @@ def answer_schema(kind, targets=()):
     payload = {
         "ALIGN": VISION, "PLAN": PLAN, "REPAIR": PLAN,
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
-        "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP),
-                      integratedWalkthrough={"type": "string"},
-                      inspections=array(obj(check=TEXT, path=TEXT, show=choice("text", "presence")))),
+        "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
         "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT, discoveries=array(GAP)),
         "JUDGE": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
         "DEMO": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),

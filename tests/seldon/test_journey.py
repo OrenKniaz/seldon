@@ -19,7 +19,9 @@ from seldon.store import Store, encode
 
 VISION = {"size": "tiny", "understanding": "Read named values", "users": ["CLI user"],
           "scopeIn": ["Named values"], "scopeOut": [], "improvements": [],
-          "quality": [{"criterion": "Clear output", "verification": "Run the real checks"}], "unknowns": []}
+          "quality": [{"criterion": "Clear output", "verification": "Read the observed output"},
+                      {"criterion": "Persist the exact value", "verification": "Run the real check"}],
+          "unknowns": []}
 
 
 def planned(count, mode):
@@ -49,7 +51,7 @@ def planned(count, mode):
                 deps = sorted({i - 1, i - 5})
         scopes.append({"scope": [directory + "/**"], "checkPaths": [directory + "/check.py"],
                        "requirements": [r], "dependencies": deps, "instructions": f"Deliver value {i:03}"})
-        if mode == "parallel" and i == 4:
+        if mode == "traced-evidence" or mode == "parallel" and i == 4:
             scopes[-1]["checkPaths"] = [directory + "/*.py"]
     if mode == "wave-start":
         edits[4]["typedBody"]["obligation"] = "Read the dependency's value-001"
@@ -73,7 +75,16 @@ def planned(count, mode):
             "command": [sys.executable, "-B", "unit-001/check.py"],
             "requiredEnvironment": ["Python"], "expectedEvidence": "A value already present at base",
             "requirements": ["new:r001"]}})
-    return {"edits": edits, "units": scopes}
+    if mode == "scale50":
+        # Ten features each contain five requirements; a feature-sized DEMO would grow here.
+        for i in range(count):
+            edits[3 * i + 1]["typedBody"]["features"] = [f"new:f{(i // 5) * 5 + 1:03}"]
+        edits = [e for e in edits if e["kind"] != "feature" or
+                 int(e["targetHandle"][-3:]) % 5 == 1]
+    selected = "new:c002" if mode == "traced-evidence" else "new:c001"
+    return {"edits": edits, "units": scopes, "quality": [
+        {"criterion": 1, "checks": [selected], "judgment": True},
+        {"criterion": 2, "checks": [selected], "judgment": False}]}
 
 
 NATIVE = r'''
@@ -128,9 +139,15 @@ else:
               "import os\n"
               f"assert Path('{name}/value.txt').read_text() == '{value}'\n"
               f"print('observed {value}')\n")
-    if mode == "walkthrough":
-        source += "print(Path.cwd())\n"
-    if mode in ("single1", "scale50", "walkthrough", "walkthrough-refuse"):
+    if mode == "traced-evidence":
+        Path(name, "helper.py").write_text(
+            "from pathlib import Path\ndef read_value(path):\n    return Path(path).read_text()\n")
+        source = "from helper import read_value\n" + source.replace(
+            f"Path('{name}/value.txt').read_text()", f"read_value('{name}/value.txt')")
+        source += ("print(Path.cwd())\n"
+                   "if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
+                   f"    Path(os.environ['SELDON_EVIDENCE_DIR'], 'value.json').write_text('\"{value}\"')\n")
+    if mode in ("single1", "scale50", "traced-evidence"):
         source += ("if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
                    "    Path(os.environ['SELDON_EVIDENCE_DIR'], 'observed.png').write_bytes(\n"
                    "        __import__('base64').b64decode(\n"
@@ -163,6 +180,10 @@ else:
                   "print('observed final-compatible value')\n")
         if turn > 1:
             value = "value-001-final"
+    if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved") and number == 1:
+        Path(name, "interaction.txt").write_text("ready" if turn > 1 else "blocked")
+        if turn > 1:
+            source += f"assert Path('{name}/interaction.txt').read_text() == 'ready'\n"
     Path(name, "check.py").write_text(source)
     Path(name, "value.txt").write_text(value)
     if mode == "wave-start" and name == "unit-002":
@@ -225,7 +246,8 @@ class Scripted:
             answer = dict(VISION)
             if self.mode == "user-path":
                 answer["quality"] = [{"criterion": "Read the value in the browser",
-                                      "verification": "Open the page and display the saved value"}]
+                                      "verification": "Open the page and display the saved value"},
+                                     VISION["quality"][1]]
         elif kind in ("PLAN", "REPAIR"):
             answer = planned(self.count, self.mode)
             if self.mode == "plan-overlap":
@@ -243,22 +265,9 @@ class Scripted:
         elif kind == "REVIEW":
             first = not (self.slot / "reviewed").exists()
             (self.slot / "reviewed").write_text("reviewed")
-            checks = plan.select(q["facts"]["Plan"], "check")
-            purpose = "Read value 002" if self.mode == "walkthrough" else "Read value 001"
-            selected = next(ref for ref, body in checks.items() if body["purpose"] == purpose)
-            answer = {"verdict": "adequate", "gaps": [], "integratedWalkthrough": selected, "inspections": []}
-            if self.mode in ("single1", "scale50", "walkthrough", "walkthrough-missing"):
-                answer["inspections"] = [{"check": r, "path": f"unit-{i:03}/value.txt", "show": "text"}
-                                         for i, r in enumerate(checks, 1)]
-            if self.mode == "walkthrough-missing":
-                answer["inspections"][0]["path"] = "unit-001/missing.txt"
-            if self.mode in ("walkthrough", "walkthrough-refuse"):
-                if self.mode == "walkthrough-refuse" or not q["facts"].get("Exact corrections"):
-                    answer["integratedWalkthrough"] = "n001"  # A feature is not a check.
-                elif len(q["facts"]["Exact corrections"]) == 1:
-                    answer["inspections"][0]["path"] = "unit-002/value.txt"
+            answer = {"verdict": "adequate", "gaps": []}
             if first and self.mode == "review-repair":
-                answer = {"verdict": "gap", "integratedWalkthrough": "", "inspections": [], "gaps": [
+                answer = {"verdict": "gap", "gaps": [
                     {"target": "n002", "correction": "Clarify exact value"}]}
         elif kind == "DECIDE":
             answer = {"choice": "revise" if q["facts"]["User's words"].startswith("Revise") else "approve"}
@@ -272,28 +281,56 @@ class Scripted:
                     "why": "A semantic fact needs clarification"}})
             answer = {"verdict": "satisfied", "gaps": [],
                       "assessments": questions.assessments(q["targets"], final=kind != "JUDGE")}
-            if kind == "DEMO":
-                assert "Quality bar" not in q["facts"] and "Try-it guide" not in q["facts"]
-            if kind == "PRODUCT" and self.mode == "user-path":
-                # The underlying storage check really passed. Its stdout documents only that read.
-                output = [o["stdout"] for o in q["facts"]["Final observations"]]
-                assert output and all(s.strip() == "observed value-001" for s in output)
-                for assessment in answer["assessments"]:
-                    assessment.update(exercisedOnFinalUserPath=bool(q["images"]),
-                                      why="The stored value was read, but there is no browser observation")
-            if kind == "PRODUCT" and self.mode in ("single1", "scale50", "walkthrough"):
+            if kind in ("DEMO", "PRODUCT"):
+                assert len(q["targets"]) == 1
                 facts = q["facts"]
-                expected = "unit-002/check.py" if self.mode == "walkthrough" else "unit-001/check.py"
-                assert set(facts["Final check sources"]) == {expected}
-                source = facts["Final check sources"][expected]
-                assert "observed value-" in source and "SELDON_EVIDENCE_DIR" in source
-                assert len(facts["Final observations"]) == len(q["images"]) == 1
-                observation = facts["Final observations"][0]
-                assert observation["command"][-1] == expected
-                assert observation["check"] == facts["Integrated walkthrough"]["check"]
-                assert observation["ranOnDeliveredRevision"] and len(observation["commit"]) == 40
-                assert Path(observation["workingDirectory"], expected).is_file()
-                assert "Try it yourself" in facts["Try-it guide"]
+                files = facts["Files on the delivered revision"]
+                if q["targets"] == ["tryItGuide"]:
+                    guide = facts["Guide file"]
+                    assert guide["present"] and guide["bytes"] > 0 and len(guide["commit"]) == 40
+                    assert "Try it yourself" in guide["text"]
+                    assert list(files) == [plan.GUIDE_PATH] and not q["images"]
+                elif self.mode in ("single1", "scale50", "traced-evidence"):
+                    expected = ("002" if kind == "PRODUCT" and self.mode == "traced-evidence" else
+                                next(p.split("/")[0][-3:] for p in files))
+                    helper = {f"unit-{expected}/helper.py"} if self.mode == "traced-evidence" else set()
+                    assert set(files) == {f"unit-{expected}/check.py", f"unit-{expected}/value.txt"} | helper
+                    assert files[f"unit-{expected}/value.txt"]["text"] == f"value-{expected}"
+                    assert set(facts["Final check sources"]) == {f"unit-{expected}/check.py"} | helper
+                    assert len(facts["Final observations"]) == len(q["images"]) == 1
+                    observation = facts["Final observations"][0]
+                    assert observation["command"][-1] == f"unit-{expected}/check.py"
+                    assert observation["ranOnDeliveredRevision"] and len(observation["commit"]) == 40
+                    if self.mode == "traced-evidence":
+                        assert Path(observation["stdout"].splitlines()[-1]) == self.slot / "product"
+                        artifact, = [a for a in facts["Check artifacts"].values() if "text" in a]
+                        assert json.loads(artifact["text"]) == f"value-{expected}"
+                if kind == "PRODUCT" and self.mode == "user-path" and q["targets"] != ["tryItGuide"]:
+                    output = [o["stdout"] for o in facts["Final observations"]]
+                    assert output and all(t.strip() == "observed value-001" for t in output)
+                    answer["assessments"][0].update(exercisedOnFinalUserPath=False,
+                        why="The stored value was read, but there is no browser observation")
+                prefix = kind.lower()
+                is_subject = q["targets"] == (["n002"] if kind == "DEMO" else ["quality:001"])
+                if is_subject and self.mode == prefix + "-uncertain":
+                    if "Requested facts" not in facts:
+                        return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
+                            "Did this check execute on the delivered commit with verified cleanup?"],
+                            "why": "Need the actual execution facts"}})
+                    actual, = facts["Code-established execution facts"]
+                    assert actual["executionStarted"] and actual["cleanupVerified"]
+                    assert actual["commit"] == facts["Code-established coverage"]["commit"]
+                    assert facts["Code-established coverage"]["checksPassed"]
+                if is_subject and self.mode in (prefix + "-gap", prefix + "-unresolved"):
+                    interaction = files.get("unit-001/interaction.txt", {})
+                    if interaction.get("text") == "blocked":
+                        if self.mode.endswith("-unresolved"):
+                            return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
+                                "Demonstrate that the interaction is ready, not blocked"],
+                                "why": "The observed interaction remains unresolved"}})
+                        answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                            "correction": "The interaction is blocked; make it ready and assert it "
+                                          "in the check"}])
             if kind == "JUDGE":
                 assert "other units' files" in q["facts"]["Checkout coverage"].lower()
                 sources = q["facts"]["Check sources"]
@@ -344,7 +381,9 @@ def finish(run):
     assert not outcome["accepted"] and outcome["verification_complete"]
     assert all(u.state == "DONE" for u in units.values())
     assert len([b for _, k, b in rows if k == "product_verdict"]) == 1
-    assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]) == 1
+    final_questions = [b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]
+    assert all(len(q["targets"]) == 1 for q in final_questions)
+    assert all(q["targets"] != ["quality:002"] for q in final_questions)
     observations = [b for _, kind, b in rows if kind == "observation"]
     for obs in observations:
         assert obs["executionStarted"] and obs["cleanupVerified"] and not obs["timedOut"]
@@ -384,13 +423,6 @@ def admission_journey(slot):
 def simple_journey(slot, mode, count=1):
     run, provider = prepare(slot, mode, count)
     try:
-        if mode == "walkthrough-refuse":
-            cursor = run.run()
-            assert cursor.state == "INCOMPLETE" and not cursor.B
-            errors = [error for _, _, b in run.store.records("provider_reply") for error in b["errors"]]
-            assert len(errors) == 3 and all("canonical check handle" in e for e in errors)
-            assert not any(b["gate"] == "B" for _, _, b in run.store.records("decision_request"))
-            return
         if mode in ("judge-provider", "big-source", "big-product", "check-deadline", "native-denied"):
             cursor = run.run()
             result = run.store.records("outcome")[-1][2]
@@ -419,12 +451,6 @@ def simple_journey(slot, mode, count=1):
             assert run.run() == cursor
             assert run.store.units() == units and run.store.records() == before
             return
-        if mode == "walkthrough-missing":
-            cursor = run.run()
-            outcome = run.store.records("outcome")[-1][2]
-            assert cursor.state == "INCOMPLETE" and "unit-001/missing.txt" in outcome["reason"]
-            assert all(u.state == "DONE" for u in run.store.units().values())
-            return
         if mode == "user-path":
             cursor = run.run()
             outcome = run.store.records("outcome")[-1][2]
@@ -444,6 +470,14 @@ def simple_journey(slot, mode, count=1):
             assert (slot / "turn-unit-001").read_text() == "3"
             assert "'purpose': 'base'" in outcome["failed"]["u001"]
             return
+        if mode in ("demo-uncertain", "product-uncertain"):
+            # Reopen with a pending fact request: ordinary in-process retries cannot expose lost intent.
+            target = "DEMO-FACTS" if mode.startswith("demo") else "PRODUCT-FACTS"
+            while run.store.cursor().state != target:
+                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                run.step()
+            run.close()
+            run = Run.reopen(slot / "product", provider, approve)
         cursor, rows, units = finish(run)
         if mode == "timeout":
             failures = run.store.records("provider_failure")
@@ -481,21 +515,21 @@ def simple_journey(slot, mode, count=1):
                        for _, k, b in rows)
         if mode == "review-repair":
             assert cursor.repairs == 1 and len(run.store.records("approval")) == 4
-        if mode == "walkthrough":
-            approval = run.store.read(cursor.B)
-            assert approval["subject"]["review"]["answer"]["integratedWalkthrough"] == "n006"
-            finals = [run.store.read(r) for r in cursor.finalObservations]
-            walkthrough, = [o for o in finals if o["check"] == "n006"]
-            assert Path(walkthrough["stdout"].splitlines()[-1]) == run.project.resolve()
-            assert walkthrough["unit"] == "u002"
-            errors = [error for _, _, b in run.store.records("provider_reply") for error in b["errors"]]
-            assert len(errors) == 2 and "canonical check handle" in errors[0] and "owned" in errors[1]
-            finals = [b for _, k, b in rows if k == "question" and b["kind"] in ("PRODUCT", "DEMO")]
-            for q in finals:
-                expected = "001" if q["kind"] == "DEMO" and "n002" in q["targets"] else "002"
-                files = q["facts"]["Inspected files on the delivered revision"]
-                assert list(files) == [f"unit-{expected}/value.txt"]
-                assert files[f"unit-{expected}/value.txt"]["text"] == f"value-{expected}"
+        if mode in ("demo-uncertain", "product-uncertain"):
+            assert not run.store.records("fixup")
+            assert all(u.recoveries == 0 for u in units.values())
+            retries = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
+            assert len(retries) == 1 and run.store.records("judge_uncertain")
+        if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved"):
+            fixup, = run.store.records("fixup")
+            assert fixup[2]["units"] == ["u001"]
+            assert units["u001"].recoveries == 1 and units["u002"].recoveries == 0
+            assert (slot / "turn-unit-001").read_text() == "2"
+            assert (slot / "turn-unit-002").read_text() == "1"
+            assert (run.project / "unit-001/interaction.txt").read_text() == "ready"
+            if mode.endswith("-unresolved"):
+                retries = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
+                assert len(retries) == 1
         if mode == "user-revise":
             aligns = [b for _, _, b in run.store.records("question") if b["kind"] == "ALIGN"]
             assert len(aligns) == 2
@@ -525,15 +559,13 @@ def simple_journey(slot, mode, count=1):
             assert row[3] == "SCRIPTED_C" and len(row) == 16 and "accepted=False" in output
         sizes = {kind: max(len(encode(b).encode("utf-8")) for _, k, b in rows
                           if k == "question" and b["kind"] == kind)
-                 for kind in ("WORK", "JUDGE", "PRODUCT")}
+                 for kind in ("WORK", "JUDGE", "DEMO", "PRODUCT")}
         if mode in ("single1", "scale50"):
-            product = next(b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT")
             final = [run.store.read(r) for r in cursor.finalObservations]
             demos = [b for _, k, b in rows if k == "question" and b["kind"] == "DEMO"]
             assert len(final) == count and len(demos) == count
             assert {o["check"] for q in demos for o in q["facts"]["Final observations"]} == {
                 o["check"] for o in final}
-            assert len(product["facts"]["Final observations"]) == len(product["images"]) == 1
         return sizes
     finally:
         run.close()
@@ -679,14 +711,14 @@ def test_clean_core_golden(tmp_path):
     wrongly integrate it. Judge uncertainty still returns only its own unit to its worker.
     Windows native Access-is-denied wording must stop after one call; generic transport faults
     otherwise retry a denied operation and the successful native journey never exposes it.
-    Non-first walkthrough selection and invalid-reference correction protect the approved subject;
-    a one-check success cannot expose first-check guesses or admission of a feature as a check.
-    One versus fifty retains equal walkthrough images/source/output while covering every feature,
-    catching a product-sized PRODUCT brief without weakening the effective observation workload.
-    The real walkthrough prints its working directory: an equal-revision worker checkout can pass
-    the same command while leaving the guide's delivered-folder instructions unexercised.
-    A passed command cannot establish a missing declared artifact. The final reader must see its
-    check's actual shipped files; two owners expose leaks that a one-file walkthrough cannot.
+    Subject traces include the final shipped files, imported check helpers, supplemental JSON artifacts
+    and delivered-folder observations; a standalone check and stdout alone cannot expose lost evidence.
+    Non-first criterion coverage catches a first-check guess, while deterministic quality must need no call.
+    Uncertainty twins prove a store fact resolves without rework; persistent uncertainty and real gaps
+    must repair an actual blocked interaction through its original owner, preserving unrelated DONE work.
+    Existing success-only journeys cannot expose the old all-DONE/INCOMPLETE failure or false satisfaction.
+    One versus fifty compares DEMO and PRODUCT too, with multiple requirements per feature to expose
+    feature-wide evidence growth that one-requirement-per-feature plans cannot catch.
     Reopening a terminal failure preserves state and records; interrupted recovery cannot prove this.
     """
     clean_core_golden(tmp_path / "suite")
@@ -705,8 +737,8 @@ def clean_core_golden(root):
              ("schema-fix", 1), ("plan-overlap", 2), ("user-path", 1), ("judge-provider", 2),
              ("big-source", 2), ("big-product", 2), ("user-revise", 1), ("wave-start", 2),
              ("native-denied", 2)]
-    modes.extend([("walkthrough", 2), ("walkthrough-refuse", 1)])
-    modes.append(("walkthrough-missing", 1))
+    modes.extend([("traced-evidence", 2), ("demo-uncertain", 1), ("product-uncertain", 1),
+                  ("demo-gap", 2), ("product-gap", 2), ("demo-unresolved", 2), ("product-unresolved", 2)])
 
     def run_case(item):
         mode, count = item
@@ -731,7 +763,7 @@ def clean_core_golden(root):
     assert scale_seconds < 90, f"50-unit bound exceeded: {scale_seconds:.2f}s"
     seconds = time.monotonic() - began
     print(f"M1 suite: {seconds:.2f}s; artifacts {root}", flush=True)
-    assert seconds < 270, f"suite bound exceeded: {seconds:.2f}s (target 180 s, T-77)"
+    assert seconds < 180, f"suite bound exceeded: {seconds:.2f}s (target 180 s)"
 
 
 if __name__ == "__main__":

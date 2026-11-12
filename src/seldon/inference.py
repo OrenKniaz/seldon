@@ -64,6 +64,6 @@ def call(store, provider, question, unit=None, check=lambda answer: None):
     with store.transaction():
         result = store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit, "answer": answer})
         store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
-    if answer.get("verdict") == "uncertain":
+    if answer.get("verdict") == "uncertain" and kind not in ("DEMO", "PRODUCT"):
         raise ValueError("Unresolved facts: " + "; ".join(answer["neededFacts"]))
     return result, answer

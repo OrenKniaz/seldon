@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, gitwork, inference, plan, proof, questions, scheduler, units
+from . import decisions, gitwork, inference, judgment, plan, proof, questions, scheduler, units
 from .states import advance
 from .store import RunRow, Store, UnitRow
 
@@ -26,6 +26,13 @@ def eligible(store):
             or proof.failures(store, cursor.finalObservations)):
         raise ValueError("Every requirement and check needs passing execution on the final commit")
     verdicts = [store.read(r) for r in cursor.demoVerdicts]
+    for kind, refs in (("DEMO", cursor.requirementVerdicts), ("PRODUCT", cursor.qualityVerdicts)):
+        rows = [store.read(r) for r in refs]
+        if ({r["subject"] for r in rows} != set(judgment.subjects(document, kind))
+                or len(rows) != len(judgment.subjects(document, kind))
+                or not all(r["commit"] == cursor.candidate
+                           and questions.satisfied(r["answer"], final=True) for r in rows)):
+            raise ValueError("C requires every final subject's satisfied verdict")
     if ({v["feature"] for v in verdicts} != set(plan.select(document, "feature"))
             or not all(v["commit"] == cursor.candidate and questions.satisfied(v["answer"], final=True)
                        for v in verdicts)):
@@ -50,24 +57,12 @@ def wave_verify(store, capacity):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
     assignments = plan.assigned(document)
-    approved = store.read(cursor.B)["subject"]["review"]["answer"]
-    walkthrough = approved.get("integratedWalkthrough")
     gitwork.unchanged(store.root.parent, cursor.candidate)
 
     def observe_unit(ref):
-        unit = store.unit(ref)
         try:
             checks = assignments[ref]
-            if walkthrough in checks:
-                local = {r: c for r, c in checks.items() if r != walkthrough}
-                observed = proof.observe(store, store.root.parent, cursor.candidate,
-                                         {walkthrough: checks[walkthrough]}, "final", ref)
-                if local:
-                    gitwork.checkout(unit.worktree, cursor.candidate)
-                    observed.extend(proof.observe(store, unit.worktree, cursor.candidate, local, "final", ref))
-                return ref, observed
-            gitwork.checkout(unit.worktree, cursor.candidate)
-            return ref, proof.observe(store, unit.worktree, cursor.candidate, checks, "final", ref)
+            return ref, proof.observe(store, store.root.parent, cursor.candidate, checks, "final", ref)
         finally:
             store.close()
 
@@ -90,7 +85,8 @@ def wave_verify(store, capacity):
     with store.transaction():
         advance(store, "rework" if rework else "passed", observations,
                 finalCommit=None if rework else cursor.candidate,
-                finalObservations=[] if rework else observations, demoVerdicts=[], productVerdict=None)
+                finalObservations=[] if rework else observations, demoVerdicts=[], productVerdict=None,
+                requirementVerdicts=[], qualityVerdicts=[], pendingJudge=None)
 
 
 class Run:
@@ -146,8 +142,6 @@ class Run:
             ref, answer = inference.call(store, self.provider, questions.build("ALIGN", facts))
             advance(store, "aligned", ref, vision=ref, requestedChange=None)
         elif state in ("A", "B", "CHECK-IN", "C"):
-            if state == "B":
-                questions.review_selection(store.plan(cursor.revision), store.read(cursor.review)["answer"])
             if not cursor.decision:
                 subject = ({"vision": store.read(cursor.vision)["answer"]} if state == "A" else
                            {"revision": cursor.revision, "plan": store.plan(cursor.revision),
@@ -169,8 +163,7 @@ class Run:
         elif state == "REVIEW":
             result, answer = inference.call(store, self.provider, questions.build("REVIEW", {
                 "Original request": kickoff["words"], "Approved vision": store.read(cursor.vision)["answer"],
-                "Plan": store.plan(cursor.revision)}),
-                check=lambda answer: questions.review_selection(store.plan(cursor.revision), answer))
+                "Plan": store.plan(cursor.revision)}))
             adequate = answer["verdict"] == "adequate" and not answer["gaps"]
             advance(store, "adequate" if adequate else "gap", result, review=result, failure=str(answer))
         elif state == "REPAIR":
@@ -196,37 +189,8 @@ class Run:
                 advance(store, "finished", "Every unit integrated")
         elif state == "WAVE-VERIFY":
             wave_verify(store, self.capacity)
-        elif state == "DEMO-JUDGE":
-            document = store.plan(cursor.revision)
-            done = {store.read(r)["feature"] for r in cursor.demoVerdicts}
-            patterns = [p for u in plan.select(document, "unit").values() for p in u["checkPaths"]]
-            args = {arg for c in plan.select(document, "check").values() for arg in c["command"]}
-            check_sources = gitwork.sources(self.project, cursor.finalCommit, patterns, args)
-            review = store.read(cursor.B)["subject"]["review"]["answer"]
-            catalog = gitwork.inspection_catalog(self.project, cursor.finalCommit, review.get("inspections", []))
-            for ref in plan.select(document, "feature"):
-                if ref in done:
-                    continue
-                question = questions.feature_brief(store, ref, check_sources, review, catalog)
-                result, answer = inference.call(store, self.provider, question)
-                if not questions.satisfied(answer, final=True):
-                    raise ValueError("Feature demo gap: " + str(answer))
-                with store.transaction():
-                    verdict = store.record("feature_verdict", {"feature": ref, "commit": cursor.candidate,
-                                                              "answer": answer, "source": result})
-                    store.cursor(replace(store.cursor(),
-                                         demoVerdicts=store.cursor().demoVerdicts + [verdict]))
-            advance(store, "satisfied", "Every feature satisfied; code checks final trace coverage")
-        elif state == "PRODUCT-JUDGE":
-            if not cursor.productVerdict:
-                result, answer = inference.call(store, self.provider, questions.product_brief(store))
-                if not questions.satisfied(answer, final=True):
-                    raise ValueError("Product quality or guide gap: " + str(answer))
-                with store.transaction():
-                    verdict = store.record("product_verdict", {"commit": cursor.candidate,
-                                                               "answer": answer, "source": result})
-                    store.cursor(replace(store.cursor(), productVerdict=verdict))
-            advance(store, "satisfied", "Product quality and try-it guide satisfied")
+        elif state in ("DEMO-JUDGE", "PRODUCT-JUDGE", "DEMO-FACTS", "PRODUCT-FACTS"):
+            judgment.step(store, self.provider)
         return store.cursor().state
 
     def run(self):

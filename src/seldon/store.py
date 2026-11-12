@@ -38,6 +38,9 @@ class RunRow:
     finalObservations: list[str] = field(default_factory=list)
     demoVerdicts: list[str] = field(default_factory=list)
     productVerdict: str | None = None
+    pendingJudge: str | None = None
+    requirementVerdicts: list[str] = field(default_factory=list)
+    qualityVerdicts: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

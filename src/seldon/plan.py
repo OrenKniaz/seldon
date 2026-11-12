@@ -78,6 +78,14 @@ def create(vision, answer):
             "requirements": [handles.get(r, r) for r in unit["requirements"]],
             "dependencies": [f"u{d:03}" for d in unit["dependencies"]]}}
     document = {"nodes": nodes}
+    quality = vision["quality"]
+    if sorted(q["criterion"] for q in answer["quality"]) != list(range(1, len(quality) + 1)):
+        raise ValueError("Trace every accepted quality criterion exactly once")
+    for item in answer["quality"]:
+        index = item["criterion"]
+        nodes[f"quality:{index:03}"] = {"kind": "criterion", "body": {
+            **quality[index - 1], "judgment": item["judgment"],
+            "checks": [handles.get(r, r) for r in item["checks"]]}}
     validate(document)
     return document
 
@@ -91,6 +99,10 @@ def validate(document):
         if ref == "vision":
             continue
         kind, body = node["kind"], node["body"]
+        if kind == "criterion":
+            if not body["checks"] or any(nodes.get(c, {}).get("kind") != "check" for c in body["checks"]):
+                raise ValueError(f"{ref}: quality must trace to existing checks")
+            continue
         validate_schema(body, BODIES[kind], ref)
         relation, target_kind = relation_types[kind]
         if any(nodes.get(r, {}).get("kind") != target_kind for r in body[relation]):

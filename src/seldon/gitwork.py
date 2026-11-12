@@ -47,7 +47,7 @@ def paths(root, revision):
     return [p for p in git(root, "ls-tree", "-rz", "--name-only", revision).split("\0") if p]
 
 
-def sources(root, revision, patterns, named=None):
+def sources(root, revision, patterns, named=None, *, details=False):
     entries = git(root, "ls-tree", "-rz", revision, binary=True)
     blobs = {}
     for entry in entries.split(b"\0"):
@@ -63,48 +63,17 @@ def sources(root, revision, patterns, named=None):
     result = {}
     for path in blobs:
         _, _, size = batch.readline().split()
-        result[path] = batch.read(int(size)).decode("utf-8", errors="replace")
+        content = batch.read(int(size))
+        if details:
+            result[path] = {"present": True, "bytes": len(content), "commit": revision}
+            try:
+                result[path]["text"] = content.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        else:
+            result[path] = content.decode("utf-8", errors="replace")
         batch.read(1)  # Git separates size-delimited blobs with a newline.
     return result
-
-
-def inspection_catalog(root, revision, selected):
-    """Load named regular blobs once for this revision; only a subject's selection reaches its judge."""
-    requested = {}
-    for item in selected:
-        path = safe_path(item["path"])
-        requested[path] = requested.get(path, False) or item["show"] == "text"
-    if not requested:
-        return {}
-    files = {}
-    blobs = {}
-    for entry in git(root, "ls-tree", "-rzl", revision, binary=True).split(b"\0"):
-        if not entry:
-            continue
-        header, raw_name = entry.split(b"\t", 1)
-        name = raw_name.decode("utf-8")
-        if name not in requested:
-            continue
-        mode, kind, oid, size = header.split()
-        if kind != b"blob" or mode not in (b"100644", b"100755"):
-            raise ValueError(f"The approved file inspection requires a regular tracked file: {name}")
-        files[name] = {"present": True, "bytes": int(size)}
-        if requested[name] and int(size) <= 65536:
-            blobs[name] = oid
-    if blobs:
-        batch = BytesIO(git(root, "cat-file", "--batch", data=b"\n".join(blobs.values()) + b"\n", binary=True))
-        for name in blobs:
-            _, _, size = batch.readline().split()
-            content = batch.read(int(size))
-            batch.read(1)
-            try:
-                files[name]["text"] = content.decode("utf-8")
-            except UnicodeDecodeError as error:
-                raise ValueError(f"The approved final text inspection requires UTF-8: {name}") from error
-    missing = requested.keys() - files.keys()
-    if missing:
-        raise ValueError("Approved inspection files absent at the delivered revision: " + ", ".join(sorted(missing)))
-    return files
 
 
 def snapshots(root, base, scope, check_paths, scratch):
