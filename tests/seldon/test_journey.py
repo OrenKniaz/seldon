@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from seldon import gitwork, guide, judgment, plan, proof, questions
+from seldon import flow_review, gitwork, guide, judgment, plan, proof, questions
 from seldon.providers import Codex, ProviderFailure, ROLES
 from seldon.run import Run
 from seldon.store import RunRow, Store, UnitRow, encode
@@ -79,12 +79,6 @@ def planned(count, mode):
             "command": [sys.executable, "-S", "-B", "unit-001/check.py"],
             "requiredEnvironment": ["Python"], "expectedEvidence": "A value already present at base",
             "requirements": ["new:r001"]}})
-    if mode == "scale50":
-        # Ten features each contain five requirements; a feature-sized DEMO would grow here.
-        for i in range(count):
-            edits[3 * i + 1]["typedBody"]["features"] = [f"new:f{(i // 5) * 5 + 1:03}"]
-        edits = [e for e in edits if e["kind"] != "feature" or
-                 int(e["targetHandle"][-3:]) % 5 == 1]
     selected = "new:c002" if mode == "traced-evidence" else "new:c001"
     edits.append({"kind": "area", "targetHandle": "new:area", "typedBody": {
         "responsibility": "Deliver named values", "scope": ["**"]}})
@@ -378,7 +372,7 @@ class Scripted:
                                       "unit-001; trace the checks of both owners"}]}
         elif kind == "DECIDE":
             answer = {"choice": "revise" if q["facts"]["User's words"].startswith("Revise") else "approve"}
-        elif kind in ("JUDGE", "DEMO", "PRODUCT"):
+        elif kind in ("JUDGE", "FLOW", "PRODUCT"):
             if kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n002", *questions.SOURCE_TARGETS]:
                 raise ProviderFailure("Judge transport unavailable", True, True)
             if (kind == "JUDGE" and self.mode == "judge-provider" and q["targets"] == ["n005", *questions.SOURCE_TARGETS]
@@ -389,7 +383,7 @@ class Scripted:
                     "why": "A semantic fact needs clarification"}})
             answer = {"verdict": "satisfied", "gaps": [],
                       "assessments": questions.assessments(q["targets"], final=kind != "JUDGE")}
-            if kind in ("DEMO", "PRODUCT"):
+            if kind == "PRODUCT":
                 assert len(q["targets"]) == 1
                 facts = q["facts"]
                 assert "Files on the delivered revision" not in facts and "Check source paths" not in facts
@@ -417,8 +411,6 @@ class Scripted:
                     assert reached == {"u001", "u002"}
                     assert {o["stdout"].strip() for o in facts["Final observations"]} == {
                         "observed value-001", "observed value-002"}
-                elif self.mode == "parallel" and kind == "DEMO" and q["targets"] == ["n002"]:
-                    assert "3 of 3 satisfied" in summary
                 elif self.mode in ("single1", "scale50", "traced-evidence"):
                     expected = ("002" if kind == "PRODUCT" and self.mode == "traced-evidence" else
                                 next(iter(reached))[-3:])
@@ -442,11 +434,20 @@ class Scripted:
                     assert output and all(t.strip() == "observed value-001" for t in output)
                     answer["assessments"][0].update(meaningful=False,
                         why="The stored value was read, but there is no browser observation")
-                if kind == "DEMO" and self.mode == "demo-facts-unavailable" and q["targets"] == ["n002"]:
+            if kind == "FLOW":
+                facts = q["facts"]
+                assert set(q["targets"]) == set(facts["Requirements"])
+                assert facts["Source judgment"]["scopeTreesUnchanged"]
+                assert "Product files at P" not in facts and "Check sources" not in facts
+                assert all(o["exitCode"] == 0 and o["executionStarted"] and o["cleanupVerified"]
+                           for o in facts["Final observations"])
+            if kind in ("FLOW", "PRODUCT"):
+                facts = q["facts"]
+                if kind == "FLOW" and self.mode == "demo-facts-unavailable" and q["targets"] == ["n002"]:
                     return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                         "The missing manual observation of the demonstrated interaction"], "why": "Not observed"}})
-                prefix = kind.lower()
-                is_subject = q["targets"] == (["n002"] if kind == "DEMO" else ["quality:001"])
+                prefix = "demo" if kind == "FLOW" else "product"
+                is_subject = q["targets"] == (["n002"] if kind == "FLOW" else ["quality:001"])
                 if is_subject and (self.mode == prefix + "-uncertain"
                                    or kind == "PRODUCT" and self.mode in ("single1", "scale50")):
                     if "Requested facts" not in facts:
@@ -455,7 +456,8 @@ class Scripted:
                             "why": "Need the actual execution facts"}})
                     actual, = facts["Final observations"]
                     assert actual["executionStarted"] and actual["cleanupVerified"]
-                    assert actual["ranOnDeliveredRevision"]
+                    if kind == "PRODUCT":
+                        assert actual["ranOnDeliveredRevision"]
                 if (kind == "PRODUCT" and is_subject
                         and self.mode in ("product-source-resolved", "product-source-unresolved",
                                           "product-source-oversize", "product-facts-unavailable")):
@@ -570,15 +572,15 @@ def records_and_skeleton_journey(slot):
     began = time.monotonic()
     run, provider = prepare(slot, "records-guide-gap", 3)
     try:
-        while run.store.cursor().state != "DEMO-JUDGE":
+        while run.store.cursor().state != "FLOW-JUDGE":
             assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
             run.step()
         assert obligations.remaining(run.store)
-        with pytest.raises(ValueError, match="open skeleton obligations"):
+        with pytest.raises(ValueError, match="after check-in"):
             eligible(run.store)
-        run.step()
-        assert run.store.cursor().state == "PRODUCT-JUDGE"
+        assert run.step() == "CHECK-IN"
         assert not obligations.remaining(run.store)
+        assert run.step() == "PRODUCT-JUDGE"
         before = run.store.units()
         observations = run.store.records("observation")
         checks_before = {run.store.read(r)["check"] for r in run.store.cursor().finalObservations}
@@ -605,16 +607,16 @@ def records_and_skeleton_journey(slot):
             run.step()
         assert run.step() == "EXECUTE"
         assert run.step() == "WAVE-VERIFY"
-        assert run.step() == "CHECK-IN"
+        assert run.step() == "FLOW-JUDGE"
         fresh = run.store.records("observation")[len(observations):]
         assert {b["check"] for _, _, b in fresh} == checks_before
         assert len(fresh) == len(checks_before)
         assert all(b["purpose"] == "final" and b["commit"] == run.store.cursor().candidate
                    for _, _, b in fresh)
-        assert run.step() == "DEMO-JUDGE"
+        assert run.step() == "CHECK-IN"
+        assert run.step() == "PRODUCT-JUDGE"
         assert sum(b["gate"] == "CHECK-IN" for _, _, b in run.store.records("decision_request")) == \
             checkins_before + 1
-        assert run.step() == "PRODUCT-JUDGE"
         after = run.store.units()
         assert retained in run.store.cursor().requirementVerdicts
         assert after["u001"].judgment == before["u001"].judgment
@@ -631,6 +633,11 @@ def records_and_skeleton_journey(slot):
         assert {b["check"] for b in final} == checks_before
         assert all(b["commit"] == cursor.candidate and b["exitCode"] == 0 for b in final)
         assert all(run.store.read(r)["commit"] == cursor.candidate for r in cursor.requirementVerdicts)
+        # C must refuse a lost closure even when all commands and flow headlines are green.
+        run.store.cursor(replace(cursor, requirementVerdicts=[]))
+        with pytest.raises(ValueError, match="open skeleton obligations"):
+            eligible(run.store)
+        run.store.cursor(cursor)
         for kind in ("WORK", "JUDGE"):
             briefs = [b["facts"] for _, k, b in rows if k == "question" and b["kind"] == kind
                       and "Guide path" not in b["facts"]]
@@ -687,6 +694,10 @@ def finish(run):
         assert sum(q["targets"] == [subject] for q in initial) == 1
     observations = [b for _, kind, b in rows if kind == "observation"]
     for obs in observations:
+        if obs["check"] == "guide:format":
+            assert not obs["executionStarted"] and obs["cleanupVerified"] and obs["exitCode"] is None
+            assert obs["command"] == [] and obs["stderr"] and obs["unit"] == "guide"
+            continue
         assert obs["executionStarted"] and obs["cleanupVerified"] and not obs["timedOut"]
     revisions = sorted({o["commit"] for o in observations})
     checked = gitwork.git(run.project, "cat-file", "--batch-check",
@@ -724,7 +735,7 @@ def admission_journey(slot):
 
 
 def stale_scope_journey(slot):
-    """A merge losing a check assertion must reach its unit JUDGE before DEMO.
+    """A merge losing a check assertion must reach its unit JUDGE before FLOW.
 
     Ordinary disjoint merges keep the unit's scope intact and never challenge a stale unit verdict.
     """
@@ -766,8 +777,8 @@ def stale_scope_journey(slot):
                    and b["targets"] == ["n005", *questions.SOURCE_TARGETS]]
         assert len(sibling) == 2 and "integration annotation" in sibling[1]["facts"]["Check sources"][
             "unit-002/check.py"]
-        final = next(b for _, k, b in rows if k == "question" and b["kind"] == "DEMO")
-        assert "scope trees unchanged" in final["facts"]["Source judgment"]
+        final = next(b for _, k, b in rows if k == "question" and b["kind"] == "FLOW")
+        assert final["facts"]["Source judgment"]["scopeTreesUnchanged"]
     finally:
         run.close()
 
@@ -776,7 +787,7 @@ def final_seed(slot):
     """One actual scripted delivery supplies final-judge faults with real Git and proof records."""
     run, _ = prepare(slot, "final-seed", 2)
     try:
-        while run.store.cursor().state != "DEMO-JUDGE":
+        while run.store.cursor().state != "FLOW-JUDGE":
             assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
             run.step()
     finally:
@@ -872,7 +883,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             return
         if mode in ("demo-uncertain", "product-uncertain"):
             # Reopen with a pending fact request: ordinary in-process retries cannot expose lost intent.
-            target = "DEMO-FACTS" if mode.startswith("demo") else "PRODUCT-FACTS"
+            target = "FLOW-FACTS" if mode.startswith("demo") else "PRODUCT-FACTS"
             while run.store.cursor().state != target:
                 assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
                 run.step()
@@ -882,7 +893,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
         if mode in ("mixed-criterion", "product-source-resolved", "product-source-unresolved",
                     "product-source-oversize", "product-facts-unavailable", "demo-facts-unavailable",
                     "unit-uncertain"):
-            assert not run.store.records("fixup") and cursor.repairs == 0
+            assert not run.store.records("unit_fixup") and cursor.repairs == 0
             assert all(u.recoveries == 0 for u in units.values())
             local = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"]
             assert all(not any(t.startswith("quality:") for t in q["targets"]) for q in local)
@@ -956,13 +967,13 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert reviews[0]["gaps"][0]["target"] == "quality:002"
             assert reviews[1]["verdict"] == "adequate"
         if mode in ("demo-uncertain", "product-uncertain"):
-            assert not run.store.records("fixup")
+            assert not run.store.records("unit_fixup")
             assert all(u.recoveries == 0 for u in units.values())
             retries = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
             assert len(retries) == 1 and run.store.records("judge_uncertain")
         if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved"):
-            fixup, = run.store.records("fixup")
-            assert fixup[2]["units"] == ["u001"]
+            fixup, = run.store.records("unit_fixup")
+            assert fixup[2]["owner"] == "u001"
             assert units["u001"].recoveries == 1 and units["u002"].recoveries == 0
             assert (slot / "turn-unit-001").read_text() == "2"
             assert (slot / "turn-unit-002").read_text() == "1"
@@ -973,7 +984,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
         if mode in ("guide-gap", "guide-command", "guide-path", "guide-format"):
             assert units["guide"].recoveries == 1 and units["u001"].recoveries == 0
             assert (slot / "turn-docs").read_text() == "2"
-            assert len([b for _, k, b in rows if k == "question" and b["kind"] == "DEMO"]) == count
+            assert len([b for _, k, b in rows if k == "question" and b["kind"] == "FLOW"]) == count
             assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"
                         and b["targets"] != ["tryItGuide"]]) == 2
             assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"
@@ -1012,7 +1023,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert row[3] == "SCRIPTED_C" and len(row) == 16 and "accepted=False" in output
         sizes = {kind: max(len(encode(b).encode("utf-8")) for _, k, b in rows
                           if k == "question" and b["kind"] == kind)
-                 for kind in ("WORK", "JUDGE", "DEMO", "PRODUCT")}
+                 for kind in ("WORK", "JUDGE", "FLOW", "PRODUCT")}
         if mode in ("single1", "scale50"):
             sizes["same-unit JUDGE"] = max(len(encode(b).encode("utf-8")) for _, k, b in rows
                 if k == "question" and b["kind"] == "JUDGE"
@@ -1020,7 +1031,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             sizes["re-ask"] = max(len(encode(q).encode()) for q in reasks)
         if mode in ("single1", "scale50"):
             final = [run.store.read(r) for r in cursor.finalObservations]
-            demos = [b for _, k, b in rows if k == "question" and b["kind"] == "DEMO"]
+            demos = [b for _, k, b in rows if k == "question" and b["kind"] == "FLOW"]
             final = [o for o in final if o["unit"] != "guide"]
             assert len(final) == count and len(demos) == count
             assert {o["check"] for q in demos for o in q["facts"]["Final observations"]} == {
@@ -1184,9 +1195,8 @@ def test_clean_core_golden(tmp_path):
     Uncertainty twins prove a store fact resolves without rework; persistent uncertainty and real gaps
     must repair an actual blocked interaction through its original owner, preserving unrelated DONE work.
     Existing success-only journeys cannot expose the old all-DONE/INCOMPLETE failure or false satisfaction.
-    One versus fifty uses real Foundation source sizes and compares DEMO and PRODUCT too,
-    with multiple requirements per feature to expose
-    feature-wide evidence growth that one-requirement-per-feature plans cannot catch.
+    One versus fifty uses the same feature and real Foundation source sizes to compare FLOW,
+    PRODUCT and JUDGE. The shared-page journey covers multiple requirements per feature.
     Reopening a terminal failure preserves state and records; interrupted recovery cannot prove this.
     Guide command/path faults catch guide prose passing without execution. A docs-only semantic fix
     preserves all other final verdicts; the old all-verdict reset is invisible in pre-final failures.
@@ -1243,15 +1253,25 @@ def recorded_judgment_journey(root):
             verdict = store.record("unit_verdict", {"commit": commit, "answer": {"verdict": "satisfied"},
                 "scopeTree": gitwork.scope_tree(root, commit, unit["scope"], scratch)})
             store.unit(ref, UnitRow(state="DONE", P=commit, judgment=verdict))
-        for case in recording["cases"]:
-            question = judgment.brief(store, case["kind"], case["subject"])
+        cases = [(case, feature) for case in recording["cases"] for feature in (
+            plan.select(recording["plan"], "requirement")[case["subject"]]["features"]
+            if case["kind"] == "DEMO" else [None])]
+        for case, feature in cases:
+            if feature and set(flow_review.trace(recording["plan"], feature)[1]) - {
+                    store.read(r)["check"] for r in refs}:
+                # This retained requirement recording cannot prove the rest of its feature.
+                with pytest.raises(ValueError, match="every traced check"):
+                    flow_review.brief(store, feature)
+                continue
+            question = (flow_review.brief(store, feature) if feature else
+                        judgment.brief(store, case["kind"], case["subject"]))
             size = len(encode(question).encode("utf-8"))
             assert size < case["maxBytes"], (case["kind"], size, case["beforeBytes"])
             facts = question["facts"]
             assert question["images"] == [artifacts[p] for p in recording["images"]]
             assert "Files on the delivered revision" not in facts and "Check source paths" not in facts
             assert all(encode(source)[1:-1] not in encode(facts) for source in recording["files"].values())
-            for artifact in facts["Check artifacts"].values():
+            for artifact in facts.get("Check artifacts", {}).values():
                 if "text" in artifact:
                     assert artifact["text"] in {text.encode("utf-8")[-4096:].decode("utf-8", errors="replace")
                                                 for text in recording["artifacts"].values()}
@@ -1328,14 +1348,18 @@ def recorded_minimal_journey(root):
         store.unit("u001", replace(store.unit("u001"), judgment=verdict))
         store.cursor(replace(store.cursor(), finalObservations=green))
         product = judgment.brief(store, "PRODUCT", "quality:001")
+        flow = flow_review.brief(store, "n001")
         assert product["facts"]["Subject"] == recording["criterion"]
         assert len(product["images"]) == 3 and "Product files at P" not in product["facts"]
         expanded = deepcopy(document)
         expanded["nodes"]["n004"]["body"]["scope"] = ["**"]
         for number in range(2, 51):
             r, c = f"r{number}", f"c{number}"
+            expanded["nodes"][f"f{number}"] = {"kind": "feature", "body": {
+                **document["nodes"]["n001"]["body"]}}
             expanded["nodes"][r] = {"kind": "requirement", "body": {
-                **document["nodes"]["n002"]["body"], "obligation": f"Independent value {number}"}}
+                **document["nodes"]["n002"]["body"], "features": [f"f{number}"],
+                "obligation": f"Independent value {number}"}}
             expanded["nodes"][c] = {"kind": "check", "body": {
                 **document["nodes"]["n003"]["body"], "requirements": [r]}}
             expanded["nodes"][f"u{number:03}"] = {"kind": "unit", "body": {
@@ -1346,10 +1370,12 @@ def recorded_minimal_journey(root):
         store.cursor(replace(store.cursor(), revision=store.revision(expanded)))
         assert questions.judge_brief(store, "u001") == question
         assert judgment.brief(store, "PRODUCT", "quality:001") == product
+        assert flow_review.brief(store, "n001") == flow
         print("P10 recorded c01 JUDGE: " + str(len(encode(original).encode())) + " -> "
               + str(len(encode(question).encode())) + " bytes; 0 -> 3 local images; c02 PRODUCT: "
               + str(len(encode(product).encode())) + " bytes; identical at 1/50 units", flush=True)
-        return {"JUDGE": len(encode(question).encode()), "PRODUCT": len(encode(product).encode())}
+        return {"JUDGE": len(encode(question).encode()), "PRODUCT": len(encode(product).encode()),
+                "FLOW": len(encode(flow).encode())}
     finally:
         store.close()
 
@@ -1891,7 +1917,7 @@ def clean_core_golden(root):
     # A copied fault must never mutate its shared seed through an old store/Git/provider path.
     store = Store(seed / "product")
     try:
-        assert store.cursor().state == "DEMO-JUDGE"
+        assert store.cursor().state == "FLOW-JUDGE"
         gitwork.unchanged(seed / "product", store.cursor().candidate)
         assert all((seed / name).read_text() == "1" for name in
                    ("turn-unit-001", "turn-unit-002", "turn-docs"))

@@ -3,13 +3,13 @@
 from dataclasses import replace
 from pathlib import Path
 
-from . import gitwork, guide, inference, plan, proof, questions, units
+from . import fixups, gitwork, guide, inference, plan, proof, questions
 from .states import advance
 from .store import encode
 
 
 def subjects(document, kind):
-    if kind == "DEMO":
+    if kind == "FLOW":
         return plan.select(document, "requirement")
     return {**plan.select(document, "criterion"), "tryItGuide": {
         "criterion": "The try-it guide is usable from the delivered directory",
@@ -63,8 +63,7 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
         item.update(workingDirectory=body["cwd"], commit=body["commit"], ranOnDeliveredRevision=True,
                     **{k: body[k] for k in ("executionStarted", "cleanupVerified", "timedOut")})
     body = subjects(document, kind)[subject]
-    obligation = ({k: v for k, v in body.items() if k != "features"} if kind == "DEMO" else
-                  {k: body[k] for k in ("criterion", "verification")})
+    obligation = {k: body[k] for k in ("criterion", "verification")}
     facts = {"Subject": obligation, "Checks": checks, "Final observations": final,
              "Source judgment": ("source judged at every reached unit: "
                                  f"{satisfied} of {len(set(owned) - {'guide'})} satisfied, "
@@ -132,23 +131,13 @@ def fixup(store, kind, subject, result, answer, affected=None):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
     affected = owners(document, kind, subject) if affected is None else affected
-    failure = str(answer)
-    with store.transaction():
-        cause = store.record("fixup", {"subject": subject, "kind": kind, "source": result,
-                                      "units": list(affected), "commit": cursor.candidate,
-                                      "correction": failure})
-        for ref in affected:
-            row = store.unit(ref)
-            gitwork.checkout(row.worktree, cursor.candidate)
-            store.unit(ref, replace(row, base=cursor.candidate))
-            units.recover(store, ref, failure)
-        advance(store, "gap", cause, pendingJudge=None, finalCommit=None, finalObservations=[],
-                demoVerdicts=[], productVerdict=None,
-                checkin=None, decision=None)
+    return fixups.apply(store, [{"subject": subject, "kind": "flow", "source": result,
+                                 "units": list(affected), "commit": cursor.candidate,
+                                 "correction": str(answer)}])
 
 
 def save(store, kind, subject, result, answer, trees):
-    field = "requirementVerdicts" if kind == "DEMO" else "qualityVerdicts"
+    field = "qualityVerdicts"
     with store.transaction():
         cursor = store.cursor()
         ref = store.record("subject_verdict", {"subject": subject, "kind": kind,
@@ -157,10 +146,8 @@ def save(store, kind, subject, result, answer, trees):
         store.cursor(replace(cursor, **{field: getattr(cursor, field) + [ref]}, pendingJudge=None))
 
 
-def step(store, provider):
+def refresh_units(store, provider):
     cursor = store.cursor()
-    kind = "DEMO" if cursor.state.startswith("DEMO") else "PRODUCT"
-    field = "requirementVerdicts" if kind == "DEMO" else "qualityVerdicts"
     document = store.plan(cursor.revision)
     approved = store.read(cursor.B)["subject"]
     if (approved["revision"] != cursor.revision or approved["plan"] != document
@@ -181,12 +168,22 @@ def step(store, provider):
         result, answer = inference.call(store, provider, questions.judge_brief(
             store, ref, cursor.candidate, evidence))
         if answer["verdict"] != "not judged" and not questions.satisfied(answer):
-            fixup(store, kind, ref, result, answer, {ref: unit})
-            return
+            fixup(store, "FLOW", ref, result, answer, {ref: unit})
+            return False
         result = store.record("unit_verdict", {"commit": cursor.candidate, "scopeTree": trees[ref],
                                                "answer": answer, "source": result})
         with store.transaction():
             store.unit(ref, replace(row, judgment=result))
+    return True
+
+
+def step(store, provider):
+    if not refresh_units(store, provider):
+        return
+    cursor = store.cursor()
+    kind, field = "PRODUCT", "qualityVerdicts"
+    document = store.plan(cursor.revision)
+    trees = scope_trees(store, plan.select(document, "unit"))
     with store.transaction():
         cursor = replace(cursor, **{f: [r for r in getattr(cursor, f) if current(store.read(r), trees)]
                                     for f in ("requirementVerdicts", "qualityVerdicts")})
@@ -238,26 +235,6 @@ def step(store, provider):
     cursor = store.cursor()
     verdicts = [store.read(r) for r in getattr(cursor, field)]
     with store.transaction():
-        if kind == "DEMO":
-            # Unchanged scope-tree verdicts are reusable, but obligation closure binds to this final commit.
-            current_refs = []
-            for ref in cursor.requirementVerdicts:
-                row = store.read(ref)
-                current_refs.append(ref if row["commit"] == cursor.candidate else store.record(
-                    "subject_verdict", {**row, "commit": cursor.candidate, "reusedFrom": ref}))
-            cursor = replace(cursor, requirementVerdicts=current_refs)
-            store.cursor(cursor)
-            refs = []
-            for feature in plan.select(document, "feature"):
-                requirements = {r for r, b in plan.select(document, "requirement").items()
-                                if feature in b["features"]}
-                selected = [v for v in verdicts if v["subject"] in requirements]
-                refs.append(store.record("feature_verdict", {"feature": feature,
-                    "commit": cursor.candidate, "answer": combined(selected),
-                    "sources": [r for r in cursor.requirementVerdicts
-                                if store.read(r)["subject"] in requirements]}))
-            advance(store, "satisfied", refs, demoVerdicts=refs)
-        else:
-            verdict = store.record("product_verdict", {"commit": cursor.candidate,
-                "answer": combined(verdicts), "sources": cursor.qualityVerdicts})
-            advance(store, "satisfied", verdict, productVerdict=verdict)
+        verdict = store.record("product_verdict", {"commit": cursor.candidate,
+            "answer": combined(verdicts), "sources": cursor.qualityVerdicts})
+        advance(store, "satisfied", verdict, productVerdict=verdict)

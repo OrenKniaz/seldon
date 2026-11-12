@@ -61,7 +61,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None, max_by
         if kind in ("JUDGE", "DEMO", "PRODUCT"):
             if sorted(a["target"] for a in answer["assessments"]) != sorted(question["targets"]):
                 raise ValueError("Assess the exact requested subjects, each once")
-        if answer.get("verdict") == "satisfied" and not questions.satisfied(answer, final=kind != "JUDGE"):
+        if (kind != "FLOW" and answer.get("verdict") == "satisfied"
+                and not questions.satisfied(answer, final=kind != "JUDGE")):
             raise ValueError("A negative assessment requires a gap verdict and correction: " + str(answer))
         check(answer)
 
@@ -78,6 +79,6 @@ def call(store, provider, question, unit=None, check=lambda answer: None, max_by
             except (questions.MissingFacts, questions.UnitTooLarge) as error:
                 answer = {**answer, "why": answer["why"] + "; " + str(error)}
         answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
-    elif answer.get("verdict") == "uncertain" and kind not in ("DEMO", "PRODUCT"):
+    elif answer.get("verdict") == "uncertain" and kind not in ("FLOW", "PRODUCT"):
         raise questions.MissingFacts("Unresolved facts: " + "; ".join(answer["neededFacts"]))
     return result, answer

@@ -198,7 +198,9 @@ class Store:
                     for field in ("requirementVerdicts", "qualityVerdicts"):
                         fields[field] = [r for r in getattr(cursor, field) if not affected.intersection(
                             judgment.owners(document, self.read(r)["kind"], self.read(r)["subject"]))]
-                    self.cursor(replace(cursor, **fields, demoVerdicts=[], productVerdict=None,
+                    fields["demoVerdicts"] = [r for r in cursor.demoVerdicts if not affected.intersection(
+                        self.read(r)["scopeTrees"])]
+                    self.cursor(replace(cursor, **fields, productVerdict=None,
                                         pendingJudge=None))
             return row.lastrowid
 

@@ -1,12 +1,11 @@
 """C1/C8/C15/C23/I6; R7/R9/R11: one wave of independent unit lifecycles, then final proof."""
 
 import os
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from pathlib import Path
 
 from . import (
-    decisions, gitwork, guide, inference, judgment, obligations, plan, proof, questions, scheduler, units,
+    decisions, fixups, flow_review, gitwork, guide, inference, judgment, obligations, plan, proof,
+    questions, scheduler, units, wave_verify,
 )
 from .states import advance
 from .store import RunRow, Store, UnitRow
@@ -33,7 +32,7 @@ def eligible(store):
         raise ValueError("C requires current unit judgments after contract changes")
     verdicts = [store.read(r) for r in cursor.demoVerdicts]
     trees = judgment.scope_trees(store, plan.select(document, "unit"))
-    for kind, refs in (("DEMO", cursor.requirementVerdicts), ("PRODUCT", cursor.qualityVerdicts)):
+    for kind, refs in (("FLOW", cursor.requirementVerdicts), ("PRODUCT", cursor.qualityVerdicts)):
         rows = [store.read(r) for r in refs]
         if ({r["subject"] for r in rows} != set(judgment.subjects(document, kind))
                 or len(rows) != len(judgment.subjects(document, kind))
@@ -41,7 +40,9 @@ def eligible(store):
                            and judgment.ready(r["answer"]) for r in rows)):
             raise ValueError("C requires each final subject satisfied or explicitly not judged")
     if ({v["feature"] for v in verdicts} != set(plan.select(document, "feature"))
-            or not all(v["commit"] == cursor.candidate and judgment.ready(v["answer"])
+            or len(verdicts) != len(plan.select(document, "feature"))
+            or not all(v["commit"] == cursor.candidate and judgment.current(v, trees)
+                       and judgment.ready(v["answer"])
                        for v in verdicts)):
         raise ValueError("C requires a satisfied final verdict for every feature")
     product = store.read(cursor.productVerdict) if cursor.productVerdict else None
@@ -57,60 +58,6 @@ def incomplete(store, reason):
         "reason": reason, "failed": failed, "blocked": blocked,
         "nextAction": "Resolve the named failure, then start a fresh run."})
     advance(store, "fail", outcome)
-
-
-def wave_verify(store, capacity):
-    cursor = store.cursor()
-    document = store.plan(cursor.revision)
-    assignments = plan.assigned(document)
-    gitwork.unchanged(store.root.parent, cursor.candidate)
-
-    def observe_unit(ref):
-        try:
-            checks, root = assignments[ref], store.root.parent
-            if ref == "guide":
-                # A user follows the guide in a fresh copy of the delivery; its steps never touch the candidate.
-                row = store.unit(ref)
-                gitwork.checkout(row.worktree, cursor.candidate)
-                gitwork.git(row.worktree, "clean", "-fdx")
-                root = row.worktree
-                try:
-                    checks = guide.checks(root)
-                except ValueError as error:
-                    store.unit(ref, replace(row, base=cursor.candidate))
-                    units.recover(store, ref, str(error))
-                    return ref, []
-            tree = gitwork.scope_tree(store.root.parent, cursor.candidate,
-                                      plan.select(document, "unit")[ref]["scope"], cursor.scratch)
-            return ref, proof.observe(store, root, cursor.candidate, checks, "final", ref, tree,
-                                      disposable=ref == "guide")
-        finally:
-            store.close()
-
-    with ThreadPoolExecutor(max_workers=capacity) as pool:
-        results = list(pool.map(observe_unit, store.units()))
-    wave = proof.observe(store, store.root.parent, cursor.candidate, assignments[None], "final")
-    observations = [r for _, refs in results for r in refs] + wave
-    rework = False
-    for ref, refs in results:
-        if store.unit(ref).state != "DONE":
-            rework = True
-            continue
-        bad = proof.failures(store, refs)
-        if bad:
-            row = store.unit(ref)
-            gitwork.checkout(row.worktree, cursor.candidate)
-            with store.transaction():
-                store.unit(ref, replace(row, base=cursor.candidate))
-            units.recover(store, ref, "Final unit checks failed: " + proof.explain(bad))
-            rework = True
-    if proof.failures(store, wave):
-        raise ValueError("Final cross-unit wave checks failed: " + proof.explain(proof.failures(store, wave)))
-    with store.transaction():
-        advance(store, "rework" if rework else "passed", observations,
-                finalCommit=None if rework else cursor.candidate,
-                finalObservations=[] if rework else observations, demoVerdicts=[], productVerdict=None,
-                pendingJudge=None)
 
 
 class Run:
@@ -214,8 +161,16 @@ class Run:
             else:
                 advance(store, "finished", "Every unit integrated")
         elif state == "WAVE-VERIFY":
-            wave_verify(store, self.capacity)
-        elif state in ("DEMO-JUDGE", "PRODUCT-JUDGE", "DEMO-FACTS", "PRODUCT-FACTS"):
+            observations = wave_verify.verify(store, cursor.candidate)
+            gaps = proof.gaps(store, cursor.candidate, observations)
+            if gaps:
+                fixups.apply(store, gaps)
+            else:
+                advance(store, "passed", observations, finalCommit=cursor.candidate,
+                        finalObservations=observations)
+        elif state in ("FLOW-JUDGE", "FLOW-FACTS"):
+            flow_review.step(store, self.provider)
+        elif state in ("PRODUCT-JUDGE", "PRODUCT-FACTS"):
             judgment.step(store, self.provider)
         return store.cursor().state
 

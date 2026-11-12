@@ -4,7 +4,7 @@ import os
 import uuid
 from pathlib import Path
 
-from . import gitwork
+from . import gitwork, plan
 from .processes import execute
 from .providers import ROLES
 
@@ -57,6 +57,22 @@ def explain(failed):
     fields = ("check", "purpose", "command", "executionStarted", "timedOut", "cleanupVerified",
               "exitCode", "stdout", "stderr")
     return str([{field: body[field] for field in fields} for body in failed])
+
+
+def gaps(store, candidate, observations):
+    """Return observed check failures to the fixup owner; never change a unit or the run."""
+    document = store.plan(store.cursor().revision)
+    result = []
+    for ref in observations:
+        body = store.read(ref)
+        if body["commit"] != candidate:
+            raise ValueError("Check gaps require observations from the candidate commit")
+        if failures(store, [ref]):
+            owners = (["guide"] if body["unit"] == "guide" else
+                      list(plan.traced_units(document, {body["check"]: body})))
+            result.append({"subject": body["check"], "kind": "check", "commit": candidate,
+                           "units": owners, "correction": explain([body]), "source": ref})
+    return result
 
 
 def prove(store, ref, contract, checks):

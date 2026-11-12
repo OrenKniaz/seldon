@@ -26,7 +26,7 @@ class ProviderFailure(RuntimeError):
 
 
 def role_for(kind, context):
-    return {"REVIEW": "reviewer", "WORK": "build", "JUDGE": "judge", "DEMO": "demo", "PRODUCT": "demo",
+    return {"REVIEW": "reviewer", "WORK": "build", "JUDGE": "judge", "FLOW": "demo", "PRODUCT": "demo",
             "DECIDE": "decider"}.get(kind, "planner")
 
 

@@ -5,7 +5,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import gitwork, inference, plan, proof, questions
+from . import fixups, gitwork, inference, plan, proof, questions
 from .providers import ProviderFailure, ResumeUnavailable, session_id, terminal_answer
 from .schema import validate
 from .states import advance
@@ -21,6 +21,23 @@ def recover(store, ref, failure, retryable=True):
         advance(store, "exhausted" if exhausted else "recover", cause, unit=ref,
                 recoveries=unit.recoveries if exhausted else unit.recoveries + 1,
                 failure=failure, report=None, T=None, P=None, observations=[], judgment=None)
+        if exhausted and fixups.active(store, ref):
+            block_dependants(store, ref, cause)
+
+
+def block_dependants(store, failed, cause):
+    document = store.plan(store.cursor().revision)
+    reached = {failed}
+    while True:
+        added = {ref for ref in store.units() if ref not in reached
+                 and reached.intersection(plan.prerequisites(document, ref))}
+        if not added:
+            return
+        reached.update(added)
+        for ref in added:
+            if store.unit(ref).state not in ("FAILED", "BLOCKED"):
+                advance(store, "blocked", cause, unit=ref,
+                        failure=f"Dependency {failed} exhausted its recoveries", waiting="")
 
 
 def recovered_report(store, ref):
@@ -58,12 +75,22 @@ def thread_from_recording(store, ref):
                     store.unit(ref, replace(store.unit(ref), thread=thread))
 
 
+def work_brief(store, ref):
+    question = questions.work_brief(store, ref)
+    if assignment := fixups.active(store, ref):
+        question["facts"]["Checks"] = fixups.checks_for(store, store.plan(store.cursor().revision), ref)
+        question["facts"]["Scoped corrections"] = {
+            "owner": ref, "writeScope": assignment["scope"],
+            "corrections": [g["correction"] for g in assignment["gaps"]]}
+    return question
+
+
 def work(store, provider, ref):
     unit = store.unit(ref)
     report = recovered_report(store, ref)
     if report is None:
         thread_from_recording(store, ref)
-        question = questions.work_brief(store, ref)
+        question = work_brief(store, ref)
         store.record("writer_start", {"unit": ref, "session": store.unit(ref).thread,
                                       "startedAt": time.time()})
         try:
@@ -76,7 +103,7 @@ def work(store, provider, ref):
                 row = store.unit(ref)
                 store.unit(ref, replace(row, thread=None,
                                         failure=row.failure + "\nResume unavailable: " + str(error)))
-            question = questions.work_brief(store, ref)
+            question = work_brief(store, ref)
             question["execution"]["session"] = None
             question["facts"]["Session recovery"] = "Resume unavailable; use this brief, patch and failure."
             report, answer = inference.call(store, provider, question, unit=ref)
@@ -120,7 +147,7 @@ def integrate(store, ref, checks):
 def run_unit(store, provider, ref):
     document = store.plan(store.cursor().revision)
     contract = plan.select(document, "unit")[ref]
-    checks = plan.assigned(document)[ref]
+    checks = fixups.checks_for(store, document, ref)
     try:
         while (unit := store.unit(ref)).state not in ("DONE", "FAILED", "BLOCKED"):
             try:
@@ -130,7 +157,10 @@ def run_unit(store, provider, ref):
                     advance(store, "start", "Isolated worktree admitted", unit=ref,
                             base=base, worktree=root, waiting="", failure="")
                 elif unit.state == "REWORK":
-                    advance(store, "retry", unit.failure, unit=ref, callFolder=None, callAttempt=None)
+                    root = unit.worktree or gitwork.admit(
+                        store.root.parent, store.cursor().scratch, unit.base)
+                    advance(store, "retry", unit.failure, unit=ref, worktree=root,
+                            callFolder=None, callAttempt=None)
                 elif unit.state == "WORKING":
                     work(store, provider, ref)
                 elif unit.state == "PROVING":
@@ -144,7 +174,9 @@ def run_unit(store, provider, ref):
                             "scopeTree": gitwork.scope_tree(unit.worktree, unit.P, contract["scope"],
                                                             store.cursor().scratch)})
                     else:
-                        result, answer = inference.call(store, provider, questions.judge_brief(store, ref))
+                        question = questions.judge_brief(store, ref)
+                        question["facts"]["Checks"] = checks
+                        result, answer = inference.call(store, provider, question)
                         if answer["verdict"] != "not judged" and not questions.satisfied(answer):
                             raise ValueError("Judgment gap: " + str(answer))
                         result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,
