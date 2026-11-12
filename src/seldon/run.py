@@ -62,19 +62,23 @@ def wave_verify(store, capacity):
 
     def observe_unit(ref):
         try:
-            checks = assignments[ref]
+            checks, root = assignments[ref], store.root.parent
             if ref == "guide":
+                # A user follows the guide in a fresh copy of the delivery; its steps never touch the candidate.
+                row = store.unit(ref)
+                gitwork.checkout(row.worktree, cursor.candidate)
+                gitwork.git(row.worktree, "clean", "-fdx")
+                root = row.worktree
                 try:
-                    checks = guide.checks(store.root.parent)
+                    checks = guide.checks(root)
                 except ValueError as error:
-                    row = store.unit(ref)
-                    gitwork.checkout(row.worktree, cursor.candidate)
                     store.unit(ref, replace(row, base=cursor.candidate))
                     units.recover(store, ref, str(error))
                     return ref, []
             tree = gitwork.scope_tree(store.root.parent, cursor.candidate,
                                       plan.select(document, "unit")[ref]["scope"], cursor.scratch)
-            return ref, proof.observe(store, store.root.parent, cursor.candidate, checks, "final", ref, tree)
+            return ref, proof.observe(store, root, cursor.candidate, checks, "final", ref, tree,
+                                      disposable=ref == "guide")
         finally:
             store.close()
 

@@ -131,7 +131,9 @@ if mode == "parallel" and name in ("unit-001", "unit-002", "unit-003"):
 if guide:
     path = Path(facts["Guide path"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-B", "unit-001/check.py"]
+    # Like a real guide, the walkthrough step writes an output folder where it runs (T-84).
+    command = [sys.executable, "-B", "-c", "import os, subprocess, sys; os.makedirs('guide-output', exist_ok=True); "
+               "sys.exit(subprocess.call([sys.executable, '-B', 'unit-001/check.py']))"]
     if mode == "guide-command" and turn == 1:
         command = [sys.executable, "-B", "-c", "raise SystemExit(7)"]
     linked = "unit-001/absent.txt" if mode == "guide-path" and turn == 1 else "unit-001/check.py"
@@ -328,7 +330,7 @@ class Scripted:
                     assert all(o["exitCode"] == 0 for o in facts["Final observations"])
                     expected = "observed final-compatible value" if self.mode == "final-rework" else \
                         "observed value-001"
-                    assert expected in facts["Final observations"][-1]["stdout"]
+                    assert any(expected in o["stdout"] for o in facts["Final observations"])
                     if self.mode == "guide-gap" and "Clarify the expected result" in guide["text"]:
                         answer.update(verdict="gap", gaps=[{"target": "tryItGuide",
                             "correction": "Explain that the command prints observed value-001"}])

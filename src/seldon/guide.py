@@ -29,4 +29,4 @@ def checks(root):
              "print('Guide paths:', sys.argv[1:], 'missing:', missing); sys.exit(bool(missing))")
     return {f"tryItGuide:{i:03}": {"command": command, "requirements": [],
                                  "purpose": "Walk the delivered try-it guide"}
-            for i, command in enumerate([[sys.executable, "-B", "-c", probe, *paths], *commands])}
+            for i, command in enumerate([*commands, [sys.executable, "-B", "-c", probe, *paths]])}

@@ -13,7 +13,7 @@ class UncertainCleanup(RuntimeError):
     pass
 
 
-def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
+def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None, disposable=False):
     observations = []
     setup = store.read(store.cursor().kickoff)["setup"]
     timeout = setup.get("providers", {}).get("check", ROLES["check"])["timeout"]
@@ -37,7 +37,8 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
             observations.append(store.record("observation", body))
         if not result["cleanupVerified"]:
             raise UncertainCleanup("Command cleanup unverified: " + str(body))
-    gitwork.unchanged(root, commit)
+    if not disposable:  # A disposable copy (the guide walk) may gain the outputs its steps create.
+        gitwork.unchanged(root, commit)
     return observations
 
 
