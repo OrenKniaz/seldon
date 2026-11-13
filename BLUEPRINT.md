@@ -1,4 +1,4 @@
-# SELDON BLUEPRINT v1.6 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.7 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
@@ -8,6 +8,7 @@
 > **v1.4 (Oren, 2026-11-12, "you can ratify"):** eleven changes from two independent bird's-eye reviews (Fable, Astra) after four judgment redesigns in one day: source is judged once at the unit (R2, §8.4); real-question size checks (R2); local re-ask (R7); reuse only on git ids (R9); no judge execution booleans (R12); flow review is the only cross-unit judge (§3.2); M2 contents and order; milestone cohorts and an earlier fight (P4, P5); review trigger (P10); roles (§8.3). Merged notes: `work/ladder/RECOMMENDATIONS.json` in the dev workspace.
 > **v1.5 (Oren, 2026-11-12, "ok, you can ratify"):** wave-start RED in the unit table (PROVING): a check an earlier unit of the same wave already satisfies must fail on the wave's start commit. The lead's M1 decision, ratified (T-76).
 > **v1.6 (Oren, 2026-11-13, "Ok you can ratify"):** two execution rules from the P10 bird's-eye (Fable + Astra) after M2 exit cohort #4 reached 4/10 on five different walls: every check has one owner and a declared level; every check run is hermetic (§3.1). Notes: `work/ladder/design-review/birds-eye-2026-11-13-{fable,astra}.md`.
+> **v1.7 (Oren, 2026-11-13, "Ok, I accept both re. 15 and process.py changes"):** M3 wording from Fable's design (REC-15): wave-exclusive scopes with the latest path owner; B binds the accepted commitments, other changes go through STEER and show at check-in; VALIDATE per accepted commitment, quality per area; placeholders name their commitment; §8.4 C15 reading for folded commits. §5: processes.py may replace its bootstrap with a suspended start. Notes: `work/ladder/design-review/m3-design-2026-11-13.md`.
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -48,14 +49,14 @@ These six are the load-bearing parts. Work that serves none of them waits.
 | **Feature / Requirement** | The story and acceptance; the observable obligation. |
 | **Check** | An ordinary command and what it proves. Declares `establishes` (must fail before the work, pass after) or `preserves` (must pass before and after). Levels: unit, contract, wave, walkthrough. Every check declares its level and has exactly one owner: the unit whose scope holds its file. A unit check is proven inside its unit; a wave check runs only on the integrated product and only its owner repairs it. Every check run observes an exact commit in its own disposable checkout that code cleans afterwards; scratch and evidence live outside the product files; code never refuses a run for what a check left behind. |
 | **Wave** | A goal and its units. Ends in an integrated, running, proven product. |
-| **Unit** (the charter's bead) | One agent session's worth of work: a path scope, its requirements and checks, the contracts it provides and consumes, its dependencies. |
+| **Unit** (the charter's bead) | One agent session's worth of work: a path scope, its requirements and checks, the contracts it provides and consumes, its dependencies. A unit's scope is exclusive among the units of its wave. A later wave's unit may take paths an earlier unit owned. The owner of a path is the latest unit whose scope holds it; that owner inherits the checks stored there and may change one only when its plan names it. |
 
 Execution adds: Attempt, Patch (a commit), Observation, Judgment, Integration, Discovery, Approval. The walk dream → feature → requirement → check → unit → commit → result must work in both directions.
 
 ### 3.2 Three nested loops
 
-**Run.** `ALIGN → A → ARCHITECT (areas, contracts, decisions, wave outline) → DETAIL wave 1 → REVIEW → B →` per wave `[EXECUTE → WAVE-VERIFY → STEER → CHECK-IN → DETAIL next wave] → VALIDATE (whole dream, feature by feature) → DEMO → C`.
-B approves the architecture, the wave outline and wave 1. Later waves are Seldon's to detail; a change to accepted scope goes to the user (C16).
+**Run.** `ALIGN → A → ARCHITECT (areas, contracts, decisions, wave outline) → DETAIL wave 1 → REVIEW → B →` per wave `[EXECUTE → WAVE-VERIFY → STEER → CHECK-IN → DETAIL next wave] → VALIDATE (code confirms the trace for every feature; a judge is asked once per accepted commitment whether it was delivered as accepted) → DEMO → C`.
+B approves the architecture, the wave outline and wave 1. What the user's approval binds is the accepted commitments. Seldon may change areas, contracts, decisions and the outline through STEER and shows every such change at the next check-in; any change to the commitments goes to the user first. Later waves are Seldon's to detail; a change to accepted scope goes to the user (C16).
 
 **Wave.** Units run concurrently as the graph, scopes and machine allow, each waiting with a shown reason (C12). The wave ends when its units are integrated and WAVE-VERIFY passes on one commit: every check in the product so far, the wave's cross-unit checks, and real-path proof for each surface touched (C26). A **flow review** then has a judge trace each user flow across the contracts it crosses, on the integrated product. Flow review is the only cross-unit judge: its subject is one user flow plus the contracts it crosses, and it replaces the M1 stand-in of a DEMO and PRODUCT judgment after the wave. A WAVE-VERIFY failure becomes a small **fixup unit** owned by the failing scope; integration itself never waits on the whole suite.
 
@@ -86,13 +87,13 @@ Each rule names its check and the real failure it prevents. A change that breaks
 
 **R1. One machine, sized by data.** No size branches in structure; tiny is 1 area, 1 wave, 1 unit. *Check:* hello-world and the 50-unit synthetic journey take the same code path. *Prevents:* the tiny-only plan shape that hid concurrency (core8).
 
-**R2. No call is sized by the product.** A question's facts are bounded by its subject: one unit, one feature, one contract, one wave summary. Product-wide conclusions are computed by code from per-item verdicts. Source text is judged once, at the unit that owns it; questions after integration carry behaviour (observations, screenshots, contract text, one verdict row per unit), never file text. *Check:* the largest question is the same size at 1 and at 50 units, measured on recorded real questions as well as the scripted journey, and each run reports its total judgment calls and bytes. *Prevents:* the 87–97 KB judge questions (f7, f9), the 1.5M-character request (round 33), and final judges re-reading every unit's files (66–86 KB, T-82).
+**R2. No call is sized by the product.** A question's facts are bounded by its subject: one unit, one feature, one contract, one wave summary. Product-wide conclusions are computed by code from per-item verdicts. A quality criterion is judged per area; code combines the areas. Source text is judged once, at the unit that owns it; questions after integration carry behaviour (observations, screenshots, contract text, one verdict row per unit), never file text. *Check:* the largest question is the same size at 1 and at 50 units, measured on recorded real questions as well as the scripted journey, and each run reports its total judgment calls and bytes. *Prevents:* the 87–97 KB judge questions (f7, f9), the 1.5M-character request (round 33), and final judges re-reading every unit's files (66–86 KB, T-82).
 
 **R3. No single-call plan.** Any list an LLM must write is small and bounded; code splits a larger subject into more questions with recorded coverage. *Prevents:* the 32-slot plan ceiling; five PLAN calls and 519 s for three buttons (f7).
 
 **R4. Contracts before parallel work.** Anything two units must agree on is a Contract with one provider. Consumers receive its text in their brief. A unit never depends on another unit's files without a contract or a dependency edge. A contract change stale-marks its consumers (C10). *Prevents:* three button units each needing a page nobody had built (f3).
 
-**R5. Skeleton first.** Any placeholder in the skeleton is a recorded obligation; C cannot pass while one is open (C15). *Prevents:* parts that work alone and fail together.
+**R5. Skeleton first.** Any placeholder in the skeleton is a recorded obligation; C cannot pass while one is open (C15). A placeholder names the accepted commitment it defers and closes when that commitment is validated. *Prevents:* parts that work alone and fail together.
 
 **R6. Scopes, not file lists.** A unit owns path scopes and may create files inside them. A shared file has one named owner. Code enforces scope from the observed diff. *Prevents:* plans rejected over exact file lists (f8); a planner cannot know every file of a large app in advance.
 
@@ -116,7 +117,7 @@ Each rule names its check and the real failure it prevents. A change that breaks
 
 | | Modules |
 |---|---|
-| **Keep** | `store.py` (add typed state records), schema validator, `providers.py` (add session resume and a second provider), `processes.py`, worktrees and atomic publication in `work.py`, recording of every real call, `run_report.py`, the recorded-answer replay test. |
+| **Keep** | `store.py` (add typed state records), schema validator, `providers.py` (add session resume and a second provider), `processes.py` (its bootstrap handshake may be replaced by a suspended start into the job, Oren 2026-11-13), worktrees and atomic publication in `work.py`, recording of every real call, `run_report.py`, the recorded-answer replay test. |
 | **Change** | `plan.py` → the records of §3.1, progressive. `execution.py` → the unit loop of §3.2 on Git commits. `verification.py` → proof by code per unit, then WAVE-VERIFY. `inference.py` and `questions.py` → one brief builder per subject (R12). |
 | **Drop** | Global `WORK(tests)` and `WORK(build)` phases; evidence applicability hashing and `checkGeneration`; exact-file ownership; the 64 KB error as a limit; repair counts by origin; hard-coded `TRY.txt`; required citations nobody reads; the staged `core10b` paging change (keep its recordings and replay test). |
 
@@ -168,4 +169,4 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 | Design consult | Fable, one-shot, when a failure is unclear (bug or design, and the right fix) and for P10 reviews |
 | Executors | Sol 6.1 or Terra 6.1, effort chosen by the orchestrator per task |
 
-4. **Reading of C15 (Oren, 2026-11-12):** the no-stubs, mocks or missing check is the unit JUDGE verdict bound to the unit's commit. Code confirms the unit's scope files are unchanged in the integrated commit, or the changed unit is judged again by its own unit JUDGE. Judges after integration see behaviour, not source (R2).
+4. **Reading of C15 (Oren, 2026-11-12):** the no-stubs, mocks or missing check is the unit JUDGE verdict bound to the unit's commit. Code confirms that every commit folded into the integrated product is a unit patch carrying its own unit JUDGE verdict. A unit whose paths a later unit rewrote is not judged again; the later unit's verdict covers the change. Judges after integration see behaviour, not source (R2).
