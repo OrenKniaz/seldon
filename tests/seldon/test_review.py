@@ -114,11 +114,12 @@ def review_journeys(root):
                 run.close()
                 run = Run.reopen(slot / "product", provider, approve)
                 if mode == "persistent":
-                    assert run.run().state == "INCOMPLETE"
-                    assert run.store.cursor().repairs == 3
-                    reason = run.store.records("outcome")[-1][2]["reason"]
-                    assert "Three pre-B plan repairs exhausted" in reason
-                    assert not run.store.cursor().B
+                    # R15: three repair rounds route the remaining gap to B; the run never ends on a count.
+                    while run.store.cursor().state != "B":
+                        assert run.step() != "INCOMPLETE"
+                    shown = run.store.read(run.store.cursor().review)["answer"]["gaps"]
+                    assert run.store.cursor().repairs == 3 and shown[0]["area"] == "area-002"
+                    assert not run.store.records("outcome")
                     continue
                 while run.store.cursor().state != "B":
                     run.step()

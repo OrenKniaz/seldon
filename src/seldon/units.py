@@ -220,8 +220,6 @@ def run_unit(store, provider, ref):
                 else:
                     thread_from_recording(store, ref)
                     recover(store, ref, str(error), retryable=error.transient and error.cleanup_verified)
-            except questions.UnitTooLarge as error:
-                recover(store, ref, str(error))
             except questions.MissingFacts as error:
                 recover(store, ref, str(error), retryable=False)
             except proof.UncertainCleanup as error:

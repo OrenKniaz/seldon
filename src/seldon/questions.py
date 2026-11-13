@@ -4,7 +4,6 @@ import json
 
 from . import architecture, gitwork, obligations, plan
 from .schema import SOURCE_TARGETS, answer_schema, validate
-from .store import encode
 
 # Owner decision: ALIGN improves craft within scope, with observable quality and a distinctive UI direction.
 ALIGN_DESIGN = (
@@ -99,21 +98,8 @@ PROMPTS = {
 }
 
 
-class UnitTooLarge(ValueError):
-    pass
-
-
 class MissingFacts(ValueError):
     pass
-
-
-def bounded_unit(question):
-    size = len(encode(question).encode("utf-8"))
-    if question["kind"] in ("WORK", "JUDGE") and size > 65536:
-        raise UnitTooLarge(f"{question['kind']} brief is {size} bytes (limit 65536); reduce the scoped text")
-    if question["kind"] in ("ARCHITECT", "DETAIL") and len(encode(question).encode("utf-8")) > 65536:
-        raise UnitTooLarge("Planning subject exceeds 65536 bytes; narrow its accepted area")
-    return question
 
 
 def build(kind, facts, targets=(), execution=None, images=(), owners=()):
@@ -171,9 +157,9 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
                       "The observed interaction and check sources support this answer")
     schema = answer_schema(kind, targets, owners)
     validate({"answer": example}, schema)
-    return bounded_unit({"kind": kind, "prompt": PROMPTS[kind] + (" " + CRAFT if kind == "WORK" else ""),
+    return {"kind": kind, "prompt": PROMPTS[kind] + (" " + CRAFT if kind == "WORK" else ""),
             "facts": facts, "targets": list(targets), "schema": schema,
-            "examples": [{"answer": example}], "execution": execution or {}, "images": list(images)})
+            "examples": [{"answer": example}], "execution": execution or {}, "images": list(images)}
 
 
 def assessments(targets, *, final=False):
@@ -394,7 +380,7 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
     original = question
     rejected = []
     for attempt in range(retries + 1):
-        raw = provider(bounded_unit(question))
+        raw = provider(question)
         errors = []
         answer = None
         try:

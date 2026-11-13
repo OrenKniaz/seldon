@@ -5,10 +5,9 @@ from dataclasses import replace
 
 from . import questions
 from .providers import ProviderFailure, role_for
-from .store import encode
 
 
-def call(store, provider, question, unit=None, check=lambda answer: None, max_bytes=None, retries=2):
+def call(store, provider, question, unit=None, check=lambda answer: None, retries=2):
     setup = store.read(store.cursor().kickoff)["setup"]
     kind = question["kind"]
     role = role_for(kind, {})
@@ -16,8 +15,6 @@ def call(store, provider, question, unit=None, check=lambda answer: None, max_by
 
     def invoke(current):
         nonlocal attempt
-        if max_bytes is not None and len(encode(current).encode("utf-8")) > max_bytes:
-            raise questions.MissingFacts("FACTS corrections exceed twice the original subject brief")
         if unit:
             current = {**current, "execution": {**current["execution"], "session": store.unit(unit).thread}}
         previous = None
@@ -72,12 +69,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None, max_by
         store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
     if answer.get("verdict") == "uncertain" and kind == "JUDGE":
         if "Requested facts" not in question["facts"]:
-            limit = 2 * len(encode(question).encode("utf-8"))
             reask = {**question, "facts": {**question["facts"], "Requested facts": answer["neededFacts"]}}
-            try:
-                return call(store, provider, reask, unit, check, limit)
-            except (questions.MissingFacts, questions.UnitTooLarge) as error:
-                answer = {**answer, "why": answer["why"] + "; " + str(error)}
+            return call(store, provider, reask, unit, check)
         answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
     elif answer.get("verdict") == "uncertain" and kind == "DEMO":
         raise questions.MissingFacts("Unresolved facts: " + "; ".join(answer["neededFacts"]))

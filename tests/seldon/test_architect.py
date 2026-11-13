@@ -372,6 +372,309 @@ def test_planning_size_journey(tmp_path):
     size_journey(tmp_path / "size")
 
 
+def test_review_links_journeys(tmp_path):
+    review_links_journeys(tmp_path / "review-links")
+
+
+def review_links_journeys(root):
+    """Recorded g04 interface DETAIL reaches B with resolvable links; persistent gaps stay visible.
+
+    Existing adequate reviewers ignore foreign ids, hiding merge-derived links the area cannot resolve.
+    Their repaired reviews also cannot catch a count ending a run before the user sees the open gap.
+    Keep g04's interface answer verbatim; a small server supplies its two consumed HTTP agreements.
+    """
+    # shelflife-26e68f0-g04: recorded answer r47 (interface DETAIL, first valid answer).
+    interface_detail = {'edits': [{'kind': 'feature',
+                'targetHandle': 'new:pantry-ledger',
+                'typedBody': {'acceptance': 'Urgent food appears first, the searchable pantry '
+                                            'second, and a clearly labeled add-item form last. The '
+                                            'responsive page supports daily household use without '
+                                            'downloaded assets.',
+                              'story': 'Understand what needs using and manage the household pantry '
+                                       'from one calm, accessible page.'}},
+               {'kind': 'feature',
+                'targetHandle': 'new:reliable-interactions',
+                'typedBody': {'acceptance': 'Add, search, filter, consume and delete work without '
+                                            'discarding search/filter choices or entered values on '
+                                            'failure. Loading, empty, success and failure states '
+                                            'remain understandable and actionable.',
+                              'story': 'Make pantry changes confidently, including when validation '
+                                       'or API requests fail.'}},
+               {'kind': 'requirement',
+                'targetHandle': 'new:ledger-presentation',
+                'typedBody': {'contract': 'Page title: ShelfLife. Section headings, in order: '
+                                          'Expiring soon, Pantry, Add item. Overdue items carry the '
+                                          'label Expired. Keyboard accessible with visible focus; '
+                                          'readable contrast; no horizontal scrolling at 375px. '
+                                          'Clean, calm visual design.',
+                              'design': 'Use warm ivory surfaces, ink-dark text, forest-green '
+                                        'actions, restrained rust expiry warnings, Georgia headings '
+                                        'and an Arial, Helvetica, sans-serif body. Use deliberate '
+                                        'hierarchy, spacing and structured rows rather than nested '
+                                        'cards. Use local-date expiry labels and treat loading, '
+                                        'empty, success and failure states as designed content. No '
+                                        'TODOs, no partial implementations.',
+                              'features': ['new:pantry-ledger'],
+                              'obligation': 'Deliver the complete responsive pantry page at phone '
+                                            'and desktop sizes, with urgent food first, the '
+                                            'searchable pantry second, and a clearly labeled '
+                                            'add-item form.'}},
+               {'kind': 'requirement',
+                'targetHandle': 'new:pantry-interactions',
+                'typedBody': {'contract': 'Consume http-items and http-errors. Expiring soon uses '
+                                          'GET /api/items?expiring_within=7. Preserve search and '
+                                          'filter choices after actions; show useful inline feedback '
+                                          'without discarding entered values. Items have name (1-80 '
+                                          'chars), quantity (integer >= 0), optional unit, and '
+                                          'expires (YYYY-MM-DD or null).',
+                              'design': 'Keep form and search/filter state independent of fetched '
+                                        'results. Use the agreed query parameters and mutation '
+                                        'routes; consume positive integer amounts. Refresh affected '
+                                        'views after successful mutations without resetting '
+                                        'controls. Provide labeled controls, inline validation, '
+                                        'pending feedback, useful server/network error messages and '
+                                        'explicit recovery. Render item strings as text, not HTML. '
+                                        'Prevent duplicate submission while an action is pending.',
+                              'features': ['new:reliable-interactions', 'new:pantry-ledger'],
+                              'obligation': 'Implement full-list search and expiry filtering, '
+                                            'add-item inline validation, consume and delete actions, '
+                                            'expired labels, empty states and visible recoverable '
+                                            'API failure states through the agreed API.'}},
+               {'kind': 'requirement',
+                'targetHandle': 'new:offline-page-assets',
+                'typedBody': {'contract': 'Provide page-assets: / serves static/index.html as '
+                                          'text/html; charset=utf-8. /app.css serves static/app.css '
+                                          'as text/css; charset=utf-8. /app.js serves static/app.js '
+                                          'as text/javascript; charset=utf-8. The page title is '
+                                          'ShelfLife. Section headings, in order, are Expiring soon, '
+                                          'Pantry, Add item. Overdue items carry the label Expired. '
+                                          'Expiring soon uses GET /api/items?expiring_within=7.',
+                              'design': 'Deliver plain HTML, CSS and browser JavaScript at the '
+                                        'contracted paths. Reference only local resources. Use no '
+                                        'third-party application dependencies, downloaded assets or '
+                                        'build tooling. Keep UI-only copy and styling local to this '
+                                        'owner.',
+                              'features': ['new:pantry-ledger', 'new:reliable-interactions'],
+                              'obligation': 'Supply complete offline assets consumable by the '
+                                            'canonical server and demonstrate their integrated '
+                                            'behavior through its real routes.'}},
+               {'kind': 'check',
+                'targetHandle': 'new:interface-local',
+                'typedBody': {'command': ['C:\\nvm4w\\nodejs\\node.EXE',
+                                          'checks/interface/local.cjs'],
+                              'expectedEvidence': 'Assertions and actual Edge screenshots in '
+                                                  'SELDON_EVIDENCE_DIR at 375px and desktop: '
+                                                  'populated/expired, loading, empty, invalid form, '
+                                                  'successful action, recoverable failure and '
+                                                  'keyboard-focus states. Record no horizontal '
+                                                  'overflow, labeled controls, retained '
+                                                  'inputs/filters, safe rendering of hostile item '
+                                                  'text and no external requests. Close browser and '
+                                                  'fixture server.',
+                              'level': 'unit',
+                              'mode': 'establishes',
+                              'purpose': 'Prove the actual owned page and interactions before '
+                                         'integration. A bounded HTTP fixture serves the actual '
+                                         'static files and supplies controlled API inputs, delayed '
+                                         'responses and failures; it must not implement UI behavior '
+                                         'or stand in for backend integration. Catch lost control '
+                                         'state, inaccessible feedback, duplicate submissions and '
+                                         'narrow-screen overflow. No existing interface tests or '
+                                         'product files cover these behaviors.',
+                              'requiredEnvironment': ['Supplied Node executable and '
+                                                      'playwrightPackage',
+                                                      'Supplied Edge browserExecutable',
+                                                      'SELDON_EVIDENCE_DIR writable',
+                                                      'Loopback HTTP fixture using Node '
+                                                      'standard-library facilities'],
+                              'requirements': ['new:ledger-presentation',
+                                               'new:pantry-interactions',
+                                               'new:offline-page-assets']}},
+               {'kind': 'check',
+                'targetHandle': 'new:page-assets-wave',
+                'typedBody': {'command': ['C:\\nvm4w\\nodejs\\node.EXE',
+                                          'checks/interface/page-assets-wave.cjs'],
+                              'expectedEvidence': 'One integrated page-assets check verifies '
+                                                  'canonical asset responses and MIME types, title '
+                                                  'and ordered headings, the agreed urgent-list '
+                                                  'request, and real '
+                                                  'add/search/filter/consume/reload/restart/delete '
+                                                  'behavior against a temporary SQLite database. '
+                                                  'Screenshots show the real served page and '
+                                                  'retained data after restart. Requests remain '
+                                                  'local. Browser, child servers and temporary '
+                                                  'resources are cleaned up.',
+                              'level': 'wave',
+                              'mode': 'establishes',
+                              'purpose': 'Provider-owned integration check for page-assets, '
+                                         'consuming http-items and http-errors. Catch mismatched '
+                                         'asset routes, API envelopes or mutation refresh behavior '
+                                         'hidden by controlled local responses. Use the canonical '
+                                         'server and persistence, never a reconstructed backend. '
+                                         'Exercise a real API validation failure and verify visible '
+                                         'feedback without losing entered values. Local fixture '
+                                         'evidence cannot establish this integration.',
+                              'requiredEnvironment': ['Integrated server.py and its canonical '
+                                                      'persistence dependency',
+                                                      'C:\\Users\\oren\\AppData\\Local\\Programs\\'
+                                                      'Python\\Python312\\python.exe, '
+                                                      'invoked with -B',
+                                                      'Supplied Node, playwrightPackage and Edge '
+                                                      'browserExecutable',
+                                                      'Writable temporary database directory and '
+                                                      'SELDON_EVIDENCE_DIR',
+                                                      'Available loopback port'],
+                              'requirements': ['new:offline-page-assets',
+                                               'new:pantry-interactions',
+                                               'http-items',
+                                               'http-errors']}}],
+     'quality': [{'checks': ['new:interface-local'], 'criterion': 1},
+                 {'checks': ['new:interface-local'], 'criterion': 5}],
+     'units': [{'checkPaths': ['checks/interface/**'],
+                'consumes': ['http-items', 'http-errors'],
+                'dependencies': [],
+                'instructions': 'Own the whole interface and its checks as one coherent '
+                                'implementation. Create static/index.html, static/app.css and '
+                                'static/app.js; keep all additional interface helpers and fixtures '
+                                'beneath checks/interface/**. Implement only the accepted '
+                                'page/actions, not extra editing screens or backend behavior. The '
+                                'local check must exercise actual browser assets and save all states '
+                                'needed for visual judgment. Its fixture proves UI behavior only. '
+                                'Author exactly one provider-owned page-assets wave check against '
+                                'the integrated canonical server; its absence in this checkout is '
+                                'expected and must not block local evidence. Use the supplied '
+                                'runtime paths without installs or downloads. Link consumed '
+                                'contracts to their provider requirements through the contract '
+                                'handles, not guessed foreign requirement names. Backend validation, '
+                                'concurrency, importer and README ownership remain outside this '
+                                'unit.',
+                'provides': ['page-assets'],
+                'reads': [],
+                'requirements': ['new:ledger-presentation',
+                                 'new:pantry-interactions',
+                                 'new:offline-page-assets'],
+                'scope': ['static/**', 'checks/interface/**']}],
+     'verdict': 'planned',
+     'why': 'One owner covers the complete interface scope without introducing internal contracts or '
+            'serial handoffs. Local browser evidence establishes owned behavior and visual states; '
+            'one provider-owned wave check establishes page-assets integration with the consumed '
+            'HTTP contracts. Backend, importer and fresh-folder delivery criteria remain with their '
+            'respective owners.'}
+    correction = "Explain how API failure feedback preserves entered values"
+
+    class ReviewLinksProvider(Scripted):
+        def __call__(self, question):
+            kind, facts = question["kind"], question["facts"]
+            if kind == "ALIGN":
+                answer = {**VISION, "quality": [
+                    {"criterion": f"Pantry quality {i}", "verification": "Observe the pantry workflow"}
+                    for i in range(1, 7)]}
+            elif kind == "ARCHITECT":
+                answer = {"areas": [
+                    {"handle": "server", "responsibility": "Serve the canonical pantry API",
+                     "scope": ["server.py", "checks/server/**"],
+                     "commitments": ["scopeIn:1", "quality:2", "quality:3", "quality:4", "quality:6"]},
+                    {"handle": "interface", "responsibility": "Deliver the complete pantry interface",
+                     "scope": ["static/**", "checks/interface/**"],
+                     "commitments": ["scopeIn:1", "quality:1", "quality:5"]}],
+                    "contracts": [
+                        {"handle": h, "kind": "api", "text": text,
+                         "provider": "server", "consumers": ["interface"]}
+                        for h, text in (("http-items", "Canonical pantry item routes and JSON responses"),
+                                       ("http-errors", "HTTP validation and failure response envelopes"))] + [
+                        {"handle": "page-assets", "kind": "file-format",
+                         "text": "ShelfLife offline HTML, CSS and JavaScript assets",
+                         "provider": "interface", "consumers": ["server"]}],
+                    "decisions": [], "waves": [{"goal": "Run the pantry end to end"}]}
+            elif kind == "DETAIL":
+                if facts["Area"]["handle"] == "interface":
+                    return json.dumps({"answer": interface_detail})
+                requirements = ["new:http-operations", "new:http-failures",
+                                "new:server-launch", "new:server-assets"]
+                local = {"purpose": "Exercise the server's owned behavior", "level": "unit",
+                         "mode": "establishes", "command": ["python", "checks/server/local.py"],
+                         "requiredEnvironment": ["Python"], "expectedEvidence": "Real HTTP responses",
+                         "requirements": requirements}
+                answer = {"verdict": "planned", "edits": [
+                    {"kind": "feature", "targetHandle": "new:server", "typedBody": {
+                        "story": "Use the pantry API", "acceptance": "Persist and retrieve pantry items"}},
+                    *[{"kind": "requirement", "targetHandle": r, "typedBody": {
+                        "obligation": r, "design": "Canonical HTTP server", "contract": r,
+                        "features": ["new:server"]}} for r in requirements],
+                    {"kind": "check", "targetHandle": "new:server-local", "typedBody": local},
+                    *[{"kind": "check", "targetHandle": "new:" + h, "typedBody": {
+                        **local, "level": "wave", "requirements": [r],
+                        "command": ["python", f"checks/server/{h}.py"]}}
+                      for h, r in zip(("http-items", "http-errors"), requirements)]],
+                    "units": [{"scope": ["server.py", "checks/server/**"],
+                        "checkPaths": ["checks/server/**"], "requirements": requirements,
+                        "provides": ["http-items", "http-errors"], "consumes": ["page-assets"],
+                        "reads": [], "dependencies": [], "instructions": "Deliver the pantry server"}],
+                    "quality": [{"criterion": i, "checks": ["new:server-local"]} for i in (2, 3, 4, 6)]}
+            elif kind == "REVIEW" and facts["Review subject"] == "interface":
+                nodes = facts["Plan"]["nodes"]
+                missing = sorted({r for c in plan.select(facts["Plan"], "check").values()
+                                  for r in c["requirements"] if r not in nodes})
+                wave = next(r for r, c in plan.select(facts["Plan"], "check").items()
+                            if c["command"][-1] == "checks/interface/page-assets-wave.cjs")
+                gaps = ([{"target": wave, "correction": "Resolve foreign requirements: " + str(missing)}]
+                        if missing else [{"target": wave, "correction": correction}]
+                        if persistent_gap else [])
+                answer = {"verdict": "gap" if gaps else "adequate", "gaps": gaps}
+            else:
+                return super().__call__(question)
+            return json.dumps({"answer": {**answer, "why": "Review the area's own plan and agreements"}})
+
+    class DisplayedB(Exception):
+        pass
+
+    def user(request):
+        if request["gate"] == "B":
+            raise DisplayedB
+        return approve(request)
+
+    for persistent_gap in (False, True):
+        slot = root / ("gap" if persistent_gap else "resolvable")
+        slot.mkdir(parents=True)
+        provider = ReviewLinksProvider(slot, "review-links", 1)
+        run = Run(slot / "product", slot / "workers", "Build the ShelfLife pantry", provider.setup,
+                  provider, user, capacity=2)
+        try:
+            for _ in range(24):
+                if run.store.cursor().state == "B":
+                    break
+                assert run.store.cursor().state not in ("INCOMPLETE", "STOPPED", "EXECUTE")
+                reviewing = run.store.cursor().state == "REVIEW"
+                if reviewing:
+                    canonical = deepcopy(run.store.plan(run.store.cursor().revision))
+                run.step()
+                if reviewing:
+                    assert run.store.plan(run.store.cursor().revision) == canonical
+            assert run.store.cursor().state == "B"
+            with pytest.raises(DisplayedB):
+                run.step()
+            displayed = run.store.read(run.store.cursor().decision)["subject"]
+            assert not run.store.records("outcome")
+            assert displayed["review"]["answer"]["verdict"] == ("gap" if persistent_gap else "adequate")
+            if persistent_gap:
+                assert [g["correction"] for g in displayed["review"]["answer"]["gaps"]] == [correction]
+                assert run.store.cursor().repairs == 3
+                assert len([q for _, _, q in run.store.records("question") if q["kind"] == "REVIEW"
+                            and q["facts"]["Review subject"] == "interface"]) == 4
+            else:
+                question, = [q for _, _, q in run.store.records("question")
+                             if q["kind"] == "REVIEW" and q["facts"]["Review subject"] == "interface"]
+                check = next(c for c in plan.select(question["facts"]["Plan"], "check").values()
+                             if c["command"][-1] == "checks/interface/page-assets-wave.cjs")
+                assert check["integrates"] == ["http-items", "http-errors"]
+                canonical_check = next(c for c in plan.select(displayed["plan"], "check").values()
+                                       if c["command"] == check["command"])
+                assert len(canonical_check["requirements"]) == len(check["requirements"]) + 4
+                assert "integrates" not in canonical_check
+        finally:
+            run.close()
+
+
 def size_journey(root):
     """One versus fifty reaches B; growing siblings cannot enlarge the same area's REVIEW.
 
@@ -863,6 +1166,7 @@ def recorded_detail_journeys(root):
 def architect_journeys(tmp_path):
     """Contract delivery and local planning recovery share the canonical plan and recorder."""
     began = time.monotonic()
+    review_links_journeys(tmp_path / "review-links")
     correction_journeys(tmp_path / "corrections")
     recorded_detail_journeys(tmp_path / "recorded")
     area_product_journey(tmp_path)

@@ -98,8 +98,6 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
     facts = {**facts, "Requested facts": [{"request": item, "observations": list(checks),
                                   "screenshots": images} for item in resolve]}
     reask = questions.build(kind, facts, [subject], images=images)
-    if len(encode(reask).encode("utf-8")) > 2 * len(encode(question).encode("utf-8")):
-        raise questions.MissingFacts("Requested facts exceed twice the original subject brief")
     return reask
 
 
@@ -195,12 +193,8 @@ def step(store, provider):
     if cursor.pendingJudge:
         pending = store.read(cursor.pendingJudge)
         subject = pending["subject"]
-        try:
-            question = brief(store, kind, subject, resolve=pending["answer"]["neededFacts"], trees=trees)
-            result, answer = inference.call(store, provider, question, max_bytes=2 * pending["questionBytes"])
-        except questions.MissingFacts as error:
-            result = pending["source"]
-            answer = {**pending["answer"], "why": pending["answer"]["why"] + "; " + str(error)}
+        question = brief(store, kind, subject, resolve=pending["answer"]["neededFacts"], trees=trees)
+        result, answer = inference.call(store, provider, question)
         if answer["verdict"] == "uncertain":
             answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
         if not ready(answer):

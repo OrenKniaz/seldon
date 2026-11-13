@@ -72,11 +72,8 @@ def brief(store, feature, *, resolve=None):
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
         "execution": {}, "images": images}
     if resolve is not None:
-        original_bytes = len(encode(question).encode("utf-8"))
         facts["Requested facts"] = [{"request": item, "observations": list(checks), "screenshots": images}
                                     for item in resolve]
-        if len(encode(question).encode("utf-8")) > 2 * original_bytes:
-            raise questions.MissingFacts("Requested facts exceed twice the original flow brief")
     return question
 
 
@@ -173,13 +170,9 @@ def step(store, provider):
                 or not judgment.current(pending, trees)):
             raise ValueError("Pending FLOW facts require their original candidate and scope trees")
         feature = pending["subject"]
-        try:
-            question = brief(store, feature, resolve=pending["answer"]["neededFacts"])
-            result, answer = inference.call(store, provider, question,
-                check=lambda a: validate(a, question["targets"]), max_bytes=2 * pending["questionBytes"])
-        except questions.MissingFacts as error:
-            result = pending["source"]
-            answer = {**pending["answer"], "why": pending["answer"]["why"] + "; " + str(error)}
+        question = brief(store, feature, resolve=pending["answer"]["neededFacts"])
+        result, answer = inference.call(store, provider, question,
+            check=lambda a: validate(a, question["targets"]))
         reviewed = review(store, feature, result, answer, reasked=True)
         if reviewed["gaps"]:
             fixups.apply(store, reviewed["gaps"])

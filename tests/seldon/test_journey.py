@@ -293,13 +293,9 @@ else:
                             "['slot']=='content'\nprint('shared page slot content')\n")
     if mode == "check-deadline" and name == "unit-001":
         Path(name, "check.py").write_text("import time\ntime.sleep(8)\n" + source)
-    if name == "unit-001" and mode == "big-source" and turn == 1:
+    if name == "unit-001" and mode == "big-brief":
         Path(name, "check.py").write_text("#" + "large source " * 6000 + "\n" + source)
-    if name == "unit-001" and mode == "big-product":
-        if turn == 1:
-            Path(name, "details.txt").write_text("large product " * 6000)
-        else:
-            Path(name, "details.txt").unlink()
+        Path(name, "details.txt").write_text("large product " * 6000)
     if mode == "parallel" and name == "unit-004":
         wave_checks = list(facts["Wave checks to write, not run here"].values())
         assert len(wave_checks) == 1 and wave_checks[0]["command"][-1] == "unit-004/compose.py"
@@ -345,7 +341,12 @@ class Scripted:
     def invoke(self, question, started):
         if question["kind"] == "WORK":
             self.native.timeout = self.timeout_for("WORK", {})
-            return self.native.invoke(question, started)
+            result = self.native.invoke(question, started)
+            if self.mode == "big-brief" and "Guide path" not in question["facts"]:
+                root = Path(question["execution"]["cwd"])
+                self.returned = {p.relative_to(root).as_posix(): p.read_bytes()
+                                 for p in (root / "unit-001").iterdir()}
+            return result
         return self(question), None
 
     def __call__(self, q):
@@ -486,14 +487,13 @@ class Scripted:
                         assert actual["ranOnDeliveredRevision"]
                 if (kind == "PRODUCT" and is_subject
                         and self.mode in ("product-source-resolved", "product-source-unresolved",
-                                          "product-source-oversize", "product-facts-unavailable")):
+                                          "product-facts-unavailable")):
                     if "Requested facts" in facts:
                         assert "source is judged at the unit" in facts["Source availability"].lower()
                         assert "satisfied" in facts["Source judgment"]
                     if "Requested facts" not in facts or self.mode != "product-source-resolved":
                         return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
-                            "Supply the script sources to inspect module ownership"] *
-                            (100 if self.mode == "product-source-oversize" else 1),
+                            "Supply the script sources to inspect module ownership"],
                             "why": "The criterion needs source inspection"}})
                 if is_subject and self.mode in (prefix + "-gap", prefix + "-unresolved"):
                     if any("interaction blocked" in o["stdout"] for o in facts["Final observations"]):
@@ -920,19 +920,19 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
         cursor, rows, units = finish(run)
-        if mode in ("big-source", "big-product"):
-            # Oversized real source must return its measured failure to a worker that can shrink it;
-            # the old terminal-only faults never proved that the next WORK brief remains deliverable.
-            failure, = [b["failure"] for _, k, b in rows if k == "unit_failure"]
-            assert failure.startswith("JUDGE brief is ")
-            assert int(failure.split()[3]) > 65536
+        if mode == "big-brief":
+            question, = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"]
+            assert len(encode(question).encode("utf-8")) > 100000
+            assert units["u001"].state == "DONE" and units["u001"].recoveries == 0
+            assert not run.store.records("unit_failure")
+            assert all(gitwork.git(run.project, "show", f"{units['u001'].P}:{p}", binary=True) == content
+                       and (run.project / p).read_bytes() == content
+                       for p, content in provider.returned.items())
             launches = [json.loads(line) for line in
                         (slot / "launch-unit-001.jsonl").read_text().splitlines()]
-            assert launches[1]["facts"]["Exact failure"] == failure
-            assert launches[1]["facts"]["Read current patch"][:4] == ["git", "diff", "--cached", "--binary"]
-            assert units["u001"].recoveries == 1 and len(launches) == 2
+            assert len(launches) == 1
         if mode in ("mixed-criterion", "product-source-resolved", "product-source-unresolved",
-                    "product-source-oversize", "product-facts-unavailable", "demo-facts-unavailable",
+                    "product-facts-unavailable", "demo-facts-unavailable",
                     "unit-uncertain"):
             assert not run.store.records("unit_fixup") and cursor.repairs == 0
             assert all(u.recoveries == 0 for u in units.values())
@@ -941,7 +941,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             if mode == "mixed-criterion":
                 assert any(b["targets"] == ["quality:002"] for _, k, b in rows
                            if k == "question" and b["kind"] == "PRODUCT")
-            if mode in ("product-source-unresolved", "product-source-oversize", "product-facts-unavailable",
+            if mode in ("product-source-unresolved", "product-facts-unavailable",
                         "demo-facts-unavailable", "unit-uncertain"):
                 target = ("n002" if mode == "demo-facts-unavailable" else
                           "u001" if mode == "unit-uncertain" else "quality:001")
@@ -953,12 +953,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 from run_report import report
                 assert target + ": not judged:" in report(slot)[0]
         reasks = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
-        if mode == "product-source-oversize":
-            assert not reasks, "An oversized FACTS question must never reach the provider"
         for q in reasks:
-            first = next(b for _, k, b in rows if k == "question" and b["kind"] == q["kind"]
-                         and b["targets"] == q["targets"] and "Requested facts" not in b["facts"])
-            assert len(encode(q).encode()) <= 2 * len(encode(first).encode())
             assert "Code-established execution facts" not in q["facts"]
         if mode == "timeout":
             failures = run.store.records("provider_failure")
@@ -1193,6 +1188,12 @@ def crash_journey(slot, mode):
 
 
 @pytest.mark.fast
+def test_large_judge_journey(tmp_path):
+    """A >100 KB JUDGE reaches C unchanged; tiny patches missed size-driven worker deletion."""
+    simple_journey(tmp_path / "large-judge", "big-brief")
+
+
+@pytest.mark.fast
 def test_clean_core_golden(tmp_path):
     """One-unit C protects the actual approved delivery path; parallel/fan-in catches serialization.
 
@@ -1219,7 +1220,7 @@ def test_clean_core_golden(tmp_path):
     A transient Git worktree admission failure must preserve its cause and retry before WORKING.
     Faults after admission already have a worktree and cannot catch an illegal READY recovery.
     Judge transport exhaustion fails locally without resuming a correct worker. Oversized check
-    sources and product patches refuse the complete brief rather than silently dropping assertions.
+    sources and product patches reach one JUDGE without reworking or dropping assertions.
     Verbatim A/B revisions protect user intent that schema-valid approval alone cannot preserve.
     A dependency may satisfy a check at T; wave-start RED prevents needless rework while still
     refusing checks that are green before any product work. Product quality is judged exactly once,
@@ -1251,7 +1252,7 @@ def test_clean_core_golden(tmp_path):
     classification success twins previously hid mixed prose that had no legal marking. Persistent
     uncertainty in a criterion, requirement or unit reaches C as not judged with verification
     incomplete; a success-only final subject cannot expose false unit failure. A gap repairs only its
-    owner. FACTS requests remain bounded to twice the first ask, including oversize requests.
+    owner.
     Shared-page contracts reach provider and consumer briefs; undeclared reads and broken ownership
     are refused at PLAN. Skeleton obligations need final requirement verdicts and retain closure
     across an unrelated docs repair. Text-only contract repair/reopen renews only consumer judges;
@@ -1310,7 +1311,6 @@ def recorded_judgment_journey(root):
             question = (flow_review.brief(store, feature) if feature else
                         judgment.brief(store, case["kind"], case["subject"]))
             size = len(encode(question).encode("utf-8"))
-            assert size < case["maxBytes"], (case["kind"], size, case["beforeBytes"])
             facts = question["facts"]
             assert question["images"] == [artifacts[p] for p in recording["images"]]
             assert "Files on the delivered revision" not in facts and "Check source paths" not in facts
@@ -1893,7 +1893,6 @@ def recorded_artifact_journey(root):
                                 kickoff=kickoff, scratch=str(scratch), finalObservations=refs))
             question = judgment.brief(store, "PRODUCT", subject)
             size = len(encode(question).encode("utf-8"))
-            assert size < 65536, (cohort, size)
             assert question["targets"] == original["targets"]
             if subject == "tryItGuide":
                 assert question["facts"]["Guide file"]["text"] == original["facts"]["Guide file"]["text"]
@@ -1937,19 +1936,19 @@ def clean_core_golden(root):
     recorded_sizes = recorded_minimal_journey(root / "recorded-minimal")
     prepared = {"demo-uncertain", "product-uncertain", "demo-gap", "product-gap",
                 "demo-unresolved", "product-unresolved", "guide-gap",
-                "product-source-resolved", "product-source-unresolved", "product-source-oversize",
+                "product-source-resolved", "product-source-unresolved",
                 "product-facts-unavailable", "demo-facts-unavailable"}
     modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
              ("timeout", 1),
              ("exhaust", 4), ("parallel", 4), ("review-repair", 2), ("final-rework", 2),
              ("schema-fix", 1), ("plan-overlap", 2), ("user-path", 1), ("judge-provider", 2),
-             ("big-source", 2), ("big-product", 2), ("user-revise", 1), ("wave-start", 2),
+             ("big-brief", 1), ("user-revise", 1), ("wave-start", 2),
              ("native-denied", 2)]
     modes.extend([("traced-evidence", 2), ("demo-uncertain", 2), ("product-uncertain", 2),
                   ("demo-gap", 2), ("product-gap", 2), ("demo-unresolved", 2), ("product-unresolved", 2),
                   ("guide-gap", 2), ("guide-command", 1), ("guide-path", 1), ("guide-format", 1)])
     modes.extend([("unit-uncertain", 1), ("demo-facts-unavailable", 2), ("visual-unit", 1), ("mixed-criterion", 2), ("product-source-resolved", 2), ("product-source-unresolved", 2)])
-    modes.extend([("product-source-oversize", 2), ("product-facts-unavailable", 2)])
+    modes.extend([("product-facts-unavailable", 2)])
 
     def run_case(item):
         mode, count = item

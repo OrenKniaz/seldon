@@ -10,6 +10,8 @@ def briefs(document, words):
     outline = document["architecture"]
     vision = document["nodes"]["vision"]["body"]
     units = {r: u for r, u in plan.select(document, "unit").items() if r != "guide"}
+    agreements = dict(zip((c["handle"] for c in outline["contracts"]),
+                          plan.select(document, "contract").values(), strict=True))
     coverage = plan.coverage(document)
     result = {}
     for area, area_ref in zip(outline["areas"], plan.select(document, "area"), strict=True):
@@ -20,15 +22,22 @@ def briefs(document, words):
         refs = set(owned) | requirements | features | checks
         refs.update(r for r, o in plan.select(document, "obligation").items() if o["owner"] in owned)
         nodes = {r: n for r, n in document["nodes"].items() if r in refs}
+        participants = [area["handle"], *area.get("ancestors", [])]
+        contracts = [c for c in outline["contracts"]
+                     if any(architecture.endpoint(a, c) for a in participants)]
+        for r in checks:
+            check = nodes[r]["body"]
+            removed = set(check["requirements"]) - requirements
+            nodes[r] = {**nodes[r], "body": {**check,
+                "requirements": [ref for ref in check["requirements"] if ref in requirements],
+                "integrates": [c["handle"] for c in contracts if removed.intersection(
+                    units[agreements[c["handle"]]["provider"]]["requirements"])]}}
         for r, c in plan.select(document, "criterion").items():
             nodes[r] = {"kind": "criterion", "body": {
                 **c, "checks": [ref for ref in c["checks"] if ref in checks]}}
         trace = {r: {"checks": [c for c in row["checks"] if c in checks],
                      "units": [u for u in row["units"] if u in owned]}
                  for r, row in coverage.items() if r in requirements or r.startswith("quality:")}
-        participants = [area["handle"], *area.get("ancestors", [])]
-        contracts = [c for c in outline["contracts"]
-                     if any(architecture.endpoint(a, c) for a in participants)]
         result[area["handle"]] = questions.build("REVIEW", {
             "Review subject": area["handle"], "Approved vision": vision, "Area": area,
             "User's words": words,
@@ -140,15 +149,12 @@ def step(store, provider, capacity):
         result = store.record("plan_review", {"revision": cursor.revision, "subjects": refs,
             "answer": {"verdict": verdict, "gaps": gaps}, "notJudged": not_judged,
             "reviewTier": "partial review: not judged" if not_judged else "same-provider review"})
-        advance(store, "gap" if gaps else "reviewed", result, review=result, failure=str(gaps))
+        advance(store, "gap" if gaps and cursor.repairs < 3 else "reviewed", result,
+                review=result, failure=str(gaps))
 
 
 def repair(store):
     cursor = store.cursor()
-    if cursor.B:
-        raise ValueError("Post-B plan steering is deferred to M3")
-    if cursor.repairs >= 3:
-        raise ValueError("Three pre-B plan repairs exhausted: " + cursor.failure)
     gaps = store.read(cursor.review)["answer"]["gaps"] if cursor.review else []
     corrections = {}
     for gap in gaps:
