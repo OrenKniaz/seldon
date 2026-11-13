@@ -1895,13 +1895,16 @@ def recorded_artifact_journey(root):
 
 
 def clean_core_golden(root):
-    from test_architect import architect_journeys
+    from test_fixups import blocked_owner_journeys
+    from test_architect import agreed_literals_journey, architect_journeys
     from test_review import recorded_review_journey, review_journeys, uncertain_review_journey
 
     root.mkdir(parents=True)
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(root)
     began = time.monotonic()
+    agreed_literals_journey(root / "agreed-literals")
+    blocked_owner_journeys(root / "blocked-owner")
     guide_links_journey(root / "guide-links")
     recorded_artifact_journey(root / "recorded-artifacts")
     recorded_judgment_journey(root / "recorded-judgment")

@@ -13,6 +13,59 @@ from seldon.run import Run
 from test_journey import Scripted, approve, copy_final, finish, prepare
 
 
+def blocked_owner_journeys(root):
+    """A real blocked WORK must reach its sibling owner; final-judge gaps never exercise WORK routing.
+
+    The own-scope twin catches wrongly waiving local failures, which the sibling success cannot expose.
+    """
+    for own_scope in (False, True):
+        slot = root / ("own" if own_scope else "sibling")
+        run, provider = prepare(slot, "final-seed", 2)
+
+        def scopes(answer):
+            # The discovered check belongs to u001 through checkPaths, outside its explicit scope.
+            answer["units"][0]["scope"] = ["unit-001/value.txt", "unit-001/interaction.txt"]
+
+        provider.plan_fault = scopes
+        native = slot / "native.py"
+        target = "docs/try-it.md" if own_scope else "unit-001/check.py"
+        correction = "Require a ready interaction in the value check and make the interaction ready."
+        blocked = ("if guide and " + ("True" if own_scope else
+                   "Path('unit-001/interaction.txt').read_text() != 'ready'") + ":\n"
+                   "    answer['answer'].update(outcome='blocked', discoveries=["
+                   + repr({"target": target, "correction": correction}) + "])\n")
+        native.write_text(native.read_text("utf-8").replace(
+            'print(json.dumps({"type":"item.completed"', blocked
+            + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
+        try:
+            if own_scope:
+                cursor = run.run()
+                assert cursor.state == "INCOMPLETE"
+                assert run.store.unit("guide").state == "FAILED"
+                assert run.store.unit("guide").recoveries == 2
+                assert not run.store.records("unit_fixup")
+            else:
+                finish(run)
+                assert run.store.unit("guide").recoveries == 0
+                assert not [b for _, _, b in run.store.records("unit_failure") if b["unit"] == "guide"]
+                assignments = [b for _, _, b in run.store.records("unit_fixup")]
+                assert [a["owner"] for a in assignments] == ["u001"]
+                assignment, = assignments
+                assert assignment["scope"] == [
+                    "unit-001/value.txt", "unit-001/interaction.txt", "unit-001/check.py"]
+                assert assignment["gaps"][0]["correction"] == correction
+                assert run.store.read(assignment["gaps"][0]["source"])["answer"]["outcome"] == "blocked"
+                owner = run.store.unit("u001")
+                assert run.store.unit("guide").base == owner.integrated
+                assert (run.project / "unit-001/interaction.txt").read_text() == "ready"
+                assert (slot / "turn-docs").read_text() == "2"
+            assert run.store.unit("u002").state == "DONE"
+            assert run.store.unit("u002").recoveries == 0
+            assert (slot / "turn-unit-002").read_text() == "1"
+        finally:
+            run.close()
+
+
 @pytest.fixture(scope="module")
 def seed(tmp_path_factory):
     slot = tmp_path_factory.mktemp("fixup-seed")

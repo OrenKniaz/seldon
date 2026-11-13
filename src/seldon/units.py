@@ -30,7 +30,7 @@ def block_dependants(store, failed, cause):
     reached = {failed}
     while True:
         added = {ref for ref in store.units() if ref not in reached
-                 and reached.intersection(plan.prerequisites(document, ref))}
+                 and reached.intersection(plan.prerequisites(document, ref) + store.unit(ref).waitingFor)}
         if not added:
             return
         reached.update(added)
@@ -110,6 +110,8 @@ def work(store, provider, ref):
     else:
         answer = store.read(report)["answer"]
     store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
+    if fixups.handoff(store, ref, report, answer):
+        return
     if answer.get("outcome") != "done":
         raise ValueError("Worker could not complete this unit: " + str(answer))
     with store.transaction():
@@ -149,7 +151,7 @@ def run_unit(store, provider, ref):
     contract = plan.select(document, "unit")[ref]
     checks = fixups.checks_for(store, document, ref)
     try:
-        while (unit := store.unit(ref)).state not in ("DONE", "FAILED", "BLOCKED"):
+        while (unit := store.unit(ref)).state not in ("DONE", "FAILED", "BLOCKED", "WAITING"):
             try:
                 if unit.state == "READY":
                     base = store.cursor().candidate

@@ -36,6 +36,12 @@ UNIT_EVIDENCE = (
     "For visual requirements, those checks save screenshots in SELDON_EVIDENCE_DIR at each "
     "observable state needed for judgment. Wave screenshots are available only after integration.")
 
+AGREED_LITERALS = (
+    "A check may assert an exact literal only if that literal is in agreed text visible to the area "
+    "(accepted vision commitment, contract text, or its own requirement text); otherwise assert by "
+    "role, structure or behaviour; an unagreed literal needed by two areas is a contract_gap, "
+    "never an invention.")
+
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
              + ALIGN_DESIGN,
@@ -43,7 +49,9 @@ PROMPTS = {
                  "Assign every supplied commitment handle to an area; name disjoint area scopes "
                  "covering product files and each area's own check subtree, with one owner for shared "
                  "check helpers, and one responsible provider area for each contract. "
-                 "Return architecture only: no features, requirements, checks or units.",
+                 "Return architecture only: no features, requirements, checks or units. "
+                 "Contract text states every exact user-visible or machine-visible value two areas "
+                 "must share (labels, names, messages, ids, routes) and nothing more.",
     "DETAIL": "What features, requirements, semantic checks and units deliver this area? "
               "Divide its complete scope among units and bind provided and consumed contracts by handle. "
               "A cross-area check names its local requirements and the consumed contract handles; "
@@ -54,10 +62,13 @@ PROMPTS = {
               "Checks run automatically; Seldon judges visual quality from saved screenshots. "
               "If the answer exceeds the small list bounds, return subdivide with narrower sub-areas "
               "covering this responsibility and their contracts. If an agreement or needed scope is missing, "
-              "return contract_gap and the need; do not invent an agreement.",
+              "return contract_gap and the need; do not invent an agreement: an exact value asserted "
+              "by a check is an agreement. " + AGREED_LITERALS,
     "REVIEW": "Does this area's plan deliver its part of the accepted scope and quality bar? "
               "Check its records, agreements and trace coverage. "
-              "Judge only the supplied subject. Name concrete gaps only.",
+              "Judge only the supplied subject. Name concrete gaps only. "
+              "Name any check depending on an exact value absent from the accepted vision, "
+              "contracts or its own requirements as a concrete gap.",
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
             "run its checks and refine before returning. Meet the accepted quality bar.",
@@ -69,7 +80,7 @@ PROMPTS = {
              "every preserves check exercised existing behavior on its baseline. A missing product can "
              "demonstrate RED; a missing check helper or broken test environment cannot. "
              "Exit codes are CODE facts; interpret their meaning. A no on any obligation is a gap. "
-             + JUDGMENT_LEEWAY,
+             + JUDGMENT_LEEWAY + " " + AGREED_LITERALS,
     "DEMO": "Does this requirement's demonstrated behavior meet its obligation "
             "without stubs, mocks or missing behavior? Inspect final observations and screenshots. "
             "Identify the real user path and the observed evidence that exercised it "
@@ -113,7 +124,8 @@ def build(kind, facts, targets=(), execution=None, images=()):
             "to reach product assertions on this baseline. Every owned requirement needs a local check "
             "that runs "
             "in that checkout before integration. "
-            "A check covering requirements from different units runs on the integrated product; "
+            "A check covering requirements from different units runs on the integrated product at "
+            "wave level, never by rebuilding another area's surface in a local fixture; "
             "one unit owns its source file. An establishes check must fail on the unit base or, if "
             "already passing there, on the wave-start product with every unit's check sources and "
             "helpers as they stand at the unit base; shared check mechanics (helpers, fixtures, test "
@@ -220,6 +232,7 @@ def detail_brief(store, outline, area):
     facts = {"Approved scope": {"scopeIn": [goals[r] for r in area["commitments"]
                                            if not r.startswith("quality:")],
                                "scopeOut": vision["scopeOut"], "quality": vision["quality"]},
+             "Accepted commitments": {r: goals[r] for r in area["commitments"]},
              "Area": {k: area[k] for k in ("handle", "responsibility", "scope")},
              "Current wave": outline["waves"][0],
              "Contracts": {r: {"kind": c["kind"], "text": c["text"],

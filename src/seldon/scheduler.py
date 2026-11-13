@@ -18,7 +18,7 @@ def execute(store, provider, capacity):
             for ref, row in rows.items():
                 if ref in running.values() or row.state in ("DONE", "FAILED", "BLOCKED"):
                     continue
-                deps = plan.prerequisites(document, ref)
+                deps = plan.prerequisites(document, ref) + row.waitingFor
                 failed = [d for d in deps if rows[d].state in ("FAILED", "BLOCKED")]
                 if failed:
                     reason = "; ".join(f"{d}: {rows[d].state}: {rows[d].failure}" for d in failed)
@@ -38,7 +38,8 @@ def execute(store, provider, capacity):
                             store.unit(ref, replace(store.unit(ref), waiting=reason))
                     continue
                 if row.state == "WAITING":
-                    advance(store, "ready", "Dependencies DONE and scope available", unit=ref, waiting="")
+                    advance(store, "ready", "Dependencies DONE and scope available", unit=ref,
+                            waiting="", waitingFor=[])
                 running[pool.submit(units.run_unit, store, provider, ref)] = ref
             if not running:
                 pending = [r for r, u in store.units().items()

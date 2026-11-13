@@ -33,7 +33,7 @@ UNIT = {
     "WAITING": {"ready": "READY", "blocked": "BLOCKED"},
     "READY": {"start": "WORKING", "recover": "READY", "exhausted": "FAILED", "blocked": "BLOCKED"},
     "WORKING": {"returned": "PROVING", "recover": "REWORK", "exhausted": "FAILED",
-                "reopen": "WORKING"},
+                "reopen": "WORKING", "wait-owner": "WAITING"},
     "PROVING": {"proven": "JUDGING", "recover": "REWORK", "exhausted": "FAILED"},
     "JUDGING": {"approved": "INTEGRATING", "recover": "REWORK", "exhausted": "FAILED"},
     "INTEGRATING": {"integrated": "DONE", "recover": "REWORK", "exhausted": "FAILED"},

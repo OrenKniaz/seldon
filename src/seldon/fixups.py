@@ -15,7 +15,7 @@ def plan(store, gaps):
     assignments = {}
     for gap in gaps:
         if (set(gap) != {"subject", "kind", "commit", "units", "correction", "source"}
-                or gap["kind"] not in ("flow", "check") or gap["commit"] != cursor.candidate
+                or gap["kind"] not in ("flow", "check", "blocked") or gap["commit"] != cursor.candidate
                 or not isinstance(gap["correction"], str) or not gap["correction"].strip()
                 or not isinstance(gap["units"], list) or not gap["units"]):
             raise ValueError("Fixup requires a concrete current-candidate Gap and its owning units")
@@ -46,6 +46,39 @@ def active(store, ref):
     return None
 
 
+def handoff(store, ref, report, answer):
+    """A blocked worker waits for DONE scope owners, without spending its recoveries."""
+    if answer["outcome"] != "blocked" or not answer["discoveries"]:
+        return False
+    # One handoff per unit: a second block is the unit's own recovery, so owner loops stay bounded.
+    if any(b["unit"] == ref and b["disposition"] == "owner fixup"
+           for _, _, b in store.records("discovery")):
+        return False
+    # Serialize candidate selection with integration, and owner admission with other handoffs.
+    with store.integration_lock, store.transaction():
+        cursor = store.cursor()
+        document = store.plan(cursor.revision)
+        owners = planning.select(document, "unit")
+        gaps = []
+        for discovery in answer["discoveries"]:
+            target = planning.safe_path(discovery["target"])
+            matches = [r for r, u in owners.items()
+                       if planning.matches(target, planning.owned_scope(u))]
+            if len(matches) != 1 or matches[0] == ref or store.unit(matches[0]).state != "DONE":
+                return False
+            gaps.append({"subject": target, "kind": "blocked", "commit": cursor.candidate,
+                         "units": matches, "correction": discovery["correction"], "source": report})
+        for discovery in answer["discoveries"]:
+            store.record("discovery", {"unit": ref, "report": report,
+                                      "disposition": "owner fixup", **discovery})
+        advance(store, "wait-owner", report, unit=ref,
+                waitingFor=list(dict.fromkeys(r for g in gaps for r in g["units"])),
+                report=None, callFolder=None, callAttempt=None, worktree=None,
+                T=None, P=None, observations=[], judgment=None)
+        apply(store, gaps)
+    return True
+
+
 def checks_for(store, document, ref):
     """Preserve existing behaviour; re-prove failed local checks, leaving cross-unit proof to the wave."""
     local = planning.assigned(document)[ref]
@@ -53,8 +86,8 @@ def checks_for(store, document, ref):
     if fixup is None:
         return local
     failed = {g["subject"] for g in fixup["gaps"] if g["kind"] == "check"}
-    flow = any(g["kind"] == "flow" for g in fixup["gaps"])
-    return {r: dict(c, mode="establishes" if r in failed or flow and c["mode"] == "establishes"
+    reprove = any(g["kind"] in ("flow", "blocked") for g in fixup["gaps"])
+    return {r: dict(c, mode="establishes" if r in failed or reprove and c["mode"] == "establishes"
                    else "preserves")
             for r, c in local.items()}
 
@@ -81,7 +114,8 @@ def apply(store, gaps):
                        + "\n".join(g["correction"] for g in assignment["gaps"]))
             units.recover(store, ref, failure)
         cursor = store.cursor()
-        event = "rework" if cursor.state == "WAVE-VERIFY" else "gap"
-        advance(store, event, refs, pendingJudge=None, finalCommit=None, finalObservations=[],
-                productVerdict=None, checkin=None, decision=None)
+        if cursor.state != "EXECUTE":
+            event = "rework" if cursor.state == "WAVE-VERIFY" else "gap"
+            advance(store, event, refs, pendingJudge=None, finalCommit=None, finalObservations=[],
+                    productVerdict=None, checkin=None, decision=None)
     return refs

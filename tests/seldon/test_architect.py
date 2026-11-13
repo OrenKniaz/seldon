@@ -178,6 +178,91 @@ def area_recovery_journey(tmp_path, mode):
     print(f"ARCHITECT {mode}: {time.monotonic()-began:.2f}s", flush=True)
 
 
+def agreed_literals_journey(root):
+    """A shared unnamed check value gets one contract revision and reaches B with visible facts.
+
+    The agreed control and missing-agreement twin catch lost ARCHITECT routing or contract/commitment
+    delivery; the format-gap journey never consumes an accepted improvement or plans a cross-area
+    assertion. Scripted semantic decisions prove the structural path, not real-model judgment.
+    """
+    literal = "Open reading"
+    commitment = "Keep the reading available after restart"
+    agreement = f'The reading control has accessible name "{literal}".'
+
+    class LiteralProvider(AreaProvider):
+        def areas(self):
+            return [{"handle": f"area-{i:03}", "responsibility": "Deliver named values",
+                     "scope": [f"unit-{i:03}/**"],
+                     "commitments": ["scopeIn:1", "improvements:1", "quality:1", "quality:2"]}
+                    for i in (1, 2)]
+
+        def __call__(self, question):
+            kind, facts = question["kind"], question["facts"]
+            if kind == "DETAIL" and not facts["Contracts"]:
+                with self.lock:
+                    self.detail_calls.append(deepcopy(question))
+                area = facts["Area"]["handle"]
+                return json.dumps({"answer": {"verdict": "contract_gap",
+                    "need": f'{area} check would assert "{literal}" on the shared reading control',
+                    "why": "Two areas need this name but no visible agreement supplies it"}})
+            answer = json.loads(super().__call__(question))
+            body = answer["answer"]
+            if kind == "ALIGN":
+                body["improvements"] = [commitment]
+            elif kind == "ARCHITECT" and (agreed or self.arch_calls > 1):
+                body["contracts"] = [{"handle": "reading-control", "kind": "ui-structure",
+                    "text": agreement, "provider": "area-001", "consumers": ["area-002"]}]
+            elif kind == "DETAIL":
+                # The canonical question, rather than a copied fixture, supplies accepted text.
+                requirement = next(e for e in body["edits"] if e["kind"] == "requirement")
+                requirement["typedBody"]["obligation"] += (
+                    "; " + facts["Accepted commitments"]["improvements:1"])
+                if facts["Area"]["handle"] == "area-002":
+                    local = requirement["targetHandle"]
+                    body["edits"].append({"kind": "check", "targetHandle": "reading-flow",
+                        "typedBody": {"purpose": f'Activate the integrated "{literal}" control',
+                            "mode": "preserves", "command": ["python", "-B", "unit-002/flow.py"],
+                            "requiredEnvironment": ["Python"], "expectedEvidence": "Reading opens",
+                            "requirements": [local, "reading-control"]}})
+            return json.dumps(answer)
+
+    for agreed in (True, False):
+        run, base = start(root / ("agreed" if agreed else "missing"), 2, "sizing")
+        provider = LiteralProvider(base.slot, 2, "sizing")
+        run.provider = provider
+        try:
+            for _ in range(20):
+                if run.store.cursor().state == "B":
+                    break
+                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                run.step()
+            assert run.store.cursor().state == "B"
+            assert provider.arch_calls == (1 if agreed else 2)
+            gaps = run.store.records("architecture_gap")
+            assert len(gaps) == (0 if agreed else 1)
+            if not agreed:
+                assert all(a in gaps[0][2]["gap"] for a in ("area-001", "area-002"))
+            document = run.store.plan(run.store.cursor().revision)
+            contracts = plan.select(document, "contract")
+            contract, = contracts.values()
+            assert contract["text"] == agreement
+            delivered = [q["facts"] for q in provider.detail_calls if q["facts"]["Contracts"]]
+            assert {f["Contracts"]["reading-control"]["side"] for f in delivered} == {
+                "provider", "consumer"}
+            assert all(f["Contracts"]["reading-control"]["text"] == agreement for f in delivered)
+            requirements = plan.select(document, "requirement")
+            assert all(commitment in r["obligation"] for r in requirements.values())
+            wave_check, = [c for c in plan.assigned(document)[None].values()
+                           if literal in c["purpose"]]
+            assert len(wave_check["requirements"]) == 2
+            assert not any(literal in c["purpose"] for ref, checks in plan.assigned(document).items()
+                           if ref for c in checks.values())
+            print(f"Agreed literals {'control' if agreed else 'fault twin'} -> B; "
+                  f"ARCHITECT revisions {provider.arch_calls - 1}; cross-area check wave-only", flush=True)
+        finally:
+            run.close()
+
+
 def size_journey(root):
     """One versus fifty reaches B; growing siblings cannot enlarge the same area's REVIEW.
 
