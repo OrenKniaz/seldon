@@ -55,35 +55,42 @@ def select(document, kind):
 
 
 def assigned(document):
-    normalize_checks(document)
+    writers = owners(document)
+    normalize_checks(document, writers)
     result = {r: {} for r in select(document, "unit")}
     result[None] = {}
     for ref, check in select(document, "check").items():
-        result[owner(document, ref) if check["level"] == "unit" else None][ref] = check
+        result[writers[ref] if check["level"] == "unit" else None][ref] = check
+    return result
+
+
+def owners(document):
+    """The check's file has one writer, even when argv also names another unit's product."""
+    units = select(document, "unit")
+    scopes = {r: owned_scope(u) for r, u in units.items()}
+    result = {}
+    for ref, check in select(document, "check").items():
+        candidates = [r for r in units if any(matches(arg, scopes[r]) for arg in check["command"])]
+        if len(candidates) != 1:
+            candidates = [r for r in candidates
+                          if any(matches(arg, units[r]["checkPaths"]) for arg in check["command"])]
+        if len(candidates) != 1:
+            raise ValueError(f"{ref}: name a check file with exactly one unit owner")
+        result[ref] = candidates[0]
     return result
 
 
 def owner(document, check_ref):
-    """The check's file has one writer, even when argv also names another unit's product."""
-    check = select(document, "check")[check_ref]
-    units = select(document, "unit")
-    candidates = [r for r, u in units.items()
-                  if any(matches(arg, owned_scope(u)) for arg in check["command"])]
-    if len(candidates) != 1:
-        candidates = [r for r in candidates
-                      if any(matches(arg, units[r]["checkPaths"]) for arg in check["command"])]
-    if len(candidates) != 1:
-        raise ValueError(f"{check_ref}: name a check file with exactly one unit owner")
-    return candidates[0]
+    return owners(document)[check_ref]
 
 
-def normalize_checks(document):
+def normalize_checks(document, writers=None):
     """Declared wave checks stay wave; cross-unit inputs can only promote a local check."""
     units = select(document, "unit")
+    writers = writers or owners(document)
     for ref, check in select(document, "check").items():
-        writer = owner(document, ref)
         requirements = set(check["requirements"])
-        local = set(units[writer]["requirements"])
+        local = set(units[writers[ref]]["requirements"])
         if requirements - local:
             check["level"] = "wave"
         else:

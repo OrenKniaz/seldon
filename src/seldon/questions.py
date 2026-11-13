@@ -308,8 +308,8 @@ def work_brief(store, ref):
         owned = {r: o for r, o in items.items() if o["owner"] == ref}
         if owned:
             facts["Skeleton obligations owned here"] = owned
-    wave_checks = {r: c for r, c in plan.assigned(document)[None].items()
-                   if plan.owner(document, r) == ref}
+    writers = plan.owners(document)
+    wave_checks = {r: c for r, c in plan.assigned(document)[None].items() if writers[r] == ref}
     if wave_checks:
         facts["Wave checks to write, not run here"] = wave_checks
     if ref == "guide":
