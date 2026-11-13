@@ -1,4 +1,4 @@
-# SELDON BLUEPRINT v1.7 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.8 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
@@ -9,6 +9,7 @@
 > **v1.5 (Oren, 2026-11-12, "ok, you can ratify"):** wave-start RED in the unit table (PROVING): a check an earlier unit of the same wave already satisfies must fail on the wave's start commit. The lead's M1 decision, ratified (T-76).
 > **v1.6 (Oren, 2026-11-13, "Ok you can ratify"):** two execution rules from the P10 bird's-eye (Fable + Astra) after M2 exit cohort #4 reached 4/10 on five different walls: every check has one owner and a declared level; every check run is hermetic (§3.1). Notes: `work/ladder/design-review/birds-eye-2026-11-13-{fable,astra}.md`.
 > **v1.7 (Oren, 2026-11-13, "Ok, I accept both re. 15 and process.py changes"):** M3 wording from Fable's design (REC-15): wave-exclusive scopes with the latest path owner; B binds the accepted commitments, other changes go through STEER and show at check-in; VALIDATE per accepted commitment, quality per area; placeholders name their commitment; §8.4 C15 reading for folded commits. §5: processes.py may replace its bootstrap with a suspended start. Notes: `work/ladder/design-review/m3-design-2026-11-13.md`.
+> **v1.8 (Oren, 2026-11-13, "no hard caps on budget anywhere, but later efficiency debrief"):** R15: no size, time or count limit refuses a question, fails a unit or ends a run; limits only route (split, recover, steer, ask the user). §3.2: the end of the steering chain is a user question. P11: efficiency debrief after each cohort or fight. §5: every hard cap dropped. Notes: `work/ladder/design-review/no-hard-caps-2026-11-13-fable.md`.
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -71,7 +72,7 @@ B approves the architecture, the wave outline and wave 1. What the user's approv
 | INTEGRATING | code | Merge into the wave candidate; affected checks rerun on the new commit. |
 | DONE | | |
 
-A failure in PROVING, JUDGING or INTEGRATING returns the unit to its own worker with the exact failure. Two recoveries (C18), then **unit steering**: the planner re-splits it, changes approach, corrects a contract, or raises scope to the user. Other units keep running.
+A failure in PROVING, JUDGING or INTEGRATING returns the unit to its own worker with the exact failure. Two recoveries (C18), then **unit steering**: the planner re-splits it, changes approach, corrects a contract, or raises it to the user. Work that reaches steering a second time, as the same unit or as the units it was split into, goes to the user as one question: what was tried, what failed, and Seldon's recommendation. Only the user's answer drops a unit or ends the dream. Meanwhile other units keep running, dependants wait with the reason shown, and a run with nothing else to do waits for the user; it does not end.
 
 ### 3.3 Planning is progressive
 
@@ -113,13 +114,15 @@ Each rule names its check and the real failure it prevents. A change that breaks
 
 **R14. Clarity over line count.** One job per module with real boundaries; no mixins sharing one object; lines of at most 110 characters; no god files. Line totals are reported, never targeted.
 
+**R15. No hard caps.** A size, time or count limit may only route work: split a question, recover a call, steer a unit, ask the user. It never refuses a question, fails a unit or ends a run. "Bounded" in R2 and R3 says how code builds questions: a subject too large for one question becomes several, and a piece that cannot be split is sent whole. No brief asks a worker to make the product or its tests smaller to fit Seldon. Provider deadlines stay as hang guards; a hit is a transient failure and recovers in the same session (R8). The chain always ends at the user (§3.2), never at a number. Each run records its largest question per kind, total calls and bytes, wall time and recoveries; nothing in a run acts on those numbers. Until unit steering lands (M3), two recoveries go straight to the user question. *Check:* a journey unit with a 150 KB patch reaches DONE with its files unchanged and no recovery spent; a unit that never passes ends in a user question while the other N−1 integrate and the run stays resumable. *Prevents:* T-131 (an 84 KB JUDGE refused; workers deleted tests and product to fit), T-133 (one unit's third failure ended a run with three healthy units waiting).
+
 ## 5. The present core (`e4024b6`): keep, change, drop
 
 | | Modules |
 |---|---|
 | **Keep** | `store.py` (add typed state records), schema validator, `providers.py` (add session resume and a second provider), `processes.py` (its bootstrap handshake may be replaced by a suspended start into the job, Oren 2026-11-13), worktrees and atomic publication in `work.py`, recording of every real call, `run_report.py`, the recorded-answer replay test. |
 | **Change** | `plan.py` → the records of §3.1, progressive. `execution.py` → the unit loop of §3.2 on Git commits. `verification.py` → proof by code per unit, then WAVE-VERIFY. `inference.py` and `questions.py` → one brief builder per subject (R12). |
-| **Drop** | Global `WORK(tests)` and `WORK(build)` phases; evidence applicability hashing and `checkGeneration`; exact-file ownership; the 64 KB error as a limit; repair counts by origin; hard-coded `TRY.txt`; required citations nobody reads; the staged `core10b` paging change (keep its recordings and replay test). |
+| **Drop** | Global `WORK(tests)` and `WORK(build)` phases; evidence applicability hashing and `checkGeneration`; exact-file ownership; every hard cap (R15): the 64 KB refusals on JUDGE, WORK, ARCHITECT and DETAIL questions, the 2x re-ask size refusal, repair counts by origin, retry counts that fail a unit or end a run; hard-coded `TRY.txt`; required citations nobody reads; the staged `core10b` paging change (keep its recordings and replay test). |
 
 ## 6. Build order
 
@@ -155,6 +158,8 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 **P8. No ceremony.** Briefs and reports are short and say only what changed, what was proven and what is not. No boilerplate lines, no status documents nobody reads, no review rounds without a named risk.
 
 **P10. Step back on repeat design faults.** A second DESIGN ticket in the same module within a day stops new lanes there and triggers one bird's-eye review of the shape before any third fix.
+
+**P11. Efficiency debrief.** After each cohort or fight the lead reads the recorded numbers (largest questions, slowest steps, repeated recoveries, deadline hits) and opens tickets for the biggest wins. Efficiency changes land through ordinary lanes; they never become limits inside a run (R15).
 
 ## 8. Ratified decisions (Oren, 2026-11-11)
 
