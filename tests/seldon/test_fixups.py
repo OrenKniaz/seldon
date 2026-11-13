@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -17,6 +19,8 @@ def blocked_owner_journeys(root):
     """A real blocked WORK must reach its sibling owner; final-judge gaps never exercise WORK routing.
 
     The own-scope twin catches wrongly waiving local failures, which the sibling success cannot expose.
+    The missing-base twin catches reopening a DONE sibling for absent integration; guide repair
+    always starts with that sibling's files and cannot expose this false blocker.
     """
     for mode in ("sibling", "own", "repeated"):
         own_scope = mode == "own"
@@ -65,6 +69,83 @@ def blocked_owner_journeys(root):
             assert (slot / "turn-unit-002").read_text() == "1"
         finally:
             run.close()
+
+    slot = root / "missing-base"
+    run, provider = prepare(slot, "base-only", 2)
+
+    def wave(answer):
+        answer["units"][1]["checkPaths"] = ["unit-002/*.py"]
+        answer["units"][0]["provides"] = ["new:page"]
+        answer["units"][1]["consumes"] = ["new:page"]
+        answer["edits"].extend([
+            {"kind": "contract", "targetHandle": "new:page", "typedBody": {
+                "kind": "ui-structure", "text": "The page exposes a named content slot.",
+                "provider": 1, "consumers": [2]}},
+            {"kind": "check", "targetHandle": "new:wave", "typedBody": {
+                "purpose": "Read the integrated page and consumer value", "level": "wave",
+                "mode": "establishes", "command": [sys.executable, "-S", "-B", "unit-002/wave.py"],
+                "requiredEnvironment": ["Python"], "expectedEvidence": "Page and consumer compose",
+                "requirements": ["new:r001", "new:r002"]}}])
+
+    provider.plan_fault = wave
+    native = slot / "native.py"
+    source = ("from pathlib import Path\n"
+              "assert Path('unit-001/page.txt').read_text() == 'content slot'\n"
+              "assert Path('unit-002/value.txt').read_text() == 'value-002'\n"
+              "print('integrated page and consumer')\n")
+    injection = ("if name == 'unit-001':\n"
+                 "    Path(name, 'page.txt').write_text('content slot')\n"
+                 "if name == 'unit-002':\n"
+                 "    assert not Path('unit-001/page.txt').exists()\n"
+                 f"    Path(name, 'wave.py').write_text({source!r})\n"
+                 "    if turn == 1:\n"
+                 "        answer['answer'].update(outcome='blocked', discoveries=[{\n"
+                 "            'owner': 'u001', 'correction': 'lacks integrated page'}])\n")
+    native.write_text(native.read_text("utf-8").replace(
+        'print(json.dumps({"type":"item.completed"', injection
+        + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
+    invoke = provider.invoke
+    consumer_started = Event()
+
+    def coordinated(question, started):
+        if question["kind"] == "WORK":
+            scope = question["facts"]["Write scope"]
+            if scope == ["unit-001/**"]:
+                assert consumer_started.wait(20), "Consumer must start before page integration"
+            elif scope == ["unit-002/**"]:
+                consumer_started.set()
+                deadline = time.monotonic() + 20
+                while run.store.unit("u001").state != "DONE" and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert run.store.unit("u001").state == "DONE", "Page owner must be DONE at handoff"
+        return invoke(question, started)
+
+    provider.invoke = coordinated
+    try:
+        cursor, rows, _ = finish(run)
+        assert not run.store.records("unit_fixup")
+        transitions = [b for _, k, b in rows if k == "transition" and b["unit"] == "u001"]
+        assert not any(b["input"] == "DONE" for b in transitions)
+        failure, = [b["failure"] for _, k, b in rows if k == "unit_failure" and b["unit"] == "u002"]
+        assert failure == ("u001's files are not in this unit's base by design; "
+                           "write the wave check, run unit checks, return done")
+        wave_ref, = plan.assigned(run.store.plan(cursor.revision))[None]
+        assert any(b["check"] == wave_ref and b["purpose"] == "final"
+                   and b["commit"] == cursor.candidate and b["exitCode"] == 0
+                   and "integrated page and consumer" in b["stdout"]
+                   for _, k, b in rows if k == "observation")
+        questions = [b for _, k, b in rows if k == "question" and b["kind"] == "WORK"
+                     and b["facts"]["Write scope"] == ["unit-002/**"]]
+        assert len(questions) == 2
+        assert all("Wave checks to write, not run here" in q["facts"] for q in questions)
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+def test_blocked_owner_journeys(tmp_path):
+    """Exercise WORK handoffs through C, including an owner absent from the consumer's base."""
+    blocked_owner_journeys(tmp_path / "blocked-owner")
 
 
 def owner_repair_journeys(root):

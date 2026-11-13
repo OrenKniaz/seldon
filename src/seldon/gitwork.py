@@ -27,6 +27,11 @@ def commit(root, tree, parent=None):
                *(["-p", parent] if parent else []), "-m", "Seldon candidate")
 
 
+def contains(project, commit, base):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", commit, base], cwd=project,
+                          capture_output=True, timeout=120).returncode == 0
+
+
 def init(root):
     git(root, "init", "--quiet")
     empty = git(root, "mktree", data=b"")

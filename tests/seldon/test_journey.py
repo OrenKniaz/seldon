@@ -296,7 +296,7 @@ else:
         else:
             Path(name, "details.txt").unlink()
     if mode == "parallel" and name == "unit-004":
-        wave_checks = list(facts["Wave checks to write in this scope"].values())
+        wave_checks = list(facts["Wave checks to write, not run here"].values())
         assert len(wave_checks) == 1 and wave_checks[0]["command"][-1] == "unit-004/compose.py"
         Path(name, "compose.py").write_text(
             "from pathlib import Path\n"

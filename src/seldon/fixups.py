@@ -1,5 +1,6 @@
 """C18/C23; R7/R8/R9: recorded gaps reopen only their approved owning units."""
 
+from . import gitwork
 from . import plan as planning
 from .states import advance
 
@@ -61,8 +62,13 @@ def handoff(store, ref, report, answer):
         gaps = []
         for discovery in answer["discoveries"]:
             owner = discovery["owner"]
-            if owner not in owners or owner == ref or store.unit(owner).state != "DONE":
+            if owner not in owners or owner == ref:
                 return False
+            named = store.unit(owner)
+            if (named.state != "DONE" or not named.integrated
+                    or not gitwork.contains(store.root.parent, named.integrated, row.base)):
+                raise ValueError(f"{owner}'s files are not in this unit's base by design; "
+                                 "write the wave check, run unit checks, return done")
             gaps.append({"subject": owner, "kind": "blocked", "commit": cursor.candidate,
                          "units": [owner], "correction": discovery["correction"], "source": report})
         if repeated:

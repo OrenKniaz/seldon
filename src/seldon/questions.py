@@ -34,7 +34,9 @@ JUDGMENT_LEEWAY = (
 UNIT_EVIDENCE = (
     "The unit JUDGE receives only observations from this unit's local checks at T and P. "
     "For visual requirements, those checks save screenshots in SELDON_EVIDENCE_DIR at each "
-    "observable state needed for judgment. Wave screenshots are available only after integration.")
+    "observable state needed for judgment. Wave screenshots are available only after integration. "
+    "Wave checks are written here and first run by Seldon on the integrated product; "
+    "other units' files missing from this worktree are expected, never a blocker.")
 
 AGREED_LITERALS = (
     "When asserting an exact value about another area's surface or a shared contract, a check uses "
@@ -71,7 +73,7 @@ PROMPTS = {
               + AGREED_LITERALS,
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
-            "run its checks and refine before returning. Meet the accepted quality bar.",
+            "run its unit checks and refine before returning. Meet the accepted quality bar.",
     "JUDGE": "For each requirement: are its checks meaningful; did they actually exercise the "
              "requirement at P (not skipped, not empty, not asserting nothing); is anything a stub, "
              "mock or missing? Read the check sources, RED output at T or wave start, passing P output "
@@ -288,7 +290,7 @@ def work_brief(store, ref):
     wave_checks = {r: c for r, c in plan.assigned(document)[None].items()
                    if plan.owner(document, r) == ref}
     if wave_checks:
-        facts["Wave checks to write in this scope"] = wave_checks
+        facts["Wave checks to write, not run here"] = wave_checks
     if ref == "guide":
         # The writer inspects the already integrated product; its brief never copies the whole plan.
         facts["Guide path"] = plan.GUIDE_PATH
@@ -306,7 +308,6 @@ def work_brief(store, ref):
     units = plan.select(document, "unit")
     owners = {ref, *plan.prerequisites(document, ref)}
     owners.update(c["provider"] for c in architecture.contracts_for(document, ref).values())
-    owners.update(plan.owner(document, r) for r in [*checks, *wave_checks])
     facts["Correction owners"] = {r: plan.owned_scope(u)
                                   for r, u in units.items() if r in owners}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
