@@ -263,6 +263,115 @@ def agreed_literals_journey(root):
             run.close()
 
 
+def user_words_journeys(root):
+    """Lossy ALIGN still reaches B with the dream and every A/B revise; uncertainty is corrected.
+
+    Existing named-value dreams fit the vision and revise only once, hiding lost source literals
+    and earlier edits. The fault twin catches an ARCHITECT missing-facts answer ending the run
+    instead of the ordinary schema correction and a visible planning decision.
+    """
+    dream = ("Build an importer. GET /api/items -> 200\n"
+             "CSV: sku,name,quantity,expires_on\nShow imported N, skipped M.\n"
+             "Choose the retention period.")
+    changes = ["Revise: preserve status=ready.", "Revise: use UTF-8 CSV.",
+               "Revise: include import_id.", "Revise: show retry-after=5."]
+    literals = ["GET /api/items -> 200", "sku,name,quantity,expires_on", "imported N, skipped M",
+                "status=ready", "UTF-8 CSV", "import_id", "retry-after=5"]
+
+    class WordsProvider(AreaProvider):
+        def areas(self):
+            return [{"handle": f"area-{i:03}", "responsibility": "Deliver the importer",
+                     "scope": [f"unit-{i:03}/**"],
+                     "commitments": ["scopeIn:1", "quality:1", "quality:2"]}
+                    for i in (1, 2)]
+
+        def __call__(self, question):
+            kind, facts = question["kind"], question["facts"]
+            if kind == "DECIDE":
+                return super().__call__(question)
+            words = facts.get("User's words", {})
+            text = "\n".join([words.get("Dream", ""), *words.get("Requested change", [])])
+            found = sorted((literal for literal in literals if literal in text), key=text.index)
+            if kind == "ARCHITECT" and fault and not self.arch_calls:
+                self.arch_calls += 1
+                return json.dumps({"answer": {"verdict": "uncertain",
+                    "neededFacts": ["the referenced API specification", "CSV columns"],
+                    "why": "The condensed vision does not specify them"}})
+            answer = json.loads(super().__call__(question))
+            body = answer["answer"]
+            if kind == "ALIGN":
+                body["understanding"] = "Import items with an API and CSV"
+                body["scopeIn"] = ["Import and list items"]
+            elif kind == "ARCHITECT":
+                body["contracts"] = [{"handle": "import-format", "kind": "api",
+                    "text": "; ".join(found), "provider": "area-001", "consumers": ["area-002"]}]
+                body["decisions"] = [{"choice": "Retain imports for 30 days",
+                    "reason": "The user left retention open", "origin": "architecture",
+                    "areas": ["area-001"]}]
+            elif kind == "DETAIL":
+                for edit in body["edits"]:
+                    if edit["kind"] == "requirement":
+                        edit["typedBody"].update(obligation="; ".join(found), contract="; ".join(found))
+            elif kind == "REVIEW":
+                if not words:
+                    body.update(verdict="gap", gaps=[{"target": facts["Review subject"],
+                        "correction": "Supply the user's agreed text to review the plan"}])
+            return json.dumps(answer)
+
+    for fault in (False, True):
+        slot = root / ("fault" if fault else "control")
+        slot.mkdir(parents=True)
+        provider = WordsProvider(slot, 2, "sizing")
+        revised = {"A": 0, "B": 0}
+
+        def user(item):
+            gate = item["gate"]
+            if gate in revised and revised[gate] < 2:
+                offset = 0 if gate == "A" else 2
+                words = changes[offset + revised[gate]]
+                revised[gate] += 1
+                return words
+            return approve(item)
+
+        run = Run(slot / "product", slot / "workers", dream, provider.setup, provider, user, capacity=6)
+        try:
+            for _ in range(45):
+                if run.store.cursor().state == "B" and revised["B"] == 2:
+                    break
+                assert run.store.cursor().state not in ("INCOMPLETE", "EXECUTE")
+                run.step()
+            assert run.store.cursor().state == "B"
+            run.step()  # The user approves the displayed final plan, without executing workers.
+            approval = run.store.read(run.store.cursor().B)
+            document = approval["subject"]["plan"]
+            requirement = next(iter(plan.select(document, "requirement").values()))
+            assert all(literal in requirement["obligation"] for literal in literals)
+            assert [requirement["obligation"].index(literal) for literal in literals] == sorted(
+                requirement["obligation"].index(literal) for literal in literals)
+            contract, = plan.select(document, "contract").values()
+            assert all(literal in contract["text"] for literal in literals[:5])
+            assert any(d["choice"] == "Retain imports for 30 days"
+                       for d in plan.select(document, "decision").values())
+            assert approval["subject"]["review"]["answer"]["verdict"] == "adequate"
+            assert not run.store.records("outcome")
+            replies = [b for _, _, b in run.store.records("provider_reply")]
+            rejected = [b for b in replies if b["errors"]]
+            assert len(rejected) == (1 if fault else 0), rejected
+            if fault:
+                assert json.loads(rejected[0]["rawAnswer"])["answer"]["verdict"] == "uncertain"
+        finally:
+            run.close()
+    print("User words twin + fault twin -> B with all A/B revisions and a recorded decision", flush=True)
+
+
+def test_user_words_journeys(tmp_path):
+    user_words_journeys(tmp_path / "user-words")
+
+
+def test_planning_size_journey(tmp_path):
+    size_journey(tmp_path / "size")
+
+
 def size_journey(root):
     """One versus fifty reaches B; growing siblings cannot enlarge the same area's REVIEW.
 

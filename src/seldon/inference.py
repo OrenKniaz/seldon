@@ -79,6 +79,6 @@ def call(store, provider, question, unit=None, check=lambda answer: None, max_by
             except (questions.MissingFacts, questions.UnitTooLarge) as error:
                 answer = {**answer, "why": answer["why"] + "; " + str(error)}
         answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
-    elif answer.get("verdict") == "uncertain" and kind not in ("REVIEW", "FLOW", "PRODUCT"):
+    elif answer.get("verdict") == "uncertain" and kind == "DEMO":
         raise questions.MissingFacts("Unresolved facts: " + "; ".join(answer["neededFacts"]))
     return result, answer

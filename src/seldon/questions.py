@@ -39,6 +39,8 @@ UNIT_EVIDENCE = (
     "other units' files missing from this worktree are expected, never a blocker.")
 
 AGREED_LITERALS = (
+    "The user's words are agreed text; an exact value they state appears verbatim in the commitment, "
+    "contract or requirement that owns it. "
     "When asserting an exact value about another area's surface or a shared contract, a check uses "
     "agreed text visible to the area (accepted vision commitment, contract text, or requirement text); "
     "otherwise assert by role, structure or behaviour; an unagreed value needed by two areas is a "
@@ -46,6 +48,8 @@ AGREED_LITERALS = (
 
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
+             "Keep every exact value the user stated verbatim in the scopeIn item it belongs to; "
+             "improving never paraphrases an exact value. "
              + ALIGN_DESIGN,
     "ARCHITECT": "What areas, agreements, decisions and wave goals deliver the accepted vision? "
                  "Assign every supplied commitment handle to an area; name disjoint area scopes "
@@ -53,7 +57,9 @@ PROMPTS = {
                  "check helpers, and one responsible provider area for each contract. "
                  "Return architecture only: no features, requirements, checks or units. "
                  "Contract text states every exact user-visible or machine-visible value two areas "
-                 "must share (labels, names, messages, ids, routes) and nothing more.",
+                 "must share (labels, names, messages, ids, routes) and nothing more. "
+                 "Copy exact values from the user's words into contract text or the owning commitment; "
+                 "a value they leave open is yours to choose — record it in decisions.",
     "DETAIL": "What features, requirements, semantic checks and units deliver this area? "
               "Divide its complete scope among units and bind provided and consumed contracts by handle. "
               "A cross-area check names its local requirements and the consumed contract handles; "
@@ -210,8 +216,22 @@ def example_detail():
             "quality": example["quality"]}
 
 
-def architect_brief(vision, gap=None, previous=None):
+def user_words(store):
+    cursor = store.cursor()
+    if cursor.vision:
+        answer = store.read(cursor.vision)
+        attempt = store.read(answer["attempt"])
+        dream = store.read(attempt["question"])["facts"]["Dream"]
+    else:
+        dream = store.read(cursor.kickoff)["words"]
+    changes = [store.read(b["cause"])["words"] for _, _, b in store.records("transition")
+               if b["event"] == "revise" and b["input"] in ("A", "B")]
+    return {"Dream": dream, **({"Requested change": changes} if changes else {})}
+
+
+def architect_brief(vision, words, gap=None, previous=None):
     facts = {"Approved vision": {k: v for k, v in vision.items() if k != "why"},
+             "User's words": words,
              "Commitment handles": architecture.commitments(vision),
              "Ownership": "Areas own complete disjoint scopes including their check subtrees. "
                           "Shared check helpers have one named owner. DETAIL cannot enlarge these scopes.",
@@ -232,7 +252,8 @@ def detail_brief(store, outline, area):
     listing = gitwork.git(store.root.parent, "ls-tree", "-r", "--name-only", cursor.candidate).splitlines()
     files = [p for p in listing if plan.matches(p, area["scope"])]
     goals = architecture.commitments(vision)
-    facts = {"Approved scope": {"scopeIn": [goals[r] for r in area["commitments"]
+    facts = {"User's words": user_words(store),
+             "Approved scope": {"scopeIn": [goals[r] for r in area["commitments"]
                                            if not r.startswith("quality:")],
                                "scopeOut": vision["scopeOut"], "quality": vision["quality"]},
              "Accepted commitments": {r: goals[r] for r in area["commitments"]},

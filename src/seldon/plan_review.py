@@ -6,7 +6,7 @@ from . import architecture, detail, inference, plan, questions
 from .states import advance
 
 
-def briefs(document):
+def briefs(document, words):
     outline = document["architecture"]
     vision = document["nodes"]["vision"]["body"]
     units = {r: u for r, u in plan.select(document, "unit").items() if r != "guide"}
@@ -31,17 +31,19 @@ def briefs(document):
                      if any(architecture.endpoint(a, c) for a in participants)]
         result[area["handle"]] = questions.build("REVIEW", {
             "Review subject": area["handle"], "Approved vision": vision, "Area": area,
+            "User's words": words,
             "Wave goal": outline["waves"][0]["goal"], "Contracts": contracts,
             "Decisions": [d for d in outline["decisions"] if set(d["areas"]) & set(participants)],
             "Plan": {"nodes": nodes}, "Trace coverage": trace})
     return result
 
 
-def architecture_brief(document):
+def architecture_brief(document, words):
     outline = document["architecture"]
     question = questions.build("REVIEW", {
         "Review subject": "architecture",
         "Approved vision": {k: v for k, v in document["nodes"]["vision"]["body"].items() if k != "why"},
+        "User's words": words,
         "Architecture outline": {
             "areas": [{k: a[k] for k in ("handle", "responsibility", "commitments")}
                       for a in outline["areas"]],
@@ -98,7 +100,7 @@ def review(store, provider, question, basis):
 
 def arch_review(store, provider):
     document = store.plan(store.cursor().revision)
-    question = architecture_brief(document)
+    question = architecture_brief(document, questions.user_words(store))
     ref = review(store, provider, question, question)
     answer = store.read(ref)["answer"]
     if answer["verdict"] == "gap":
@@ -111,7 +113,7 @@ def arch_review(store, provider):
 def step(store, provider, capacity):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
-    pending = briefs(document)
+    pending = briefs(document, questions.user_words(store))
 
     def ask(subject):
         try:
@@ -126,7 +128,7 @@ def step(store, provider, capacity):
 
     with ThreadPoolExecutor(max_workers=capacity) as pool:
         refs = dict(zip(pending, pool.map(ask, pending), strict=True))
-    outline_question = architecture_brief(document)
+    outline_question = architecture_brief(document, questions.user_words(store))
     refs["architecture"] = next(b["answer"] for _, _, b in reversed(store.records("area_review"))
                                 if b["subject"] == "architecture" and b["basis"] == outline_question)
     answers = {s: store.read(r)["answer"] for s, r in refs.items()}

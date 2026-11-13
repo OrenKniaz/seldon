@@ -146,10 +146,15 @@ with (slot / ("launch-" + name + ".jsonl")).open("a") as log:
     log.write(json.dumps({"turn": turn, "thread": thread, "resumed": "resume" in args,
                           "start": time.time(), "facts": facts}) + "\n")
 if name == "unit-001" and mode == "timeout" and not any((slot / "calls").glob("*/result.json")):
+    # Real Codex start-up noise (f01 T-132): stderr denial words must not make a timeout final.
+    sys.stderr.write("codex_skills_extension: failed to install system skills: "
+                     "Access is denied. (os error 5)\n")
+    sys.stderr.flush()
     time.sleep(30)
 if name == "unit-001" and mode == "native-denied":
-    sys.stderr.write("Error: failed to initialize in-process app-server client: "
-                     "Access is denied. (os error 5)\n")
+    print(json.dumps({"type": "turn.failed", "error": {"message":
+          "failed to initialize in-process app-server client: Access is denied. (os error 5)"}}),
+          flush=True)
     sys.exit(1)
 if name == "unit-002" and mode in ("kill-work", "kill-fresh") and not (slot / "resume").exists():
     Path(name).mkdir(exist_ok=True)
@@ -1028,8 +1033,8 @@ def simple_journey(slot, mode, count=1, *, seed=None):
         if mode == "user-revise":
             aligns = [b for _, _, b in run.store.records("question") if b["kind"] == "ALIGN"]
             assert len(aligns) == 2
-            assert aligns[1]["facts"]["Requested change"] == (
-                "Revise the dream: describe the exact observable value.")
+            assert aligns[1]["facts"]["Requested change"] == [
+                "Revise the dream: describe the exact observable value."]
             assert cursor.repairs == 1
         if mode == "wave-start":
             observed = [b for _, _, b in run.store.records("observation") if b["unit"] == "u002"]
@@ -1221,7 +1226,8 @@ def test_clean_core_golden(tmp_path):
     separate from feature requirements, preventing demands for global quality from one feature.
     A configured short check deadline times out a real command; a fixed 30-second observer would
     wrongly integrate it. Missing unit judge facts remain not judged without reworking a correct worker.
-    Windows native Access-is-denied wording must stop after one call; generic transport faults
+    A native turn.failed denial must stop after one call, while the same words as stderr start-up
+    noise on a timed-out WORK call stay transient (T-132); generic transport faults
     otherwise retry a denied operation and the successful native journey never exposes it.
     Subject traces include unit verdicts, supplemental JSON artifacts
     and delivered-folder observations; a standalone check and stdout alone cannot expose lost evidence.
@@ -1921,6 +1927,7 @@ def clean_core_golden(root):
         os.environ[key] = str(root)
     began = time.monotonic()
     __import__('test_proof').hermetic_journey(root / 'hermetic')
+    __import__("test_architect").user_words_journeys(root / "user-words")
     __import__("test_architect").check_owner_journeys(root / "check-owner")
     agreed_literals_journey(root / "agreed-literals")
     blocked_owner_journeys(root / "blocked-owner")

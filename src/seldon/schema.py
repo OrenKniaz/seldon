@@ -122,8 +122,9 @@ def answer_schema(kind, targets=(), owners=()):
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
     }[kind]
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
-    alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP, uncertain) if kind == "DETAIL"
-                    else (payload, uncertain))
+    alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
+                    (payload, uncertain) if kind in ("JUDGE", "DEMO", "PRODUCT", "REVIEW") else
+                    (payload,))
     result = obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
     return bounded(result) if kind in ("ARCHITECT", "DETAIL") else result
 

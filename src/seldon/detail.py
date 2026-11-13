@@ -154,7 +154,7 @@ def step(store, provider, capacity):
             leaves.extend(replacements.values())
     with store.transaction():
         revision = store.revision(compiled, cursor.revision)
-        reviewed = plan_review.architecture_brief(compiled)
+        reviewed = plan_review.architecture_brief(compiled, questions.user_words(store))
         has_review = any(b["subject"] == "architecture" and b["basis"] == reviewed
                          for _, _, b in store.records("area_review"))
         advance(store, "detailed" if has_review else "outline-changed", refs, revision=revision)

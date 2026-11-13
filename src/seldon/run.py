@@ -126,9 +126,7 @@ class Run:
             return state
         kickoff = store.read(cursor.kickoff)
         if state == "ALIGN":
-            facts = {"Dream": kickoff["words"], "Runtime": questions.runtime(kickoff["setup"])}
-            if cursor.requestedChange:
-                facts["Requested change"] = store.read(cursor.requestedChange)["words"]
+            facts = {**questions.user_words(store), "Runtime": questions.runtime(kickoff["setup"])}
             ref, answer = inference.call(store, self.provider, questions.build("ALIGN", facts))
             advance(store, "aligned", ref, vision=ref, requestedChange=None)
         elif state in ("A", "B", "CHECK-IN", "C"):
@@ -146,7 +144,8 @@ class Run:
             vision = store.read(cursor.vision)["answer"]
             gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
             result, answer = inference.call(store, self.provider,
-                questions.architect_brief(vision, gaps[-1]["gap"] if gaps else None,
+                questions.architect_brief(vision, questions.user_words(store),
+                                         gaps[-1]["gap"] if gaps else None,
                                          store.plan(cursor.revision)["architecture"] if gaps else None),
                 check=lambda a: architecture.outline(a, vision))
             document = {"architecture": {k: v for k, v in answer.items() if k != "why"},

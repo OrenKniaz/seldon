@@ -13,7 +13,7 @@ from .store import encode
 
 ROLES = {role: {"provider": "codex", "model": "gpt-6.1-sol", "effort": effort, "timeout": timeout}
          for role, (effort, timeout) in {"planner": ("medium", 180), "reviewer": ("medium", 180),
-             "worker": ("medium", 600), "judge": ("medium", 180), "build": ("high", 900),
+             "judge": ("medium", 180), "build": ("high", 1800),
              "demo": ("high", 300), "decider": ("low", 90)}.items()}
 ROLES["check"] = {"timeout": 300}
 
@@ -197,7 +197,7 @@ class Codex:
                 from .schema import validate
                 validate(json.loads(raw), question["schema"])
         except (RuntimeError, ValueError) as error:
-            native_errors = [result["stderr"].decode("utf-8", errors="replace")]
+            native_errors = []  # denial is the provider's own terminal event, never stderr noise
             for line in output.splitlines():
                 try:
                     event = json.loads(line)
@@ -205,7 +205,7 @@ class Codex:
                     continue
                 if isinstance(event, dict) and event.get("type") in ("turn.failed", "error"):
                     native_errors.append(encode(event))
-            denied = any(word in "\n".join(native_errors).lower() for word in (
+            denied = not result["timedOut"] and any(word in "\n".join(native_errors).lower() for word in (
                 "unauthorized", "unauthenticated", "authentication", "not authenticated", "not logged in",
                 "invalid_api_key", "forbidden", "log in", "login", "http 401", "http 403",
                 "permission_denied", "permission denied", "access denied", "access is denied",
