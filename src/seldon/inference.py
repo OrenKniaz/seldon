@@ -8,7 +8,7 @@ from .providers import ProviderFailure, role_for
 from .store import encode
 
 
-def call(store, provider, question, unit=None, check=lambda answer: None, max_bytes=None):
+def call(store, provider, question, unit=None, check=lambda answer: None, max_bytes=None, retries=2):
     setup = store.read(store.cursor().kickoff)["setup"]
     kind = question["kind"]
     role = role_for(kind, {})
@@ -66,7 +66,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, max_by
             raise ValueError("A negative assessment requires a gap verdict and correction: " + str(answer))
         check(answer)
 
-    answer = questions.ask(invoke, question, recorded, validate)
+    answer = questions.ask(invoke, question, recorded, validate, retries=retries)
     with store.transaction():
         result = store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit, "answer": answer})
         store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})

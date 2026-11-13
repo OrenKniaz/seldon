@@ -98,8 +98,16 @@ def planned(count, mode):
         scopes[provider - 1]["provides"] = ["new:page"]
         for number in consumers:
             scopes[number - 1]["consumes"] = ["new:page"]
+            scopes[number - 1]["dependencies"] = sorted({*scopes[number - 1]["dependencies"], provider})
             scopes[number - 1]["reads"] = [f"unit-{provider:03}/value.txt" if mode == "scale50"
                                            else "unit-001/page.json"]
+        if mode == "scale50":
+            # Mutual interface texts must not create an execution cycle. Only unit 50 needs 49's file.
+            edits.append({"kind": "contract", "targetHandle": "new:feedback", "typedBody": {
+                "kind": "file-format", "text": "Consumers acknowledge the agreed UTF-8 value format.",
+                "provider": 50, "consumers": [49]}})
+            scopes[49]["provides"] = ["new:feedback"]
+            scopes[48]["consumes"] = ["new:feedback"]
         edits.append({"kind": "decision", "targetHandle": "new:decision", "typedBody": {
             "choice": "Use one shared page", "reason": "Consumers agree on the content slot",
             "origin": "architecture", "areas": ["new:area"]}})
@@ -179,7 +187,11 @@ else:
     number = int(name.split("-")[1])
     Path(name).mkdir(exist_ok=True)
     value = f"value-{number:03}"
-    if mode == "scale50" and facts.get("Contracts consumed"):
+    if mode == "scale50" and number == 49:
+        # The feedback contract's text is usable while its provider's implementation is absent.
+        assert facts["Contracts consumed"]
+        assert not Path('unit-050/value.txt').exists()
+    if mode == "scale50" and number == 50 and facts.get("Contracts consumed"):
         # A build-time consumer uses the existing file-format contract without growing its runtime check.
         value = 'value-' + f"{int(Path('unit-049/value.txt').read_text().split('-')[1]) + 1:03}"
     source = ("from pathlib import Path\n"
@@ -539,6 +551,7 @@ def test_plan_refuses_broken_agreements(tmp_path, fault, fix):
         if fault == "unlinked-read":
             contract["consumers"] = [3]
             answer["units"][1]["consumes"] = []
+            answer["units"][1]["dependencies"] = []
         elif fault == "duplicate-provider":
             answer["units"][1]["provides"] = ["new:page"]
         elif fault == "missing-endpoint":
@@ -916,7 +929,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 assert c["subject"]["notJudged"] == judgment.not_judged(run.store)
                 assert c["subject"]["deviation"] == "DV6"
                 assert not run.store.records("outcome")[-1][2]["verification_complete"]
-                from tests.seldon.run_report import report
+                from run_report import report
                 assert target + ": not judged:" in report(slot)[0]
         reasks = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
         if mode == "product-source-oversize":
@@ -1027,7 +1040,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert len(plan.select(document, "unit")) == 2  # One product unit plus CODE's delivery guide.
             assert not document["skeleton"] and not plan.select(document, "contract")
             assert not plan.select(document, "obligation")
-            from tests.seldon.run_report import report
+            from run_report import report
             output, row = report(slot)
             assert row[3] == "SCRIPTED_C" and len(row) == 16 and "accepted=False" in output
         sizes = {kind: max(len(encode(b).encode("utf-8")) for _, k, b in rows
@@ -1045,7 +1058,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert len(final) == count and len(demos) == count
             assert {o["check"] for q in demos for o in q["facts"]["Final observations"]} == {
                 o["check"] for o in final}
-        from tests.seldon.run_report import report
+        from run_report import report
         output, _ = report(slot)
         print(mode + ": " + next(line for line in output.splitlines() if line.startswith("Final judgment:")),
               flush=True)
@@ -1142,7 +1155,7 @@ def crash_journey(slot, mode):
             assert "interrupted WORKING" in launches[1]["facts"]["Exact failure"]
             if mode == "kill-work":
                 assert launches[1]["resumed"] and launches[1]["thread"] == launches[0]["thread"]
-                from tests.seldon.run_report import report
+                from run_report import report
                 assert report(slot)[1][13] == 1, "A recovered interruption must count as a red flag"
             else:
                 assert not launches[1]["resumed"]
@@ -1356,6 +1369,7 @@ def recorded_minimal_journey(root):
             "answer": {"verdict": "satisfied"}})
         store.unit("u001", replace(store.unit("u001"), judgment=verdict))
         store.cursor(replace(store.cursor(), finalObservations=green))
+        work = questions.work_brief(store, "u001")
         product = judgment.brief(store, "PRODUCT", "quality:001")
         flow = flow_review.brief(store, "n001")
         assert product["facts"]["Subject"] == recording["criterion"]
@@ -1370,7 +1384,8 @@ def recorded_minimal_journey(root):
                 **document["nodes"]["n002"]["body"], "features": [f"f{number}"],
                 "obligation": f"Independent value {number}"}}
             expanded["nodes"][c] = {"kind": "check", "body": {
-                **document["nodes"]["n003"]["body"], "requirements": [r]}}
+                **document["nodes"]["n003"]["body"], "requirements": [r],
+                "command": [sys.executable, "-B", f"unit-{number}/check.py"]}}
             expanded["nodes"][f"u{number:03}"] = {"kind": "unit", "body": {
                 **document["nodes"]["u001"]["body"], "requirements": [r],
                 "scope": [f"unit-{number}/**"], "checkPaths": [f"unit-{number}/check.py"]}}
@@ -1378,12 +1393,14 @@ def recorded_minimal_journey(root):
         plan.validate(expanded)
         store.cursor(replace(store.cursor(), revision=store.revision(expanded)))
         assert questions.judge_brief(store, "u001") == question
+        assert questions.work_brief(store, "u001") == work
         assert judgment.brief(store, "PRODUCT", "quality:001") == product
         assert flow_review.brief(store, "n001") == flow
         print("P10 recorded c01 JUDGE: " + str(len(encode(original).encode())) + " -> "
               + str(len(encode(question).encode())) + " bytes; 0 -> 3 local images; c02 PRODUCT: "
               + str(len(encode(product).encode())) + " bytes; identical at 1/50 units", flush=True)
-        return {"JUDGE": len(encode(question).encode()), "PRODUCT": len(encode(product).encode()),
+        return {"WORK": len(encode(work).encode()), "JUDGE": len(encode(question).encode()),
+                "PRODUCT": len(encode(product).encode()),
                 "FLOW": len(encode(flow).encode())}
     finally:
         store.close()
@@ -1875,7 +1892,7 @@ def recorded_artifact_journey(root):
 
 
 def clean_core_golden(root):
-    from .test_architect import architect_journeys
+    from test_architect import architect_journeys
 
     root.mkdir(parents=True)
     for key in ("TEMP", "TMP", "TMPDIR"):

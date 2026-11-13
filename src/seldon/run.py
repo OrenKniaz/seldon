@@ -68,9 +68,13 @@ def eligible(store):
 def incomplete(store, reason):
     failed = {r: u.failure for r, u in store.units().items() if u.state == "FAILED"}
     blocked = {r: u.failure for r, u in store.units().items() if u.state == "BLOCKED"}
+    stops = [b for _, _, b in store.records("planning_stop")
+             if b["revision"] == store.cursor().revision]
     outcome = store.record("outcome", {"accepted": False, "verification_complete": False,
         "reason": reason, "failed": failed, "blocked": blocked,
-        "nextAction": "Resolve the named failure, then start a fresh run."})
+        "nextAction": ("Resolve the named planning defect, reopen, and call Run.resume_planning()."
+                       if stops and store.cursor().state in ("DETAIL", "ARCHITECT") else
+                       "Resolve the named failure, then start a fresh run.")})
     advance(store, "fail", outcome)
 
 
@@ -141,7 +145,8 @@ class Run:
             vision = store.read(cursor.vision)["answer"]
             gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
             result, answer = inference.call(store, self.provider,
-                questions.architect_brief(vision, gaps[-1]["gap"] if gaps else None),
+                questions.architect_brief(vision, gaps[-1]["gap"] if gaps else None,
+                                         store.plan(cursor.revision)["architecture"] if gaps else None),
                 check=lambda a: architecture.outline(a, vision))
             document = {"architecture": {k: v for k, v in answer.items() if k != "why"},
                         "nodes": {"vision": {"kind": "vision", "body": vision}}}
@@ -190,6 +195,20 @@ class Run:
         elif state in ("PRODUCT-JUDGE", "PRODUCT-FACTS"):
             judgment.step(store, self.provider)
         return store.cursor().state
+
+    def resume_planning(self):
+        if self._lease.closed:
+            raise ValueError("Reopen the stopped run before resuming planning")
+        cursor = self.store.cursor()
+        stops = [(r, b) for r, _, b in self.store.records("planning_stop")
+                 if b["revision"] == cursor.revision and b["vision"] == cursor.vision]
+        if cursor.state != "INCOMPLETE" or cursor.B or self.store.units() or not stops:
+            raise ValueError("Only a stopped pre-B planning correction can resume")
+        ref, stop = stops[-1]
+        with self.store.transaction():
+            resumed = self.store.record("planning_resume", {
+                "vision": cursor.vision, "revision": cursor.revision, "stop": ref})
+            advance(self.store, "resume-" + stop["stage"], resumed, failure="")
 
     def run(self):
         try:

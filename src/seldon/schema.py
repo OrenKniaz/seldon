@@ -56,7 +56,9 @@ PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
                              checks=array(TEXT, 1)), 1))
 
 # Architecture names areas, never work units. DETAIL owns only its local records.
-AREA = obj(handle=TEXT, responsibility=TEXT, scope=small(TEXT, 1), commitments=small(TEXT, 1))
+AREA = obj(handle=TEXT, responsibility=TEXT, scope={**small(TEXT, 1), "description":
+    "Complete disjoint ownership: product paths, this area's check subtree, and any shared check "
+    "helpers it owns. DETAIL may divide this scope but cannot enlarge it."}, commitments=small(TEXT, 1))
 AREA_CONTRACT = obj(handle=TEXT, **{**BODIES["contract"]["properties"], "consumers": small(TEXT, 1)})
 ARCHITECT = obj(areas=small(AREA, 1), contracts=small(AREA_CONTRACT, maximum=24),
                 decisions=small(BODIES["decision"]), waves=small(obj(goal=TEXT), 1, 8))
@@ -93,7 +95,7 @@ SOURCE_TARGETS = (
     "No stubs, mocks or missing behaviour in this unit",
     "Meaningful tests for this unit's requirements",
     "This unit owns its stated responsibility",
-    "No reliance on sibling files without a declared contract or dependency",
+    "No reliance on sibling implementation files without an explicit dependency",
 )
 
 

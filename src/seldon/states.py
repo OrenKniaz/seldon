@@ -22,7 +22,8 @@ RUN = {
                       "gap": "EXECUTE", "fail": "INCOMPLETE"},
     "PRODUCT-FACTS": {"resolved": "PRODUCT-JUDGE", "gap": "EXECUTE", "fail": "INCOMPLETE"},
     "C": {"approve": "ACCEPTED", "scripted": "SCRIPTED_C", "fail": "INCOMPLETE"},
-    "ACCEPTED": {}, "SCRIPTED_C": {}, "INCOMPLETE": {},
+    "ACCEPTED": {}, "SCRIPTED_C": {},
+    "INCOMPLETE": {"resume-detail": "DETAIL", "resume-architecture": "ARCHITECT"},
 }
 UNIT = {
     "NEW": {"create": "WAITING"},

@@ -10,7 +10,7 @@ import pytest
 
 from seldon import fixups, plan, proof
 from seldon.run import Run
-from tests.seldon.test_journey import Scripted, approve, copy_final, finish, prepare
+from test_journey import Scripted, approve, copy_final, finish, prepare
 
 
 @pytest.fixture(scope="module")
@@ -159,7 +159,7 @@ def test_kill_during_fixup_reopens_without_redoing_done_units(seed, tmp_path):
         fixups.apply(run.store, [gap(run, "one", "check", ["u001"])])
     finally:
         run.close()
-    child = subprocess.run([sys.executable, "-B", "-m", "tests.seldon.test_fixups", "--kill", str(slot)],
+    child = subprocess.run([sys.executable, "-B", "-m", "test_fixups", "--kill", str(slot)],
                            cwd=Path(__file__).resolve().parents[2], capture_output=True, timeout=40)
     assert child.returncode == 77, child.stdout.decode() + child.stderr.decode()
     run = Run.reopen(slot / "product", Scripted(slot, "final-seed", 2), approve)

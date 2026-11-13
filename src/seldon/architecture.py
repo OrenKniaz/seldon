@@ -1,6 +1,7 @@
 """C9/C10/C12; R4/R6: canonical endpoints, ownership and bounded agreement projections."""
 
 from copy import deepcopy
+from graphlib import TopologicalSorter
 
 from . import plan
 from .schema import ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT
@@ -8,7 +9,17 @@ from .schema import validate as validate_schema
 
 
 class ContractGap(ValueError):
-    pass
+    def __init__(self, message, areas):
+        super().__init__(message)
+        self.areas = areas
+
+
+class DetailCorrection(ValueError):
+    """Merge defects belong to the areas which can correct their records."""
+
+    def __init__(self, corrections):
+        self.corrections = corrections
+        super().__init__("; ".join(f"{area}: {facts}" for area, facts in corrections.items()))
 
 
 def endpoint(unit, contract):
@@ -66,7 +77,7 @@ def validate(document):
                 raise ValueError(f"{ref}: {path} needs one planned file owner")
             owner, = owners
             if owner != ref and owner not in plan.prerequisites(document, ref):
-                raise ValueError(f"{ref}: reading {path} needs a contract with {owner} or a dependency edge")
+                raise ValueError(f"{ref}: reading {path} needs an explicit dependency edge to {owner}")
 
 
 def stale_consumers(before, after):
@@ -111,7 +122,7 @@ def outline(answer, vision=None):
     return areas, contracts
 
 
-def local_plan(area, contracts, answer):
+def local_plan(area, contracts, answer, vision, single_area):
     """Check ownership before merging; canonical trace validation runs on the merged document."""
     validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_PLAN)
     handles = {e["targetHandle"]: e["kind"] for e in answer["edits"]}
@@ -129,11 +140,16 @@ def local_plan(area, contracts, answer):
         if edit["kind"] == "obligation":
             item = edit["typedBody"]
             if (item["owner"] > len(answer["units"])
-                    or handles.get(item["closingRequirement"]) != "requirement"):
-                raise ValueError("An obligation needs a local owner and its closing requirement")
+                    or item["closingRequirement"] not in answer["units"][item["owner"]-1]["requirements"]):
+                raise ValueError("A skeleton obligation needs an owner and its closing requirement")
     for unit in answer["units"]:
-        if not all(any(plan.contains(s, p) for s in area["scope"]) for p in unit["scope"]):
-            raise ValueError("Keep unit scopes inside its named area scopes")
+        for path in [*unit["scope"], *unit["checkPaths"]]:
+            plan.safe_path(path)
+        missing = [p for p in [*unit["scope"], *unit["checkPaths"]]
+                   if not any(plan.contains(s, p) for s in area["scope"])]
+        if missing:
+            raise ContractGap(f"Area {area['handle']}: keep work inside its named area scopes; "
+                              f"ARCHITECT must assign missing scope for {missing}", [area["handle"]])
         if any(handles.get(r) != "requirement" for r in unit["requirements"]):
             raise ValueError("Units must own local requirement handles")
         for dep in unit["dependencies"]:
@@ -145,13 +161,53 @@ def local_plan(area, contracts, answer):
                 if "*" in dep or "?" in dep:
                     raise ValueError("A file prerequisite must name a concrete file")
         for field, side in (("provides", "provider"), ("consumes", "consumer")):
+            if len(set(unit[field])) != len(unit[field]):
+                raise ValueError(f"Name each existing contract once in {field}")
             for ref in unit[field]:
                 if ref not in contracts or endpoint(area["handle"], contracts[ref]) != side:
                     raise ValueError(f"{ref}: bind one provider and its agreed consumer endpoints; "
                                      "report a contract gap")
     for quality in answer["quality"]:
+        if quality["criterion"] > len(vision["quality"]):
+            raise ValueError("Quality coverage must name an accepted criterion position")
         if any(handles.get(r) != "check" for r in quality["checks"]):
             raise ValueError("Quality coverage must name local checks")
+    # Preserve external contract handles: assigned() correctly leaves these checks at wave level.
+    nodes = {"vision": {"kind": "vision", "body": {
+        k: v for k, v in vision.items() if k != "why"}}}
+    nodes.update({e["targetHandle"]: {"kind": e["kind"], "body": {
+        **e["typedBody"], **({"vision": ["vision"]} if e["kind"] == "feature" else {}),
+        **({"owner": f"unit:{e['typedBody']['owner']}"} if e["kind"] == "obligation" else {})}}
+        for e in answer["edits"]})
+    units = {f"unit:{i}": {**u, "area": area["handle"],
+             "dependencies": [f"unit:{d}" for d in u["dependencies"] if isinstance(d, int)]}
+             for i, u in enumerate(answer["units"], 1)}
+    nodes.update({r: {"kind": "unit", "body": u} for r, u in units.items()})
+    document = {"nodes": nodes}
+    plan.validate_records(document, contracts)
+    plan.validate_owned_work(document)
+    if single_area:
+        from . import obligations
+        document["skeleton"] = list(units) if len(units) > 1 else []
+        obligations.validate(document)
+    for (ref, unit), original in zip(units.items(), answer["units"], strict=True):
+        files = [d for d in original["dependencies"] if isinstance(d, str)]
+        for path in [*unit["reads"], *files]:
+            plan.safe_path(path)
+            if "*" in path or "?" in path:
+                raise ValueError(f"{path}: reads and file prerequisites must name a concrete file")
+            if plan.matches(path, area["scope"]):
+                writers = [r for r, u in units.items() if plan.matches(path, u["scope"])]
+                if len(writers) != 1:
+                    raise ValueError(f"{path}: needs one planned file owner in {area['handle']}")
+                owner, = writers
+                if path in files:
+                    if owner == ref:
+                        raise ValueError(f"{path}: a file prerequisite needs one other planned writer")
+                    unit["dependencies"].append(owner)
+                elif owner != ref and owner not in unit["dependencies"]:
+                    raise ValueError(f"{ref}: reading {path} needs a dependency edge to {owner}")
+    tuple(TopologicalSorter({r: u["dependencies"] for r, u in units.items()}).static_order())
 
 
 def subdivision(parent, answer, known_contracts):

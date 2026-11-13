@@ -1,10 +1,11 @@
 """C9/C12/I6/I7; R6/R14: scoped unit ownership and CODE-assigned check coverage."""
 
 import fnmatch
-from graphlib import TopologicalSorter
+from graphlib import CycleError, TopologicalSorter
 from pathlib import PurePosixPath
 
-from .schema import BODIES, PLAN, VISION, validate as validate_schema
+from .schema import BODIES, PLAN, VISION
+from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_WORK = ("Write the try-it guide for the integrated product. Give exact steps, the expected results "
@@ -141,7 +142,7 @@ def merge(vision, architecture, leaves):
             "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
             "consumers": [area["handle"] if a in area.get("ancestors", []) else a for a in c["consumers"]]}
             for r, c in relevant.items()}
-        owner.local_plan(area, local_contracts, answer)
+        owner.local_plan(area, local_contracts, answer, vision, len(architecture["areas"]) == 1)
         offset = len(units)
         handles = {e["targetHandle"]: f"{area['handle']}/{e['targetHandle']}" for e in answer["edits"]}
         # Equal feature records with the same proposed handle are one story across areas.
@@ -187,12 +188,29 @@ def merge(vision, architecture, leaves):
     for area in architecture["areas"]:
         edits.append({"kind": "area", "targetHandle": area["handle"], "typedBody": {
             k: area[k] for k in ("responsibility", "scope")}})
+    corrections = {}
+
+    def correct(areas, error, facts):
+        for area in sorted(set(areas)):
+            item = {"error": error, "otherSide": facts}
+            if item not in corrections.setdefault(area, []):
+                corrections[area].append(item)
+
     for contract in architecture["contracts"]:
         bound = endpoints.get(contract["handle"], {"provides": [], "consumes": []})
         if (len(bound["provides"]) != 1 or not bound["consumes"]
                 or {c for _, areas in bound["consumes"] for c in contract["consumers"] if c in areas}
                 != set(contract["consumers"])):
-            raise ValueError(f"{contract['handle']}: bind exactly one provider and every named consumer")
+            missing = set(contract["consumers"]) - {
+                c for _, areas in bound["consumes"] for c in contract["consumers"] if c in areas}
+            if len(bound["provides"]) != 1:
+                missing.add(contract["provider"])
+            participants = {a["handle"] for a, _ in leaves
+                            if missing & {a["handle"], *a.get("ancestors", [])}}
+            correct(participants,
+                    f"{contract['handle']}: bind exactly one provider and every named consumer",
+                    {"contract": contract["text"]})
+            continue
         edits.append({"kind": "contract", "targetHandle": contract["handle"], "typedBody": {
             "kind": contract["kind"], "text": contract["text"],
             "provider": bound["provides"][0][0], "consumers": [p for p, _ in bound["consumes"]]}})
@@ -200,28 +218,72 @@ def merge(vision, architecture, leaves):
         edits.append({"kind": "decision", "targetHandle": f"architecture-decision:{i}",
                       "typedBody": decision})
     providers = {e["targetHandle"]: e["typedBody"]["provider"] for e in edits if e["kind"] == "contract"}
+    for criterion in set(range(1, len(vision["quality"])+1)) - quality.keys():
+        correct([a["handle"] for a, _ in leaves if f"quality:{criterion}" in a["commitments"]],
+                f"Trace accepted quality criterion {criterion} to semantic checks", {})
     for check, refs in deferred_checks:
         check["requirements"] = list(dict.fromkeys([*check["requirements"],
-            *(r for contract in refs for r in units[providers[contract] - 1]["requirements"])]))
+            *(r for contract in refs if contract in providers
+              for r in units[providers[contract] - 1]["requirements"])]))
+
+    def planned_paths(path, reader):
+        return [{"area": writer["area"], "path": p} for i, writer in enumerate(units, 1)
+                if writer["area"] == reader["area"] or any(
+                    providers.get(c) == i for c in reader["consumes"])
+                for p in writer["scope"] if PurePosixPath(p).name == PurePosixPath(path).name]
+
+    area_names = {a["handle"]: {a["handle"], *a.get("ancestors", [])} for a, _ in leaves}
+
     for position, paths in file_dependencies.items():
         for path in paths:
             writers = [i for i, u in enumerate(units, 1) if path in u["scope"] or matches(path, u["scope"])]
             if len(writers) != 1 or writers[0] == position:
-                raise ValueError(f"{path}: a file prerequisite needs one other planned writer")
+                correct([units[position-1]["area"]],
+                        f"{path}: a file prerequisite needs one other planned writer",
+                        {"plannedPaths": planned_paths(path, units[position-1])})
+                continue
             deps = units[position - 1]["dependencies"]
             if writers[0] not in deps:
                 deps.append(writers[0])
-    for unit in units:
+    for position, unit in enumerate(units, 1):
+        for other, writer in enumerate(units, 1):
+            if (position < other and unit["area"] != writer["area"]
+                    and overlaps(unit["scope"], writer["scope"])):
+                correct([unit["area"], writer["area"]], "Scope ownership overlaps; assign disjoint scopes",
+                        {unit["area"]: unit["scope"], writer["area"]: writer["scope"]})
         for path in unit["reads"]:
             owners = [(i, u) for i, u in enumerate(units, 1)
                       if path in u["scope"] or matches(path, u["scope"])]
-            if len(owners) == 1:
+            if len(owners) != 1:
+                correct([unit["area"]], f"{path}: needs one planned file owner",
+                        {"plannedPaths": planned_paths(path, unit)})
+            else:
                 other, writer = owners[0]
-                if (writer["area"] != unit["area"] and other not in unit["dependencies"] and not any(
-                        e["kind"] == "contract" and e["targetHandle"] in unit["consumes"]
-                        and e["typedBody"]["provider"] == other for e in edits)):
-                    raise owner.ContractGap(
-                        f"{unit['area']} reading {path} needs a contract with {writer['area']}")
+                agreements = [c for c in architecture["contracts"] if (
+                        c["provider"] in area_names[writer["area"]]
+                        and set(c["consumers"]) & area_names[unit["area"]])]
+                if writer["area"] != unit["area"] and other not in unit["dependencies"]:
+                    if not agreements:
+                        raise owner.ContractGap(
+                            f"{unit['area']} reading {path} needs a contract with {writer['area']}",
+                            [unit["area"], writer["area"]])
+                    correct([unit["area"]], f"Reading {path} needs an explicit dependency edge to its writer",
+                            {"area": writer["area"], "plannedPath": path})
+    dependencies = {i: u["dependencies"] for i, u in enumerate(units, 1)}
+    try:
+        tuple(TopologicalSorter(dependencies).static_order())
+    except CycleError as error:
+        cycle = error.args[1]
+        for area in {units[i-1]["area"] for i in cycle}:
+            local = [i for i, u in enumerate(units, 1) if u["area"] == area]
+            correct([area], "Explicit dependency cycle; split work or move integration checks "
+                           "after integration",
+                    {"edges": [{"unit": local.index(i)+1, "needs": [
+                        {"area": units[d-1]["area"], "scope": units[d-1]["scope"]}
+                        for d in dependencies[i] if d in cycle]}
+                        for i in local if i in cycle]})
+    if corrections:
+        raise owner.DetailCorrection(corrections)
     document = create(vision, {"edits": edits, "units": units,
         "skeleton": list(range(1, len(units) + 1)) if len(units) > 1 else [],
         "quality": [{"criterion": c, "checks": list(dict.fromkeys(checks))}
@@ -230,7 +292,7 @@ def merge(vision, architecture, leaves):
     return document
 
 
-def validate(document):
+def validate_records(document, external=()):
     nodes = document["nodes"]
     validate_schema(nodes["vision"]["body"], VISION)
     relation_types = {"feature": ("vision", "vision"), "requirement": ("features", "feature"),
@@ -246,25 +308,17 @@ def validate(document):
         validate_schema(body, BODIES[kind], ref)
         if kind in relation_types:
             relation, target_kind = relation_types[kind]
-            if any(nodes.get(r, {}).get("kind") != target_kind for r in body[relation]):
+            if any(nodes.get(r, {}).get("kind") != target_kind
+                   and not (kind == "check" and r in external) for r in body[relation]):
                 raise ValueError(f"{ref}.{relation}: wrong trace target kind")
+
+
+def validate_owned_work(document):
+    """The same area-owned rules serve DETAIL exact-fix and canonical plan validation."""
     features, requirements, checks, units = (
         select(document, k) for k in ("feature", "requirement", "check", "unit"))
     if not all((features, requirements, checks, units)):
         raise ValueError("Plan requires features, requirements, checks and units")
-    by_unit = assigned(document)
-    uncovered = []
-    for ref in requirements:
-        owners = [u for u, body in units.items() if ref in body["requirements"]]
-        if len(owners) != 1:
-            raise ValueError(f"{ref}: needs exactly one unit owner, found {owners}")
-        if not any(ref in c["requirements"] for c in by_unit[owners[0]].values()):
-            uncovered.append(requirements[ref]["obligation"])
-    if uncovered:
-        raise ValueError(f"Unit judgment needs a local semantic check for {sorted(uncovered)}. "
-                         "A check spanning owners runs only after the units integrate.")
-    if set(features) - {f for r in requirements.values() for f in r["features"]}:
-        raise ValueError("Every feature needs a requirement")
     for ref, unit in units.items():
         for pattern in [*unit["scope"], *unit["checkPaths"]]:
             safe_path(pattern)
@@ -275,21 +329,47 @@ def validate(document):
         if ref != "guide" and overlaps(unit["scope"], [GUIDE_PATH]):
             raise ValueError(f"{ref}: {GUIDE_PATH} belongs to the CODE-created last unit")
         for other, owner in units.items():
-            if ref < other and overlaps(unit["scope"], owner["scope"]):
+            if (ref < other and unit["area"] == owner["area"]
+                    and overlaps(unit["scope"], owner["scope"])):
                 raise ValueError(f"Scope ownership overlaps: {ref} {unit['scope']} and "
                                  f"{other} {owner['scope']}; assign disjoint subtrees or literal paths")
+
+    by_unit = assigned(document)
+    uncovered = []
+    for ref in requirements:
+        owners = [u for u, body in units.items() if ref in body["requirements"]]
+        if len(owners) != 1:
+            raise ValueError(f"{ref}: needs exactly one unit owner, found {owners}")
+        unit = units[owners[0]]
+        if not any(ref in c["requirements"]
+                   and any(matches(a, unit["checkPaths"]) for a in c["command"])
+                   for c in by_unit[owners[0]].values()):
+            uncovered.append(requirements[ref]["obligation"])
+    if uncovered:
+        raise ValueError(f"Unit judgment needs a local semantic check for {sorted(uncovered)}. "
+                         "A check spanning owners runs only after the units integrate.")
+    if set(features) - {f for r in requirements.values() for f in r["features"]}:
+        raise ValueError("Every feature needs a requirement")
+
+
+def validate(document):
+    validate_records(document)
+    validate_owned_work(document)
+    units = select(document, "unit")
+    for ref, unit in units.items():
+        for other, owner in units.items():
+            if (ref < other and unit["area"] != owner["area"]
+                    and overlaps(unit["scope"], owner["scope"])):
+                raise ValueError(f"Scope ownership overlaps: {ref} and {other}")
     from . import architecture, obligations
     architecture.validate(document)
     obligations.validate(document)
-    # A contract's provider is a scheduling prerequisite, even without a redundant dependency edge.
     tuple(TopologicalSorter({r: prerequisites(document, r) for r in units}).static_order())
     return coverage(document)
 
 
 def prerequisites(document, ref):
-    unit = select(document, "unit")[ref]
-    contracts = select(document, "contract")
-    return list(dict.fromkeys([*unit["dependencies"], *(contracts[c]["provider"] for c in unit["consumes"])]))
+    return select(document, "unit")[ref]["dependencies"]
 
 
 def add_guide(document):

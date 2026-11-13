@@ -5,13 +5,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from seldon import architecture, plan
 from seldon.run import Run
 from seldon.store import encode
-
 from test_journey import NATIVE, VISION, Scripted, approve, finish, planned
 
 
@@ -76,6 +76,7 @@ class AreaProvider(Scripted):
                     unit["consumes"] = [r for r, c in facts["Contracts"].items() if c["side"] == "consumer"]
                     if unit["consumes"]:
                         unit["reads"] = [f"unit-{numbers[0]-1:03}/value.txt"]
+                        unit["dependencies"] = list(unit["reads"])
                 answer = {"verdict": "planned", "edits": edits, "units": units,
                           "quality": full["quality"] if 1 in numbers else []}
         else:
@@ -197,6 +198,312 @@ def size_journey(root):
     return sizes
 
 
+class CorrectionProvider(AreaProvider):
+    def __call__(self, question):
+        answer = json.loads(super().__call__(question))
+        if question["kind"] == "DETAIL" and question["facts"]["Area"]["handle"] == "area-002":
+            facts, body = question["facts"], answer["answer"]
+            if (self.defect == "local" and "Exact corrections" not in facts
+                    or self.defect == "local-persistent" and "Merge correction" not in facts):
+                next(e for e in body["edits"] if e["kind"] == "check")["typedBody"][
+                    "requirements"].append("link-1")
+            elif self.defect in ("path", "persistent") and (
+                    self.defect == "persistent" or "Merge correction" not in facts):
+                body["units"][0].update(reads=["value.txt"], dependencies=["value.txt"])
+            elif self.defect == "endpoint" and "Merge correction" not in facts:
+                body["units"][0]["consumes"] = []
+        if (question["kind"] == "DETAIL" and self.defect == "cycle"
+                and question["facts"]["Area"]["handle"] == "area-001"
+                and "Merge correction" not in question["facts"]):
+            answer["answer"]["units"][0]["dependencies"] = ["unit-003/value.txt"]
+        return json.dumps(answer)
+
+
+class ScopeProvider(AreaProvider):
+    def __call__(self, question):
+        facts = question["facts"]
+        if (question["kind"] == "DETAIL" and facts["Area"]["handle"] == "area-002"
+                and facts["Area"]["scope"] == ["unit-002/value.txt"]):
+            self.detail_calls.append(deepcopy(question))
+            full = planned(3, "architect")
+            unit = {k: v for k, v in full["units"][1].items() if k != "area"}
+            unit.update(scope=["unit-002/value.txt"], provides=["link-2"], consumes=["link-1"],
+                        reads=["unit-001/value.txt"], dependencies=["unit-001/value.txt"])
+            return json.dumps({"answer": {"verdict": "planned", "edits": full["edits"][3:6],
+                                          "units": [unit], "quality": [], "why": "Need space for my check"}})
+        answer = json.loads(super().__call__(question))
+        if question["kind"] == "ARCHITECT" and self.arch_calls == 1:
+            answer["answer"]["areas"][1]["scope"] = ["unit-002/value.txt"]
+        return json.dumps(answer)
+
+
+def single_obligation_journey(root):
+    """A single-unit obligation exhausts 3+1 answers, then deliberately resumes to approved B.
+
+    Multi-unit ownership tests miss the absent single-unit skeleton. This catches a merge ValueError
+    escaping repair, resetting the retry count or losing the stopped run's supported continuation.
+    """
+    class ObligationProvider(AreaProvider):
+        repaired = False
+
+        def __call__(self, question):
+            answer = json.loads(super().__call__(question))
+            if question["kind"] == "DETAIL" and not self.repaired:
+                answer["answer"]["edits"].append({"kind": "obligation", "targetHandle": "new:placeholder",
+                    "typedBody": {"what": "Close the value placeholder", "owner": 1,
+                                  "closingRequirement": "new:r001"}})
+            return json.dumps(answer)
+
+    run, base = start(root, count=1, mode="sizing")
+    provider = ObligationProvider(base.slot, 1, "sizing")
+    run.provider = provider
+    try:
+        assert run.run().state == "INCOMPLETE"
+        assert len(provider.detail_calls) == 4
+        outcome = run.store.records("outcome")[-1][2]
+        assert "area-001" in outcome["reason"] and "skeleton" in outcome["reason"]
+        assert "Run.resume_planning()" in outcome["nextAction"]
+        assert not run.store.cursor().B
+        run.close()
+        run = Run.reopen(root / "product", provider, approve)
+        provider.repaired = True
+        run.resume_planning()
+        while run.store.cursor().state != "EXECUTE":
+            run.step()
+        assert run.store.cursor().B and len(provider.detail_calls) == 5
+    finally:
+        run.close()
+
+
+def collapsing_scope_journey(root):
+    """An architecture collapse revalidates an unchanged subject and corrects its obsolete obligation.
+
+    Ordinary scope repair keeps the area count unchanged. It misses a formerly valid cached skeleton
+    answer becoming invalid solely because ARCHITECT removes a redundant area.
+    """
+    class CollapseProvider(Scripted):
+        arch_calls = 0
+        detail_calls = []
+
+        def __call__(self, question):
+            kind, facts = question["kind"], question["facts"]
+            if kind == "ARCHITECT":
+                self.arch_calls += 1
+                areas = [{"handle": "area-001", "responsibility": "Deliver named values",
+                          "scope": ["unit-001/**"], "commitments": list(architecture.commitments(VISION))}]
+                if self.arch_calls == 1:
+                    areas.append({"handle": "area-002", "responsibility": "Alternate value delivery",
+                                  "scope": ["unit-002/value.txt"],
+                                  "commitments": list(architecture.commitments(VISION))})
+                answer = {"areas": areas, "contracts": [], "decisions": [],
+                          "waves": [{"goal": "Deliver the named value"}]}
+            elif kind == "DETAIL":
+                self.detail_calls.append(deepcopy(question))
+                number = 1 if facts["Area"]["handle"] == "area-001" else 2
+                full = planned(2, "architect")
+                edits = full["edits"][3*(number-1):3*number]
+                unit = {k: v for k, v in full["units"][number-1].items() if k != "area"}
+                if number == 1 and "Exact corrections" not in facts:
+                    edits.append({"kind": "obligation", "targetHandle": "new:placeholder", "typedBody": {
+                        "what": "Close the value placeholder", "owner": 1, "closingRequirement": "new:r001"}})
+                if number == 2:
+                    unit["scope"] = ["unit-002/value.txt"]
+                answer = {"verdict": "planned", "edits": edits, "units": [unit],
+                          "quality": full["quality"] if number == 1 else []}
+            else:
+                return super().__call__(question)
+            return json.dumps({"answer": {**answer,
+                "why": "One complete writer suffices for the accepted value"}})
+
+    root.mkdir(parents=True)
+    provider = CollapseProvider(root, "collapse", 2)
+    run = Run(root / "product", root / "workers", "Read named values", provider.setup, provider, approve)
+    try:
+        for _ in range(16):
+            if run.store.cursor().state == "EXECUTE":
+                break
+            run.step()
+        assert run.store.cursor().state == "EXECUTE" and run.store.cursor().B
+        assert provider.arch_calls == 2
+        a = [q for q in provider.detail_calls if q["facts"]["Area"]["handle"] == "area-001"]
+        assert len(a) == 3 and "Exact corrections" in a[-1]["facts"]
+        assert not plan.select(run.store.plan(run.store.cursor().revision), "obligation")
+    finally:
+        run.close()
+
+
+def correction_journeys(root):
+    """Bad DETAIL records recover to B locally; persistent cross-area defects name their owner.
+
+    The retained contract-gap journey cannot catch a malformed use of an existing agreement, or a
+    local check accidentally assigned to wave verification. These use the real answer validator,
+    merger, review and B; unrelated areas must keep their original answers, including across an
+    architecture scope correction. Deliberate resume must retain siblings after a bounded stop.
+    """
+    began = time.monotonic()
+    for mode in ("path", "persistent", "local", "endpoint", "local-persistent", "cycle", "scope"):
+        run, provider = start(root / mode, mode="contracts")
+
+        provider_type = ScopeProvider if mode == "scope" else CorrectionProvider
+        provider = provider_type(provider.slot, 3, "contracts")
+        provider.defect = mode
+        provider.barrier = None
+        provider.interrupted = True
+        run.provider = provider
+        try:
+            if mode == "persistent":
+                assert run.run().state == "INCOMPLETE"
+                reason = run.store.records("outcome")[-1][2]["reason"]
+                assert "After one DETAIL re-ask" in reason and "area-002" in reason and "value.txt" in reason
+                assert not any(b["gate"] == "B" for _, _, b in run.store.records("decision_request"))
+            else:
+                while run.store.cursor().state != "EXECUTE":
+                    run.step()
+                assert {b["gate"] for _, _, b in run.store.records("decision_request")} == {"A", "B"}
+                assert not run.store.units()
+            reasks = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
+            assert sorted(q["facts"]["Area"]["handle"] for q in reasks) == (
+                [] if mode in ("local", "scope") else ["area-001", "area-002", "area-003"] if mode == "cycle"
+                else ["area-002"])
+            assert any("Exact corrections" in q["facts"] for q in provider.detail_calls) == (
+                mode in ("local", "local-persistent"))
+            if mode == "local-persistent":
+                assert len([q for q in provider.detail_calls
+                            if q["facts"]["Area"]["handle"] == "area-002"]) == 4
+            assert provider.arch_calls == (2 if mode == "scope" else 1)
+            if mode == "scope":
+                assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls].count("area-001") == 1
+                assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls].count("area-003") == 1
+            if mode == "persistent":
+                assert "Run.resume_planning()" in run.store.records("outcome")[-1][2]["nextAction"]
+                calls = len(provider.detail_calls)
+                run.close()
+                run = Run.reopen(root / mode / "product", provider, approve)
+                assert run.store.cursor().state == "INCOMPLETE" and len(provider.detail_calls) == calls
+                provider.defect = "path"
+                run.resume_planning()
+                while run.store.cursor().state != "EXECUTE":
+                    run.step()
+                assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls[calls:]] == ["area-002"]
+        finally:
+            run.close()
+    single_obligation_journey(root / "single-obligation")
+    collapsing_scope_journey(root / "collapse")
+    print(f"DETAIL correction journeys: {time.monotonic()-began:.2f}s", flush=True)
+
+
+class RecordedDetailProvider(Scripted):
+    """Recorded first replies; new scripted replies answer only observed correction questions."""
+
+    def __init__(self, slot, recording):
+        super().__init__(slot, "recorded-detail", 1)
+        self.recording, self.arch_calls, self.detail_calls = recording, 0, []
+
+    def __call__(self, question):
+        kind, facts = question["kind"], question["facts"]
+        if kind == "ALIGN":
+            return self.recording["align"]
+        if kind == "ARCHITECT":
+            self.arch_calls += 1
+            if "Architecture correction" not in facts:
+                return self.recording["architect"]
+            answer = deepcopy(json.loads(self.recording["architect"])["answer"])
+            for area in answer["areas"]:
+                area["scope"].append(f"checks/{area['handle']}/**")
+            return json.dumps({"answer": answer})
+        if kind != "DETAIL":
+            return super().__call__(question)
+        self.detail_calls.append(deepcopy(question))
+        area = facts["Area"]["handle"]
+        raw = self.recording["details"][area]["raw"]
+        if f"checks/{area}/**" not in facts["Area"]["scope"]:
+            return raw
+        # The architecture correction supplies space. This new DETAIL reply places its own checks there.
+        answer = deepcopy(facts.get("Previous area plan") or json.loads(raw)["answer"])
+        paths = {p: f"checks/{area}/{PurePosixPath(p).name}"
+                 for u in answer["units"] for p in u["checkPaths"]}
+        for unit in answer["units"]:
+            unit["scope"] = list(dict.fromkeys([*unit["scope"], f"checks/{area}/**"]))
+            unit["checkPaths"] = [paths[p] for p in unit["checkPaths"]]
+        for edit in answer["edits"]:
+            if edit["kind"] == "check":
+                edit["typedBody"]["command"] = [paths.get(a, a) for a in edit["typedBody"]["command"]]
+        if "Exact corrections" in facts:
+            # The unit proves its local contribution; the original integrated checks remain at wave level.
+            for unit in answer["units"]:
+                for req in unit["requirements"]:
+                    local = [e for e in answer["edits"] if e["kind"] == "check"
+                             and set(e["typedBody"]["requirements"]) <= set(unit["requirements"])]
+                    if any(req in e["typedBody"]["requirements"] for e in local):
+                        continue
+                    requirement = next(e["typedBody"] for e in answer["edits"] if e["targetHandle"] == req)
+                    if req in ("new:page-assembly", "new:offline-composition"):
+                        requirement["obligation"] = ("Reference the agreed local deferred script entrypoints "
+                            "from the canonical page, with no page-owned interaction or external resources.")
+                    answer["edits"].append({"kind": "check", "targetHandle": req + "-local", "typedBody": {
+                        "purpose": "Prove the local contribution: " + requirement["obligation"],
+                        "mode": "establishes", "command": ["node", unit["checkPaths"][0], "--local", req],
+                        "requiredEnvironment": ["Supplied Node, Edge and Playwright"],
+                        "expectedEvidence": "Observe the actual local product against the agreed interface; "
+                                            "cross-area interaction remains an integrated wave check.",
+                        "requirements": [req]}})
+        if "Merge correction" in facts:
+            assert area == "page-shell"
+            assert any("planned writer" in c["error"] for c in facts["Merge correction"])
+            # Shell-local checks need no sibling implementation; integration runs after the units integrate.
+            answer["units"][0].update(dependencies=[], reads=[])
+        answer["why"] = ("Correct the observed ownership/check boundary; "
+                         "retain the approved product and wave checks.")
+        return json.dumps({"answer": answer})
+
+
+def recorded_detail_journeys(root):
+    """Both real planning failures reach reviewed B through recorded, observable corrections.
+
+    Synthetic valid plans cannot expose the literal scopes, unowned bare file paths or wave-only unit
+    proof in these replies. Raw first answers reach the real validator; only subsequent correction
+    questions receive new scripted answers. No provider implementation or execution acceptance is claimed.
+    """
+    began = time.monotonic()
+    recordings = json.loads(Path(__file__).with_name("recorded_detail.json").read_text("utf-8"))
+    for recording in recordings:
+        slot = root / recording["source"].rsplit("-", 1)[-1]
+        slot.mkdir(parents=True)
+        provider = RecordedDetailProvider(slot, recording)
+        run = Run(slot / "product", slot / "workers", recording["dream"], provider.setup,
+                  provider, approve, capacity=6)
+        try:
+            for _ in range(16):
+                if run.store.cursor().state == "EXECUTE":
+                    break
+                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                run.step()
+            assert run.store.cursor().state == "EXECUTE" and run.store.cursor().B
+            assert not run.store.units()
+            rows = run.store.records()
+            replies = [b["rawAnswer"] for _, k, b in rows if k == "provider_reply"]
+            assert recording["architect"] in replies
+            assert all(d["raw"] in replies for d in recording["details"].values())
+            assert provider.arch_calls == 2 and len(run.store.records("architecture_gap")) == 1
+            assert any(k == "transition" and b["next"] == "REVIEW" for _, k, b in rows)
+            assert {b["gate"] for _, k, b in rows if k == "decision_request"} == {"A", "B"}
+            assert any("Exact corrections" in q["facts"] for q in provider.detail_calls)
+            wave = json.loads(recording["architect"])["answer"]["waves"][0]
+            assert all(q["facts"]["Current wave"] == wave
+                       for q in provider.detail_calls)
+            corrections = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
+            assert [q["facts"]["Area"]["handle"] for q in corrections] == (
+                ["page-shell"] if slot.name == "c01" else [])
+            document = run.store.plan(run.store.cursor().revision)
+            plan.validate(document)
+            assert len(plan.assigned(document)[None]) > 0
+            print(f"Recorded {slot.name}: ARCHITECT correction -> DETAIL correction -> REVIEW -> B",
+                  flush=True)
+        finally:
+            run.close()
+    print(f"Recorded DETAIL journeys: {time.monotonic()-began:.2f}s", flush=True)
+
+
 def architect_journeys(tmp_path):
     """One and fifty units get B; the largest planning brief has identical bytes.
 
@@ -206,6 +513,8 @@ def architect_journeys(tmp_path):
     began = time.monotonic()
     with ThreadPoolExecutor(max_workers=2) as pool:
         sizing = pool.submit(size_journey, tmp_path / "size")
+        correction_journeys(tmp_path / "corrections")
+        recorded_detail_journeys(tmp_path / "recorded")
         area_product_journey(tmp_path)
         for mode in ("gap", "unresolved", "split"):
             area_recovery_journey(tmp_path, mode)

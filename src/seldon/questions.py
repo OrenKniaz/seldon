@@ -41,10 +41,11 @@ PROMPTS = {
              + ALIGN_DESIGN,
     "ARCHITECT": "What areas, agreements, decisions and wave goals deliver the accepted vision? "
                  "Assign every supplied commitment handle to an area; name disjoint area scopes "
-                 "and one provider area for each contract. "
+                 "covering product files and each area's own check subtree, with one owner for shared "
+                 "check helpers, and one responsible provider area for each contract. "
                  "Return architecture only: no features, requirements, checks or units.",
     "DETAIL": "What features, requirements, semantic checks and units deliver this area? "
-              "Keep work inside its scope and bind provided and consumed contracts by handle. "
+              "Divide its complete scope among units and bind provided and consumed contracts by handle. "
               "A cross-area check names its local requirements and the consumed contract handles; "
               "code links those contracts' provider requirements. "
               "Dependencies are local 1-based unit positions or exact prerequisite file paths; "
@@ -52,7 +53,7 @@ PROMPTS = {
               "Trace quality criteria by their supplied 1-based positions. Commands are argv. "
               "Checks run automatically; Seldon judges visual quality from saved screenshots. "
               "If the answer exceeds the small list bounds, return subdivide with narrower sub-areas "
-              "covering this responsibility and their contracts. If an agreement is missing, "
+              "covering this responsibility and their contracts. If an agreement or needed scope is missing, "
               "return contract_gap and the need; do not invent an agreement.",
     "PLAN": "What product work is needed in addition to the supplied delivery work? Plan its features, "
             "areas, contracts, decisions, requirements, semantic checks and scoped units. "
@@ -114,7 +115,10 @@ def build(kind, facts, targets=(), execution=None, images=()):
             "Each unit has one worker and a separate checkout. Disjoint units can run concurrently "
             "once their dependencies are integrated. Files assigned to the same unit share one worker. "
             "Each unit writes its own local check files inside its scope; checkPaths selects those "
-            "files for its tests-only commit. Include newly authored check helpers and fixtures needed "
+            "files for its tests-only commit. Area scopes cannot grow in DETAIL; missing space returns "
+            "to ARCHITECT. Contract text is available before parallel work; consuming it does not wait "
+            "for its implementation. Reading another unit's newly built files requires an explicit "
+            "dependency. Include newly authored check helpers and fixtures needed "
             "to reach product assertions on this baseline. Every owned requirement needs a local check "
             "that runs "
             "in that checkout before integration. "
@@ -188,7 +192,8 @@ def example_plan():
 
 
 def example_architecture():
-    return {"areas": [{"handle": "greeting", "responsibility": "Deliver greetings", "scope": ["greeting/**"],
+    return {"areas": [{"handle": "greeting", "responsibility": "Deliver greetings",
+                       "scope": ["greeting/**", "checks/greeting/**"],
                        "commitments": ["scopeIn:1", "quality:1"]}],
             "contracts": [], "decisions": [], "waves": [{"goal": "Deliver a complete greeting"}]}
 
@@ -200,11 +205,16 @@ def example_detail():
             "quality": example["quality"]}
 
 
-def architect_brief(vision, gap=None):
+def architect_brief(vision, gap=None, previous=None):
     facts = {"Approved vision": {k: v for k, v in vision.items() if k != "why"},
-             "Commitment handles": architecture.commitments(vision)}
+             "Commitment handles": architecture.commitments(vision),
+             "Ownership": "Areas own complete disjoint scopes including their check subtrees. "
+                          "Shared check helpers have one named owner. DETAIL cannot enlarge these scopes.",
+             "Contracts": "Agreements are shared text, available before implementation. Only explicit "
+                          "file dependencies order execution; mutual contracts are allowed."}
     if gap:
-        facts["Contract gap"] = gap
+        facts["Architecture correction"] = gap
+        facts["Previous architecture"] = previous
     return build("ARCHITECT", facts)
 
 
@@ -221,6 +231,7 @@ def detail_brief(store, outline, area):
                                            if not r.startswith("quality:")],
                                "scopeOut": vision["scopeOut"], "quality": vision["quality"]},
              "Area": {k: area[k] for k in ("handle", "responsibility", "scope")},
+             "Current wave": outline["waves"][0],
              "Contracts": {r: {"kind": c["kind"], "text": c["text"],
                               "side": "provider" if c["provider"] in participants else "consumer"}
                            for r, c in contracts.items()},
@@ -335,12 +346,19 @@ def judge_brief(store, ref, commit=None, observations=None):
                  images=images(store, observations if observations is not None else unit.observations))
 
 
-def ask(provider, question, record, check=lambda answer: None):
+class AnswerRejected(ValueError):
+    def __init__(self, message, answer):
+        super().__init__(message)
+        self.answer = answer
+
+
+def ask(provider, question, record, check=lambda answer: None, retries=2):
     original = question
     rejected = []
-    for attempt in range(3):
+    for attempt in range(retries + 1):
         raw = provider(bounded_unit(question))
         errors = []
+        answer = None
         try:
             decoded = json.loads(raw)
             validate(decoded, question["schema"])
@@ -349,14 +367,18 @@ def ask(provider, question, record, check=lambda answer: None):
                 if answer.get("verdict") == "gap" and not answer["gaps"]:
                     raise ValueError("A gap verdict must name its correction")
                 check(answer)
+        except architecture.ContractGap:
+            record({"rawAnswer": raw, "errors": ["Needs an architecture correction"]})
+            raise
         except (ValueError, KeyError) as error:
             errors = str(error).splitlines()
         record({"rawAnswer": raw, "errors": errors})
         if not errors:
             return answer
         rejected.append({"Rejected answer": raw, "Errors": errors})
-        if attempt == 2:
-            raise ValueError(f"{original['kind']}: two exact-fix retries exhausted; " + "; ".join(errors))
+        if attempt == retries:
+            raise AnswerRejected(f"{original['kind']}: {retries} exact-fix retries exhausted; "
+                                 + "; ".join(errors), answer)
         question = {**original, "facts": {**original["facts"], "Exact corrections": rejected}}
 
 
