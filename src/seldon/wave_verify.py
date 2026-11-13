@@ -10,17 +10,15 @@ def verify(store, candidate):
     document = store.plan(cursor.revision)
     assignments = plan.assigned(document)
     owned = plan.select(document, "unit")
-    gitwork.unchanged(store.root.parent, candidate)
 
     def observe_unit(ref):
         try:
             checks, root = assignments[ref], store.root.parent
             tree = gitwork.scope_tree(root, candidate, owned[ref]["scope"], cursor.scratch)
             if ref == "guide":
-                # The guide's steps may create outputs only in a fresh disposable delivery.
+                # Read the committed guide; observe owns the disposable execution checkout.
                 root = store.unit(ref).worktree
-                gitwork.checkout(root, candidate)
-                gitwork.git(root, "clean", "-fdx")
+                gitwork.clean(root, candidate)
                 try:
                     checks = guide.checks(root)
                 except ValueError as error:
@@ -30,8 +28,7 @@ def verify(store, candidate):
                         "scopeTree": tree, "evidenceFiles": [], "executionStarted": False,
                         "timedOut": False, "cleanupVerified": True, "exitCode": None,
                         "stdout": "", "stderr": str(error)})]
-            return proof.observe(store, root, candidate, checks, "final", ref, tree,
-                                 disposable=ref == "guide")
+            return proof.observe(store, root, candidate, checks, "final", ref, tree)
         finally:
             store.close()
 

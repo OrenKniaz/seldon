@@ -45,6 +45,12 @@ def checkout(root, revision):
     git(root, "reset", "--hard", "--quiet", revision)
 
 
+def clean(root, revision):
+    """Restore an observation checkout, including ignored outputs and nested fixture repos."""
+    checkout(root, revision)
+    git(root, "clean", "-ffdx", "--quiet")
+
+
 def paths(root, revision):
     return [e.split(b"\t", 1)[1].decode("utf-8") for e in tree_entries(root, revision)]
 

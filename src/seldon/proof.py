@@ -1,6 +1,7 @@
 """C14/C15/C26/I1; R6/R9: code observes ordinary commands on exact Git commits."""
 
 import os
+import threading
 import uuid
 from pathlib import Path
 
@@ -9,36 +10,63 @@ from .processes import execute
 from .providers import ROLES
 
 
+_observer = threading.local()
+
+
 class UncertainCleanup(RuntimeError):
     pass
 
 
-def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None, disposable=False):
+def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
     observations = []
+    if not declarations:
+        return observations
     setup = store.read(store.cursor().kickoff)["setup"]
     timeout = setup.get("providers", {}).get("check", ROLES["check"])["timeout"]
-    for ref, check in declarations.items():
-        evidence = Path(store.cursor().scratch) / ("evidence-" + uuid.uuid4().hex)
-        evidence.mkdir()
-        command = list(check["command"])
-        if (Path(root) / command[0]).is_file():
-            command[0] = str((Path(root) / command[0]).resolve())
-        result = execute(command, root, timeout=timeout,
-                         env={**os.environ, "SELDON_EVIDENCE_DIR": str(evidence)})
-        body = {k: v[-4096:].decode("utf-8", errors="replace") if isinstance(v, bytes) else v
-                for k, v in result.items()}
-        files = [store.artifact(p.read_bytes(), ref) for p in evidence.rglob("*") if p.is_file()]
-        body.update(check=ref, unit=unit, commit=commit, purpose=purpose,
-                    requirements=check["requirements"], command=check["command"], cwd=str(root),
-                    evidenceFiles=files)
-        if scope_tree is not None:
-            body["scopeTree"] = scope_tree
-        with store.transaction():
-            observations.append(store.record("observation", body))
-        if not result["cleanupVerified"]:
-            raise UncertainCleanup("Command cleanup unverified: " + str(body))
-    if not disposable:  # A disposable copy (the guide walk) may gain the outputs its steps create.
-        gitwork.unchanged(root, commit)
+    scratch = Path(store.cursor().scratch)
+    checkout = getattr(_observer, "checkout", None)
+    if checkout is None or checkout.parent != scratch:
+        checkout = Path(gitwork.admit(root, scratch, commit))
+        _observer.checkout = checkout
+    else:
+        gitwork.checkout(checkout, commit)
+    cleanup_verified = True
+    dirty = False
+    try:
+        for ref, check in declarations.items():
+            runtime = scratch / ("check-" + uuid.uuid4().hex)
+            evidence, temp = runtime / "evidence", runtime / "temp"
+            evidence.mkdir(parents=True)
+            temp.mkdir()
+            command = list(check["command"])
+            if (checkout / command[0]).is_file():
+                command[0] = str((checkout / command[0]).resolve())
+            dirty = True
+            cleanup_verified = False
+            result = execute(command, checkout, timeout=timeout,
+                             env={**os.environ, "SELDON_EVIDENCE_DIR": str(evidence),
+                                  **{key: str(temp) for key in ("TEMP", "TMP", "TMPDIR")}})
+            cleanup_verified = result["cleanupVerified"]
+            body = {k: v[-4096:].decode("utf-8", errors="replace") if isinstance(v, bytes) else v
+                    for k, v in result.items()}
+            files = [store.artifact(p.read_bytes(), ref) for p in evidence.rglob("*") if p.is_file()]
+            body.update(check=ref, unit=unit, commit=commit, purpose=purpose,
+                        requirements=check["requirements"], command=check["command"], cwd=str(checkout),
+                        evidenceFiles=files)
+            if scope_tree is not None:
+                body["scopeTree"] = scope_tree
+            with store.transaction():
+                observations.append(store.record("observation", body))
+            if not cleanup_verified:
+                raise UncertainCleanup("Command cleanup unverified: " + str(body))
+            gitwork.clean(checkout, commit)
+            dirty = False
+    finally:
+        # Never reset/reuse a workspace whose descendants may still be running.
+        if not cleanup_verified:
+            _observer.checkout = None
+        elif dirty:
+            gitwork.clean(checkout, commit)
     return observations
 
 
@@ -89,7 +117,6 @@ def prove(store, ref, contract, checks):
     observations = []
     try:
         establishes = {r: c for r, c in checks.items() if c["mode"] == "establishes"}
-        gitwork.checkout(root, unit.T)
         red = observe(store, root, unit.T, establishes, "T", ref)
         observations.extend(red)
         # T contains the current check sources on the pre-unit product. A newly written
@@ -109,7 +136,6 @@ def prove(store, ref, contract, checks):
                                          mechanics, store.cursor().scratch)
             store.record("proof_base", {"unit": ref, "commit": start, "waveStart": store.cursor().waveStart,
                                         "product": unit.P})
-            gitwork.checkout(root, start)
             start_red = observe(store, root, start, {r: establishes[r] for r in passing_T}, "wave-start", ref)
             observations.extend(start_red)
         proven_red = {store.read(r)["check"] for r in [*red, *start_red]

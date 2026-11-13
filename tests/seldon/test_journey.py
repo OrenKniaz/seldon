@@ -437,7 +437,8 @@ class Scripted:
                     assert observation["command"][-1] == f"unit-{expected}/check.py"
                     assert observation["ranOnDeliveredRevision"] and len(observation["commit"]) == 40
                     if self.mode == "traced-evidence":
-                        assert Path(observation["stdout"].splitlines()[-1]) == self.slot / "product"
+                        assert Path(observation["stdout"].splitlines()[-1]) == Path(
+                            observation["workingDirectory"])
                         artifacts = list(facts["Check artifacts"].values())
                         texts = [a["text"] for a in artifacts if "text" in a]
                         assert set(texts) == {f'"value-{expected}"', ('long observation ' * 400)[-4096:]}
@@ -1420,18 +1421,22 @@ def guide_links_journey(root):
     (root / "docs").mkdir()
     (root / "index.html").write_text("Foundation", encoding="utf-8")
     (root / "assets").mkdir()
+    (root / "assets/.keep").touch()
     command = [sys.executable, "-B", "-c",
                "from pathlib import Path; assert Path('index.html').read_text() == 'Foundation'"]
     text = "Read [the page]({}).\n```argv\n" + json.dumps(command) + "\n```\n"
     store = Store(root)
     try:
         kickoff = store.record("kickoff", {"setup": {"providers": ROLES}})
-        scratch = root / "scratch"
+        scratch = root.parent / (root.name + "-scratch")
         scratch.mkdir()
         store.cursor(RunRow(kickoff=kickoff, scratch=str(scratch)))
         for link, passes in (("../index.html", True), ("../assets/", True), ("index.html", False)):
             (root / plan.GUIDE_PATH).write_text(text.format(link), encoding="utf-8")
-            refs = proof.observe(store, root, commit, guide.checks(root), "guide", disposable=True)
+            gitwork.git(root, "add", "--all", "--", ".", ":!.seldon")
+            commit = gitwork.commit(root, gitwork.git(root, "write-tree"), commit)
+            gitwork.checkout(root, commit)
+            refs = proof.observe(store, root, commit, guide.checks(root), "guide")
             assert bool(proof.failures(store, refs)) is not passes
         (root / plan.GUIDE_PATH).write_text(text.format("../../outside.html"), encoding="utf-8")
         with pytest.raises(ValueError):
@@ -1839,7 +1844,7 @@ def recorded_artifact_journey(root):
                 criterion = document["nodes"].pop("quality:001")
                 criterion["body"]["checks"] = list(checks)
                 document["nodes"][subject] = criterion
-            scratch = project / "scratch"
+            scratch = root / (cohort + "-scratch")
             scratch.mkdir()
             kickoff = store.record("kickoff", {"setup": {"providers": ROLES}})
             store.cursor(RunRow(kickoff=kickoff, scratch=str(scratch)))
@@ -1851,7 +1856,7 @@ def recorded_artifact_journey(root):
                 "Path(os.environ['SELDON_EVIDENCE_DIR'],'report.json').write_bytes(data); "
                 "sys.stdout.buffer.write(data)", str(source)]
             observed, = proof.observe(store, project, commit, {"recorded": {
-                "command": command, "requirements": []}}, "recorded", disposable=True)
+                "command": command, "requirements": []}}, "recorded")
             canonical = store.read(observed)
             assert not proof.failures(store, [observed])
             artifacts = {}
@@ -1903,6 +1908,7 @@ def clean_core_golden(root):
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(root)
     began = time.monotonic()
+    __import__('test_proof').hermetic_journey(root / 'hermetic')
     agreed_literals_journey(root / "agreed-literals")
     blocked_owner_journeys(root / "blocked-owner")
     guide_links_journey(root / "guide-links")
