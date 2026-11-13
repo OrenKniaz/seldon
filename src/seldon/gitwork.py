@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import threading
 import uuid
 from dataclasses import replace
 from functools import lru_cache
@@ -40,9 +41,15 @@ def init(root):
     return revision
 
 
+# Git does not make concurrent `worktree add` on one repository safe on Windows: parallel wave
+# observations raced on .git/worktrees/<name>/commondir (gate 11-13). One process, one adder.
+_WORKTREE_ADD = threading.Lock()
+
+
 def admit(project, scratch, base):
     root = Path(scratch) / ("worker-" + uuid.uuid4().hex)
-    git(project, "worktree", "add", "--quiet", "--detach", str(root), base)
+    with _WORKTREE_ADD:
+        git(project, "worktree", "add", "--quiet", "--detach", str(root), base)
     return str(root)
 
 
