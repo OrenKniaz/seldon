@@ -2266,11 +2266,9 @@ def clean_core_golden(root):
     assert all(scale[kind] <= baseline[kind] for kind in baseline), (baseline, scale)
     print(f"M1 scale50: {scale_seconds:.2f}s; question bytes {baseline} -> {scale}", flush=True)
     # Target is 60 s on a quiet machine; fail only well above it so host load does not block (T-77).
-    assert scale_seconds < 90, f"50-unit bound exceeded: {scale_seconds:.2f}s"
+    # Timing is measured, never a gate (Oren 11-13, BLUEPRINT R15/P11): read it in the efficiency debrief.
     seconds = time.monotonic() - began
     print(f"M1 suite: {seconds:.2f}s; artifacts {root}", flush=True)
-    # 270 -> 300 on 11-13: three new journeys (user words, review links, 253 KB judge) took the suite to 274-276 s; trim back via T-138.
-    assert seconds < 300, f"suite bound exceeded: {seconds:.2f}s (target 180 s, T-77, T-138)"
 
 
 if __name__ == "__main__":
