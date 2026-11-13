@@ -1,4 +1,4 @@
-# SELDON BLUEPRINT v1.5 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.6 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
@@ -7,6 +7,7 @@
 > **v1.3 (Oren, 2026-11-11):** Astra takes control when Claude has no usage; every new failure opens a ticket (P9).
 > **v1.4 (Oren, 2026-11-12, "you can ratify"):** eleven changes from two independent bird's-eye reviews (Fable, Astra) after four judgment redesigns in one day: source is judged once at the unit (R2, §8.4); real-question size checks (R2); local re-ask (R7); reuse only on git ids (R9); no judge execution booleans (R12); flow review is the only cross-unit judge (§3.2); M2 contents and order; milestone cohorts and an earlier fight (P4, P5); review trigger (P10); roles (§8.3). Merged notes: `work/ladder/RECOMMENDATIONS.json` in the dev workspace.
 > **v1.5 (Oren, 2026-11-12, "ok, you can ratify"):** wave-start RED in the unit table (PROVING): a check an earlier unit of the same wave already satisfies must fail on the wave's start commit. The lead's M1 decision, ratified (T-76).
+> **v1.6 (Oren, 2026-11-13, "Ok you can ratify"):** two execution rules from the P10 bird's-eye (Fable + Astra) after M2 exit cohort #4 reached 4/10 on five different walls: every check has one owner and a declared level; every check run is hermetic (§3.1). Notes: `work/ladder/design-review/birds-eye-2026-11-13-{fable,astra}.md`.
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -45,7 +46,7 @@ These six are the load-bearing parts. Work that serves none of them waits.
 | **Contract** | One agreement between areas or units: an API, schema, file format, shared type, UI structure, command line. Exactly one provider; named consumers. |
 | **Decision** | A recorded choice and its reason (architecture, research, user). |
 | **Feature / Requirement** | The story and acceptance; the observable obligation. |
-| **Check** | An ordinary command and what it proves. Declares `establishes` (must fail before the work, pass after) or `preserves` (must pass before and after). Levels: unit, contract, wave, walkthrough. |
+| **Check** | An ordinary command and what it proves. Declares `establishes` (must fail before the work, pass after) or `preserves` (must pass before and after). Levels: unit, contract, wave, walkthrough. Every check declares its level and has exactly one owner: the unit whose scope holds its file. A unit check is proven inside its unit; a wave check runs only on the integrated product and only its owner repairs it. Every check run observes an exact commit in its own disposable checkout that code cleans afterwards; scratch and evidence live outside the product files; code never refuses a run for what a check left behind. |
 | **Wave** | A goal and its units. Ends in an integrated, running, proven product. |
 | **Unit** (the charter's bead) | One agent session's worth of work: a path scope, its requirements and checks, the contracts it provides and consumes, its dependencies. |
 
