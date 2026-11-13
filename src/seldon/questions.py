@@ -250,7 +250,8 @@ def agreement_facts(document, ref):
     contracts = architecture.contracts_for(document, ref)
     return {label: {r: {k: c[k] for k in ("kind", "text")} for r, c in contracts.items()
                     if architecture.endpoint(ref, c) == side}
-            for label, side in (("Contracts provided", "provider"), ("Contracts consumed", "consumer"))
+            for label, side in (("Contracts provided", "provider"), ("Contracts consumed", "consumer"),
+                                ("Area contracts", None))
             if any(architecture.endpoint(ref, c) == side for c in contracts.values())}
 
 

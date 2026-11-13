@@ -440,6 +440,8 @@ class RecordedDetailProvider(Scripted):
             self.arch_calls += 1
             if "Architecture correction" not in facts:
                 return self.recording["architect"]
+            if "architectureCorrection" in self.recording:
+                return self.recording["architectureCorrection"]
             answer = deepcopy(json.loads(self.recording["architect"])["answer"])
             for area in answer["areas"]:
                 area["scope"].append(f"checks/{area['handle']}/**")
@@ -449,6 +451,33 @@ class RecordedDetailProvider(Scripted):
         self.detail_calls.append(deepcopy(question))
         area = facts["Area"]["handle"]
         raw = self.recording["details"][area]["raw"]
+        if "pagePlan" in self.recording:
+            if area == "page" and facts["Contracts"]["assembly-slots"]["text"] != json.loads(
+                    self.recording["architect"])["answer"]["contracts"][0]["text"]:
+                raw = self.recording["pagePlan"]
+            if not any(k in facts for k in ("Exact corrections", "Merge correction")):
+                return raw
+            answer = deepcopy(facts.get("Previous area plan") or json.loads(raw)["answer"])
+            for unit in answer["units"]:
+                unit["consumes"] = [r for r in unit["consumes"]
+                                    if facts["Contracts"][r]["side"] == "consumer"]
+                unit["reads"] = ["checks/shared/assembly.cjs" if p == "checks/shared/**" else p
+                                 for p in unit["reads"]]
+                for req in unit["requirements"]:
+                    if any(e["kind"] == "check" and req in e["typedBody"]["requirements"]
+                           and set(e["typedBody"]["requirements"]) <= set(unit["requirements"])
+                           for e in answer["edits"]):
+                        continue
+                    answer["edits"].append({"kind": "check", "targetHandle": req + "-local", "typedBody": {
+                        "purpose": "Prove this owner's contribution against the agreed contract text; "
+                                   "integrated browser checks retain real cross-area proof.",
+                        "mode": "establishes", "command": ["node", unit["checkPaths"][0].replace(
+                            "**", "local.cjs"), "--local", req],
+                        "requiredEnvironment": ["Supplied Node, Edge and Playwright"],
+                        "expectedEvidence": "Observe the owned contribution against the published interface; "
+                                            "no sibling implementation supplied by a mock.",
+                        "requirements": [req]}})
+            return json.dumps({"answer": answer})
         if "5e3e40e" in self.recording["source"]:
             if not any(k in facts for k in ("Exact corrections", "Merge correction")):
                 return raw
@@ -541,6 +570,8 @@ def recorded_detail_journeys(root):
     questions receive new scripted answers. No provider implementation or execution acceptance is claimed.
     The 5e3e40e corrections omit duplicated check scope, catching both local and merged ownership
     rejection that the older recordings' scripted replies (which repeat check scopes) cannot expose.
+    The bd6d374 reply exposes an in-area integration owner using its own area's contract. Earlier
+    recordings collapse the page to one unit, so cannot catch missing shared text or a false endpoint.
     """
     began = time.monotonic()
     recordings = json.loads(Path(__file__).with_name("recorded_detail.json").read_text("utf-8"))
@@ -562,6 +593,10 @@ def recorded_detail_journeys(root):
             replies = [b["rawAnswer"] for _, k, b in rows if k == "provider_reply"]
             assert recording["architect"] in replies
             assert all(d["raw"] in replies for d in recording["details"].values())
+            own_contract = "pagePlan" in recording
+            if own_contract:
+                assert recording["architectureCorrection"] in replies
+                assert recording["pagePlan"] in replies
             owns_checks = "5e3e40e" in recording["source"]
             assert provider.arch_calls == (1 if owns_checks else 2)
             assert len(run.store.records("architecture_gap")) == (0 if owns_checks else 1)
@@ -569,14 +604,39 @@ def recorded_detail_journeys(root):
             assert {b["gate"] for _, k, b in rows if k == "decision_request"} == {"A", "B"}
             assert any("Exact corrections" in q["facts"] for q in provider.detail_calls)
             wave = json.loads(recording["architect"])["answer"]["waves"][0]
-            assert all(q["facts"]["Current wave"] == wave
-                       for q in provider.detail_calls)
+            for question in provider.detail_calls:
+                expected = wave
+                if own_contract:
+                    initial = architecture.index(json.loads(recording["architect"])["answer"]["contracts"])
+                    if question["facts"]["Contracts"]["assembly-slots"]["text"] != initial[
+                            "assembly-slots"]["text"]:
+                        expected = json.loads(recording["architectureCorrection"])["answer"]["waves"][0]
+                assert question["facts"]["Current wave"] == expected
             corrections = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
             assert sorted(q["facts"]["Area"]["handle"] for q in corrections) == (
-                ["foundation", "seldon"] if owns_checks else
+                [] if own_contract else ["foundation", "seldon"] if owns_checks else
                 ["page-shell"] if "2073b1d-c01" in slot.name else [])
             document = run.store.plan(run.store.cursor().revision)
             plan.validate(document)
+            if own_contract:
+                units = plan.select(document, "unit")
+                contracts = plan.select(document, "contract")
+                agreed = architecture.index(json.loads(recording["architectureCorrection"])[
+                    "answer"]["contracts"])["assembly-slots"]["text"]
+                shared = next(r for r, c in contracts.items() if c["text"] == agreed)
+                provider_unit = units[contracts[shared]["provider"]]
+                integration = next(r for r, u in units.items() if u["area"] == provider_unit["area"]
+                                   and r != contracts[shared]["provider"] and r != "guide")
+                from seldon import questions
+                assert contracts[shared]["text"] == questions.agreement_facts(document, integration)[
+                    "Area contracts"][shared]["text"]
+                assert integration not in contracts[shared]["consumers"]
+                assert contracts[shared]["provider"] in units[integration]["dependencies"]
+                invalid = deepcopy(document)
+                plan.select(invalid, "contract")[shared]["consumers"].append(integration)
+                plan.select(invalid, "unit")[integration]["consumes"].append(shared)
+                with pytest.raises(ValueError, match="consumer endpoints must cross area boundaries"):
+                    architecture.validate(invalid)
             assert len(plan.assigned(document)[None]) > 0
             if owns_checks:
                 assert not any("checkPaths must be inside scope" in json.dumps(q["facts"])

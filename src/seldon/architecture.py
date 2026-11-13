@@ -29,7 +29,9 @@ def endpoint(unit, contract):
 
 
 def contracts_for(document, unit):
-    return {r: c for r, c in plan.select(document, "contract").items() if endpoint(unit, c)}
+    units = plan.select(document, "unit")
+    return {r: c for r, c in plan.select(document, "contract").items()
+            if endpoint(unit, c) or units[unit]["area"] == units[c["provider"]]["area"]}
 
 
 def area_decisions(document, area):
@@ -57,6 +59,9 @@ def validate(document):
         if (contract["provider"] not in units or set(consumers) - units.keys()
                 or contract["provider"] in consumers or len(set(consumers)) != len(consumers)):
             raise ValueError(f"{ref}: name one existing provider and distinct existing consumers")
+        if any(units[u]["area"] == units[contract["provider"]]["area"] for u in consumers):
+            raise ValueError(f"{ref}: consumer endpoints must cross area boundaries; "
+                             "use the providing area's contract text without consuming it")
         providers = [r for r, u in units.items() if ref in u["provides"]]
         readers = {r for r, u in units.items() if ref in u["consumes"]}
         if providers != [contract["provider"]] or readers != set(consumers):
@@ -134,7 +139,7 @@ def local_plan(area, contracts, answer, vision, single_area):
             field, kind = relations[edit["kind"]]
             if any(handles.get(r) != kind and not (
                     kind == "requirement" and r in contracts
-                    and endpoint(area["handle"], contracts[r]) == "consumer")
+                    and endpoint(area["handle"], contracts[r]))
                    for r in edit["typedBody"][field]):
                 raise ValueError(f"Local {field} must name this area's {kind} handles")
         if edit["kind"] == "obligation":
@@ -164,6 +169,10 @@ def local_plan(area, contracts, answer, vision, single_area):
             if len(set(unit[field])) != len(unit[field]):
                 raise ValueError(f"Name each existing contract once in {field}")
             for ref in unit[field]:
+                if (field == "consumes" and ref in contracts
+                        and endpoint(area["handle"], contracts[ref]) == "provider"):
+                    raise ValueError(f"{ref}: use this area's contract text without a consumer endpoint; "
+                                     "remove it from consumes and retain actual file dependencies")
                 if ref not in contracts or endpoint(area["handle"], contracts[ref]) != side:
                     raise ValueError(f"{ref}: bind one provider and its agreed consumer endpoints; "
                                      "report a contract gap")
