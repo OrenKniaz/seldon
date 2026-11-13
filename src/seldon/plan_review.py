@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import architecture, inference, plan, questions
+from . import architecture, detail, inference, plan, questions
 from .states import advance
 
 
@@ -11,7 +11,7 @@ def briefs(document):
     vision = document["nodes"]["vision"]["body"]
     units = {r: u for r, u in plan.select(document, "unit").items() if r != "guide"}
     coverage = plan.coverage(document)
-    result, counts = {}, {}
+    result = {}
     for area, area_ref in zip(outline["areas"], plan.select(document, "area"), strict=True):
         owned = {r: u for r, u in units.items() if u["area"] == area_ref}
         requirements = {r for u in owned.values() for r in u["requirements"]}
@@ -36,58 +36,111 @@ def briefs(document):
             "Wave goal": outline["waves"][0]["goal"], "Contracts": contracts,
             "Decisions": [d for d in outline["decisions"] if set(d["areas"]) & set(participants)],
             "Plan": {"nodes": nodes}, "Trace coverage": trace})
-        counts[area["handle"]] = {"features": len(features), "requirements": len(requirements),
-            "checks": len(checks), "units": len(owned),
-            "requirementsWithChecks": sum(bool(trace[r]["checks"]) for r in requirements),
-            "qualityCriteriaWithChecks": sum(bool(trace[r]["checks"]) for r in trace
-                                              if r.startswith("quality:"))}
-    result["cross-area"] = questions.build("REVIEW", {
-        "Review subject": "cross-area", "Approved vision": vision,
-        "Architecture outline": {"areas": [{k: a[k] for k in ("handle", "responsibility", "commitments")}
-                                           for a in outline["areas"]],
-                                 "contracts": outline["contracts"], "waves": outline["waves"]},
-        "Per-area coverage counts": counts})
     return result
+
+
+def architecture_brief(document):
+    outline = document["architecture"]
+    question = questions.build("REVIEW", {
+        "Review subject": "architecture",
+        "Approved vision": {k: v for k, v in document["nodes"]["vision"]["body"].items() if k != "why"},
+        "Architecture outline": {
+            "areas": [{k: a[k] for k in ("handle", "responsibility", "commitments")}
+                      for a in outline["areas"]],
+            **{k: outline[k] for k in ("contracts", "decisions", "waves")}}})
+    question["prompt"] = ("Can these responsibilities, agreements and waves deliver the accepted vision? "
+                          "Is an accepted promise or a cross-area agreement missing?")
+    return question
+
+
+def review(store, provider, question, basis):
+    subject = question["facts"]["Review subject"]
+    previous = next((b for _, _, b in reversed(store.records("area_review"))
+                     if b["subject"] == subject and b["basis"] == basis), None)
+    if previous:
+        return previous["answer"]
+
+    def check(answer):
+        if (answer["verdict"] == "adequate") != (not answer["gaps"]):
+            raise ValueError("An adequate review has no gaps; a gap needs a concrete correction")
+
+    ref, answer = inference.call(store, provider, question, check=check)
+    sources = [ref]
+    if answer["verdict"] == "uncertain":
+        cursor = store.cursor()
+        document = store.plan(cursor.revision)
+        setup = store.read(cursor.kickoff)["setup"]
+        available = {"Runtime": questions.runtime(setup)}
+        if subject == "architecture":
+            available["Accepted commitments"] = architecture.commitments(
+                document["nodes"]["vision"]["body"])
+            available["Planning stage"] = (
+                "Area details are recorded and reviewed separately; this subject is the outline."
+                if "areaDetails" in document else
+                "Architecture outline before DETAIL; requirements, checks and unit plans "
+                "have not been written for this outline.")
+        else:
+            area = next(a for a in document["architecture"]["areas"] if a["handle"] == subject)
+            available["Recorded area plan"] = store.read(document["areaDetails"][subject])["answer"]
+            available["Product in this area"] = questions.detail_brief(
+                store, document["architecture"], area)["facts"]["Product in this area"]
+            available["Planning stage"] = "Before B; these are planned checks, not execution evidence."
+        reask = {**question, "facts": {**question["facts"], "Requested facts": {
+            "Needs": answer["neededFacts"], "Available subject facts": available}}}
+        ref, answer = inference.call(store, provider, reask, check=check)
+        sources.append(ref)
+        if answer["verdict"] == "uncertain":
+            answer = {**answer, "verdict": "not judged", "gaps": []}
+    with store.transaction():
+        result = store.record("review_verdict", {"subject": subject, "answer": answer, "sources": sources})
+        store.record("area_review", {"revision": store.cursor().revision, "subject": subject,
+                                     "basis": basis, "answer": result})
+    return result
+
+
+def arch_review(store, provider):
+    document = store.plan(store.cursor().revision)
+    question = architecture_brief(document)
+    ref = review(store, provider, question, question)
+    answer = store.read(ref)["answer"]
+    if answer["verdict"] == "gap":
+        detail.gap(store, {"architecture": [{"error": g["correction"], "target": g["target"],
+                                            "otherSide": {}} for g in answer["gaps"]]})
+    else:
+        advance(store, "reviewed-details" if "areaDetails" in document else "reviewed", ref)
 
 
 def step(store, provider, capacity):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
     pending = briefs(document)
-    saved = [b for _, _, b in store.records("area_review")]
 
     def ask(subject):
         try:
             question = pending[subject]
             # Canonical DETAIL records survive global handle renumbering when another area grows.
-            basis = (question if subject == "cross-area" else {
-                "detail": document["areaDetails"][subject],
-                "facts": {k: v for k, v in question["facts"].items() if k not in ("Plan", "Trace coverage")}})
-            previous = next((b for b in reversed(saved)
-                             if b["subject"] == subject and b["basis"] == basis), None)
-            if previous:
-                return previous["answer"]
-
-            def check(answer):
-                if (answer["verdict"] == "adequate") != (not answer["gaps"]):
-                    raise ValueError("An adequate review has no gaps; a gap needs a concrete correction")
-
-            ref, _ = inference.call(store, provider, question, check=check)
-            store.record("area_review", {"revision": cursor.revision, "subject": subject,
-                                         "basis": basis, "answer": ref})
-            return ref
+            basis = {"detail": document["areaDetails"][subject],
+                     "facts": {k: v for k, v in question["facts"].items()
+                               if k not in ("Plan", "Trace coverage")}}
+            return review(store, provider, question, basis)
         finally:
             store.close()
 
     with ThreadPoolExecutor(max_workers=capacity) as pool:
         refs = dict(zip(pending, pool.map(ask, pending), strict=True))
+    outline_question = architecture_brief(document)
+    refs["architecture"] = next(b["answer"] for _, _, b in reversed(store.records("area_review"))
+                                if b["subject"] == "architecture" and b["basis"] == outline_question)
     answers = {s: store.read(r)["answer"] for s, r in refs.items()}
     gaps = [{**g, "area": s} for s, a in answers.items() for g in a["gaps"]]
-    adequate = all(a["verdict"] == "adequate" for a in answers.values())
+    not_judged = {s: {"reason": a["why"], "neededFacts": a["neededFacts"]}
+                  for s, a in answers.items() if a["verdict"] == "not judged"}
+    verdict = "gap" if gaps else "not judged" if not_judged else "adequate"
     with store.transaction():
         result = store.record("plan_review", {"revision": cursor.revision, "subjects": refs,
-            "answer": {"verdict": "adequate" if adequate else "gap", "gaps": gaps}})
-        advance(store, "adequate" if adequate else "gap", result, review=result, failure=str(gaps))
+            "answer": {"verdict": verdict, "gaps": gaps}, "notJudged": not_judged,
+            "reviewTier": "partial review: not judged" if not_judged else "same-provider review"})
+        advance(store, "gap" if gaps else "reviewed", result, review=result, failure=str(gaps))
 
 
 def repair(store):
@@ -108,10 +161,4 @@ def repair(store):
     with store.transaction():
         ref = store.record("review_repair", {"revision": cursor.revision, "review": cursor.review,
                                             "corrections": corrections})
-        if "cross-area" in corrections:
-            store.record("architecture_gap", {"vision": cursor.vision,
-                                               "gap": str(corrections), "repair": ref})
-            event = "architecture-gap"
-        else:
-            event = "area-gap"
-        advance(store, event, ref, repairs=cursor.repairs + 1, decision=None, requestedChange=None)
+        advance(store, "area-gap", ref, repairs=cursor.repairs + 1, decision=None, requestedChange=None)

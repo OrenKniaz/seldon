@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import architecture, inference, plan, questions
+from . import architecture, inference, plan, plan_review, questions
 from .states import advance
 
 
@@ -78,8 +78,7 @@ def step(store, provider, capacity):
             body = {"revision": cursor.revision, "area": area["handle"], "basis": basis, "resume": resumed,
                     "correction": correction[0] if correction else None}
             try:
-                result, answer = inference.call(store, provider, question, check=validate,
-                                                retries=0 if correction else 2)
+                result, answer = inference.call(store, provider, question, check=validate)
                 body["answer"] = result
                 if answer.get("verdict") == "contract_gap":
                     body["architecture"] = answer["need"]
@@ -155,4 +154,7 @@ def step(store, provider, capacity):
             leaves.extend(replacements.values())
     with store.transaction():
         revision = store.revision(compiled, cursor.revision)
-        advance(store, "detailed", refs, revision=revision)
+        reviewed = plan_review.architecture_brief(compiled)
+        has_review = any(b["subject"] == "architecture" and b["basis"] == reviewed
+                         for _, _, b in store.records("area_review"))
+        advance(store, "detailed" if has_review else "outline-changed", refs, revision=revision)

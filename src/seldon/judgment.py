@@ -110,11 +110,15 @@ def ready(answer):
 
 def not_judged(store):
     cursor = store.cursor()
-    return {v["subject"]: "not judged: " + "; ".join(dict.fromkeys(v["answer"]["neededFacts"]))
-            for v in ([store.read(r) for r in [*cursor.requirementVerdicts, *cursor.qualityVerdicts]]
-                      + [{"subject": ref, "answer": store.read(row.judgment).get("answer", {})}
-                         for ref, row in store.units().items() if row.judgment])
-            if v["answer"].get("verdict") == "not judged"}
+    deferred = {"review:" + subject: "not judged: " + row["reason"]
+                for subject, row in (store.read(cursor.review)["notJudged"].items()
+                                     if cursor.review else [])}
+    deferred.update({v["subject"]: "not judged: " + "; ".join(dict.fromkeys(v["answer"]["neededFacts"]))
+                     for v in ([store.read(r) for r in [*cursor.requirementVerdicts, *cursor.qualityVerdicts]]
+                               + [{"subject": ref, "answer": store.read(row.judgment).get("answer", {})}
+                                  for ref, row in store.units().items() if row.judgment])
+                     if v["answer"].get("verdict") == "not judged"})
+    return deferred
 
 
 def combined(verdicts):

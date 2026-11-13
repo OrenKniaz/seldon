@@ -56,8 +56,7 @@ PROMPTS = {
               "covering this responsibility and their contracts. If an agreement or needed scope is missing, "
               "return contract_gap and the need; do not invent an agreement.",
     "REVIEW": "Does this area's plan deliver its part of the accepted scope and quality bar? "
-              "Check its records, agreements and trace coverage. For the cross-area subject, "
-              "does this plan lead to the whole built dream, or is something missing between areas? "
+              "Check its records, agreements and trace coverage. "
               "Judge only the supplied subject. Name concrete gaps only.",
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
@@ -102,7 +101,7 @@ def build(kind, facts, targets=(), execution=None, images=()):
         targets = [*targets, *SOURCE_TARGETS]
     if kind == "ALIGN":
         facts = {**facts, "Design guidance used by UI workers": CRAFT}
-    if kind in ("DETAIL", "REVIEW"):
+    if kind == "DETAIL" or kind == "REVIEW" and facts.get("Review subject") != "architecture":
         facts = {**facts, "How the plan executes": (
             "Each unit has one worker and a separate checkout. Disjoint units can run concurrently "
             "once their dependencies are integrated. Files assigned to the same unit share one worker. "
@@ -146,7 +145,9 @@ def build(kind, facts, targets=(), execution=None, images=()):
         "DEMO": {"verdict": "satisfied", "gaps": [], "assessments": assessments(targets, final=True)},
         "PRODUCT": {"verdict": "satisfied", "gaps": [], "assessments": assessments(targets, final=True)},
     }[kind]
-    example["why"] = "The observed interaction and check sources support this answer"
+    example["why"] = ("The responsibilities, agreements and waves cover the accepted promises"
+                      if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
+                      "The observed interaction and check sources support this answer")
     schema = answer_schema(kind, targets)
     validate({"answer": example}, schema)
     return bounded_unit({"kind": kind, "prompt": PROMPTS[kind] + (" " + CRAFT if kind == "WORK" else ""),

@@ -154,6 +154,8 @@ class Run:
             with store.transaction():
                 revision = store.revision(document, cursor.revision)
                 advance(store, "outlined", result, revision=revision)
+        elif state == "ARCH-REVIEW":
+            plan_review.arch_review(store, self.provider)
         elif state == "DETAIL":
             detail.step(store, self.provider, self.capacity)
         elif state == "REVIEW":

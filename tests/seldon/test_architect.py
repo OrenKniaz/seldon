@@ -240,7 +240,7 @@ class CorrectionProvider(AreaProvider):
                     or self.defect == "local-persistent" and "Merge correction" not in facts):
                 next(e for e in body["edits"] if e["kind"] == "check")["typedBody"][
                     "requirements"].append("link-1")
-            elif self.defect in ("path", "persistent") and (
+            elif self.defect in ("path", "persistent", "targeted-exact") and (
                     self.defect == "persistent" or "Merge correction" not in facts):
                 body["units"][0].update(reads=["value.txt"], dependencies=["value.txt"])
             elif self.defect == "endpoint" and "Merge correction" not in facts:
@@ -249,6 +249,10 @@ class CorrectionProvider(AreaProvider):
                 and question["facts"]["Area"]["handle"] == "area-001"
                 and "Merge correction" not in question["facts"]):
             answer["answer"]["units"][0]["dependencies"] = ["unit-003/value.txt"]
+        if (question["kind"] == "DETAIL" and self.defect == "targeted-exact"
+                and "Merge correction" in question["facts"]
+                and "Exact corrections" not in question["facts"]):
+            del answer["answer"]["units"]
         return json.dumps(answer)
 
 
@@ -271,7 +275,7 @@ class ScopeProvider(AreaProvider):
 
 
 def single_obligation_journey(root):
-    """A single-unit obligation exhausts 3+1 answers, then deliberately resumes to approved B.
+    """A single-unit obligation exhausts 3+3 answers, then deliberately resumes to approved B.
 
     Multi-unit ownership tests miss the absent single-unit skeleton. This catches a merge ValueError
     escaping repair, resetting the retry count or losing the stopped run's supported continuation.
@@ -292,7 +296,7 @@ def single_obligation_journey(root):
     run.provider = provider
     try:
         assert run.run().state == "INCOMPLETE"
-        assert len(provider.detail_calls) == 4
+        assert len(provider.detail_calls) == 6
         outcome = run.store.records("outcome")[-1][2]
         assert "area-001" in outcome["reason"] and "skeleton" in outcome["reason"]
         assert "Run.resume_planning()" in outcome["nextAction"]
@@ -303,7 +307,7 @@ def single_obligation_journey(root):
         run.resume_planning()
         while run.store.cursor().state != "EXECUTE":
             run.step()
-        assert run.store.cursor().B and len(provider.detail_calls) == 5
+        assert run.store.cursor().B and len(provider.detail_calls) == 7
     finally:
         run.close()
 
@@ -372,9 +376,11 @@ def correction_journeys(root):
     local check accidentally assigned to wave verification. These use the real answer validator,
     merger, review and B; unrelated areas must keep their original answers, including across an
     architecture scope correction. Deliberate resume must retain siblings after a bounded stop.
+    A malformed targeted re-ask needs an exact-fix retry; ordinary valid re-asks miss the y09 failure.
     """
     began = time.monotonic()
-    for mode in ("path", "persistent", "local", "endpoint", "local-persistent", "cycle", "scope"):
+    for mode in ("path", "persistent", "local", "endpoint", "local-persistent", "cycle", "scope",
+                 "targeted-exact"):
         run, provider = start(root / mode, mode="contracts")
 
         provider_type = ScopeProvider if mode == "scope" else CorrectionProvider
@@ -397,9 +403,9 @@ def correction_journeys(root):
             reasks = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
             assert sorted(q["facts"]["Area"]["handle"] for q in reasks) == (
                 [] if mode in ("local", "scope") else ["area-001", "area-002", "area-003"] if mode == "cycle"
-                else ["area-002"])
+                else ["area-002", "area-002"] if mode == "targeted-exact" else ["area-002"])
             assert any("Exact corrections" in q["facts"] for q in provider.detail_calls) == (
-                mode in ("local", "local-persistent"))
+                mode in ("local", "local-persistent", "targeted-exact"))
             if mode == "local-persistent":
                 assert len([q for q in provider.detail_calls
                             if q["facts"]["Area"]["handle"] == "area-002"]) == 4

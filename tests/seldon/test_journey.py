@@ -381,7 +381,7 @@ class Scripted:
                 fault(answer)
         elif kind == "REVIEW":
             answer = {"verdict": "adequate", "gaps": []}
-            if self.mode == "review-repair" and q["facts"]["Review subject"] != "cross-area":
+            if self.mode == "review-repair" and q["facts"]["Review subject"] != "architecture":
                 coverage = q["facts"]["Trace coverage"]["quality:002"]
                 if set(coverage["units"]) != {"u001", "u002"}:
                     answer = {"verdict": "gap", "gaps": [{"target": "quality:002",
@@ -619,7 +619,7 @@ def records_and_skeleton_journey(slot):
         finally:
             revised.close()
         revision = run.store.revision(document, run.store.cursor().revision)
-        run.store.cursor(replace(run.store.cursor(), state="REVIEW", B=None, review=None, revision=revision))
+        run.store.cursor(replace(run.store.cursor(), state="ARCH-REVIEW", B=None, review=None, revision=revision))
         assert run.store.unit("u001").judgment == before["u001"].judgment
         assert all(run.store.unit(u).state == "DONE" and run.store.unit(u).judgment is None
                    for u in ("u002", "u003"))
@@ -1896,7 +1896,7 @@ def recorded_artifact_journey(root):
 
 def clean_core_golden(root):
     from test_architect import architect_journeys
-    from test_review import review_journeys
+    from test_review import recorded_review_journey, review_journeys, uncertain_review_journey
 
     root.mkdir(parents=True)
     for key in ("TEMP", "TMP", "TMPDIR"):
@@ -1941,7 +1941,11 @@ def clean_core_golden(root):
         seed_task = pool.submit(final_seed, root / "final-seed")
         records_task = pool.submit(records_and_skeleton_journey, root / "records")
         architect_task = pool.submit(architect_journeys, root / "architect")
-        review_task = pool.submit(review_journeys, root / "review")
+        def reviews():
+            review_journeys(root / "review")
+            uncertain_review_journey(root / "review-uncertain")
+            recorded_review_journey(root / "recorded-review")
+        review_task = pool.submit(reviews)
         list(pool.map(run_case, modes))
         baseline = baseline_task.result()
         admission_task.result()
