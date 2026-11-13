@@ -335,7 +335,7 @@ class Scripted:
 
     def timeout_for(self, kind, context):
         if kind == "WORK" and self.mode == "timeout" and not any((self.slot / "calls").glob("*/result.json")):
-            return 0.35
+            return 3  # above process bootstrap (~0.3-1 s), so the deadline, not startup, ends the call
         return 30
 
     def invoke(self, question, started):
@@ -2008,7 +2008,8 @@ def clean_core_golden(root):
     assert scale_seconds < 90, f"50-unit bound exceeded: {scale_seconds:.2f}s"
     seconds = time.monotonic() - began
     print(f"M1 suite: {seconds:.2f}s; artifacts {root}", flush=True)
-    assert seconds < 270, f"suite bound exceeded: {seconds:.2f}s (target 180 s, T-77)"
+    # 270 -> 300 on 11-13: three new journeys (user words, review links, 253 KB judge) took the suite to 274-276 s; trim back via T-138.
+    assert seconds < 300, f"suite bound exceeded: {seconds:.2f}s (target 180 s, T-77, T-138)"
 
 
 if __name__ == "__main__":
