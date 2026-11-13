@@ -16,9 +16,7 @@ def briefs(document):
         owned = {r: u for r, u in units.items() if u["area"] == area_ref}
         requirements = {r for u in owned.values() for r in u["requirements"]}
         features = {f for r in requirements for f in document["nodes"][r]["body"]["features"]}
-        checks = {r for r, c in plan.select(document, "check").items()
-                  if set(c["requirements"]) <= requirements
-                  or any(plan.matches(arg, u["scope"]) for arg in c["command"] for u in owned.values())}
+        checks = {r for r in plan.select(document, "check") if plan.owner(document, r) in owned}
         refs = set(owned) | requirements | features | checks
         refs.update(r for r, o in plan.select(document, "obligation").items() if o["owner"] in owned)
         nodes = {r: n for r, n in document["nodes"].items() if r in refs}

@@ -18,8 +18,9 @@ def blocked_owner_journeys(root):
 
     The own-scope twin catches wrongly waiving local failures, which the sibling success cannot expose.
     """
-    for own_scope in (False, True):
-        slot = root / ("own" if own_scope else "sibling")
+    for mode in ("sibling", "own", "repeated"):
+        own_scope = mode == "own"
+        slot = root / mode
         run, provider = prepare(slot, "final-seed", 2)
 
         def scopes(answer):
@@ -28,22 +29,22 @@ def blocked_owner_journeys(root):
 
         provider.plan_fault = scopes
         native = slot / "native.py"
-        target = "docs/try-it.md" if own_scope else "unit-001/check.py"
+        owner = "guide" if own_scope else "u001"
         correction = "Require a ready interaction in the value check and make the interaction ready."
-        blocked = ("if guide and " + ("True" if own_scope else
+        blocked = ("if guide and " + ("True" if mode != "sibling" else
                    "Path('unit-001/interaction.txt').read_text() != 'ready'") + ":\n"
                    "    answer['answer'].update(outcome='blocked', discoveries=["
-                   + repr({"target": target, "correction": correction}) + "])\n")
+                   + repr({"owner": owner, "correction": correction}) + "])\n")
         native.write_text(native.read_text("utf-8").replace(
             'print(json.dumps({"type":"item.completed"', blocked
             + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
         try:
-            if own_scope:
+            if mode != "sibling":
                 cursor = run.run()
                 assert cursor.state == "INCOMPLETE"
                 assert run.store.unit("guide").state == "FAILED"
                 assert run.store.unit("guide").recoveries == 2
-                assert not run.store.records("unit_fixup")
+                assert len(run.store.records("unit_fixup")) == (0 if own_scope else 3)
             else:
                 finish(run)
                 assert run.store.unit("guide").recoveries == 0
@@ -66,6 +67,90 @@ def blocked_owner_journeys(root):
             run.close()
 
 
+def owner_repair_journeys(root):
+    """A real three-unit wave failure reopens its file owner, even after two earlier recoveries.
+
+    The passing twin catches repair on coverage alone. The failing twin strengthens a local check
+    and must prove it on P, then rerun the wave check at integration; local-only gaps miss x09.
+    """
+    for broken in (False, True):
+        slot = root / ("broken" if broken else "passing")
+        run, provider = prepare(slot, "owner-repair", 3)
+
+        def wave(answer):
+            answer["units"][0]["checkPaths"] = ["unit-001/*.py"]
+            answer["edits"].append({"kind": "check", "targetHandle": "new:wave", "typedBody": {
+                "purpose": "Compose three values and request the first interaction", "level": "wave",
+                "mode": "establishes", "command": [sys.executable, "-S", "-B", "unit-001/wave.py"],
+                "requiredEnvironment": ["Python"], "expectedEvidence": "Three values and ready interaction",
+                "requirements": ["new:r001", "new:r002", "new:r003"]}})
+
+        provider.plan_fault = wave
+        native = slot / "native.py"
+        injection = ("if not guide and name == 'unit-001':\n"
+                     f"    ready = turn > 3 or {not broken!r}\n"
+                     "    Path(name, 'interaction.txt').write_text('ready' if ready else 'blocked')\n"
+                     "    Path(name, 'wave.py').write_text(\"from pathlib import Path\\n\"\n"
+                     "        + \"assert all(Path(f'unit-{i:03}/value.txt').exists() for i in (1,2,3))\\n\"\n"
+                     "        + \"assert Path('unit-001/interaction.txt').read_text() == 'ready'\\n\"\n"
+                     "        + \"print('three values and ready interaction')\\n\")\n"
+                     "    if turn > 3:\n"
+                     "        with Path(name, 'check.py').open('a') as check:\n"
+                     "            check.write(\"assert Path('unit-001/interaction.txt').read_text() == 'ready'\\n\")\n")
+        native.write_text(native.read_text("utf-8").replace(
+            'answer = {"answer":{"outcome":"done"', injection + 'answer = {"answer":{"outcome":"done"'),
+            encoding="utf-8")
+        invoke = provider.invoke
+        rejected = 0
+
+        def judged(question, started):
+            nonlocal rejected
+            raw, thread = invoke(question, started)
+            if (broken and question["kind"] == "JUDGE"
+                    and "unit-001/check.py" in question["facts"]["Check sources"] and rejected < 2):
+                reply = json.loads(raw)
+                reply["answer"].update(verdict="gap", gaps=[{
+                    "target": question["targets"][0], "correction": "Clarify the local interaction evidence"}])
+                rejected += 1
+                return json.dumps(reply), thread
+            return raw, thread
+
+        provider.invoke = judged
+        try:
+            while run.store.cursor().state != "WAVE-VERIFY":
+                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                run.step()
+            before = run.store.units()
+            assert before["u001"].recoveries == (2 if broken else 0)
+            wave_ref, = plan.assigned(run.store.plan(run.store.cursor().revision))[None]
+            run.step()
+            if broken:
+                assert run.store.unit("u001").state == "REWORK"
+                assert run.store.unit("u001").recoveries == 0
+                for ref in ("u002", "u003", "guide"):
+                    assert run.store.unit(ref) == before[ref]
+                assignment, = [b for _, _, b in run.store.records("unit_fixup")]
+                assert assignment["owner"] == "u001"
+                source = run.store.read(assignment["gaps"][0]["source"])
+                assert source["check"] == wave_ref and source["exitCode"] != 0
+            else:
+                assert not run.store.records("unit_fixup")
+            _, rows, after = finish(run)
+            assert after["u001"].recoveries == 0
+            for ref in ("u002", "u003", "guide"):
+                assert after[ref] == before[ref]
+            if broken:
+                patch = after["u001"].P
+                repaired = [b for _, k, b in rows if k == "observation" and b["commit"] == patch]
+                assert any(b["purpose"] == "P" and b["exitCode"] == 0 for b in repaired)
+                assert not any(b["purpose"] in ("T", "base") for b in repaired)
+                assert any(b["check"] == wave_ref and b["purpose"] == "integrated"
+                           and b["exitCode"] == 0 for _, k, b in rows if k == "observation")
+                assert (slot / "turn-unit-001").read_text() == "4"
+        finally:
+            run.close()
+
+
 @pytest.fixture(scope="module")
 def seed(tmp_path_factory):
     slot = tmp_path_factory.mktemp("fixup-seed")
@@ -73,15 +158,11 @@ def seed(tmp_path_factory):
     slot = slot / "delivery"
 
     def shared_check(answer):
+        answer["units"][0]["checkPaths"] = ["unit-001/*.py"]
         answer["edits"].append({"kind": "check", "targetHandle": "new:interaction", "typedBody": {
             "purpose": "A user can request either interaction or compose both",
-            "mode": "preserves", "command": [sys.executable, "-S", "-B", "-c",
-                "from pathlib import Path; "
-                f"request=Path({(slot / 'request').as_posix()!r}); "
-                "action=request.read_text() if request.exists() else 'values'; "
-                "owners=(1,2) if action=='compose' else (1,) if action=='one' else (); "
-                "assert all(Path(f'unit-{i:03}/interaction.txt').read_text()=='ready' for i in owners); "
-                "print('requested interactions ready')"],
+            "mode": "preserves", "level": "wave", "command": [sys.executable, "-S", "-B",
+                "unit-001/interactions.py", str(slot / "request")],
             "requiredEnvironment": ["Python"], "expectedEvidence": "Requested interactions are ready",
             "requirements": ["new:r001", "new:r002"]}})
 
@@ -92,6 +173,16 @@ def seed(tmp_path_factory):
     text = text.replace('        if turn > 1:\n            source += f"assert Path('
                         "'{name}/interaction.txt')"
                         '.read_text() == \'ready\'\\n"\n', "")
+    native.write_text(text, encoding="utf-8")
+    source = ("from pathlib import Path\nimport sys\nrequest=Path(sys.argv[1])\n"
+              "action=request.read_text() if request.exists() else 'values'\n"
+              "owners=(1,2) if action=='compose' else (1,) if action=='one' else ()\n"
+              "assert all(Path(f'unit-{i:03}/interaction.txt').read_text()=='ready' for i in owners)\n"
+              "print('requested interactions ready')\n")
+    text = text.replace('answer = {"answer":{"outcome":"done"',
+                        "if not guide and name == 'unit-001':\n"
+                        f"    Path(name, 'interactions.py').write_text({source!r})\n"
+                        + 'answer = {"answer":{"outcome":"done"')
     native.write_text(text, encoding="utf-8")
     try:
         while run.store.cursor().state != "PRODUCT-JUDGE":

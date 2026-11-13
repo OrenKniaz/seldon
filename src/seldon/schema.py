@@ -35,7 +35,8 @@ BODIES = {
     "obligation": obj(what=TEXT, owner=TEXT, closingRequirement=TEXT),
     "feature": obj(**FEATURE["properties"], vision=array(choice("vision"), 1)),
     "requirement": obj(obligation=TEXT, design=TEXT, contract=TEXT, features=array(TEXT, 1)),
-    "check": obj(purpose=TEXT, mode=choice("establishes", "preserves"), command=array(TEXT, 1),
+    "check": obj(purpose=TEXT, level=choice("unit", "wave"), mode=choice("establishes", "preserves"),
+                 command=array(TEXT, 1),
                  requiredEnvironment=REFS, expectedEvidence=TEXT, requirements=array(TEXT, 1)),
     "unit": obj(instructions=TEXT, scope=array(TEXT, 1), checkPaths=array(TEXT, 1),
                 requirements=REFS, dependencies=REFS, area=TEXT, provides=REFS, consumes=REFS, reads=REFS),
@@ -99,7 +100,7 @@ SOURCE_TARGETS = (
 )
 
 
-def answer_schema(kind, targets=()):
+def answer_schema(kind, targets=(), owners=()):
     flag = {"type": "boolean"}
     assessment = obj(target=choice(*targets) if targets else TEXT, meaningful=flag,
                      noStubsMocksMissing=flag, why=TEXT)
@@ -114,7 +115,8 @@ def answer_schema(kind, targets=()):
         "DETAIL": DETAIL_PLAN,
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
-        "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT, discoveries=array(GAP)),
+        "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT,
+                    discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
         "JUDGE": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
         "DEMO": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),

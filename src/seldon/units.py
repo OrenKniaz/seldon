@@ -78,7 +78,6 @@ def thread_from_recording(store, ref):
 def work_brief(store, ref):
     question = questions.work_brief(store, ref)
     if assignment := fixups.active(store, ref):
-        question["facts"]["Checks"] = fixups.checks_for(store, store.plan(store.cursor().revision), ref)
         question["facts"]["Scoped corrections"] = {
             "owner": ref, "writeScope": assignment["scope"],
             "corrections": [g["correction"] for g in assignment["gaps"]]}
@@ -146,10 +145,35 @@ def integrate(store, ref, checks):
         gitwork.publish(project, store)
 
 
+def prove_fixup(store, ref, contract, checks):
+    """The recorded gap is RED; the owner's current local checks must be GREEN on its patch."""
+    unit = store.unit(ref)
+    if unit.P is None:
+        T, P, changed = gitwork.snapshots(unit.worktree, unit.base, contract["scope"],
+                                        contract["checkPaths"], store.cursor().scratch)
+        with store.transaction():
+            store.record("patch", {"unit": ref, "base": unit.base, "T": T, "P": P, "paths": changed})
+            unit = replace(unit, T=T, P=P)
+            store.unit(ref, unit)
+    gitwork.checkout(unit.worktree, unit.P)
+    observations = proof.observe(store, unit.worktree, unit.P, checks, "P", ref)
+    with store.transaction():
+        store.unit(ref, replace(store.unit(ref), observations=observations))
+    if bad := proof.failures(store, observations):
+        raise ValueError("Fixup checks failed: " + proof.explain(bad))
+    return observations
+
+
 def run_unit(store, provider, ref):
     document = store.plan(store.cursor().revision)
     contract = plan.select(document, "unit")[ref]
-    checks = fixups.checks_for(store, document, ref)
+    checks = plan.assigned(document)[ref]
+    assignment = fixups.active(store, ref)
+    integrated_checks = dict(checks)
+    if assignment:
+        all_checks = plan.select(document, "check")
+        integrated_checks.update({g["subject"]: all_checks[g["subject"]] for g in assignment["gaps"]
+                                  if g["kind"] == "check" and g["subject"] in all_checks})
     try:
         while (unit := store.unit(ref)).state not in ("DONE", "FAILED", "BLOCKED", "WAITING"):
             try:
@@ -166,7 +190,8 @@ def run_unit(store, provider, ref):
                 elif unit.state == "WORKING":
                     work(store, provider, ref)
                 elif unit.state == "PROVING":
-                    observations = proof.prove(store, ref, contract, checks)
+                    observations = (prove_fixup(store, ref, contract, checks) if assignment else
+                                    proof.prove(store, ref, contract, checks))
                     advance(store, "proven", observations, unit=ref)
                 elif unit.state == "JUDGING":
                     if ref == "guide":
@@ -186,7 +211,7 @@ def run_unit(store, provider, ref):
                                 unit.worktree, unit.P, contract["scope"], store.cursor().scratch)})
                     advance(store, "approved", result, unit=ref, judgment=result)
                 elif unit.state == "INTEGRATING":
-                    integrate(store, ref, checks)
+                    integrate(store, ref, integrated_checks)
                 else:
                     raise RuntimeError(f"Unscheduled unit state: {unit.state}")
             except ProviderFailure as error:
@@ -195,7 +220,9 @@ def run_unit(store, provider, ref):
                 else:
                     thread_from_recording(store, ref)
                     recover(store, ref, str(error), retryable=error.transient and error.cleanup_verified)
-            except (questions.UnitTooLarge, questions.MissingFacts) as error:
+            except questions.UnitTooLarge as error:
+                recover(store, ref, str(error))
+            except questions.MissingFacts as error:
                 recover(store, ref, str(error), retryable=False)
             except proof.UncertainCleanup as error:
                 recover(store, ref, str(error), retryable=False)

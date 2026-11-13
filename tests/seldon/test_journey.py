@@ -288,10 +288,13 @@ else:
                             "['slot']=='content'\nprint('shared page slot content')\n")
     if mode == "check-deadline" and name == "unit-001":
         Path(name, "check.py").write_text("import time\ntime.sleep(8)\n" + source)
-    if name == "unit-001" and mode == "big-source":
+    if name == "unit-001" and mode == "big-source" and turn == 1:
         Path(name, "check.py").write_text("#" + "large source " * 6000 + "\n" + source)
     if name == "unit-001" and mode == "big-product":
-        Path(name, "details.txt").write_text("large product " * 6000)
+        if turn == 1:
+            Path(name, "details.txt").write_text("large product " * 6000)
+        else:
+            Path(name, "details.txt").unlink()
     if mode == "parallel" and name == "unit-004":
         wave_checks = list(facts["Wave checks to write in this scope"].values())
         assert len(wave_checks) == 1 and wave_checks[0]["command"][-1] == "unit-004/compose.py"
@@ -312,9 +315,9 @@ if ((mode == "schema-fix" and name == "unit-001"
     answer = json.loads((slot / "recorded-work.json").read_text("utf-8"))
 if mode == "kill-blocked" and name == "unit-002" and turn == 1:
     answer["answer"]["outcome"] = "blocked"
-    answer["answer"]["discoveries"] = [{"target":"unit-002", "correction":"Need another worker turn"}]
+    answer["answer"]["discoveries"] = [{"owner":"u002", "correction":"Need another worker turn"}]
 if mode == "kill-report" and name == "unit-002":
-    answer["answer"]["discoveries"] = [{"target":"unit-002", "correction":"Retain this successful discovery"}]
+    answer["answer"]["discoveries"] = [{"owner":"u002", "correction":"Retain this successful discovery"}]
 print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":json.dumps(answer)}}),
       flush=True)
 print(json.dumps({"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}), flush=True)
@@ -370,7 +373,7 @@ class Scripted:
                 corrections = q["facts"].get("Exact corrections", [])
                 if not corrections:
                     for unit in answer["units"]:
-                        unit.update(scope=["shared/**"], checkPaths=["shared/check.py"])
+                        unit.update(scope=["shared/**"])
                 elif len(corrections) == 1:
                     answer["edits"][2]["typedBody"]["requirements"].append("new:r002")
             if self.mode == "review-repair" and "Merge correction" in q["facts"]:
@@ -651,7 +654,7 @@ def records_and_skeleton_journey(slot):
                    and "Its slot is named content." in encode(b["facts"])]
         assert len(changed) == 2
         assert not obligations.remaining(run.store)
-        assert run.store.unit("guide").recoveries == 1
+        assert run.store.unit("guide").recoveries == 0
         assert cursor.candidate != candidate_before
         final = [run.store.read(r) for r in cursor.finalObservations]
         assert {b["check"] for b in final} == checks_before
@@ -791,7 +794,7 @@ def stale_scope_journey(slot):
     try:
         with patch.object(gitwork, "integrated", lost_assertion):
             _, rows, units = finish(run)
-        assert units["u001"].recoveries == 1 and units["u002"].recoveries == 0
+        assert units["u001"].recoveries == 0 and units["u002"].recoveries == 0
         judgments = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
                      and b["targets"] == ["n002", *questions.SOURCE_TARGETS]]
         assert len(judgments) == 3
@@ -857,7 +860,7 @@ def copy_final(seed, slot, mode):
 def simple_journey(slot, mode, count=1, *, seed=None):
     run, provider = copy_final(seed, slot, mode) if seed else prepare(slot, mode, count)
     try:
-        if mode in ("judge-provider", "big-source", "big-product", "check-deadline", "native-denied"):
+        if mode in ("judge-provider", "check-deadline", "native-denied"):
             cursor = run.run()
             result = run.store.records("outcome")[-1][2]
             units = run.store.units()
@@ -878,8 +881,6 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             elif mode == "check-deadline":
                 assert any(b["unit"] == "u001" and b["timedOut"] and b["executionStarted"]
                            and b["cleanupVerified"] for _, _, b in run.store.records("observation"))
-            else:
-                assert units["u001"].failure == "unit too large to judge; split it"
             before = run.store.records()
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
@@ -914,6 +915,17 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
         cursor, rows, units = finish(run)
+        if mode in ("big-source", "big-product"):
+            # Oversized real source must return its measured failure to a worker that can shrink it;
+            # the old terminal-only faults never proved that the next WORK brief remains deliverable.
+            failure, = [b["failure"] for _, k, b in rows if k == "unit_failure"]
+            assert failure.startswith("JUDGE brief is ")
+            assert int(failure.split()[3]) > 65536
+            launches = [json.loads(line) for line in
+                        (slot / "launch-unit-001.jsonl").read_text().splitlines()]
+            assert launches[1]["facts"]["Exact failure"] == failure
+            assert launches[1]["facts"]["Read current patch"][:4] == ["git", "diff", "--cached", "--binary"]
+            assert units["u001"].recoveries == 1 and len(launches) == 2
         if mode in ("mixed-criterion", "product-source-resolved", "product-source-unresolved",
                     "product-source-oversize", "product-facts-unavailable", "demo-facts-unavailable",
                     "unit-uncertain"):
@@ -949,7 +961,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             failure = failures[0][2]
             assert failure["cleanupVerified"] and "timed out" in failure["reason"]
         if mode in ("scope", "fresh", "false-red", "skipped", "final-rework"):
-            assert units["u001"].recoveries == 1
+            assert units["u001"].recoveries == (0 if mode == "final-rework" else 1)
             assert (slot / "turn-unit-001").read_text() == "2"
             launches = [json.loads(line) for line in
                         (slot / "launch-unit-001.jsonl").read_text().splitlines()]
@@ -998,7 +1010,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
         if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved"):
             fixup, = run.store.records("unit_fixup")
             assert fixup[2]["owner"] == "u001"
-            assert units["u001"].recoveries == 1 and units["u002"].recoveries == 0
+            assert units["u001"].recoveries == 0 and units["u002"].recoveries == 0
             assert (slot / "turn-unit-001").read_text() == "2"
             assert (slot / "turn-unit-002").read_text() == "1"
             assert (run.project / "unit-001/interaction.txt").read_text() == "ready"
@@ -1006,7 +1018,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 retries = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
                 assert len(retries) == 1
         if mode in ("guide-gap", "guide-command", "guide-path", "guide-format"):
-            assert units["guide"].recoveries == 1 and units["u001"].recoveries == 0
+            assert units["guide"].recoveries == 0 and units["u001"].recoveries == 0
             assert (slot / "turn-docs").read_text() == "2"
             assert len([b for _, k, b in rows if k == "question" and b["kind"] == "FLOW"]) == count
             assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"
@@ -1900,7 +1912,7 @@ def recorded_artifact_journey(root):
 
 
 def clean_core_golden(root):
-    from test_fixups import blocked_owner_journeys
+    from test_fixups import blocked_owner_journeys, owner_repair_journeys
     from test_architect import agreed_literals_journey, architect_journeys
     from test_review import recorded_review_journey, review_journeys, uncertain_review_journey
 
@@ -1909,6 +1921,7 @@ def clean_core_golden(root):
         os.environ[key] = str(root)
     began = time.monotonic()
     __import__('test_proof').hermetic_journey(root / 'hermetic')
+    __import__("test_architect").check_owner_journeys(root / "check-owner")
     agreed_literals_journey(root / "agreed-literals")
     blocked_owner_journeys(root / "blocked-owner")
     guide_links_journey(root / "guide-links")
@@ -1944,6 +1957,7 @@ def clean_core_golden(root):
                  "kill-proof", "kill-intent", "kill-apply"):
         modes.append((mode, 2))
     with ThreadPoolExecutor(max_workers=8) as pool:
+        owner_task = pool.submit(owner_repair_journeys, root / "owner-repair")
         baseline_task = pool.submit(simple_journey, root / "single1", "single1")
         admission_task = pool.submit(admission_journey, root / "admission")
         stale_task = pool.submit(stale_scope_journey, root / "stale-scope")
@@ -1959,6 +1973,7 @@ def clean_core_golden(root):
         baseline = baseline_task.result()
         admission_task.result()
         stale_task.result()
+        owner_task.result()
         records_task.result()
         architect_task.result()
         review_task.result()

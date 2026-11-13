@@ -37,10 +37,10 @@ UNIT_EVIDENCE = (
     "observable state needed for judgment. Wave screenshots are available only after integration.")
 
 AGREED_LITERALS = (
-    "A check may assert an exact literal only if that literal is in agreed text visible to the area "
-    "(accepted vision commitment, contract text, or its own requirement text); otherwise assert by "
-    "role, structure or behaviour; an unagreed literal needed by two areas is a contract_gap, "
-    "never an invention.")
+    "When asserting an exact value about another area's surface or a shared contract, a check uses "
+    "agreed text visible to the area (accepted vision commitment, contract text, or requirement text); "
+    "otherwise assert by role, structure or behaviour; an unagreed value needed by two areas is a "
+    "contract_gap. A unit's own local implementation values need no agreement.")
 
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
@@ -56,19 +56,19 @@ PROMPTS = {
               "Divide its complete scope among units and bind provided and consumed contracts by handle. "
               "A cross-area check names its local requirements and the consumed contract handles; "
               "code links those contracts' provider requirements. "
+              "Declare each check unit or wave: unit checks run in their owner's checkout; use one wave "
+              "check per contract, owned by the provider area, for integrated behaviour. "
               "Dependencies are local 1-based unit positions or exact prerequisite file paths; "
               "obligation owners are local 1-based unit positions. "
               "Trace quality criteria by their supplied 1-based positions. Commands are argv. "
               "Checks run automatically; Seldon judges visual quality from saved screenshots. "
               "If the answer exceeds the small list bounds, return subdivide with narrower sub-areas "
               "covering this responsibility and their contracts. If an agreement or needed scope is missing, "
-              "return contract_gap and the need; do not invent an agreement: an exact value asserted "
-              "by a check is an agreement. " + AGREED_LITERALS,
+              "return contract_gap and the need; do not invent an agreement. " + AGREED_LITERALS,
     "REVIEW": "Does this area's plan deliver its part of the accepted scope and quality bar? "
               "Check its records, agreements and trace coverage. "
               "Judge only the supplied subject. Name concrete gaps only. "
-              "Name any check depending on an exact value absent from the accepted vision, "
-              "contracts or its own requirements as a concrete gap.",
+              + AGREED_LITERALS,
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
             "run its checks and refine before returning. Meet the accepted quality bar.",
@@ -100,14 +100,15 @@ class MissingFacts(ValueError):
 
 
 def bounded_unit(question):
-    if question["kind"] in ("WORK", "JUDGE") and len(encode(question).encode("utf-8")) > 65536:
-        raise UnitTooLarge("unit too large to judge; split it")
+    size = len(encode(question).encode("utf-8"))
+    if question["kind"] in ("WORK", "JUDGE") and size > 65536:
+        raise UnitTooLarge(f"{question['kind']} brief is {size} bytes (limit 65536); reduce the scoped text")
     if question["kind"] in ("ARCHITECT", "DETAIL") and len(encode(question).encode("utf-8")) > 65536:
         raise UnitTooLarge("Planning subject exceeds 65536 bytes; narrow its accepted area")
     return question
 
 
-def build(kind, facts, targets=(), execution=None, images=()):
+def build(kind, facts, targets=(), execution=None, images=(), owners=()):
     if kind == "JUDGE":
         targets = [*targets, *SOURCE_TARGETS]
     if kind == "ALIGN":
@@ -160,7 +161,7 @@ def build(kind, facts, targets=(), execution=None, images=()):
     example["why"] = ("The responsibilities, agreements and waves cover the accepted promises"
                       if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
                       "The observed interaction and check sources support this answer")
-    schema = answer_schema(kind, targets)
+    schema = answer_schema(kind, targets, owners)
     validate({"answer": example}, schema)
     return bounded_unit({"kind": kind, "prompt": PROMPTS[kind] + (" " + CRAFT if kind == "WORK" else ""),
             "facts": facts, "targets": list(targets), "schema": schema,
@@ -182,7 +183,7 @@ def example_plan():
             "obligation": "Greet the supplied name", "design": "One argument", "contract": "name -> greeting",
             "features": ["new:f"]}},
         {"kind": "check", "targetHandle": "new:c", "typedBody": {
-            "purpose": "Run the greeting command", "mode": "establishes",
+            "purpose": "Run the greeting command", "level": "unit", "mode": "establishes",
             "command": ["python", "-B", "greeting/check.py"], "requiredEnvironment": ["Python"],
             "expectedEvidence": "Actual stdout", "requirements": ["new:r"]}},
         {"kind": "area", "targetHandle": "new:a", "typedBody": {
@@ -285,7 +286,7 @@ def work_brief(store, ref):
         if owned:
             facts["Skeleton obligations owned here"] = owned
     wave_checks = {r: c for r, c in plan.assigned(document)[None].items()
-                   if any(plan.matches(arg, contract["scope"]) for arg in c["command"])}
+                   if plan.owner(document, r) == ref}
     if wave_checks:
         facts["Wave checks to write in this scope"] = wave_checks
     if ref == "guide":
@@ -300,8 +301,16 @@ def work_brief(store, ref):
     if unit.failure:
         facts["Exact failure"] = unit.failure
         gitwork.git(unit.worktree, "add", "--all", "--force", "--", ".", ":!.seldon")
-        facts["Current patch"] = gitwork.git(unit.worktree, "diff", "--cached", "--binary", unit.base)
-    return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread})
+        facts["Current patch"] = gitwork.git(unit.worktree, "diff", "--cached", "--stat", unit.base)
+        facts["Read current patch"] = ["git", "diff", "--cached", "--binary", unit.base]
+    units = plan.select(document, "unit")
+    owners = {ref, *plan.prerequisites(document, ref)}
+    owners.update(c["provider"] for c in architecture.contracts_for(document, ref).values())
+    owners.update(plan.owner(document, r) for r in [*checks, *wave_checks])
+    facts["Correction owners"] = {r: plan.owned_scope(u)
+                                  for r, u in units.items() if r in owners}
+    return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
+                 owners=tuple(facts["Correction owners"]))
 
 
 def observed(store, refs):
@@ -323,15 +332,17 @@ def judge_brief(store, ref, commit=None, observations=None):
     commit = commit or unit.P
     requirements = requirement_facts(document, contract["requirements"])
     sources = gitwork.blobs(root, commit, [*contract["scope"], *contract["checkPaths"]])
-    checks, product = {}, {}
+    checks, product, binaries = {}, {}, {}
     for path, content in sources.items():
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            binaries[path] = len(content)
+            continue
         if plan.matches(path, contract["checkPaths"]):
-            checks[path] = content.decode("utf-8", errors="replace")
+            checks[path] = text
         elif plan.matches(path, contract["scope"]):
-            try:
-                product[path] = content.decode("utf-8")
-            except UnicodeDecodeError:
-                pass
+            product[path] = text
     facts = {"Unit responsibility": contract["instructions"],
              "Declared dependency scopes": [plan.select(document, "unit")[r]["scope"]
                                             for r in plan.prerequisites(document, ref)],
@@ -340,6 +351,7 @@ def judge_brief(store, ref, commit=None, observations=None):
                                   "is proven at wave verify. This judgment covers only this unit's "
                                   "requirements against this unit's checks at P and its source obligations.",
              "Check sources": checks,
+             "Binary files at P (bytes)": binaries,
              # The unit's whole product source at P: a rebased rework can leave the T..P diff empty (T-86).
              "Product files at P": product,
              "Product changes": gitwork.git(root, "diff", "--no-ext-diff", "--no-textconv",
@@ -365,6 +377,8 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
         answer = None
         try:
             decoded = json.loads(raw)
+            if question["kind"] == "DETAIL" and isinstance(decoded.get("answer"), dict):
+                plan.recorded_levels(decoded["answer"])
             validate(decoded, question["schema"])
             answer = decoded["answer"]
             if answer.get("verdict") != "uncertain":

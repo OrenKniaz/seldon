@@ -55,14 +55,46 @@ def select(document, kind):
 
 
 def assigned(document):
-    owners = {r: u for r, u in select(document, "unit").items()}
-    result = {r: {} for r in owners}
+    normalize_checks(document)
+    result = {r: {} for r in select(document, "unit")}
     result[None] = {}
     for ref, check in select(document, "check").items():
-        local = [r for r, unit in owners.items()
-                 if set(check["requirements"]) <= set(unit["requirements"])]
-        result[local[0] if local else None][ref] = check
+        result[owner(document, ref) if check["level"] == "unit" else None][ref] = check
     return result
+
+
+def owner(document, check_ref):
+    """The check's file has one writer, even when argv also names another unit's product."""
+    check = select(document, "check")[check_ref]
+    units = select(document, "unit")
+    candidates = [r for r, u in units.items()
+                  if any(matches(arg, owned_scope(u)) for arg in check["command"])]
+    if len(candidates) != 1:
+        candidates = [r for r in candidates
+                      if any(matches(arg, units[r]["checkPaths"]) for arg in check["command"])]
+    if len(candidates) != 1:
+        raise ValueError(f"{check_ref}: name a check file with exactly one unit owner")
+    return candidates[0]
+
+
+def normalize_checks(document):
+    """Declared wave checks stay wave; cross-unit inputs can only promote a local check."""
+    units = select(document, "unit")
+    for ref, check in select(document, "check").items():
+        writer = owner(document, ref)
+        requirements = set(check["requirements"])
+        local = set(units[writer]["requirements"])
+        if requirements - local:
+            check["level"] = "wave"
+        else:
+            check.setdefault("level", "unit")
+
+
+def recorded_levels(answer):
+    """Old DETAIL recordings lack a level; structural promotion follows once links are resolved."""
+    for edit in answer.get("edits", []):
+        if edit.get("kind") == "check":
+            edit["typedBody"].setdefault("level", "unit")
 
 
 def traced_checks(document, subject):
@@ -87,6 +119,7 @@ def coverage(document):
 
 
 def create(vision, answer):
+    recorded_levels(answer)
     validate_schema({k: v for k, v in answer.items() if k != "why"}, PLAN)
     vision = {field: vision[field] for field in VISION["properties"]}
     nodes = {"vision": {"kind": "vision", "body": vision}}
@@ -304,6 +337,7 @@ def merge(vision, architecture, leaves):
 
 
 def validate_records(document, external=()):
+    normalize_checks(document)
     nodes = document["nodes"]
     validate_schema(nodes["vision"]["body"], VISION)
     relation_types = {"feature": ("vision", "vision"), "requirement": ("features", "feature"),

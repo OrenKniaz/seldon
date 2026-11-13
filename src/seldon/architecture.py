@@ -135,6 +135,7 @@ def outline(answer, vision=None):
 
 def local_plan(area, contracts, answer, vision, single_area):
     """Check ownership before merging; canonical trace validation runs on the merged document."""
+    plan.recorded_levels(answer)
     validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_PLAN)
     handles = {e["targetHandle"]: e["kind"] for e in answer["edits"]}
     if len(handles) != len(answer["edits"]):

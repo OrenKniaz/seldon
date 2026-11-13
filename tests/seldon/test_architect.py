@@ -1,9 +1,9 @@
 """C1/C9/C12/C14; R1-R4: approved area plans execute through the canonical unit and proof loop."""
 
+import base64
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
@@ -752,22 +752,114 @@ def recorded_detail_journeys(root):
 
 
 def architect_journeys(tmp_path):
-    """One and fifty units get B; the largest planning brief has identical bytes.
-
-    A single-call plan passes L0 but grows with unit count and hits the answer ceiling at fifty.
-    This exercises the real question recorder, merge and B, rather than sizing fixtures.
-    """
+    """Contract delivery and local planning recovery share the canonical plan and recorder."""
     began = time.monotonic()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        sizing = pool.submit(size_journey, tmp_path / "size")
-        correction_journeys(tmp_path / "corrections")
-        recorded_detail_journeys(tmp_path / "recorded")
-        area_product_journey(tmp_path)
-        for mode in ("gap", "unresolved", "split"):
-            area_recovery_journey(tmp_path, mode)
-        sizes = sizing.result()
-    print(f"ARCHITECT size journey: {time.monotonic()-began:.2f}s", flush=True)
-    return sizes
+    correction_journeys(tmp_path / "corrections")
+    recorded_detail_journeys(tmp_path / "recorded")
+    area_product_journey(tmp_path)
+    for mode in ("gap", "unresolved", "split"):
+        area_recovery_journey(tmp_path, mode)
+    print(f"ARCHITECT contract journeys: {time.monotonic()-began:.2f}s", flush=True)
+
+
+def check_owner_journeys(root):
+    """DETAIL's declared placement reaches real workers and integrated proof, with one file owner.
+
+    Existing multi-requirement fixtures hide an own-only wave check wrongly run in isolation.
+    The same delivery exercises old missing levels, promotion across units, argv naming a sibling,
+    and binary check evidence that previously overflowed the unit judge. WORK's real recorder must
+    correct a prose owner once; done-only workers never exercise the owner enum.
+    """
+    from seldon import gitwork, inference, questions
+
+    class CheckProvider(AreaProvider):
+        def __call__(self, question):
+            answer = json.loads(super().__call__(question))
+            if question["kind"] == "DETAIL":
+                body = answer["answer"]
+                body["units"][0]["checkPaths"] = ["unit-001/*.py", "unit-001/evidence/**"]
+                for handle, level, requirements in (
+                        ("declared-wave", "wave", ["new:r001"]),
+                        ("spanning", "unit", ["new:r001", "new:r002"]),
+                        ("old-spanning", None, ["new:r001", "new:r002"])):
+                    check = deepcopy(body["edits"][2])
+                    check.update(targetHandle=handle)
+                    check["typedBody"].update(purpose=handle, mode="preserves",
+                        command=[body["edits"][2]["typedBody"]["command"][0], "-B",
+                                 "unit-001/wave.py", "unit-002/value.txt"],
+                        requirements=requirements)
+                    if level:
+                        check["typedBody"]["level"] = level
+                    body["edits"].append(check)
+            return json.dumps(answer)
+
+    run, base = start(root, 2, "sizing")
+    provider = CheckProvider(base.slot, 2, "sizing")
+    run.provider = provider
+    native = root / "native.py"
+    wave_source = ("from pathlib import Path\n"
+                   "assert Path('unit-001/value.txt').read_text() == 'value-001'\n"
+                   "assert Path('unit-002/value.txt').read_text() == 'value-002'\n")
+    native.write_text(native.read_text("utf-8").replace(
+        'print(json.dumps({"type":"item.completed"',
+        "if name == 'unit-001':\n"
+        + "    Path('unit-001/wave.py').write_text(" + repr(wave_source) + ")\n"
+        + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
+    try:
+        while run.store.cursor().state != "WAVE-VERIFY":
+            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            run.step()
+        document = run.store.plan(run.store.cursor().revision)
+        waves = plan.assigned(document)[None]
+        assert {c["purpose"] for c in waves.values()} == {
+            "declared-wave", "spanning", "old-spanning"}
+        assert all(plan.owner(document, ref) == "u001" for ref in waves)
+        before = run.store.records("observation")
+        assert not any(b["check"] in waves for _, _, b in before)
+        run.step()
+        assert run.store.cursor().state == "FLOW-JUDGE", run.store.records("outcome")
+        observations = [b for _, _, b in run.store.records("observation") if b["check"] in waves]
+        assert len(observations) == 3 and all(b["exitCode"] == 0 for b in observations)
+        assert all(b["commit"] == run.store.cursor().candidate for b in observations)
+
+        # Preserve source text and bound the actual JUDGE after adding the retained failure's 13 PNGs.
+        project = run.project
+        unit = run.store.unit("u001")
+        text_question = questions.judge_brief(run.store, "u001", commit=unit.P)
+        evidence = project / "unit-001/evidence"
+        evidence.mkdir()
+        recording = json.loads(Path(__file__).with_name("recorded_judgment.json").read_text("utf-8"))
+        png = base64.b64decode(next(iter(recording["images"].values())))
+        for i in range(13):
+            (evidence / f"{i:02}.png").write_bytes(png)
+        gitwork.git(project, "add", "--", "unit-001/evidence")
+        tree = gitwork.git(project, "write-tree")
+        candidate = gitwork.commit(project, tree, unit.P)
+        binary_question = questions.judge_brief(run.store, "u001", commit=candidate)
+        assert binary_question["facts"]["Check sources"] == text_question["facts"]["Check sources"]
+        assert binary_question["facts"]["Binary files at P (bytes)"] == {
+            f"unit-001/evidence/{i:02}.png": len(png) for i in range(13)}
+        delta = len(encode(binary_question).encode()) - len(encode(text_question).encode())
+        assert delta < 3000, delta
+
+        question = questions.work_brief(run.store, "guide")
+        replies = []
+
+        def blocked(current):
+            replies.append(current)
+            return json.dumps({"answer": {"outcome": "blocked", "summary": "Needs its provider",
+                "discoveries": [{"owner": "the first value owner" if len(replies) == 1 else "u001",
+                                 "correction": "Correct the shared reading"}],
+                "why": "The defect belongs to the prerequisite's scope"}})
+
+        _, answer = inference.call(run.store, blocked, question)
+        assert answer["discoveries"] == [{"owner": "u001", "correction": "Correct the shared reading"}]
+        assert len(replies) == 2 and "Exact corrections" in replies[-1]["facts"]
+        print(f"Check ownership: declared/spanning/legacy wave checks integrated only; "
+              f"13 PNGs add {delta} JUDGE bytes; prose WORK owner corrected once", flush=True)
+    finally:
+        run.close()
+    size_journey(root / "size")
 
 
 def retained_area_answer(provider, q):
@@ -778,6 +870,25 @@ def retained_area_answer(provider, q):
         provider.plan_revised = True
     full = json.loads(provider({**q, "kind": "PLAN"}))["answer"]
     units = full["units"]
+    # These old synthetic commands had no source file, so could not have a file owner. Give each
+    # fixture an ordinary worker-written check; production ownership never guesses from coverage.
+    for i, edit in enumerate(full["edits"]):
+        if edit["kind"] != "check" or "-c" not in edit["typedBody"]["command"]:
+            continue
+        check = edit["typedBody"]
+        writer = next(u for u in units if check["requirements"][-1] in u["requirements"])
+        directory = writer["checkPaths"][0].split("/")[0]
+        path = f"{directory}/inline-{i}.py"
+        source = check["command"][-1]
+        check["command"] = [*check["command"][:-2], path]
+        writer["checkPaths"].append(path)
+        native = provider.slot / "native.py"
+        marker = f"# owned fixture {path}"
+        text = native.read_text("utf-8")
+        if marker not in text:
+            native.write_text(text.replace('print(json.dumps({"type":"item.completed"',
+                f"{marker}\nif name == {directory!r}:\n    Path({path!r}).write_text({source!r})\n"
+                + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
     areas = [e for e in full["edits"] if e["kind"] == "area"]
     contracts = [deepcopy(e) for e in full["edits"] if e["kind"] == "contract"]
     groups = ([list(range(i, min(i + 10, len(units) + 1)))
@@ -829,6 +940,9 @@ def retained_area_answer(provider, q):
         for check in (e for e in full["edits"] if e["kind"] == "check"):
             reqs = set(check["typedBody"]["requirements"])
             if not reqs & owned or reqs <= owned:
+                continue
+            if not any(plan.matches(arg, plan.owned_scope(units[n-1]))
+                       for n in numbers for arg in check["typedBody"]["command"]):
                 continue
             external = reqs - owned
             links = [e for e in contracts if area in
