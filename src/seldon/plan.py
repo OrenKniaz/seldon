@@ -184,8 +184,12 @@ def merge(vision, architecture, leaves):
             units.append({**unit, "scope": owned_scope(unit), "area": area["handle"],
                           "requirements": [handles[r] for r in unit["requirements"]],
                           "dependencies": [d + offset for d in unit["dependencies"] if isinstance(d, int)]})
+            local = {c["handle"]: {**c, "provider": area["handle"]}
+                     for c in architecture["contracts"]
+                     if c["provider"] in {area["handle"], *area.get("ancestors", [])}}
+            units[-1]["consumes"] = owner.own_consumes(area, local, unit["consumes"])
             for side in ("provides", "consumes"):
-                for ref in unit[side]:
+                for ref in units[-1][side]:
                     endpoints.setdefault(ref, {"provides": [], "consumes": []})[side].append(
                         (position, {area["handle"], *area.get("ancestors", [])}))
         for item in answer["quality"]:

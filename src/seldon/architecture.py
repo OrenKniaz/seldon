@@ -28,6 +28,12 @@ def endpoint(unit, contract):
     return "consumer" if unit in contract["consumers"] else None
 
 
+def own_consumes(area, contracts, refs):
+    """Redundant structure is normalised, never refused (T-111, T-113): a unit listing its own area's
+    contract under consumes already has that text as an area fact, so code drops the endpoint."""
+    return [r for r in refs if not (r in contracts and endpoint(area["handle"], contracts[r]) == "provider")]
+
+
 def contracts_for(document, unit):
     units = plan.select(document, "unit")
     return {r: c for r, c in plan.select(document, "contract").items()
@@ -168,11 +174,7 @@ def local_plan(area, contracts, answer, vision, single_area):
         for field, side in (("provides", "provider"), ("consumes", "consumer")):
             if len(set(unit[field])) != len(unit[field]):
                 raise ValueError(f"Name each existing contract once in {field}")
-            for ref in unit[field]:
-                if (field == "consumes" and ref in contracts
-                        and endpoint(area["handle"], contracts[ref]) == "provider"):
-                    raise ValueError(f"{ref}: use this area's contract text without a consumer endpoint; "
-                                     "remove it from consumes and retain actual file dependencies")
+            for ref in (own_consumes(area, contracts, unit[field]) if field == "consumes" else unit[field]):
                 if ref not in contracts or endpoint(area["handle"], contracts[ref]) != side:
                     raise ValueError(f"{ref}: bind one provider and its agreed consumer endpoints; "
                                      "report a contract gap")
