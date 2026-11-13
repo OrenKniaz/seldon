@@ -194,7 +194,7 @@ def merge(vision, architecture, leaves):
         raise ValueError("Detail every area exactly once")
     for area in architecture["areas"]:
         edits.append({"kind": "area", "targetHandle": area["handle"], "typedBody": {
-            k: area[k] for k in ("responsibility", "scope")}})
+            "responsibility": area["responsibility"], "scope": list(area["scope"])}})
     corrections = {}
 
     def correct(areas, error, facts):

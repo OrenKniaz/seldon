@@ -38,6 +38,9 @@ def step(store, provider, capacity):
     vision = store.read(cursor.vision)["answer"]
     resumed = resume_id(store)
     done, refs = {}, []
+    repairs = [(r, b["corrections"]) for r, _, b in store.records("review_repair")
+               if b["revision"] == cursor.revision]
+    review_correction = repairs[-1] if repairs else None
 
     def ask(area, correction=None):
         try:
@@ -96,7 +99,8 @@ def step(store, provider, capacity):
         with ThreadPoolExecutor(max_workers=capacity) as pool:
             while pending:
                 batch, pending = pending, []
-                results = list(pool.map(lambda a, c=correction: ask(a, c), batch))
+                results = list(pool.map(lambda a, c=correction: ask(
+                    a, c if c and a["handle"] in c[1] else None), batch))
                 correction = None
                 for area, ref in zip(batch, results, strict=True):
                     refs.append(ref)
@@ -118,7 +122,7 @@ def step(store, provider, capacity):
             return None, failures
         return leaves, failures
 
-    leaves, failures = collect(outline["areas"])
+    leaves, failures = collect(outline["areas"], review_correction)
     if leaves is None:
         return
     while True:
@@ -126,6 +130,7 @@ def step(store, provider, capacity):
             if failures:
                 raise architecture.DetailCorrection(failures)
             compiled = plan.add_guide(plan.merge(vision, outline, leaves))
+            compiled["areaDetails"] = {a["handle"]: done[a["handle"]]["answer"] for a in outline["areas"]}
             break
         except architecture.ContractGap as error:
             gap(store, {a: [{"error": str(error), "otherSide": {}}] for a in error.areas})
@@ -145,7 +150,9 @@ def step(store, provider, capacity):
                                              if a["handle"] in correction[1]], correction)
             if replacement is None:
                 return
-            leaves = [(a, b) for a, b in leaves if a["handle"] not in correction[1]] + replacement
+            replacements = {a["handle"]: (a, b) for a, b in replacement}
+            leaves = [replacements.pop(a["handle"], (a, b)) for a, b in leaves]
+            leaves.extend(replacements.values())
     with store.transaction():
         revision = store.revision(compiled, cursor.revision)
         advance(store, "detailed", refs, revision=revision)

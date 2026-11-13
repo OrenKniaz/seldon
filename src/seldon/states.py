@@ -10,7 +10,7 @@ RUN = {
     "ARCHITECT": {"outlined": "DETAIL", "fail": "INCOMPLETE"},
     "DETAIL": {"detailed": "REVIEW", "contract-gap": "ARCHITECT", "fail": "INCOMPLETE"},
     "REVIEW": {"adequate": "B", "gap": "REPAIR", "fail": "INCOMPLETE"},
-    "REPAIR": {"repaired": "REVIEW", "fail": "INCOMPLETE"},
+    "REPAIR": {"area-gap": "DETAIL", "architecture-gap": "ARCHITECT", "fail": "INCOMPLETE"},
     "B": {"approve": "EXECUTE", "revise": "REPAIR", "fail": "INCOMPLETE"},
     "EXECUTE": {"finished": "WAVE-VERIFY", "fail": "INCOMPLETE"},
     "WAVE-VERIFY": {"passed": "FLOW-JUDGE", "rework": "EXECUTE", "fail": "INCOMPLETE"},

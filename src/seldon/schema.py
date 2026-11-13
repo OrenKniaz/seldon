@@ -110,7 +110,7 @@ def answer_schema(kind, targets=()):
         assessment = {"anyOf": [requirement, obj(**{**assessment["properties"],
                                                    "target": choice(*SOURCE_TARGETS)})]}
     payload = {
-        "ALIGN": VISION, "PLAN": PLAN, "REPAIR": PLAN, "ARCHITECT": ARCHITECT,
+        "ALIGN": VISION, "ARCHITECT": ARCHITECT,
         "DETAIL": DETAIL_PLAN,
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),

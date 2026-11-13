@@ -1,4 +1,4 @@
-"""C8/C11/C21/I6; R11/R12: subject-bound approvals, plan repair."""
+"""C8/C21/I6; R11/R12: subject-bound approvals."""
 
 from dataclasses import replace
 
@@ -56,30 +56,3 @@ def decide(store, provider, user):
             advance(store, "scripted" if scripted else "approve", outcome, decision=None)
         else:
             raise ValueError("No approval gate in " + cursor.state)
-
-
-def repair(store, provider):
-    from . import plan
-    cursor = store.cursor()
-    if cursor.B:
-        raise ValueError("Post-B plan steering is deferred to M3")
-    if cursor.repairs >= 3:
-        raise ValueError("Three pre-B plan repairs exhausted: " + cursor.failure)
-    vision = store.read(cursor.vision)["answer"]
-
-    def check(answer):
-        document = plan.create(vision, answer)
-        if plan.add_guide(document) == store.plan(cursor.revision):
-            raise ValueError("Repair changes nothing; resolve the named review gap")
-
-    facts = {
-        "Original request": store.read(cursor.kickoff)["words"], "Approved vision": vision,
-        "Plan": store.plan(cursor.revision), "Review gap": cursor.failure}
-    if cursor.requestedChange:
-        facts["Requested change"] = store.read(cursor.requestedChange)["words"]
-    result, answer = inference.call(store, provider, questions.build("REPAIR", facts), check=check)
-    document = plan.add_guide(plan.create(vision, answer))
-    with store.transaction():
-        revision = store.revision(document, cursor.revision)
-        advance(store, "repaired", result, revision=revision, repairs=cursor.repairs + 1,
-                review=None, decision=None, requestedChange=None)

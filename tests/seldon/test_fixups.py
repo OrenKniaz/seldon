@@ -106,14 +106,15 @@ def test_flow_gap_repairs_two_scopes_without_replanning(seed, tmp_path):
     run, _ = copy_final(seed, tmp_path / "flow", "final-seed")
     try:
         before = run.store.units()
-        planning = [(r, k) for r, k, b in run.store.records("question") if b["kind"] in ("PLAN", "REPAIR")]
+        planning = [(r, k) for r, k, b in run.store.records("question")
+                    if b["kind"] in ("ARCHITECT", "DETAIL", "REVIEW")]
         revision = run.store.cursor().revision
         fixups.apply(run.store, [gap(run, "compose", "flow", ["u001", "u002"])])
         assert run.store.unit("guide") == before["guide"]
         finish(run)
         assert run.store.cursor().revision == revision
         assert planning == [(r, k) for r, k, b in run.store.records("question")
-                            if b["kind"] in ("PLAN", "REPAIR")]
+                            if b["kind"] in ("ARCHITECT", "DETAIL", "REVIEW")]
         for ref in ("u001", "u002"):
             directory = "unit-" + ref[1:]
             assert (run.project / directory / "interaction.txt").read_text() == "ready"

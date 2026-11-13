@@ -15,6 +15,7 @@ from . import (
     judgment,
     obligations,
     plan,
+    plan_review,
     proof,
     questions,
     scheduler,
@@ -156,13 +157,9 @@ class Run:
         elif state == "DETAIL":
             detail.step(store, self.provider, self.capacity)
         elif state == "REVIEW":
-            result, answer = inference.call(store, self.provider, questions.build("REVIEW", {
-                "Original request": kickoff["words"], "Approved vision": store.read(cursor.vision)["answer"],
-                "Plan": store.plan(cursor.revision)}))
-            adequate = answer["verdict"] == "adequate" and not answer["gaps"]
-            advance(store, "adequate" if adequate else "gap", result, review=result, failure=str(answer))
+            plan_review.step(store, self.provider, self.capacity)
         elif state == "REPAIR":
-            decisions.repair(store, self.provider)
+            plan_review.repair(store)
         elif state == "EXECUTE":
             document = store.plan(cursor.revision)
             approval = store.read(cursor.B)

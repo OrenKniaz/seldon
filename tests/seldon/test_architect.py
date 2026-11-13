@@ -179,8 +179,13 @@ def area_recovery_journey(tmp_path, mode):
 
 
 def size_journey(root):
-    """One versus fifty reaches B on recorded questions; the retained scale journey executes fifty."""
+    """One versus fifty reaches B; growing siblings cannot enlarge the same area's REVIEW.
+
+    The original fixture also grows each area from one to ten units. Report that changing-subject
+    maximum separately; comparing an unchanged area catches the old whole-plan leak directly.
+    """
     sizes = []
+    review_maxima = []
     for count in (1, 50):
         run, _ = start(root / str(count), count, "sizing")
         try:
@@ -188,6 +193,8 @@ def size_journey(root):
                 assert run.store.cursor().state not in ("INCOMPLETE", "SCRIPTED_C")
                 run.step()
             sizes.append(question_sizes(run.store))
+            review_maxima.append(max(len(encode(q).encode()) for _, _, q in run.store.records("question")
+                                     if q["kind"] == "REVIEW"))
             document = run.store.plan(run.store.cursor().revision)
             assert len(plan.select(document, "unit")) == count + 1
             assert len(plan.select(document, "area")) == (1 if count == 1 else 5)
@@ -195,6 +202,32 @@ def size_journey(root):
             run.close()
     assert sizes[0] == sizes[1], sizes
     print(f"ARCHITECT/DETAIL bytes 1 vs 50: {sizes[0]} / {sizes[1]}", flush=True)
+    print(f"REVIEW growing-area maximum bytes 1 vs 50: {review_maxima}", flush=True)
+
+    class SameAreaProvider(AreaProvider):
+        def areas(self):
+            groups = [[1], *[list(range(i, min(i + 10, self.count + 1)))
+                             for i in range(2, self.count + 1, 10)]]
+            return [{"handle": f"area-{i:03}", "responsibility": "Deliver named values",
+                     "scope": [f"unit-{n:03}/**" for n in numbers],
+                     "commitments": ["scopeIn:1", "quality:1", "quality:2"]}
+                    for i, numbers in enumerate(groups, 1)]
+
+    review_sizes = []
+    for count in (1, 50):
+        run, base = start(root / "same-area" / str(count), count, "sizing")
+        run.provider = SameAreaProvider(base.slot, count, "sizing")
+        try:
+            while run.store.cursor().state != "EXECUTE":
+                run.step()
+            question, = [q for _, _, q in run.store.records("question")
+                         if q["kind"] == "REVIEW" and q["facts"]["Review subject"] == "area-001"]
+            assert len(plan.select(question["facts"]["Plan"], "unit")) == 1
+            review_sizes.append(len(encode(question).encode()))
+        finally:
+            run.close()
+    assert review_sizes[0] == review_sizes[1], review_sizes
+    print(f"REVIEW same-area bytes 1 vs 50: {review_sizes}", flush=True)
     return sizes
 
 
@@ -588,6 +621,10 @@ def architect_journeys(tmp_path):
 
 def retained_area_answer(provider, q):
     """Keep the retained fault/recording corpus on the actual area-planning path."""
+    if provider.mode == "user-revise" and "Merge correction" in q["facts"]:
+        assert q["facts"]["Merge correction"][0]["error"] == (
+            "Revise the plan: describe the exact stored value.")
+        provider.plan_revised = True
     full = json.loads(provider({**q, "kind": "PLAN"}))["answer"]
     units = full["units"]
     areas = [e for e in full["edits"] if e["kind"] == "area"]

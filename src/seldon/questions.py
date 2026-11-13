@@ -55,18 +55,10 @@ PROMPTS = {
               "If the answer exceeds the small list bounds, return subdivide with narrower sub-areas "
               "covering this responsibility and their contracts. If an agreement or needed scope is missing, "
               "return contract_gap and the need; do not invent an agreement.",
-    "PLAN": "What product work is needed in addition to the supplied delivery work? Plan its features, "
-            "areas, contracts, decisions, requirements, semantic checks and scoped units. "
-            "Trace each accepted quality criterion by its 1-based position to its checks in quality. "
-            "Dependencies, contract endpoints, obligation owners and the skeleton set "
-            "are 1-based unit positions. "
-            "Commands are argv. CODE assigns checks from requirement ownership. "
-            "Checks are automated commands that never wait on manual or visual review; "
-            "visual quality is judged by Seldon from real screenshots.",
-    "REPAIR": "What corrected plan resolves the named review gap while preserving the approved vision? "
-              "Return the complete corrected plan; it will be reviewed again before B.",
-    "REVIEW": "Does this plan deliver the accepted vision and quality bar? Review every criterion's "
-              "check coverage against Trace coverage. Name concrete gaps only.",
+    "REVIEW": "Does this area's plan deliver its part of the accepted scope and quality bar? "
+              "Check its records, agreements and trace coverage. For the cross-area subject, "
+              "does this plan lead to the whole built dream, or is something missing between areas? "
+              "Judge only the supplied subject. Name concrete gaps only.",
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
             "run its checks and refine before returning. Meet the accepted quality bar.",
@@ -110,7 +102,7 @@ def build(kind, facts, targets=(), execution=None, images=()):
         targets = [*targets, *SOURCE_TARGETS]
     if kind == "ALIGN":
         facts = {**facts, "Design guidance used by UI workers": CRAFT}
-    if kind in ("PLAN", "DETAIL", "REPAIR", "REVIEW"):
+    if kind in ("DETAIL", "REVIEW"):
         facts = {**facts, "How the plan executes": (
             "Each unit has one worker and a separate checkout. Disjoint units can run concurrently "
             "once their dependencies are integrated. Files assigned to the same unit share one worker. "
@@ -137,9 +129,7 @@ def build(kind, facts, targets=(), execution=None, images=()):
             "PRODUCT": "One criterion's behaviour: traced checks, final observations, screenshots and "
                        "a CODE summary of reached unit source verdicts and unchanged scope trees."}}
 
-    if kind == "REVIEW":
-        facts = {**facts, "Trace coverage": plan.coverage(facts["Plan"])}
-    if kind in ("PLAN", "DETAIL", "REPAIR"):
+    if kind == "DETAIL":
         facts = {**facts, "Delivery work supplied by Seldon after the product units": {
             "path": plan.GUIDE_PATH, "work": plan.GUIDE_WORK, "owner": "Seldon's final guide unit"}}
     example = {
@@ -147,7 +137,6 @@ def build(kind, facts, targets=(), execution=None, images=()):
                   "scopeIn": ["Greet a supplied name"], "scopeOut": [], "improvements": [],
                   "quality": [{"criterion": "Clear output", "verification": "Run with a name"}],
                   "unknowns": []},
-        "PLAN": example_plan(), "REPAIR": example_plan(),
         "ARCHITECT": example_architecture(), "DETAIL": example_detail(),
         "REVIEW": {"verdict": "adequate", "gaps": []},
         "DECIDE": {"choice": "approve"},

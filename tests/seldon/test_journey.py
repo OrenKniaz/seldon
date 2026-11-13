@@ -362,7 +362,7 @@ class Scripted:
                 answer["quality"] = [{"criterion": "Read the value in the browser",
                                       "verification": "Open the page and display the saved value"},
                                      VISION["quality"][1]]
-        elif kind in ("PLAN", "REPAIR"):
+        elif kind == "PLAN":
             answer = planned(self.count, self.mode)
             if self.mode == "mixed-criterion":
                 answer["quality"][1]["checks"] = ["new:c001", "new:c002"]
@@ -373,16 +373,15 @@ class Scripted:
                         unit.update(scope=["shared/**"], checkPaths=["shared/check.py"])
                 elif len(corrections) == 1:
                     answer["edits"][2]["typedBody"]["requirements"].append("new:r002")
-            if self.mode == "review-repair" and kind == "REPAIR":
+            if self.mode == "review-repair" and "Merge correction" in q["facts"]:
                 answer["quality"][1]["checks"] = ["new:c001", "new:c002"]
-            if self.mode == "user-revise" and kind == "REPAIR":
-                assert q["facts"]["Requested change"] == "Revise the plan: describe the exact stored value."
+            if self.mode == "user-revise" and getattr(self, "plan_revised", False):
                 answer["edits"][1]["typedBody"]["obligation"] += "; exact stored value requested by user"
             if fault := getattr(self, "plan_fault", None):
                 fault(answer)
         elif kind == "REVIEW":
             answer = {"verdict": "adequate", "gaps": []}
-            if self.mode == "review-repair":
+            if self.mode == "review-repair" and q["facts"]["Review subject"] != "cross-area":
                 coverage = q["facts"]["Trace coverage"]["quality:002"]
                 if set(coverage["units"]) != {"u001", "u002"}:
                     answer = {"verdict": "gap", "gaps": [{"target": "quality:002",
@@ -581,7 +580,7 @@ def records_and_skeleton_journey(slot):
 
     Open obligations block C until final requirement verdicts; an unrelated guide repair must preserve
     closure. A text-only contract repair revokes consumers even with unchanged scope trees, which the
-    source-change journey misses. Prepared REPAIR uses the canonical writer, review/B and reopen,
+    source-change journey misses. A fresh canonical area plan reaches the revision writer, review/B and reopen,
     then the ordinary EXECUTE/WAVE-VERIFY/CHECK-IN path. This catches stale proof reuse after a
     changed agreement, which a source-change fixup cannot expose. No extra repair entry is added.
     """
@@ -609,14 +608,18 @@ def records_and_skeleton_journey(slot):
         retained = run.store.cursor().requirementVerdicts[0]
 
         def correct(answer):
-            next(e["typedBody"] for e in answer["edits"] if e["kind"] == "contract")["text"] += \
-                " Its slot is named content."
+            answer["contracts"][0]["text"] += " Its slot is named content."
 
-        provider.plan_fault = correct
-        # Seed only the existing REPAIR entry; review and exact-plan B remain mandatory.
-        run.store.cursor(replace(run.store.cursor(), state="REPAIR", B=None,
-                                 failure="Clarify the shared page agreement"))
-        run.step()
+        revised, revision_provider = prepare(slot / "contract-correction", "records", 3)
+        revision_provider.architecture_fault = correct
+        try:
+            while revised.store.cursor().state != "B":
+                revised.step()
+            document = revised.store.plan(revised.store.cursor().revision)
+        finally:
+            revised.close()
+        revision = run.store.revision(document, run.store.cursor().revision)
+        run.store.cursor(replace(run.store.cursor(), state="REVIEW", B=None, review=None, revision=revision))
         assert run.store.unit("u001").judgment == before["u001"].judgment
         assert all(run.store.unit(u).state == "DONE" and run.store.unit(u).judgment is None
                    for u in ("u002", "u003"))
@@ -662,7 +665,7 @@ def records_and_skeleton_journey(slot):
             briefs = [b["facts"] for _, k, b in rows if k == "question" and b["kind"] == kind
                       and "Guide path" not in b["facts"]]
             assert all("Shared page exposes a named content slot." in encode(b) for b in briefs)
-        assert len(plan.select(run.store.plan(cursor.revision), "area")) == 1
+        assert len(plan.select(run.store.plan(cursor.revision), "area")) == 3
         print(f"M2 records, obligations, contract repair/reopen: {time.monotonic() - began:.2f}s", flush=True)
     finally:
         run.close()
@@ -983,7 +986,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                        for _, k, b in rows)
         if mode == "review-repair":
             assert cursor.repairs == 1 and len(run.store.records("approval")) == 4
-            reviews = [b["answer"] for _, _, b in run.store.records("answer") if b["kind"] == "REVIEW"]
+            reviews = [b["answer"] for _, _, b in run.store.records("plan_review")]
             assert reviews[0]["gaps"][0]["target"] == "quality:002"
             assert reviews[1]["verdict"] == "adequate"
         if mode in ("demo-uncertain", "product-uncertain"):
@@ -1893,6 +1896,7 @@ def recorded_artifact_journey(root):
 
 def clean_core_golden(root):
     from test_architect import architect_journeys
+    from test_review import review_journeys
 
     root.mkdir(parents=True)
     for key in ("TEMP", "TMP", "TMPDIR"):
@@ -1937,12 +1941,14 @@ def clean_core_golden(root):
         seed_task = pool.submit(final_seed, root / "final-seed")
         records_task = pool.submit(records_and_skeleton_journey, root / "records")
         architect_task = pool.submit(architect_journeys, root / "architect")
+        review_task = pool.submit(review_journeys, root / "review")
         list(pool.map(run_case, modes))
         baseline = baseline_task.result()
         admission_task.result()
         stale_task.result()
         records_task.result()
         architect_task.result()
+        review_task.result()
         seed = seed_task.result()
     # A copied fault must never mutate its shared seed through an old store/Git/provider path.
     store = Store(seed / "product")
