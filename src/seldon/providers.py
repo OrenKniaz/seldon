@@ -34,6 +34,10 @@ class ResumeUnavailable(ProviderFailure):
     pass
 
 
+class Deadline(ProviderFailure):
+    """Seldon's WORK deadline, the only provider failure charged to the unit."""
+
+
 def session_id(output):
     for line in output.splitlines():
         try:
@@ -114,7 +118,8 @@ class Codex:
 
     def prepare(self, question):
         if not self.setup["codexCommand"]:
-            raise RuntimeError("Codex executable unavailable; install/authenticate Codex before resuming")
+            raise ProviderFailure("Codex executable unavailable; install/authenticate Codex before resuming",
+                                  False, True)
         folder = self.root / ("call-" + uuid.uuid4().hex)
         folder.mkdir()
         cwd = folder
@@ -190,7 +195,8 @@ class Codex:
         diagnostics = output + "\n" + result["stderr"].decode("utf-8", errors="replace")
         try:
             if result["timedOut"] or not result["cleanupVerified"]:
-                reason = "Provider timed out" if result["timedOut"] else "Provider cleanup unverified"
+                reason = ("Provider cleanup unverified" if not result["cleanupVerified"]
+                          else "Provider timed out")
                 raise RuntimeError(reason)
             raw = terminal_answer(output)
             if result["exitCode"] != 0:
@@ -210,11 +216,14 @@ class Codex:
                 "invalid_api_key", "forbidden", "log in", "login", "http 401", "http 403",
                 "permission_denied", "permission denied", "access denied", "access is denied",
                 "approval denied",
-                "operation not permitted"))
+                "operation not permitted", "logged out", "usage limit", "usage_limit_reached",
+                "rate limit", "insufficient_quota", "hit your"))
             unavailable = question.get("execution", {}).get("session") and any(
                 term in diagnostics.lower() for term in ("session not found", "no session found",
                                                         "thread not found", "resume is not supported"))
             failure_type = ResumeUnavailable if unavailable and not denied else ProviderFailure
+            if result["timedOut"] and result["cleanupVerified"] and question["kind"] == "WORK":
+                failure_type = Deadline
             raise failure_type(f"Codex invocation failed: {error}; {diagnostics[-4096:]}",
                 not denied, result["cleanupVerified"], str(folder / "result.json")) from error
         (folder / "answer.txt").write_text(raw, encoding="utf-8")

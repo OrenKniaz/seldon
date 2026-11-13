@@ -865,7 +865,29 @@ def copy_final(seed, slot, mode):
 def simple_journey(slot, mode, count=1, *, seed=None):
     run, provider = copy_final(seed, slot, mode) if seed else prepare(slot, mode, count)
     try:
-        if mode in ("judge-provider", "check-deadline", "native-denied"):
+        if mode in ("judge-provider", "native-denied"):
+            def usage_back(seconds):
+                assert run.store.cursor().state == "EXECUTE"
+                assert run.store.cursor().failure
+                assert not run.store.records("unit_failure")
+                assert run.store.units()["u001"].recoveries == 0
+                assert run.store.units()["u001"].state == (
+                    "JUDGING" if mode == "judge-provider" else "WORKING")
+                failures = run.store.records("provider_failure")
+                assert len(failures) == (3 if mode == "judge-provider" else 1)
+                if mode == "native-denied":
+                    assert failures[0][2]["transient"] is False
+                    assert "Access is denied" in run.store.cursor().failure
+                provider.mode = "pause"
+                (slot / "mode").write_text("pause")
+
+            assert run.run(wait=usage_back).state == "SCRIPTED_C"
+            assert not run.store.cursor().failure
+            assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
+            assert (slot / "turn-unit-001").read_text() == ("1" if mode == "judge-provider" else "2")
+            assert (slot / "turn-unit-002").read_text() == "1"
+            return
+        if mode == "check-deadline":
             cursor = run.run()
             result = run.store.records("outcome")[-1][2]
             units = run.store.units()
@@ -874,18 +896,8 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert units["u002"].state == "DONE"
             assert (slot / "turn-unit-001").read_text() == ("3" if mode == "check-deadline" else "1")
             assert result["nextAction"] == "Resolve the named failure, then start a fresh run."
-            if mode == "judge-provider":
-                assert len(run.store.records("provider_failure")) == 3
-                assert "Judge transport unavailable" in units["u001"].failure
-                assert units["u002"].recoveries == 0 and (slot / "turn-unit-002").read_text() == "1"
-                assert run.store.read(units["u002"].judgment)["answer"]["verdict"] == "not judged"
-            elif mode == "native-denied":
-                failures = run.store.records("provider_failure")
-                assert len(failures) == 1 and failures[0][2]["transient"] is False
-                assert "Access is denied" in units["u001"].failure
-            elif mode == "check-deadline":
-                assert any(b["unit"] == "u001" and b["timedOut"] and b["executionStarted"]
-                           and b["cleanupVerified"] for _, _, b in run.store.records("observation"))
+            assert any(b["unit"] == "u001" and b["timedOut"] and b["executionStarted"]
+                       and b["cleanupVerified"] for _, _, b in run.store.records("observation"))
             before = run.store.records()
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
@@ -1083,7 +1095,256 @@ def simple_journey(slot, mode, count=1, *, seed=None):
         run.close()
 
 
+def unavailable_run(slot, kind, message):
+    run, provider = prepare(slot, "pause", 2)
+    run.capacity = 1  # A finished sibling makes replay of completed work observable.
+    script = slot / "unavailable.py"
+    script.write_text("import json, sys\n"
+                      "print(json.dumps({'type':'turn.failed','error':{'message':" + repr(message) + "}}))\n"
+                      "sys.stderr.write('authentication usage limit: unrelated startup noise')\n",
+                      encoding="utf-8")
+    native = Codex(slot / "calls", {**provider.setup,
+                                  "codexCommand": [sys.executable, "-S", "-B", str(script)]})
+    invoke = provider.invoke
+
+    def failing(question, started):
+        selected = (question["kind"] == kind and
+                    (kind == "DETAIL" or kind == "WORK" and
+                     question["facts"]["Write scope"] == ["unit-002/**"] or kind == "JUDGE" and
+                     question["targets"] == ["n005", *questions.SOURCE_TARGETS]))
+        if selected and not (slot / "usage-back").exists():
+            return native.invoke(question, started)
+        return invoke(question, started)
+
+    provider.invoke = failing
+    return run, provider
+
+
+def test_provider_pause_journey(tmp_path):
+    """Usage returning resumes WORK to C once, without recovery or replay of a finished sibling.
+
+    Successful calls miss provider outages wrongly becoming unit failures; synthetic state misses
+    the native-event producer and durable session/patch consumer.
+    """
+    slot = tmp_path / "usage"
+    message = "usage_limit_reached: usage back tomorrow"
+    run, _ = unavailable_run(slot, "WORK", message)
+    paused = []
+
+    def usage_back(seconds):
+        cursor, rows = run.store.cursor(), run.store.units()
+        assert cursor.state == "EXECUTE" and message in cursor.failure
+        assert not run.store.records("unit_failure") and not run.store.records("outcome")
+        assert all(u.recoveries == 0 for u in rows.values())
+        assert rows["u001"].state == "DONE" and rows["u002"].state == "WORKING"
+        assert len(run.store.records("provider_failure")) == 1
+        paused.append(rows["u001"])
+        (slot / "usage-back").touch()  # Injected wait: no sleeping.
+
+    try:
+        assert run.run(wait=usage_back).state == "SCRIPTED_C"
+        assert len(paused) == 1 and run.store.units()["u001"] == paused[0]
+        assert not run.store.cursor().failure and not run.store.records("unit_failure")
+        assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
+        assert all((slot / ("turn-" + name)).read_text() == "1"
+                   for name in ("unit-001", "unit-002", "docs"))
+    finally:
+        run.close()
+
+
+def test_provider_unknown_pause_journey(tmp_path):
+    """An unknown native DETAIL error retries twice then pauses, preserving the planning step.
+
+    Recognised usage faults miss the retry route; stderr denial noise catches classifiers reading
+    non-native diagnostics. Usage-return and restart journeys already prove continuation to C.
+    """
+    message = "unknown native transport error"
+    run, _ = unavailable_run(tmp_path / "unknown", "DETAIL", message)
+
+    def paused(seconds):
+        raise SystemExit("pause observed")  # Stop this controller without a real backoff wait.
+
+    try:
+        with pytest.raises(SystemExit, match="pause observed"):
+            run.run(wait=paused)
+        assert run.store.cursor().state == "DETAIL" and message in run.store.cursor().failure
+        failures = run.store.records("provider_failure")
+        assert len(failures) == 3 and all(b["transient"] for _, _, b in failures)
+        assert not run.store.units() and not run.store.records("unit_failure")
+        assert not run.store.records("outcome")
+    finally:
+        run.close()
+
+
+def test_provider_recovery_journey(tmp_path, monkeypatch):
+    """A verified WORK deadline recovers the same session once and reaches C.
+
+    Usage pauses miss Deadline classification. The golden already proves real hung-process
+    teardown; fault only a real stub's timeout receipt here, avoiding another deliberate hang.
+    """
+    from seldon import providers
+
+    slot = tmp_path / "deadline"
+    run, _ = prepare(slot, "pause", 1)
+    execute, faulted = providers.execute, []
+
+    def deadline(*args, **kwargs):
+        result = execute(*args, **kwargs)
+        if not faulted:
+            assert result["cleanupVerified"]
+            faulted.append(True)
+            return {**result, "timedOut": True}
+        return result
+
+    try:
+        monkeypatch.setattr(providers, "execute", deadline)
+        cursor = run.run(wait=lambda _: pytest.fail("Own deadline must recover, never pause"))
+        assert cursor.state == "SCRIPTED_C"
+        assert run.store.units()["u001"].recoveries == 1
+        assert len(run.store.records("unit_failure")) == len(run.store.records("provider_failure")) == 1
+        launches = [json.loads(line) for line in (slot / "launch-unit-001.jsonl").read_text().splitlines()]
+        assert len(launches) == 2 and launches[1]["resumed"]
+        assert launches[0]["thread"] == launches[1]["thread"]
+    finally:
+        run.close()
+
+
+def test_provider_pause_kill_resume_journey(tmp_path):
+    """OS death during JUDGE backoff resumes to C without replaying DONE work.
+
+    In-process waiting misses a lost durable pause reason. Reap the controller's whole process
+    tree, including on assertion failure, so a failed crash twin cannot load later journeys.
+    """
+    slot = tmp_path / "kill"
+    log = tmp_path / "controller.log"
+    job = None
+    if os.name == "nt":
+        from seldon.processes import _WindowsJob
+        job = _WindowsJob()
+    with log.open("wb") as output:
+        child = subprocess.Popen([job.image() if job else sys.executable, "-B",
+                                  str(Path(__file__).resolve()), "--child", str(slot), "pause-JUDGE"],
+                                 stdin=subprocess.PIPE, stdout=output, stderr=output,
+                                 env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+                                 start_new_session=os.name != "nt")
+        try:
+            if job:
+                job.assign(child)
+            child.stdin.write(b"1")  # No worker starts before the controller belongs to its Job.
+            child.stdin.close()
+            deadline = time.monotonic() + 40
+            while not (slot / "pause-ready").exists():
+                assert child.poll() is None, log.read_text()
+                assert time.monotonic() < deadline, log.read_text()
+                time.sleep(.02)
+            store = Store(slot / "product")
+            try:
+                assert "usage_limit_reached" in store.cursor().failure
+                before = store.units()["u001"]
+                assert before.state == "DONE"
+                assert not store.records("unit_failure") and not store.records("outcome")
+            finally:
+                store.close()
+        finally:
+            child.stdin.close()
+            if job:
+                control = {}
+                job.finish(child, control)
+                job.api.CloseHandle(job.handle)
+                assert control["quiescenceVerified"] and control["activeProcessesAfterTeardown"] == 0
+            else:
+                if child.poll() is None:
+                    import signal
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait(10)
+    (slot / "usage-back").touch()
+    run = Run.reopen(slot / "product", Scripted(slot, "pause", 2), approve)
+    try:
+        assert "usage_limit_reached" in run.store.cursor().failure
+        assert run.run(wait=lambda _: pytest.fail("Usage has returned")).state == "SCRIPTED_C"
+        assert run.store.units()["u001"] == before
+        assert not run.store.cursor().failure and not run.store.records("unit_failure")
+        assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
+        assert all((slot / ("turn-" + name)).read_text() == "1"
+                   for name in ("unit-001", "unit-002", "docs"))
+    finally:
+        run.close()
+
+
+def test_cleanup_pause_journey(tmp_path, monkeypatch):
+    """Proof and provider teardown uncertainty each pause until manual resume, retaining receipts.
+
+    Clean outages cannot catch unsafe automatic retry while another process may own the checkout.
+    Reuse one real delivery through both cleanup sinks instead of repeating successful work.
+    """
+    from seldon import providers
+
+    slot = tmp_path / "cleanup"
+    run, provider = unavailable_run(slot, "JUDGE", "unverified cleanup at provider")
+    native_execute, check_execute = providers.execute, proof.execute
+    receipts = {}
+
+    def provider_cleanup(*args, **kwargs):
+        result = native_execute(*args, **kwargs)
+        if '"kind":"JUDGE"' in Path(args[3]).with_name("question.json").read_text("utf-8"):
+            receipts["provider"] = str(Path(kwargs["output_dir"]) / "result.json")
+            return {**result, "cleanupVerified": False, "timedOut": True}
+        return result
+
+    def check_cleanup(command, *args, **kwargs):
+        result = check_execute(command, *args, **kwargs)
+        if "unit-002/check.py" in command and "proof" not in receipts:
+            receipt = slot / "cleanup-receipt.json"
+            receipts["proof"] = receipt.as_posix()
+            result = {**result, "cleanupVerified": False,
+                      "processControl": {**result["processControl"], "receipt": receipt.as_posix()}}
+            receipt.write_text(encode({k: v for k, v in result.items()
+                                       if k not in ("stdout", "stderr")}), encoding="utf-8")
+        return result
+
+    def no_retry(seconds):
+        pytest.fail("Unverified cleanup must wait for explicit resume")
+
+    try:
+        monkeypatch.setattr(providers, "execute", provider_cleanup)
+        monkeypatch.setattr(proof, "execute", check_cleanup)
+        for owner, state in (("proof", "PROVING"), ("provider", "JUDGING")):
+            cursor = run.run(wait=no_retry)
+            rows = run.store.units()
+            assert cursor.state == "EXECUTE" and receipts[owner] in cursor.failure
+            assert "cleanup unverified" in cursor.failure
+            assert rows["u001"].state == "DONE" and rows["u002"].state == state
+            assert all(u.recoveries == 0 for u in rows.values())
+            assert not run.store.records("unit_failure") and not run.store.records("outcome")
+            run.close()
+            run = Run.reopen(slot / "product", provider, approve)
+        (slot / "usage-back").touch()
+        assert run.run(wait=no_retry).state == "SCRIPTED_C"
+        assert not run.store.cursor().failure and not run.store.records("unit_failure")
+        assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
+        assert all((slot / ("turn-" + name)).read_text() == "1"
+                   for name in ("unit-001", "unit-002", "docs"))
+    finally:
+        run.close()
+
+
 def child_main(slot, mode):
+    if mode.startswith("pause-"):
+        if sys.stdin.buffer.read(1) != b"1":
+            return
+        run, _ = unavailable_run(slot, mode.removeprefix("pause-"),
+                                 "usage_limit_reached: usage back tomorrow")
+
+        def waiting(seconds):
+            (slot / "pause-ready").write_text("paused")
+            while True:
+                time.sleep(.02)
+
+        try:
+            run.run(wait=waiting)
+        finally:
+            run.close()
+        return
     run, _ = prepare(slot, mode, 2)
     if mode in ("kill-invalid", "kill-blocked", "kill-report"):
         invoke = Codex.invoke
@@ -1219,7 +1480,7 @@ def test_clean_core_golden(tmp_path):
     assessment must withhold C even when the judge's overall verdict and all commands are green.
     A transient Git worktree admission failure must preserve its cause and retry before WORKING.
     Faults after admission already have a worktree and cannot catch an illegal READY recovery.
-    Judge transport exhaustion fails locally without resuming a correct worker. Oversized check
+    Judge transport exhaustion pauses without resuming a correct worker. Oversized check
     sources and product patches reach one JUDGE without reworking or dropping assertions.
     Verbatim A/B revisions protect user intent that schema-valid approval alone cannot preserve.
     A dependency may satisfy a check at T; wave-start RED prevents needless rework while still
@@ -1227,7 +1488,7 @@ def test_clean_core_golden(tmp_path):
     separate from feature requirements, preventing demands for global quality from one feature.
     A configured short check deadline times out a real command; a fixed 30-second observer would
     wrongly integrate it. Missing unit judge facts remain not judged without reworking a correct worker.
-    A native turn.failed denial must stop after one call, while the same words as stderr start-up
+    A native turn.failed denial must pause after one call, while the same words as stderr start-up
     noise on a timed-out WORK call stay transient (T-132); generic transport faults
     otherwise retry a denied operation and the successful native journey never exposes it.
     Subject traces include unit verdicts, supplemental JSON artifacts

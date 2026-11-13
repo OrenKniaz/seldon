@@ -4,7 +4,7 @@ import time
 from dataclasses import replace
 
 from . import questions
-from .providers import ProviderFailure, role_for
+from .providers import Deadline, ProviderFailure, ResumeUnavailable, role_for
 
 
 def call(store, provider, question, unit=None, check=lambda answer: None, retries=2):
@@ -46,8 +46,8 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                 store.record("provider_failure", {"attempt": attempt, "reason": str(error),
                     "transient": error.transient, "cleanupVerified": error.cleanup_verified,
                     "receipt": error.receipt})
-                # Worker transport recovery is local to its unit, sharing its C18 recovery allowance.
-                if unit or not error.transient or not error.cleanup_verified or recovery == 2:
+                if (isinstance(error, (Deadline, ResumeUnavailable)) or not error.transient
+                        or not error.cleanup_verified or recovery == 2):
                     raise
                 previous = attempt
 

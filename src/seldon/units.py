@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import fixups, gitwork, inference, plan, proof, questions
-from .providers import ProviderFailure, ResumeUnavailable, session_id, terminal_answer
+from .providers import Deadline, ProviderFailure, ResumeUnavailable, session_id, terminal_answer
 from .schema import validate
 from .states import advance
 
@@ -215,15 +215,18 @@ def run_unit(store, provider, ref):
                 else:
                     raise RuntimeError(f"Unscheduled unit state: {unit.state}")
             except ProviderFailure as error:
-                if store.unit(ref).state == "JUDGING":
-                    recover(store, ref, str(error), retryable=False)
+                thread_from_recording(store, ref)
+                if isinstance(error, Deadline) and error.cleanup_verified:
+                    recover(store, ref, str(error))
                 else:
-                    thread_from_recording(store, ref)
-                    recover(store, ref, str(error), retryable=error.transient and error.cleanup_verified)
+                    if error.cleanup_verified:
+                        with store.transaction():
+                            store.unit(ref, replace(store.unit(ref), callFolder=None, callAttempt=None))
+                    raise
             except questions.MissingFacts as error:
                 recover(store, ref, str(error), retryable=False)
-            except proof.UncertainCleanup as error:
-                recover(store, ref, str(error), retryable=False)
+            except proof.UncertainCleanup:
+                raise
             except (ValueError, RuntimeError, OSError) as error:
                 recover(store, ref, str(error))
     finally:

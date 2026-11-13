@@ -208,10 +208,34 @@ class Run:
                 "vision": cursor.vision, "revision": cursor.revision, "stop": ref})
             advance(self.store, "resume-" + stop["stage"], resumed, failure="")
 
-    def run(self):
+    def run(self, wait=None):
+        import time
+        from dataclasses import replace
+
+        from .providers import ProviderFailure
+
+        wait = wait or time.sleep
+        delay = 60
         try:
-            while self.store.cursor().state not in TERMINAL:
-                self.step()
+            cursor = self.store.cursor()
+            while cursor.state not in TERMINAL:
+                try:
+                    self.step()
+                except (ProviderFailure, proof.UncertainCleanup) as error:
+                    receipt = getattr(error, "receipt", None)
+                    reason = str(error) + (f"; receipt: {receipt}" if receipt else "")
+                    with self.store.transaction():
+                        cursor = self.store.cursor(replace(self.store.cursor(), failure=reason))
+                    if isinstance(error, proof.UncertainCleanup) or not error.cleanup_verified:
+                        break
+                    wait(delay)
+                    delay = min(900, delay * 2)
+                else:
+                    cursor = self.store.cursor()
+                    if cursor.failure:
+                        with self.store.transaction():
+                            cursor = self.store.cursor(replace(cursor, failure=""))
+                    delay = 60
         except (ValueError, RuntimeError, OSError) as error:
             incomplete(self.store, f"{type(error).__name__}: {error}")
         finally:
