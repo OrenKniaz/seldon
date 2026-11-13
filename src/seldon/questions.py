@@ -114,8 +114,8 @@ def build(kind, facts, targets=(), execution=None, images=()):
         facts = {**facts, "How the plan executes": (
             "Each unit has one worker and a separate checkout. Disjoint units can run concurrently "
             "once their dependencies are integrated. Files assigned to the same unit share one worker. "
-            "Each unit writes its own local check files inside its scope; checkPaths selects those "
-            "files for its tests-only commit. Area scopes cannot grow in DETAIL; missing space returns "
+            "checkPaths selects each unit's local check files for its tests-only commit. "
+            "Area scopes cannot grow in DETAIL; missing space returns "
             "to ARCHITECT. Contract text is available before parallel work; consuming it does not wait "
             "for its implementation. Reading another unit's newly built files requires an explicit "
             "dependency. Include newly authored check helpers and fixtures needed "

@@ -416,6 +416,49 @@ class RecordedDetailProvider(Scripted):
         self.detail_calls.append(deepcopy(question))
         area = facts["Area"]["handle"]
         raw = self.recording["details"][area]["raw"]
+        if "5e3e40e" in self.recording["source"]:
+            if not any(k in facts for k in ("Exact corrections", "Merge correction")):
+                return raw
+            answer = deepcopy(facts.get("Previous area plan") or json.loads(raw)["answer"])
+            handles = {e["targetHandle"] for e in answer["edits"] if e["kind"] == "requirement"}
+            consumers = {c["handle"] for c in json.loads(self.recording["architect"])["answer"]["contracts"]
+                         if area in c["consumers"]}
+            if area == "page":
+                # One page owner writes shell and assembly checks; component-dom is its own output.
+                units = answer["units"]
+                answer["units"] = [{**units[0],
+                    **{k: list(dict.fromkeys(p for u in units for p in u[k]))
+                       for k in ("scope", "checkPaths", "requirements")},
+                    "consumes": sorted(consumers), "dependencies": [], "reads": []}]
+            for edit in answer["edits"]:
+                if edit["kind"] == "check":
+                    edit["typedBody"]["requirements"] = [r for r in edit["typedBody"]["requirements"]
+                                                         if r in handles | consumers]
+            for unit in answer["units"]:
+                # Scripted local-proof corrections need not duplicate check ownership in product scope.
+                # Keep check-only units' scope; product owners deliberately omit their check subtree.
+                product = [p for p in unit["scope"] if not plan.matches(p, unit["checkPaths"])]
+                if product:
+                    unit["scope"] = product
+                for req in unit["requirements"]:
+                    if any(e["kind"] == "check" and req in e["typedBody"]["requirements"]
+                           and set(e["typedBody"]["requirements"]) <= set(unit["requirements"])
+                           for e in answer["edits"]):
+                        continue
+                    requirement = next(e["typedBody"] for e in answer["edits"] if e["targetHandle"] == req)
+                    answer["edits"].append({"kind": "check", "targetHandle": req + "-local", "typedBody": {
+                        "purpose": "Prove the local contribution: " + requirement["obligation"],
+                        "mode": "establishes", "command": ["node", unit["checkPaths"][0], "--local", req],
+                        "requiredEnvironment": ["Supplied Node, Edge and Playwright"],
+                        "expectedEvidence": "Observe local behavior against the agreed interface; "
+                                            "integrated checks still exercise the canonical page.",
+                        "requirements": [req]}})
+                if "Merge correction" in facts:
+                    assert any("dependency cycle" in c["error"] for c in facts["Merge correction"])
+                    # Local proof uses the agreed interface; sibling assembly checks run at wave level.
+                    unit["reads"] = []
+                    unit["dependencies"] = []
+            return json.dumps({"answer": answer})
         if f"checks/{area}/**" not in facts["Area"]["scope"]:
             return raw
         # The architecture correction supplies space. This new DETAIL reply places its own checks there.
@@ -458,16 +501,18 @@ class RecordedDetailProvider(Scripted):
 
 
 def recorded_detail_journeys(root):
-    """Both real planning failures reach reviewed B through recorded, observable corrections.
+    """Real planning failures reach reviewed B through recorded, observable corrections.
 
     Synthetic valid plans cannot expose the literal scopes, unowned bare file paths or wave-only unit
     proof in these replies. Raw first answers reach the real validator; only subsequent correction
     questions receive new scripted answers. No provider implementation or execution acceptance is claimed.
+    The 5e3e40e corrections omit duplicated check scope, catching both local and merged ownership
+    rejection that the older recordings' scripted replies (which repeat check scopes) cannot expose.
     """
     began = time.monotonic()
     recordings = json.loads(Path(__file__).with_name("recorded_detail.json").read_text("utf-8"))
     for recording in recordings:
-        slot = root / recording["source"].rsplit("-", 1)[-1]
+        slot = root / recording["source"].replace("\\", "/").rsplit("/", 1)[-1]
         slot.mkdir(parents=True)
         provider = RecordedDetailProvider(slot, recording)
         run = Run(slot / "product", slot / "workers", recording["dream"], provider.setup,
@@ -484,7 +529,9 @@ def recorded_detail_journeys(root):
             replies = [b["rawAnswer"] for _, k, b in rows if k == "provider_reply"]
             assert recording["architect"] in replies
             assert all(d["raw"] in replies for d in recording["details"].values())
-            assert provider.arch_calls == 2 and len(run.store.records("architecture_gap")) == 1
+            owns_checks = "5e3e40e" in recording["source"]
+            assert provider.arch_calls == (1 if owns_checks else 2)
+            assert len(run.store.records("architecture_gap")) == (0 if owns_checks else 1)
             assert any(k == "transition" and b["next"] == "REVIEW" for _, k, b in rows)
             assert {b["gate"] for _, k, b in rows if k == "decision_request"} == {"A", "B"}
             assert any("Exact corrections" in q["facts"] for q in provider.detail_calls)
@@ -492,12 +539,28 @@ def recorded_detail_journeys(root):
             assert all(q["facts"]["Current wave"] == wave
                        for q in provider.detail_calls)
             corrections = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
-            assert [q["facts"]["Area"]["handle"] for q in corrections] == (
-                ["page-shell"] if slot.name == "c01" else [])
+            assert sorted(q["facts"]["Area"]["handle"] for q in corrections) == (
+                ["foundation", "seldon"] if owns_checks else
+                ["page-shell"] if "2073b1d-c01" in slot.name else [])
             document = run.store.plan(run.store.cursor().revision)
             plan.validate(document)
             assert len(plan.assigned(document)[None]) > 0
-            print(f"Recorded {slot.name}: ARCHITECT correction -> DETAIL correction -> REVIEW -> B",
+            if owns_checks:
+                assert not any("checkPaths must be inside scope" in json.dumps(q["facts"])
+                               for q in provider.detail_calls)
+                units = plan.select(document, "unit")
+                assert all(any(plan.contains(s, c) for s in u["scope"])
+                           for u in units.values() for c in u["checkPaths"])
+                # The canonical producer reply omits check scope; its persisted consumer plan owns it.
+                answers = [json.loads(raw)["answer"] for raw in replies]
+                omitted = [u for a in answers for u in a.get("units", [])
+                           if any(not any(plan.contains(s, c) for s in u["scope"])
+                                  for c in u["checkPaths"])]
+                assert omitted
+                assert all(any(u["checkPaths"] == original["checkPaths"]
+                               and set(original["scope"]) <= set(u["scope"]) for u in units.values())
+                           for original in omitted)
+            print(f"Recorded {slot.name}: DETAIL corrections -> REVIEW -> B",
                   flush=True)
         finally:
             run.close()

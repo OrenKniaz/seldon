@@ -127,6 +127,12 @@ def create(vision, answer):
     return document
 
 
+def owned_scope(unit):
+    """A unit owns its checks; the planner need not repeat them in scope (T-111, I1)."""
+    return [*unit["scope"], *(c for c in unit["checkPaths"]
+                              if not any(contains(s, c) for s in unit["scope"]))]
+
+
 def merge(vision, architecture, leaves):
     """CODE assigns global handles, unit positions, contract endpoints and skeleton membership."""
     from . import architecture as owner
@@ -174,7 +180,8 @@ def merge(vision, architecture, leaves):
         for unit in answer["units"]:
             position = len(units) + 1
             file_dependencies[position] = [d for d in unit["dependencies"] if isinstance(d, str)]
-            units.append({**unit, "area": area["handle"],
+            # Area containment is already checked in architecture.local_plan.
+            units.append({**unit, "scope": owned_scope(unit), "area": area["handle"],
                           "requirements": [handles[r] for r in unit["requirements"]],
                           "dependencies": [d + offset for d in unit["dependencies"] if isinstance(d, int)]})
             for side in ("provides", "consumes"):

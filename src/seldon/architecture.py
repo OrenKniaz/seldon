@@ -179,7 +179,7 @@ def local_plan(area, contracts, answer, vision, single_area):
         **e["typedBody"], **({"vision": ["vision"]} if e["kind"] == "feature" else {}),
         **({"owner": f"unit:{e['typedBody']['owner']}"} if e["kind"] == "obligation" else {})}}
         for e in answer["edits"]})
-    units = {f"unit:{i}": {**u, "area": area["handle"],
+    units = {f"unit:{i}": {**u, "scope": plan.owned_scope(u), "area": area["handle"],
              "dependencies": [f"unit:{d}" for d in u["dependencies"] if isinstance(d, int)]}
              for i, u in enumerate(answer["units"], 1)}
     nodes.update({r: {"kind": "unit", "body": u} for r, u in units.items()})
