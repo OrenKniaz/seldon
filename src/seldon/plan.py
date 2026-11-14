@@ -101,6 +101,7 @@ def recorded_levels(answer):
     """Old DETAIL recordings lack a level; structural promotion follows once links are resolved."""
     for edit in answer.get("edits", []):
         if edit.get("kind") == "check":
+            edit["typedBody"].pop("mode", None)
             edit["typedBody"].setdefault("level", "unit")
 
 

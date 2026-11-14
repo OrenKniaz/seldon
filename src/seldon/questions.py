@@ -83,10 +83,9 @@ PROMPTS = {
     "JUDGE": "For each requirement: are its checks meaningful; did they actually exercise the "
              "requirement at P (not skipped, not empty, not asserting nothing); is anything a stub, "
              "mock or missing? Read the check sources, RED output at T or wave start, passing P output "
-             "and screenshots. For each requirement set baselineDemonstrated only if every establishes "
-             "check failed on T or wave start because the required PRODUCT behavior was absent, and "
-             "every preserves check exercised existing behavior on its baseline. A missing product can "
-             "demonstrate RED; a missing check helper or broken test environment cannot. "
+             "and screenshots. For baselineDemonstrated, a requirement new in this unit needs a check "
+             "that failed without the product; a check that passed there proves preservation only. "
+             "A missing product can demonstrate RED; a missing check helper or broken test environment cannot. "
              "Exit codes are CODE facts; interpret their meaning. A no on any obligation is a gap. "
              + JUDGMENT_LEEWAY + " " + AGREED_LITERALS,
     "DEMO": "Does this requirement's demonstrated behavior meet its obligation "
@@ -124,12 +123,11 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
             "in that checkout before integration. "
             "A check covering requirements from different units runs on the integrated product at "
             "wave level, never by rebuilding another area's surface in a local fixture; "
-            "one unit owns its source file. An establishes check must fail on the unit base or, if "
-            "already passing there, on the wave-start product with every unit's check sources and "
-            "helpers as they stand at the unit base; shared check mechanics (helpers, fixtures, test "
-            "config) belong in a unit's checkPaths, never in product scope. It must "
-            "pass at P. A preserves check must pass on the unit base and P with the current check "
-            "sources."), "Unit evidence": UNIT_EVIDENCE, "Judge coverage": {
+            "one unit owns its source file. Code records each check's exit at T and, if it passed there, "
+            "at wave start, with all units' check sources and helpers retained; all checks must pass at P. "
+            "Shared check mechanics belong in checkPaths. A requirement new in this unit needs a check "
+            "that failed without the product; a check that passed there proves preservation only."),
+            "Unit evidence": UNIT_EVIDENCE, "Judge coverage": {
             "Unit JUDGE": "Its own requirements and standing source obligations, its checks, product "
                           "files at P, its T..P diff, outputs and screenshots. "
                           "No sibling or whole-product files.",
@@ -180,7 +178,7 @@ def example_plan():
             "obligation": "Greet the supplied name", "design": "One argument", "contract": "name -> greeting",
             "features": ["new:f"]}},
         {"kind": "check", "targetHandle": "new:c", "typedBody": {
-            "purpose": "Run the greeting command", "level": "unit", "mode": "establishes",
+            "purpose": "Run the greeting command", "level": "unit",
             "command": ["python", "-B", "greeting/check.py"], "requiredEnvironment": ["Python"],
             "expectedEvidence": "Actual stdout", "requirements": ["new:r"]}},
         {"kind": "area", "targetHandle": "new:a", "typedBody": {

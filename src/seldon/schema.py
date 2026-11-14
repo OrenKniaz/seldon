@@ -35,7 +35,7 @@ BODIES = {
     "obligation": obj(what=TEXT, owner=TEXT, closingRequirement=TEXT),
     "feature": obj(**FEATURE["properties"], vision=array(choice("vision"), 1)),
     "requirement": obj(obligation=TEXT, design=TEXT, contract=TEXT, features=array(TEXT, 1)),
-    "check": obj(purpose=TEXT, level=choice("unit", "wave"), mode=choice("establishes", "preserves"),
+    "check": obj(purpose=TEXT, level=choice("unit", "wave"),
                  command=array(TEXT, 1),
                  requiredEnvironment=REFS, expectedEvidence=TEXT, requirements=array(TEXT, 1)),
     "unit": obj(instructions=TEXT, scope=array(TEXT, 1), checkPaths=array(TEXT, 1),

@@ -116,17 +116,10 @@ def prove(store, ref, contract, checks):
             store.unit(ref, unit)
     observations = []
     try:
-        establishes = {r: c for r, c in checks.items() if c["mode"] == "establishes"}
-        red = observe(store, root, unit.T, establishes, "T", ref)
+        red = observe(store, root, unit.T, checks, "T", ref)
         observations.extend(red)
-        # T contains the current check sources on the pre-unit product. A newly written
-        # preservation check must exercise that product before it can claim existing behavior.
-        preserves = {r: c for r, c in checks.items() if c["mode"] == "preserves"}
-        base = observe(store, root, unit.T, preserves, "base", ref) if preserves else []
-        observations.extend(base)
         passing_T = {store.read(r)["check"] for r in red if store.read(r)["exitCode"] == 0
                      and not failures(store, [r])}
-        start_red = []
         if passing_T:
             # A RED baseline removes product only, never check machinery: every unit's check sources
             # as they stand at T, so a helper owned by a sibling unit is present (T-104).
@@ -136,22 +129,15 @@ def prove(store, ref, contract, checks):
                                          mechanics, store.cursor().scratch)
             store.record("proof_base", {"unit": ref, "commit": start, "waveStart": store.cursor().waveStart,
                                         "product": unit.P})
-            start_red = observe(store, root, start, {r: establishes[r] for r in passing_T}, "wave-start", ref)
+            start_red = observe(store, root, start, {r: checks[r] for r in passing_T}, "wave-start", ref)
             observations.extend(start_red)
-        proven_red = {store.read(r)["check"] for r in [*red, *start_red]
-                      if not failures(store, [r], red=True)}
-        undetected = [store.read(r)["check"] for r in start_red if store.read(r)["exitCode"] == 0]
         gitwork.checkout(root, unit.P)
         green = observe(store, root, unit.P, checks, "P", ref)
         observations.extend(green)
-        bad = [store.read(r) for r in [*red, *start_red] if store.read(r)["check"] not in proven_red]
-        bad += failures(store, [*base, *green])
+        bad = failures(store, green)
         with store.transaction():
             store.unit(ref, replace(store.unit(ref), observations=observations))
         if bad:
-            if undetected:
-                raise ValueError("this check does not detect the missing requirement; make it assert it, "
-                                 "or declare it preserves: " + ", ".join(undetected) + "; " + explain(bad))
             raise ValueError("Proof failed: " + explain(bad))
     except UncertainCleanup:
         raise

@@ -75,10 +75,13 @@ def planned(count, mode):
             "requirements": ["new:r004"]}})
     if mode == "exhaust":
         edits[1]["typedBody"]["obligation"] += "; preserve the claimed existing value"
-        edits.append({"kind": "check", "targetHandle": "new:preserve", "typedBody": {
-            "purpose": "Preserve the claimed existing value", "mode": "preserves",
-            "command": [sys.executable, "-S", "-B", "unit-001/check.py"],
-            "requiredEnvironment": ["Python"], "expectedEvidence": "A value already present at base",
+    if mode == "machinery":
+        scopes[0]["checkPaths"] = ["unit-001/*.py"]
+        edits[1]["typedBody"]["obligation"] = "Supply reusable check machinery and the documented value"
+        edits.append({"kind": "check", "targetHandle": "new:wave", "typedBody": {
+            "purpose": "Read the delivered value", "level": "wave",
+            "command": [sys.executable, "-S", "-B", "unit-001/wave.py"],
+            "requiredEnvironment": ["Python"], "expectedEvidence": "Actual persisted value",
             "requirements": ["new:r001"]}})
     selected = "new:c002" if mode == "traced-evidence" else "new:c001"
     edits.append({"kind": "area", "targetHandle": "new:area", "typedBody": {
@@ -270,6 +273,11 @@ else:
         source += f"print('interaction', Path('{name}/interaction.txt').read_text())\n"
         if turn > 1:
             source += f"assert Path('{name}/interaction.txt').read_text() == 'ready'\n"
+    if mode == "machinery":
+        Path(name, "wave.py").write_text(source)
+        Path(name, "helper.py").write_text("def expected_value():\n    return 'value-001'\n")
+        source = ("from helper import expected_value\n"
+                  "assert expected_value() == 'value-001'\nprint('observed value-001')\n")
     Path(name, "check.py").write_text(source)
     Path(name, "value.txt").write_text(value)
     if mode in ("single1", "scale50"):
@@ -531,6 +539,12 @@ class Scripted:
                 if self.mode == "stale-scope" and any("lost assertion" in s for s in sources.values()):
                     answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
                         "correction": "Integration lost the assertion; restore the persisted-value check"}])
+                if (self.mode == "false-red" and any("empty check" in s for s in sources.values())
+                        or self.mode == "exhaust" and q["targets"][0] == "n002"):
+                    answer["assessments"][0]["baselineDemonstrated"] = False
+                    answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                        "correction": "The check does not demonstrate the requirement without the product; "
+                                      "assert the promised behavior"}])
         answer["why"] = "The supplied facts support this semantic answer"
         return json.dumps({"answer": answer})
 
@@ -1032,7 +1046,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             subject = run_state(str(run.project))["waitingFor"]["subject"]
             assert subject["unit"] == "u001" and "u002" in subject["affects"]
             assert (slot / "turn-unit-001").read_text() == "3"
-            assert any("'purpose': 'base'" in text for text in subject["tried"])
+            assert any("does not demonstrate the requirement" in text for text in subject["tried"])
             return
         if mode in ("demo-uncertain", "product-uncertain"):
             # Reopen with a pending fact request: ordinary in-process retries cannot expose lost intent.
@@ -1098,7 +1112,12 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 assert "rogue.txt" in launches[1]["facts"]["Exact failure"]
                 assert not (run.project / "rogue.txt").exists()
             if mode == "false-red":
-                assert any(k == "unit_failure" and "'exitCode': 0" in b["failure"] for _, k, b in rows)
+                gap = next(b["answer"]["gaps"][0]["correction"] for _, k, b in rows
+                           if k == "answer" and b["kind"] == "JUDGE" and b["answer"]["verdict"] == "gap")
+                assert gap in launches[1]["facts"]["Exact failure"]
+                first_judge = next(b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE")
+                assert any(o["purpose"] == "T" and o["exitCode"] == 0
+                           for o in first_judge["facts"]["Observations"])
             if mode == "skipped":
                 assert any(k == "unit_failure" and "skipped its assertion" in b["failure"]
                            for _, k, b in rows)
@@ -1118,8 +1137,14 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert max(x["start"] for x in launches) < min(endings)
             assert any(k == "unit_wait" and "Dependencies" in b["reason"] for _, k, b in rows)
             assert any(k == "observation" and b["unit"] is None and b["exitCode"] == 0 for _, k, b in rows)
-            assert any(k == "observation" and b["purpose"] == "base" and b["exitCode"] == 0
+            assert any(k == "observation" and b["purpose"] == "T" and b["exitCode"] == 0
                        for _, k, b in rows)
+        if mode == "machinery":
+            assert units["u001"].recoveries == 0 and not run.store.records("unit_failure")
+            unit_judge = next(b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE")
+            observed = unit_judge["facts"]["Observations"]
+            assert all(any(o["purpose"] == purpose and o["exitCode"] == 0 for o in observed)
+                       for purpose in ("T", "wave-start", "P"))
         if mode == "review-repair":
             assert cursor.repairs == 1 and len(run.store.records("approval")) == 4
             reviews = [b["answer"] for _, _, b in run.store.records("plan_review")]
@@ -1579,6 +1604,25 @@ def test_rule1b_journeys(tmp_path, mode):
     rule1b_journey(tmp_path / mode, mode)
 
 
+@pytest.mark.parametrize("mode,count", [("machinery", 1), ("false-red", 1), ("exhaust", 4),
+                                       ("parallel", 4), ("wave-start", 2)])
+def test_rule3_journeys(tmp_path, mode, count):
+    """T-passing checks reach judgment; gaps repair locally or reach a resumable user question.
+
+    Catches code refusing check machinery or accepting vacuous product proof. Earlier journeys
+    declared a mode and expected code to reject T success, so never exercised these judge decisions.
+    """
+    simple_journey(tmp_path / mode, mode, count)
+
+
+def test_rule3_scale50_journey(tmp_path):
+    """Reuse the unchanged scale journey to catch lost scheduling/proof across fifty units.
+
+    Single-unit twins cannot detect dependency and concurrent observation regressions at scale.
+    """
+    simple_journey(tmp_path / "scale50", "scale50", 50)
+
+
 @pytest.mark.fast
 def test_clean_core_golden(tmp_path):
     """One-unit C protects the actual approved delivery path; parallel/fan-in catches serialization.
@@ -1599,7 +1643,7 @@ def test_clean_core_golden(tmp_path):
     valid WORK replies and a provider with available resume do not exercise.
     Retained invalid/blocked/successful reports protect ordinary outcome and discovery handling
     after OS death; interrupted in-flight calls have no report to reconcile.
-    Exhaustion also refuses a false preserves claim that is GREEN at P but failed at base;
+    Exhaustion returns the judge's missing preservation evidence to the worker and then the user;
     the parallel consumer retains a genuinely existing dependency, protecting the success path.
     A storage check can pass without demonstrating the accepted browser path. A final negative
     assessment must withhold C even when the judge's overall verdict and all commands are green.
@@ -2325,7 +2369,7 @@ def clean_core_golden(root):
                 "demo-unresolved", "product-unresolved", "guide-gap",
                 "product-source-resolved", "product-source-unresolved",
                 "product-facts-unavailable", "demo-facts-unavailable"}
-    modes = [("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
+    modes = [("machinery", 1), ("check-deadline", 2), ("scope", 1), ("false-red", 1), ("skipped", 1), ("fresh", 1),
              ("timeout", 1),
              ("exhaust", 4), ("parallel", 4), ("review-repair", 2), ("final-rework", 2),
              ("schema-fix", 1), ("plan-overlap", 2), ("user-path", 1), ("judge-provider", 2),
