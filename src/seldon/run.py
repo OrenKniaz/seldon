@@ -152,20 +152,15 @@ class Run:
         elif state == "REPAIR":
             plan_review.repair(store)
         elif state == "EXECUTE":
-            document = store.plan(cursor.revision)
             if not plan.approved(store):
                 raise ValueError("Execution requires B for this exact plan and review")
             with store.transaction():
-                for ref in plan.select(document, "unit"):
+                for ref in plan.select(store.plan(cursor.revision), "unit"):
                     if store.unit(ref) is None:
                         store.unit(ref, UnitRow())
                         advance(store, "create", cursor.B, unit=ref)
-            scheduler.execute(store, self.provider, self.capacity)
-            decisions.ask_unit(store)
-            if store.cursor().decision:
-                decisions.decide(store, self.provider, self.user)
-            else:
-                advance(store, "finished", "Every unit integrated")
+            scheduler.execute(store, self.provider, self.capacity, self.user)
+            advance(store, "finished", "Every unit integrated")
         elif state == "WAVE-VERIFY":
             observations = wave_verify.verify(store, cursor.candidate)
             gaps = proof.gaps(store, cursor.candidate, observations)

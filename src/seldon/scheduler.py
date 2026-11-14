@@ -3,23 +3,29 @@
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import replace
 
-from . import plan, units
+from . import decisions, plan, units
 from .states import advance
 
 
-def execute(store, provider, capacity):
-    document = store.plan(store.cursor().revision)
-    contracts = plan.select(document, "unit")
+def execute(store, provider, capacity, user):
+    doc = store.plan(store.cursor().revision)
+    contracts = plan.select(doc, "unit")
     running = {}
     with ThreadPoolExecutor(max_workers=capacity) as pool:
         while True:
+            decisions.ask_unit(store)
+            if user and store.cursor().decision:
+                try:
+                    with store.integration_lock:
+                        decisions.decide(store, provider, user)
+                except decisions.Waiting:
+                    user = None
             rows = store.units()
             for ref, row in rows.items():
-                if ref in running.values() or row.state in ("DONE", "ASKED", "DROPPED"):
+                if ref in running or row.state in ("DONE", "ASKED", "DROPPED"):
                     continue
-                deps = plan.prerequisites(document, ref) + row.waitingFor
-                unmet = [d for d in deps if rows[d].state != "DONE"]
-                conflict = [r for r in running.values()
+                unmet = [d for d in plan.prerequisites(doc, ref) + row.waitingFor if rows[d].state != "DONE"]
+                conflict = [r for r in running
                             if plan.overlaps(contracts[ref]["scope"], contracts[r]["scope"])]
                 reason = ("Dependencies not DONE: " + ", ".join(unmet) if unmet else
                           "Scope overlaps running units: " + ", ".join(conflict) if conflict else
@@ -33,14 +39,13 @@ def execute(store, provider, capacity):
                 if row.state == "WAITING":
                     advance(store, "ready", "Dependencies DONE and scope available", unit=ref,
                             waiting="", waitingFor=[])
-                running[pool.submit(units.run_unit, store, provider, ref)] = ref
+                running[ref] = pool.submit(units.run_unit, store, provider, ref)
             if not running:
-                pending = [r for r, u in store.units().items()
-                           if u.state not in ("DONE", "ASKED", "DROPPED")]
-                if pending and not any(u.state == "ASKED" for u in store.units().values()):
+                if store.cursor().decision:
+                    raise decisions.Waiting()
+                if pending := [r for r, u in rows.items() if u.state not in ("DONE", "DROPPED")]:
                     raise ValueError("No unit can progress: " + ", ".join(pending))
                 return
-            done, _ = wait(running, return_when=FIRST_COMPLETED)
-            for future in done:
-                running.pop(future)
-                future.result()
+            wait(running.values(), return_when=FIRST_COMPLETED)
+            for ref in [r for r, future in running.items() if future.done()]:
+                running.pop(ref).result()

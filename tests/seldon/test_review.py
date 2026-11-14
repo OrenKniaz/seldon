@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from seldon import plan
+from seldon.frontdoor import state as run_state
 from seldon.run import Run
 from test_architect import AreaProvider, start
 from test_journey import Scripted, approve, finish, prepare
@@ -66,7 +67,7 @@ class ReviewProvider(AreaProvider):
 def rule2_journey(root, mode):
     """Foreign quality proof stays visible; changed gaps replan and a repeated outline asks at DETAIL.
 
-    The c05 twin's importer reviewer needs delivery's API/UI check in both criterion and trace views.
+    The c05 twin's importer reviewer needs delivery's API/UI check in its proof map.
     Existing local-link reviews miss that omission, and their single-gap repair misses a second,
     unrelated gap being refused by a count instead of answered by ARCHITECT.
     """
@@ -84,13 +85,10 @@ def rule2_journey(root, mode):
         def __call__(self, question):
             kind, facts = question["kind"], question["facts"]
             if kind == "REVIEW" and facts["Review subject"] != "architecture":
-                checks = plan.select(facts["Plan"], "check")
-                rows = [*plan.select(facts["Plan"], "criterion").values(),
-                        *(row for r, row in facts["Trace coverage"].items() if r.startswith("quality:"))]
+                rows = [row for r, row in facts["Proof map"].items() if r.startswith("quality:")]
                 missing = self.rule2_mode == "foreign" and any(not any(
-                    c["area"] == "area-003" and "API" in c["purpose"] and "UI" in c["purpose"] for c in
-                    [*[{**checks[r], "area": facts["Review subject"]} for r in row["checks"]],
-                     *row.get("provenElsewhere", [])]) for row in rows)
+                    c["owner"] == "u003" and "API" in c["purpose"] and "UI" in c["purpose"]
+                    for c in row) for row in rows)
                 return json.dumps({"answer": {"verdict": "gap" if missing else "adequate",
                     "gaps": [{"target": "quality", "correction": "Name delivery's API/UI check"}]
                             if missing else [], "why": "Review the supplied quality proof locations"}})
@@ -147,7 +145,7 @@ def review_journeys(root):
     DETAIL success cannot catch a missing review, serialized fan-out, a false adequate aggregate,
     or lost sibling verdicts after repair/reopen, including when new records renumber sibling handles.
     A cross-area persistence gap must reach ARCHITECT,
-    while repeated unchanged answers must exhaust three repairs rather than approve or loop.
+    while repeated unchanged answers reach one unresolved-work question rather than approve or loop.
     """
     began = time.monotonic()
     for mode in ("adequate", "area", "area-records", "cross", "persistent"):
@@ -184,7 +182,7 @@ def review_journeys(root):
                 else:
                     units = plan.select(facts["Plan"], "unit")
                     assert len(units) == 1
-                    assert facts["Trace coverage"] and facts["Contracts"]
+                    assert facts["Proof map"] and facts["Contracts"]
             if mode != "adequate":
                 assert run.store.cursor().state == "REPAIR" and not run.store.cursor().B
                 assert initial["answer"]["gaps"][0]["area"] == (
@@ -192,13 +190,10 @@ def review_journeys(root):
                 run.close()
                 run = Run.reopen(slot / "product", provider, approve)
                 if mode == "persistent":
-                    # R15: three repair rounds route the remaining gap to B; the run never ends on a count.
-                    while run.store.cursor().state != "B":
-                        assert not run.store.cursor().decision
-                        run.step()
-                    shown = run.store.read(run.store.cursor().review)["answer"]["gaps"]
-                    assert run.store.cursor().repairs == 3 and shown[0]["area"] == "area-002"
-                    assert not run.store.records("outcome")
+                    run.run()
+                    waiting = run_state(str(run.project))["waitingFor"]
+                    assert waiting["gate"] == "REPAIR" and "area-002" in str(waiting["subject"])
+                    assert not run.store.cursor().B and not run.store.records("outcome")
                     continue
                 while run.store.cursor().state != "B":
                     run.step()

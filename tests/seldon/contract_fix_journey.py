@@ -13,7 +13,7 @@ from test_journey import finish, prepare
 
 
 def contract_fix_journey(slot, mode):
-    """Catch recovery charged to the consumer and stale provider briefs; old fixups never amend text.
+    """Catch stale provider briefs and lost agreed text through a useful correction.
 
     Pending catches needless provider rework; user catches a silent commitment change. The f01 twin
     exercises a real items HTTP response whose server date was unavailable under the old agreement.
@@ -102,12 +102,11 @@ server.serve_forever()
             assert 'accepted commitment' in shown['waitingFor']['subject']['recommendation']
             assert len(planner) == 1 and not run.store.records('contract_revision')
             assert run.store.cursor().revision == approved
-            assert run.store.unit('u002').recoveries == 0
             assert not run.store.records('unit_fixup') and not run.store.records('outcome')
             return
         # Re-enter EXECUTE after correction: B must still bind the unchanged commitments.
         run.step()
-        assert run.store.unit('u002').recoveries == 0
+        assert not run.store.cursor().decision
         finish(run)
         assert len(planner) == 1
         assert not run.store.records('unit_failure')

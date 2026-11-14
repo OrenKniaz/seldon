@@ -1,6 +1,6 @@
 """C18/C23; R7/R8/R9: recorded gaps reopen only their approved owning units."""
 
-from . import gitwork
+from . import gitwork, recovery
 from . import plan as planning
 from .states import advance
 
@@ -48,7 +48,7 @@ def active(store, ref):
     return None
 
 
-def handoff(store, ref, report, answer):
+def handoff(store, ref, report, answer, *, key=None, charged=False):
     """A blocked worker waits for a named DONE owner; repeated handoffs spend recovery."""
     if answer["outcome"] != "blocked" or not answer["discoveries"]:
         return False
@@ -59,11 +59,8 @@ def handoff(store, ref, report, answer):
         owners = planning.select(document, "unit")
         contracts = planning.select(document, "contract")
         contract_change = all(d["owner"] in contracts for d in answer["discoveries"])
-        repeated = any(b["unit"] == ref and b["disposition"] == "owner fixup"
-                       for _, _, b in store.records("discovery")) and not contract_change
         row = store.unit(ref)
-        if repeated and row.recoveries >= 2:
-            return False
+        key = key or recovery.lineage(store, ref)
         gaps = []
         for discovery in answer["discoveries"]:
             owner = discovery["owner"]
@@ -81,9 +78,8 @@ def handoff(store, ref, report, answer):
                                  "write the wave check, run unit checks, return done")
             gaps.append({"subject": owner, "kind": "blocked", "commit": cursor.candidate,
                          "units": [owner], "correction": discovery["correction"], "source": report})
-        if repeated:
-            store.record("unit_failure", {"unit": ref, "state": row.state, "failure": str(answer),
-                         "recovery": row.recoveries + 1, "exhausted": False})
+        if not charged:
+            recovery.failed(store, report, ref, key=key)
         for discovery in answer["discoveries"]:
             store.record("discovery", {"unit": ref, "report": report,
                                       "disposition": "owner fixup", **discovery})
@@ -94,29 +90,31 @@ def handoff(store, ref, report, answer):
                 waitingFor=list(dict.fromkeys(r for g in gaps for r in g["units"])),
                 report=None, callFolder=None, callAttempt=None, worktree=None,
                 T=None, P=None, observations=[], judgment=None,
-                recoveries=row.recoveries + int(repeated))
-        apply(store, gaps)
+                lineage=key)
+        apply(store, gaps, key=key, charged=True)
     return True
 
 
-def apply(store, gaps):
+def apply(store, gaps, *, key=None, charged=False):
     """Atomically admit local rework; filesystem preparation happens in the resumable unit loop."""
     assignments = plan(store, gaps)
     if not assignments:
         return []
     with store.transaction():
-        refs = []
+        refs, seen = [], set()
         for ref, assignment in assignments.items():
             cause = store.record("unit_fixup", assignment)
             refs.append(cause)
             failure = "\n".join(g["correction"] for g in assignment["gaps"])
-            # A new life preserves the session, but not the previous life's recovery count or receipts.
-            advance(store, "recover", cause, unit=ref, base=assignment["base"], worktree=None,
-                    callFolder=None, callAttempt=None, recoveries=0, failure=failure, report=None,
-                    T=None, P=None, observations=[], judgment=None)
+            gap = assignment["gaps"][0]
+            acceptance = "check" if gap["kind"] == "check" else store.cursor().state.split("-")[0]
+            origin = key or "gap:" + acceptance + ":" + gap["subject"]
+            recovery.recover(store, ref, failure, key=origin, cause=cause, charged=charged or origin in seen,
+                             base=assignment["base"], worktree=None, callFolder=None, callAttempt=None)
+            seen.add(origin)
         cursor = store.cursor()
         if cursor.state != "EXECUTE":
             event = "rework" if cursor.state == "WAVE-VERIFY" else "gap"
             advance(store, event, refs, pendingJudge=None, finalCommit=None, finalObservations=[],
-                    productVerdict=None, checkin=None, decision=None)
+                    productVerdict=None, checkin=None)
     return refs

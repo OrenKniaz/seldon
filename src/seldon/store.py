@@ -19,6 +19,7 @@ def encode(value):
 
 @dataclass(frozen=True)
 class RunRow:
+    lineage: str = ""
     state: str = "NEW"
     kickoff: str = ""
     scratch: str = ""
@@ -46,6 +47,7 @@ class RunRow:
 
 @dataclass(frozen=True)
 class UnitRow:
+    lineage: str = ""
     state: str = "NEW"
     base: str | None = None
     worktree: str | None = None
@@ -92,6 +94,7 @@ def checked(value, model):
 
 def decoded(body, model):
     value = json.loads(body)
+    value.setdefault("lineage", "")
     if model is UnitRow:
         value.setdefault("waitingFor", [])  # Runs saved before owner handoffs have no dynamic wait.
     if set(value) != {f.name for f in fields(model)}:
@@ -117,6 +120,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS record
                 (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS unit (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS recovery (id TEXT PRIMARY KEY, body TEXT NOT NULL);
         """)
 
     @property
@@ -149,6 +153,16 @@ class Store:
     def units(self):
         return {ref: decoded(body, UnitRow) for ref, body in
                 self.db.execute("SELECT id,body FROM unit ORDER BY rowid")}
+
+    def recovery(self, ref, value=None):
+        if value is not None:
+            self.db.execute("INSERT INTO recovery VALUES (?,?) "
+                            "ON CONFLICT(id) DO UPDATE SET body=excluded.body",
+                            (ref, encode(value)))
+        row = self.db.execute("SELECT body FROM recovery WHERE id=?", (ref,)).fetchone()
+        state = json.loads(row[0]) if row else {}
+        return state if state and not state.get("resolved") else dict(
+            rounds=0, stage=0, question=None, answer=None, attempts=[], seen=[])
 
     def unit(self, ref, value=None):
         if value is not None:
@@ -195,7 +209,7 @@ class Store:
                     cursor = self.cursor()
                     self.record("contract_change", {"revision": row.lastrowid, "parent": parent,
                                                     "consumers": sorted(affected)})
-                    for ref in affected:
+                    for ref in affected - {"guide"}:  # guide_written is independent of contract text.
                         self.unit(ref, replace(self.unit(ref), judgment=None))
                     fields = {}
                     for field in ("requirementVerdicts", "qualityVerdicts"):

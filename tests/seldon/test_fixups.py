@@ -20,23 +20,24 @@ def blocked_owner_journeys(root):
     """A real blocked WORK must reach its sibling owner; final-judge gaps never exercise WORK routing.
 
     The own-scope twin catches retrying a self-owned blocker instead of asking, which the sibling success cannot expose.
-    The missing-base twin catches reopening a DONE sibling for absent integration; guide repair
-    always starts with that sibling's files and cannot expose this false blocker.
+    The missing-base twin catches reopening a DONE sibling for absent integration; a declared file reader
+    starts with that sibling's files and cannot expose this false blocker.
     """
     for mode in ("sibling", "own", "repeated"):
         own_scope = mode == "own"
         slot = root / mode
-        run, provider = prepare(slot, "final-seed", 2)
+        run, provider = prepare(slot, "final-seed", 3)
 
         def scopes(answer):
             # The discovered check belongs to u001 through checkPaths, outside its explicit scope.
             answer["units"][0]["scope"] = ["unit-001/value.txt", "unit-001/interaction.txt"]
+            answer["units"][1].update(dependencies=[1], reads=["unit-001/interaction.txt"])
 
         provider.plan_fault = scopes
         native = slot / "native.py"
-        owner = "guide" if own_scope else "u001"
+        owner = "u002" if own_scope else "u001"
         correction = "Require a ready interaction in the value check and make the interaction ready."
-        blocked = ("if guide and " + ("True" if mode != "sibling" else
+        blocked = ("if name == 'unit-002' and " + ("True" if mode != "sibling" else
                    "Path('unit-001/interaction.txt').read_text() != 'ready'") + ":\n"
                    "    answer['answer'].update(outcome='blocked', discoveries=["
                    + repr({"owner": owner, "correction": correction}) + "])\n")
@@ -46,13 +47,12 @@ def blocked_owner_journeys(root):
         try:
             if mode != "sibling":
                 cursor = run.run()
-                assert cursor.decision and run.store.unit("guide").state == "ASKED"
-                assert run.store.unit("guide").recoveries == (0 if own_scope else 2)
-                assert len(run.store.records("unit_fixup")) == (0 if own_scope else 3)
+                assert cursor.decision
+                assert run.store.unit("u002" if own_scope else "u001").state == "ASKED"
+                assert len(run.store.records("unit_fixup")) == (0 if own_scope else 2)
             else:
                 finish(run)
-                assert run.store.unit("guide").recoveries == 0
-                assert not [b for _, _, b in run.store.records("unit_failure") if b["unit"] == "guide"]
+                assert not [b for _, _, b in run.store.records("unit_failure") if b["unit"] == "u002"]
                 assignments = [b for _, _, b in run.store.records("unit_fixup")]
                 assert [a["owner"] for a in assignments] == ["u001"]
                 assignment, = assignments
@@ -61,12 +61,12 @@ def blocked_owner_journeys(root):
                 assert assignment["gaps"][0]["correction"] == correction
                 assert run.store.read(assignment["gaps"][0]["source"])["answer"]["outcome"] == "blocked"
                 owner = run.store.unit("u001")
-                assert run.store.unit("guide").base == owner.integrated
+                assert run.store.unit("u002").base == owner.integrated
                 assert (run.project / "unit-001/interaction.txt").read_text() == "ready"
-                assert (slot / "turn-docs").read_text() == "2"
-            assert run.store.unit("u002").state == "DONE"
-            assert run.store.unit("u002").recoveries == 0
-            assert (slot / "turn-unit-002").read_text() == "1"
+                assert (slot / "turn-unit-002").read_text() == "2"
+            assert run.store.unit("u003").state == "DONE"
+            assert run.store.unit("u003").recoveries == 0
+            assert (slot / "turn-unit-003").read_text() == "1"
         finally:
             run.close()
 
@@ -149,7 +149,7 @@ def test_blocked_owner_journeys(tmp_path):
 
 
 def owner_repair_journeys(root):
-    """A real three-unit wave failure reopens its file owner, even after two earlier recoveries.
+    """A real three-unit wave failure reopens its file owner, after an earlier local recovery.
 
     The passing twin catches repair on coverage alone. The failing twin strengthens a local check
     and must prove it on P, then rerun the wave check at integration; local-only gaps miss x09.
@@ -169,13 +169,13 @@ def owner_repair_journeys(root):
         provider.plan_fault = wave
         native = slot / "native.py"
         injection = ("if not guide and name == 'unit-001':\n"
-                     f"    ready = turn > 3 or {not broken!r}\n"
+                     f"    ready = turn > 2 or {not broken!r}\n"
                      "    Path(name, 'interaction.txt').write_text('ready' if ready else 'blocked')\n"
                      "    Path(name, 'wave.py').write_text(\"from pathlib import Path\\n\"\n"
                      "        + \"assert all(Path(f'unit-{i:03}/value.txt').exists() for i in (1,2,3))\\n\"\n"
                      "        + \"assert Path('unit-001/interaction.txt').read_text() == 'ready'\\n\"\n"
                      "        + \"print('three values and ready interaction')\\n\")\n"
-                     "    if turn > 3:\n"
+                     "    if turn > 2:\n"
                      "        with Path(name, 'check.py').open('a') as check:\n"
                      "            check.write(\"assert Path('unit-001/interaction.txt').read_text() == 'ready'\\n\")\n")
         native.write_text(native.read_text("utf-8").replace(
@@ -188,7 +188,7 @@ def owner_repair_journeys(root):
             nonlocal rejected
             raw, thread = invoke(question, started)
             if (broken and question["kind"] == "JUDGE"
-                    and "unit-001/check.py" in question["facts"]["Check sources"] and rejected < 2):
+                    and "unit-001/check.py" in question["facts"]["Check sources"] and rejected < 1):
                 reply = json.loads(raw)
                 reply["answer"].update(verdict="gap", gaps=[{
                     "target": question["targets"][0], "correction": "Clarify the local interaction evidence"}])
@@ -202,12 +202,12 @@ def owner_repair_journeys(root):
                 assert not run.store.cursor().decision, run.store.records("unit_failure")
                 run.step()
             before = run.store.units()
-            assert before["u001"].recoveries == (2 if broken else 0)
+            assert before["u001"].recoveries == (1 if broken else 0)
             wave_ref, = plan.assigned(run.store.plan(run.store.cursor().revision))[None]
             run.step()
             if broken:
                 assert run.store.unit("u001").state == "REWORK"
-                assert run.store.unit("u001").recoveries == 0
+                assert not run.store.cursor().decision
                 for ref in ("u002", "u003", "guide"):
                     assert run.store.unit(ref) == before[ref]
                 assignment, = [b for _, _, b in run.store.records("unit_fixup")]
@@ -217,7 +217,7 @@ def owner_repair_journeys(root):
             else:
                 assert not run.store.records("unit_fixup")
             _, rows, after = finish(run)
-            assert after["u001"].recoveries == 0
+            assert after["u001"].state == "DONE"
             for ref in ("u002", "u003", "guide"):
                 assert after[ref] == before[ref]
             if broken:
@@ -230,7 +230,7 @@ def owner_repair_journeys(root):
                            for q in judged for o in q["facts"]["Observations"])
                 assert any(b["check"] == wave_ref and b["purpose"] == "integrated"
                            and b["exitCode"] == 0 for _, k, b in rows if k == "observation")
-                assert (slot / "turn-unit-001").read_text() == "4"
+                assert (slot / "turn-unit-001").read_text() == "3"
         finally:
             run.close()
 
@@ -370,7 +370,7 @@ def test_fixup_exhaustion_blocks_done_dependants(seed, tmp_path):
         cursor = run.run()
         assert cursor.decision and run.store.unit("u001").state == "ASKED"
         assert run.store.unit("u002") == before and not run.store.records("outcome")
-        assert "guide" in run_state(str(run.project))["waitingFor"]["subject"]["affects"]
+        assert "guide" not in run_state(str(run.project))["waitingFor"]["subject"]["affects"]
     finally:
         run.close()
 

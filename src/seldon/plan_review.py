@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import architecture, detail, inference, plan, questions
+from . import architecture, detail, inference, plan, questions, recovery
 from .states import advance
 
 
@@ -12,7 +12,6 @@ def briefs(document, words):
     units = {r: u for r, u in plan.select(document, "unit").items() if r != "guide"}
     agreements = dict(zip((c["handle"] for c in outline["contracts"]),
                           plan.select(document, "contract").values(), strict=True))
-    coverage = plan.coverage(document)
     writers = plan.owners(document)
     areas = dict(zip(plan.select(document, "area"), outline["areas"], strict=True))
     result = {}
@@ -21,11 +20,6 @@ def briefs(document, words):
         requirements = {r for u in owned.values() for r in u["requirements"]}
         features = {f for r in requirements for f in document["nodes"][r]["body"]["features"]}
         checks = {r for r, w in writers.items() if w in owned}
-
-        def links(refs):
-            return {"checks": [r for r in refs if r in checks], "provenElsewhere": [
-                {"area": areas[units[writers[r]]["area"]]["handle"],
-                 "purpose": document["nodes"][r]["body"]["purpose"]} for r in refs if r not in checks]}
         refs = set(owned) | requirements | features | checks
         refs.update(r for r, o in plan.select(document, "obligation").items() if o["owner"] in owned)
         nodes = {r: n for r, n in document["nodes"].items() if r in refs}
@@ -40,15 +34,14 @@ def briefs(document, words):
                 "integrates": [c["handle"] for c in contracts if removed.intersection(
                     units[agreements[c["handle"]]["provider"]]["requirements"])]}}
         for r, c in plan.select(document, "criterion").items():
-            nodes[r] = {"kind": "criterion", "body": {**c, **links(c["checks"])}}
-        trace = {r: {**links(row["checks"]), "units": [u for u in row["units"] if u in owned]}
-                 for r, row in coverage.items() if r in requirements or r.startswith("quality:")}
+            nodes[r] = {"kind": "criterion", "body": {k: v for k, v in c.items() if k != "checks"}}
         result[area["handle"]] = questions.build("REVIEW", {
             "Review subject": area["handle"], "Approved vision": vision, "Area": area,
             "User's words": words,
             "Wave goal": outline["waves"][0]["goal"], "Contracts": contracts,
             "Decisions": [d for d in outline["decisions"] if set(d["areas"]) & set(participants)],
-            "Plan": {"nodes": nodes}, "Trace coverage": trace})
+            "Plan": {"nodes": nodes}, "Proof map": plan.proof_map(
+                document, [*sorted(requirements), *plan.select(document, "criterion")])})
     return result
 
 
@@ -119,7 +112,7 @@ def arch_review(store, provider):
     answer = store.read(ref)["answer"]
     if answer["verdict"] == "gap":
         detail.gap(store, {"architecture": [{"error": g["correction"], "target": g["target"],
-                                            "otherSide": {}} for g in answer["gaps"]]})
+                                            "otherSide": {}} for g in answer["gaps"]]}, ref)
     else:
         advance(store, "reviewed-details" if "areaDetails" in document else "reviewed", ref)
 
@@ -135,7 +128,7 @@ def step(store, provider, capacity):
             # Canonical DETAIL records survive global handle renumbering when another area grows.
             basis = {"detail": document["areaDetails"][subject],
                      "facts": {k: v for k, v in question["facts"].items()
-                               if k not in ("Plan", "Trace coverage")}}
+                               if k not in ("Plan", "Proof map")}}
             return review(store, provider, question, basis)
         finally:
             store.close()
@@ -154,7 +147,7 @@ def step(store, provider, capacity):
         result = store.record("plan_review", {"revision": cursor.revision, "subjects": refs,
             "answer": {"verdict": verdict, "gaps": gaps}, "notJudged": not_judged,
             "reviewTier": "partial review: not judged" if not_judged else "same-provider review"})
-        advance(store, "gap" if gaps and cursor.repairs < 3 else "reviewed", result,
+        advance(store, "gap" if gaps else "reviewed", result,
                 review=result, failure=str(gaps))
 
 
@@ -169,7 +162,7 @@ def repair(store):
         words = store.read(cursor.requestedChange)["words"]
         corrections = {a["handle"]: [{"error": words, "otherSide": {}}]
                        for a in store.plan(cursor.revision)["architecture"]["areas"]}
-    with store.transaction():
-        ref = store.record("review_repair", {"revision": cursor.revision, "review": cursor.review,
-                                            "corrections": corrections})
-        advance(store, "area-gap", ref, repairs=cursor.repairs + 1, decision=None, requestedChange=None)
+    ref = store.record("review_repair", {"revision": cursor.revision, "review": cursor.review,
+                                        "corrections": corrections})
+    recovery.planning(store, ref, corrections, "area-gap", repairs=cursor.repairs + 1,
+                      decision=None, requestedChange=None)

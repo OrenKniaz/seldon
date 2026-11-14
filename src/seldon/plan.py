@@ -8,13 +8,11 @@ from .schema import BODIES, PLAN, VISION
 from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
-GUIDE_WORK = ("Write the try-it guide for the integrated product. Give exact steps, the expected results "
-              "and the user's real interaction. Link local paths relative to the guide file; URLs are links. "
-              "Include one terminating walkthrough in an argv fence (JSON string array), run from the "
-              "product root: read this guide's examples, create its sample fixtures, execute its documented "
-              "operations, start its service command if needed, wait for readiness, exercise the interaction "
-              "and clean up in finally. Keep sequential state inside that check and retain browser evidence "
-              "in SELDON_EVIDENCE_DIR for UI interactions. Other fences are human examples, not checks.")
+GUIDE_WORK = ("Write the walkthrough from contracts; reference belongs in README. Link guide-relative "
+              "paths. One argv fence (JSON string array) runs from the product root: read examples, create "
+              "fixtures, run documented commands and services, wait for readiness, check expected results "
+              "and clean up in finally. Save UI evidence in SELDON_EVIDENCE_DIR; other fences are prose. "
+              "Seldon proves the walkthrough on the integrated product at WAVE-VERIFY.")
 
 
 def safe_path(value):
@@ -125,6 +123,12 @@ def coverage(document):
     return {r: {"checks": list(checks), "units": list(traced_units(document, checks))}
             for r in {**select(document, "requirement"), **select(document, "criterion")}
             for checks in [traced_checks(document, r)]}
+
+
+def proof_map(document, subjects):
+    writers = owners(document)
+    return {r: [{"check": c, "level": check["level"], "owner": writers[c], "purpose": check["purpose"]}
+                for c, check in traced_checks(document, r).items()] for r in subjects}
 
 
 def create(vision, answer):
@@ -419,15 +423,17 @@ def prerequisites(document, ref):
 
 
 def add_guide(document):
-    # Scheduling creates the unit; its worker writes the user-facing instructions.
     from copy import deepcopy
     result = deepcopy(document)
     area = next(iter(select(result, "area")))
     result["nodes"][area]["body"]["scope"].append(GUIDE_PATH)
+    consumed = [r for r, c in select(result, "contract").items()
+                if select(result, "unit")[c["provider"]]["area"] != area]
+    for ref in consumed:
+        result["nodes"][ref]["body"]["consumers"].append("guide")
     result["nodes"]["guide"] = {"kind": "unit", "body": {
         "scope": [GUIDE_PATH], "checkPaths": [GUIDE_PATH], "requirements": [],
-        "area": area, "provides": [], "consumes": [], "reads": [],
-        "dependencies": list(select(document, "unit")),
+        "area": area, "provides": [], "consumes": consumed, "reads": [], "dependencies": [],
         "instructions": GUIDE_WORK}}
     return result
 

@@ -117,7 +117,7 @@ def answer_schema(kind, targets=(), owners=()):
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
         "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT,
-                    discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
+                    discoveries=array(obj(owner=TEXT, correction=TEXT))),
         "CONTRACT": obj(verdict=choice("corrected"), changes=array(
             obj(contract=choice(*targets), text=TEXT), 1), decision=TEXT),
         "JUDGE": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),

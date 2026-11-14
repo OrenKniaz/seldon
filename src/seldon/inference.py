@@ -46,15 +46,19 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                 store.record("provider_failure", {"attempt": attempt, "reason": str(error),
                     "transient": error.transient, "cleanupVerified": error.cleanup_verified,
                     "receipt": error.receipt})
-                if (isinstance(error, (Deadline, ResumeUnavailable)) or not error.transient
-                        or not error.cleanup_verified or recovery == 2):
+                if (isinstance(error, ResumeUnavailable) or not error.transient
+                        or not error.cleanup_verified or unit and isinstance(error, Deadline)):
                     raise
+                if recovery == 2:
+                    raise RuntimeError(f"{error}; receipt: {error.receipt}") from error
                 previous = attempt
 
     def recorded(body):
         return store.record("provider_reply", {"attempt": attempt, "finishedAt": time.time(), **body})
 
     def validate(answer):
+        if kind == "WORK":
+            questions.validate_discoveries(store.plan(store.cursor().revision), answer)
         if kind in ("JUDGE", "DEMO", "PRODUCT"):
             if sorted(a["target"] for a in answer["assessments"]) != sorted(question["targets"]):
                 raise ValueError("Assess the exact requested subjects, each once")

@@ -54,8 +54,19 @@ def advance(store, event, cause, unit=None, **updates):
             raise ValueError("State is owned by the transition table")
         value = replace(row, state=target, **updates)
         if unit:
+            if event == "integrated" and row.lineage == "unit:" + unit:
+                history = store.recovery(row.lineage)
+                history["resolved"] = cause
+                store.recovery(row.lineage, history)
             store.unit(unit, value)
         else:
+            if event == "passed" or event == "satisfied" or event == "approve" and row.state == "B":
+                prefix = ("gap:check:" if event == "passed" else
+                          "gap:" + row.state.split("-")[0] + ":" if event == "satisfied" else "planning:")
+                for key, in store.db.execute("SELECT id FROM recovery WHERE id LIKE ?", (prefix + "%",)):
+                    history = store.recovery(key)
+                    history["resolved"] = cause
+                    store.recovery(key, history)
             store.cursor(value)
         store.record("transition", {"unit": unit, "input": row.state, "event": event,
                                     "next": target, "cause": cause})

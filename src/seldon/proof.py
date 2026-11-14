@@ -19,7 +19,7 @@ class UncertainCleanup(RuntimeError):
 
 def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
     observations = []
-    walkthrough = unit == "guide" and purpose in ("P", "final")
+    walkthrough = unit == "guide" and purpose in ("wave-start", "final")
     if not declarations and not walkthrough:
         return observations
     setup = store.read(store.cursor().kickoff)["setup"]
@@ -134,7 +134,7 @@ def prove(store, ref, contract, checks):
         document = store.plan(store.cursor().revision)
         baseline.update({r: c for r, c in plan.assigned(document)[None].items()
                          if plan.owner(document, r) == ref})
-        if baseline:
+        if baseline or ref == "guide":
             # Remove product only; keep every unit's check machinery as it stands at T (T-104).
             mechanics = [p for u in plan.select(document, "unit").values() for p in u["checkPaths"]]
             start = gitwork.check_commit(root, store.cursor().waveStart, unit.T,

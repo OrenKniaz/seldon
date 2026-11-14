@@ -90,7 +90,7 @@ def planned(count, mode):
         unit.update(area="new:area", provides=[], consumes=[], reads=[])
     if mode == "wave-start":
         scopes[1]["reads"] = ["unit-001/value.txt"]
-    if mode.startswith("kill") or mode == "exhaust":
+    if mode.startswith("kill") or mode in ("exhaust", "final-rework"):
         scopes[1]["reads"] = ["unit-001/value.txt"]
     if mode == "parallel":
         scopes[3]["reads"] = [f"unit-{i:03}/value.txt" for i in (1, 2, 3)]
@@ -151,7 +151,7 @@ print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 with (slot / ("launch-" + name + ".jsonl")).open("a") as log:
     log.write(json.dumps({"turn": turn, "thread": thread, "resumed": "resume" in args,
                           "start": time.time(), "facts": facts}) + "\n")
-if name == "unit-001" and mode == "timeout" and not any((slot / "calls").glob("*/result.json")):
+if name == "unit-001" and mode == "timeout" and turn == 1:
     # Real Codex start-up noise (f01 T-132): stderr denial words must not make a timeout final.
     sys.stderr.write("codex_skills_extension: failed to install system skills: "
                      "Access is denied. (os error 5)\n")
@@ -201,7 +201,7 @@ else:
     number = int(name.split("-")[1])
     Path(name).mkdir(exist_ok=True)
     value = f"value-{number:03}"
-    if number == 2 and (mode.startswith('kill') or mode == 'exhaust'):
+    if number == 2 and (mode.startswith('kill') or mode in ('exhaust', 'final-rework')):
         assert Path('unit-001/value.txt').read_text() == 'value-001'
     if mode == "scale50" and number == 49:
         # The feedback contract's text is usable while its provider's implementation is absent.
@@ -327,9 +327,10 @@ else:
             pass  # The deliberate deadline fault remains for Seldon's independent observer to reject.
 answer = {"answer":{"outcome":"done","summary":"Wrote product and checks and ran them",
                     "discoveries":[],"why":"The scoped delivery is ready for independent proof"}}
-if ((mode == "schema-fix" and name == "unit-001"
-     or mode == "kill-invalid" and name == "unit-002") and turn == 1):
+if mode == "schema-fix" and name == "unit-001" and turn == 1:
     answer = json.loads((slot / "recorded-work.json").read_text("utf-8"))
+if mode == "kill-invalid" and name == "unit-002" and turn == 1:
+    answer["answer"]["discoveries"] = [{"owner":"n001", "correction":"A feature is not a work owner"}]
 if mode == "kill-blocked" and name == "unit-002" and turn == 1:
     answer["answer"]["outcome"] = "blocked"
     answer["answer"]["discoveries"] = [{"owner":"u002", "correction":"Need another worker turn"}]
@@ -350,7 +351,7 @@ class Scripted:
         self.native = Codex(self.slot / "calls", self.setup)
 
     def timeout_for(self, kind, context):
-        if kind == "WORK" and self.mode == "timeout" and not any((self.slot / "calls").glob("*/result.json")):
+        if kind == "WORK" and self.mode == "timeout" and not (self.slot / "turn-unit-001").exists():
             return 3  # above process bootstrap (~0.3-1 s), so the deadline, not startup, ends the call
         return 30
 
@@ -407,8 +408,8 @@ class Scripted:
         elif kind == "REVIEW":
             answer = {"verdict": "adequate", "gaps": []}
             if self.mode == "review-repair" and q["facts"]["Review subject"] != "architecture":
-                coverage = q["facts"]["Trace coverage"]["quality:002"]
-                if set(coverage["units"]) != {"u001", "u002"}:
+                coverage = q["facts"]["Proof map"]["quality:002"]
+                if {c["owner"] for c in coverage} != {"u001", "u002"}:
                     answer = {"verdict": "gap", "gaps": [{"target": "quality:002",
                         "correction": "The criterion names both value files but its trace reaches only "
                                       "unit-001; trace the checks of both owners"}]}
@@ -527,7 +528,6 @@ class Scripted:
                     assert {o["purpose"] for o in observations} == {"T", "P"}
                     assert len(q["images"]) == 2
                     assert all(Path(p).read_bytes().startswith(b"\x89PNG") for p in q["images"])
-                assert "other units' files" in q["facts"]["Checkout coverage"].lower()
                 sources = q["facts"]["Check sources"]
                 assert sources, "Judge needs actual check sources"
                 # Every unit judgment, rework included, sees its own whole product source at P (T-86).
@@ -677,13 +677,13 @@ def records_and_skeleton_journey(slot):
         assert retained in run.store.cursor().requirementVerdicts
         assert after["u001"].judgment == before["u001"].judgment
         assert all(after[u].judgment != before[u].judgment for u in ("u002", "u003"))
-        assert all(after[u].P == before[u].P and after[u].recoveries == 0 for u in before)
+        assert all(after[u].P == before[u].P for u in before)
         cursor, rows, _ = finish(run)
         changed = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
                    and "Its slot is named content." in encode(b["facts"])]
         assert len(changed) == 2
         assert not obligations.remaining(run.store)
-        assert run.store.unit("guide").recoveries == 0
+        assert run.store.unit("guide").state == "DONE"
         assert cursor.candidate != candidate_before
         final = [run.store.read(r) for r in cursor.finalObservations]
         assert {b["check"] for b in final} == checks_before
@@ -704,7 +704,7 @@ def records_and_skeleton_journey(slot):
         run.close()
 
 
-def prepare(slot, mode, count, capacity=6):
+def prepare(slot, mode, count, capacity=6, worker_first_effort=None):
     slot.mkdir(parents=True)
     (slot / "mode").write_text(mode)
     (slot / "native.py").write_text(NATIVE, encoding="utf-8")
@@ -714,6 +714,8 @@ def prepare(slot, mode, count, capacity=6):
     # Its removed fields must receive exact schema corrections, not fabricated compatibility credit.
     shutil.copyfile(Path(__file__).with_name("recorded_work.json"), slot / "recorded-work.json")
     provider = Scripted(slot, mode, count)
+    if worker_first_effort:
+        provider.setup["providers"]["worker_first_effort"] = worker_first_effort
     if mode == "check-deadline":
         provider.setup["providers"]["check"]["timeout"] = 2
     decisions = set()
@@ -809,7 +811,7 @@ def test_asked_unit_journey(tmp_path, count):
         assert cursor.state == "EXECUTE" and value["status"] == "WAITING", value
         waiting = value["waitingFor"]
         assert waiting["gate"] == "UNIT" and waiting["subject"]["unit"] == "u002"
-        assert len(waiting["subject"]["tried"]) == 3
+        assert len(waiting["subject"]["tried"]) == 2
         assert all("AssertionError: items route never passed" in text for text in waiting["subject"]["tried"])
         assert not run.store.records("outcome")
         rows = run.store.units()
@@ -817,9 +819,10 @@ def test_asked_unit_journey(tmp_path, count):
         if count == 4:
             assert rows["u001"].state == rows["u004"].state == "DONE"
             assert rows["u003"].state == "WAITING" and "u002" in rows["u003"].waiting
-            assert {"u003", "guide"} <= set(waiting["subject"]["affects"])
+            assert "u003" in waiting["subject"]["affects"]
+            assert rows["guide"].state == "DONE" and "guide" not in waiting["subject"]["affects"]
         else:
-            assert sum(u.state == "DONE" for u in rows.values()) == 49
+            assert sum(u.state == "DONE" for u in rows.values()) == 50
         run.close()
         run = Run.reopen(slot / "product", provider, approve)
         before = run.store.records()
@@ -845,29 +848,111 @@ def test_asked_unit_journey(tmp_path, count):
         run.close()
 
 
+def ask_now_journey(slot, answer):
+    """An unresolved unit asks before its two working siblings finish and resumes in this wave.
+
+    Older ASKED journeys inspect only the drained wave, missing a question delayed by siblings.
+    The dev-answer twin catches bypassing the scripted non-gate guard while draining useful work.
+    """
+    from threading import Event
+
+    run, provider = prepare(slot, "ask-now", 3, capacity=3)
+    working = [Event(), Event()]
+    resume = Event()
+    direction = "Try the same delivery again with the agreed value"
+    native = slot / "native.py"
+    native.write_text(native.read_text("utf-8").replace(
+        'print(json.dumps({"type":"item.completed"',
+        'if name == "unit-001" and turn == 1:\n'
+        '    answer["answer"].update(outcome="blocked", discoveries=[\n'
+        '        {"owner": "u001", "correction": "Need the owner to clarify delivery"}])\n'
+        'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
+    directed_provider(provider)
+    invoke = provider.invoke
+
+    def deliver(question, started):
+        if question["kind"] == "WORK" and "Guide path" not in question["facts"]:
+            scope = question["facts"]["Write scope"]
+            if scope == ["unit-001/**"]:
+                for event in working:
+                    if not event.wait(30):
+                        raise RuntimeError("Journey siblings never started")
+                if "User direction" in question["facts"].get("Exact failure", ""):
+                    resume.set()
+            else:
+                working[0 if scope == ["unit-002/**"] else 1].set()
+                if not resume.wait(30):
+                    raise RuntimeError("Journey owner question never resumed useful work")
+        return invoke(question, started)
+
+    provider.invoke = deliver
+    shown = []
+
+    def user(request):
+        if request["gate"] != "UNIT":
+            return approve(request)
+        value = run_state(str(run.project))
+        assert value["waitingFor"]["request"] == request["request"]
+        assert value["waitingFor"]["subject"]["unit"] == "u001"
+        assert all(value["units"][ref]["state"] == "WORKING" for ref in ("u002", "u003"))
+        shown.append(value["waitingFor"])
+        if answer == "direction":
+            return direction
+        resume.set()
+        return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
+
+    run.user = user
+    try:
+        if answer == "direction":
+            finish(run)
+            assert (slot / "turn-unit-001").read_text() == "2"
+            assert all((slot / f"turn-unit-{i:03}").read_text() == "1" for i in (2, 3))
+        else:
+            cursor = run.run()
+            value = run_state(str(run.project))
+            assert cursor.state == "EXECUTE" and value["status"] == "WAITING"
+            assert value["waitingFor"] == shown[0]
+            assert run.store.unit("u001").state == "ASKED"
+            assert all(run.store.unit(ref).state == "DONE" for ref in ("u002", "u003"))
+            assert not run.store.records("outcome")
+        assert len(shown) == 1
+    finally:
+        resume.set()
+        run.close()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("answer", ["direction", "dev"])
+def test_ask_now_journey(tmp_path, answer):
+    """Protect immediate in-wave questions and scripted-user WAITING; drain-only tests miss latency."""
+    ask_now_journey(tmp_path / "ask-now", answer)
+
+
 @pytest.mark.fast
 @pytest.mark.parametrize("mixed", [False, True])
 def test_blocked_discovery_ask_twin(tmp_path, mixed):
-    """A blocked reporter routes both foreign discoveries to the DONE owner and reaches C.
+    """A declared file reader routes both foreign discoveries to the DONE owner and reaches C.
 
     Ordinary proof failures cannot catch treating a worker's foreign discovery as its own failure;
     two discoveries catch a path that silently routes only the first correction.
     """
     run, provider = prepare(tmp_path / "handoff", "ask", 2)
+    provider.plan_fault = lambda answer: answer["units"][1].update(
+        dependencies=[1], reads=["unit-001/value.txt"])
     native = provider.slot / "native.py"
     native.write_text(native.read_text("utf-8").replace(
         'print(json.dumps({"type":"item.completed"',
-        'if guide and turn == 1:\n'
+        'if name == "unit-002" and turn == 1:\n'
         '    answer["answer"].update(outcome="blocked", discoveries=[\n'
         '        {"owner": "u001", "correction": "Clarify the persisted value interaction"},\n'
         '        {"owner": "u001", "correction": "Keep the exact stored value"}])\n'
-        + ('if guide and turn == 1:\n    answer["answer"]["discoveries"].append('
-           + repr({"owner": "guide", "correction": "Clarify my walkthrough"}) + ')\n' if mixed else '')
+        + ('if name == "unit-002" and turn == 1:\n    answer["answer"]["discoveries"].append('
+           + repr({"owner": "u002", "correction": "Clarify my value check"}) + ')\n' if mixed else '')
         + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
     try:
         if mixed:
             assert run.run().decision
-            assert run.store.unit("guide").state == "ASKED"
+            assert run.store.unit("u002").state == "ASKED"
             run.user = lambda item: "try again" if item["gate"] == "UNIT" else approve(item)
             directed_provider(provider)
         finish(run)
@@ -875,7 +960,6 @@ def test_blocked_discovery_ask_twin(tmp_path, mixed):
         assert len(assignments) == 1 and assignments[0]["owner"] == "u001"
         assert len(assignments[0]["gaps"]) == 2
         assert run.store.unit("guide").state == "DONE"
-        assert run.store.unit("guide").recoveries == 0
         assert not [b for _, _, b in run.store.records("unit_failure") if b["unit"] == "guide"]
     finally:
         run.close()
@@ -888,22 +972,26 @@ def admission_journey(slot):
     occupied = slot / "occupied"
     occupied.write_text("This path is a file; Git cannot create a worker directory here.")
     admit = gitwork.admit
+    admission = __import__("threading").Lock()
 
     def try_admit(project, scratch, base):
         if Path(project) != run.project:
             return admit(project, scratch, base)
-        target = occupied if occupied.exists() else scratch
-        try:
-            return admit(project, target, base)
-        finally:
-            occupied.unlink(missing_ok=True)
+        with admission:
+            target = occupied if occupied.exists() else scratch
+            try:
+                return admit(project, target, base)
+            finally:
+                occupied.unlink(missing_ok=True)
 
     try:
         with patch.object(gitwork, "admit", try_admit):
             _, rows, units = finish(run)
         failures = [b for _, kind, b in rows if kind == "unit_failure"]
         assert len(failures) == 1 and failures[0]["state"] == "READY"
-        assert "occupied" in failures[0]["failure"] and units["u001"].recoveries == 1
+        failed = failures[0]["unit"]
+        assert "occupied" in failures[0]["failure"] and units[failed].recoveries == 1
+        assert all(row.recoveries == 0 for ref, row in units.items() if ref != failed)
     finally:
         run.close()
 
@@ -941,7 +1029,7 @@ def stale_scope_journey(slot):
     try:
         with patch.object(gitwork, "integrated", lost_assertion):
             _, rows, units = finish(run)
-        assert units["u001"].recoveries == 0 and units["u002"].recoveries == 0
+        assert units["u002"].state == "DONE"
         judgments = [b for _, k, b in rows if k == "question" and b["kind"] == "JUDGE"
                      and b["targets"] == ["n002", *questions.SOURCE_TARGETS]]
         assert len(judgments) == 3
@@ -1007,39 +1095,41 @@ def copy_final(seed, slot, mode):
 def simple_journey(slot, mode, count=1, *, seed=None):
     run, provider = copy_final(seed, slot, mode) if seed else prepare(slot, mode, count)
     try:
-        if mode in ("judge-provider", "native-denied"):
+        if mode == "native-denied":
             def usage_back(seconds):
                 assert run.store.cursor().state == "EXECUTE"
                 assert run.store.cursor().failure
                 assert not run.store.records("unit_failure")
                 assert run.store.units()["u001"].recoveries == 0
-                assert run.store.units()["u001"].state == (
-                    "JUDGING" if mode == "judge-provider" else "WORKING")
+                assert run.store.units()["u001"].state == "WORKING"
                 failures = run.store.records("provider_failure")
-                assert len(failures) == (3 if mode == "judge-provider" else 1)
-                if mode == "native-denied":
-                    assert failures[0][2]["transient"] is False
-                    assert "Access is denied" in run.store.cursor().failure
+                assert len(failures) == 1 and failures[0][2]["transient"] is False
+                assert "Access is denied" in run.store.cursor().failure
                 provider.mode = "pause"
                 (slot / "mode").write_text("pause")
 
             assert run.run(wait=usage_back).state == "SCRIPTED_C"
             assert not run.store.cursor().failure
             assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
-            assert (slot / "turn-unit-001").read_text() == ("1" if mode == "judge-provider" else "2")
+            assert (slot / "turn-unit-001").read_text() == "2"
             assert (slot / "turn-unit-002").read_text() == "1"
             return
-        if mode == "check-deadline":
-            cursor = run.run()
+        if mode in ("check-deadline", "judge-provider"):
+            cursor = run.run(wait=lambda _: pytest.fail("Own failures must recover, never pause"))
             units = run.store.units()
             assert run_state(str(run.project))["status"] == "WAITING"
             assert units["u001"].state == "ASKED"
-            assert units["u001"].recoveries == (2 if mode == "check-deadline" else 0)
+            assert units["u001"].recoveries == 2
             assert units["u002"].state == "DONE"
-            assert (slot / "turn-unit-001").read_text() == ("3" if mode == "check-deadline" else "1")
+            assert (slot / "turn-unit-001").read_text() == "2"
             assert not run.store.records("outcome")
-            assert any(b["unit"] == "u001" and b["timedOut"] and b["executionStarted"]
-                       and b["cleanupVerified"] for _, _, b in run.store.records("observation"))
+            if mode == "check-deadline":
+                assert any(b["unit"] == "u001" and b["timedOut"] and b["executionStarted"]
+                           and b["cleanupVerified"] for _, _, b in run.store.records("observation"))
+            else:
+                request = run.store.read(cursor.decision)
+                assert request["gate"] == "UNIT" and request["subject"]["unit"] == "u001"
+                assert "Judge transport unavailable" in "\n".join(request["subject"]["tried"])
             before = run.store.records()
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
@@ -1059,11 +1149,11 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             assert not run.store.records("outcome")
             rows = run.store.units()
             assert rows["u001"].state == "ASKED" and rows["u001"].recoveries == 2
-            assert rows["u002"].state == "WAITING" and rows["guide"].state == "WAITING"
+            assert rows["u002"].state == "WAITING" and rows["guide"].state == "DONE"
             assert rows["u003"].state == rows["u004"].state == "DONE"
             subject = run_state(str(run.project))["waitingFor"]["subject"]
             assert subject["unit"] == "u001" and "u002" in subject["affects"]
-            assert (slot / "turn-unit-001").read_text() == "3"
+            assert (slot / "turn-unit-001").read_text() == "2"
             assert any("does not demonstrate the requirement" in text for text in subject["tried"])
             return
         if mode in ("demo-uncertain", "product-uncertain"):
@@ -1116,7 +1206,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             failure = failures[0][2]
             assert failure["cleanupVerified"] and "timed out" in failure["reason"]
         if mode in ("scope", "fresh", "false-red", "skipped", "final-rework"):
-            assert units["u001"].recoveries == (0 if mode == "final-rework" else 1)
+            assert units["u001"].recoveries == 1
             assert (slot / "turn-unit-001").read_text() == "2"
             launches = [json.loads(line) for line in
                         (slot / "launch-unit-001.jsonl").read_text().splitlines()]
@@ -1176,7 +1266,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
         if mode in ("demo-gap", "product-gap", "demo-unresolved", "product-unresolved"):
             fixup, = run.store.records("unit_fixup")
             assert fixup[2]["owner"] == "u001"
-            assert units["u001"].recoveries == 0 and units["u002"].recoveries == 0
+            assert units["u002"].state == "DONE"
             assert (slot / "turn-unit-001").read_text() == "2"
             assert (slot / "turn-unit-002").read_text() == "1"
             assert (run.project / "unit-001/interaction.txt").read_text() == "ready"
@@ -1184,7 +1274,7 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 retries = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
                 assert len(retries) == 1
         if mode in ("guide-gap", "guide-command", "guide-path", "guide-format"):
-            assert units["guide"].recoveries == (1 if mode in ("guide-command", "guide-path") else 0)
+            assert units["guide"].recoveries == (0 if mode == "guide-format" else 1)
             assert units["u001"].recoveries == 0
             assert (slot / "turn-docs").read_text() == ("1" if mode == "guide-format" else "2")
             assert len([b for _, k, b in rows if k == "question" and b["kind"] == "FLOW"]) == count
@@ -1264,7 +1354,7 @@ def unavailable_run(slot, kind, message):
 
     def failing(question, started):
         selected = (question["kind"] == kind and
-                    (kind == "DETAIL" or kind == "WORK" and
+                    (kind not in ("WORK", "JUDGE") or kind == "WORK" and
                      question["facts"]["Write scope"] == ["unit-002/**"] or kind == "JUDGE" and
                      question["targets"] == ["n005", *questions.SOURCE_TARGETS]))
         if selected and not (slot / "usage-back").exists():
@@ -1275,14 +1365,15 @@ def unavailable_run(slot, kind, message):
     return run, provider
 
 
-def test_provider_pause_journey(tmp_path):
-    """Usage returning resumes WORK to C once, without recovery or replay of a finished sibling.
+@pytest.mark.parametrize("message", ["usage_limit_reached: usage back tomorrow",
+    "offline: connection refused", "service unavailable: provider down"], ids=["usage", "offline", "down"])
+def test_provider_pause_journey(tmp_path, message):
+    """Availability returning resumes WORK to C, without recovery or replay of a finished sibling.
 
     Successful calls miss provider outages wrongly becoming unit failures; synthetic state misses
     the native-event producer and durable session/patch consumer.
     """
     slot = tmp_path / "usage"
-    message = "usage_limit_reached: usage back tomorrow"
     run, _ = unavailable_run(slot, "WORK", message)
     paused = []
 
@@ -1292,13 +1383,13 @@ def test_provider_pause_journey(tmp_path):
         assert not run.store.records("unit_failure") and not run.store.records("outcome")
         assert all(u.recoveries == 0 for u in rows.values())
         assert rows["u001"].state == "DONE" and rows["u002"].state == "WORKING"
-        assert len(run.store.records("provider_failure")) == 1
         paused.append(rows["u001"])
-        (slot / "usage-back").touch()  # Injected wait: no sleeping.
+        if len(paused) == 12:
+            (slot / "usage-back").touch()  # Injected waits: no sleeping.
 
     try:
         assert run.run(wait=usage_back).state == "SCRIPTED_C"
-        assert len(paused) == 1 and run.store.units()["u001"] == paused[0]
+        assert len(paused) == 12 and run.store.units()["u001"] == paused[0]
         assert not run.store.cursor().failure and not run.store.records("unit_failure")
         assert all(u.state == "DONE" and u.recoveries == 0 for u in run.store.units().values())
         assert all((slot / ("turn-" + name)).read_text() == "1"
@@ -1307,25 +1398,60 @@ def test_provider_pause_journey(tmp_path):
         run.close()
 
 
-def test_provider_unknown_pause_journey(tmp_path):
-    """An unknown native DETAIL error retries twice then pauses, preserving the planning step.
+def test_provider_unknown_failure_journey(tmp_path):
+    """An unexplained native DETAIL failure reaches one question at that step.
 
-    Recognised usage faults miss the retry route; stderr denial noise catches classifiers reading
-    non-native diagnostics. Usage-return and restart journeys already prove continuation to C.
+    Usage faults miss exhausted own calls restarting forever; stderr denial noise catches
+    classifiers reading non-native diagnostics instead of the failed call's terminal event.
     """
     message = "unknown native transport error"
     run, _ = unavailable_run(tmp_path / "unknown", "DETAIL", message)
 
-    def paused(seconds):
-        raise SystemExit("pause observed")  # Stop this controller without a real backoff wait.
-
     try:
-        with pytest.raises(SystemExit, match="pause observed"):
-            run.run(wait=paused)
-        assert run.store.cursor().state == "DETAIL" and message in run.store.cursor().failure
-        failures = run.store.records("provider_failure")
-        assert len(failures) == 3 and all(b["transient"] for _, _, b in failures)
+        cursor = run.run(wait=lambda _: pytest.fail("Own call failure must reach a question"))
+        requests = run.store.records("decision_request")
+        assert cursor.state == "DETAIL" and len(requests) == 2  # A, then the failed step.
+        request = run.store.read(cursor.decision)
+        assert request["gate"] == "DETAIL" and request["subject"]["step"] == "DETAIL"
+        assert message in "\n".join(request["subject"]["tried"])
         assert not run.store.units() and not run.store.records("unit_failure")
+        assert not run.store.records("outcome")
+    finally:
+        run.close()
+
+
+@pytest.mark.parametrize("fault,kind,reason", [
+    ("malformed", "ARCHITECT", "exact-fix retries exhausted"),
+    ("missing", "DETAIL", "no completed terminal answer"),
+    ("deadline", "ARCHITECT", "Provider timed out"),
+])
+def test_provider_call_failure_journey(tmp_path, monkeypatch, fault, kind, reason):
+    """A permanently broken native answer asks once at its owning run step, never backs off.
+
+    The usage twin and successful retry journeys miss an outer loop that replenishes attempts
+    for malformed answers, absent terminal records or non-WORK deadlines.
+    """
+    from seldon import providers
+
+    slot = tmp_path / fault
+    run, _ = unavailable_run(slot, kind, "own call failed")
+    output = (encode({"type": "item.completed", "item": {"type": "agent_message", "text": "{}"}})
+              + "\n" + encode({"type": "turn.completed"})) if fault == "malformed" else ""
+    (slot / "unavailable.py").write_text("print(" + repr(output) + ")\n", encoding="utf-8")
+    execute = providers.execute
+
+    def deadline(*args, **kwargs):
+        return {**execute(*args, **kwargs), "timedOut": True}
+
+    if fault == "deadline":
+        monkeypatch.setattr(providers, "execute", deadline)
+    try:
+        cursor = run.run(wait=lambda _: pytest.fail("Own call failure must reach a question"))
+        request = run.store.read(cursor.decision)
+        assert cursor.state == kind and request["gate"] == kind
+        assert request["subject"]["step"] == kind
+        assert reason in "\n".join(request["subject"]["tried"])
+        assert [b["gate"] for _, _, b in run.store.records("decision_request")] == ["A", kind]
         assert not run.store.records("outcome")
     finally:
         run.close()
@@ -1345,7 +1471,8 @@ def test_provider_recovery_journey(tmp_path, monkeypatch):
 
     def deadline(*args, **kwargs):
         result = execute(*args, **kwargs)
-        if not faulted:
+        question = json.loads((kwargs["output_dir"] / "question.json").read_text("utf-8"))
+        if "Guide path" not in question["facts"] and not faulted:
             assert result["cleanupVerified"]
             faulted.append(True)
             return {**result, "timedOut": True}
@@ -1362,6 +1489,16 @@ def test_provider_recovery_journey(tmp_path, monkeypatch):
         assert launches[0]["thread"] == launches[1]["thread"]
     finally:
         run.close()
+
+
+@pytest.mark.parametrize("mode", ["judge-provider", "native-denied", "unit-uncertain", "fresh"])
+def test_provider_unit_route_journey(tmp_path, mode):
+    """Own JUDGE failure asks while outages pause, missing facts defer and resume loss recovers.
+
+    The planning fault twins miss unit-local routing, false judgment credit and fresh-session
+    fallback. Reuse the golden outcomes, including finished siblings and restart continuity.
+    """
+    simple_journey(tmp_path / mode, mode, 2)
 
 
 def test_provider_pause_kill_resume_journey(tmp_path):
@@ -1576,7 +1713,7 @@ def crash_journey(slot, mode):
     run = Run.reopen(slot / "product", provider, approve)
     try:
         if mode == "kill-blocked":
-            assert run.run().decision and run.store.unit("u002").recoveries == 0
+            assert run.run().decision and run.store.unit("u002").state == "ASKED"
             run.user = lambda item: "try again" if item["gate"] == "UNIT" else approve(item)
             directed_provider(provider)
         _, _, after = finish(run)
@@ -1616,7 +1753,7 @@ def test_self_owned_blocked_reopen_journey(tmp_path):
 @pytest.mark.fast
 @pytest.mark.parametrize("mode", ["done", "pending", "user", "f01"])
 def test_contract_fix_journey(tmp_path, mode):
-    """A contract fault spends no unit recovery; old owner handoffs cannot revise agreed text."""
+    """A contract correction retains causal history; old owner handoffs cannot revise agreed text."""
     from contract_fix_journey import contract_fix_journey
     contract_fix_journey(tmp_path / mode, mode)
 
@@ -1733,10 +1870,10 @@ finally:
 
 
 def guide_walkthrough_journey(slot, wrong=False):
-    """A real service/CSV walkthrough reaches C; a wrong documented launch returns to its writer.
+    """A first-wave guide reaches C with integrated proof; a wrong launch gets one guide fixup.
 
-    Catches service timeouts, URL/fence refusals and lost sequential state. The existing value-only
-    golden cannot expose these; changing the documented launch must break the same walkthrough.
+    Catches a serial guide tail and unit proof against absent peers. The existing value-only golden
+    cannot expose these; changing the documented launch must break wave proof and return to its owner.
     """
     import socket
     with socket.socket() as listener:
@@ -1755,26 +1892,42 @@ def guide_walkthrough_journey(slot, wrong=False):
     script = slot / 'native.py'
     script.write_text(NATIVE.replace('\nelse:\n    number = int(name.split',
         '\n    path.write_text(' + repr(bad if wrong else text) + ' if turn == 1 else '
-        + repr(text) + ')\nelse:\n    number = int(name.split'), encoding='utf-8')
+        + repr(text) + ')\nelse:\n    number = int(name.split').replace(
+        '\nif guide:\n',
+        '\nif turn == 1:\n'
+        '    other = slot / ("launch-unit-001.jsonl" if guide else "launch-docs.jsonl")\n'
+        '    while not other.exists():\n        time.sleep(0.01)\n'
+        '    assert not Path("unit-001/value.txt").exists()\n'
+        '\nif guide:\n'), encoding='utf-8')
     try:
         _, rows, _ = finish(run)
-        failed = [b for _, k, b in rows if k == 'unit_failure' and b['unit'] == 'guide']
+        assert not [b for _, k, b in rows if k == 'unit_failure' and b['unit'] == 'guide']
+        fixups = [b for _, k, b in rows if k == 'unit_fixup']
         if wrong:
-            gap, = failed
-            assert 'missing_documented_server' in gap['failure']
-            assert gap['state'] == 'PROVING'
+            fixup, = fixups
+            gap, = fixup['gaps']
+            failed = run.store.read(gap['source'])
+            assert fixup['owner'] == 'guide' and gap['kind'] == 'check'
+            assert failed['purpose'] == 'final' and failed['exitCode'] != 0
+            assert failed['commit'] == fixup['base']
+            assert 'missing_documented_server' in gap['correction']
         else:
-            assert not failed
-        assert not run.store.records('unit_fixup')
+            assert not fixups
         observations = [b for _, k, b in rows if k == 'observation' and b['unit'] == 'guide']
         assert all(not b['timedOut'] and b['cleanupVerified'] for b in observations)
         assert not any(b['check'] == 'guide:format' for b in observations)
-        assert any('persisted apple:3' in b['stdout'] and b['purpose'] == 'P' for b in observations)
+        assert {b['purpose'] for b in observations} == {'wave-start', 'final'}
+        assert any(b['purpose'] == 'wave-start' and b['exitCode'] != 0 for b in observations)
+        delivered = [run.store.read(ref) for ref in run.store.cursor().finalObservations]
+        assert any('persisted apple:3' in b['stdout'] and b['purpose'] == 'final'
+                   and b['commit'] == run.store.cursor().finalCommit and b['exitCode'] == 0 for b in delivered)
         assert not (run.project / 'fixtures').exists()
         with socket.socket() as listener:
             assert listener.connect_ex(('127.0.0.1', port)) != 0
-        began = next(b['startedAt'] for _, k, b in rows if k == 'writer_start' and b['unit'] == 'guide')
-        print(f'Guide tail seconds (wrong={wrong}): {time.time() - began:.2f}', flush=True)
+        starts = [json.loads(p.read_text().splitlines()[0])['start'] for p in slot.glob('launch-*.jsonl')]
+        began = json.loads((slot / 'launch-docs.jsonl').read_text().splitlines()[0])['start']
+        print(f'Guide start minute from first WORK (wrong={wrong}): '
+              f'{(began - min(starts)) / 60:.3f}', flush=True)
     finally:
         run.close()
 
@@ -1788,13 +1941,56 @@ def test_guide_walkthrough_journey(tmp_path, wrong):
 
 @pytest.mark.fast
 @pytest.mark.parametrize('mode,count', [('final-rework', 2), ('guide-gap', 2),
-                                      ('guide-command', 1), ('guide-path', 1), ('guide-format', 1)])
+                                      ('guide-command', 1), ('guide-path', 1), ('guide-format', 1), ('timeout', 1)])
 def test_guide_existing_journeys(tmp_path, mode, count):
-    """Replay affected golden outcomes: early guide repair, prose normalization and wave-owned repair.
+    """Replay guide repair, prose normalization, wave repair and a concurrent worker timeout.
 
-    Success-only service coverage cannot catch stale wave-only fixtures or docs verdict invalidation.
+    Success-only service coverage misses stale wave-only fixtures, docs verdict loss and a skipped timeout fault.
     """
     simple_journey(tmp_path / mode, mode, count)
+
+
+@pytest.mark.fast
+def test_proven_once_journey(tmp_path):
+    from proven_once_journey import proven_once_journey
+    proven_once_journey(tmp_path / "proven-once")
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("part", ["golden", "review"])
+def test_proven_once_retained_journey(tmp_path, part):
+    """Retain tiny delivery and local review repair; peer re-testing misses cached sibling verdict loss."""
+    if part == "golden":
+        simple_journey(tmp_path / "single1", "single1")
+    else:
+        from test_review import review_journeys
+        review_journeys(tmp_path / "review")
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("first_effort", [None, "medium"], ids=["default", "ab-medium"])
+def test_hermetic_work_journey(tmp_path, first_effort):
+    """An isolated worker can write, repair in its session and deliver a working product to C.
+
+    Catches lost worker tools or resume support when read-only call isolation is shared with WORK.
+    Existing success journeys miss that configuration boundary; print invocations for effort/isolation review.
+    """
+    slot = tmp_path / "hermetic"
+    run, _ = prepare(slot, "scope", 1, worker_first_effort=first_effort)
+    try:
+        _, _, units = finish(run)
+        assert units["u001"].recoveries == 1
+        launches = [json.loads(line) for line in (slot / "launch-unit-001.jsonl").read_text().splitlines()]
+        assert launches[1]["resumed"] and launches[0]["thread"] == launches[1]["thread"]
+        assert not (run.project / "rogue.txt").exists()
+        for folder in sorted((slot / "calls").glob("call-*")):
+            question = json.loads((folder / "question.json").read_text("utf-8"))
+            label = ("guide" if "Guide path" in question["facts"] else
+                     "rework" if question["facts"].get("Exact failure") else "first product WORK")
+            invocation = json.loads((folder / "invocation.json").read_text("utf-8"))
+            print(f"{first_effort or 'default'} {label}: {invocation['commandLine']}", flush=True)
+    finally:
+        run.close()
 
 
 @pytest.mark.fast
@@ -1823,7 +2019,7 @@ def test_clean_core_golden(tmp_path):
     assessment must withhold C even when the judge's overall verdict and all commands are green.
     A transient Git worktree admission failure must preserve its cause and retry before WORKING.
     Faults after admission already have a worktree and cannot catch an illegal READY recovery.
-    Judge transport exhaustion pauses without resuming a correct worker. Oversized check
+    Judge transport exhaustion reaches unit recovery and one question. Oversized check
     sources and product patches reach one JUDGE without reworking or dropping assertions.
     Verbatim A/B revisions protect user intent that schema-valid approval alone cannot preserve.
     A dependency may satisfy a check at T; wave-start RED prevents needless rework while still
@@ -2527,6 +2723,8 @@ def clean_core_golden(root):
     from test_review import recorded_review_journey, review_journeys, uncertain_review_journey
 
     root.mkdir(parents=True)
+    for answer in ("direction", "dev"):
+        ask_now_journey(root / ("ask-now-" + answer), answer)
     for mode in ("done", "pending", "user", "f01"):
         contract_fix_journey(root / ("contract-fix-" + mode), mode)
     for key in ("TEMP", "TMP", "TMPDIR"):
@@ -2633,3 +2831,23 @@ def test_final_fanout_journey(tmp_path, stage, case):
     """
     from fanout_journey import final_fanout_journey
     final_fanout_journey(tmp_path / "fanout", stage, case)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("case", ["unit", "transfer", "product", "guide", "contract-done", "contract-pending",
+                                  "oscillate-done", "oscillate-pending", "renamed", "split",
+                                  "final-check", "executor-guide"])
+def test_lineage_journey(tmp_path, case):
+    """Forever-fault twins protect bounded autonomy; successful repairs miss renewed allowances."""
+    from lineage_journey import unit_lineage, final_lineage, contract_lineage, planning_lineage, executor_lineage
+    slot = tmp_path / case
+    if case == "unit":
+        unit_lineage(slot)
+    elif case in ("transfer", "product", "guide"):
+        final_lineage(slot, case)
+    elif case in ("final-check", "executor-guide"):
+        executor_lineage(slot, case == "executor-guide")
+    elif "-" in case:
+        contract_lineage(slot, case.endswith("pending"), case.startswith("oscillate"))
+    else:
+        planning_lineage(slot, case == "split")

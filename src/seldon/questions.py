@@ -62,9 +62,13 @@ PROMPTS = {
               "Divide its complete scope among units and bind provided and consumed contracts by handle. "
               "A wave check names its local requirements and the consumed contract handles; "
               "code links those contracts' provider requirements. "
-              "Declare checks unit or wave: unit checks run in their owner's checkout; a check reaches only "
-              "through its owner's product and contracts its unit consumes, so a contract's integrated check "
-              "belongs to a consumer and a provider proves its side locally. "
+              "Unit check: the unit's own behaviours on its real surface, fed contract-shaped data; "
+              "never re-test a peer's behaviour or contain a peer with logic or state. "
+              "Contract check: the provider's real product honours the contract text, run locally; "
+              "consumer fixture data and this check read the same contract text. "
+              "Wave check: one real path per contract crossed, asserting agreement only; "
+              "repeat no unit state or edge case. "
+              "Walkthrough: the guide's commands run and its paths exist; nothing else. "
               "Dependencies (local 1-based units or exact files) serve declared local reads only, never "
               "contract consumption or authoring wave checks; assign each integrated scenario and distinct "
               "obligation once at its strongest boundary, with one documentation owner and local 1-based "
@@ -275,10 +279,9 @@ def requirement_facts(document, refs):
 
 
 def agreement_facts(document, ref):
-    # Endpoints and adjacent units stay in the plan; this question needs only its own agreements.
     contracts = architecture.contracts_for(document, ref)
     return {"Contract authority": "Contract nodes below override copies in requirement prose.",
-            **{label: {r: {k: c[k] for k in ("kind", "text")} for r, c in contracts.items()
+            **{label: {r: {k: c[k] for k in ("kind", "text", "provider")} for r, c in contracts.items()
                     if architecture.endpoint(ref, c) == side}
             for label, side in (("Contracts provided", "provider"), ("Contracts consumed", "consumer"),
                                 ("Area contracts", None))
@@ -308,12 +311,11 @@ def work_brief(store, ref):
     unit = store.unit(ref)
     document = store.plan(store.cursor().revision)
     contract = plan.select(document, "unit")[ref]
-    requirements = requirement_facts(document, contract["requirements"])
-    checks = plan.assigned(document)[ref]
     facts = {"Unit": contract["instructions"], "Write scope": contract["scope"],
-             "Check paths": contract["checkPaths"], "Requirements": requirements, "Checks": checks,
+             "Check paths": contract["checkPaths"],
+             "Requirements": requirement_facts(document, contract["requirements"]),
              "Quality bar": document["nodes"]["vision"]["body"]["quality"],
-             "Unit evidence": UNIT_EVIDENCE}
+             "Unit evidence": UNIT_EVIDENCE, "Checks": plan.assigned(document)[ref]}
     facts.update(agreement_facts(document, ref))
     refs = []
     if assignment := fixups.active(store, ref):
@@ -323,12 +325,10 @@ def work_brief(store, ref):
         owned = {r: o for r, o in items.items() if o["owner"] == ref}
         if owned:
             facts["Skeleton obligations owned here"] = owned
-    writers = plan.owners(document)
-    wave_checks = {r: c for r, c in plan.assigned(document)[None].items() if writers[r] == ref}
+    wave_checks = {r: c for r, c in plan.assigned(document)[None].items() if plan.owner(document, r) == ref}
     if wave_checks:
         facts["Wave checks to write, not run here"] = wave_checks
     if ref == "guide":
-        # The writer inspects the already integrated product; its brief never copies the whole plan.
         facts["Guide path"] = plan.GUIDE_PATH
         facts["Reader's starting directory"] = str(store.root.parent.resolve())
         vision = document["nodes"]["vision"]["body"]
@@ -341,14 +341,15 @@ def work_brief(store, ref):
         gitwork.git(unit.worktree, "add", "--all", "--force", "--", ".", ":!.seldon")
         facts["Current patch"] = gitwork.git(unit.worktree, "diff", "--cached", "--stat", unit.base)
         facts["Read current patch"] = ["git", "diff", "--cached", "--binary", unit.base]
-    units = plan.select(document, "unit")
-    owners = {ref, *plan.prerequisites(document, ref)}
-    owners.update(c["provider"] for c in architecture.contracts_for(document, ref).values())
-    facts["Correction owners"] = {r: plan.owned_scope(u)
-                                  for r, u in units.items() if r in owners}
+    facts["Correction owners"] = [ref, *plan.prerequisites(document, ref)]
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
-                 images=images(store, refs),
-                 owners=(*facts["Correction owners"], *contract["consumes"], *contract["provides"]))
+                 images=images(store, refs))
+
+
+def validate_discoveries(document, answer):
+    if any(document["nodes"].get(d["owner"], {}).get("kind") not in ("unit", "contract")
+           for d in answer["discoveries"]):
+        raise ValueError("Discoveries must name an approved unit or contract")
 
 
 def observed(store, refs):
@@ -391,10 +392,7 @@ def judge_brief(store, ref, commit=None, observations=None):
                                             for r in plan.prerequisites(document, ref)],
              "Requirements": requirements, "Checks": {r: c for r, c in plan.select(document, "check").items()
                                                     if writers[r] == ref},
-             "Checkout coverage": "Other units' files are outside this judgment; behaviour across units "
-                                  "is proven at wave verify. This judgment covers only this unit's "
-                                  "requirements against this unit's checks at P and its source obligations. An owned wave "
-                                  "check shows its RED here; its passing run is code-proven at wave verify.",
+             "Proof map": plan.proof_map(document, requirements),
              "Check sources": checks,
              "Binary files at P (bytes)": binaries,
              # The unit's whole product source at P: a rebased rework can leave the T..P diff empty (T-86).

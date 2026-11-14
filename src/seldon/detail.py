@@ -2,31 +2,28 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import architecture, inference, plan, plan_review, questions
+from . import architecture, inference, plan, plan_review, questions, recovery
 from .states import advance
 
 
-def gap(store, corrections):
+def gap(store, corrections, source):
     cursor = store.cursor()
     outline = store.plan(cursor.revision)["architecture"]
-    if any(b["vision"] == cursor.vision and b.get("outline") == outline
-           for _, _, b in store.records("architecture_gap")):
-        raise ValueError("Architecture gap remains with the same outline: " + str(corrections))
     with store.transaction():
         ref = store.record("architecture_gap", {"vision": cursor.vision, "outline": outline,
-                           "gap": str(architecture.DetailCorrection(corrections))})
-        advance(store, "contract-gap", ref)
+                           "source": source, "gap": str(architecture.DetailCorrection(corrections))})
+    recovery.planning(store, ref, outline, "contract-gap")
 
 
 def step(store, provider, capacity):
     cursor = store.cursor()
     outline = store.plan(cursor.revision)["architecture"]
     vision = store.read(cursor.vision)["answer"]
-    resumed = next((b["request"] for _, _, b in reversed(store.records("approval"))
-                    if "step" in b["subject"] and b.get("choice") in ("approve", "revise")), None)
+    resumed = next((b["words"] for _, _, b in reversed(store.records("approval"))
+                    if "step" in b["subject"] and b["choice"] in ("approve", "revise")), None)
     done, refs = {}, []
-    repairs = [(r, b["corrections"]) for r, _, b in store.records("review_repair")
-               if b["revision"] == cursor.revision]
+    repairs = [(r, b["corrections"]) for r, k, b in store.records()
+               if k in ("review_repair", "detail_correction") and b["revision"] == cursor.revision]
     review_correction = repairs[-1] if repairs else None
 
     def ask(area, correction=None):
@@ -42,9 +39,11 @@ def step(store, provider, capacity):
                      "singleArea": len(outline["areas"]) == 1}
             prior = [(r, b) for r, _, b in store.records("area_detail") if b.get("basis") == basis
                      and (not b.get("failure") and not b.get("architecture") or
-                          b["revision"] == cursor.revision and b.get("resume") == resumed)]
+                          b["revision"] == cursor.revision)]
             previous = prior[-1] if prior else None
-            if previous and (not correction or previous[1].get("correction") == correction[0]):
+            if previous and (not correction or previous[1].get("correction") == correction[0]
+                             and previous[1].get("resume") == resumed) and (
+                    previous[1].get("resume") == resumed or not previous[1].get("architecture")):
                 done[area["handle"]] = previous[1]
                 return previous[0]
             if correction:
@@ -96,13 +95,14 @@ def step(store, provider, capacity):
                     else:
                         answer = store.read(body["answer"])["answer"]
                         if answer["verdict"] == "subdivide":
+                            recovery.planning(store, ref, answer)
                             outline = architecture.expand(outline, area, answer)
                             pending.extend(a for a in outline["areas"]
                                            if a["handle"] in architecture.index(answer["subareas"]))
                         else:
                             leaves.append((area, answer))
         if gaps:
-            gap(store, gaps)
+            gap(store, gaps, refs)
             return None, failures
         return leaves, failures
 
@@ -117,17 +117,12 @@ def step(store, provider, capacity):
             compiled["areaDetails"] = {a["handle"]: done[a["handle"]]["answer"] for a in outline["areas"]}
             break
         except architecture.ContractGap as error:
-            gap(store, {a: [{"error": str(error), "otherSide": {}}] for a in error.areas})
+            gap(store, {a: [{"error": str(error), "otherSide": {}}] for a in error.areas}, refs)
             return
         except architecture.DetailCorrection as error:
-            retained = next(((r, b["corrections"]) for r, _, b in store.records("detail_correction")
-                             if b["revision"] == cursor.revision and b.get("resume") == resumed
-                             and b["corrections"] == error.corrections), None)
-            if retained and all(any(b.get("correction") == retained[0] and b["area"] == a
-                                   for _, _, b in store.records("area_detail")) for a in error.corrections):
-                raise ValueError(str(error))
-            correction = retained or (store.record("detail_correction", {"revision": cursor.revision,
-                "resume": resumed, "corrections": error.corrections}), error.corrections)
+            correction = (store.record("detail_correction", {"revision": cursor.revision,
+                "sources": list(refs), "corrections": error.corrections}), error.corrections)
+            recovery.planning(store, correction[0], error.corrections)
             replacement, failures = collect([a for a in outline["areas"]
                                              if a["handle"] in correction[1]], correction)
             if replacement is None:

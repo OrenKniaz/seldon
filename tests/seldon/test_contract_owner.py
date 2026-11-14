@@ -69,7 +69,7 @@ class ContractProvider(Scripted):
 
 
 def contract_owner_journeys(root):
-    """A c03 four-area twin reaches B/DONE; a broken provider is repaired without consumer recovery.
+    """A c03 four-area twin reaches B/DONE; a repeated final cause asks at its repair owner before continuing.
 
     Earlier journeys let a leaf provider drive unseen HTTP agreements and never use a consumed
     contract reference to carry provider requirements through merge into wave proof and handoff.
@@ -112,8 +112,22 @@ def contract_owner_journeys(root):
             assert plan.owner(document, wave_ref) == "u004"
             assert set(plan.traced_units(document, plan.assigned(document)[None])) == {
                 "u001", "u002", "u003", "u004"}
+            if broken:
+                from seldon.decisions import Waiting
+                assert run.run().decision
+                request = run.store.read(run.store.cursor().decision)
+                assert request["gate"] == "UNIT" and request["subject"]["unit"] == "u001"
+                answered = []
+                def user(item, answered=answered):
+                    if item["gate"] != "UNIT":
+                        return approve(item)
+                    if answered:
+                        raise Waiting()
+                    answered.append(item["request"])
+                    return "Repair the stored interaction through its data owner"
+                run.user = user
             _, rows, units = finish(run)
-            assert all(u.state == "DONE" and u.recoveries == 0 for u in units.values())
+            assert all(u.state == "DONE" for u in units.values())
             assert not [b for _, k, b in rows if k == "unit_failure" and b["unit"] == "u004"]
             corrections = [q for _, k, q in rows if k == "question" and q["kind"] == "DETAIL"
                            and "Exact corrections" in q["facts"]]

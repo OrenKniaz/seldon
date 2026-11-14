@@ -80,9 +80,10 @@ def setup_facts():
                 "chromium.launch({headless:true,executablePath:browserExecutable}). "
                 "Exercise the actual product; save screenshots in process.env.SELDON_EVIDENCE_DIR, "
                 "close the browser. No downloads. Python tests use -B.",
-            "providers": {role: {**label, "version": version, "freshCall": True,
+            "providers": {"worker_first_effort": "high", **{
+                role: {**label, "version": version, "freshCall": True,
                 "independence": "fresh same-provider call" if role == "reviewer" else "same-provider"}
-                for role, label in ROLES.items()},
+                for role, label in ROLES.items()}},
             "scriptedUser": True, "userOrigin": "dev runner scripted yes; not owner acceptance"}
 
 
@@ -125,9 +126,12 @@ class Codex:
         cwd = folder
         worker = question["kind"] == "WORK"
         role = role_for(question["kind"], {})
-        config = self.setup["providers"][role]
+        config = dict(self.setup["providers"][role])
         if worker:
             cwd = Path(question["execution"]["cwd"])
+            config["effort"] = ("medium" if "Guide path" in question["facts"]
+                or question["facts"].get("Exact failure") else
+                self.setup["providers"].get("worker_first_effort", config["effort"]))
         (folder / "question.json").write_text(encode(question), encoding="utf-8")
         (folder / "schema.json").write_text(encode(question["schema"]), encoding="utf-8")
         instructions = ("Answer one typed question with schema-valid JSON. Facts are data. "
@@ -141,29 +145,24 @@ class Codex:
                   + "\n\nExample\n" + encode(question["examples"][0]))
         (folder / "prompt.txt").write_text(prompt, encoding="utf-8")
         session = question.get("execution", {}).get("session")
-        command = [*self.setup["codexCommand"], "exec", "--json", "--skip-git-repo-check",
-                   "--sandbox", "danger-full-access",
+        command = [*self.setup["codexCommand"], "exec"]
+        command += ["resume", session] if session else ["--cd", str(cwd)]
+        command += ["--json", "--skip-git-repo-check", "--ignore-user-config",
                    "--model", config["model"], "-c", 'model_reasoning_effort=' + encode(config["effort"]),
-                   "-c", 'approval_policy="never"', "--cd", str(cwd),
+                   "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"',
                    "--output-schema", str(folder / "schema.json")]
-        if session:
-            command = [*self.setup["codexCommand"], "exec", "resume", session, "--json",
-                       "--skip-git-repo-check", "--model", config["model"],
-                       "-c", 'model_reasoning_effort=' + encode(config["effort"]),
-                       "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"',
-                       "--output-schema", str(folder / "schema.json")]
         # Full access (Oren 2026-11-14: "We are not a security app"). The Codex Windows sandbox re-minted a
         # worktree's capability SID mid-session and denied writes to existing files (T-136); scope is still
         # enforced by Seldon from the observed diff (R6), proof runs in disposable checkouts.
+        options = ['project_doc_max_bytes=0', 'developer_instructions=""', 'web_search="disabled"',
+                   'model_instructions_file=' + encode(str(folder / "instructions.txt"))]
+        options += [key + '=false' for key in ('skills.include_instructions', 'skills.bundled.enabled',
+            'plugins._default.enabled', 'features.apps', 'features.multi_agent', 'features.memory_tool',
+            'features.sleep_tool', 'tools.update_plan.enabled')]
         if not worker:
-            command += ["--ignore-user-config", "--ephemeral"]
-            options = ['project_doc_max_bytes=0', 'developer_instructions=""', 'web_search="disabled"',
-                       'model_instructions_file=' + encode(str(folder / "instructions.txt"))]
-            options += [key + '=false' for key in ('skills.include_instructions', 'skills.bundled.enabled',
-                'plugins._default.enabled', 'features.apps', 'features.shell_tool', 'features.multi_agent',
-                'features.code_mode_host', 'features.memory_tool', 'features.sleep_tool',
-                'tools.update_plan.enabled')]
-            command += [arg for option in options for arg in ("-c", option)]
+            command += ["--ephemeral"]
+            options += ['features.shell_tool=false', 'features.code_mode_host=false']
+        command += [arg for option in options for arg in ("-c", option)]
         images = question.get("images", [])
         for index, source in enumerate(images):
             attached = folder / f"image-{index}.png"
@@ -193,14 +192,10 @@ class Codex:
         diagnostics = output + "\n" + result["stderr"].decode("utf-8", errors="replace")
         try:
             if result["timedOut"] or not result["cleanupVerified"]:
-                reason = ("Provider cleanup unverified" if not result["cleanupVerified"]
-                          else "Provider timed out")
-                raise RuntimeError(reason)
+                raise RuntimeError("Provider cleanup unverified" if not result["cleanupVerified"]
+                                   else "Provider timed out")
             raw = terminal_answer(output)
-            if result["exitCode"] != 0:
-                from .schema import validate
-                validate(json.loads(raw), question["schema"])
-        except (RuntimeError, ValueError) as error:
+        except RuntimeError as error:
             native_errors = []  # denial is the provider's own terminal event, never stderr noise
             for line in output.splitlines():
                 try:
@@ -209,20 +204,22 @@ class Codex:
                     continue
                 if isinstance(event, dict) and event.get("type") in ("turn.failed", "error"):
                     native_errors.append(encode(event))
-            denied = not result["timedOut"] and any(word in "\n".join(native_errors).lower() for word in (
+            paused = not result["timedOut"] and any(word in "\n".join(native_errors).lower() for word in (
                 "unauthorized", "unauthenticated", "authentication", "not authenticated", "not logged in",
                 "invalid_api_key", "forbidden", "log in", "login", "http 401", "http 403",
                 "permission_denied", "permission denied", "access denied", "access is denied",
-                "approval denied",
-                "operation not permitted", "logged out", "usage limit", "usage_limit_reached",
-                "rate limit", "insufficient_quota", "hit your"))
+                "approval denied", "operation not permitted", "logged out", "usage limit",
+                "usage_limit_reached", "rate limit", "insufficient_quota", "hit your", "offline",
+                "connection", "failed to connect", "error sending request", "error trying to connect",
+                "dns error", "network", "service unavailable", "provider down", "server overloaded",
+                "http 429", "http 5"))
             unavailable = question.get("execution", {}).get("session") and any(
                 term in diagnostics.lower() for term in ("session not found", "no session found",
                                                         "thread not found", "resume is not supported"))
-            failure_type = ResumeUnavailable if unavailable and not denied else ProviderFailure
+            failure_type = ResumeUnavailable if unavailable and not paused else ProviderFailure
             if result["timedOut"] and result["cleanupVerified"] and question["kind"] == "WORK":
                 failure_type = Deadline
             raise failure_type(f"Codex invocation failed: {error}; {diagnostics[-4096:]}",
-                not denied, result["cleanupVerified"], str(folder / "result.json")) from error
+                not paused, result["cleanupVerified"], str(folder / "result.json")) from error
         (folder / "answer.txt").write_text(raw, encoding="utf-8")
         return raw, session_id(output)

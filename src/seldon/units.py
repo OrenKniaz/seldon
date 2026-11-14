@@ -5,23 +5,10 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, fixups, gitwork, inference, plan, proof, questions
+from . import decisions, fixups, gitwork, inference, plan, proof, questions, recovery
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, session_id, terminal_answer
 from .schema import validate
 from .states import advance
-
-
-def recover(store, ref, failure):
-    with store.transaction():
-        unit = store.unit(ref)
-        asked = unit.recoveries >= 2
-        cause = store.record("unit_failure", {"unit": ref, "state": unit.state,
-            "failure": failure, "recovery": unit.recoveries + 1, "exhausted": asked})
-        advance(store, "asked" if asked else "recover", cause, unit=ref,
-                recoveries=unit.recoveries if asked else unit.recoveries + 1,
-                failure=failure, report=None, T=None, P=None, observations=[], judgment=None)
-        if asked:
-            decisions.ask_unit(store)
 
 
 def recovered_report(store, ref):
@@ -43,6 +30,7 @@ def recovered_report(store, ref):
                 raw = terminal_answer((folder / "stdout.bin").read_text("utf-8", errors="replace"))
                 question = json.loads((folder / "question.json").read_text("utf-8"))
                 validate(json.loads(raw), question["schema"])
+                questions.validate_discoveries(store.plan(store.cursor().revision), json.loads(raw)["answer"])
                 return store.record("answer", {"unit": ref, "attempt": unit.callAttempt, "kind": "WORK",
                     "answer": json.loads(raw)["answer"], "recovered": True})
     return None
@@ -60,7 +48,6 @@ def thread_from_recording(store, ref):
 
 
 def work(store, provider, ref):
-    unit = store.unit(ref)
     report = recovered_report(store, ref)
     if report is None:
         thread_from_recording(store, ref)
@@ -93,21 +80,28 @@ def work(store, provider, ref):
                 questions.contract_brief(store, ref, discoveries))
             with store.transaction():
                 if correction["verdict"] == "user":
-                    advance(store, "asked", result, unit=ref,
-                            failure=str(discoveries) + "\n" + correction["why"])
-                    decisions.ask_unit(store, correction["why"])
+                    recovery.recover(store, ref, str(discoveries) + "\n" + correction["why"],
+                                     cause=result, direct=True)
                 else:
+                    key = recovery.lineage(store, ref)
+                    shape = plan.contract_texts(store.plan(store.cursor().revision), correction["changes"])
+                    texts = plan.select(shape, "contract")
+                    current = plan.select(store.plan(store.cursor().revision), "contract")
+                    if recovery.failed(store, result, ref, shape=texts, direct=texts == current):
+                        advance(store, "asked", result, unit=ref, failure=str(discoveries))
+                        decisions.ask_unit(store, correction["why"])
+                        return
                     plan.correct_contracts(store, result, correction)
                     fixups.handoff(store, ref, report, {"outcome": "blocked", "discoveries": [
-                        {"owner": c["contract"], "correction": c["text"]} for c in correction["changes"]]})
+                        {"owner": c["contract"], "correction": c["text"]} for c in correction["changes"]]},
+                        key=key, charged=True)
         return
     foreign = [d for d in answer["discoveries"] if d["owner"] != ref]
     if foreign and fixups.handoff(store, ref, report, {**answer, "discoveries": foreign}):
         if not any(d["owner"] == ref for d in answer["discoveries"]):
             return
     if answer["outcome"] == "blocked" and any(d["owner"] == ref for d in answer["discoveries"]):
-        advance(store, "asked", report, unit=ref, failure=str(answer["discoveries"]))
-        decisions.ask_unit(store)
+        recovery.recover(store, ref, str(answer["discoveries"]), cause=report, direct=True)
         return
     if answer.get("outcome") != "done":
         raise ValueError("Worker could not complete this unit: " + str(answer))
@@ -193,7 +187,7 @@ def run_unit(store, provider, ref):
             except ProviderFailure as error:
                 thread_from_recording(store, ref)
                 if isinstance(error, Deadline) and error.cleanup_verified:
-                    recover(store, ref, str(error))
+                    recovery.recover(store, ref, str(error))
                 else:
                     if error.cleanup_verified:
                         with store.transaction():
@@ -202,6 +196,6 @@ def run_unit(store, provider, ref):
             except proof.UncertainCleanup:
                 raise
             except (ValueError, RuntimeError, OSError) as error:
-                recover(store, ref, str(error))
+                recovery.recover(store, ref, str(error))
     finally:
         store.close()
