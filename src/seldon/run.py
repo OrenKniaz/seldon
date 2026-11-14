@@ -125,6 +125,7 @@ class Run:
                             "review": store.read(cursor.review)} if state == "B" else
                            {"commit": cursor.candidate,
                             "units": {r: u.state for r, u in store.units().items()},
+                            "contractChanges": [b for _, _, b in store.records("contract_revision")],
                             **({"notJudged": judgment.not_judged(store), "deviation": "DV6"}
                                if state == "C" else {})})
                 decisions.request(store, state, subject)
@@ -152,10 +153,7 @@ class Run:
             plan_review.repair(store)
         elif state == "EXECUTE":
             document = store.plan(cursor.revision)
-            approval = store.read(cursor.B)
-            if (approval["subject"]["revision"] != cursor.revision
-                    or approval["subject"]["plan"] != document
-                    or approval["subject"]["review"] != store.read(cursor.review)):
+            if not plan.approved(store):
                 raise ValueError("Execution requires B for this exact plan and review")
             with store.transaction():
                 for ref in plan.select(document, "unit"):

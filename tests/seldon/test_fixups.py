@@ -19,7 +19,7 @@ from test_journey import Scripted, approve, copy_final, finish, prepare
 def blocked_owner_journeys(root):
     """A real blocked WORK must reach its sibling owner; final-judge gaps never exercise WORK routing.
 
-    The own-scope twin catches wrongly waiving local failures, which the sibling success cannot expose.
+    The own-scope twin catches retrying a self-owned blocker instead of asking, which the sibling success cannot expose.
     The missing-base twin catches reopening a DONE sibling for absent integration; guide repair
     always starts with that sibling's files and cannot expose this false blocker.
     """
@@ -47,7 +47,7 @@ def blocked_owner_journeys(root):
             if mode != "sibling":
                 cursor = run.run()
                 assert cursor.decision and run.store.unit("guide").state == "ASKED"
-                assert run.store.unit("guide").recoveries == 2
+                assert run.store.unit("guide").recoveries == (0 if own_scope else 2)
                 assert len(run.store.records("unit_fixup")) == (0 if own_scope else 3)
             else:
                 finish(run)

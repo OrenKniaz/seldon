@@ -10,7 +10,7 @@ class Waiting(Exception):
     """The next words belong to a future chat turn."""
 
 
-def ask_unit(store):
+def ask_unit(store, recommendation=""):
     if store.cursor().decision:
         return
     document = store.plan(store.cursor().revision)
@@ -21,8 +21,9 @@ def ask_unit(store):
                     and affected.intersection(plan.prerequisites(document, r) + u.waitingFor)}:
                 affected.update(added)
             request(store, "UNIT", {"unit": ref,
-                "tried": [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref],
-                "affects": sorted(affected - {ref}), "recommendation": "",
+                "tried": [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
+                         or [row.failure],
+                "affects": sorted(affected - {ref}), "recommendation": recommendation,
                 "drop": "Dropping is not available yet; try again, give direction, or use stop",
                 "options": ["Try again", "Give direction", "Stop the dream"]})
             return

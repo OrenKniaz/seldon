@@ -77,6 +77,9 @@ PROMPTS = {
               "Judge only the supplied subject. Name concrete gaps only. "
               + AGREED_LITERALS,
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
+    "CONTRACT": "What contract text resolves this worker's need within the accepted commitments? "
+                "Replace only consumed contract texts and record the decision; answer user if the fix "
+                "would change an accepted commitment.",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
             "run its unit checks and refine before returning. Meet the accepted quality bar.",
     "JUDGE": "For each requirement: are its checks meaningful; did they actually exercise the "
@@ -146,6 +149,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
         "ARCHITECT": example_architecture(), "DETAIL": example_detail(),
         "REVIEW": {"verdict": "adequate", "gaps": []},
         "DECIDE": {"choice": "approve"},
+        "CONTRACT": {"verdict": "user"},
         "WORK": {"outcome": "done", "summary": "Implemented and ran the assigned checks", "discoveries": []},
         "JUDGE": {"verdict": "satisfied", "gaps": [],
                   "assessments": assessments(targets)},
@@ -271,11 +275,22 @@ def requirement_facts(document, refs):
 def agreement_facts(document, ref):
     # Endpoints and adjacent units stay in the plan; this question needs only its own agreements.
     contracts = architecture.contracts_for(document, ref)
-    return {label: {r: {k: c[k] for k in ("kind", "text")} for r, c in contracts.items()
+    return {"Contract authority": "Contract nodes below override copies in requirement prose.",
+            **{label: {r: {k: c[k] for k in ("kind", "text")} for r, c in contracts.items()
                     if architecture.endpoint(ref, c) == side}
             for label, side in (("Contracts provided", "provider"), ("Contracts consumed", "consumer"),
                                 ("Area contracts", None))
-            if any(architecture.endpoint(ref, c) == side for c in contracts.values())}
+            if any(architecture.endpoint(ref, c) == side for c in contracts.values())}}
+
+
+def contract_brief(store, ref, discoveries):
+    document = store.plan(store.cursor().revision)
+    units, contracts = plan.select(document, "unit"), plan.select(document, "contract")
+    consumed = {r: {**contracts[r], "Provider responsibility":
+                   units[contracts[r]["provider"]]["instructions"]}
+                for r in units[ref]["consumes"]}
+    return build("CONTRACT", {"Worker's need": discoveries, "Contracts consumed": consumed,
+        "Accepted commitments": document["nodes"]["vision"]["body"]}, targets=tuple(consumed))
 
 
 def work_brief(store, ref):
@@ -317,7 +332,7 @@ def work_brief(store, ref):
     facts["Correction owners"] = {r: plan.owned_scope(u)
                                   for r, u in units.items() if r in owners}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
-                 owners=tuple(facts["Correction owners"]))
+                 owners=(*facts["Correction owners"], *contract["consumes"]))
 
 
 def observed(store, refs):

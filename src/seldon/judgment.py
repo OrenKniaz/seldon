@@ -151,9 +151,7 @@ def save(store, kind, subject, result, answer, trees):
 def refresh_units(store, provider):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
-    approved = store.read(cursor.B)["subject"]
-    if (approved["revision"] != cursor.revision or approved["plan"] != document
-            or approved["review"] != store.read(cursor.review)):
+    if not plan.approved(store):
         raise ValueError("Final judgment requires B for this exact plan and review")
     trees = scope_trees(store, plan.select(document, "unit"))
     for ref, unit in plan.select(document, "unit").items():

@@ -93,10 +93,29 @@ def work(store, provider, ref):
     else:
         answer = store.read(report)["answer"]
     store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
+    document = store.plan(store.cursor().revision)
+    consumed = plan.select(document, "unit")[ref]["consumes"]
+    if discoveries := [d for d in answer["discoveries"] if d["owner"] in consumed]:
+        with store.integration_lock:
+            result, correction = inference.call(store, provider,
+                questions.contract_brief(store, ref, discoveries))
+            with store.transaction():
+                if correction["verdict"] == "user":
+                    advance(store, "asked", result, unit=ref,
+                            failure=str(discoveries) + "\n" + correction["why"])
+                    decisions.ask_unit(store, correction["why"])
+                else:
+                    plan.correct_contracts(store, result, correction)
+                    fixups.handoff(store, ref, report, {"outcome": "blocked", "discoveries": [
+                        {"owner": c["contract"], "correction": c["text"]} for c in correction["changes"]]})
+        return
     foreign = [d for d in answer["discoveries"] if d["owner"] != ref]
     if foreign and fixups.handoff(store, ref, report, {**answer, "discoveries": foreign}):
-        if local := [d for d in answer["discoveries"] if d["owner"] == ref]:
-            recover(store, ref, "Worker could not complete this unit: " + str(local))
+        if not any(d["owner"] == ref for d in answer["discoveries"]):
+            return
+    if answer["outcome"] == "blocked" and any(d["owner"] == ref for d in answer["discoveries"]):
+        advance(store, "asked", report, unit=ref, failure=str(answer["discoveries"]))
+        decisions.ask_unit(store)
         return
     if answer.get("outcome") != "done":
         raise ValueError("Worker could not complete this unit: " + str(answer))

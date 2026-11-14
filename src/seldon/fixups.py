@@ -39,7 +39,8 @@ def active(store, ref):
         if body["owner"] == ref:
             if body["base"] != row.base:
                 return None
-            if (body["revision"] != store.cursor().revision or body["approval"] != store.cursor().B):
+            if (not planning.contract_descendant(store, body["revision"])
+                    or body["approval"] != store.cursor().B):
                 raise ValueError("Fixup requires its approved plan and owner")
             return body
     return None
@@ -54,19 +55,26 @@ def handoff(store, ref, report, answer):
         cursor = store.cursor()
         document = store.plan(cursor.revision)
         owners = planning.select(document, "unit")
+        contracts = planning.select(document, "contract")
+        contract_change = all(d["owner"] in contracts for d in answer["discoveries"])
         repeated = any(b["unit"] == ref and b["disposition"] == "owner fixup"
-                       for _, _, b in store.records("discovery"))
+                       for _, _, b in store.records("discovery")) and not contract_change
         row = store.unit(ref)
         if repeated and row.recoveries >= 2:
             return False
         gaps = []
         for discovery in answer["discoveries"]:
             owner = discovery["owner"]
+            if contract_change:
+                owner = contracts[owner]["provider"]
+                if store.unit(owner).state != "DONE":
+                    continue
             if owner not in owners or owner == ref:
                 return False
             named = store.unit(owner)
             if (named.state != "DONE" or not named.integrated
-                    or not gitwork.contains(store.root.parent, named.integrated, row.base)):
+                    or not contract_change and not gitwork.contains(
+                        store.root.parent, named.integrated, row.base)):
                 raise ValueError(f"{owner}'s files are not in this unit's base by design; "
                                  "write the wave check, run unit checks, return done")
             gaps.append({"subject": owner, "kind": "blocked", "commit": cursor.candidate,
@@ -77,6 +85,9 @@ def handoff(store, ref, report, answer):
         for discovery in answer["discoveries"]:
             store.record("discovery", {"unit": ref, "report": report,
                                       "disposition": "owner fixup", **discovery})
+        if not gaps:
+            advance(store, "reopen", report, unit=ref, report=None, callFolder=None, callAttempt=None)
+            return True
         advance(store, "wait-owner", report, unit=ref,
                 waitingFor=list(dict.fromkeys(r for g in gaps for r in g["units"])),
                 report=None, callFolder=None, callAttempt=None, worktree=None,

@@ -852,13 +852,18 @@ def test_blocked_discovery_ask_twin(tmp_path, mixed):
            + repr({"owner": "guide", "correction": "Clarify my walkthrough"}) + ')\n' if mixed else '')
         + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
     try:
+        if mixed:
+            assert run.run().decision
+            assert run.store.unit("guide").state == "ASKED"
+            run.user = lambda item: "try again" if item["gate"] == "UNIT" else approve(item)
+            directed_provider(provider)
         finish(run)
         assignments = [b for _, _, b in run.store.records("unit_fixup")]
         assert len(assignments) == 1 and assignments[0]["owner"] == "u001"
         assert len(assignments[0]["gaps"]) == 2
         assert run.store.unit("guide").state == "DONE"
-        assert run.store.unit("guide").recoveries == int(mixed)
-        assert len([b for _, _, b in run.store.records("unit_failure") if b["unit"] == "guide"]) == int(mixed)
+        assert run.store.unit("guide").recoveries == 0
+        assert not [b for _, _, b in run.store.records("unit_failure") if b["unit"] == "guide"]
     finally:
         run.close()
 
@@ -1556,6 +1561,10 @@ def crash_journey(slot, mode):
     provider = Scripted(slot, mode, 2)
     run = Run.reopen(slot / "product", provider, approve)
     try:
+        if mode == "kill-blocked":
+            assert run.run().decision and run.store.unit("u002").recoveries == 0
+            run.user = lambda item: "try again" if item["gate"] == "UNIT" else approve(item)
+            directed_provider(provider)
         _, _, after = finish(run)
         assert after["u001"] == before["u001"]
         assert (slot / "turn-unit-001").read_text() == "1"
@@ -1575,13 +1584,27 @@ def crash_journey(slot, mode):
                 assert "session not found" in launches[1]["facts"]["Exact failure"]
         if mode == "kill-blocked":
             launch = json.loads((slot / "launch-unit-002.jsonl").read_text().splitlines()[1])
-            assert "Worker could not complete" in launch["facts"]["Exact failure"]
+            assert "Need another worker turn" in launch["facts"]["Exact failure"]
         if mode == "kill-report":
             assert any(b["correction"] == "Retain this successful discovery"
                        for _, _, b in run.store.records("discovery"))
         assert run.store.cursor().publication is None
     finally:
         run.close()
+
+
+@pytest.mark.fast
+def test_self_owned_blocked_reopen_journey(tmp_path):
+    """A retained blocked WORK asks once with zero recovery; live handoffs miss crash receipt replay."""
+    crash_journey(tmp_path / "kill-blocked", "kill-blocked")
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("mode", ["done", "pending", "user", "f01"])
+def test_contract_fix_journey(tmp_path, mode):
+    """A contract fault spends no unit recovery; old owner handoffs cannot revise agreed text."""
+    from contract_fix_journey import contract_fix_journey
+    contract_fix_journey(tmp_path / mode, mode)
 
 
 @pytest.mark.fast
@@ -2365,10 +2388,13 @@ def recorded_artifact_journey(root):
 
 def clean_core_golden(root):
     from test_fixups import blocked_owner_journeys, owner_repair_journeys
+    from contract_fix_journey import contract_fix_journey
     from test_architect import agreed_literals_journey, architect_journeys
     from test_review import recorded_review_journey, review_journeys, uncertain_review_journey
 
     root.mkdir(parents=True)
+    for mode in ("done", "pending", "user", "f01"):
+        contract_fix_journey(root / ("contract-fix-" + mode), mode)
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(root)
     began = time.monotonic()

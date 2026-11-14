@@ -425,3 +425,41 @@ def add_guide(document):
         "dependencies": list(select(document, "unit")),
         "instructions": GUIDE_WORK}}
     return result
+
+
+def contract_texts(document, changes):
+    from copy import deepcopy
+    result = deepcopy(document)
+    for change in changes:
+        result["nodes"][change["contract"]]["body"]["text"] = change["text"]
+    return result
+
+
+def correct_contracts(store, source, answer):
+    from dataclasses import replace
+    cursor = store.cursor()
+    document = contract_texts(store.plan(cursor.revision), answer["changes"])
+    revision = store.revision(document, cursor.revision)
+    store.record("contract_revision", {"before": cursor.revision, "revision": revision,
+                                      "source": source, **answer})
+    store.cursor(replace(cursor, revision=revision))
+
+
+def contract_descendant(store, revision):
+    """Only recorded planner text replacements can extend the approved plan."""
+    document = store.plan(revision)
+    for _, _, row in store.records("contract_revision"):
+        if row["before"] == revision:
+            document = contract_texts(document, row["changes"])
+            revision = row["revision"]
+            if document != store.plan(revision):
+                return False
+    return revision == store.cursor().revision and document == store.plan(store.cursor().revision)
+
+
+def approved(store):
+    cursor = store.cursor()
+    subject = store.read(cursor.B)["subject"]
+    return (contract_descendant(store, subject["revision"])
+            and subject["plan"] == store.plan(subject["revision"])
+            and subject["review"] == store.read(cursor.review))

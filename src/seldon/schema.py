@@ -117,12 +117,15 @@ def answer_schema(kind, targets=(), owners=()):
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
         "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT,
                     discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
+        "CONTRACT": obj(verdict=choice("corrected"), changes=array(
+            obj(contract=choice(*targets), text=TEXT), 1), decision=TEXT),
         "JUDGE": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
         "DEMO": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
     }[kind]
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
-    alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
+    alternatives = ((payload, obj(verdict=choice("user"))) if kind == "CONTRACT" else
+                    (payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
                     (payload, uncertain) if kind in ("JUDGE", "DEMO", "PRODUCT", "REVIEW") else
                     (payload,))
     result = obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
