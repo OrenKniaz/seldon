@@ -86,11 +86,14 @@ def owner(document, check_ref):
 def normalize_checks(document, writers=None):
     """Declared wave checks stay wave; cross-unit inputs can only promote a local check."""
     units = select(document, "unit")
+    contracts = select(document, "contract")
     writers = writers or owners(document)
     for ref, check in select(document, "check").items():
+        check.setdefault("integrates", [r for r in check["requirements"] if r in contracts])
+        check["requirements"] = [r for r in check["requirements"] if r not in contracts]
         requirements = {r for r in check["requirements"] if r in document["nodes"]}
         local = set(units[writers[ref]]["requirements"])
-        if requirements - local:
+        if check["integrates"] or requirements - local:
             check["level"] = "wave"
         else:
             check.setdefault("level", "unit")
@@ -127,8 +130,15 @@ def coverage(document):
 
 def proof_map(document, subjects):
     writers = owners(document)
-    return {r: [{"check": c, "level": check["level"], "owner": writers[c], "purpose": check["purpose"]}
-                for c, check in traced_checks(document, r).items()] for r in subjects}
+    normalize_checks(document, writers)
+    contracts = select(document, "contract")
+    return {r: [dict(check=c, level=check["level"], owner=writers[c],
+                    purpose=check["purpose"], peer=c not in traced_checks(document, r))
+                for c, check in {**traced_checks(document, r), **{
+                    c: check for wave, w in traced_checks(document, r).items() if w["level"] == "wave"
+                    for ref in w["integrates"]
+                    for c, check in select(document, "check").items()
+                    if writers[c] == contracts[ref]["provider"]}}.items()] for r in subjects}
 
 
 def create(vision, answer):
@@ -184,7 +194,7 @@ def merge(vision, architecture, leaves):
     from . import architecture as owner
 
     edits, units, quality = [], [], {}
-    endpoints, file_dependencies, feature_handles, deferred_checks = {}, {}, {}, []
+    endpoints, file_dependencies, feature_handles = {}, {}, {}
     emitted = set()
     for area, answer in leaves:
         # An inherited endpoint is still an explicit agreement with the parent responsibility.
@@ -214,9 +224,8 @@ def merge(vision, architecture, leaves):
             relation = {"requirement": "features", "check": "requirements"}.get(edit["kind"])
             if relation:
                 refs = body[relation]
-                body[relation] = [handles[r] for r in refs if r in handles]
-                if edit["kind"] == "check" and body["level"] == "wave":
-                    deferred_checks.append((body, [r for r in refs if r not in handles]))
+                body[relation] = [handles.get(r, r) for r in refs if r in handles
+                                  or edit["kind"] == "check" and body["level"] == "wave"]
             if edit["kind"] == "obligation":
                 body.update(owner=body["owner"] + offset,
                             closingRequirement=handles[body["closingRequirement"]])
@@ -270,11 +279,6 @@ def merge(vision, architecture, leaves):
     for criterion in set(range(1, len(vision["quality"])+1)) - quality.keys():
         correct([a["handle"] for a, _ in leaves if f"quality:{criterion}" in a["commitments"]],
                 f"Trace accepted quality criterion {criterion} to semantic checks", {})
-    for check, refs in deferred_checks:
-        check["requirements"] = list(dict.fromkeys([*check["requirements"],
-            *(r for contract in refs if contract in providers
-              for r in units[providers[contract] - 1]["requirements"])]))
-
     def planned_paths(path, reader):
         return [{"area": writer["area"], "path": p} for i, writer in enumerate(units, 1)
                 if writer["area"] == reader["area"] or any(
@@ -361,6 +365,8 @@ def validate_records(document, external=()):
             if any(nodes.get(r, {}).get("kind") != target_kind
                    and not (kind == "check" and r in external) for r in body[relation]):
                 raise ValueError(f"{ref}.{relation}: wrong trace target kind")
+        if kind == "check" and any(nodes.get(r, {}).get("kind") != "contract" for r in body["integrates"]):
+            raise ValueError(f"{ref}.integrates: name existing contracts")
 
 
 def validate_owned_work(document):

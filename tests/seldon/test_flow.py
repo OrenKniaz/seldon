@@ -153,7 +153,7 @@ def test_shared_page_flows(tmp_path):
         assert failed["kind"] == "check" and failed["units"] == ["u002"]
         assert failed["commit"] == broken and store.read(failed["source"])["exitCode"] != 0
         wave_gap, = [g for g in gaps if store.read(g["source"])["unit"] is None]
-        assert wave_gap["units"] == ["u001", "u002"]
+        assert wave_gap["units"] == ["u002"]
         assert all(store.read(r)["commit"] == broken for r in observations)
         assert store.units() == before
         gitwork.unchanged(run.project, broken)

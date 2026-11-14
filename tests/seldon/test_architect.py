@@ -106,7 +106,8 @@ def question_sizes(store):
                       if q["kind"] == kind) for kind in ("ARCHITECT", "DETAIL")}
 
 
-def area_product_journey(tmp_path):
+@pytest.mark.fast
+def test_area_product_journey(tmp_path):
     """Three contracted areas reach C with overlapping DETAIL calls and scoped facts.
 
     A global PLAN can pass the old delivery journey while serializing planning and leaking sibling
@@ -136,7 +137,7 @@ def area_product_journey(tmp_path):
         for question in provider.detail_calls:
             area = question["facts"]["Area"]
             assert question["facts"]["Product in this area"] == {"files": [], "additionalFiles": 0}
-            text = encode(question["facts"])
+            text = encode({k: v for k, v in question["facts"].items() if k != "Peer checks"})
             number = int(area["handle"].split("-")[1])
             assert all(f"unit-{i:03}/" not in text for i in range(1, 4) if i != number)
         assert len([b for _, _, b in run.store.records("decision_request") if b["gate"] == "B"]) == 1
@@ -260,7 +261,8 @@ def agreed_literals_journey(root):
             assert all(commitment in r["obligation"] for r in requirements.values())
             wave_check, = [c for c in plan.assigned(document)[None].values()
                            if literal in c["purpose"]]
-            assert len(wave_check["requirements"]) == 2
+            assert len(wave_check["requirements"]) == 1
+            assert wave_check["integrates"] == list(contracts)
             assert not any(literal in c["purpose"] for ref, checks in plan.assigned(document).items()
                            if ref for c in checks.values())
             print(f"Agreed literals {'control' if agreed else 'fault twin'} -> B; "
@@ -664,8 +666,10 @@ def review_links_journeys(root):
                 assert check["integrates"] == ["http-items", "http-errors"]
                 canonical_check = next(c for c in plan.select(displayed["plan"], "check").values()
                                        if c["command"] == check["command"])
-                assert len(canonical_check["requirements"]) == len(check["requirements"]) + 4
-                assert "integrates" not in canonical_check
+                assert canonical_check["requirements"] == check["requirements"]
+                crossings = canonical_check["integrates"]
+                assert len(crossings) == len(check["integrates"])
+                assert all(displayed["plan"]["nodes"][ref]["kind"] == "contract" for ref in crossings)
         finally:
             run.close()
 
@@ -1163,7 +1167,7 @@ def architect_journeys(tmp_path):
     began = time.monotonic()
     review_links_journeys(tmp_path / "review-links")
     recorded_detail_journeys(tmp_path / "recorded")
-    area_product_journey(tmp_path)
+    test_area_product_journey(tmp_path)
     for mode in ("gap", "split"):
         area_recovery_journey(tmp_path, mode)
     print(f"ARCHITECT contract journeys: {time.monotonic()-began:.2f}s", flush=True)

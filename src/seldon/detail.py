@@ -9,10 +9,10 @@ from .states import advance
 def gap(store, corrections, source):
     cursor = store.cursor()
     outline = store.plan(cursor.revision)["architecture"]
-    with store.transaction():
-        ref = store.record("architecture_gap", {"vision": cursor.vision, "outline": outline,
-                           "source": source, "gap": str(architecture.DetailCorrection(corrections))})
-    recovery.planning(store, ref, outline, "contract-gap")
+    ref = store.record("architecture_gap", {"vision": cursor.vision, "outline": outline,
+                       "source": source, "gap": str(architecture.DetailCorrection(corrections))})
+    forwarded = isinstance(source, str) and "corrections" in store.read(source)
+    recovery.planning(store, source if forwarded else ref, corrections, "contract-gap")
 
 
 def step(store, provider, capacity):
@@ -35,7 +35,8 @@ def step(store, provider, capacity):
                               for a in c["consumers"]]}
                 for r, c in architecture.index(outline["contracts"]).items()}
             basis = {"vision": cursor.vision, "commit": cursor.candidate, "area": area,
-                     "contracts": local, "facts": {**question["facts"]},
+                     "contracts": local, "facts": {k: v for k, v in question["facts"].items()
+                                                 if k not in ("Peer checks", "User's words")},
                      "singleArea": len(outline["areas"]) == 1}
             prior = [(r, b) for r, _, b in store.records("area_detail") if b.get("basis") == basis
                      and (not b.get("failure") and not b.get("architecture") or
@@ -105,7 +106,7 @@ def step(store, provider, capacity):
                         else:
                             leaves.append((area, answer))
         if gaps:
-            gap(store, gaps, refs)
+            gap(store, gaps, correction[0] if correction and "architecture" in correction[1] else refs)
             return None, failures
         return leaves, failures
 

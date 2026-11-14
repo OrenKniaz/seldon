@@ -2009,6 +2009,14 @@ def test_hermetic_work_journey(tmp_path, first_effort):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("surface", ["browser", "server"])
+def test_check_kit_journey(tmp_path, surface):
+    """Real browser/server delivery catches absent helpers and leaks missed by file-only checks."""
+    from kit_journey import kit_journey
+    kit_journey(tmp_path / surface, surface)
+
+
+@pytest.mark.fast
 def test_clean_core_golden(tmp_path):
     """One-unit C protects the actual approved delivery path; parallel/fan-in catches serialization.
 
@@ -2734,7 +2742,7 @@ def recorded_artifact_journey(root):
 def clean_core_golden(root):
     from test_fixups import blocked_owner_journeys, owner_repair_journeys
     from contract_fix_journey import contract_fix_journey
-    from test_architect import agreed_literals_journey, architect_journeys
+    from test_architect import agreed_literals_journey, architect_journeys, correction_journeys
     from test_review import (plan_contract_gap_journey, recorded_review_journey, review_journeys,
                              uncertain_review_journey)
 
@@ -2751,6 +2759,7 @@ def clean_core_golden(root):
     __import__("test_contract_owner").contract_owner_journeys(root / "contract-owner")
     __import__('test_proof').hermetic_journey(root / 'hermetic')
     __import__("test_architect").user_words_journeys(root / "user-words")
+    correction_journeys(root / "detail-corrections")
     agreed_literals_journey(root / "agreed-literals")
     blocked_owner_journeys(root / "blocked-owner")
     guide_links_journey(root / "guide-links")
@@ -2854,13 +2863,18 @@ def test_final_fanout_journey(tmp_path, stage, case):
 @pytest.mark.fast
 @pytest.mark.parametrize("case", ["unit", "transfer", "product", "guide", "contract-done", "contract-pending",
                                   "oscillate-done", "oscillate-pending", "renamed", "split",
-                                  "final-check", "executor-guide"])
-def test_lineage_journey(tmp_path, case):
+                                  "final-check", "executor-guide", "planning-detail",
+                                  "planning-architecture"])
+def test_lineage_journey(tmp_path, case, monkeypatch, capsys):
     """Forever-fault twins protect bounded autonomy; successful repairs miss renewed allowances."""
-    from lineage_journey import unit_lineage, final_lineage, contract_lineage, planning_lineage, executor_lineage
+    from lineage_journey import (
+        unit_lineage, final_lineage, contract_lineage, planning_lineage, executor_lineage, planning_direction,
+    )
     slot = tmp_path / case
     if case == "unit":
         unit_lineage(slot)
+    elif case.startswith("planning-"):
+        planning_direction(slot, case == "planning-architecture", monkeypatch, capsys)
     elif case in ("transfer", "product", "guide"):
         final_lineage(slot, case)
     elif case in ("final-check", "executor-guide"):
@@ -2869,3 +2883,18 @@ def test_lineage_journey(tmp_path, case):
         contract_lineage(slot, case.endswith("pending"), case.startswith("oscillate"))
     else:
         planning_lineage(slot, case == "split")
+
+
+@pytest.mark.fast
+def test_planning_peer_review_journey(tmp_path):
+    """Cross-area proof and guide facts prevent unfixable REVIEW gaps and duplicate round charges."""
+    from gap_owner_journey import planning_peer_review
+    planning_peer_review(tmp_path / "peers")
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("overlap", [False, True], ids=["quality", "overlap-owner"])
+def test_planning_coverage_repair_journey(tmp_path, overlap):
+    """Existing peer proof is linked or narrowed by its actual owner before B."""
+    from gap_owner_journey import planning_coverage_repair
+    planning_coverage_repair(tmp_path / "coverage", overlap)

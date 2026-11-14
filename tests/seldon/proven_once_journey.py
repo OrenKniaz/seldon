@@ -9,10 +9,10 @@ from test_journey import NATIVE, Scripted, finish, planned, prepare
 
 
 def proven_once_journey(root):
-    """Repair peer re-testing, then reach C without demanding integrated proof locally.
+    """Reach C without demanding integrated proof locally or rejecting surplus peer proof at REVIEW.
 
     Catches REVIEW losing foreign proof owners and JUDGE asking for a peer's local evidence.
-    Existing ownership journeys exercise placement, but their semantic stubs accept duplicate cases.
+    Existing ownership journeys exercise placement, but omit the actual integrated consumer path.
     """
     class Provider(Scripted):
         def __call__(self, question):
@@ -41,27 +41,12 @@ def proven_once_journey(root):
                         command=[*join["typedBody"]["command"][:-1], "unit-002/join.py"],
                         requirements=["new:r002", "reading"])
                     edits.append(join)
-                    if "Merge correction" not in facts:
-                        duplicate = deepcopy(edits[2])
-                        duplicate.update(targetHandle="duplicate-peer")
-                        duplicate["typedBody"].update(level="unit", purpose="Repeat provider persistence states")
-                        edits.append(duplicate)
+                    duplicate = deepcopy(edits[2])
+                    duplicate.update(targetHandle="duplicate-peer")
+                    duplicate["typedBody"].update(level="unit", purpose="Repeat provider persistence states")
+                    edits.append(duplicate)
                 answer = {"verdict": "planned", "edits": edits, "units": [unit],
                           "quality": full["quality"] if n == 1 else []}
-            elif kind == "REVIEW" and facts["Review subject"] != "architecture":
-                duplicate = next((c for row in facts["Proof map"].values() for c in row
-                                  if c["purpose"] == "Repeat provider persistence states"), None)
-                answer = {"verdict": "gap" if duplicate else "adequate", "gaps": [
-                    {"target": duplicate["check"], "correction": "Remove the consumer's repeated provider cases"}]
-                    if duplicate else []}
-            elif kind == "JUDGE":
-                # This judge accepts a cross-unit obligation only when its actual proof location is supplied.
-                if "unit-001/check.py" in facts["Check sources"]:
-                    if "u002" not in facts["Proven by code at WAVE-VERIFY (not judged here)"].values():
-                        answer = {"verdict": "gap", "assessments": [], "gaps": [{
-                            "target": question["targets"][0], "correction": "Where is the consumer agreement proven?"}]}
-                        return json.dumps({"answer": {**answer, "why": "Missing proof location"}})
-                return super().__call__(question)
             else:
                 return super().__call__(question)
             return json.dumps({"answer": {**answer, "why": "Use the declared proof locations"}})
@@ -83,9 +68,9 @@ def proven_once_journey(root):
         + '\n    for check in facts["Checks"].values():'), encoding="utf-8")
     try:
         _, rows, _ = finish(run)
-        assert len(run.store.records("review_repair")) == 1
+        assert not run.store.records("review_repair")
         document = run.store.plan(run.store.cursor().revision)
-        assert len(plan.select(document, "check")) == 3  # two local behaviours and their join
+        assert len(plan.select(document, "check")) == 4  # surplus proof does not block planning
         assert not run.store.records("unit_failure")
         judge = next(q for _, k, q in rows if k == "question" and q["kind"] == "JUDGE"
                      and "unit-001/check.py" in q["facts"]["Check sources"])

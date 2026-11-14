@@ -12,7 +12,6 @@ def lineage(store, unit=None):
 
 
 def failed(store, cause, unit=None, *, key=None, shape=None, direct=False):
-    """Charge a failed round once; structural changes route twice, exact fixed points ask now."""
     key = key or lineage(store, unit)
     state = store.recovery(key)
     if cause in state["attempts"]:
@@ -25,7 +24,7 @@ def failed(store, cause, unit=None, *, key=None, shape=None, direct=False):
     state["attempts"].append(cause)
     if shape is not None:
         state["seen"].append(shape)
-    asked = direct or repeated or bool(state["answer"]) or state["stage"] >= (2 if shape is not None else 1)
+    asked = direct or (repeated if shape is not None else bool(state["answer"]) or state["stage"] >= 1)
     state["waiting"] = asked
     store.recovery(key, state)
     row = store.unit(unit) if unit else store.cursor()
@@ -55,19 +54,19 @@ def recover(store, ref, failure, *, key=None, cause=None, direct=False, charged=
 
 def planning(store, cause, shape, event=None, **updates):
     with store.transaction():
-        if failed(store, cause, shape=shape):
-            body = store.read(cause)
-            decisions.request(store, store.cursor().state, {"step": store.cursor().state,
-                "tried": [body.get("gap") or str(body.get("corrections", cause))],
-                "recommendation": "Change the approach to the unresolved plan",
-                "options": ["Try again", "Give direction", "Stop"]})
-            waiting = True
-        else:
-            waiting = False
+        cursor = store.cursor()
+        shape = {"subject": shape, "outline": store.plan(cursor.revision).get("architecture"),
+                 "answer": store.recovery(lineage(store))["answer"]}
+        if not failed(store, cause, shape=shape):
             if event:
                 advance(store, event, cause, **updates)
-    if waiting:
-        raise decisions.Waiting()
+            return
+        body = store.read(cause)
+        decisions.request(store, store.cursor().state, {"step": store.cursor().state,
+            "tried": [body.get("gap") or str(body.get("corrections", cause))],
+            "recommendation": "Change the approach to the unresolved plan",
+            "options": ["Try again", "Give direction", "Stop"]})
+    raise decisions.Waiting()
 
 
 def subject(store, gate, body):

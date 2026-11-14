@@ -99,7 +99,10 @@ def decide(store, provider, user):
         elif choice == "decline":
             stop(store, words)
         elif "step" in item["subject"]:
-            store.cursor(replace(cursor, decision=None, failure="", requestedChange=raw))
+            if cursor.state == "ARCH-REVIEW":
+                advance(store, "contract-gap", raw, decision=None, failure="", requestedChange=raw)
+            else:
+                store.cursor(replace(cursor, decision=None, failure="", requestedChange=raw))
         elif choice == "revise":
             advance(store, "revise", raw, decision=None, failure="", requestedChange=raw)
         elif cursor.state in fields:

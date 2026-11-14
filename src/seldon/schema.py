@@ -37,12 +37,15 @@ BODIES = {
     "requirement": obj(obligation=TEXT, design=TEXT, contract=TEXT, features=array(TEXT, 1)),
     "check": obj(purpose=TEXT, level=choice("unit", "wave"),
                  command=array(TEXT, 1),
-                 requiredEnvironment=REFS, expectedEvidence=TEXT, requirements=array(TEXT, 1)),
+                 requiredEnvironment=REFS, expectedEvidence=TEXT,
+                 requirements=array(TEXT, 1), integrates=REFS),
     "unit": obj(instructions=TEXT, scope=array(TEXT, 1), checkPaths=array(TEXT, 1),
                 requirements=REFS, dependencies=REFS, area=TEXT, provides=REFS, consumes=REFS, reads=REFS),
 }
 GAP = obj(target=TEXT, correction=TEXT)
 PLAN_BODIES = {**BODIES, "feature": FEATURE,
+               "check": obj(**{k: v for k, v in BODIES["check"]["properties"].items()
+                               if k != "integrates"}),
                "contract": obj(**{**BODIES["contract"]["properties"],
                                   "provider": POSITION, "consumers": array(POSITION)}),
                "obligation": obj(what=TEXT, owner=POSITION, closingRequirement=TEXT)}

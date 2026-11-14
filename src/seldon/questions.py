@@ -77,15 +77,17 @@ PROMPTS = {
               "covering this responsibility and their contracts. Missing or unagreed contracts or scope "
               "return contract_gap; ARCHITECT settles proposals within commitments. " + AGREED_LITERALS,
     "REVIEW": "Does this area's plan deliver its part of the accepted scope and quality bar? "
-              "Check its records, agreements and trace coverage. "
-              "Target missing or unagreed shared contracts at architecture; other gaps name local records. "
+              "Peer rows are proof already planned by their owner; never ask this area to repeat, "
+              "trace or change them; overlap with a peer is not a gap. "
+              "Target missing or unagreed shared contracts at architecture; other gaps name the supplied "
+              "correction owner's record, including a peer's check when its quality coverage needs linking. "
               + AGREED_LITERALS,
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "CONTRACT": "What contract text resolves this worker's need within the accepted commitments? "
                 "Replace only consumed contract texts and record the decision; answer user if the fix "
                 "would change an accepted commitment.",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
-            "run its unit checks and refine before returning. Meet the accepted quality bar.",
+            "run its unit checks and refine before returning. Use checks/kit/browser and checks/kit/serve.",
     "JUDGE": "For each requirement: are its checks meaningful (they exercise the requirement, not "
              "skipped, not empty, not asserting nothing; code proves they ran); is anything a stub, "
              "mock or missing? Read the check sources, RED output at T or wave start, passing P output "
@@ -145,7 +147,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
             "PRODUCT": "One criterion's behaviour: traced checks, final observations, screenshots and "
                        "a CODE summary of reached unit source verdicts and unchanged scope trees."}}
 
-    if kind == "DETAIL":
+    if kind in ("DETAIL", "REVIEW"):
         facts = {**facts, "Delivery work supplied by Seldon after the product units": {
             "path": plan.GUIDE_PATH, "work": plan.GUIDE_WORK, "owner": "Seldon's final guide unit"}}
     example = {
@@ -221,7 +223,7 @@ def user_words(store):
     else:
         dream = store.read(cursor.kickoff)["words"]
     changes = [store.read(b["words"])["words"] for _, _, b in store.records("approval")
-               if b.get("choice") == "revise"]
+               if b.get("choice") == "revise" or "step" in b["subject"]]
     return {"Dream": dream, **({"Requested change": changes} if changes else {})}
 
 
@@ -239,6 +241,21 @@ def architect_brief(vision, words, gap=None, previous=None):
     return build("ARCHITECT", facts)
 
 
+def peer_checks(store, outline, area):
+    providers = {c["provider"] for c in outline["contracts"]
+                 if set([area["handle"], *area.get("ancestors", [])]) & set(c["consumers"])}
+    areas, latest = architecture.index(outline["areas"]), {}
+    for _, _, body in store.records("area_detail"):
+        if (body["area"] in providers and not body.get("failure") and not body.get("architecture")
+                and body["basis"]["vision"] == store.cursor().vision
+                and body["basis"]["area"] == areas[body["area"]]):
+            answer = store.read(body["answer"])["answer"]
+            if answer["verdict"] == "planned":
+                latest[body["area"]] = answer
+    return [{"check": owner + "/" + e["targetHandle"], "owner": owner, "peer": True, **e["typedBody"]}
+            for owner, answer in latest.items() for e in answer["edits"] if e["kind"] == "check"]
+
+
 def detail_brief(store, outline, area):
     cursor = store.cursor()
     vision = store.read(cursor.vision)["answer"]
@@ -247,7 +264,7 @@ def detail_brief(store, outline, area):
     listing = gitwork.git(store.root.parent, "ls-tree", "-r", "--name-only", cursor.candidate).splitlines()
     files = [p for p in listing if plan.matches(p, area["scope"])]
     goals = architecture.commitments(vision)
-    facts = {"User's words": user_words(store),
+    facts = {"User's words": user_words(store), "Peer checks": peer_checks(store, outline, area),
              "Approved scope": {"scopeIn": [goals[r] for r in area["commitments"]
                                            if not r.startswith("quality:")],
                                "scopeOut": vision["scopeOut"], "quality": vision["quality"]},
@@ -270,8 +287,7 @@ def labelled(facts):
 
 
 def runtime(setup):
-    return {k: setup[k] for k in ("python", "node", "playwrightPackage", "browserExecutable", "browserHowTo")
-            if k in setup}
+    return {k: setup[k] for k in ("python", "node") if k in setup}
 
 
 def requirement_facts(document, refs):

@@ -60,26 +60,8 @@ def setup_facts():
             version = json.loads((entry.parent.parent / "package.json").read_text())["version"]
         elif Path(codex).suffix.lower() == ".exe" or os.name != "nt":
             command = [codex]
-    cache = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "ms-playwright"
-    package = next((str(root) for link in sorted((cache / ".links").glob("*"))
-                    if (root := Path(link.read_text("utf-8").strip())).joinpath("package.json").is_file()),
-                   None)
-    browser_paths = ("Microsoft/Edge/Application/msedge.exe", "Google/Chrome/Application/chrome.exe")
-    browser = next((str(path) for variable in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")
-                    for relative in browser_paths
-                    if (path := Path(os.environ.get(variable, "")) / relative).is_file()), None)
-    if browser is None:
-        patterns = ("chromium-*/chrome-*/chrome.exe",
-                    "chromium_headless_shell-*/chrome-*/headless_shell.exe")
-        browser = next((str(p) for pattern in patterns for p in sorted(cache.glob(pattern)) if p.is_file()),
-                       None)
     return {"python": {"path": sys.executable, "version": sys.version}, "node": node,
-            "codexCommand": command, "playwrightPackage": package,
-            "browserExecutable": browser,
-            "browserHowTo": "Use node with a .cjs test and require(playwrightPackage); "
-                "chromium.launch({headless:true,executablePath:browserExecutable}). "
-                "Exercise the actual product; save screenshots in process.env.SELDON_EVIDENCE_DIR, "
-                "close the browser. No downloads. Python tests use -B.",
+            "codexCommand": command,
             "providers": {"worker_first_effort": "high", **{
                 role: {**label, "version": version, "freshCall": True,
                 "independence": "fresh same-provider call" if role == "reviewer" else "same-provider"}

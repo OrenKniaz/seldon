@@ -198,12 +198,12 @@ def review_journeys(root):
                 while run.store.cursor().state != "B":
                     run.step()
                 final = run.store.read(run.store.cursor().review)
-                assert initial["subjects"]["area-003"] == final["subjects"]["area-003"]
+                assert initial["subjects"]["area-003"] != final["subjects"]["area-003"]
                 if mode in ("area", "area-records"):
                     assert provider.arch_calls == 1
                     assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls[3:]] == ["area-002"]
                     assert {q["facts"]["Review subject"] for q in provider.review_calls[4:]} == (
-                        {"area-002"})
+                        {"area-002", "area-003"})
                     assert initial["subjects"]["architecture"] == final["subjects"]["architecture"]
                     assert initial["subjects"]["area-001"] == final["subjects"]["area-001"]
             assert run.step() == "EXECUTE"
@@ -314,7 +314,8 @@ def plan_contract_gap_journey(slot, case):
             contract, = plan.select(document, "contract").values()
             assert contract["text"] == agreement and contract["consumers"] == ["u002"]
             crossing, = plan.assigned(document)[None].values()
-            assert set(crossing["requirements"]) == {"n002", "n005"}
+            assert crossing["requirements"] == plan.select(document, "unit")["u002"]["requirements"]
+            assert crossing["integrates"] == list(plan.select(document, "contract"))
             assert not any("Merge correction" in q["facts"] for q in provider.detail_calls)
     finally:
         run.close()
@@ -347,7 +348,9 @@ def uncertain_review_journey(root):
                     "why": "Need the recorded area answer and current product inventory"}})
             supplied = facts["Requested facts"]["Available subject facts"]
             assert supplied["Recorded area plan"]["units"]
-            assert supplied["Product in this area"] == {"files": [], "additionalFiles": 0}
+            product = supplied["Product in this area"]
+            assert product["additionalFiles"] == 0
+            assert all(p.startswith("checks/kit/") for p in product["files"])
             return json.dumps({"answer": {"verdict": "adequate", "gaps": [],
                                           "why": "The recorded plan covers this area"}})
 
@@ -429,6 +432,11 @@ def recorded_review_journey(root):
                 original_subject = "cross-area" if subject == "architecture" else subject
                 if i not in self.used and reply["kind"] == kind and reply["subject"] == original_subject:
                     self.used.add(i)
+                    return reply["raw"]
+            # A refreshed REVIEW of an already-reviewed subject (peer checks changed) reuses its recorded verdict.
+            for i in sorted(self.used, reverse=True):
+                reply = recording["replies"][i]
+                if kind == "REVIEW" and reply["kind"] == kind and reply["subject"] == subject:
                     return reply["raw"]
             raise AssertionError((kind, subject, list(facts)))
 

@@ -1,0 +1,51 @@
+{
+  "source": "shelflife-54eaab4-k05; r82 quality gap and r146 planned backend query records",
+  "edits": [
+    {
+      "kind": "feature",
+      "targetHandle": "new:backend-inventory",
+      "typedBody": {
+        "acceptance": "The local API maintains validated, persistent inventory, implements the agreed queries and retains every successful concurrent decrement.",
+        "story": "Maintain one household's pantry through a canonical SQLite inventory and JSON API."
+      }
+    },
+    {
+      "kind": "requirement",
+      "targetHandle": "new:backend-query",
+      "typedBody": {
+        "contract": "Provides inventory-query-semantics through GET /api/items under http-api.",
+        "design": "Use the household computer's local date, inclusive expiry bounds, literal Python str.casefold() substring search, intersected filters and deterministic expiry/id ordering.",
+        "features": [
+          "new:backend-inventory"
+        ],
+        "obligation": "GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last). Implement all inventory-query-semantics rules, including expired-item inclusion, null exclusion under expiry filtering, parameter validation and id tie-breaking. Expiring soon uses expiring_within=7."
+      }
+    },
+    {
+      "kind": "check",
+      "targetHandle": "new:backend-query-check",
+      "typedBody": {
+        "command": [
+          "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+          "-B",
+          "checks/backend/check_queries.py"
+        ],
+        "expectedEvidence": "API-created records cover yesterday, today, the inclusive expiry-window boundary, beyond it, null expiry and equal-expiry ties. Real GET results prove membership, ordering, casefolded literal search, empty search and filter intersection. Invalid, unknown and repeated query parameters return the agreed error.",
+        "level": "unit",
+        "purpose": "Protect inventory-query-semantics against off-by-one windows, SQL wildcard interpretation and unstable ordering, which CRUD checks miss. This is the authoritative backend query evidence handle for interface references; wave checks do not repeat its cases.",
+        "requiredEnvironment": [
+          "supplied-runtime",
+          "Loopback sockets",
+          "Writable temporary directory"
+        ],
+        "requirements": [
+          "new:backend-query"
+        ]
+      }
+    }
+  ],
+  "gap": {
+    "correction": "Trace the real backend expiry-membership and ordering check for yesterday, today, the inclusive seven-day boundary, beyond-window and null expiry. n019 explicitly proves presentation only, while n020 excludes date-edge cases; neither currently proves this part of the criterion. Reuse backend evidence rather than duplicating it in interface fixtures.",
+    "target": "Proof map quality:005"
+  }
+}

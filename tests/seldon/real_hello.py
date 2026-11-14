@@ -66,6 +66,8 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
         setup["questionContract"] = hashlib.sha256(b"".join((source / "src/seldon" / name).read_bytes()
             for name in ("questions.py", "schema.py"))).hexdigest()
         setup["evidenceDirectory"] = str(evidence)
+        if os.environ.get("SELDON_FIRST_EFFORT"):  # cohort A/B arm for first product WORK effort
+            setup["providers"]["worker_first_effort"] = os.environ["SELDON_FIRST_EFFORT"]
         (slot / "setup.json").write_text(json.dumps(setup, indent=2), encoding="utf-8")
     provider = Codex(slot / "calls", setup)
 
@@ -73,6 +75,9 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
 
     def yes(request):
         print(json.dumps({"scriptedDecision": request}, ensure_ascii=False), flush=True)
+        if request["gate"] == "B" and os.environ.get("SELDON_STOP_AT_B") == "1":
+            from seldon.decisions import Waiting
+            raise Waiting()
         subject = request["subject"].get("unit") or request["subject"].get("step") or request["gate"]
         asked[subject] = asked.get(subject, 0) + (request["gate"] not in ("A", "B", "CHECK-IN", "C"))
         # The simulated owner answers one subject at most twice; a third ask ends the session WAITING
@@ -119,6 +124,21 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
         # A run never fails (R15): it ends with an outcome or waits on one question; print whichever it is.
         from seldon.frontdoor import state
         outcomes = loop.store.records("outcome")
+        if cursor.state == "B" and os.environ.get("SELDON_STOP_AT_B") == "1":
+            from seldon import plan
+            document = loop.store.plan(cursor.revision)
+            attempts = [b["startedAt"] for _, _, b in loop.store.records("attempt")]
+            ends = [b["finishedAt"] for _, _, b in loop.store.records("attempt_end")]
+            print(json.dumps({"planSummary": {"units": plan.select(document, "unit"),
+                "checkCount": len(plan.select(document, "check")), "reviewRounds": sum(
+                    b["answer"]["verdict"] == "gap" for _, _, b in loop.store.records("review_verdict")),
+                "planningMinutes": (max(ends) - min(attempts)) / 60,
+                "ownerQuestions": [b for _, _, b in loop.store.records("decision_request")
+                                   if b["gate"] not in ("A", "B", "CHECK-IN", "C")]}},
+                ensure_ascii=False), flush=True)
+            print(json.dumps({"state": "B", "scriptedUser": True, "ownerAccepted": False,
+                              "outcome": None}), flush=True)
+            return 0
         print(json.dumps({"state": "WAITING" if cursor.decision else cursor.state, "scriptedUser": True,
                           "ownerAccepted": False, "outcome": outcomes[-1][2] if outcomes else None,
                           "waitingFor": state(str(loop.project)).get("waitingFor")}, indent=2), flush=True)

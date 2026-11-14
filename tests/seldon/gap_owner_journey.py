@@ -9,6 +9,177 @@ from seldon import questions
 from test_journey import finish, prepare
 
 
+def planning_coverage_repair(slot, overlap):
+    """The r82 quality gap reuses r146's new backend query check and reaches B.
+
+    The overlap twin routes the consumer's correction to the provider while keeping local proof.
+    Prior journeys only supplied already-merged provider requirements, hiding both missing facts
+    and the false claim that an agreement crossing proves every provider behaviour.
+    """
+    from copy import deepcopy
+    from seldon import plan
+    from test_journey import approve, planned
+
+    retained = json.loads(Path(__file__).with_name('recorded_planning_query.json').read_text('utf-8'))
+    run, provider = prepare(slot, 'ask', 1)
+    invoke = provider.invoke
+    calls, repairs = [], []
+
+    def answer(q, started):
+        calls.append(q)
+        raw, session = (('{"answer": {}}', None) if q['kind'] in ('ARCHITECT', 'DETAIL')
+                        else invoke(q, started))
+        body = json.loads(raw)['answer']
+        if q['kind'] == 'ALIGN':
+            body['quality'] += [{'criterion': text, 'verification': 'Read the real HTTP query'} for text in (
+                'Truthful errors', 'Atomic consumption', 'Correct expiry membership')]
+        elif q['kind'] == 'ARCHITECT':
+            body = {'areas': [
+                {'handle': 'backend', 'responsibility': 'Own real inventory queries',
+                 'scope': ['server.py', 'inventory.py', 'checks/backend/**'],
+                 'commitments': ['scopeIn:1', 'quality:1', 'quality:3', 'quality:4', 'quality:5']},
+                {'handle': 'interface', 'responsibility': 'Present the real query results',
+                 'scope': ['web/**', 'checks/interface/**'], 'commitments': ['quality:2', 'quality:5']}],
+                'contracts': [{'handle': 'inventory-query-semantics', 'kind': 'api',
+                    'text': 'GET /api/items: inclusive expiry membership and deterministic ordering',
+                    'provider': 'backend', 'consumers': ['interface']}],
+                'decisions': [], 'waves': [{'goal': 'Display the real query'}]}
+        elif q['kind'] == 'DETAIL':
+            backend = q['facts']['Area']['handle'] == 'backend'
+            correction = q['facts'].get('Merge correction')
+            if backend:
+                edits = deepcopy(retained['edits'])
+                check = edits[-1]['targetHandle']
+                quality = [{'criterion': n, 'checks': [check]} for n in (1, 3, 4)]
+                if correction:
+                    repairs.append(q)
+                    quality.append({'criterion': 5, 'checks': [check]})
+                    if overlap:
+                        edits[-1]['typedBody']['purpose'] = (
+                            'Prove query membership once at its real HTTP owner')
+                body = {'verdict': 'planned', 'edits': edits, 'quality': quality, 'units': [{
+                    'scope': ['server.py', 'inventory.py', 'checks/backend/**'],
+                    'checkPaths': ['checks/backend/**'], 'requirements': ['new:backend-query'],
+                    'dependencies': [], 'instructions': 'Implement real query semantics',
+                    'provides': ['inventory-query-semantics'], 'consumes': [], 'reads': []}]}
+            else:
+                full = planned(1, 'ask')
+                edits = deepcopy(full['edits'][:3])
+                edits[-1]['typedBody']['command'][-1] = 'checks/interface/local.py'
+                flow = deepcopy(edits[-1])
+                flow['targetHandle'] = 'query-journey'
+                flow['typedBody'].update(level='wave', purpose='Display one integrated query result',
+                    command=['python', 'checks/interface/flow.py'],
+                    requirements=['new:r001', 'inventory-query-semantics'])
+                body = {'verdict': 'planned', 'edits': [*edits, flow], 'quality': [
+                    {'criterion': n, 'checks': ['new:c001', 'query-journey']} for n in (2, 5)],
+                    'units': [{'scope': ['web/**', 'checks/interface/**'],
+                        'checkPaths': ['checks/interface/**'], 'requirements': ['new:r001'],
+                        'dependencies': [], 'instructions': 'Present query results',
+                        'provides': [], 'consumes': ['inventory-query-semantics'], 'reads': []}]}
+        elif q['kind'] == 'REVIEW' and q['facts']['Review subject'] == 'interface':
+            peer, = q['facts']['Peer checks']
+            assert peer['check'] == 'backend/new:backend-query-check'
+            expected = (retained['edits'][-1]['typedBody']['purpose'] if not repairs or not overlap
+                        else 'Prove query membership once at its real HTTP owner')
+            assert peer['purpose'] == expected
+            covered = any(row['purpose'] == retained['edits'][-1]['typedBody']['purpose'] and not row['peer']
+                          for row in q['facts']['Proof map']['quality:005'])
+            body = {'verdict': 'adequate' if repairs and (overlap or covered) else 'gap', 'gaps': []}
+            if body['verdict'] == 'gap':
+                body['gaps'] = [{'target': peer['check'], 'correction':
+                    'Narrow the backend overlap, retaining a local query check' if overlap
+                    else retained['gap']['correction']}]
+                if not overlap:
+                    body['gaps'].append({'target': 'interface',
+                        'correction': 'Align the integrated query journey with the agreed API'})
+        return json.dumps({'answer': {**body,
+            'why': 'Use the existing owner and planned query proof'}}), session
+
+    provider.invoke = answer
+    run.user = approve
+    try:
+        while run.store.cursor().state != 'B':
+            run.step()
+        assert len(repairs) == 1
+        assert len([q for q in calls if q['kind'] == 'ARCHITECT']) == 1
+        consumer = [q for q in calls if q['kind'] == 'DETAIL' and q['facts']['Area']['handle'] == 'interface']
+        if not overlap:
+            assert any(p['check'] == 'backend/new:backend-query-check' for q in consumer
+                       for p in q['facts']['Peer checks'])
+        document = run.store.plan(run.store.cursor().revision)
+        query, = [c for c, b in plan.select(document, 'check').items()
+                  if b['command'][-1] == 'checks/backend/check_queries.py']
+        assert query in plan.select(document, 'criterion')['quality:005']['checks']
+        wave, = [b for b in plan.select(document, 'check').values() if b['level'] == 'wave']
+        backend_req, = plan.select(document, 'unit')['u001']['requirements']
+        assert backend_req not in wave['requirements']
+        assert query in plan.assigned(document)['u001']
+        assert backend_req in plan.assigned(document)['u001'][query]['requirements']
+        assert not run.store.records('architecture_gap') and not run.store.cursor().decision
+    finally:
+        run.close()
+
+
+def planning_peer_review(slot):
+    """A consumer reviews integrated proof with peer facts; one mixed verdict spends one round.
+
+    Single-area review misses provider proof derived from consumed contracts and the guide owner;
+    single-target repairs miss the double charge while forwarding an architecture correction.
+    """
+    from seldon import plan, recovery
+    from test_architect import AreaProvider, start
+
+    run, base = start(slot, 2, "sizing")
+    provider = AreaProvider(base.slot, 2, "sizing")
+    invoke = provider.invoke
+    reviews = []
+
+    def answer(q, started):
+        raw, session = invoke(q, started)
+        body = json.loads(raw)
+        if q["kind"] == "ARCHITECT":
+            body["answer"]["areas"] = [{"handle": f"area-{i:03}",
+                "responsibility": "Store values" if i == 1 else "Read integrated values",
+                "scope": [f"unit-{i:03}/**"],
+                "commitments": ["scopeIn:1", "quality:1", "quality:2"]} for i in (1, 2)]
+            body["answer"]["contracts"] = [{"handle": "stored-value", "kind": "file-format",
+                "text": "UTF-8 stored value", "provider": "area-001", "consumers": ["area-002"]}]
+        elif q["kind"] == "DETAIL" and q["facts"]["Area"]["handle"] == "area-002":
+            local = next(e["targetHandle"] for e in body["answer"]["edits"] if e["kind"] == "requirement")
+            body["answer"]["edits"].append({"kind": "check", "targetHandle": "integrated-read",
+                "typedBody": {"purpose": "Read the integrated stored value", "level": "wave",
+                    "command": ["python", "unit-002/flow.py"], "requiredEnvironment": ["Python"],
+                    "expectedEvidence": "Stored value read", "requirements": [local, "stored-value"]}})
+            body["answer"]["quality"] = [{"criterion": 2, "checks": ["integrated-read"]}]
+        elif q["kind"] == "DETAIL":
+            body["answer"]["quality"] = [v for v in body["answer"]["quality"] if v["criterion"] == 1]
+        elif q["kind"] == "REVIEW" and q["facts"]["Review subject"] == "area-002":
+            reviews.append(q)
+            if len(reviews) == 1:
+                body["answer"].update(verdict="gap", gaps=[
+                    {"target": "Architecture: contract_gap stored-value",
+                     "correction": "Agree the shared encoding"},
+                    {"target": "n005", "correction": "Name the visible read"}])
+        return json.dumps(body), session
+
+    provider.invoke, run.provider = answer, provider
+    try:
+        while run.store.cursor().state != "ARCHITECT" or not reviews:
+            run.step()
+        assert run.store.recovery(recovery.lineage(run.store))["rounds"] == 1
+        facts = reviews[0]["facts"]
+        assert facts["Delivery work supplied by Seldon after the product units"]["path"] == "docs/try-it.md"
+        peer, = [row for row in facts["Proof map"]["quality:002"] if row.get("peer")]
+        document = run.store.plan(run.store.cursor().revision)
+        assert peer["owner"] == "u001"
+        check = plan.select(document, "check")[peer["check"]]
+        assert check["command"][-1] == "unit-001/check.py"
+        assert not run.store.cursor().decision and not run.store.units()
+    finally:
+        run.close()
+
+
 def gap_owner_journey(slot, case):
     """Catch g04 amplification, lost RED/screenshots and shared-text ping-pong through C.
 

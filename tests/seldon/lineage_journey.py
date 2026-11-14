@@ -187,15 +187,17 @@ def contract_lineage(slot, pending, oscillate):
 
 
 def planning_lineage(slot, split):
-    """Endless new names or narrower children reach one durable question; exact repeats alone miss both."""
+    """New names and a subdivision remain repairable; only the same unresolved outline asks again."""
     run, provider = prepare(slot, "ask", 2)
     invoke = provider.invoke
     turns = []
+    names = iter(("first", "second"))
+    subdivisions = iter((True,))
 
     def answer(q, started):
         if q["kind"] == "DETAIL":
             turns.append(q)
-            if split:
+            if split and next(subdivisions, False):
                 area = q["facts"]["Area"]
                 children = [{**deepcopy(area), "handle": area["handle"] + suffix,
                              "commitments": list(q["facts"]["Accepted commitments"]),
@@ -203,10 +205,15 @@ def planning_lineage(slot, split):
                             for suffix in ("a", "b")]
                 return json.dumps({"answer": {"verdict": "subdivide", "subareas": children,
                     "contracts": [], "why": "The same commitments need more subdivision"}}), None
+            if split:
+                return json.dumps({"answer": {"verdict": "contract_gap",
+                    "need": "The accepted values still need an agreed format",
+                    "why": "Unresolved agreement"}}), None
             raw, session = invoke(q, started)
             body = json.loads(raw)
-            body["answer"]["units"][0]["reads"] = [f"unassigned-{len(turns)}/value.txt"]
-            body["answer"]["units"][0]["dependencies"] = [f"unassigned-{len(turns)}/value.txt"]
+            path = f"unassigned-{next(names, 'unresolved')}/value.txt"
+            body["answer"]["units"][0]["reads"] = [path]
+            body["answer"]["units"][0]["dependencies"] = [path]
             return json.dumps(body), session
         return invoke(q, started)
 
@@ -214,8 +221,76 @@ def planning_lineage(slot, split):
     try:
         first = waiting(run)
         assert first["gate"] == "DETAIL" and not run.store.cursor().B
-        assert first["subject"]["routingStage"] >= 2
+        assert first["subject"]["tried"]
         run = recurrence(run, provider, first)
+    finally:
+        run.close()
+
+
+def planning_direction(slot, architecture, monkeypatch, capsys):
+    """Owner direction reaches the repairing planner before another question, then B.
+
+    Forever-fault twins cannot catch a useful answer being discarded before a real repair try.
+    REVIEW retains the missing promise alongside the words; ARCH-REVIEW routes back to ARCHITECT.
+    """
+    run, provider = prepare(slot, "ask", 1)
+    invoke = provider.invoke
+    calls, verdicts, requests, repaired = [], [], [], []
+    words = "Revise the plan: keep the exact stored value and make its read visible"
+    gap = "The accepted stored value needs a visible read"
+
+    def answer(q, started):
+        calls.append(q)
+        if q["kind"] == ("ARCHITECT" if architecture else "DETAIL") and words in json.dumps(q["facts"]):
+            repaired.append(q)
+        if q["kind"] == "REVIEW" and (q["facts"]["Review subject"] == "architecture") == architecture:
+            verdicts.append(q)
+            if not repaired:
+                correction = gap if len(verdicts) != 2 else gap + " after restart"
+                return json.dumps({"answer": {"verdict": "gap", "gaps": [{
+                    "target": "architecture: missing promise" if architecture else "n002",
+                    "correction": correction}], "why": "An accepted promise is missing"}}), None
+        return invoke(q, started)
+
+    def user(item):
+        if item["gate"] in ("A", "B", "CHECK-IN", "C"):
+            return approve(item)
+        requests.append((item, len(calls)))
+        assert len(requests) == 1, "Owner was asked again before their direction was tried"
+        return words
+
+    provider.invoke, run.user = answer, user
+    try:
+        while run.store.cursor().state != "B":
+            try:
+                run.step()
+            except Waiting:
+                pass
+        assert requests and not run.store.units()
+        following = [q for q in calls[requests[0][1]:] if q["kind"] != "DECIDE"]
+        assert following[0]["kind"] == ("ARCHITECT" if architecture else "DETAIL")
+        assert words in json.dumps(following[0]["facts"])
+        assert gap in json.dumps(following[0]["facts"])
+        if not architecture:
+            assert len(verdicts) == 4  # Three gap verdicts followed by the repaired plan.
+        assert len([b for _, _, b in run.store.records("decision_request")
+                    if "step" in b["subject"]]) == 1
+        if not architecture:
+            import real_hello
+            (slot / "setup.json").write_text(json.dumps(provider.setup), encoding="utf-8")
+            run.close()
+            monkeypatch.setattr(real_hello, "Codex", lambda *_: provider)
+            monkeypatch.setenv("SELDON_STOP_AT_B", "1")
+            monkeypatch.delenv("SELDON_SIM_USER", raising=False)
+            assert real_hello.run(slot, False, reopen=True) == 0
+            output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+            summary = next(row["planSummary"] for row in output if "planSummary" in row)
+            assert summary["units"] and summary["checkCount"]
+            assert summary["reviewRounds"] == 3 and len(summary["ownerQuestions"]) == 1
+            assert output[-1]["state"] == "B" and not output[-1]["ownerAccepted"]
+            run = Run.reopen(slot / "product", provider, approve)
+            assert run.store.cursor().state == "B" and not run.store.units()
+            assert not any(q["kind"] == "WORK" for q in calls)
     finally:
         run.close()
 

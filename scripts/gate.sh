@@ -11,4 +11,5 @@ mkdir -p "$root/temp"
 export PYTHONPATH='src;tests/seldon'
 export TEMP="$root/temp" TMP="$root/temp"
 export PYTHONDONTWRITEBYTECODE=1
-python -B -m pytest tests/seldon -q -p no:cacheprovider --basetemp="$root/pytest"
+# Parallel journeys (16 cores; Oren 11-14 "gates keep slowing us down"): the floor is the longest single journey.
+python -B -m pytest tests/seldon -q -p no:cacheprovider -n "${GATE_WORKERS:-8}" --dist loadfile --basetemp="$root/pytest"

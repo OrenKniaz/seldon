@@ -62,7 +62,7 @@ def wave_red_journey(root, preserving):
                 if target not in facts['Requirements']:
                     continue
                 if 'baselineDemonstrated' not in assessment:
-                    assert not facts['Proof map'][target]
+                    assert all(row['peer'] and row['owner'] != ref for row in facts['Proof map'][target])
                     continue
                 baseline = [o for o in facts['Observations'] if o['purpose'] in ('T', 'wave-start')
                             and o['check'] in facts['Checks'] and target in o['requirements']]

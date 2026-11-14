@@ -72,7 +72,7 @@ def contract_owner_journeys(root):
     """A c03 four-area twin reaches B/DONE; a repeated final cause asks at its repair owner before continuing.
 
     Earlier journeys let a leaf provider drive unseen HTTP agreements and never use a consumed
-    contract reference to carry provider requirements through merge into wave proof and handoff.
+    contract reference to carry crossings separately from local proof through merge and repair.
     The misplaced-reference twin catches accepting a provider's own contract instead of correcting it.
     These scripted semantic answers establish structure and recovery, not real-model acceptance.
     """
@@ -110,8 +110,9 @@ def contract_owner_journeys(root):
             document = run.store.plan(run.store.cursor().revision)
             wave_ref, = plan.assigned(document)[None]
             assert plan.owner(document, wave_ref) == "u004"
-            assert set(plan.traced_units(document, plan.assigned(document)[None])) == {
-                "u001", "u002", "u003", "u004"}
+            assert set(plan.traced_units(document, plan.assigned(document)[None])) == {"u004"}
+            assert set(plan.assigned(document)[None][wave_ref]["integrates"]) == set(
+                plan.select(document, "contract"))
             if broken:
                 from seldon.decisions import Waiting
                 assert run.run().decision

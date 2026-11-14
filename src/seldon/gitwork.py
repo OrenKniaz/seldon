@@ -35,9 +35,12 @@ def contains(project, commit, base):
 
 def init(root):
     git(root, "init", "--quiet")
-    empty = git(root, "mktree", data=b"")
-    revision = commit(root, empty)
+    changes = [("checks/kit/" + p.name, "100644",
+                git(root, "hash-object", "-w", "--stdin", data=p.read_bytes()))
+               for p in sorted(Path(__file__).with_name("kit").glob("*.cjs"))]
+    revision, = import_commits(root, None, [changes])
     git(root, "update-ref", "HEAD", revision)
+    checkout(root, revision)
     return revision
 
 
@@ -164,7 +167,7 @@ def import_commits(root, parent, patches):
         refs.append(ref)
         stream.extend([f"commit {ref}", f"mark :{number}",
                        "committer Seldon <seldon@local> now", "data 16", "Seldon candidate",
-                       f"from {parent}"])
+                       *([f"from {parent}"] if parent else [])])
         for path, mode, oid in changes:
             name = json.dumps(path, ensure_ascii=False)
             stream.append(f"D {name}" if mode == "000000" else f"M {mode} {oid} {name}")

@@ -6,12 +6,12 @@ from . import architecture, detail, inference, plan, questions, recovery
 from .states import advance
 
 
-def briefs(document, words):
+def briefs(store, document, words):
     outline = document["architecture"]
     vision = document["nodes"]["vision"]["body"]
     units = {r: u for r, u in plan.select(document, "unit").items() if r != "guide"}
-    agreements = dict(zip((c["handle"] for c in outline["contracts"]),
-                          plan.select(document, "contract").values(), strict=True))
+    agreements = dict(zip(plan.select(document, "contract"),
+                          (c["handle"] for c in outline["contracts"]), strict=True))
     writers = plan.owners(document)
     areas = dict(zip(plan.select(document, "area"), outline["areas"], strict=True))
     result = {}
@@ -28,16 +28,14 @@ def briefs(document, words):
                      if any(architecture.endpoint(a, c) for a in participants)]
         for r in checks:
             check = nodes[r]["body"]
-            removed = set(check["requirements"]) - requirements
             nodes[r] = {**nodes[r], "body": {**check,
                 "requirements": [ref for ref in check["requirements"] if ref in requirements],
-                "integrates": [c["handle"] for c in contracts if removed.intersection(
-                    units[agreements[c["handle"]]["provider"]]["requirements"])]}}
+                "integrates": [agreements[ref] for ref in check["integrates"]]}}
         for r, c in plan.select(document, "criterion").items():
             nodes[r] = {"kind": "criterion", "body": {k: v for k, v in c.items() if k != "checks"}}
         result[area["handle"]] = questions.build("REVIEW", {
             "Review subject": area["handle"], "Approved vision": vision, "Area": area,
-            "User's words": words,
+            "User's words": words, "Peer checks": questions.peer_checks(store, outline, area),
             "Wave goal": outline["waves"][0]["goal"], "Contracts": contracts,
             "Decisions": [d for d in outline["decisions"] if set(d["areas"]) & set(participants)],
             "Plan": {"nodes": nodes}, "Proof map": plan.proof_map(
@@ -120,15 +118,26 @@ def arch_review(store, provider):
 def step(store, provider, capacity):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
-    pending = briefs(document, questions.user_words(store))
+    pending = briefs(store, document, questions.user_words(store))
+    area_handles = dict(zip(plan.select(document, "area"), pending, strict=True))
+    targets = {ref: area_handles[u["area"]] for unit, u in plan.select(document, "unit").items()
+               for ref in [unit, *u["requirements"]]}
+    targets.update({c: targets[owner] for c, owner in plan.owners(document).items()})
+    targets.update(area_handles)
+    for subject, question in pending.items():
+        targets.update({p["check"]: p["owner"] for p in question["facts"]["Peer checks"]})
+        question["facts"]["Correction owners"] = {r: a for r, a in targets.items()
+            if a == subject or a in {p["owner"] for p in question["facts"]["Peer checks"]}}
 
     def ask(subject):
         try:
             question = pending[subject]
             # Canonical DETAIL records survive global handle renumbering when another area grows.
-            basis = {"detail": document["areaDetails"][subject],
+            basis = {"detail": document["areaDetails"][subject], "peers": {
+                        p["owner"]: document["areaDetails"][p["owner"]]
+                        for p in question["facts"]["Peer checks"]},
                      "facts": {k: v for k, v in question["facts"].items()
-                               if k not in ("Plan", "Proof map")}}
+                               if k not in ("Plan", "Proof map", "Correction owners")}}
             return review(store, provider, question, basis)
         finally:
             store.close()
@@ -139,7 +148,8 @@ def step(store, provider, capacity):
     refs["architecture"] = next(b["answer"] for _, _, b in reversed(store.records("area_review"))
                                 if b["subject"] == "architecture" and b["basis"] == outline_question)
     answers = {s: store.read(r)["answer"] for s, r in refs.items()}
-    gaps = [{**g, "area": "architecture" if g["target"] == "architecture" else s}
+    gaps = [{**g, "area": "architecture" if g["target"].lower().startswith("architecture")
+             else targets.get(g["target"], g["target"] if g["target"] in pending else s)}
             for s, a in answers.items() for g in a["gaps"]]
     not_judged = {s: {"reason": a["why"], "neededFacts": a["neededFacts"]}
                   for s, a in answers.items() if a["verdict"] == "not judged"}
@@ -154,15 +164,14 @@ def step(store, provider, capacity):
 
 def repair(store):
     cursor = store.cursor()
-    gaps = store.read(cursor.review)["answer"]["gaps"] if cursor.review else []
     corrections = {}
-    for gap in gaps:
+    for gap in store.read(cursor.review)["answer"]["gaps"] if cursor.review else []:
         corrections.setdefault(gap["area"], []).append({"error": gap["correction"],
                                                        "target": gap["target"], "otherSide": {}})
     if cursor.requestedChange:
         words = store.read(cursor.requestedChange)["words"]
-        corrections = {a["handle"]: [{"error": words, "otherSide": {}}]
-                       for a in store.plan(cursor.revision)["architecture"]["areas"]}
+        for area in store.plan(cursor.revision)["architecture"]["areas"]:
+            corrections.setdefault(area["handle"], []).append({"error": words, "otherSide": {}})
     ref = store.record("review_repair", {"revision": cursor.revision, "review": cursor.review,
                                         "corrections": corrections})
     recovery.planning(store, ref, corrections, "area-gap", repairs=cursor.repairs + 1,
