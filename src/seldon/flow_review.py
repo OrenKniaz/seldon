@@ -49,7 +49,6 @@ def brief(store, feature, *, resolve=None):
         observations.append({k: body[k] for k in (
             "check", "requirements", "exitCode", "stdout", "stderr", "executionStarted",
             "cleanupVerified", "timedOut")})
-        observations[-1]["screenshots"] = questions.images(store, [ref])
     facts = {
         "Feature": {k: document["nodes"][feature]["body"][k] for k in ("story", "acceptance")},
         "Requirements": {r: {k: b[k] for k in ("obligation", "design", "contract")}
@@ -57,16 +56,21 @@ def brief(store, feature, *, resolve=None):
         "Checks": {r: {k: c[k] for k in ("purpose", "expectedEvidence", "requirements")}
                    for r, c in checks.items()},
         "Final observations": observations,
-        "Crossed contracts": [{"kind": c["kind"], "text": c["text"]}
-                              for c in architecture.crossed_contracts(document, requirements).values()],
+        "Crossed contracts": architecture.crossed_contracts(document, requirements),
+        "Correction owners": {u: {k: plan.select(document, "unit")[u][k]
+                                   for k in ("instructions", "scope", "requirements")}
+                              for u in plan.traced_units(document, checks)},
         "Source judgment": {"allSatisfied": all(v == "satisfied" for v in verdicts),
                             "anyNotJudged": "not judged" in verdicts, "scopeTreesUnchanged": True}}
     images = questions.images(store, refs)
     question = {
         "kind": "FLOW",
         "prompt": "Does this feature's observed user flow meet each requirement across its contracts? "
-                  "Judge the final observations and screenshots. " + questions.JUDGMENT_LEEWAY,
-        "facts": facts, "targets": list(requirements), "schema": answer_schema("DEMO", requirements),
+                  "Name only responsible correction owners for each gap; name a crossed contract "
+                  "when its agreement needs correction. Judge the observations and screenshots. "
+                  + questions.JUDGMENT_LEEWAY,
+        "facts": facts, "targets": list(requirements), "schema": answer_schema(
+            "FLOW", requirements, [*facts["Correction owners"], *facts["Crossed contracts"]]),
         "examples": [{"answer": {"verdict": "satisfied", "gaps": [],
                      "assessments": questions.assessments(requirements, final=True),
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
@@ -81,14 +85,15 @@ def validate(answer, targets):
     if answer["verdict"] != "uncertain":
         if sorted(a["target"] for a in answer["assessments"]) != sorted(targets):
             raise ValueError("Assess every requirement of this feature exactly once")
-        if any(g["target"] not in targets for g in answer["gaps"]):
-            raise ValueError("A flow correction must name a requirement of this feature")
+        if any(not (a["meaningful"] and a["noStubsMocksMissing"])
+               and a["target"] not in {g["target"] for g in answer["gaps"]} for a in answer["assessments"]):
+            raise ValueError("A negative assessment needs a correction and its responsible approved owners")
 
 
 def review(store, feature, source, answer, *, reasked=False):
     """Consume one recorded FLOW answer; the caller owns dispatch, cursor updates and fixups."""
     cursor = store.cursor()
-    requirements, _, _, trees, _ = evidence(store, feature)
+    requirements, _, refs, trees, _ = evidence(store, feature)
     validate(answer, requirements)
     if answer["verdict"] == "uncertain":
         if not reasked:
@@ -99,24 +104,22 @@ def review(store, feature, source, answer, *, reasked=False):
             return {"verdict": None, "pending": pending, "gaps": []}
         answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
     else:
-        negatives = [a for a in answer["assessments"] if not (a["meaningful"]
-                                                              and a["noStubsMocksMissing"])]
-        corrections = answer["gaps"] + [{"target": a["target"], "correction": a["why"]}
-                                         for a in negatives if a["target"] not in
-                                         {g["target"] for g in answer["gaps"]}]
-        answer = {**answer, "verdict": "gap" if corrections else "satisfied", "gaps": corrections}
+        answer = {**answer, "verdict": "gap" if answer["gaps"] else "satisfied"}
     with store.transaction():
         verdict = store.record("feature_verdict", {
             "feature": feature, "commit": cursor.candidate, "answer": answer,
-            "source": source, "scopeTrees": trees})
+            "source": source, "scopeTrees": trees, "observations": refs})
         corrections = {}
         for gap in answer["gaps"]:
-            corrections.setdefault(gap["target"], []).append(gap["correction"])
+            for owner in gap["owners"]:
+                corrections.setdefault(owner, []).append(gap["correction"])
         document = store.plan(cursor.revision)
-        gaps = [{"subject": feature, "kind": "flow", "commit": cursor.candidate,
-                 "units": list(plan.traced_units(document, plan.traced_checks(document, requirement))),
+        contracts = architecture.crossed_contracts(document, requirements)
+        gaps = [{"subject": owner if owner in contracts else feature, "kind": "flow",
+                 "commit": cursor.candidate,
+                 "units": [contracts[owner]["provider"] if owner in contracts else owner],
                  "correction": "; ".join(items), "source": verdict}
-                for requirement, items in corrections.items()]
+                for owner, items in corrections.items()]
     return {"verdict": verdict, "pending": None, "gaps": gaps}
 
 

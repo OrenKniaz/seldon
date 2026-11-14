@@ -224,7 +224,10 @@ def owner_repair_journeys(root):
                 patch = after["u001"].P
                 repaired = [b for _, k, b in rows if k == "observation" and b["commit"] == patch]
                 assert any(b["purpose"] == "P" and b["exitCode"] == 0 for b in repaired)
-                assert not any(b["purpose"] == "T" for b in repaired)
+                judged = [q for _, k, q in rows if k == "question" and q["kind"] == "JUDGE"
+                          and "Scoped corrections" in q["facts"]]
+                assert any(o["purpose"] == "T" and o["exitCode"] != 0
+                           for q in judged for o in q["facts"]["Observations"])
                 assert any(b["check"] == wave_ref and b["purpose"] == "integrated"
                            and b["exitCode"] == 0 for _, k, b in rows if k == "observation")
                 assert (slot / "turn-unit-001").read_text() == "4"

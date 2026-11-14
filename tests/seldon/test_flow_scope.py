@@ -17,8 +17,8 @@ class RequirementFlow(Scripted):
                 for row in question["facts"]["Final observations"]):
             target = question["targets"][0]
             reply["answer"].update(verdict="gap", gaps=[
-                {"target": target, "correction": "Make the blocked interaction ready"},
-                {"target": target, "correction": "Assert that the interaction is ready"}])
+                {"target": target, "owners": ["u001"], "correction": "Make the blocked interaction ready"},
+                {"target": target, "owners": ["u001"], "correction": "Assert that the interaction is ready"}])
         return json.dumps(reply)
 
 

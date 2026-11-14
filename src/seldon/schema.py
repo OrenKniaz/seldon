@@ -110,6 +110,7 @@ def answer_schema(kind, targets=(), owners=()):
                           baselineDemonstrated=flag)
         assessment = {"anyOf": [requirement, obj(**{**assessment["properties"],
                                                    "target": choice(*SOURCE_TARGETS)})]}
+    gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1))
     payload = {
         "ALIGN": VISION, "ARCHITECT": ARCHITECT,
         "DETAIL": DETAIL_PLAN,
@@ -121,12 +122,13 @@ def answer_schema(kind, targets=(), owners=()):
             obj(contract=choice(*targets), text=TEXT), 1), decision=TEXT),
         "JUDGE": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
         "DEMO": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
+        "FLOW": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(gap)),
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
     }[kind]
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
     alternatives = ((payload, obj(verdict=choice("user"))) if kind == "CONTRACT" else
                     (payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
-                    (payload, uncertain) if kind in ("JUDGE", "DEMO", "PRODUCT", "REVIEW") else
+                    (payload, uncertain) if kind in ("JUDGE", "DEMO", "FLOW", "PRODUCT", "REVIEW") else
                     (payload,))
     result = obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
     return bounded(result) if kind in ("ARCHITECT", "DETAIL") else result

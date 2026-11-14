@@ -25,9 +25,11 @@ def plan(store, gaps):
         for ref in dict.fromkeys(gap["units"]):
             if ref not in owners or store.unit(ref).state != "DONE":
                 raise ValueError(f"{ref}: a Gap must name its DONE approved owner")
+            history = (active(store, ref) or {}).get("observations", [])
             assignment = assignments.setdefault(ref, {
                 "owner": ref, "scope": owners[ref]["scope"], "base": cursor.candidate,
-                "revision": cursor.revision, "approval": cursor.B, "gaps": []})
+                "revision": cursor.revision, "approval": cursor.B,
+                "observations": list(dict.fromkeys(history + store.unit(ref).observations)), "gaps": []})
             assignment["gaps"].append(gap)
     return assignments
 
@@ -107,8 +109,7 @@ def apply(store, gaps):
         for ref, assignment in assignments.items():
             cause = store.record("unit_fixup", assignment)
             refs.append(cause)
-            failure = (f"Fixup inside {ref}'s write scope {assignment['scope']} only:\n"
-                       + "\n".join(g["correction"] for g in assignment["gaps"]))
+            failure = "\n".join(g["correction"] for g in assignment["gaps"])
             # A new life preserves the session, but not the previous life's recovery count or receipts.
             advance(store, "recover", cause, unit=ref, base=assignment["base"], worktree=None,
                     callFolder=None, callAttempt=None, recoveries=0, failure=failure, report=None,

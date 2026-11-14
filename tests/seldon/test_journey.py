@@ -514,6 +514,7 @@ class Scripted:
                                 "Demonstrate that the interaction is ready, not blocked"],
                                     "why": "The observed interaction remains unresolved"}})
                         answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                            **({"owners": ["u001"]} if kind == "FLOW" else {}),
                             "correction": "The interaction is blocked; make it ready and assert it "
                                           "in the check"}])
             if kind == "JUDGE":
@@ -1667,6 +1668,17 @@ def test_rule3_scale50_journey(tmp_path):
     Single-unit twins cannot detect dependency and concurrent observation regressions at scale.
     """
     simple_journey(tmp_path / "scale50", "scale50", 50)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize('case', ['g04', 'two', 'literal'])
+def test_gap_owner_journey(tmp_path, case):
+    """FLOW must repair the named owner(s), retaining failing browser evidence and original RED.
+
+    Existing final-gap checks bypass semantic blame or lack a cross-owner screenshot defect.
+    """
+    from gap_owner_journey import gap_owner_journey
+    gap_owner_journey(tmp_path / case, case)
 
 
 GUIDE_WALK = r'''

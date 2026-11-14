@@ -59,21 +59,12 @@ def thread_from_recording(store, ref):
                     store.unit(ref, replace(store.unit(ref), thread=thread))
 
 
-def work_brief(store, ref):
-    question = questions.work_brief(store, ref)
-    if assignment := fixups.active(store, ref):
-        question["facts"]["Scoped corrections"] = {
-            "owner": ref, "writeScope": assignment["scope"],
-            "corrections": [g["correction"] for g in assignment["gaps"]]}
-    return question
-
-
 def work(store, provider, ref):
     unit = store.unit(ref)
     report = recovered_report(store, ref)
     if report is None:
         thread_from_recording(store, ref)
-        question = work_brief(store, ref)
+        question = questions.work_brief(store, ref)
         store.record("writer_start", {"unit": ref, "session": store.unit(ref).thread,
                                       "startedAt": time.time()})
         try:
@@ -86,7 +77,7 @@ def work(store, provider, ref):
                 row = store.unit(ref)
                 store.unit(ref, replace(row, thread=None,
                                         failure=row.failure + "\nResume unavailable: " + str(error)))
-            question = work_brief(store, ref)
+            question = questions.work_brief(store, ref)
             question["execution"]["session"] = None
             question["facts"]["Session recovery"] = "Resume unavailable; use this brief, patch and failure."
             report, answer = inference.call(store, provider, question, unit=ref)
@@ -94,8 +85,9 @@ def work(store, provider, ref):
         answer = store.read(report)["answer"]
     store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
     document = store.plan(store.cursor().revision)
-    consumed = plan.select(document, "unit")[ref]["consumes"]
-    if discoveries := [d for d in answer["discoveries"] if d["owner"] in consumed]:
+    contracts = plan.select(document, "unit")[ref]
+    if discoveries := [d for d in answer["discoveries"]
+                       if d["owner"] in contracts["consumes"] + contracts["provides"]]:
         with store.integration_lock:
             result, correction = inference.call(store, provider,
                 questions.contract_brief(store, ref, discoveries))
@@ -151,25 +143,6 @@ def integrate(store, ref, checks):
         gitwork.publish(project, store)
 
 
-def prove_fixup(store, ref, contract, checks):
-    """The recorded gap is RED; the owner's current local checks must be GREEN on its patch."""
-    unit = store.unit(ref)
-    if unit.P is None:
-        T, P, changed = gitwork.snapshots(unit.worktree, unit.base, contract["scope"],
-                                        contract["checkPaths"], store.cursor().scratch)
-        with store.transaction():
-            store.record("patch", {"unit": ref, "base": unit.base, "T": T, "P": P, "paths": changed})
-            unit = replace(unit, T=T, P=P)
-            store.unit(ref, unit)
-    gitwork.checkout(unit.worktree, unit.P)
-    observations = proof.observe(store, unit.worktree, unit.P, checks, "P", ref)
-    with store.transaction():
-        store.unit(ref, replace(store.unit(ref), observations=observations))
-    if bad := proof.failures(store, observations):
-        raise ValueError("Fixup checks failed: " + proof.explain(bad))
-    return observations
-
-
 def run_unit(store, provider, ref):
     document = store.plan(store.cursor().revision)
     contract = plan.select(document, "unit")[ref]
@@ -196,8 +169,7 @@ def run_unit(store, provider, ref):
                 elif unit.state == "WORKING":
                     work(store, provider, ref)
                 elif unit.state == "PROVING":
-                    observations = (prove_fixup(store, ref, contract, checks) if assignment else
-                                    proof.prove(store, ref, contract, checks))
+                    observations = proof.prove(store, ref, contract, checks)
                     advance(store, "proven", observations, unit=ref)
                 elif unit.state == "JUDGING":
                     if ref == "guide":

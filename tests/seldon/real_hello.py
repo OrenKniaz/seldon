@@ -69,9 +69,16 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
         (slot / "setup.json").write_text(json.dumps(setup, indent=2), encoding="utf-8")
     provider = Codex(slot / "calls", setup)
 
+    asked = {}
+
     def yes(request):
         print(json.dumps({"scriptedDecision": request}, ensure_ascii=False), flush=True)
-        if request["gate"] in ("A", "B", "CHECK-IN", "C") or not os.environ.get("SELDON_SIM_USER"):
+        subject = request["subject"].get("unit") or request["subject"].get("step") or request["gate"]
+        asked[subject] = asked.get(subject, 0) + (request["gate"] not in ("A", "B", "CHECK-IN", "C"))
+        # The simulated owner answers one subject at most twice; a third ask ends the session WAITING
+        # with the question shown (a real owner would decide differently; the rig must not loop, h01 11-14).
+        if (request["gate"] in ("A", "B", "CHECK-IN", "C") or not os.environ.get("SELDON_SIM_USER")
+                or asked[subject] > 2):
             return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
         # Simulated owner (Oren 11-14): a cheap model answers unit/step questions from the dream only.
         # It never waives Seldon; a run that needed it is not a planner-autonomous C (counted apart).

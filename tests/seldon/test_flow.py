@@ -53,7 +53,7 @@ def test_shared_page_flows(tmp_path):
     """A shared-page product must carry contract text and screenshots to each feature's judge.
 
     Per-requirement DEMO cannot expose missing cross-unit context. A negative assessment with a
-    satisfied headline catches trusting that headline instead of ANDing requirements. The same
+    satisfied headline requires an explicit owner correction rather than guessed trace blame. The same
     integrated product then loses a value: real command failure must return its owner as a check Gap,
     without reworking any unit. Success-only flow judgments cannot expose that deterministic path.
     One bounded re-ask keeps unavailable facts not judged; a successful answer cannot expose false Gaps.
@@ -111,11 +111,16 @@ def test_shared_page_flows(tmp_path):
         question = flow_review.brief(store, feature)
         negative = questions.assessments(question["targets"], final=True)
         negative[-1].update(meaningful=False, why="The observed page does not expose the stored value")
-        _, result = ask_flow(store, feature, {"verdict": "satisfied", "gaps": [],
+        with pytest.raises(questions.AnswerRejected, match="negative assessment needs a correction"):
+            ask_flow(store, feature, {"verdict": "satisfied", "gaps": [],
+                      "assessments": negative, "why": "One requirement is missing in the flow"})
+        _, result = ask_flow(store, feature, {"verdict": "gap", "gaps": [{
+                          "target": negative[-1]["target"], "owners": ["u002"],
+                          "correction": negative[-1]["why"]}],
                           "assessments": negative, "why": "One requirement is missing in the flow"})
         gap, = result["gaps"]
         assert gap == {"subject": feature, "kind": "flow", "commit": cursor.candidate,
-                       "units": ["u001", "u002"],
+                       "units": ["u002"],
                        "correction": "The observed page does not expose the stored value",
                        "source": result["verdict"]}
         uncertain = {"verdict": "uncertain", "neededFacts": ["Explain the observed page transition"],

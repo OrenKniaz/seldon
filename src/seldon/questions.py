@@ -2,7 +2,7 @@
 
 import json
 
-from . import architecture, gitwork, obligations, plan
+from . import architecture, fixups, gitwork, obligations, plan
 from .schema import SOURCE_TARGETS, answer_schema, validate
 
 # Owner decision: ALIGN improves craft within scope, with observable quality and a distinctive UI direction.
@@ -288,9 +288,18 @@ def contract_brief(store, ref, discoveries):
     units, contracts = plan.select(document, "unit"), plan.select(document, "contract")
     consumed = {r: {**contracts[r], "Provider responsibility":
                    units[contracts[r]["provider"]]["instructions"]}
-                for r in units[ref]["consumes"]}
+                for r in units[ref]["consumes"] + units[ref]["provides"]}
     return build("CONTRACT", {"Worker's need": discoveries, "Contracts consumed": consumed,
         "Accepted commitments": document["nodes"]["vision"]["body"]}, targets=tuple(consumed))
+
+
+def repair_facts(store, assignment):
+    refs = [r for g in assignment["gaps"] for r in
+            store.read(g["source"]).get("observations", [g["source"]]) if "evidenceFiles" in store.read(r)]
+    return {"Scoped corrections": {"owner": assignment["owner"], "writeScope": assignment["scope"],
+        "corrections": [g["correction"] for g in assignment["gaps"]], "gaps": assignment["gaps"]},
+        "Failing observations": observed(store, refs),
+        "Historical observations": observed(store, assignment["observations"])}, refs
 
 
 def work_brief(store, ref):
@@ -304,6 +313,10 @@ def work_brief(store, ref):
              "Quality bar": document["nodes"]["vision"]["body"]["quality"],
              "Unit evidence": UNIT_EVIDENCE}
     facts.update(agreement_facts(document, ref))
+    refs = []
+    if assignment := fixups.active(store, ref):
+        repair, refs = repair_facts(store, assignment)
+        facts.update(repair)
     if items := obligations.for_area(document, contract["area"]):
         owned = {r: o for r, o in items.items() if o["owner"] == ref}
         if owned:
@@ -332,11 +345,13 @@ def work_brief(store, ref):
     facts["Correction owners"] = {r: plan.owned_scope(u)
                                   for r, u in units.items() if r in owners}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
-                 owners=(*facts["Correction owners"], *contract["consumes"]))
+                 images=images(store, refs),
+                 owners=(*facts["Correction owners"], *contract["consumes"], *contract["provides"]))
 
 
 def observed(store, refs):
-    return [{k: b[k] for k in ("check", "requirements", "purpose", "command", "exitCode", "stdout", "stderr")}
+    return [{k: b[k] for k in ("commit", "check", "requirements", "purpose", "command",
+                             "exitCode", "stdout", "stderr")}
             for b in (store.read(ref) for ref in refs)]
 
 
@@ -350,6 +365,9 @@ def judge_brief(store, ref, commit=None, observations=None):
     unit = store.unit(ref)
     document = store.plan(store.cursor().revision)
     contract = plan.select(document, "unit")[ref]
+    refs = list(observations if observations is not None else unit.observations)
+    if assignment := fixups.active(store, ref):
+        refs += [r for r in assignment["observations"] if store.read(r)["purpose"] in ("T", "wave-start")]
     root = store.root.parent if commit else unit.worktree
     commit = commit or unit.P
     requirements = requirement_facts(document, contract["requirements"])
@@ -381,10 +399,14 @@ def judge_brief(store, ref, commit=None, observations=None):
              "Product files at P": product,
              "Product changes": gitwork.git(root, "diff", "--no-ext-diff", "--no-textconv",
                                             "--no-renames", unit.T, commit, "--", *contract["scope"]),
-             "Observations": observed(store, observations if observations is not None else unit.observations)}
+             "Observations": observed(store, refs)}
+    if assignment:
+        repair, failing = repair_facts(store, assignment)
+        facts.update(repair)
+        refs += failing
     facts.update(agreement_facts(document, ref))
     return build("JUDGE", facts, requirements,
-                 images=images(store, observations if observations is not None else unit.observations))
+                 images=images(store, refs))
 
 
 class AnswerRejected(ValueError):
