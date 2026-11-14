@@ -90,6 +90,8 @@ def planned(count, mode):
         unit.update(area="new:area", provides=[], consumes=[], reads=[])
     if mode == "wave-start":
         scopes[1]["reads"] = ["unit-001/value.txt"]
+    if mode.startswith("kill") or mode == "exhaust":
+        scopes[1]["reads"] = ["unit-001/value.txt"]
     if mode == "parallel":
         scopes[3]["reads"] = [f"unit-{i:03}/value.txt" for i in (1, 2, 3)]
     if count > 1 and mode in ("records", "records-guide-gap", "scale50"):
@@ -199,6 +201,8 @@ else:
     number = int(name.split("-")[1])
     Path(name).mkdir(exist_ok=True)
     value = f"value-{number:03}"
+    if number == 2 and (mode.startswith('kill') or mode == 'exhaust'):
+        assert Path('unit-001/value.txt').read_text() == 'value-001'
     if mode == "scale50" and number == 49:
         # The feedback contract's text is usable while its provider's implementation is absent.
         assert facts["Contracts consumed"]
@@ -789,10 +793,13 @@ def test_asked_unit_journey(tmp_path, count):
     def dependency(answer):
         if count == 4:
             answer["units"][2]["dependencies"] = [2]
+            answer["units"][2]["reads"] = ['unit-002/value.txt']
     provider.plan_fault = dependency
     native = slot / "native.py"
     native.write_text(native.read_text("utf-8").replace(
         '    Path(name, "check.py").write_text(source)',
+        '    if name == "unit-003" and facts.get("Declared dependency scopes"):\n'
+        '        assert Path("unit-002/value.txt").read_text() == "value-002"\n'
         '    if name == "unit-002" and ' + repr(direction) + ' not in facts.get("Exact failure", ""):\n'
         '        source += ' + repr("raise AssertionError('items route never passed')\n") + '\n'
         '    Path(name, "check.py").write_text(source)'), encoding="utf-8")
@@ -1668,6 +1675,18 @@ def test_rule3_scale50_journey(tmp_path):
     Single-unit twins cannot detect dependency and concurrent observation regressions at scale.
     """
     simple_journey(tmp_path / "scale50", "scale50", 50)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize('reads_ui', [False, True], ids=['contract-only', 'local-read'])
+def test_dep_graph_journey(tmp_path, reads_ui):
+    """h02's contract consumer starts with UI and reaches C with one integrated scenario.
+
+    Catches false prerequisite tails and lost/duplicated obligations; the real-file twin catches
+    removal of a necessary dependency. Existing value-only twins lack this integrated importer.
+    """
+    from dep_graph_journey import dep_graph_journey
+    dep_graph_journey(tmp_path / 'dep-graph', reads_ui)
 
 
 @pytest.mark.fast

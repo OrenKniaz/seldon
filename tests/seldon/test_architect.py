@@ -899,8 +899,11 @@ def correction_journeys(root):
                 assert not run.store.units()
             reasks = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
             assert sorted(q["facts"]["Area"]["handle"] for q in reasks) == (
-                [] if mode == "scope" else ["area-001", "area-002", "area-003"] if mode == "cycle"
+                [] if mode in ("scope", "cycle")
                 else ["area-002", "area-002"] if mode == "targeted-exact" else ["area-002"])
+            if mode == "cycle":
+                assert not plan.select(run.store.plan(run.store.cursor().revision), 'unit')['u001'][
+                    'dependencies']
             assert any("Exact corrections" in q["facts"] for q in provider.detail_calls) == (
                 mode == "targeted-exact")
             assert provider.arch_calls == (2 if mode == "scope" else 1)

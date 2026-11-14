@@ -310,7 +310,11 @@ def merge(vision, architecture, leaves):
                             [unit["area"], writer["area"]])
                     correct([unit["area"]], f"Reading {path} needs an explicit dependency edge to its writer",
                             {"area": writer["area"], "plannedPath": path})
-    dependencies = {i: u["dependencies"] for i, u in enumerate(units, 1)}
+    dependencies = {i: [d for d in u["dependencies"] if any(
+        matches(path, units[d-1]["scope"]) for path in u["reads"])]
+        for i, u in enumerate(units, 1)}
+    for i, deps in dependencies.items():
+        units[i-1]["dependencies"] = deps
     try:
         tuple(TopologicalSorter(dependencies).static_order())
     except CycleError as error:

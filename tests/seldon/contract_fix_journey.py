@@ -31,6 +31,8 @@ def contract_fix_journey(slot, mode):
         answer['units'][0]['provides'] = ['new:items-http']
         answer['units'][1]['consumes'] = ['new:items-http']
         answer['units'][0 if mode == 'pending' else 1]['dependencies'] = [2 if mode == 'pending' else 1]
+        answer['units'][0 if mode == 'pending' else 1]['reads'] = [
+            'unit-002/value.txt' if mode == 'pending' else 'unit-001/value.txt']
 
     provider.plan_fault = contracts
     invoke = provider.invoke
@@ -74,6 +76,9 @@ server.serve_forever()
     native = slot / 'native.py'
     injection = (
         "if not guide:\n"
+        f"    if name == {'unit-001' if mode == 'pending' else 'unit-002'!r}:\n"
+        f"        assert Path({'unit-002/value.txt' if mode == 'pending' else 'unit-001/value.txt'!r})"
+        f".read_text() == {'value-002' if mode == 'pending' else 'value-001'!r}\n"
         "    agreements = facts.get('Contracts provided', facts.get('Contracts consumed', {}))\n"
         "    current = next(iter(agreements.values()))['text']\n"
         "    Path(name, 'agreement.txt').write_text(current)\n"

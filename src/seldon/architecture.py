@@ -1,7 +1,6 @@
 """C9/C10/C12; R4/R6: canonical endpoints, ownership and bounded agreement projections."""
 
 from copy import deepcopy
-from graphlib import TopologicalSorter
 
 from . import plan
 from .schema import ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT
@@ -212,13 +211,8 @@ def local_plan(area, contracts, answer, vision, single_area):
                 if len(writers) != 1:
                     raise ValueError(f"{path}: needs one planned file owner in {area['handle']}")
                 owner, = writers
-                if path in files:
-                    if owner == ref:
-                        raise ValueError(f"{path}: a file prerequisite needs one other planned writer")
-                    unit["dependencies"].append(owner)
-                elif owner != ref and owner not in unit["dependencies"]:
+                if owner != ref and owner not in unit["dependencies"] and path not in files:
                     raise ValueError(f"{ref}: reading {path} needs a dependency edge to {owner}")
-    tuple(TopologicalSorter({r: u["dependencies"] for r, u in units.items()}).static_order())
 
 
 def subdivision(parent, answer, known_contracts):
