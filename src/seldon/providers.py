@@ -142,7 +142,7 @@ class Codex:
         (folder / "prompt.txt").write_text(prompt, encoding="utf-8")
         session = question.get("execution", {}).get("session")
         command = [*self.setup["codexCommand"], "exec", "--json", "--skip-git-repo-check",
-                   "--sandbox", "workspace-write" if worker else "read-only",
+                   "--sandbox", "danger-full-access",
                    "--model", config["model"], "-c", 'model_reasoning_effort=' + encode(config["effort"]),
                    "-c", 'approval_policy="never"', "--cd", str(cwd),
                    "--output-schema", str(folder / "schema.json")]
@@ -150,13 +150,11 @@ class Codex:
             command = [*self.setup["codexCommand"], "exec", "resume", session, "--json",
                        "--skip-git-repo-check", "--model", config["model"],
                        "-c", 'model_reasoning_effort=' + encode(config["effort"]),
-                       "-c", 'approval_policy="never"',
+                       "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"',
                        "--output-schema", str(folder / "schema.json")]
-        if worker:
-            # The native sandbox already includes cwd. Personal extra workspaces do not belong to a unit.
-            extra_roots = [self.setup["evidenceDirectory"]] if self.setup.get("evidenceDirectory") else []
-            command += ["-c", 'sandbox_mode="workspace-write"',
-                        "-c", "sandbox_workspace_write.writable_roots=" + encode(extra_roots)]
+        # Full access (Oren 2026-11-14: "We are not a security app"). The Codex Windows sandbox re-minted a
+        # worktree's capability SID mid-session and denied writes to existing files (T-136); scope is still
+        # enforced by Seldon from the observed diff (R6), proof runs in disposable checkouts.
         if not worker:
             command += ["--ignore-user-config", "--ephemeral"]
             options = ['project_doc_max_bytes=0', 'developer_instructions=""', 'web_search="disabled"',
