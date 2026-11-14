@@ -100,16 +100,14 @@ SOURCE_TARGETS = (
 )
 
 
-def answer_schema(kind, targets=(), owners=()):
-    flag = {"type": "boolean"}
-    assessment = obj(target=choice(*targets) if targets else TEXT, meaningful=flag,
-                     noStubsMocksMissing=flag, why=TEXT)
+def answer_schema(kind, targets=(), owners=(), *, source=SOURCE_TARGETS):
+    assessment = obj(target=choice(*targets) if targets else TEXT, meaningful={"type": "boolean"},
+                     noStubsMocksMissing={"type": "boolean"}, why=TEXT)
     if kind == "JUDGE":
-        requirement = obj(**{**assessment["properties"],
-                             "target": choice(*(t for t in targets if t not in SOURCE_TARGETS))},
-                          baselineDemonstrated=flag)
-        assessment = {"anyOf": [requirement, obj(**{**assessment["properties"],
-                                                   "target": choice(*SOURCE_TARGETS)})]}
+        assessment = {"anyOf": [obj(**{**assessment["properties"], "target": choice(
+            *(t for t in targets if (t in source) == source_only))},
+            **({} if source_only else {"baselineDemonstrated": {"type": "boolean"}}))
+            for source_only in (False, True)]}
     gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1))
     payload = {
         "ALIGN": VISION, "ARCHITECT": ARCHITECT,

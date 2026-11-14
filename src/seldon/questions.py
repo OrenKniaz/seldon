@@ -31,10 +31,8 @@ JUDGMENT_LEEWAY = (
     "it breaks.")
 
 UNIT_EVIDENCE = (
-    "The unit JUDGE receives local observations at T and P and owned wave checks at wave start. "
     "For visual requirements, checks save screenshots in SELDON_EVIDENCE_DIR at each observable state. "
-    "Owned wave checks observe the baseline at wave start; GREEN is proven at WAVE-VERIFY; "
-    "other units' files missing from this worktree are expected, never a blocker.")
+    "Wave checks are written here and run by Seldon at WAVE-VERIFY.")
 
 AGREED_LITERALS = (
     "The user's words are agreed text; an exact value they state appears verbatim in the commitment, "
@@ -111,7 +109,10 @@ class MissingFacts(ValueError):
 
 
 def build(kind, facts, targets=(), execution=None, images=(), owners=()):
+    source_targets = SOURCE_TARGETS
     if kind == "JUDGE":
+        source_targets += tuple(r for r in targets if not any(
+            c["check"] in facts["Checks"] for c in facts["Proof map"][r]))
         targets = [*targets, *SOURCE_TARGETS]
     if kind == "ALIGN":
         facts = {**facts, "Design guidance used by UI workers": CRAFT}
@@ -158,24 +159,23 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
         "CONTRACT": {"verdict": "user"},
         "WORK": {"outcome": "done", "summary": "Implemented and ran the assigned checks", "discoveries": []},
         "JUDGE": {"verdict": "satisfied", "gaps": [],
-                  "assessments": assessments(targets)},
+                  "assessments": assessments(targets, source_targets=source_targets)},
         "DEMO": {"verdict": "satisfied", "gaps": [], "assessments": assessments(targets, final=True)},
         "PRODUCT": {"verdict": "satisfied", "gaps": [], "assessments": assessments(targets, final=True)},
     }[kind]
     example["why"] = ("The responsibilities, agreements and waves cover the accepted promises"
                       if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
                       "The observed interaction and check sources support this answer")
-    schema = answer_schema(kind, targets, owners)
+    schema = answer_schema(kind, targets, owners, source=source_targets)
     validate({"answer": example}, schema)
     return {"kind": kind, "prompt": PROMPTS[kind] + (" " + CRAFT if kind == "WORK" else ""),
             "facts": facts, "targets": list(targets), "schema": schema,
             "examples": [{"answer": example}], "execution": execution or {}, "images": list(images)}
 
 
-def assessments(targets, *, final=False):
+def assessments(targets, *, final=False, source_targets=SOURCE_TARGETS):
     return [{"target": target, "meaningful": True, "noStubsMocksMissing": True,
-             **({} if final or target in SOURCE_TARGETS else
-                {"baselineDemonstrated": True}),
+             **({} if final or target in source_targets else {"baselineDemonstrated": True}),
              "why": "The real interaction asserts the required observable behavior"} for target in targets]
 
 
@@ -386,13 +386,16 @@ def judge_brief(store, ref, commit=None, observations=None):
             checks[path] = text
         elif plan.matches(path, contract["scope"]):
             product[path] = text
-    writers = plan.owners(document)
+    mapping = plan.proof_map(document, requirements)
+    refs = [r for r in refs if (b := store.read(r))["purpose"] != "wave-start"
+            or plan.select(document, "check")[b["check"]]["level"] != "wave"]
     facts = {"Unit responsibility": contract["instructions"],
              "Declared dependency scopes": [plan.select(document, "unit")[r]["scope"]
                                             for r in plan.prerequisites(document, ref)],
-             "Requirements": requirements, "Checks": {r: c for r, c in plan.select(document, "check").items()
-                                                    if writers[r] == ref},
-             "Proof map": plan.proof_map(document, requirements),
+             "Requirements": requirements, "Checks": plan.assigned(document)[ref],
+             "Proof map": {r: [c for c in rows if c["level"] == "unit"] for r, rows in mapping.items()},
+             "Proven by code at WAVE-VERIFY (not judged here)": {
+                 c["check"]: c["owner"] for rows in mapping.values() for c in rows if c["level"] == "wave"},
              "Check sources": checks,
              "Binary files at P (bytes)": binaries,
              # The unit's whole product source at P: a rebased rework can leave the T..P diff empty (T-86).

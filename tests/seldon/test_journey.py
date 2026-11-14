@@ -1804,13 +1804,21 @@ def test_wave_red_journey(tmp_path, preserving):
 
 
 @pytest.mark.fast
+def test_stage_proof_peer_discovery_journey(tmp_path):
+    from wave_red_journey import peer_discovery_journey
+    peer_discovery_journey(tmp_path / "peer-discovery")
+
+
+@pytest.mark.fast
 def test_wave_red_ownership_journey(tmp_path):
-    """Owned wave checks observe only the wave baseline before integrated GREEN.
+    """Owned wave checks observe the baseline, and a final failure repairs its actual owner.
 
     Catches running declared or promoted wave checks at T/P; the one-owner twin has no sibling.
     """
     from test_architect import check_owner_journeys
+    from test_fixups import owner_repair_journeys
     check_owner_journeys(tmp_path / "check-owner")
+    owner_repair_journeys(tmp_path / "owner-repair")
 
 
 def test_rule3_scale50_journey(tmp_path):

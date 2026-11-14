@@ -126,9 +126,10 @@ def blocked_owner_journeys(root):
         assert not run.store.records("unit_fixup")
         transitions = [b for _, k, b in rows if k == "transition" and b["unit"] == "u001"]
         assert not any(b["input"] == "DONE" for b in transitions)
-        failure, = [b["failure"] for _, k, b in rows if k == "unit_failure" and b["unit"] == "u002"]
-        assert failure == ("u001's files are not in this unit's base by design; "
-                           "write the wave check, run unit checks, return done")
+        assert not [b for _, k, b in rows if k == "unit_failure" and b["unit"] == "u002"]
+        assert run.store.unit("u002").recoveries == 0
+        assert any(b["unit"] == "u002" and b["disposition"] == "wave verify"
+                   for _, _, b in run.store.records("discovery"))
         wave_ref, = plan.assigned(run.store.plan(cursor.revision))[None]
         assert any(b["check"] == wave_ref and b["purpose"] == "final"
                    and b["commit"] == cursor.candidate and b["exitCode"] == 0
@@ -136,7 +137,7 @@ def blocked_owner_journeys(root):
                    for _, k, b in rows if k == "observation")
         questions = [b for _, k, b in rows if k == "question" and b["kind"] == "WORK"
                      and b["facts"]["Write scope"] == ["unit-002/**"]]
-        assert len(questions) == 2
+        assert len(questions) == 1
         assert all("Wave checks to write, not run here" in q["facts"] for q in questions)
     finally:
         run.close()
@@ -208,6 +209,7 @@ def owner_repair_journeys(root):
             if broken:
                 assert run.store.unit("u001").state == "REWORK"
                 assert not run.store.cursor().decision
+                assert not run.store.records("outcome")
                 for ref in ("u002", "u003", "guide"):
                     assert run.store.unit(ref) == before[ref]
                 assignment, = [b for _, _, b in run.store.records("unit_fixup")]

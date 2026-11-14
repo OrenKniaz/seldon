@@ -1,5 +1,5 @@
 {
-  "provenance": "shelflife-260584f-f04 r202 patch cc4cf111ee6ad9d45a653cd6340195d34f6b61d0, r208 JUDGE sources; plan revision 3; helper replaced by portable short-lived subprocess twin",
+  "provenance": "shelflife-260584f-f04 r202 patch cc4cf111ee6ad9d45a653cd6340195d34f6b61d0, r208 JUDGE sources; plan revision 3; helper replaced by portable short-lived subprocess twin; section 10 outcome: unit JUDGE assesses source-only requirements, WAVE-VERIFY owns wave proof; stageProof twin separates local helper preservation from wave-only fresh-folder operation",
   "document": {
     "architecture": {
       "areas": [
@@ -631,7 +631,7 @@
           "features": [
             "n025"
           ],
-          "obligation": "Deliver fresh-folder operation and check mechanics within README.md, DISCOVERY.md, checks/delivery/** and checks/shared/**. Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step. Supplied browser tooling is verification-only; product requests remain local."
+          "obligation": "Supply reusable delivery check mechanics and preserve their real subprocess behavior."
         },
         "kind": "requirement"
       },
@@ -682,7 +682,8 @@
             "n016",
             "n017",
             "n021",
-            "n022"
+            "n022",
+            "n047"
           ]
         },
         "kind": "check"
@@ -1101,7 +1102,8 @@
           "provides": [],
           "reads": [],
           "requirements": [
-            "n026"
+            "n026",
+            "n047"
           ],
           "scope": [
             "README.md",
@@ -1180,6 +1182,17 @@
           ]
         },
         "kind": "vision"
+      },
+      "n047": {
+        "body": {
+          "contract": "Done means: the server, UI and importer work together from a fresh folder; a short README explains how to run them. Consume item-representation, http-interface, shared-error-text, static-entry, server-command and import-command without redefining them. Delivery uses CLI and HTTP boundaries, not canonical-persistence-entry.",
+          "design": "README.md documents prerequisites, root-relative commands, CSV headers, opening the local UI, stopping and restarting with the same database. checks/shared/** supplies only mechanics needed by delivery checks: temporary workspaces, subprocess lifecycle, bounded readiness and cleanup. DISCOVERY.md records encountered issues, evidence, likely owner, disposition and exit test. Local checks prove helper behavior; the wave check proves documented product operation.",
+          "features": [
+            "n025"
+          ],
+          "obligation": "Deliver fresh-folder operation and check mechanics within README.md, DISCOVERY.md, checks/delivery/** and checks/shared/**. Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step. Supplied browser tooling is verification-only; product requests remain local."
+        },
+        "kind": "requirement"
       }
     },
     "skeleton": [

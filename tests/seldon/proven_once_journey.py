@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 
 from seldon import plan
+from seldon.store import encode
 from test_journey import NATIVE, Scripted, finish, planned, prepare
 
 
@@ -54,11 +55,9 @@ def proven_once_journey(root):
                     {"target": duplicate["check"], "correction": "Remove the consumer's repeated provider cases"}]
                     if duplicate else []}
             elif kind == "JUDGE":
-                mapping = facts["Proof map"]
                 # This judge accepts a cross-unit obligation only when its actual proof location is supplied.
                 if "unit-001/check.py" in facts["Check sources"]:
-                    row = mapping[question["targets"][0]]
-                    if not any(c["owner"] == "u002" and c["level"] == "wave" for c in row):
+                    if "u002" not in facts["Proven by code at WAVE-VERIFY (not judged here)"].values():
                         answer = {"verdict": "gap", "assessments": [], "gaps": [{
                             "target": question["targets"][0], "correction": "Where is the consumer agreement proven?"}]}
                         return json.dumps({"answer": {**answer, "why": "Missing proof location"}})
@@ -90,7 +89,20 @@ def proven_once_journey(root):
         assert not run.store.records("unit_failure")
         judge = next(q for _, k, q in rows if k == "question" and q["kind"] == "JUDGE"
                      and "unit-001/check.py" in q["facts"]["Check sources"])
-        assert {c["owner"] for row in judge["facts"]["Proof map"].values() for c in row} == {"u001", "u002"}
+        assert {c["owner"] for row in judge["facts"]["Proof map"].values() for c in row} == {"u001"}
+        wave, = plan.assigned(document)[None]
+        for q in (q for _, k, q in rows if k == "question" and q["kind"] == "JUDGE"):
+            assert wave not in q["facts"]["Checks"]
+            assert all(o["check"] != wave for o in q["facts"]["Observations"])
+        flow = next(q for _, k, q in rows if k == "question" and q["kind"] == "FLOW"
+                    and wave in q["facts"]["Checks"])
+        assert any(o["check"] == wave and o["exitCode"] != 0
+                   for o in flow["facts"]["Wave-start observations"])
+        assert any(o["check"] == wave and o["exitCode"] == 0 for o in flow["facts"]["Final observations"])
+        before = deepcopy(flow)
+        del before["facts"]["Wave-start observations"]
+        print(f"FLOW question bytes before/after: {len(encode(before).encode())}/{len(encode(flow).encode())}",
+              flush=True)
         final = [b for _, k, b in rows if k == "observation" and b["purpose"] == "final"]
         assert any(o["command"][-1] == "unit-002/join.py" for o in final)
         check_bytes = sum(len((run.project / f"unit-002/{p}").read_bytes()) for p in ("check.py", "join.py"))

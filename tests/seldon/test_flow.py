@@ -99,7 +99,9 @@ def test_shared_page_flows(tmp_path):
             assert all(encode(source.decode("utf-8"))[1:-1] not in encode(question["facts"])
                        for source in sources.values())
             assert "Product files at P" not in question["facts"] and "Check sources" not in question["facts"]
-            assert "from pathlib import Path" not in encode(question)
+            # Wave-start RED output may quote a traceback line; no other fact may carry check source.
+            assert "from pathlib import Path" not in encode({k: v for k, v in question["facts"].items()
+                                                            if k != "Wave-start observations"})
         assert len(store.records("question")) - sum(
             b["kind"] != "FLOW" for _, _, b in store.records("question")) == len(verdicts)
         closures = flow_review.requirement_verdicts(store, verdicts)

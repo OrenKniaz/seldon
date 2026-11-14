@@ -39,23 +39,25 @@ def evidence(store, feature):
     return requirements, checks, refs, trees, verdicts
 
 
+def row(body):
+    return {k: body[k] for k in ("check", "requirements", "exitCode", "stdout", "stderr",
+                                 "executionStarted", "cleanupVerified", "timedOut")}
+
+
 def brief(store, feature, *, resolve=None):
     cursor = store.cursor()
     document = store.plan(cursor.revision)
     requirements, checks, refs, _, verdicts = evidence(store, feature)
-    observations = []
-    for ref in refs:
-        body = store.read(ref)
-        observations.append({k: body[k] for k in (
-            "check", "requirements", "exitCode", "stdout", "stderr", "executionStarted",
-            "cleanupVerified", "timedOut")})
     facts = {
         "Feature": {k: document["nodes"][feature]["body"][k] for k in ("story", "acceptance")},
         "Requirements": {r: {k: b[k] for k in ("obligation", "design", "contract")}
                          for r, b in requirements.items()},
         "Checks": {r: {k: c[k] for k in ("purpose", "expectedEvidence", "requirements")}
                    for r, c in checks.items()},
-        "Final observations": observations,
+        "Final observations": [row(store.read(r)) for r in refs],
+        # Same fields as final rows: commands can carry check source, which is judged once at the unit.
+        "Wave-start observations": [row(b) for _, _, b in store.records("observation")
+            if b["purpose"] == "wave-start" and b["check"] in checks and checks[b["check"]]["level"] == "wave"],
         "Crossed contracts": architecture.crossed_contracts(document, requirements),
         "Correction owners": {u: {k: plan.select(document, "unit")[u][k]
                                    for k in ("instructions", "scope", "requirements")}
