@@ -82,8 +82,8 @@ PROMPTS = {
                 "would change an accepted commitment.",
     "WORK": "Deliver this whole unit in its worktree: write product and checks inside its scope, "
             "run its unit checks and refine before returning. Meet the accepted quality bar.",
-    "JUDGE": "For each requirement: are its checks meaningful; did they actually exercise the "
-             "requirement at P (not skipped, not empty, not asserting nothing); is anything a stub, "
+    "JUDGE": "For each requirement: are its checks meaningful (they exercise the requirement, not "
+             "skipped, not empty, not asserting nothing; code proves they ran); is anything a stub, "
              "mock or missing? Read the check sources, RED output at T or wave start, passing P output "
              "and screenshots. For baselineDemonstrated, a requirement new in this unit needs a check "
              "that failed without the product; a check that passed there proves preservation only. "
@@ -169,7 +169,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
 def assessments(targets, *, final=False):
     return [{"target": target, "meaningful": True, "noStubsMocksMissing": True,
              **({} if final or target in SOURCE_TARGETS else
-                {"exercisedAtP": True, "baselineDemonstrated": True}),
+                {"baselineDemonstrated": True}),
              "why": "The real interaction asserts the required observable behavior"} for target in targets]
 
 
@@ -373,7 +373,8 @@ def judge_brief(store, ref, commit=None, observations=None):
                                                     if writers[r] == ref},
              "Checkout coverage": "Other units' files are outside this judgment; behaviour across units "
                                   "is proven at wave verify. This judgment covers only this unit's "
-                                  "requirements against this unit's checks at P and its source obligations.",
+                                  "requirements against this unit's checks at P and its source obligations. An owned wave "
+                                  "check shows its RED here; its passing run is code-proven at wave verify.",
              "Check sources": checks,
              "Binary files at P (bytes)": binaries,
              # The unit's whole product source at P: a rebased rework can leave the T..P diff empty (T-86).
@@ -427,6 +428,6 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
 def satisfied(answer, *, final=False):
     return (answer.get("verdict") == "satisfied" and not answer["gaps"]
             and all((final or "baselineDemonstrated" not in a
-                     or (a["baselineDemonstrated"] is True and a["exercisedAtP"] is True))
+                     or a["baselineDemonstrated"] is True)
                     and a["meaningful"] and a["noStubsMocksMissing"]
                     for a in answer["assessments"]))

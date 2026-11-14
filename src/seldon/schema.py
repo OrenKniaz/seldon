@@ -107,7 +107,7 @@ def answer_schema(kind, targets=(), owners=()):
     if kind == "JUDGE":
         requirement = obj(**{**assessment["properties"],
                              "target": choice(*(t for t in targets if t not in SOURCE_TARGETS))},
-                          exercisedAtP=flag, baselineDemonstrated=flag)
+                          baselineDemonstrated=flag)
         assessment = {"anyOf": [requirement, obj(**{**assessment["properties"],
                                                    "target": choice(*SOURCE_TARGETS)})]}
     payload = {

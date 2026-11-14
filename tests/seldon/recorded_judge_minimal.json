@@ -14,7 +14,6 @@
           "assessments": [
             {
               "baselineDemonstrated": true,
-              "exercisedAtP": true,
               "meaningful": true,
               "noStubsMocksMissing": true,
               "target": "n006",
@@ -136,9 +135,6 @@
                           "baselineDemonstrated": {
                             "type": "boolean"
                           },
-                          "exercisedAtP": {
-                            "type": "boolean"
-                          },
                           "meaningful": {
                             "type": "boolean"
                           },
@@ -162,7 +158,6 @@
                           "meaningful",
                           "noStubsMocksMissing",
                           "why",
-                          "exercisedAtP",
                           "baselineDemonstrated"
                         ],
                         "type": "object"

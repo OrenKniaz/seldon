@@ -533,7 +533,7 @@ class Scripted:
                     assert sibling not in q["facts"]["Product changes"]
                 if any("SKIP_AT_P" in source for source in sources.values()):
                     assert all(o["exitCode"] == 0 for o in q["facts"]["Observations"] if o["purpose"] == "P")
-                    answer["assessments"][0]["exercisedAtP"] = False
+                    answer["assessments"][0]["meaningful"] = False
                     answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
                         "correction": "The check skipped its assertion at P; exercise the real requirement"}])
                 if self.mode == "stale-scope" and any("lost assertion" in s for s in sources.values()):
