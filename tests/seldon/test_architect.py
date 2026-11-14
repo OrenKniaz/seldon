@@ -1179,7 +1179,7 @@ def architect_journeys(tmp_path):
 def check_owner_journeys(root):
     """DETAIL's declared placement reaches real workers and integrated proof, with one file owner.
 
-    Existing multi-requirement fixtures hide an own-only wave check wrongly run in isolation.
+    Existing multi-requirement fixtures hide an own-only wave check wrongly run at T or P.
     The same delivery exercises old missing levels, promotion across units, argv naming a sibling,
     and binary check evidence that previously overflowed the unit judge. WORK's real recorder must
     correct a prose owner once; done-only workers never exercise the owner enum.
@@ -1229,10 +1229,13 @@ def check_owner_journeys(root):
             "declared-wave", "spanning", "old-spanning"}
         assert all(plan.owner(document, ref) == "u001" for ref in waves)
         before = run.store.records("observation")
-        assert not any(b["check"] in waves for _, _, b in before)
+        baseline = [b for _, _, b in before if b["check"] in waves]
+        assert baseline and all(b["purpose"] == "wave-start" for b in baseline)
+        assert all(b["exitCode"] != 0 for b in baseline)
         run.step()
         assert run.store.cursor().state == "FLOW-JUDGE", run.store.records("outcome")
-        observations = [b for _, _, b in run.store.records("observation") if b["check"] in waves]
+        observations = [b for _, _, b in run.store.records("observation")
+                        if b["check"] in waves and b["purpose"] == "final"]
         assert len(observations) == 3 and all(b["exitCode"] == 0 for b in observations)
         assert all(b["commit"] == run.store.cursor().candidate for b in observations)
 
@@ -1269,7 +1272,7 @@ def check_owner_journeys(root):
         _, answer = inference.call(run.store, blocked, question)
         assert answer["discoveries"] == [{"owner": "u001", "correction": "Correct the shared reading"}]
         assert len(replies) == 2 and "Exact corrections" in replies[-1]["facts"]
-        print(f"Check ownership: declared/spanning/legacy wave checks integrated only; "
+        print(f"Check ownership: declared/spanning/legacy wave baseline observed, integrated GREEN; "
               f"13 PNGs add {delta} JUDGE bytes; prose WORK owner corrected once", flush=True)
     finally:
         run.close()

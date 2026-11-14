@@ -31,10 +31,9 @@ JUDGMENT_LEEWAY = (
     "it breaks.")
 
 UNIT_EVIDENCE = (
-    "The unit JUDGE receives only observations from this unit's local checks at T and P. "
-    "For visual requirements, those checks save screenshots in SELDON_EVIDENCE_DIR at each "
-    "observable state needed for judgment. Wave screenshots are available only after integration. "
-    "Wave checks are written here and first run by Seldon on the integrated product; "
+    "The unit JUDGE receives local observations at T and P and owned wave checks at wave start. "
+    "For visual requirements, checks save screenshots in SELDON_EVIDENCE_DIR at each observable state. "
+    "Owned wave checks observe the baseline at wave start; GREEN is proven at WAVE-VERIFY; "
     "other units' files missing from this worktree are expected, never a blocker.")
 
 AGREED_LITERALS = (
@@ -351,10 +350,12 @@ def judge_brief(store, ref, commit=None, observations=None):
             checks[path] = text
         elif plan.matches(path, contract["scope"]):
             product[path] = text
+    writers = plan.owners(document)
     facts = {"Unit responsibility": contract["instructions"],
              "Declared dependency scopes": [plan.select(document, "unit")[r]["scope"]
                                             for r in plan.prerequisites(document, ref)],
-             "Requirements": requirements, "Checks": plan.assigned(document)[ref],
+             "Requirements": requirements, "Checks": {r: c for r, c in plan.select(document, "check").items()
+                                                    if writers[r] == ref},
              "Checkout coverage": "Other units' files are outside this judgment; behaviour across units "
                                   "is proven at wave verify. This judgment covers only this unit's "
                                   "requirements against this unit's checks at P and its source obligations.",

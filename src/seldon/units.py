@@ -188,9 +188,7 @@ def run_unit(store, provider, ref):
                             "scopeTree": gitwork.scope_tree(unit.worktree, unit.P, contract["scope"],
                                                             store.cursor().scratch)})
                     else:
-                        question = questions.judge_brief(store, ref)
-                        question["facts"]["Checks"] = checks
-                        result, answer = inference.call(store, provider, question)
+                        result, answer = inference.call(store, provider, questions.judge_brief(store, ref))
                         if answer["verdict"] != "not judged" and not questions.satisfied(answer):
                             raise ValueError("Judgment gap: " + str(answer))
                         result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,

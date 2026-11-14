@@ -118,18 +118,19 @@ def prove(store, ref, contract, checks):
     try:
         red = observe(store, root, unit.T, checks, "T", ref)
         observations.extend(red)
-        passing_T = {store.read(r)["check"] for r in red if store.read(r)["exitCode"] == 0
-                     and not failures(store, [r])}
-        if passing_T:
-            # A RED baseline removes product only, never check machinery: every unit's check sources
-            # as they stand at T, so a helper owned by a sibling unit is present (T-104).
-            mechanics = [p for u in plan.select(store.plan(store.cursor().revision), "unit").values()
-                         for p in u["checkPaths"]]
+        baseline = {store.read(r)["check"]: checks[store.read(r)["check"]]
+                    for r in red if store.read(r)["exitCode"] == 0 and not failures(store, [r])}
+        document = store.plan(store.cursor().revision)
+        baseline.update({r: c for r, c in plan.assigned(document)[None].items()
+                         if plan.owner(document, r) == ref})
+        if baseline:
+            # Remove product only; keep every unit's check machinery as it stands at T (T-104).
+            mechanics = [p for u in plan.select(document, "unit").values() for p in u["checkPaths"]]
             start = gitwork.check_commit(root, store.cursor().waveStart, unit.T,
                                          mechanics, store.cursor().scratch)
             store.record("proof_base", {"unit": ref, "commit": start, "waveStart": store.cursor().waveStart,
                                         "product": unit.P})
-            start_red = observe(store, root, start, {r: checks[r] for r in passing_T}, "wave-start", ref)
+            start_red = observe(store, root, start, baseline, "wave-start", ref)
             observations.extend(start_red)
         gitwork.checkout(root, unit.P)
         green = observe(store, root, unit.P, checks, "P", ref)

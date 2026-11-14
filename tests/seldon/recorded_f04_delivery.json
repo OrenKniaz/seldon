@@ -1,0 +1,1200 @@
+{
+  "provenance": "shelflife-260584f-f04 r202 patch cc4cf111ee6ad9d45a653cd6340195d34f6b61d0, r208 JUDGE sources; plan revision 3; helper replaced by portable short-lived subprocess twin",
+  "document": {
+    "architecture": {
+      "areas": [
+        {
+          "commitments": [
+            "scopeIn:2",
+            "scopeIn:3",
+            "scopeIn:4",
+            "scopeIn:5",
+            "scopeIn:6",
+            "scopeIn:12",
+            "quality:2",
+            "quality:3"
+          ],
+          "handle": "service",
+          "responsibility": "Own the local HTTP service, canonical item rules and SQLite persistence boundary.",
+          "scope": [
+            "server.py",
+            "pantry.py",
+            "checks/service/**"
+          ]
+        },
+        {
+          "commitments": [
+            "scopeIn:7",
+            "scopeIn:8",
+            "scopeIn:9",
+            "improvements:1",
+            "improvements:2",
+            "improvements:3",
+            "quality:5",
+            "quality:6",
+            "quality:7"
+          ],
+          "handle": "interface",
+          "responsibility": "Own the pantry-ledger interface, interaction recovery and accessible presentation.",
+          "scope": [
+            "static/**",
+            "checks/interface/**"
+          ]
+        },
+        {
+          "commitments": [
+            "scopeIn:10",
+            "quality:4"
+          ],
+          "handle": "importer",
+          "responsibility": "Own CSV ingestion and its interoperability with canonical persistence.",
+          "scope": [
+            "import_items.py",
+            "checks/importer/**"
+          ]
+        },
+        {
+          "commitments": [
+            "scopeIn:1",
+            "scopeIn:11",
+            "scopeIn:13",
+            "scopeIn:14",
+            "quality:1"
+          ],
+          "handle": "delivery",
+          "responsibility": "Own fresh-folder operation, documentation, cross-area integration and shared check helpers.",
+          "scope": [
+            "README.md",
+            "DISCOVERY.md",
+            "checks/delivery/**",
+            "checks/shared/**"
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "consumers": [
+            "interface",
+            "importer",
+            "delivery"
+          ],
+          "handle": "item-representation",
+          "kind": "schema",
+          "provider": "service",
+          "text": "Item JSON keys: id, name, quantity, unit, expires, created_at. id is a positive integer; name is text of 1-80 characters; quantity is an integer >= 0; unit is text; expires is YYYY-MM-DD or null; created_at is a UTC string formatted YYYY-MM-DDTHH:MM:SSZ. Creation requires name and quantity; omitted unit becomes \"\" and omitted expires becomes null. PATCH accepts only name, quantity, unit, expires. JSON booleans are not integers."
+        },
+        {
+          "consumers": [
+            "interface",
+            "delivery"
+          ],
+          "handle": "http-interface",
+          "kind": "api",
+          "provider": "service",
+          "text": "GET /api/items returns 200 with an Item array. Query names are q and expiring_within; q is case-insensitive name substring search; expiring_within is a non-negative integer day count. Filters combine; dated items through the inclusive household-local cutoff, including expired items, qualify; undated items do not. Ordering is expires ascending, nulls last, then id ascending. POST /api/items returns 201 with Item. PATCH /api/items/{id} returns 200 with Item. POST /api/items/{id}/consume accepts {\"amount\": n}, a positive integer, and returns 200 with Item. DELETE /api/items/{id} returns 204 with no body. JSON bodies use Content-Type: application/json. Error bodies are {\"error\": \"...\"}; invalid input is 400, unknown id is 404, insufficient quantity is 409."
+        },
+        {
+          "consumers": [
+            "interface",
+            "importer",
+            "delivery"
+          ],
+          "handle": "shared-error-text",
+          "kind": "shared-type",
+          "provider": "service",
+          "text": "Exact error strings: \"Name must be 1-80 characters.\"; \"Quantity must be a whole number of 0 or more.\"; \"Unit must be text.\"; \"Expiry must be a valid date in YYYY-MM-DD format or null.\"; \"Amount must be a positive whole number.\"; \"Not enough quantity remaining.\"; \"Item not found.\"; \"Request body must be a JSON object.\"; \"Unknown field.\"; \"Provide at least one field to update.\"; \"Expiry days must be a non-negative integer.\"; \"Route not found.\"; \"Unable to access pantry data.\". Malformed JSON and non-object JSON use \"Request body must be a JSON object.\"; unexpected persistence failure returns 500 with \"Unable to access pantry data.\"."
+        },
+        {
+          "consumers": [
+            "importer"
+          ],
+          "handle": "canonical-persistence-entry",
+          "kind": "api",
+          "provider": "service",
+          "text": "pantry.py exports initialize_database(db_path) -> None and create_item(db_path, fields) -> Item. fields uses name, quantity, unit, expires from item-representation. Invalid fields raise ValueError with a shared-error-text message. Successful creation returns the committed Item. Both functions accept a filesystem path to the same SQLite file used by server.py."
+        },
+        {
+          "consumers": [
+            "service",
+            "delivery"
+          ],
+          "handle": "static-entry",
+          "kind": "file-format",
+          "provider": "interface",
+          "text": "/ serves static/index.html; /static/styles.css serves static/styles.css; /static/app.js serves static/app.js. The document title and application heading are \"ShelfLife\". The dated attention section heading is \"Expiring soon\" and uses expiring_within=7."
+        },
+        {
+          "consumers": [
+            "delivery"
+          ],
+          "handle": "server-command",
+          "kind": "command-line",
+          "provider": "service",
+          "text": "python server.py --port PORT --db PATH binds 127.0.0.1. With the supplied Python runtime, the documented invocation is python -B server.py --port PORT --db PATH."
+        },
+        {
+          "consumers": [
+            "delivery"
+          ],
+          "handle": "import-command",
+          "kind": "command-line",
+          "provider": "importer",
+          "text": "python import_items.py FILE.csv --db PATH; supplied-runtime invocation: python -B import_items.py FILE.csv --db PATH. CSV requires header names name,quantity,unit,expires; blank unit becomes \"\" and blank expires becomes null. Normal completion prints exactly one stdout line \"imported N, skipped M\" and exits 0. Unreadable input exits 2 and writes \"Unable to read CSV file.\" to stderr. Missing required headers exit 2 and write \"CSV header must contain name,quantity,unit,expires.\" to stderr."
+        }
+      ],
+      "decisions": [
+        {
+          "areas": [
+            "service",
+            "importer"
+          ],
+          "choice": "The service owns pantry.py and the SQLite schema. The importer calls its canonical creation boundary rather than duplicating SQL or validation. Persistent tables remain private to that owner.",
+          "origin": "architecture",
+          "reason": "One authority prevents importer/server drift without requiring a separate storage area."
+        },
+        {
+          "areas": [
+            "service",
+            "interface",
+            "importer",
+            "delivery"
+          ],
+          "choice": "Adopt the approved household-local filtering defaults. Choose numeric positive IDs, UTC created_at timestamps, empty-string units, raw array listing responses, returned Item mutation responses, bodyless 204 deletion and id tie-breaking as specified in the contracts.",
+          "origin": "architecture",
+          "reason": "These previously open representation choices give consumers one unambiguous wire format."
+        },
+        {
+          "areas": [
+            "service",
+            "interface",
+            "importer",
+            "delivery"
+          ],
+          "choice": "Use the exact shared error strings and importer diagnostics in the contracts. Reject unknown mutation fields and empty PATCH bodies; treat null as valid only for expires. Unexpected persistence failures use the contracted 500 response.",
+          "origin": "architecture",
+          "reason": "Plain-language, stable diagnostics avoid consumer-specific interpretations of failure."
+        },
+        {
+          "areas": [
+            "interface",
+            "service",
+            "delivery"
+          ],
+          "choice": "Use static/index.html, static/styles.css and static/app.js with the contracted local URLs. Keep other interface labels, expiry wording and DOM identifiers private to the interface area.",
+          "origin": "architecture",
+          "reason": "Only deployment paths and shared API values need cross-area coordination; visual and interaction decisions retain one owner."
+        },
+        {
+          "areas": [
+            "importer",
+            "delivery"
+          ],
+          "choice": "Use UTF-8 CSV input with optional BOM, permit extra header columns, skip invalid data rows, and treat missing required headers as a fatal input error with the contracted diagnostic.",
+          "origin": "architecture",
+          "reason": "This resolves unspecified file-level behavior while retaining the requested row-skipping summary."
+        },
+        {
+          "areas": [
+            "service",
+            "interface",
+            "importer",
+            "delivery"
+          ],
+          "choice": "Delivery exclusively owns checks/shared/** and DISCOVERY.md. Each other area exclusively owns its named check subtree. Runtime databases and screenshot evidence are generated artifacts, not additional source ownership surfaces.",
+          "origin": "architecture",
+          "reason": "Shared support and integration work have one writer without overlapping product ownership."
+        }
+      ],
+      "waves": [
+        {
+          "goal": "Establish the canonical service and persistence boundary while the interface, importer and delivery surfaces develop against the agreed contracts."
+        },
+        {
+          "goal": "Connect the local page and CSV entry point to the same canonical persisted inventory."
+        },
+        {
+          "goal": "Deliver the coherent fresh-folder application with documented local operation and the accepted usability, recovery and durability outcomes."
+        }
+      ]
+    },
+    "areaDetails": {
+      "delivery": "r99",
+      "importer": "r43",
+      "interface": "r55",
+      "service": "r51"
+    },
+    "nodes": {
+      "guide": {
+        "body": {
+          "area": "n030",
+          "checkPaths": [
+            "docs/try-it.md"
+          ],
+          "consumes": [],
+          "dependencies": [
+            "u001",
+            "u002",
+            "u003",
+            "u004"
+          ],
+          "instructions": "Write the try-it guide for the integrated product. Give exact steps, the expected results and the user's real interaction. Link every named path relative to the guide file; argv commands run from the delivered product root. Put every command, if the product has any that finish on their own, in an argv fenced block containing a JSON string array, in execution order. Use prose for expected results and manual interactions.",
+          "provides": [],
+          "reads": [],
+          "requirements": [],
+          "scope": [
+            "docs/try-it.md"
+          ]
+        },
+        "kind": "unit"
+      },
+      "n001": {
+        "body": {
+          "acceptance": "Validated items can be created, listed, updated, consumed and deleted through the agreed JSON API.",
+          "story": "Manage household pantry items through one canonical item boundary.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n002": {
+        "body": {
+          "acceptance": "Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).",
+          "story": "Trust saved pantry data and concurrent consumption.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n003": {
+        "body": {
+          "acceptance": "Backend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.",
+          "story": "Run the service locally and use the interface and importer against its canonical database.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n004": {
+        "body": {
+          "contract": "Provide item-representation, canonical-persistence-entry and shared-error-text. Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at. Apply the complete supplied contract texts, including defaults, timestamp format, JSON boolean rejection and exact diagnostics.",
+          "design": "pantry.py owns validation and the private SQLite schema. Export initialize_database(db_path) -> None and create_item(db_path, fields) -> Item. Commit successful creation before returning; raise ValueError with the contracted message for invalid fields. Reuse this creation boundary from the server.",
+          "features": [
+            "n001",
+            "n003"
+          ],
+          "obligation": "Give the server and importer one canonical creation and item-validation authority."
+        },
+        "kind": "requirement"
+      },
+      "n005": {
+        "body": {
+          "contract": "Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds). Consumption never produces a negative quantity; the losing request returns 409.",
+          "design": "Keep schema and SQL private to pantry.py. Use request-safe connections and transactional mutations, with conditional consumption and its outcome determined atomically. Initialize an existing database without losing records.",
+          "features": [
+            "n002"
+          ],
+          "obligation": "Preserve committed fields and prevent lost updates or double consumption under concurrent requests."
+        },
+        "kind": "requirement"
+      },
+      "n006": {
+        "body": {
+          "contract": "Provide http-interface and shared-error-text using item-representation. GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last). POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}. Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404.",
+          "design": "Implement the supplied route, status, body, Content-Type and exact error contracts in server.py. Use household-local calendar dates, inclusive expiry cutoff including expired items, exclusion of undated items from expiry filtering, combined filters, case-insensitive substring search and id tie-breaking. Reject unknown mutation fields, empty PATCH, invalid dates and nonpositive or noninteger consumption. Convert unexpected persistence failures to the contracted 500 response without exposing internals.",
+          "features": [
+            "n001",
+            "n002"
+          ],
+          "obligation": "Expose the complete agreed API without allowing invalid requests to mutate stored data."
+        },
+        "kind": "requirement"
+      },
+      "n007": {
+        "body": {
+          "contract": "Provide server-command and consume static-entry and import-command. python server.py --port PORT --db PATH binds 127.0.0.1. With the supplied Python runtime, the documented invocation is python -B server.py --port PORT --db PATH. / serves static/index.html; /static/styles.css serves static/styles.css; /static/app.js serves static/app.js.",
+          "design": "Use Python 3.12 standard library only, with no runtime network access beyond local serving and no build step. Resolve supplied static files relative to the product, serve appropriate content types, and prevent URL traversal outside the allowed static entries. Do not author interface or importer files. Verify their real integrated outputs at wave level.",
+          "features": [
+            "n003"
+          ],
+          "obligation": "Launch the local service and connect the real interface and imported records to the canonical service boundary."
+        },
+        "kind": "requirement"
+      },
+      "n008": {
+        "body": {
+          "command": [
+            "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            "-B",
+            "checks/service/check_canonical.py"
+          ],
+          "expectedEvidence": "A temporary database is initialized, a real create_item call returns a contracted Item, and a separate connection observes the committed record. Direct invalid calls raise ValueError with the agreed messages and leave the record set unchanged. Reinitialization preserves the record.",
+          "level": "unit",
+          "purpose": "Protect the importer's callable creation boundary against uncommitted returns, incompatible signatures or validation bypasses. HTTP checks cannot prove the direct Python exception and commit contract. Keep direct validation cases focused on that boundary rather than repeating the HTTP matrix.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime",
+            "Writable temporary directory"
+          ],
+          "requirements": [
+            "n004"
+          ]
+        },
+        "kind": "check"
+      },
+      "n009": {
+        "body": {
+          "command": [
+            "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            "-B",
+            "checks/service/check_http.py"
+          ],
+          "expectedEvidence": "Actual HTTP observations cover CRUD, Item responses and defaults, field boundaries, malformed/non-object JSON, unknown fields, empty PATCH, invalid calendar dates, boolean rejection, exact errors, unknown IDs, insufficient consumption and unchanged data after rejection. Date-relative records prove combined search/expiry filtering, expired inclusion, inclusive cutoff, undated exclusion and deterministic nulls-last ordering. A controlled persistence failure produces the contracted 500 JSON response.",
+          "level": "unit",
+          "purpose": "Protect wire behavior and rejection integrity against routing, parsing, filtering and error-translation defects. Direct pantry calls cannot detect those defects. Start the actual server on an available local port with a temporary database, wait for readiness and stop it in cleanup.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime",
+            "Available loopback port",
+            "Writable temporary directory"
+          ],
+          "requirements": [
+            "n006",
+            "n007"
+          ]
+        },
+        "kind": "check"
+      },
+      "n010": {
+        "body": {
+          "command": [
+            "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            "-B",
+            "checks/service/check_concurrency_restart.py"
+          ],
+          "expectedEvidence": "Two synchronized HTTP consumes of a real item with quantity one yield exactly one 200 and one 409, with quantity zero. Concurrent successful consumes against sufficient stock preserve every decrement. After stopping and restarting the actual server with the same SQLite file, API reads preserve quantities and saved fields.",
+          "level": "unit",
+          "purpose": "Protect transactional consumption and restart durability against read-modify-write races and ephemeral storage. Sequential HTTP and direct creation checks do not exercise these interleavings or process restarts. Own and clean up every server process and temporary database.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime",
+            "Available loopback port",
+            "Writable temporary directory"
+          ],
+          "requirements": [
+            "n005"
+          ]
+        },
+        "kind": "check"
+      },
+      "n011": {
+        "body": {
+          "command": [
+            "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            "-B",
+            "checks/service/check_integrated_hosting.py"
+          ],
+          "expectedEvidence": "The real importer runs against a temporary database using its contracted command and produces its exact summary for mixed valid/invalid rows. The actual server reads those committed records through the API, consumes an imported item and retains the result after restart. HTTP requests retrieve the real integrated HTML, CSS and JavaScript at the contracted URLs with appropriate content types; HTML has the contracted title and heading. Traversal requests cannot disclose files outside the allowed entries.",
+          "level": "wave",
+          "purpose": "Protect the canonical producer-to-consumer integrations against database divergence and static deployment mismatches. Local tests cannot prove another area's real files. Use integrated importer and interface files, never substitute fixtures for them; this is not a browser usability or visual-quality check.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime",
+            "Integrated importer and interface product files",
+            "Available loopback port",
+            "Writable temporary directory"
+          ],
+          "requirements": [
+            "n004",
+            "n006",
+            "n005",
+            "n007",
+            "n015",
+            "n016",
+            "n017",
+            "n021",
+            "n022"
+          ]
+        },
+        "kind": "check"
+      },
+      "n012": {
+        "body": {
+          "acceptance": "Users can review expiry, search and filter items, add items with inline validation, consume and delete, and recover from failed requests without losing entered values.",
+          "story": "Manage household pantry items through one responsive local page.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n013": {
+        "body": {
+          "acceptance": "The page presents clear expiry warnings and distinct empty, no-results and unavailable states in a calm pantry-ledger design.",
+          "story": "Understand pantry status and the next useful action at a glance.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n014": {
+        "body": {
+          "acceptance": "Core workflows work by keyboard with visible focus, labeled controls and understandable feedback at phone and desktop sizes.",
+          "story": "Use the pantry comfortably without relying on a mouse or color.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n015": {
+        "body": {
+          "contract": "Provide static-entry: / serves static/index.html; /static/styles.css serves static/styles.css; /static/app.js serves static/app.js. The document title and application heading are \"ShelfLife\". The dated attention section heading is \"Expiring soon\" and uses expiring_within=7. Consume item-representation, http-interface and shared-error-text without changing their meanings.",
+          "design": "Use static HTML, CSS and JavaScript with same-origin requests and no third-party dependencies, downloaded resources or build step. Use the contracted list filters and mutation endpoints. Keep consume controls close to quantity. Validate add fields inline, expose server errors, preserve entered form values when a request fails, and offer a usable retry. Handle DELETE's bodyless response. Refresh affected lists after successful mutations and prevent stale search responses from replacing newer results.",
+          "features": [
+            "n012"
+          ],
+          "obligation": "Implement \"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails. Show expiry status beside each item. Do not add editing workflows beyond add, consume and delete."
+        },
+        "kind": "requirement"
+      },
+      "n016": {
+        "body": {
+          "contract": "Present items from item-representation and http-interface using household-local date interpretation. Use textual status labels as well as visual warning treatments; distinguish an empty pantry, no matching results and an unavailable API without relying on color alone.",
+          "design": "Use a calm pantry-ledger visual direction: warm white, deep ink and restrained green, with amber and red reserved for expiry warnings; offline serif headings, clear sans-serif controls, generous spacing and simple ruled rows rather than nested cards. Use plain-language validation and status messages. Choose responsive layouts that accommodate long names, units and controls.",
+          "features": [
+            "n013"
+          ],
+          "obligation": "Provide one responsive page that works at phone and desktop sizes. Maintain readable contrast; no horizontal scrolling at 375px. Clean, calm visual design. Clearly distinguish expired, approaching-expiry and undated items."
+        },
+        "kind": "requirement"
+      },
+      "n017": {
+        "body": {
+          "contract": "All core add, search, filter, consume and delete interactions are operable by keyboard. Controls have accessible names, visible focus and understandable non-color-only feedback.",
+          "design": "Use semantic headings, forms, labels and native controls; associate inline errors with their inputs and announce request outcomes appropriately. Preserve sensible focus after list mutations and error recovery. Avoid unnecessary motion; respect reduced-motion preference if motion is introduced.",
+          "features": [
+            "n014"
+          ],
+          "obligation": "Keyboard accessible with visible focus; readable contrast. Users can identify validation failures, expiry warnings and API failure without color alone."
+        },
+        "kind": "requirement"
+      },
+      "n018": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/interface/interface.cjs",
+            "local"
+          ],
+          "expectedEvidence": "A failing baseline without the interface, then browser assertions and screenshots in SELDON_EVIDENCE_DIR for desktop, 375px, expiry warnings, empty pantry, no results, inline validation, API failure with retained input, and keyboard focus. Recorded requests demonstrate correct query and mutation bodies, bodyless deletion handling and protection against stale responses. Browser and temporary static server are closed.",
+          "level": "unit",
+          "purpose": "Prove the owned UI against controlled contract responses, not a replacement backend. Catch incorrect request construction, lost form values, misleading states, layout overflow and inaccessible controls. These frontend failure cases are not established by backend tests or a successful integrated happy path.",
+          "requiredEnvironment": [
+            "Supplied Node runtime",
+            "Supplied playwright-core package and Edge executable",
+            "SELDON_EVIDENCE_DIR",
+            "Local loopback access"
+          ],
+          "requirements": [
+            "n015",
+            "n016",
+            "n017"
+          ]
+        },
+        "kind": "check"
+      },
+      "n019": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/interface/interface.cjs",
+            "wave"
+          ],
+          "expectedEvidence": "Against the actual server and temporary SQLite file, import valid pantry rows through the actual importer, read and consume an imported item through the UI, add, search, filter, consume and delete using keyboard interaction, and observe expiry and empty-result states. Interrupt API availability, show a visible error and retained add values, restart with the same database, then retry successfully and confirm persisted results through the API. Save actual Edge desktop and 375px screenshots, assert page geometry and local-only product requests, and close browser and child processes.",
+          "level": "wave",
+          "purpose": "Prove interface requirements through consumed contracts item-representation, http-interface, shared-error-text, server-command and import-command. Catch deployment, wire-format, importer-to-UI and restart/recovery mismatches that controlled local responses cannot reveal. Exercise consumer behavior, not exhaustive provider validation or concurrency.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime",
+            "Supplied Node runtime",
+            "Supplied playwright-core package and Edge executable",
+            "SELDON_EVIDENCE_DIR",
+            "Integrated providers of item-representation, http-interface, shared-error-text, server-command and import-command",
+            "Local loopback access"
+          ],
+          "requirements": [
+            "n015",
+            "n016",
+            "n017"
+          ]
+        },
+        "kind": "check"
+      },
+      "n020": {
+        "body": {
+          "acceptance": "Valid CSV rows become pantry items through canonical persistence; invalid rows are skipped with accurate counts, and file-level failures produce the agreed diagnostics.",
+          "story": "Import household inventory from a CSV file into the same database used by ShelfLife.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n021": {
+        "body": {
+          "contract": "Provide import-command: python import_items.py FILE.csv --db PATH; supplied-runtime invocation: python -B import_items.py FILE.csv --db PATH. CSV requires header names name,quantity,unit,expires. Normal completion prints exactly one stdout line \"imported N, skipped M\" and exits 0. Unreadable input exits 2 and writes \"Unable to read CSV file.\" to stderr. Missing required headers exit 2 and write \"CSV header must contain name,quantity,unit,expires.\" to stderr.",
+          "design": "Use Python 3.12 standard-library argparse and csv. Read UTF-8 with optional BOM, permit extra header columns, and process rows without third-party dependencies or network access. Count each rejected data row once. Keep file-level errors distinct from row rejection.",
+          "features": [
+            "n020"
+          ],
+          "obligation": "Implement the documented command, CSV framing, summary and fatal input behavior."
+        },
+        "kind": "requirement"
+      },
+      "n022": {
+        "body": {
+          "contract": "Consume canonical-persistence-entry, item-representation and shared-error-text. Call initialize_database(db_path) and create_item(db_path, fields), passing the requested database path. Blank unit becomes \"\" and blank expires becomes null. Imported records must be usable by the actual server and UI.",
+          "design": "Convert CSV quantity text to an integer, rejecting non-integer text. Map the four required columns to canonical creation fields. Delegate item validation, IDs, timestamps, commits and schema ownership to pantry.py; count ValueError validation rejection as a skipped row. Do not duplicate SQL or canonical item validation, and do not disguise unexpected persistence failures as invalid rows or successful completion.",
+          "features": [
+            "n020"
+          ],
+          "obligation": "Persist accepted rows exclusively through the canonical creation boundary, preserving accurate counts and interoperability."
+        },
+        "kind": "requirement"
+      },
+      "n023": {
+        "body": {
+          "command": [
+            "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            "-B",
+            "checks/importer/check_cli.py"
+          ],
+          "expectedEvidence": "Assertions and subprocess exit/output observations establish BOM and extra-column handling, required headers, unreadable input, blank normalization, integer conversion, row counting, exact summary and diagnostics, canonical call arguments, validation rejection and propagation of unexpected persistence failure. The check fails when import_items.py is absent.",
+          "level": "unit",
+          "purpose": "Protect importer-owned parsing and command behavior against miscounting, wrong field/path forwarding and swallowed failures. Use an isolated recording canonical-boundary double only to observe calls and inject failures, not to claim canonical validation or persistence; the wave check proves those real interactions.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime",
+            "Temporary writable directory"
+          ],
+          "requirements": [
+            "n021",
+            "n022"
+          ]
+        },
+        "kind": "check"
+      },
+      "n024": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/importer/check_integration.cjs"
+          ],
+          "expectedEvidence": "The actual importer processes a mixed valid/invalid CSV with exact summary and exit assertions. Actual API responses expose accepted records with canonical fields and normalized blanks, excluding invalid rows. Edge consumes an imported item; API observations show its reduced quantity before and after server restart. Save the resulting UI screenshot in SELDON_EVIDENCE_DIR. Emit observations and clean up browser, server and temporary files.",
+          "level": "wave",
+          "purpose": "Protect actual importer-to-persistence-to-server/UI interoperability against schema drift, bypassed validation and nonpersistent writes. Local recording-double checks cannot establish these behaviors. Start all needed processes and stop them within this check; use only this area's product and its consumed contracts.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime",
+            "Supplied Node runtime",
+            "C:\\Users\\oren\\codex-harness\\ui\\node_modules\\.pnpm\\playwright-core@1.59.1\\node_modules\\playwright-core",
+            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            "SELDON_EVIDENCE_DIR",
+            "Integrated canonical persistence, server and UI providers",
+            "Temporary writable directory and available loopback port"
+          ],
+          "requirements": [
+            "n021",
+            "n022",
+            "n004",
+            "n005",
+            "n006",
+            "n007",
+            "n015",
+            "n016",
+            "n017"
+          ]
+        },
+        "kind": "check"
+      },
+      "n025": {
+        "body": {
+          "acceptance": "The documented importer, server and browser workflow succeeds in a fresh folder with a temporary database using the supplied runtime, without downloads, external requests or a build step.",
+          "story": "Run ShelfLife locally using a short README and verify that its independently delivered surfaces work together.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "n026": {
+        "body": {
+          "contract": "Done means: the server, UI and importer work together from a fresh folder; a short README explains how to run them. Consume item-representation, http-interface, shared-error-text, static-entry, server-command and import-command without redefining them. Delivery uses CLI and HTTP boundaries, not canonical-persistence-entry.",
+          "design": "README.md documents prerequisites, root-relative commands, CSV headers, opening the local UI, stopping and restarting with the same database. checks/shared/** supplies only mechanics needed by delivery checks: temporary workspaces, subprocess lifecycle, bounded readiness and cleanup. DISCOVERY.md records encountered issues, evidence, likely owner, disposition and exit test. Local checks prove helper behavior; the wave check proves documented product operation.",
+          "features": [
+            "n025"
+          ],
+          "obligation": "Deliver fresh-folder operation and check mechanics within README.md, DISCOVERY.md, checks/delivery/** and checks/shared/**. Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step. Supplied browser tooling is verification-only; product requests remain local."
+        },
+        "kind": "requirement"
+      },
+      "n027": {
+        "body": {
+          "command": [
+            "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            "-B",
+            "checks/delivery/check_helpers.py"
+          ],
+          "expectedEvidence": "A real temporary child process starts, exposes its readiness signal and is stopped. Early child exit and readiness timeout produce bounded diagnostic failures and leave no live child. Temporary workspace cleanup succeeds, including on failure. The check fails initially when the required helper implementation is absent.",
+          "level": "unit",
+          "purpose": "Protect bounded readiness and cleanup against leaked subprocesses and indefinite waits. Exercise real subprocesses rather than mocked answers or sibling product replicas. Product workflow checks do not independently prove these harness failure paths. Do not inspect documentation or source text as a substitute for behavior.",
+          "requiredEnvironment": [
+            "Supplied Python 3.12 runtime; Python subprocesses use -B.",
+            "Temporary filesystem space and permission to launch short-lived local test child processes during check execution."
+          ],
+          "requirements": [
+            "n026"
+          ]
+        },
+        "kind": "check"
+      },
+      "n028": {
+        "body": {
+          "command": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "checks/delivery/fresh_folder.cjs"
+          ],
+          "expectedEvidence": "A clean staging folder runs the README workflow. Mixed CSV rows produce the contracted imported/skipped summary and exit 0; unreadable input produces exit 2 and the contracted stderr. Imported fields appear through the actual API and UI. Edge consumes an imported item. After stopping and restarting the server with the same SQLite file, API and UI retain the changed quantity and other fields. Screenshots show imported inventory and persisted consumption. Observed product requests remain on the local server. Browser and child processes close even on failure.",
+          "level": "wave",
+          "purpose": "Prove the canonical importer-to-database-to-server-to-browser path and documented fresh-folder operation. Catch mismatched database paths, missing runtime assets, incorrect launch instructions, importer output mismatches and nonpersistent UI consumption. Provider-local tests cannot prove this integrated path; do not repeat exhaustive API or UI suites.",
+          "requiredEnvironment": [
+            "Integrated product and README.md; temporary staging folder and database.",
+            "python.path = C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe; all Python invocations use -B.",
+            "playwrightPackage = C:\\Users\\oren\\codex-harness\\ui\\node_modules\\.pnpm\\playwright-core@1.59.1\\node_modules\\playwright-core",
+            "browserExecutable = C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            "Require the supplied playwrightPackage; chromium.launch({headless:true,executablePath:browserExecutable}). No downloads.",
+            "SELDON_EVIDENCE_DIR is writable; save screenshots there and close the browser."
+          ],
+          "requirements": [
+            "n026",
+            "n004",
+            "n005",
+            "n006",
+            "n007",
+            "n015",
+            "n016",
+            "n017",
+            "n021",
+            "n022"
+          ]
+        },
+        "kind": "check"
+      },
+      "n029": {
+        "body": {
+          "closingRequirement": "n026",
+          "owner": "u004",
+          "what": "Own the complete delivery scope and integrated check source. Use the actual importer CLI as record producer and actual HTTP service and browser as consumers; never substitute a synthetic backend or manually populated database. Record discovered defects in DISCOVERY.md and route sibling repairs to their owners. Do not edit sibling product files, install tooling, launch providers, commit changes or author docs/try-it.md, which belongs to Seldon's final guide unit."
+        },
+        "kind": "obligation"
+      },
+      "n030": {
+        "body": {
+          "responsibility": "Own the local HTTP service, canonical item rules and SQLite persistence boundary.",
+          "scope": [
+            "server.py",
+            "pantry.py",
+            "checks/service/**",
+            "docs/try-it.md"
+          ]
+        },
+        "kind": "area"
+      },
+      "n031": {
+        "body": {
+          "responsibility": "Own the pantry-ledger interface, interaction recovery and accessible presentation.",
+          "scope": [
+            "static/**",
+            "checks/interface/**"
+          ]
+        },
+        "kind": "area"
+      },
+      "n032": {
+        "body": {
+          "responsibility": "Own CSV ingestion and its interoperability with canonical persistence.",
+          "scope": [
+            "import_items.py",
+            "checks/importer/**"
+          ]
+        },
+        "kind": "area"
+      },
+      "n033": {
+        "body": {
+          "responsibility": "Own fresh-folder operation, documentation, cross-area integration and shared check helpers.",
+          "scope": [
+            "README.md",
+            "DISCOVERY.md",
+            "checks/delivery/**",
+            "checks/shared/**"
+          ]
+        },
+        "kind": "area"
+      },
+      "n034": {
+        "body": {
+          "consumers": [
+            "u002",
+            "u003",
+            "u004"
+          ],
+          "kind": "schema",
+          "provider": "u001",
+          "text": "Item JSON keys: id, name, quantity, unit, expires, created_at. id is a positive integer; name is text of 1-80 characters; quantity is an integer >= 0; unit is text; expires is YYYY-MM-DD or null; created_at is a UTC string formatted YYYY-MM-DDTHH:MM:SSZ. Creation requires name and quantity; omitted unit becomes \"\" and omitted expires becomes null. PATCH accepts only name, quantity, unit, expires. JSON booleans are not integers."
+        },
+        "kind": "contract"
+      },
+      "n035": {
+        "body": {
+          "consumers": [
+            "u002",
+            "u003",
+            "u004"
+          ],
+          "kind": "api",
+          "provider": "u001",
+          "text": "GET /api/items returns 200 with an Item array. Query names are q and expiring_within; q is case-insensitive name substring search; expiring_within is a non-negative integer day count. Filters combine; dated items through the inclusive household-local cutoff, including expired items, qualify; undated items do not. Ordering is expires ascending, nulls last, then id ascending. POST /api/items returns 201 with Item. PATCH /api/items/{id} returns 200 with Item. POST /api/items/{id}/consume accepts {\"amount\": n}, a positive integer, and returns 200 with Item. DELETE /api/items/{id} returns 204 with no body. JSON bodies use Content-Type: application/json. Error bodies are {\"error\": \"...\"}; invalid input is 400, unknown id is 404, insufficient quantity is 409."
+        },
+        "kind": "contract"
+      },
+      "n036": {
+        "body": {
+          "consumers": [
+            "u002",
+            "u003",
+            "u004"
+          ],
+          "kind": "shared-type",
+          "provider": "u001",
+          "text": "Exact error strings: \"Name must be 1-80 characters.\"; \"Quantity must be a whole number of 0 or more.\"; \"Unit must be text.\"; \"Expiry must be a valid date in YYYY-MM-DD format or null.\"; \"Amount must be a positive whole number.\"; \"Not enough quantity remaining.\"; \"Item not found.\"; \"Request body must be a JSON object.\"; \"Unknown field.\"; \"Provide at least one field to update.\"; \"Expiry days must be a non-negative integer.\"; \"Route not found.\"; \"Unable to access pantry data.\". Malformed JSON and non-object JSON use \"Request body must be a JSON object.\"; unexpected persistence failure returns 500 with \"Unable to access pantry data.\"."
+        },
+        "kind": "contract"
+      },
+      "n037": {
+        "body": {
+          "consumers": [
+            "u003"
+          ],
+          "kind": "api",
+          "provider": "u001",
+          "text": "pantry.py exports initialize_database(db_path) -> None and create_item(db_path, fields) -> Item. fields uses name, quantity, unit, expires from item-representation. Invalid fields raise ValueError with a shared-error-text message. Successful creation returns the committed Item. Both functions accept a filesystem path to the same SQLite file used by server.py."
+        },
+        "kind": "contract"
+      },
+      "n038": {
+        "body": {
+          "consumers": [
+            "u001",
+            "u003",
+            "u004"
+          ],
+          "kind": "file-format",
+          "provider": "u002",
+          "text": "/ serves static/index.html; /static/styles.css serves static/styles.css; /static/app.js serves static/app.js. The document title and application heading are \"ShelfLife\". The dated attention section heading is \"Expiring soon\" and uses expiring_within=7."
+        },
+        "kind": "contract"
+      },
+      "n039": {
+        "body": {
+          "consumers": [
+            "u002",
+            "u003",
+            "u004"
+          ],
+          "kind": "command-line",
+          "provider": "u001",
+          "text": "python server.py --port PORT --db PATH binds 127.0.0.1. With the supplied Python runtime, the documented invocation is python -B server.py --port PORT --db PATH."
+        },
+        "kind": "contract"
+      },
+      "n040": {
+        "body": {
+          "consumers": [
+            "u001",
+            "u002",
+            "u004"
+          ],
+          "kind": "command-line",
+          "provider": "u003",
+          "text": "python import_items.py FILE.csv --db PATH; supplied-runtime invocation: python -B import_items.py FILE.csv --db PATH. CSV requires header names name,quantity,unit,expires; blank unit becomes \"\" and blank expires becomes null. Normal completion prints exactly one stdout line \"imported N, skipped M\" and exits 0. Unreadable input exits 2 and writes \"Unable to read CSV file.\" to stderr. Missing required headers exit 2 and write \"CSV header must contain name,quantity,unit,expires.\" to stderr."
+        },
+        "kind": "contract"
+      },
+      "n041": {
+        "body": {
+          "areas": [
+            "n030",
+            "n032"
+          ],
+          "choice": "The service owns pantry.py and the SQLite schema. The importer calls its canonical creation boundary rather than duplicating SQL or validation. Persistent tables remain private to that owner.",
+          "origin": "architecture",
+          "reason": "One authority prevents importer/server drift without requiring a separate storage area."
+        },
+        "kind": "decision"
+      },
+      "n042": {
+        "body": {
+          "areas": [
+            "n030",
+            "n031",
+            "n032",
+            "n033"
+          ],
+          "choice": "Adopt the approved household-local filtering defaults. Choose numeric positive IDs, UTC created_at timestamps, empty-string units, raw array listing responses, returned Item mutation responses, bodyless 204 deletion and id tie-breaking as specified in the contracts.",
+          "origin": "architecture",
+          "reason": "These previously open representation choices give consumers one unambiguous wire format."
+        },
+        "kind": "decision"
+      },
+      "n043": {
+        "body": {
+          "areas": [
+            "n030",
+            "n031",
+            "n032",
+            "n033"
+          ],
+          "choice": "Use the exact shared error strings and importer diagnostics in the contracts. Reject unknown mutation fields and empty PATCH bodies; treat null as valid only for expires. Unexpected persistence failures use the contracted 500 response.",
+          "origin": "architecture",
+          "reason": "Plain-language, stable diagnostics avoid consumer-specific interpretations of failure."
+        },
+        "kind": "decision"
+      },
+      "n044": {
+        "body": {
+          "areas": [
+            "n031",
+            "n030",
+            "n033"
+          ],
+          "choice": "Use static/index.html, static/styles.css and static/app.js with the contracted local URLs. Keep other interface labels, expiry wording and DOM identifiers private to the interface area.",
+          "origin": "architecture",
+          "reason": "Only deployment paths and shared API values need cross-area coordination; visual and interaction decisions retain one owner."
+        },
+        "kind": "decision"
+      },
+      "n045": {
+        "body": {
+          "areas": [
+            "n032",
+            "n033"
+          ],
+          "choice": "Use UTF-8 CSV input with optional BOM, permit extra header columns, skip invalid data rows, and treat missing required headers as a fatal input error with the contracted diagnostic.",
+          "origin": "architecture",
+          "reason": "This resolves unspecified file-level behavior while retaining the requested row-skipping summary."
+        },
+        "kind": "decision"
+      },
+      "n046": {
+        "body": {
+          "areas": [
+            "n030",
+            "n031",
+            "n032",
+            "n033"
+          ],
+          "choice": "Delivery exclusively owns checks/shared/** and DISCOVERY.md. Each other area exclusively owns its named check subtree. Runtime databases and screenshot evidence are generated artifacts, not additional source ownership surfaces.",
+          "origin": "architecture",
+          "reason": "Shared support and integration work have one writer without overlapping product ownership."
+        },
+        "kind": "decision"
+      },
+      "quality:001": {
+        "body": {
+          "checks": [
+            "n009",
+            "n011",
+            "n028"
+          ],
+          "criterion": "The complete product runs locally from a fresh folder using only the documented commands and supplied runtime, without downloads, third-party Python packages, external requests or a build step.",
+          "verification": "Use the supplied Python with -B and a temporary database. Follow the README to import, launch, open the UI and restart. Monitor browser requests to confirm all product requests remain on the local server."
+        },
+        "kind": "criterion"
+      },
+      "quality:002": {
+        "body": {
+          "checks": [
+            "n009"
+          ],
+          "criterion": "The API implements the stated item contract, routes, filtering, expiry ordering and error responses without accepting invalid mutations.",
+          "verification": "Run standard-library HTTP tests against the actual server covering valid creation and edits, field boundaries, invalid dates, search, expiry filtering, nulls-last ordering, deletion, unknown IDs and malformed input. Verify rejected requests leave stored data unchanged."
+        },
+        "kind": "criterion"
+      },
+      "quality:003": {
+        "body": {
+          "checks": [
+            "n010"
+          ],
+          "criterion": "Consumption is atomic and persisted data survives restarts.",
+          "verification": "Send two simultaneous consume requests against an item with one remaining unit: exactly one succeeds, the other returns 409, and the stored quantity is zero. Restart with the same SQLite file and verify the result and other saved fields through the API."
+        },
+        "kind": "criterion"
+      },
+      "quality:004": {
+        "body": {
+          "checks": [
+            "n008",
+            "n011",
+            "n023",
+            "n024",
+            "n028"
+          ],
+          "criterion": "The importer produces the required summary and exit behavior, and imported items are immediately usable by the server and UI.",
+          "verification": "Import a CSV containing valid and invalid rows; assert exact counts, summary text and exit status. Read the imported records through the running API, consume an imported item through the UI and verify persistence. Test an unreadable file for exit 2 and an error."
+        },
+        "kind": "criterion"
+      },
+      "quality:005": {
+        "body": {
+          "checks": [
+            "n019"
+          ],
+          "criterion": "All requested UI states and actions work against the actual backend, including useful recovery after API failure.",
+          "verification": "Use the supplied Playwright and Edge runtime to exercise adding, inline validation, search, expiry filtering, consume, delete, empty results and expiry labels. Interrupt API availability to observe a visible error and retained form input, then restore service and successfully retry."
+        },
+        "kind": "criterion"
+      },
+      "quality:006": {
+        "body": {
+          "checks": [
+            "n018",
+            "n019"
+          ],
+          "criterion": "The interface consistently expresses the pantry-ledger visual direction and remains readable and usable at phone and desktop sizes.",
+          "verification": "Inspect actual Edge screenshots at 375px and a desktop viewport, saved in process.env.SELDON_EVIDENCE_DIR. Check deliberate typography, spacing, strong text contrast, consistent warning treatment and absence of horizontal scrolling; use browser geometry checks to confirm the page fits."
+        },
+        "kind": "criterion"
+      },
+      "quality:007": {
+        "body": {
+          "checks": [
+            "n018",
+            "n019"
+          ],
+          "criterion": "Core workflows are keyboard accessible, with visible focus, labeled controls and understandable non-color-only feedback.",
+          "verification": "Complete add, search, filter, consume and delete using keyboard interaction in Edge. Inspect focus visibility, label associations and validation messages; emulate reduced motion if motion is used. Close the browser after verification."
+        },
+        "kind": "criterion"
+      },
+      "u001": {
+        "body": {
+          "area": "n030",
+          "checkPaths": [
+            "checks/service/**"
+          ],
+          "consumes": [
+            "n038",
+            "n040"
+          ],
+          "dependencies": [],
+          "instructions": "Implement the canonical pantry boundary and local HTTP server together, with all service checks and any service-private helpers under checks/service/**. Own server.py, pantry.py and the entire service check subtree. Use only Python 3.12 standard library. Bind provided contracts to the owning requirements and follow their complete supplied texts. Run local checks against real service code; author the wave check for integrated execution without requiring sibling files locally. Do not implement static assets, the importer, README, shared check helpers or discovery-ledger changes. Criterion 1 and 4 traces are partial contributions; browser workflow, complete importer diagnostics, documentation and visual/accessibility evidence remain with their respective owners.",
+          "provides": [
+            "n034",
+            "n035",
+            "n036",
+            "n037",
+            "n039"
+          ],
+          "reads": [],
+          "requirements": [
+            "n004",
+            "n005",
+            "n006",
+            "n007"
+          ],
+          "scope": [
+            "server.py",
+            "pantry.py",
+            "checks/service/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "u002": {
+        "body": {
+          "area": "n031",
+          "checkPaths": [
+            "checks/interface/**"
+          ],
+          "consumes": [
+            "n034",
+            "n035",
+            "n036",
+            "n039",
+            "n040"
+          ],
+          "dependencies": [],
+          "instructions": "Own the complete interface and its checks. Implement static/index.html, static/styles.css and static/app.js directly, with no build tooling or external assets. Author checks/interface/interface.cjs and all required helpers and fixtures inside checks/interface/**. Local mode serves only owned static files and uses Playwright request interception for controlled contract responses; assert actual outgoing requests and rendered behavior rather than supplying assertion answers or rebuilding the service. Cover meaningful validation boundaries, response races, failed mutations, retry and focus recovery. Save screenshots of each visually material state for unit judgment. Wave mode starts the actual server and importer through their contracted commands using the supplied Python with -B, temporary files and an available loopback port; it must not depend on an already-running service. Missing sibling product files locally are expected: write the wave check for integration, do not reconstruct them. Use the supplied Playwright package and Edge executable, deterministic browser dates where necessary, screenshots under SELDON_EVIDENCE_DIR, and reliable finally cleanup. Do not edit backend, importer, shared checks, README or DISCOVERY.md; report discoveries to their owner. Seldon judges visual quality from saved screenshots.",
+          "provides": [
+            "n038"
+          ],
+          "reads": [],
+          "requirements": [
+            "n015",
+            "n016",
+            "n017"
+          ],
+          "scope": [
+            "static/**",
+            "checks/interface/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "u003": {
+        "body": {
+          "area": "n032",
+          "checkPaths": [
+            "checks/importer/**"
+          ],
+          "consumes": [
+            "n037",
+            "n034",
+            "n036",
+            "n035",
+            "n039",
+            "n038"
+          ],
+          "dependencies": [],
+          "instructions": "Own the complete importer surface and its checks. Implement the two requirements and provide import-command. Author all check helpers and generated-fixture logic inside checks/importer/**. Run the unit check in the isolated checkout; author the wave check for execution after integration, without requiring sibling implementations locally. Exercise real canonical validation in the wave with invalid name, quantity and expiry rows alongside valid rows. Use runtime-generated CSVs and databases, not additional owned source paths. Assert other surfaces only through consumed contracts; locate UI consume controls by accessible role and item context rather than assuming unagreed labels or DOM structure. Do not edit pantry.py, server.py, static files, README, shared checks or DISCOVERY.md. Report encountered issues to their owners without editing those surfaces.",
+          "provides": [
+            "n040"
+          ],
+          "reads": [],
+          "requirements": [
+            "n021",
+            "n022"
+          ],
+          "scope": [
+            "import_items.py",
+            "checks/importer/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "u004": {
+        "body": {
+          "area": "n033",
+          "checkPaths": [
+            "checks/delivery/**",
+            "checks/shared/**"
+          ],
+          "consumes": [
+            "n034",
+            "n035",
+            "n036",
+            "n038",
+            "n039",
+            "n040"
+          ],
+          "dependencies": [],
+          "instructions": "Own README.md, DISCOVERY.md, delivery checks and their minimal shared mechanics. Write the unit helper check before implementation and prove actual subprocess behavior. Document python -B server.py --port PORT --db PATH and python -B import_items.py FILE.csv --db PATH. Author the wave check without requiring sibling implementation files locally; Seldon first executes it on the integrated checkout. Stage delivered runtime files into a fresh temporary folder without existing databases and exercise the README workflow using supplied executables. Use the importer CLI as canonical producer, HTTP as consumer and actual Edge UI consumption before restart verification; do not import pantry.py or consume canonical-persistence-entry. Assert exact cross-area values only from visible agreements. Locate UI controls by semantic role and behavior rather than private selectors or unagreed wording. Keep all helper and fixture sources within checkPaths and ensure cleanup on failure. Do not expand into exhaustive sibling validation, visual redesign, additional workflows, separate planning documents or the final try-it guide.",
+          "provides": [],
+          "reads": [],
+          "requirements": [
+            "n026"
+          ],
+          "scope": [
+            "README.md",
+            "DISCOVERY.md",
+            "checks/delivery/**",
+            "checks/shared/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "vision": {
+        "body": {
+          "improvements": [
+            "Use a calm pantry-ledger visual direction: warm white, deep ink and restrained green, with amber and red reserved for expiry warnings; offline serif headings, clear sans-serif controls, generous spacing and simple ruled rows rather than nested cards.",
+            "Make the next useful action obvious: show expiry status beside each item, keep consume controls close to quantity, and preserve entered form values when a request fails.",
+            "Use plain-language validation and status messages; distinguish an empty pantry, no matching results and an unavailable API without relying on color alone."
+          ],
+          "quality": [
+            {
+              "criterion": "The complete product runs locally from a fresh folder using only the documented commands and supplied runtime, without downloads, third-party Python packages, external requests or a build step.",
+              "verification": "Use the supplied Python with -B and a temporary database. Follow the README to import, launch, open the UI and restart. Monitor browser requests to confirm all product requests remain on the local server."
+            },
+            {
+              "criterion": "The API implements the stated item contract, routes, filtering, expiry ordering and error responses without accepting invalid mutations.",
+              "verification": "Run standard-library HTTP tests against the actual server covering valid creation and edits, field boundaries, invalid dates, search, expiry filtering, nulls-last ordering, deletion, unknown IDs and malformed input. Verify rejected requests leave stored data unchanged."
+            },
+            {
+              "criterion": "Consumption is atomic and persisted data survives restarts.",
+              "verification": "Send two simultaneous consume requests against an item with one remaining unit: exactly one succeeds, the other returns 409, and the stored quantity is zero. Restart with the same SQLite file and verify the result and other saved fields through the API."
+            },
+            {
+              "criterion": "The importer produces the required summary and exit behavior, and imported items are immediately usable by the server and UI.",
+              "verification": "Import a CSV containing valid and invalid rows; assert exact counts, summary text and exit status. Read the imported records through the running API, consume an imported item through the UI and verify persistence. Test an unreadable file for exit 2 and an error."
+            },
+            {
+              "criterion": "All requested UI states and actions work against the actual backend, including useful recovery after API failure.",
+              "verification": "Use the supplied Playwright and Edge runtime to exercise adding, inline validation, search, expiry filtering, consume, delete, empty results and expiry labels. Interrupt API availability to observe a visible error and retained form input, then restore service and successfully retry."
+            },
+            {
+              "criterion": "The interface consistently expresses the pantry-ledger visual direction and remains readable and usable at phone and desktop sizes.",
+              "verification": "Inspect actual Edge screenshots at 375px and a desktop viewport, saved in process.env.SELDON_EVIDENCE_DIR. Check deliberate typography, spacing, strong text contrast, consistent warning treatment and absence of horizontal scrolling; use browser geometry checks to confirm the page fits."
+            },
+            {
+              "criterion": "Core workflows are keyboard accessible, with visible focus, labeled controls and understandable non-color-only feedback.",
+              "verification": "Complete add, search, filter, consume and delete using keyboard interaction in Edge. Inspect focus visibility, label associations and validation messages; emulate reduced motion if motion is used. Close the browser after verification."
+            }
+          ],
+          "scopeIn": [
+            "Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step.",
+            "Backend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.",
+            "Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at.",
+            "GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).",
+            "POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.",
+            "Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404. Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).",
+            "UI (served at /): one responsive page that works at phone and desktop sizes.",
+            "\"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails.",
+            "Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design.",
+            "Import: `python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file.",
+            "Done means: the server, UI and importer work together from a fresh folder; a short README explains how to run them.",
+            "Recommended behavior defaults: use household-local calendar dates; include expired dated items in expiry filtering alongside items through the inclusive cutoff; exclude undated items from that filter; combine search and expiry filters; use case-insensitive name search; require a positive integer consume amount. Import expects a header containing name,quantity,unit,expires.",
+            "Supplied verification runtime: python.path = C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe; python.version = 3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]; node = C:\\nvm4w\\nodejs\\node.EXE; playwrightPackage = C:\\Users\\oren\\codex-harness\\ui\\node_modules\\.pnpm\\playwright-core@1.59.1\\node_modules\\playwright-core; browserExecutable = C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe.",
+            "Supplied browserHowTo: Use node with a .cjs test and require(playwrightPackage); chromium.launch({headless:true,executablePath:browserExecutable}). Exercise the actual product; save screenshots in process.env.SELDON_EVIDENCE_DIR, close the browser. No downloads. Python tests use -B."
+          ],
+          "scopeOut": [
+            "Accounts, multiple households, remote hosting, cloud synchronization and external services.",
+            "Barcode scanning, recipes, shopping lists, notifications and inventory analytics.",
+            "Third-party application dependencies, downloaded fonts, build tooling and installation or global configuration changes.",
+            "Additional UI editing workflows beyond the requested add, consume and delete actions; the specified PATCH API remains included."
+          ],
+          "size": "medium",
+          "understanding": "A complete, modest local pantry application: one dependable SQLite-backed service, one thoughtfully designed responsive page and one interoperable CSV importer.",
+          "unknowns": [],
+          "users": [
+            "Household members checking what they have, using items and spotting food that needs attention.",
+            "The household member importing inventory and running the application locally."
+          ]
+        },
+        "kind": "vision"
+      }
+    },
+    "skeleton": [
+      "u001",
+      "u002",
+      "u003",
+      "u004"
+    ]
+  },
+  "files": {
+    "checks/delivery/fixtures/items.csv": "name,quantity,unit,expires\nChickpeas,3,tins,2031-12-31\nRolled oats,2,,\nInvalid example,-1,tins,\n",
+    "checks/delivery/fresh_folder.cjs": "'use strict';\n\n// Wave entry point. The Python driver owns staging and server lifetimes; this\n// file also runs the two real Edge visits requested by that driver. No product\n// implementation is needed to author or syntax-check this source locally.\nconst assert = require('node:assert/strict');\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst {spawnSync} = require('node:child_process');\n\nconst PYTHON = 'C:\\\\Users\\\\oren\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe';\nconst PLAYWRIGHT = 'C:\\\\Users\\\\oren\\\\codex-harness\\\\ui\\\\node_modules\\\\.pnpm\\\\playwright-core@1.59.1\\\\node_modules\\\\playwright-core';\nconst EDGE = 'C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe';\n\n// Match the meaning of an accessible action, without demanding a particular\n// label, CSS class, ID, markup layout, or one-unit consumption implementation.\nconst CONSUME_ACTION = /consume|use\\b|take\\b|decrease|decrement|subtract|minus|^\\s*[−-]\\s*$/i;\n\nasync function itemScope(page, name) {\n  const label = page.getByText(name, {exact: true}).first();\n  await label.waitFor({state: 'visible'});\n  let scope = label;\n  // Walk outward from the visible item name. Controls themselves are always\n  // located by semantic role; no private product selectors are consumed.\n  for (let depth = 0; depth < 10; depth++) {\n    const action = scope.getByRole('button', {name: CONSUME_ACTION});\n    if (await action.count() === 1) return {scope, action};\n    scope = scope.locator('..');\n  }\n  const names = await page.getByRole('button').allTextContents();\n  throw new Error(`Cannot identify a unique accessible consumption action for ${name}; buttons: ${JSON.stringify(names)}`);\n}\n\nasync function visibleQuantity(scope, quantity) {\n  const number = new RegExp(`(?:^|\\\\D)${quantity}(?:\\\\D|$)`);\n  const deadline = Date.now() + 8000;\n  let rendered = '';\n  do {\n    rendered = await scope.innerText();\n    if (number.test(rendered)) return rendered;\n    await new Promise(resolve => setTimeout(resolve, 80));\n  } while (Date.now() < deadline);\n  throw new Error(`Quantity ${quantity} is not visible in the imported item: ${rendered}`);\n}\n\nasync function browserVisit(phase, base, expectedFile) {\n  assert.ok(['consume', 'persisted'].includes(phase), 'Unknown browser check phase');\n  assert.ok(process.env.SELDON_EVIDENCE_DIR, 'SELDON_EVIDENCE_DIR is required');\n  const evidence = path.resolve(process.env.SELDON_EVIDENCE_DIR);\n  fs.mkdirSync(evidence, {recursive: true});\n  const expected = JSON.parse(fs.readFileSync(expectedFile, 'utf8'));\n  const {chromium} = require(PLAYWRIGHT);\n  const requests = [];\n  const external = [];\n  const errors = [];\n  let browser;\n  let page;\n  let result;\n  try {\n    browser = await chromium.launch({headless: true, executablePath: EDGE});\n    const context = await browser.newContext({viewport: {width: 1365, height: 900}});\n    context.setDefaultTimeout(8000);\n    context.on('request', request => {\n      requests.push({method: request.method(), url: request.url()});\n    });\n    // Block and fail any attempted external request, so verification itself\n    // cannot let the product contact another host.\n    await context.route('**/*', async route => {\n      if (new URL(route.request().url()).origin !== base) {\n        external.push(route.request().url());\n        await route.abort('blockedbyclient');\n      } else {\n        await route.continue();\n      }\n    });\n    context.on('page', opened => {\n      opened.on('pageerror', error => errors.push(error.message));\n      opened.on('websocket', socket => {\n        const address = new URL(socket.url());\n        address.protocol = address.protocol === 'wss:' ? 'https:' : 'http:';\n        if (address.origin !== base) external.push(socket.url());\n      });\n    });\n    page = await context.newPage();\n    await page.goto(base + '/', {waitUntil: 'networkidle'});\n    assert.equal(await page.title(), 'ShelfLife');\n    await page.getByRole('heading', {name: 'ShelfLife', exact: true}).waitFor();\n    for (const item of expected.items) {\n      await page.getByText(item.name, {exact: true}).first().waitFor({state: 'visible'});\n    }\n\n    const target = expected.target;\n    const located = await itemScope(page, target.name);\n    const initialText = await visibleQuantity(located.scope, target.quantity);\n    if (target.unit) assert.ok(initialText.toLowerCase().includes(target.unit.toLowerCase()),\n      'Imported unit must be visible');\n    await page.screenshot({path: path.join(evidence,\n      phase === 'consume' ? 'delivery-imported-desktop.png' : 'delivery-persisted-desktop.png'), fullPage: true});\n\n    let changed = target;\n    if (phase === 'consume') {\n      // A real keyboard activation must cause the real local consume endpoint.\n      // No page.evaluate mutation or test-only HTTP write replaces the UI.\n      await located.action.focus();\n      const [response] = await Promise.all([\n        page.waitForResponse(response => {\n          const url = new URL(response.url());\n          return url.origin === base &&\n            url.pathname === `/api/items/${target.id}/consume` &&\n            response.request().method() === 'POST';\n        }),\n        located.action.press('Enter'),\n      ]);\n      assert.equal(response.status(), 200, await response.text());\n      changed = await response.json();\n      assert.ok(Number.isInteger(changed.quantity) && changed.quantity >= 0 &&\n        changed.quantity < target.quantity, 'The UI must reduce the imported quantity');\n      assert.deepEqual({...changed, quantity: target.quantity}, target,\n        'Consumption must preserve every other imported field');\n      await visibleQuantity(located.scope, changed.quantity);\n      await page.screenshot({path: path.join(evidence, 'delivery-consumed-desktop.png'), fullPage: true});\n    } else {\n      // The second visit occurs only after the Python driver restarts the server.\n      await page.setViewportSize({width: 375, height: 812});\n      await page.getByText(target.name, {exact: true}).first().waitFor({state: 'visible'});\n      await visibleQuantity(located.scope, target.quantity);\n      await page.screenshot({path: path.join(evidence, 'delivery-persisted-phone.png'), fullPage: true});\n    }\n\n    assert.deepEqual(external, [], 'Every observed product request must remain on the local server');\n    assert.deepEqual(errors, [], 'The integrated page must not have unhandled JavaScript errors');\n    result = {phase, item: changed, rendered: await located.scope.innerText(),\n      request_count: requests.length, external_requests: external, page_errors: errors};\n  } catch (error) {\n    if (page && !page.isClosed()) {\n      try {\n        await page.screenshot({path: path.join(evidence, `delivery-${phase}-failure.png`), fullPage: true});\n      } catch (captureError) {\n        console.error(`Failure screenshot unavailable: ${captureError.message}`);\n      }\n    }\n    throw error;\n  } finally {\n    // Closing Edge comes first even if writing diagnostic evidence fails.\n    try {\n      if (browser) await browser.close();\n    } finally {\n      fs.writeFileSync(path.join(evidence, `delivery-${phase}-requests.json`),\n        JSON.stringify({requests, external_requests: external, page_errors: errors}, null, 2));\n    }\n  }\n  process.stdout.write(JSON.stringify(result) + '\\n');\n}\n\nif (process.argv[2] === '--browser') {\n  browserVisit(...process.argv.slice(3)).catch(error => {\n    console.error(error.stack || error);\n    process.exitCode = 1;\n  });\n} else {\n  const result = spawnSync(PYTHON, ['-B', path.join(__dirname, 'fresh_folder.py')],\n    {stdio: 'inherit', cwd: path.resolve(__dirname, '..', '..')});\n  if (result.error) console.error(result.error.message);\n  process.exitCode = result.status === null ? 1 : result.status;\n}\n",
+    "checks/delivery/fresh_folder.py": "\"\"\"Integrated README workflow, launched by fresh_folder.cjs after integration.\n\nProtects the real importer -> SQLite -> HTTP -> Edge -> restart path. Catches\nmissing runtime assets, mismatched DB arguments and unpersisted UI mutations;\nprovider-local suites cannot prove this cross-owner path. No pantry imports or\ndirect database access; sibling API/UI suites own exhaustive feature checks.\n\"\"\"\n\nfrom contextlib import contextmanager\nimport json\nimport os\nfrom pathlib import Path\nimport shutil\nimport socket\nimport sys\nfrom urllib.error import URLError\nfrom urllib.request import ProxyHandler, build_opener\n\nROOT = Path(__file__).resolve().parents[2]\nsys.path.insert(0, str(ROOT / \"checks\"))\nfrom shared.runtime import Child, workspace\n\nNODE = r\"C:\\nvm4w\\nodejs\\node.EXE\"\nBROWSER_CHECK = Path(__file__).with_suffix(\".cjs\")\nHTTP = build_opener(ProxyHandler({}))\nEXPECTED = [\n    {\"name\": \"Chickpeas\", \"quantity\": 3, \"unit\": \"tins\", \"expires\": \"2031-12-31\"},\n    {\"name\": \"Rolled oats\", \"quantity\": 2, \"unit\": \"\", \"expires\": None},\n]\n\n\ndef require(condition, message):\n    if not condition:\n        raise AssertionError(message)\n\n\ndef run(command, folder, *, timeout=15):\n    with Child(command, cwd=folder) as child:\n        result = child.finish(timeout=timeout)\n    return result\n\n\ndef read_items(base):\n    with HTTP.open(base + \"/api/items\", timeout=1) as response:\n        require(response.status == 200, \"GET /api/items must return 200\")\n        return json.load(response)\n\n\ndef free_port():\n    with socket.socket() as listener:\n        listener.bind((\"127.0.0.1\", 0))\n        return listener.getsockname()[1]\n\n\n@contextmanager\ndef server(folder, port):\n    # These are the README's root-relative arguments, using the supplied Python.\n    command = [sys.executable, \"-B\", \"server.py\", \"--port\", str(port),\n               \"--db\", \"pantry.sqlite3\"]\n    base = f\"http://127.0.0.1:{port}\"\n    with Child(command, cwd=folder) as child:\n        def ready():\n            try:\n                read_items(base)\n                return True\n            except URLError:\n                return False\n\n        child.wait_ready(ready, timeout=10)\n        try:\n            yield base\n        except BaseException:\n            print(f\"Server diagnostics:\\n{child.stdout}\\n{child.stderr}\", file=sys.stderr)\n            raise\n\n\ndef inspect_imported(items):\n    require(isinstance(items, list) and len(items) == 2,\n            f\"Expected exactly two imported items, got {items!r}\")\n    by_name = {item[\"name\"]: item for item in items}\n    require(set(by_name) == {item[\"name\"] for item in EXPECTED},\n            f\"Imported names differ: {items!r}\")\n    for expected in EXPECTED:\n        actual = by_name[expected[\"name\"]]\n        for field, value in expected.items():\n            require(type(actual[field]) is type(value) and actual[field] == value,\n                    f\"Imported {field} differs: {actual!r}; expected {expected!r}\")\n        require(set(actual) == {\"id\", \"name\", \"quantity\", \"unit\", \"expires\", \"created_at\"},\n                f\"Unexpected Item keys: {actual!r}\")\n        require(type(actual[\"id\"]) is int and actual[\"id\"] > 0,\n                f\"Invalid imported id: {actual!r}\")\n    return by_name[\"Chickpeas\"]\n\n\ndef browser(phase, base, expected_path, folder):\n    result = run([NODE, str(BROWSER_CHECK), \"--browser\", phase, base,\n                  str(expected_path)], folder, timeout=50)\n    require(result.returncode == 0,\n            f\"Edge {phase} failed ({result.returncode}):\\n{result.stdout}\\n{result.stderr}\")\n    return json.loads(result.stdout)\n\n\ndef main():\n    evidence = Path(os.environ[\"SELDON_EVIDENCE_DIR\"]).resolve()\n    evidence.mkdir(parents=True, exist_ok=True)\n    with workspace() as temporary:\n        folder = temporary / \"product\"\n        folder.mkdir()\n        # Copy only delivered runtime assets and the README: no databases,\n        # development environments, implementation test fixtures or build output.\n        for name in (\"server.py\", \"pantry.py\", \"import_items.py\", \"README.md\"):\n            shutil.copy2(ROOT / name, folder / name)\n        shutil.copytree(ROOT / \"static\", folder / \"static\")\n        require(not any(folder.glob(\"*.sqlite*\")) and not any(folder.glob(\"*.db\")),\n                \"Staging must not contain an existing database\")\n        shutil.copy2(Path(__file__).parent / \"fixtures\" / \"items.csv\", folder / \"items.csv\")\n\n        imported = run([sys.executable, \"-B\", \"import_items.py\", \"items.csv\",\n                        \"--db\", \"pantry.sqlite3\"], folder)\n        require(imported.returncode == 0 and imported.stdout == \"imported 2, skipped 1\\n\",\n                f\"Mixed CSV import mismatch: {imported!r}\")\n        missing = run([sys.executable, \"-B\", \"import_items.py\", \"missing.csv\",\n                       \"--db\", \"pantry.sqlite3\"], folder)\n        require(missing.returncode == 2 and missing.stderr.strip() == \"Unable to read CSV file.\",\n                f\"Unreadable CSV mismatch: {missing!r}\")\n\n        expected_path = temporary / \"expected.json\"\n        port = free_port()\n        with server(folder, port) as base:\n            before = read_items(base)\n            target = inspect_imported(before)\n            expected_path.write_text(json.dumps({\"items\": before, \"target\": target}), encoding=\"utf-8\")\n            consumed = browser(\"consume\", base, expected_path, folder)\n            after = read_items(base)\n            changed = next(item for item in after if item[\"id\"] == target[\"id\"])\n            require(type(changed[\"quantity\"]) is int and 0 <= changed[\"quantity\"] < target[\"quantity\"],\n                    f\"UI did not consume the imported item: {changed!r}\")\n            expected_after = [dict(item, quantity=changed[\"quantity\"])\n                              if item[\"id\"] == target[\"id\"] else item for item in before]\n            require(after == expected_after,\n                    f\"UI consumption changed unrelated fields/items: {after!r}\")\n            require(consumed[\"item\"] == changed, \"UI response and persisted HTTP result differ\")\n\n        # Only after real Edge consumption: stop, then use exactly the same DB.\n        expected_path.write_text(json.dumps({\"items\": after, \"target\": changed}), encoding=\"utf-8\")\n        with server(folder, port) as base:\n            restarted = read_items(base)\n            require(restarted == after,\n                    f\"Saved items changed across restart: {restarted!r} != {after!r}\")\n            persisted = browser(\"persisted\", base, expected_path, folder)\n\n        report = {\n            \"fresh_folder\": True, \"mixed_import\": imported.stdout.strip(),\n            \"unreadable_exit\": missing.returncode, \"before\": before,\n            \"after_ui_consumption\": after, \"after_restart\": restarted,\n            \"browser_before_restart\": consumed, \"browser_after_restart\": persisted,\n        }\n        (evidence / \"delivery-workflow.json\").write_text(json.dumps(report, indent=2), encoding=\"utf-8\")\n    require(not temporary.exists(), \"Temporary workflow folder was not removed\")\n    print(\"PASS: fresh-folder CLI import -> HTTP -> Edge consumption -> restart -> HTTP and Edge\")\n\n\nif __name__ == \"__main__\":\n    main()\n",
+    "checks/shared/runtime.py": "\"\"\"Only delivery mechanics: temporary folders and bounded child lifetimes.\"\"\"\n\nfrom contextlib import contextmanager\nfrom pathlib import Path\nimport os\nimport subprocess\nimport tempfile\nimport time\nimport uuid\n\n\nclass ProcessFailure(RuntimeError):\n    \"\"\"A bounded process operation failed, with captured diagnostics.\"\"\"\n\n\n@contextmanager\ndef workspace():\n    with tempfile.TemporaryDirectory(prefix=\"shelflife-delivery-\") as folder:\n        yield Path(folder)\n\n\nclass Child:\n    def __init__(self, command, *, cwd):\n        self.command = [str(part) for part in command]\n        token = uuid.uuid4().hex\n        self._out_path = Path(cwd) / f\"child-{token}.stdout.log\"\n        self._err_path = Path(cwd) / f\"child-{token}.stderr.log\"\n        self._out = self._out_path.open(\"wb\")\n        self._err = self._err_path.open(\"wb\")\n        try:\n            self.process = subprocess.Popen(\n                self.command, cwd=cwd, stdin=subprocess.DEVNULL,\n                stdout=self._out, stderr=self._err,\n            )\n        except BaseException:\n            self._out.close()\n            self._err.close()\n            raise\n\n    @property\n    def stdout(self):\n        return self._out_path.read_text(encoding=\"utf-8\", errors=\"replace\")\n\n    @property\n    def stderr(self):\n        return self._err_path.read_text(encoding=\"utf-8\", errors=\"replace\")\n\n    def _failure(self, reason):\n        return ProcessFailure(\n            f\"{reason}\\ncommand: {self.command!r}\\n\"\n            f\"stdout:\\n{self.stdout}\\nstderr:\\n{self.stderr}\"\n        )\n\n    def stop(self):\n        if self.process.poll() is None:\n            if os.name == \"nt\":\n                # Node owns Edge children. A timed-out Node command must not\n                # leave its browser alive after the temporary folder is gone.\n                killer = Path(os.environ[\"SystemRoot\"]) / \"System32\" / \"taskkill.exe\"\n                try:\n                    result = subprocess.run(\n                        [str(killer), \"/PID\", str(self.process.pid), \"/T\", \"/F\"],\n                        capture_output=True, text=True, timeout=2,\n                    )\n                except (OSError, subprocess.TimeoutExpired) as error:\n                    self.process.kill()\n                    self.process.wait(timeout=2)\n                    raise self._failure(f\"process-tree shutdown failed: {error}\") from error\n                if result.returncode != 0 and self.process.poll() is None:\n                    self.process.kill()\n                    self.process.wait(timeout=2)\n                    raise self._failure(f\"process-tree shutdown failed: {result.stderr}\")\n            else:\n                self.process.terminate()\n            try:\n                self.process.wait(timeout=2)\n            except subprocess.TimeoutExpired:\n                self.process.kill()\n                self.process.wait(timeout=2)\n        else:\n            self.process.wait()\n\n    def wait_ready(self, probe, *, timeout):\n        deadline = time.monotonic() + timeout\n        try:\n            while True:\n                code = self.process.poll()\n                if code is not None:\n                    raise self._failure(f\"child exited with code {code} before readiness\")\n                if probe():\n                    return\n                remaining = deadline - time.monotonic()\n                if remaining <= 0:\n                    raise self._failure(f\"readiness timed out after {timeout:g}s\")\n                time.sleep(min(0.05, remaining))\n        except BaseException:\n            self.stop()\n            raise\n\n    def finish(self, *, timeout):\n        try:\n            self.process.wait(timeout=timeout)\n        except subprocess.TimeoutExpired:\n            self.stop()\n            raise self._failure(f\"command timed out after {timeout:g}s\") from None\n        return subprocess.CompletedProcess(\n            self.command, self.process.returncode, self.stdout, self.stderr,\n        )\n\n    def __enter__(self):\n        return self\n\n    def __exit__(self, *_):\n        try:\n            self.stop()\n        finally:\n            self._out.close()\n            self._err.close()\n",
+    "DISCOVERY.md": "# Delivery findings\n\nDelivery owner: **u004**. This unit owns `README.md`, this ledger, and\n`checks/delivery/` plus `checks/shared/`. It does not change the server,\nimporter, UI, their feature suites, or the final try-it guide.\n\n## Evidence and remaining boundary\n\nThe last proven outcome is delivery-helper behavior on the supplied Python\n3.12 runtime: **6 real-process checks passed**. The checks cover readiness,\nearly exit, timeouts, separate CLI streams and exit status, temporary-directory\ncleanup, and stopping a child together with its descendant.\n\n```powershell\n& 'C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe' -B checks/delivery/check_helpers.py\n```\n\nThe initial run failed with `ModuleNotFoundError: No module named 'shared'`\nbefore the helper was implemented. The final run reported `Ran 6 tests` and\n`OK` in 4.556 seconds. Python source parsing and the supplied Node's\n`--check checks/delivery/fresh_folder.cjs` also passed.\n\nThe next unproven step is Seldon's first integrated run:\n\n```powershell\n& 'C:\\nvm4w\\nodejs\\node.EXE' checks/delivery/fresh_folder.cjs\n```\n\nThat check is authored here and **was not run locally**, as instructed. This\nworktree has no sibling runtime files, which is expected and is not a blocker.\nThe integrated check stages only runtime assets and the README in a new\ntemporary product folder, then follows the documented CSV and commands using\nthe supplied executables. The importer is the record producer; HTTP and real\nEdge visits are consumers. It verifies UI consumption before stopping the\nserver, then verifies the same records through HTTP and Edge after restarting\nwith the same database. It does not import `pantry.py`, inspect SQLite, or\nrepeat the sibling feature suites.\n\nScreenshots of imported inventory, consumption and persisted inventory, plus\nrequest observations and a workflow result, go to `SELDON_EVIDENCE_DIR`.\nThere are no local product screenshots or product-acceptance claims. The wave\ncheck must establish those after integration; any failure belongs with the\nowner of the failing boundary, using its output and screenshots as evidence.\n\n## Encountered issues\n\n| ID | Issue and evidence | Likely owner | Disposition | Exit test |\n| --- | --- | --- | --- | --- |\n| D001 | Required helper absent at baseline; the check failed on importing `shared.runtime`. | u004 — delivery mechanics | Closed: helper implemented after the failing check was observed. | Run the helper command above; readiness, exit and timeout cases must use real subprocesses and remove their temporary folders. Passed. |\n| D002 | Terminating only the direct child left its descendant alive. A real parent/descendant check failed with wait status `258 != 0`, while its failure cleanup stopped the descendant. This would risk leaving Edge alive after a Node timeout. | u004 — subprocess lifecycle | Closed: Windows shutdown now targets the owned process tree, with bounded execution. The same regression check passed after the repair. | `test_stopping_child_stops_its_descendants` must observe the retained descendant process handle as signaled after shutdown, and remove the workspace. Passed. |\n\nNo outstanding sibling defect has been observed in this isolated unit.\n",
+    "README.md": "# ShelfLife\n\nA small pantry ledger for one household. Everything runs on your computer;\nthe application needs no downloads, third-party Python packages, build step,\nor runtime internet access.\n\n## Run locally\n\nYou need **Python 3.12** and a browser. Open a terminal in the folder containing\n`server.py`, `pantry.py`, `import_items.py`, and `static/`. Run every command\nbelow from that folder. `python` must refer to Python 3.12.\n\nOn the supplied Windows machine, the executable is\n`C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe`.\nIf `python` is unavailable, replace it in each PowerShell command with\n`& 'C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe'`.\n\nSave this as `items.csv` in that folder:\n\n```csv\nname,quantity,unit,expires\nChickpeas,3,tins,2031-12-31\nRolled oats,2,,\nInvalid example,-1,tins,\n```\n\nThe four required headers are `name,quantity,unit,expires`. A blank unit means\nno unit; a blank expiry means no expiry date. Use whole quantities of zero or\nmore and dates in `YYYY-MM-DD` format. Names must contain 1–80 characters.\nThe final example row intentionally has an invalid quantity and will be skipped.\n\nImport the CSV, then start the server with the **same database path**:\n\n```powershell\npython -B import_items.py items.csv --db pantry.sqlite3\npython -B server.py --port 8765 --db pantry.sqlite3\n```\n\nThe import prints `imported 2, skipped 1` and exits successfully. An unreadable\nfile exits with status 2 and writes `Unable to read CSV file.` to stderr.\nMissing headers also exit with status 2, with\n`CSV header must contain name,quantity,unit,expires.` on stderr.\n\nKeep the server terminal open and visit **http://127.0.0.1:8765/**. You can add,\nsearch, consume, and delete pantry items there. “Expiring soon” shows dated\nitems due within seven days, including items already expired.\n\nPress **Ctrl+C** in the terminal to stop the server. To return later, run the\nsame server command from the same folder and reopen the address. Keep\n`pantry.sqlite3`: it holds your saved items and quantities. Importing is an\nexplicit action; do not rerun the sample import just to restart the server.\nTo choose another port or database, replace `8765` or `pantry.sqlite3` in the\ncommands and use the matching browser address and database on subsequent runs.\n"
+  }
+}

@@ -1615,6 +1615,23 @@ def test_rule3_journeys(tmp_path, mode, count):
     simple_journey(tmp_path / mode, mode, count)
 
 
+@pytest.mark.fast
+@pytest.mark.parametrize("preserving", [False, True], ids=["f04", "later-wave"])
+def test_wave_red_journey(tmp_path, preserving):
+    from wave_red_journey import wave_red_journey
+    wave_red_journey(tmp_path / "wave-red", preserving)
+
+
+@pytest.mark.fast
+def test_wave_red_ownership_journey(tmp_path):
+    """Owned wave checks observe only the wave baseline before integrated GREEN.
+
+    Catches running declared or promoted wave checks at T/P; the one-owner twin has no sibling.
+    """
+    from test_architect import check_owner_journeys
+    check_owner_journeys(tmp_path / "check-owner")
+
+
 def test_rule3_scale50_journey(tmp_path):
     """Reuse the unchanged scale journey to catch lost scheduling/proof across fifty units.
 
@@ -2358,7 +2375,6 @@ def clean_core_golden(root):
     __import__("test_contract_owner").contract_owner_journeys(root / "contract-owner")
     __import__('test_proof').hermetic_journey(root / 'hermetic')
     __import__("test_architect").user_words_journeys(root / "user-words")
-    __import__("test_architect").check_owner_journeys(root / "check-owner")
     agreed_literals_journey(root / "agreed-literals")
     blocked_owner_journeys(root / "blocked-owner")
     guide_links_journey(root / "guide-links")
