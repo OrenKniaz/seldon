@@ -186,12 +186,15 @@ if guide:
         "Observe value-001"
     if mode == "final-rework":
         note = "Observe final-compatible value"
+        # Walk the reader's operation; the intentionally broken wave check belongs to u001.
+        command = [sys.executable, "-B", "-c", "from pathlib import Path; "
+                   "print('observed final-compatible value:', Path('unit-001/value.txt').read_text())"]
     path.write_text("Try it yourself\nRead [the value check](" + linked + ").\n"
                     + "```argv\n" + json.dumps(command) + "\n```\n" + note + "\n")
     if mode == "guide-format" and turn == 1:
-        # A shell-string command is refused; commands must be argv arrays (guide.py).
-        path.write_text("Try it yourself: read [the value](../unit-001/value.txt).\n"
-                        "```sh\npython unit-001/check.py\n```\n")
+        # Human shell examples are prose; the terminating walkthrough still runs.
+        with path.open("a") as output:
+            output.write("```sh\npython unit-001/check.py\n```\n")
 else:
     number = int(name.split("-")[1])
     Path(name).mkdir(exist_ok=True)
@@ -433,7 +436,7 @@ class Scripted:
                     guide = facts["Guide file"]
                     assert "Try it yourself" in guide["text"] and len(guide["commit"]) == 40
                     assert reached == {"guide"}
-                    assert len(facts["Final observations"]) == 2
+                    assert len(facts["Final observations"]) == 1
                     assert all(o["exitCode"] == 0 for o in facts["Final observations"])
                     expected = "observed final-compatible value" if self.mode == "final-rework" else \
                         "observed value-001"
@@ -696,7 +699,7 @@ def records_and_skeleton_journey(slot):
         run.close()
 
 
-def prepare(slot, mode, count):
+def prepare(slot, mode, count, capacity=6):
     slot.mkdir(parents=True)
     (slot / "mode").write_text(mode)
     (slot / "native.py").write_text(NATIVE, encoding="utf-8")
@@ -719,7 +722,7 @@ def prepare(slot, mode, count):
         return approve(request)
 
     return Run(slot / "product", slot / "workers", "Read named values", provider.setup,
-               provider, user, capacity=6), provider
+               provider, user, capacity=capacity), provider
 
 
 def finish(run):
@@ -734,10 +737,12 @@ def finish(run):
     assert len([b for _, k, b in rows if k == "product_verdict"]) == 1
     final_questions = [b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"]
     assert all(len(q["targets"]) == 1 for q in final_questions)
+    answered = [run.store.read(run.store.read(b["attempt"])["question"])
+                for _, k, b in rows if k == "answer" and b["kind"] == "PRODUCT"]
     for subject, body in plan.select(run.store.plan(cursor.revision), "criterion").items():
         verdict, = [run.store.read(r) for r in cursor.qualityVerdicts
                     if run.store.read(r)["subject"] == subject]
-        initial = [q for q in final_questions if "Requested facts" not in q["facts"]
+        initial = [q for q in answered if "Requested facts" not in q["facts"]
                    and all(o["commit"] == verdict["commit"] for o in q["facts"]["Final observations"])]
         assert sum(q["targets"] == [subject] for q in initial) == 1
     observations = [b for _, kind, b in rows if kind == "observation"]
@@ -1171,8 +1176,9 @@ def simple_journey(slot, mode, count=1, *, seed=None):
                 retries = [b for _, k, b in rows if k == "question" and "Requested facts" in b["facts"]]
                 assert len(retries) == 1
         if mode in ("guide-gap", "guide-command", "guide-path", "guide-format"):
-            assert units["guide"].recoveries == 0 and units["u001"].recoveries == 0
-            assert (slot / "turn-docs").read_text() == "2"
+            assert units["guide"].recoveries == (1 if mode in ("guide-command", "guide-path") else 0)
+            assert units["u001"].recoveries == 0
+            assert (slot / "turn-docs").read_text() == ("1" if mode == "guide-format" else "2")
             assert len([b for _, k, b in rows if k == "question" and b["kind"] == "FLOW"]) == count
             assert len([b for _, k, b in rows if k == "question" and b["kind"] == "PRODUCT"
                         and b["targets"] != ["tryItGuide"]]) == 2
@@ -1661,6 +1667,103 @@ def test_rule3_scale50_journey(tmp_path):
     Single-unit twins cannot detect dependency and concurrent observation regressions at scale.
     """
     simple_journey(tmp_path / "scale50", "scale50", 50)
+
+
+GUIDE_WALK = r'''
+import csv, io, json, re, subprocess, sys, time, urllib.error, urllib.request
+from pathlib import Path
+text = Path('docs/try-it.md').read_text()
+server = json.loads(re.search(r'```service\n(.*?)\n```', text, re.S)[1])
+url = re.search(r'\[sample\]\((http[^)]+)\)', text)[1]
+sample = re.search(r'```csv\n(.*?)\n```', text, re.S)[1] + '\n'
+Path('fixtures').mkdir()
+Path('fixtures/sample.csv').write_text(sample)
+process = subprocess.Popen(server, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+try:
+    while True:
+        if process.poll() is not None:
+            raise RuntimeError('Documented command failed: ' + repr(server))
+        try:
+            with urllib.request.urlopen(url) as response:
+                downloaded = response.read().decode()
+            break
+        except urllib.error.URLError:
+            time.sleep(0.01)
+    rows = list(csv.DictReader(io.StringIO(downloaded)))
+    assert rows == [{'name': 'apple', 'quantity': '3'}]
+    Path('fixtures/result.json').write_text(json.dumps(rows))
+    assert json.loads(Path('fixtures/result.json').read_text()) == rows
+    subprocess.run([sys.executable, '-B', 'unit-001/check.py'], check=True)
+    print('Documented server -> CSV -> persisted apple:3')
+finally:
+    process.terminate()
+    process.wait()
+'''
+
+
+def guide_walkthrough_journey(slot, wrong=False):
+    """A real service/CSV walkthrough reaches C; a wrong documented launch returns to its writer.
+
+    Catches service timeouts, URL/fence refusals and lost sequential state. The existing value-only
+    golden cannot expose these; changing the documented launch must break the same walkthrough.
+    """
+    import socket
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        port = listener.getsockname()[1]
+    run, _ = prepare(slot, "guide-walk", 1)
+    server = [sys.executable, '-B', '-m', 'http.server', str(port), '--bind', '127.0.0.1']
+    text = ("Try it yourself. Start this server from the product root:\n```service\n"
+            + json.dumps(server) + "\n```\nCreate [the sample](../fixtures/sample.csv):\n"
+            "```csv\nname,quantity\napple,3\n```\n"
+            f"Read [sample](http://127.0.0.1:{port}/fixtures/sample.csv), then persist its rows.\n"
+            "```text\nThe imported apple has quantity 3.\n```\n"
+            "Run the complete walkthrough:\n```argv\n"
+            + json.dumps([sys.executable, '-B', '-c', GUIDE_WALK]) + "\n```\n")
+    bad = text.replace('"http.server"', '"missing_documented_server"')
+    script = slot / 'native.py'
+    script.write_text(NATIVE.replace('\nelse:\n    number = int(name.split',
+        '\n    path.write_text(' + repr(bad if wrong else text) + ' if turn == 1 else '
+        + repr(text) + ')\nelse:\n    number = int(name.split'), encoding='utf-8')
+    try:
+        _, rows, _ = finish(run)
+        failed = [b for _, k, b in rows if k == 'unit_failure' and b['unit'] == 'guide']
+        if wrong:
+            gap, = failed
+            assert 'missing_documented_server' in gap['failure']
+            assert gap['state'] == 'PROVING'
+        else:
+            assert not failed
+        assert not run.store.records('unit_fixup')
+        observations = [b for _, k, b in rows if k == 'observation' and b['unit'] == 'guide']
+        assert all(not b['timedOut'] and b['cleanupVerified'] for b in observations)
+        assert not any(b['check'] == 'guide:format' for b in observations)
+        assert any('persisted apple:3' in b['stdout'] and b['purpose'] == 'P' for b in observations)
+        assert not (run.project / 'fixtures').exists()
+        with socket.socket() as listener:
+            assert listener.connect_ex(('127.0.0.1', port)) != 0
+        began = next(b['startedAt'] for _, k, b in rows if k == 'writer_start' and b['unit'] == 'guide')
+        print(f'Guide tail seconds (wrong={wrong}): {time.time() - began:.2f}', flush=True)
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize('wrong', [False, True])
+def test_guide_walkthrough_journey(tmp_path, wrong):
+    """Prove documented operations and ordinary guide repair at the complete run boundary."""
+    guide_walkthrough_journey(tmp_path / 'walkthrough', wrong)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize('mode,count', [('final-rework', 2), ('guide-gap', 2),
+                                      ('guide-command', 1), ('guide-path', 1), ('guide-format', 1)])
+def test_guide_existing_journeys(tmp_path, mode, count):
+    """Replay affected golden outcomes: early guide repair, prose normalization and wave-owned repair.
+
+    Success-only service coverage cannot catch stale wave-only fixtures or docs verdict invalidation.
+    """
+    simple_journey(tmp_path / mode, mode, count)
 
 
 @pytest.mark.fast
@@ -2486,3 +2589,16 @@ def clean_core_golden(root):
 if __name__ == "__main__":
     assert sys.argv[1] == "--child"
     child_main(Path(sys.argv[2]), sys.argv[3])
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("stage", ["FLOW", "PRODUCT"])
+@pytest.mark.parametrize("case", ["clean", "gaps", "restart", "uncertain"])
+def test_final_fanout_journey(tmp_path, stage, case):
+    """Concurrent final subjects retain serial closure, every gap and durable replies.
+
+    Existing single-gap/uncertainty journeys cannot catch mid-batch mutation, lost sibling
+    gaps or repeating a finished subject after an interrupted batch.
+    """
+    from fanout_journey import final_fanout_journey
+    final_fanout_journey(tmp_path / "fanout", stage, case)

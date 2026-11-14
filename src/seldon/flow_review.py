@@ -164,39 +164,32 @@ def step(store, provider):
                     "feature_verdict", {**row, "commit": cursor.candidate, "reusedFrom": ref}))
         store.cursor(replace(cursor, demoVerdicts=refs))
     cursor = store.cursor()
-    if cursor.pendingJudge:
-        pending = store.read(cursor.pendingJudge)
-        if (pending["kind"] != "FLOW" or pending["commit"] != cursor.candidate
-                or not judgment.current(pending, trees)):
-            raise ValueError("Pending FLOW facts require their original candidate and scope trees")
-        feature = pending["subject"]
-        question = brief(store, feature, resolve=pending["answer"]["neededFacts"])
-        result, answer = inference.call(store, provider, question,
-            check=lambda a: validate(a, question["targets"]))
-        reviewed = review(store, feature, result, answer, reasked=True)
-        if reviewed["gaps"]:
-            fixups.apply(store, reviewed["gaps"])
-            return
-        advance(store, "resolved", result, demoVerdicts=cursor.demoVerdicts + [reviewed["verdict"]],
-                pendingJudge=None)
-        return
+    pending = store.read(cursor.pendingJudge) if cursor.pendingJudge else None
+    if pending and (pending["kind"] != "FLOW" or pending["commit"] != cursor.candidate
+                    or not judgment.current(pending, trees)):
+        raise ValueError("Pending FLOW facts require their original candidate and scope trees")
     done = {store.read(r)["feature"] for r in cursor.demoVerdicts}
-    for feature in plan.select(document, "feature"):
-        if feature in done:
-            continue
-        question = brief(store, feature)
-        result, answer = inference.call(store, provider, question,
-                                       check=lambda a: validate(a, question["targets"]))
-        reviewed = review(store, feature, result, answer)
-        if reviewed["gaps"]:
-            fixups.apply(store, reviewed["gaps"])
-            return
-        if reviewed["pending"]:
-            advance(store, "uncertain", result, pendingJudge=reviewed["pending"])
-            return
-        with store.transaction():
-            cursor = store.cursor()
-            store.cursor(replace(cursor, demoVerdicts=cursor.demoVerdicts + [reviewed["verdict"]]))
-    cursor = store.cursor()
-    closures = requirement_verdicts(store, cursor.demoVerdicts)
-    advance(store, "satisfied", cursor.demoVerdicts, requirementVerdicts=closures)
+    selected = [pending["subject"]] if pending else [
+        f for f in plan.select(document, "feature") if f not in done]
+    batch = {f: brief(store, f, resolve=pending["answer"]["neededFacts"] if pending else None)
+             for f in selected}
+    replies = inference.batch(store, provider, batch, check=lambda a, q: validate(a, q["targets"]))
+    gaps, uncertain, verdicts = [], [], list(cursor.demoVerdicts)
+    with store.transaction():
+        for feature, (result, answer) in replies.items():
+            reviewed = review(store, feature, result, answer, reasked=bool(pending))
+            gaps.extend(reviewed["gaps"])
+            if reviewed["pending"]:
+                uncertain.append(reviewed["pending"])
+            elif not reviewed["gaps"]:
+                verdicts.append(reviewed["verdict"])
+        store.cursor(replace(store.cursor(), demoVerdicts=verdicts))
+        if gaps:
+            fixups.apply(store, gaps)
+        elif pending:
+            advance(store, "resolved", list(replies), pendingJudge=None)
+        elif uncertain:
+            advance(store, "uncertain", list(replies), pendingJudge=uncertain[0])
+        else:
+            closures = requirement_verdicts(store, verdicts)
+            advance(store, "satisfied", verdicts, requirementVerdicts=closures)

@@ -9,11 +9,12 @@ from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_WORK = ("Write the try-it guide for the integrated product. Give exact steps, the expected results "
-              "and the user's real interaction. Link every named path relative to the guide file; "
-              "argv commands run from the delivered product root. Put every command, "
-              "if the product has any that finish on their own, in an argv fenced block containing a "
-              "JSON string array, in execution order. "
-              "Use prose for expected results and manual interactions.")
+              "and the user's real interaction. Link local paths relative to the guide file; URLs are links. "
+              "Include one terminating walkthrough in an argv fence (JSON string array), run from the "
+              "product root: read this guide's examples, create its sample fixtures, execute its documented "
+              "operations, start its service command if needed, wait for readiness, exercise the interaction "
+              "and clean up in finally. Keep sequential state inside that check and retain browser evidence "
+              "in SELDON_EVIDENCE_DIR for UI interactions. Other fences are human examples, not checks.")
 
 
 def safe_path(value):

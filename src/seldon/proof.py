@@ -5,7 +5,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from . import gitwork, plan
+from . import gitwork, guide, plan
 from .processes import execute
 from .providers import ROLES
 
@@ -19,7 +19,8 @@ class UncertainCleanup(RuntimeError):
 
 def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
     observations = []
-    if not declarations:
+    walkthrough = unit == "guide" and purpose in ("P", "final")
+    if not declarations and not walkthrough:
         return observations
     setup = store.read(store.cursor().kickoff)["setup"]
     timeout = setup.get("providers", {}).get("check", ROLES["check"])["timeout"]
@@ -30,6 +31,16 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
         _observer.checkout = checkout
     else:
         gitwork.checkout(checkout, commit)
+    if walkthrough:
+        try:
+            declarations = guide.checks(checkout)
+        except ValueError as error:
+            return [store.record("observation", {
+                "check": "guide:format", "unit": unit, "commit": commit, "purpose": purpose,
+                "requirements": [], "command": [], "cwd": str(checkout),
+                "scopeTree": scope_tree, "evidenceFiles": [], "executionStarted": False,
+                "timedOut": False, "cleanupVerified": True, "exitCode": None,
+                "stdout": "", "stderr": str(error)})]
     cleanup_verified = True
     dirty = False
     try:
