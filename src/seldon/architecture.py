@@ -145,7 +145,7 @@ def local_plan(area, contracts, answer, vision, single_area):
         if edit["kind"] in relations:
             field, kind = relations[edit["kind"]]
             if any(handles.get(r) != kind and not (kind == "requirement" and r in contracts
-                    and endpoint(area["handle"], contracts[r]) == "consumer")
+                    and endpoint(area["handle"], contracts[r]) != "provider")
                    for r in edit["typedBody"][field]):
                 raise ValueError(f"Local {field} must name this area's {kind} handles")
         if edit["kind"] == "obligation":
@@ -175,15 +175,15 @@ def local_plan(area, contracts, answer, vision, single_area):
             if len(set(unit[field])) != len(unit[field]):
                 raise ValueError(f"Name each existing contract once in {field}")
             for ref in (own_consumes(area, contracts, unit[field]) if field == "consumes" else unit[field]):
-                if ref not in contracts or endpoint(area["handle"], contracts[ref]) != side:
-                    raise ValueError(f"{ref}: bind one provider and its agreed consumer endpoints; "
-                                     "report a contract gap")
+                if ref not in contracts or (side == "provider"
+                                           and endpoint(area["handle"], contracts[ref]) != side):
+                    raise ValueError(f"{ref}: bind an existing contract with its agreed provider")
     for quality in answer["quality"]:
         if quality["criterion"] > len(vision["quality"]):
             raise ValueError("Quality coverage must name an accepted criterion position")
         if any(handles.get(r) != "check" for r in quality["checks"]):
             raise ValueError("Quality coverage must name local checks")
-    # Preserve external contract handles: assigned() correctly leaves these checks at wave level.
+    # External contract text does not turn a local check into integrated proof.
     nodes = {"vision": {"kind": "vision", "body": {
         k: v for k, v in vision.items() if k != "why"}}}
     nodes.update({e["targetHandle"]: {"kind": e["kind"], "body": {

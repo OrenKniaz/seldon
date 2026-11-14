@@ -32,13 +32,11 @@ def step(store, provider, capacity):
     def ask(area, correction=None):
         try:
             question = questions.detail_brief(store, outline, area)
-            relevant = {r: c for r, c in architecture.index(outline["contracts"]).items()
-                        if any(architecture.endpoint(a, c)
-                               for a in [area["handle"], *area.get("ancestors", [])])}
             local = {r: {**c,
                 "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
                 "consumers": [area["handle"] if a in area.get("ancestors", []) else a
-                              for a in c["consumers"]]} for r, c in relevant.items()}
+                              for a in c["consumers"]]}
+                for r, c in architecture.index(outline["contracts"]).items()}
             basis = {"vision": cursor.vision, "commit": cursor.candidate, "area": area,
                      "contracts": local, "facts": {**question["facts"]},
                      "singleArea": len(outline["areas"]) == 1}
@@ -122,16 +120,14 @@ def step(store, provider, capacity):
             gap(store, {a: [{"error": str(error), "otherSide": {}}] for a in error.areas})
             return
         except architecture.DetailCorrection as error:
-            retained = [(r, b["corrections"]) for r, _, b in store.records("detail_correction")
-                        if b["revision"] == cursor.revision and b.get("resume") == resumed]
-            if retained:
-                correction, = retained
-                if all(done[a].get("correction") == correction[0] for a in correction[1]):
-                    raise ValueError(str(error))
-            else:
-                ref = store.record("detail_correction", {"revision": cursor.revision, "resume": resumed,
-                                                        "corrections": error.corrections})
-                correction = ref, error.corrections
+            retained = next(((r, b["corrections"]) for r, _, b in store.records("detail_correction")
+                             if b["revision"] == cursor.revision and b.get("resume") == resumed
+                             and b["corrections"] == error.corrections), None)
+            if retained and all(any(b.get("correction") == retained[0] and b["area"] == a
+                                   for _, _, b in store.records("area_detail")) for a in error.corrections):
+                raise ValueError(str(error))
+            correction = retained or (store.record("detail_correction", {"revision": cursor.revision,
+                "resume": resumed, "corrections": error.corrections}), error.corrections)
             replacement, failures = collect([a for a in outline["areas"]
                                              if a["handle"] in correction[1]], correction)
             if replacement is None:

@@ -37,7 +37,8 @@ class ContractProvider(Scripted):
             unit = {k: v for k, v in full["units"][i-1].items() if k != "area"}
             unit.update(checkPaths=[f"unit-{i:03}/*.py"],
                 provides=[r for r, c in facts["Contracts"].items() if c["side"] == "provider"],
-                consumes=[r for r, c in facts["Contracts"].items() if c["side"] == "consumer"])
+                consumes={"data": [], "server": ["store"], "ui": ["http"],
+                          "delivery": ["store", "http", "assets"]}[name])
             edits = deepcopy(full["edits"][3*(i-1):3*i])
             if name == "data" and self.misplaced and "Exact corrections" not in facts:
                 # The obsolete provider-owned contract reference must get an ordinary DETAIL correction.

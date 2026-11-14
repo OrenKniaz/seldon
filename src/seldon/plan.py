@@ -89,7 +89,7 @@ def normalize_checks(document, writers=None):
     units = select(document, "unit")
     writers = writers or owners(document)
     for ref, check in select(document, "check").items():
-        requirements = set(check["requirements"])
+        requirements = {r for r in check["requirements"] if r in document["nodes"]}
         local = set(units[writers[ref]]["requirements"])
         if requirements - local:
             check["level"] = "wave"
@@ -181,13 +181,11 @@ def merge(vision, architecture, leaves):
     endpoints, file_dependencies, feature_handles, deferred_checks = {}, {}, {}, []
     emitted = set()
     for area, answer in leaves:
-        relevant = {r: c for r, c in owner.index(architecture["contracts"]).items()
-                    if any(owner.endpoint(a, c) for a in [area["handle"], *area.get("ancestors", [])])}
         # An inherited endpoint is still an explicit agreement with the parent responsibility.
         local_contracts = {r: {**c,
             "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
             "consumers": [area["handle"] if a in area.get("ancestors", []) else a for a in c["consumers"]]}
-            for r, c in relevant.items()}
+            for r, c in owner.index(architecture["contracts"]).items()}
         owner.local_plan(area, local_contracts, answer, vision, len(architecture["areas"]) == 1)
         offset = len(units)
         handles = {e["targetHandle"]: f"{area['handle']}/{e['targetHandle']}" for e in answer["edits"]}
@@ -211,7 +209,7 @@ def merge(vision, architecture, leaves):
             if relation:
                 refs = body[relation]
                 body[relation] = [handles[r] for r in refs if r in handles]
-                if edit["kind"] == "check":
+                if edit["kind"] == "check" and body["level"] == "wave":
                     deferred_checks.append((body, [r for r in refs if r not in handles]))
             if edit["kind"] == "obligation":
                 body.update(owner=body["owner"] + offset,
@@ -249,17 +247,11 @@ def merge(vision, architecture, leaves):
 
     for contract in architecture["contracts"]:
         bound = endpoints.get(contract["handle"], {"provides": [], "consumes": []})
-        if (len(bound["provides"]) != 1 or not bound["consumes"]
-                or {c for _, areas in bound["consumes"] for c in contract["consumers"] if c in areas}
-                != set(contract["consumers"])):
-            missing = set(contract["consumers"]) - {
-                c for _, areas in bound["consumes"] for c in contract["consumers"] if c in areas}
-            if len(bound["provides"]) != 1:
-                missing.add(contract["provider"])
+        if len(bound["provides"]) != 1:
             participants = {a["handle"] for a, _ in leaves
-                            if missing & {a["handle"], *a.get("ancestors", [])}}
+                            if contract["provider"] in {a["handle"], *a.get("ancestors", [])}}
             correct(participants,
-                    f"{contract['handle']}: bind exactly one provider and every named consumer",
+                    f"{contract['handle']}: bind exactly one provider",
                     {"contract": contract["text"]})
             continue
         edits.append({"kind": "contract", "targetHandle": contract["handle"], "typedBody": {
@@ -282,8 +274,6 @@ def merge(vision, architecture, leaves):
                 if writer["area"] == reader["area"] or any(
                     providers.get(c) == i for c in reader["consumes"])
                 for p in writer["scope"] if PurePosixPath(p).name == PurePosixPath(path).name]
-
-    area_names = {a["handle"]: {a["handle"], *a.get("ancestors", [])} for a, _ in leaves}
 
     for position, paths in file_dependencies.items():
         for path in paths:
@@ -310,9 +300,7 @@ def merge(vision, architecture, leaves):
                         {"plannedPaths": planned_paths(path, unit)})
             else:
                 other, writer = owners[0]
-                agreements = [c for c in architecture["contracts"] if (
-                        c["provider"] in area_names[writer["area"]]
-                        and set(c["consumers"]) & area_names[unit["area"]])]
+                agreements = [c for c in unit["consumes"] if providers.get(c) == other]
                 if writer["area"] != unit["area"] and other not in unit["dependencies"]:
                     if not agreements:
                         raise owner.ContractGap(

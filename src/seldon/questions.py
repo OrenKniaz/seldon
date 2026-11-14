@@ -61,7 +61,7 @@ PROMPTS = {
                  "a value they leave open is yours to choose — record it in decisions.",
     "DETAIL": "What features, requirements, semantic checks and units deliver this area? "
               "Divide its complete scope among units and bind provided and consumed contracts by handle. "
-              "A cross-area check names its local requirements and the consumed contract handles; "
+              "A wave check names its local requirements and the consumed contract handles; "
               "code links those contracts' provider requirements. "
               "Declare checks unit or wave: unit checks run in their owner's checkout; a check reaches only "
               "through its owner's product and contracts its unit consumes, so a contract's integrated check "
@@ -112,6 +112,8 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
         facts = {**facts, "How the plan executes": (
             "Each unit has one worker and a separate checkout. Disjoint units can run concurrently "
             "once their dependencies are integrated. Files assigned to the same unit share one worker. "
+            "Nothing is running: a wave check is an ordinary command on the integrated checkout "
+            "that starts what it needs and stops it. "
             "checkPaths selects each unit's local check files for its tests-only commit. "
             "Area scopes cannot grow in DETAIL; missing space returns "
             "to ARCHITECT. Contract text is available before parallel work; consuming it does not wait "
@@ -234,8 +236,7 @@ def detail_brief(store, outline, area):
     cursor = store.cursor()
     vision = store.read(cursor.vision)["answer"]
     participants = [area["handle"], *area.get("ancestors", [])]
-    contracts = {c["handle"]: c for c in outline["contracts"]
-                 if any(architecture.endpoint(a, c) for a in participants)}
+    contracts = {c["handle"]: c for c in outline["contracts"]}
     listing = gitwork.git(store.root.parent, "ls-tree", "-r", "--name-only", cursor.candidate).splitlines()
     files = [p for p in listing if plan.matches(p, area["scope"])]
     goals = architecture.commitments(vision)

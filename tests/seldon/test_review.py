@@ -340,9 +340,10 @@ def recorded_review_journey(root):
                 break
             run.step()
         assert run.store.cursor().state == "EXECUTE" and run.store.cursor().B
-        assert provider.corrected and len(provider.used) == len(recording["replies"])
+        # Outcome only: a recorded correction to a since-deleted refusal is simply no longer asked.
+        assert provider.corrected
         replies = [b["rawAnswer"] for _, _, b in run.store.records("provider_reply")]
-        assert all(r["raw"] in replies for r in recording["replies"])
+        assert all(recording["replies"][i]["raw"] in replies for i in provider.used)
         reviews = [b for _, _, b in run.store.records("plan_review")]
         assert reviews[0]["answer"]["verdict"] == "gap"
         assert reviews[0]["answer"]["gaps"][0]["area"] == "seldon"

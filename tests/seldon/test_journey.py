@@ -545,9 +545,8 @@ def approve(request):
 @pytest.mark.fast
 @pytest.mark.parametrize("fault,fix", [
     ("unlinked-read", "needs a contract"),
-    ("duplicate-provider", "one provider"),
+    ("duplicate-provider", "agreed provider"),
     ("missing-endpoint", "existing provider"),
-    ("unbound-consumer", "every named consumer"),
     ("area-escape", "inside its named area"),
     ("architecture-units", "unexpected field"),
     ("wrong-closing-owner", "owner and its closing requirement"),
@@ -568,8 +567,6 @@ def test_plan_refuses_broken_agreements(tmp_path, fault, fix):
             answer["units"][1]["provides"] = ["new:page"]
         elif fault == "missing-endpoint":
             contract["provider"] = 4
-        elif fault == "unbound-consumer":
-            answer["units"][1]["consumes"] = []
         elif fault == "area-escape":
             next(e["typedBody"] for e in answer["edits"] if e["kind"] == "area")["scope"] = ["else/**"]
         else:
@@ -1573,6 +1570,13 @@ def test_large_judge_journey(tmp_path):
 def test_rule2_journeys(tmp_path, mode):
     from test_review import rule2_journey
     rule2_journey(tmp_path / "rule2", mode)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("mode", ["d04", "d05", "corrections", "fixed-point"])
+def test_rule1b_journeys(tmp_path, mode):
+    from contract_binding_journey import rule1b_journey
+    rule1b_journey(tmp_path / mode, mode)
 
 
 @pytest.mark.fast

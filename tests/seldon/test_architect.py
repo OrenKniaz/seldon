@@ -74,7 +74,8 @@ class AreaProvider(Scripted):
                 units = [{k: v for k, v in full["units"][i-1].items() if k != "area"} for i in numbers]
                 for unit in units:
                     unit["provides"] = [r for r, c in facts["Contracts"].items() if c["side"] == "provider"]
-                    unit["consumes"] = [r for r, c in facts["Contracts"].items() if c["side"] == "consumer"]
+                    unit["consumes"] = [r for r, c in facts["Contracts"].items() if c["side"] == "consumer"
+                                        and (not r.startswith("link-") or r == f"link-{numbers[0]-1}")]
                     if unit["consumes"]:
                         unit["reads"] = [f"unit-{numbers[0]-1:03}/value.txt"]
                         unit["dependencies"] = list(unit["reads"])
@@ -226,7 +227,8 @@ def agreed_literals_journey(root):
                     local = requirement["targetHandle"]
                     body["edits"].append({"kind": "check", "targetHandle": "reading-flow",
                         "typedBody": {"purpose": f'Activate the integrated "{literal}" control',
-                            "mode": "preserves", "command": ["python", "-B", "unit-002/flow.py"],
+                            "level": "wave", "mode": "preserves",
+                            "command": ["python", "-B", "unit-002/flow.py"],
                             "requiredEnvironment": ["Python"], "expectedEvidence": "Reading opens",
                             "requirements": [local, "reading-control"]}})
             return json.dumps(answer)
@@ -736,15 +738,9 @@ class CorrectionProvider(AreaProvider):
         answer = json.loads(super().__call__(question))
         if question["kind"] == "DETAIL" and question["facts"]["Area"]["handle"] == "area-002":
             facts, body = question["facts"], answer["answer"]
-            if (self.defect == "local" and "Exact corrections" not in facts
-                    or self.defect == "local-persistent" and "Merge correction" not in facts):
-                next(e for e in body["edits"] if e["kind"] == "check")["typedBody"][
-                    "requirements"].append("link-1")
-            elif self.defect in ("path", "persistent", "targeted-exact") and (
+            if self.defect in ("path", "persistent", "targeted-exact") and (
                     self.defect == "persistent" or "Merge correction" not in facts):
                 body["units"][0].update(reads=["value.txt"], dependencies=["value.txt"])
-            elif self.defect == "endpoint" and "Merge correction" not in facts:
-                body["units"][0]["consumes"] = []
         if (question["kind"] == "DETAIL" and self.defect == "cycle"
                 and question["facts"]["Area"]["handle"] == "area-001"
                 and "Merge correction" not in question["facts"]):
@@ -880,8 +876,7 @@ def correction_journeys(root):
     A malformed targeted re-ask needs an exact-fix retry; ordinary valid re-asks miss the y09 failure.
     """
     began = time.monotonic()
-    for mode in ("path", "persistent", "local", "endpoint", "local-persistent", "cycle", "scope",
-                 "targeted-exact"):
+    for mode in ("path", "persistent", "cycle", "scope", "targeted-exact"):
         run, provider = start(root / mode, mode="contracts")
 
         provider_type = ScopeProvider if mode == "scope" else CorrectionProvider
@@ -904,13 +899,10 @@ def correction_journeys(root):
                 assert not run.store.units()
             reasks = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
             assert sorted(q["facts"]["Area"]["handle"] for q in reasks) == (
-                [] if mode in ("local", "scope") else ["area-001", "area-002", "area-003"] if mode == "cycle"
+                [] if mode == "scope" else ["area-001", "area-002", "area-003"] if mode == "cycle"
                 else ["area-002", "area-002"] if mode == "targeted-exact" else ["area-002"])
             assert any("Exact corrections" in q["facts"] for q in provider.detail_calls) == (
-                mode in ("local", "local-persistent", "targeted-exact"))
-            if mode == "local-persistent":
-                assert len([q for q in provider.detail_calls
-                            if q["facts"]["Area"]["handle"] == "area-002"]) == 4
+                mode == "targeted-exact")
             assert provider.arch_calls == (2 if mode == "scope" else 1)
             if mode == "scope":
                 assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls].count("area-001") == 1
@@ -1111,7 +1103,6 @@ def recorded_detail_journeys(root):
             assert len(run.store.records("architecture_gap")) == (0 if owns_checks else 1)
             assert any(k == "transition" and b["next"] == "REVIEW" for _, k, b in rows)
             assert {b["gate"] for _, k, b in rows if k == "decision_request"} == {"A", "B"}
-            assert any("Exact corrections" in q["facts"] for q in provider.detail_calls)
             wave = json.loads(recording["architect"])["answer"]["waves"][0]
             for question in provider.detail_calls:
                 expected = wave
@@ -1121,10 +1112,6 @@ def recorded_detail_journeys(root):
                             "assembly-slots"]["text"]:
                         expected = json.loads(recording["architectureCorrection"])["answer"]["waves"][0]
                 assert question["facts"]["Current wave"] == expected
-            corrections = [q for q in provider.detail_calls if "Merge correction" in q["facts"]]
-            assert sorted(q["facts"]["Area"]["handle"] for q in corrections) == (
-                [] if own_contract else ["foundation", "seldon"] if owns_checks else
-                ["page-shell"] if "2073b1d-c01" in slot.name else [])
             document = run.store.plan(run.store.cursor().revision)
             plan.validate(document)
             if own_contract:
@@ -1146,7 +1133,6 @@ def recorded_detail_journeys(root):
                 plan.select(invalid, "unit")[integration]["consumes"].append(shared)
                 with pytest.raises(ValueError, match="consumer endpoints must cross area boundaries"):
                     architecture.validate(invalid)
-            assert len(plan.assigned(document)[None]) > 0
             if owns_checks:
                 assert not any("checkPaths must be inside scope" in json.dumps(q["facts"])
                                for q in provider.detail_calls)
@@ -1170,6 +1156,11 @@ def recorded_detail_journeys(root):
 
 
 @pytest.mark.fast
+def test_detail_correction_journeys(tmp_path):
+    correction_journeys(tmp_path / "corrections")
+
+
+@pytest.mark.fast
 def test_recorded_detail_journeys(tmp_path):
     recorded_detail_journeys(tmp_path / "recorded-detail")
 
@@ -1178,7 +1169,6 @@ def architect_journeys(tmp_path):
     """Contract delivery and local planning recovery share the canonical plan and recorder."""
     began = time.monotonic()
     review_links_journeys(tmp_path / "review-links")
-    correction_journeys(tmp_path / "corrections")
     recorded_detail_journeys(tmp_path / "recorded")
     area_product_journey(tmp_path)
     for mode in ("gap", "split"):
@@ -1374,6 +1364,7 @@ def retained_area_answer(provider, q):
                      and external <= set(units[e["typedBody"]["provider"]-1]["requirements"])]
             if links:
                 local = deepcopy(check)
+                local["typedBody"]["level"] = "wave"
                 local["typedBody"]["requirements"] = [r for r in check["typedBody"]["requirements"]
                                                       if r in owned] + [links[0]["targetHandle"]]
                 edits.append(local)

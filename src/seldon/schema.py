@@ -29,7 +29,7 @@ BODIES = {
     "area": obj(responsibility=TEXT, scope=array(TEXT, 1)),
     "contract": obj(
         kind=choice("api", "schema", "file-format", "shared-type", "ui-structure", "command-line"),
-        text=TEXT, provider=TEXT, consumers=array(TEXT, 1)),
+        text=TEXT, provider=TEXT, consumers=REFS),
     "decision": obj(choice=TEXT, reason=TEXT, origin=choice("architecture", "research", "user"),
                     areas=array(TEXT, 1)),
     "obligation": obj(what=TEXT, owner=TEXT, closingRequirement=TEXT),
@@ -44,7 +44,7 @@ BODIES = {
 GAP = obj(target=TEXT, correction=TEXT)
 PLAN_BODIES = {**BODIES, "feature": FEATURE,
                "contract": obj(**{**BODIES["contract"]["properties"],
-                                  "provider": POSITION, "consumers": array(POSITION, 1)}),
+                                  "provider": POSITION, "consumers": array(POSITION)}),
                "obligation": obj(what=TEXT, owner=POSITION, closingRequirement=TEXT)}
 PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
                                      typedBody=body)
