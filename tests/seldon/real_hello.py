@@ -84,9 +84,12 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
             print(json.dumps(question["schema"], indent=2))
             return 0
         cursor = loop.run()
-        outcome = loop.store.records("outcome")[-1][2]
-        print(json.dumps({"state": cursor.state, "scriptedUser": True,
-                          "ownerAccepted": False, "outcome": outcome}, indent=2), flush=True)
+        # A run never fails (R15): it ends with an outcome or waits on one question; print whichever it is.
+        from seldon.frontdoor import state
+        outcomes = loop.store.records("outcome")
+        print(json.dumps({"state": "WAITING" if cursor.decision else cursor.state, "scriptedUser": True,
+                          "ownerAccepted": False, "outcome": outcomes[-1][2] if outcomes else None,
+                          "waitingFor": state(str(loop.project)).get("waitingFor")}, indent=2), flush=True)
         return 0 if cursor.state == "SCRIPTED_C" else 1
     finally:
         loop.close()
