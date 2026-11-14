@@ -42,7 +42,7 @@ def test_requirement_gap_preserves_other_feature_owner_to_c(tmp_path):
     run.provider = provider
     try:
         while run.store.cursor().state != "FLOW-JUDGE":
-            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            assert not run.store.cursor().decision, run.store.records("unit_failure")
             run.step()
         store = run.store
         document = store.plan(store.cursor().revision)

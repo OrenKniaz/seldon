@@ -11,13 +11,10 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 
-from . import providers
-from .run import TERMINAL, Run, incomplete
+from . import decisions, providers
+from .decisions import Waiting
+from .run import TERMINAL, Run
 from .store import Store
-
-
-class Waiting(Exception):
-    """The next words belong to a future chat turn."""
 
 
 class Refusal(ValueError):
@@ -61,7 +58,10 @@ def state(run: str):
         next_step = ("Use start with a new folder for your next dream." if cursor.state in TERMINAL else
                      f"Use answer with request {cursor.decision} to relay your words." if waiting else
                      "Use pause to pause this run." if active else "Use resume to continue this run.")
-        return {"run": str(Path(run).resolve()), "state": cursor.state,
+        status = ("ACCEPTED" if cursor.state in ("ACCEPTED", "SCRIPTED_C") else
+                  "STOPPED" if cursor.state == "STOPPED" else "WAITING" if waiting else
+                  "PAUSED" if cursor.failure else "RUNNING")
+        return {"status": status, "reason": cursor.failure, "run": str(Path(run).resolve()), "state": cursor.state,
                 "controller": "running" if active else "idle", "waitingFor": waiting,
                 "units": {ref: {key: getattr(row, key) for key in ("state", "waiting", "failure")}
                           for ref, row in store.units().items()},
@@ -140,8 +140,6 @@ def drive(run):
             time.sleep(.02)
     try:
         loop.run()
-    except Waiting:
-        pass
     finally:
         loop.close()
 
@@ -190,6 +188,7 @@ def server(setup=providers.setup_facts):
     @tool
     def answer(run: str, request: str, words: str):
         """Relay the user's words verbatim to the displayed request; never supply a choice."""
+        pause(run)
         value = available(run)
         waiting = value["waitingFor"]
         if not waiting:
@@ -201,6 +200,7 @@ def server(setup=providers.setup_facts):
     @tool
     def resume(run: str):
         """Continue an idle run; a displayed request needs answer with the user's words."""
+        pause(run)
         value = available(run)
         if value["waitingFor"]:
             raise Refusal("Use answer request " + value["waitingFor"]["request"])
@@ -212,7 +212,7 @@ def server(setup=providers.setup_facts):
         pause(run)
         available(run)
         with opened(run) as store, store.claim_controller():
-            incomplete(store, "Stopped by the user in chat")
+            decisions.stop(store, "Stopped by the user in chat")
         return state(run)
 
     return app

@@ -18,6 +18,7 @@ import pytest
 
 from seldon import flow_review, gitwork, guide, judgment, plan, proof, questions
 from seldon.providers import Codex, ProviderFailure, ROLES
+from seldon.frontdoor import state as run_state
 from seldon.run import Run
 from seldon.store import RunRow, Store, UnitRow, encode
 
@@ -535,6 +536,9 @@ class Scripted:
 
 
 def approve(request):
+    from seldon.decisions import Waiting
+    if request["gate"] not in ("A", "B", "CHECK-IN", "C"):
+        raise Waiting()
     return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
 
 
@@ -576,10 +580,11 @@ def test_plan_refuses_broken_agreements(tmp_path, fault, fix):
     else:
         provider.plan_fault = corrupt
     try:
-        assert run.run().state == "INCOMPLETE"
-        assert fix in run.store.records("outcome")[-1][2]["reason"]
+        run.run()
+        assert run_state(str(run.project))["status"] == "WAITING"
+        assert fix in str(run_state(str(run.project))["waitingFor"]["subject"])
         assert not run.store.units()
-        assert {b["gate"] for _, _, b in run.store.records("decision_request")} == {"A"}
+        assert {b["gate"] for _, _, b in run.store.records("decision_request")} == {"A", run.store.cursor().state}
     finally:
         run.close()
 
@@ -601,7 +606,7 @@ def records_and_skeleton_journey(slot):
     run, provider = prepare(slot, "records-guide-gap", 3)
     try:
         while run.store.cursor().state != "FLOW-JUDGE":
-            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
             run.step()
         assert obligations.remaining(run.store)
         with pytest.raises(ValueError, match="after check-in"):
@@ -635,7 +640,7 @@ def records_and_skeleton_journey(slot):
         run.close()
         run = Run.reopen(slot / "product", provider, approve)
         while run.store.cursor().state != "B":
-            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
             run.step()
         assert run.step() == "EXECUTE"
         assert run.step() == "WAVE-VERIFY"
@@ -739,6 +744,114 @@ def finish(run):
     return cursor, rows, units
 
 
+def directed_provider(provider):
+    """Script only the semantic interpretation of explicit journey-user answers."""
+    invoke = provider.invoke
+    def answer(question, started):
+        if question["kind"] == "DECIDE":
+            words = question["facts"]["User's words"]
+            choice = "decline" if words in ("drop it", "end this dream") else "revise"
+            return json.dumps({"answer": {"choice": choice, "why": "The user's stated direction"}}), None
+        return invoke(question, started)
+    provider.invoke = answer
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("count", [4, 50])
+def test_asked_unit_journey(tmp_path, count):
+    """An actual proof failure asks once while unrelated units integrate, surviving reopen.
+
+    Success and ordinary recovery miss the old terminal failure and blocked dependants. The
+    fifty-unit twin catches a global scheduler stop; direction proves the real WORK brief consumer.
+    """
+    from seldon import frontdoor
+
+    slot = tmp_path / "ask"
+    run, provider = prepare(slot, "ask", count)
+    direction = "use the items route, not a fixture"
+    def dependency(answer):
+        if count == 4:
+            answer["units"][2]["dependencies"] = [2]
+    provider.plan_fault = dependency
+    native = slot / "native.py"
+    native.write_text(native.read_text("utf-8").replace(
+        '    Path(name, "check.py").write_text(source)',
+        '    if name == "unit-002" and ' + repr(direction) + ' not in facts.get("Exact failure", ""):\n'
+        '        source += ' + repr("raise AssertionError('items route never passed')\n") + '\n'
+        '    Path(name, "check.py").write_text(source)'), encoding="utf-8")
+    try:
+        cursor = run.run()
+        value = frontdoor.state(str(run.project))
+        assert cursor.state == "EXECUTE" and value["status"] == "WAITING", value
+        waiting = value["waitingFor"]
+        assert waiting["gate"] == "UNIT" and waiting["subject"]["unit"] == "u002"
+        assert len(waiting["subject"]["tried"]) == 3
+        assert all("AssertionError: items route never passed" in text for text in waiting["subject"]["tried"])
+        assert not run.store.records("outcome")
+        rows = run.store.units()
+        assert rows["u002"].state == "ASKED"
+        if count == 4:
+            assert rows["u001"].state == rows["u004"].state == "DONE"
+            assert rows["u003"].state == "WAITING" and "u002" in rows["u003"].waiting
+            assert {"u003", "guide"} <= set(waiting["subject"]["affects"])
+        else:
+            assert sum(u.state == "DONE" for u in rows.values()) == 49
+        run.close()
+        run = Run.reopen(slot / "product", provider, approve)
+        before = run.store.records()
+        assert run.run().decision == waiting["request"]
+        assert run.store.records() == before
+        if count == 50:
+            return
+        directed_provider(provider)
+        run.close()
+        run = Run.reopen(slot / "product", provider, lambda _: "drop it")
+        assert run.run().state == "EXECUTE"
+        assert frontdoor.state(str(run.project))["waitingFor"] == waiting
+        assert "stop" in waiting["subject"]["drop"]
+        run.close()
+        run = Run.reopen(slot / "product", provider,
+                         lambda item: direction if item["gate"] == "UNIT" else approve(item))
+        finish(run)
+        work = [b for _, _, b in run.store.records("question") if b["kind"] == "WORK"
+                and b["facts"]["Write scope"] == ["unit-002/**"]]
+        assert direction in work[-1]["facts"]["Exact failure"]
+        assert all(u.state == "DONE" for u in run.store.units().values())
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("mixed", [False, True])
+def test_blocked_discovery_ask_twin(tmp_path, mixed):
+    """A blocked reporter routes both foreign discoveries to the DONE owner and reaches C.
+
+    Ordinary proof failures cannot catch treating a worker's foreign discovery as its own failure;
+    two discoveries catch a path that silently routes only the first correction.
+    """
+    run, provider = prepare(tmp_path / "handoff", "ask", 2)
+    native = provider.slot / "native.py"
+    native.write_text(native.read_text("utf-8").replace(
+        'print(json.dumps({"type":"item.completed"',
+        'if guide and turn == 1:\n'
+        '    answer["answer"].update(outcome="blocked", discoveries=[\n'
+        '        {"owner": "u001", "correction": "Clarify the persisted value interaction"},\n'
+        '        {"owner": "u001", "correction": "Keep the exact stored value"}])\n'
+        + ('if guide and turn == 1:\n    answer["answer"]["discoveries"].append('
+           + repr({"owner": "guide", "correction": "Clarify my walkthrough"}) + ')\n' if mixed else '')
+        + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
+    try:
+        finish(run)
+        assignments = [b for _, _, b in run.store.records("unit_fixup")]
+        assert len(assignments) == 1 and assignments[0]["owner"] == "u001"
+        assert len(assignments[0]["gaps"]) == 2
+        assert run.store.unit("guide").state == "DONE"
+        assert run.store.unit("guide").recoveries == int(mixed)
+        assert len([b for _, _, b in run.store.records("unit_failure") if b["unit"] == "guide"]) == int(mixed)
+    finally:
+        run.close()
+
+
 def admission_journey(slot):
     from unittest.mock import patch
 
@@ -820,7 +933,7 @@ def final_seed(slot):
     run, _ = prepare(slot, "final-seed", 2)
     try:
         while run.store.cursor().state != "FLOW-JUDGE":
-            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
             run.step()
     finally:
         run.close()
@@ -889,13 +1002,13 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             return
         if mode == "check-deadline":
             cursor = run.run()
-            result = run.store.records("outcome")[-1][2]
             units = run.store.units()
-            assert cursor.state == "INCOMPLETE" and units["u001"].state == "FAILED"
+            assert run_state(str(run.project))["status"] == "WAITING"
+            assert units["u001"].state == "ASKED"
             assert units["u001"].recoveries == (2 if mode == "check-deadline" else 0)
             assert units["u002"].state == "DONE"
             assert (slot / "turn-unit-001").read_text() == ("3" if mode == "check-deadline" else "1")
-            assert result["nextAction"] == "Resolve the named failure, then start a fresh run."
+            assert not run.store.records("outcome")
             assert any(b["unit"] == "u001" and b["timedOut"] and b["executionStarted"]
                        and b["cleanupVerified"] for _, _, b in run.store.records("observation"))
             before = run.store.records()
@@ -906,28 +1019,29 @@ def simple_journey(slot, mode, count=1, *, seed=None):
             return
         if mode == "user-path":
             cursor = run.run()
-            outcome = run.store.records("outcome")[-1][2]
-            assert cursor.state == "INCOMPLETE" and not outcome["verification_complete"]
-            assert "there is no browser observation" in outcome["reason"]
+            assert run_state(str(run.project))["status"] == "WAITING"
+            assert "there is no browser observation" in str(run_state(str(run.project))["waitingFor"])
+            assert not run.store.records("outcome")
             assert not any(b["gate"] == "C" for _, _, b in run.store.records("decision_request"))
             return
         if mode == "exhaust":
             cursor = run.run()
-            outcome = run.store.records("outcome")[-1][2]
-            assert cursor.state == "INCOMPLETE" and not outcome["accepted"]
+            assert cursor.state == "EXECUTE" and run_state(str(run.project))["status"] == "WAITING"
+            assert not run.store.records("outcome")
             rows = run.store.units()
-            assert rows["u001"].state == "FAILED" and rows["u001"].recoveries == 2
-            assert rows["u002"].state == "BLOCKED" and rows["guide"].state == "BLOCKED"
+            assert rows["u001"].state == "ASKED" and rows["u001"].recoveries == 2
+            assert rows["u002"].state == "WAITING" and rows["guide"].state == "WAITING"
             assert rows["u003"].state == rows["u004"].state == "DONE"
-            assert "u001" in outcome["failed"] and "u002" in outcome["blocked"]
+            subject = run_state(str(run.project))["waitingFor"]["subject"]
+            assert subject["unit"] == "u001" and "u002" in subject["affects"]
             assert (slot / "turn-unit-001").read_text() == "3"
-            assert "'purpose': 'base'" in outcome["failed"]["u001"]
+            assert any("'purpose': 'base'" in text for text in subject["tried"])
             return
         if mode in ("demo-uncertain", "product-uncertain"):
             # Reopen with a pending fact request: ordinary in-process retries cannot expose lost intent.
             target = "FLOW-FACTS" if mode.startswith("demo") else "PRODUCT-FACTS"
             while run.store.cursor().state != target:
-                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
                 run.step()
             run.close()
             run = Run.reopen(slot / "product", provider, approve)

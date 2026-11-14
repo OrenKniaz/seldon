@@ -210,8 +210,8 @@ def user_words(store):
         dream = store.read(attempt["question"])["facts"]["Dream"]
     else:
         dream = store.read(cursor.kickoff)["words"]
-    changes = [store.read(b["cause"])["words"] for _, _, b in store.records("transition")
-               if b["event"] == "revise" and b["input"] in ("A", "B")]
+    changes = [store.read(b["words"])["words"] for _, _, b in store.records("approval")
+               if b.get("choice") == "revise"]
     return {"Dream": dream, **({"Requested change": changes} if changes else {})}
 
 

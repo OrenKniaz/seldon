@@ -11,6 +11,7 @@ from threading import Event
 import pytest
 
 from seldon import fixups, plan, proof
+from seldon.frontdoor import state as run_state
 from seldon.run import Run
 from test_journey import Scripted, approve, copy_final, finish, prepare
 
@@ -45,8 +46,7 @@ def blocked_owner_journeys(root):
         try:
             if mode != "sibling":
                 cursor = run.run()
-                assert cursor.state == "INCOMPLETE"
-                assert run.store.unit("guide").state == "FAILED"
+                assert cursor.decision and run.store.unit("guide").state == "ASKED"
                 assert run.store.unit("guide").recoveries == 2
                 assert len(run.store.records("unit_fixup")) == (0 if own_scope else 3)
             else:
@@ -199,7 +199,7 @@ def owner_repair_journeys(root):
         provider.invoke = judged
         try:
             while run.store.cursor().state != "WAVE-VERIFY":
-                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                assert not run.store.cursor().decision, run.store.records("unit_failure")
                 run.step()
             before = run.store.units()
             assert before["u001"].recoveries == (2 if broken else 0)
@@ -267,7 +267,7 @@ def seed(tmp_path_factory):
     native.write_text(text, encoding="utf-8")
     try:
         while run.store.cursor().state != "PRODUCT-JUDGE":
-            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            assert not run.store.cursor().decision, run.store.records("unit_failure")
             run.step()
     finally:
         run.close()
@@ -365,12 +365,9 @@ def test_fixup_exhaustion_blocks_done_dependants(seed, tmp_path):
             encoding="utf-8")
         fixups.apply(run.store, [gap(run, "one", "check", ["u001"])])
         cursor = run.run()
-        assert cursor.state == "INCOMPLETE"
-        assert run.store.unit("u001").state == "FAILED"
-        assert run.store.unit("guide").state == "BLOCKED"
-        assert run.store.unit("u002") == before
-        outcome = run.store.records("outcome")[-1][2]
-        assert "u001" in outcome["failed"] and "guide" in outcome["blocked"]
+        assert cursor.decision and run.store.unit("u001").state == "ASKED"
+        assert run.store.unit("u002") == before and not run.store.records("outcome")
+        assert "guide" in run_state(str(run.project))["waitingFor"]["subject"]["affects"]
     finally:
         run.close()
 

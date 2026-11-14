@@ -7,16 +7,9 @@ from .states import advance
 
 
 def resume_id(store):
-    rows = [r for r, _, b in store.records("planning_resume") if b["vision"] == store.cursor().vision]
+    rows = [b["request"] for _, _, b in store.records("approval")
+            if "step" in b["subject"] and b.get("choice") in ("approve", "revise")]
     return rows[-1] if rows else None
-
-
-def stop(store, corrections, stage="detail"):
-    cursor = store.cursor()
-    store.record("planning_stop", {"revision": cursor.revision, "vision": cursor.vision,
-                                   "corrections": corrections, "stage": stage})
-    raise ValueError("After one DETAIL re-ask, planning stopped: "
-                     + str(architecture.DetailCorrection(corrections)))
 
 
 def gap(store, corrections):
@@ -24,8 +17,7 @@ def gap(store, corrections):
     resumed = resume_id(store)
     if any(b["vision"] == cursor.vision and b.get("resume") == resumed
            for _, _, b in store.records("architecture_gap")):
-        stop(store, {a: [*items, {"error": "Remains after one ARCHITECT re-ask", "otherSide": {}}]
-                     for a, items in corrections.items()}, "architecture")
+        raise ValueError("Remains after one ARCHITECT re-ask: " + str(corrections))
     with store.transaction():
         ref = store.record("architecture_gap", {"vision": cursor.vision, "resume": resumed,
                            "gap": str(architecture.DetailCorrection(corrections))})
@@ -140,7 +132,7 @@ def step(store, provider, capacity):
             if retained:
                 correction, = retained
                 if all(done[a].get("correction") == correction[0] for a in correction[1]):
-                    stop(store, error.corrections)
+                    raise ValueError(str(error))
             else:
                 ref = store.record("detail_correction", {"revision": cursor.revision, "resume": resumed,
                                                         "corrections": error.corrections})

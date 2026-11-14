@@ -89,7 +89,7 @@ def hermetic_journey(root):
         '    Path(name, "check.py").write_text(source)'))
     try:
         while run.store.cursor().state != 'WAVE-VERIFY':
-            assert run.store.cursor().state != 'INCOMPLETE', run.store.records('outcome')
+            assert not run.store.cursor().decision, run.store.records('unit_failure')
             run.step()
         candidate = run.store.cursor().candidate
         (slot / 'wave').touch()

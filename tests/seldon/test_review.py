@@ -116,7 +116,8 @@ def review_journeys(root):
                 if mode == "persistent":
                     # R15: three repair rounds route the remaining gap to B; the run never ends on a count.
                     while run.store.cursor().state != "B":
-                        assert run.step() != "INCOMPLETE"
+                        assert not run.store.cursor().decision
+                        run.step()
                     shown = run.store.read(run.store.cursor().review)["answer"]["gaps"]
                     assert run.store.cursor().repairs == 3 and shown[0]["area"] == "area-002"
                     assert not run.store.records("outcome")

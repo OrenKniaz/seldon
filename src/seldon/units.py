@@ -5,39 +5,23 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import fixups, gitwork, inference, plan, proof, questions
+from . import decisions, fixups, gitwork, inference, plan, proof, questions
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, session_id, terminal_answer
 from .schema import validate
 from .states import advance
 
 
-def recover(store, ref, failure, retryable=True):
-    unit = store.unit(ref)
-    exhausted = unit.recoveries >= 2 or not retryable
-    body = {"unit": ref, "state": unit.state, "failure": failure,
-            "recovery": unit.recoveries + 1, "exhausted": exhausted}
+def recover(store, ref, failure):
     with store.transaction():
-        cause = store.record("unit_failure", body)
-        advance(store, "exhausted" if exhausted else "recover", cause, unit=ref,
-                recoveries=unit.recoveries if exhausted else unit.recoveries + 1,
+        unit = store.unit(ref)
+        asked = unit.recoveries >= 2
+        cause = store.record("unit_failure", {"unit": ref, "state": unit.state,
+            "failure": failure, "recovery": unit.recoveries + 1, "exhausted": asked})
+        advance(store, "asked" if asked else "recover", cause, unit=ref,
+                recoveries=unit.recoveries if asked else unit.recoveries + 1,
                 failure=failure, report=None, T=None, P=None, observations=[], judgment=None)
-        if exhausted and fixups.active(store, ref):
-            block_dependants(store, ref, cause)
-
-
-def block_dependants(store, failed, cause):
-    document = store.plan(store.cursor().revision)
-    reached = {failed}
-    while True:
-        added = {ref for ref in store.units() if ref not in reached
-                 and reached.intersection(plan.prerequisites(document, ref) + store.unit(ref).waitingFor)}
-        if not added:
-            return
-        reached.update(added)
-        for ref in added:
-            if store.unit(ref).state not in ("FAILED", "BLOCKED"):
-                advance(store, "blocked", cause, unit=ref,
-                        failure=f"Dependency {failed} exhausted its recoveries", waiting="")
+        if asked:
+            decisions.ask_unit(store)
 
 
 def recovered_report(store, ref):
@@ -109,7 +93,10 @@ def work(store, provider, ref):
     else:
         answer = store.read(report)["answer"]
     store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
-    if fixups.handoff(store, ref, report, answer):
+    foreign = [d for d in answer["discoveries"] if d["owner"] != ref]
+    if foreign and fixups.handoff(store, ref, report, {**answer, "discoveries": foreign}):
+        if local := [d for d in answer["discoveries"] if d["owner"] == ref]:
+            recover(store, ref, "Worker could not complete this unit: " + str(local))
         return
     if answer.get("outcome") != "done":
         raise ValueError("Worker could not complete this unit: " + str(answer))
@@ -175,13 +162,13 @@ def run_unit(store, provider, ref):
         integrated_checks.update({g["subject"]: all_checks[g["subject"]] for g in assignment["gaps"]
                                   if g["kind"] == "check" and g["subject"] in all_checks})
     try:
-        while (unit := store.unit(ref)).state not in ("DONE", "FAILED", "BLOCKED", "WAITING"):
+        while (unit := store.unit(ref)).state not in ("DONE", "ASKED", "DROPPED", "WAITING"):
             try:
                 if unit.state == "READY":
                     base = store.cursor().candidate
                     root = gitwork.admit(store.root.parent, store.cursor().scratch, base)
                     advance(store, "start", "Isolated worktree admitted", unit=ref,
-                            base=base, worktree=root, waiting="", failure="")
+                            base=base, worktree=root, waiting="")
                 elif unit.state == "REWORK":
                     root = unit.worktree or gitwork.admit(
                         store.root.parent, store.cursor().scratch, unit.base)
@@ -223,8 +210,6 @@ def run_unit(store, provider, ref):
                         with store.transaction():
                             store.unit(ref, replace(store.unit(ref), callFolder=None, callAttempt=None))
                     raise
-            except questions.MissingFacts as error:
-                recover(store, ref, str(error), retryable=False)
             except proof.UncertainCleanup:
                 raise
             except (ValueError, RuntimeError, OSError) as error:

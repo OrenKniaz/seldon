@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from seldon import architecture, plan
+from seldon.frontdoor import state as run_state
 from seldon.run import Run
 from seldon.store import encode
 from test_journey import NATIVE, VISION, Scripted, approve, finish, planned
@@ -155,13 +156,14 @@ def area_recovery_journey(tmp_path, mode):
     run, provider = start(tmp_path / mode, 13 if mode == "split" else 3, mode)
     try:
         if mode == "unresolved":
-            assert run.run().state == "INCOMPLETE"
-            assert "after one ARCHITECT re-ask" in run.store.records("outcome")[-1][2]["reason"]
+            run.run()
+            assert run_state(str(run.project))["status"] == "WAITING"
+            assert "after one ARCHITECT re-ask" in str(run_state(str(run.project))["waitingFor"])
             assert not any(b["gate"] == "B" for _, _, b in run.store.records("decision_request"))
         else:
             if mode == "split":
                 while run.store.cursor().state != "EXECUTE":
-                    assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                    assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
                     run.step()
                 document = run.store.plan(run.store.cursor().revision)
                 assert len(plan.select(document, "unit")) == 14
@@ -234,7 +236,7 @@ def agreed_literals_journey(root):
             for _ in range(20):
                 if run.store.cursor().state == "B":
                     break
-                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
                 run.step()
             assert run.store.cursor().state == "B"
             assert provider.arch_calls == (1 if agreed else 2)
@@ -338,7 +340,8 @@ def user_words_journeys(root):
             for _ in range(45):
                 if run.store.cursor().state == "B" and revised["B"] == 2:
                     break
-                assert run.store.cursor().state not in ("INCOMPLETE", "EXECUTE")
+                assert run.store.cursor().state != "EXECUTE"
+                assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
                 run.step()
             assert run.store.cursor().state == "B"
             run.step()  # The user approves the displayed final plan, without executing workers.
@@ -643,7 +646,7 @@ def review_links_journeys(root):
             for _ in range(24):
                 if run.store.cursor().state == "B":
                     break
-                assert run.store.cursor().state not in ("INCOMPLETE", "STOPPED", "EXECUTE")
+                assert run.store.cursor().state not in ("STOPPED", "EXECUTE")
                 reviewing = run.store.cursor().state == "REVIEW"
                 if reviewing:
                     canonical = deepcopy(run.store.plan(run.store.cursor().revision))
@@ -687,7 +690,7 @@ def size_journey(root):
         run, _ = start(root / str(count), count, "sizing")
         try:
             while run.store.cursor().state != "EXECUTE":
-                assert run.store.cursor().state not in ("INCOMPLETE", "SCRIPTED_C")
+                assert run.store.cursor().state not in ("STOPPED", "SCRIPTED_C")
                 run.step()
             sizes.append(question_sizes(run.store))
             review_maxima.append(max(len(encode(q).encode()) for _, _, q in run.store.records("question")
@@ -792,16 +795,17 @@ def single_obligation_journey(root):
     provider = ObligationProvider(base.slot, 1, "sizing")
     run.provider = provider
     try:
-        assert run.run().state == "INCOMPLETE"
+        run.run()
+        assert run_state(str(run.project))["status"] == "WAITING"
         assert len(provider.detail_calls) == 6
-        outcome = run.store.records("outcome")[-1][2]
-        assert "area-001" in outcome["reason"] and "skeleton" in outcome["reason"]
-        assert "Run.resume_planning()" in outcome["nextAction"]
+        subject = run_state(str(run.project))["waitingFor"]["subject"]
+        assert "area-001" in str(subject) and "skeleton" in str(subject)
         assert not run.store.cursor().B
         run.close()
         run = Run.reopen(root / "product", provider, approve)
         provider.repaired = True
-        run.resume_planning()
+        run.user = lambda item: "try again" if item["gate"] == "DETAIL" else approve(item)
+        run.step()
         while run.store.cursor().state != "EXECUTE":
             run.step()
         assert run.store.cursor().B and len(provider.detail_calls) == 7
@@ -888,9 +892,10 @@ def correction_journeys(root):
         run.provider = provider
         try:
             if mode == "persistent":
-                assert run.run().state == "INCOMPLETE"
-                reason = run.store.records("outcome")[-1][2]["reason"]
-                assert "After one DETAIL re-ask" in reason and "area-002" in reason and "value.txt" in reason
+                run.run()
+                assert run_state(str(run.project))["status"] == "WAITING"
+                reason = str(run_state(str(run.project))["waitingFor"]["subject"])
+                assert "area-002" in reason and "value.txt" in reason
                 assert not any(b["gate"] == "B" for _, _, b in run.store.records("decision_request"))
             else:
                 while run.store.cursor().state != "EXECUTE":
@@ -911,13 +916,14 @@ def correction_journeys(root):
                 assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls].count("area-001") == 1
                 assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls].count("area-003") == 1
             if mode == "persistent":
-                assert "Run.resume_planning()" in run.store.records("outcome")[-1][2]["nextAction"]
+                assert not run.store.records("outcome")
                 calls = len(provider.detail_calls)
                 run.close()
                 run = Run.reopen(root / mode / "product", provider, approve)
-                assert run.store.cursor().state == "INCOMPLETE" and len(provider.detail_calls) == calls
+                assert run_state(str(run.project))["status"] == "WAITING" and len(provider.detail_calls) == calls
                 provider.defect = "path"
-                run.resume_planning()
+                run.user = lambda item: "try again" if item["gate"] == "DETAIL" else approve(item)
+                run.step()
                 while run.store.cursor().state != "EXECUTE":
                     run.step()
                 assert [q["facts"]["Area"]["handle"] for q in provider.detail_calls[calls:]] == ["area-002"]
@@ -1088,7 +1094,7 @@ def recorded_detail_journeys(root):
             for _ in range(16):
                 if run.store.cursor().state == "EXECUTE":
                     break
-                assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+                assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
                 run.step()
             assert run.store.cursor().state == "EXECUTE" and run.store.cursor().B
             assert not run.store.units()
@@ -1220,7 +1226,7 @@ def check_owner_journeys(root):
         + 'print(json.dumps({"type":"item.completed"'), encoding="utf-8")
     try:
         while run.store.cursor().state != "WAVE-VERIFY":
-            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            assert run_state(str(run.project))["status"] not in ("PAUSED", "WAITING")
             run.step()
         document = run.store.plan(run.store.cursor().revision)
         waves = plan.assigned(document)[None]
@@ -1374,3 +1380,40 @@ def retained_area_answer(provider, q):
             for n in numbers], "quality": [{**item, "checks": [c for c in item["checks"] if c in checks]}
                 for item in full["quality"] if set(item["checks"]) & checks]}
     return json.dumps({"answer": {**answer, "why": "The retained journey's scoped semantic answer"}})
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("decline", [False, True])
+def test_stuck_step_ask_journey(tmp_path, decline):
+    """Three invalid ARCHITECT answers ask at that step; only the user's decline ends it.
+
+    Valid planning never exercises the exact-fix limit, and unit recovery cannot protect a planning
+    question's persistence or delivery of the user's words to its next canonical ARCHITECT brief.
+    """
+    from seldon.frontdoor import state
+    from test_journey import directed_provider, prepare
+
+    run, provider = prepare(tmp_path / "stuck", "ask", 1)
+    provider.architecture_fault = lambda answer: answer.update(units=[])
+    try:
+        assert run.run().state == "ARCHITECT"
+        waiting = state(str(run.project))["waitingFor"]
+        assert state(str(run.project))["status"] == "WAITING"
+        assert waiting["gate"] == "ARCHITECT" and "unexpected field" in str(waiting["subject"])
+        assert not run.store.records("outcome")
+        directed_provider(provider)
+        words = "end this dream" if decline else "use the items route, not a fixture"
+        provider.architecture_fault = None
+        run.close()
+        run = Run.reopen(provider.slot / "product", provider,
+                         lambda item: words if item["gate"] == "ARCHITECT" else approve(item))
+        if decline:
+            assert run.run().state == "STOPPED"
+            assert state(str(run.project))["status"] == "STOPPED"
+            assert run.store.records("outcome")[-1][2]["reason"] == words
+        else:
+            finish(run)
+            question = [b for _, _, b in run.store.records("question") if b["kind"] == "ARCHITECT"][-1]
+            assert words in str(question["facts"]["User's words"])
+    finally:
+        run.close()

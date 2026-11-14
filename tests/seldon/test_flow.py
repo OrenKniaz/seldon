@@ -25,7 +25,7 @@ def integrated(slot, mode, count, change=None):
             'if mode in ("single1", "scale50", "traced-evidence", "visual-unit", "records"):'))
     try:
         while run.store.cursor().state != "WAVE-VERIFY":
-            assert run.store.cursor().state != "INCOMPLETE", run.store.records("outcome")
+            assert not run.store.cursor().decision, run.store.records("unit_failure")
             run.step()
         assert run.step() == "FLOW-JUDGE"
         return run

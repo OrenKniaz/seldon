@@ -83,7 +83,7 @@ def test_chat_controls_and_continuity(tmp_path, capsys):
                     with anyio.fail_after(55):
                         while True:
                             value = await call('state', run=run)
-                            assert value['state'] != 'INCOMPLETE', value
+                            assert value['state'] != 'STOPPED', value
                             if value['controller'] == 'idle' and value['state'] == expected:
                                 return value
                             await anyio.sleep(.05)
@@ -138,7 +138,7 @@ def test_chat_controls_and_continuity(tmp_path, capsys):
                 await call('start', dream='Read values', folder=stopped_run)
                 value = await wait(stopped_run, 'A')
                 stopped = await call('stop', run=stopped_run)
-                assert stopped['state'] == 'INCOMPLETE'
+                assert stopped['state'] == 'STOPPED'
                 assert stopped['outcome']['reason'] == 'Stopped by the user in chat'
                 await call('answer', error='start', run=stopped_run,
                            request=value['waitingFor']['request'], words='I accept')
@@ -155,11 +155,11 @@ def test_chat_controls_and_continuity(tmp_path, capsys):
                 with anyio.fail_after(10):
                     while True:
                         value = await call('state', run=declined_run)
-                        if value['state'] == 'INCOMPLETE' and value['controller'] == 'idle':
+                        if value['state'] == 'STOPPED' and value['controller'] == 'idle':
                             break
                         await anyio.sleep(.05)
                 reason = value['outcome']['reason']
-                assert 'decline' in reason and 'No, not this' in reason
+                assert value['state'] == 'STOPPED' and 'No, not this' in reason
             tasks.cancel_scope.cancel()
 
     anyio.run(journey)

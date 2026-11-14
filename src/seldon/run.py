@@ -1,6 +1,7 @@
 """C1/C8/C15/C23/I6; R7/R9/R11: one wave of independent unit lifecycles, then final proof."""
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from . import (
@@ -25,7 +26,7 @@ from . import (
 from .states import advance
 from .store import RunRow, Store, UnitRow
 
-TERMINAL = {"ACCEPTED", "SCRIPTED_C", "INCOMPLETE"}
+TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED"}
 
 
 def eligible(store):
@@ -66,19 +67,6 @@ def eligible(store):
     gitwork.unchanged(store.root.parent, cursor.candidate)
 
 
-def incomplete(store, reason):
-    failed = {r: u.failure for r, u in store.units().items() if u.state == "FAILED"}
-    blocked = {r: u.failure for r, u in store.units().items() if u.state == "BLOCKED"}
-    stops = [b for _, _, b in store.records("planning_stop")
-             if b["revision"] == store.cursor().revision]
-    outcome = store.record("outcome", {"accepted": False, "verification_complete": False,
-        "reason": reason, "failed": failed, "blocked": blocked,
-        "nextAction": ("Resolve the named planning defect, reopen, and call Run.resume_planning()."
-                       if stops and store.cursor().state in ("DETAIL", "ARCHITECT") else
-                       "Resolve the named failure, then start a fresh run.")})
-    advance(store, "fail", outcome)
-
-
 class Run:
     """The front door owns only its dependencies; modules receive the store and subjects explicitly."""
     def __init__(self, project, scratch, dream, setup, provider, user, capacity=None):
@@ -114,8 +102,7 @@ class Run:
             if row.state == "WORKING":
                 units.thread_from_recording(self.store, ref)
                 reason = "Controller interrupted WORKING; reconcile its report or resume its partial patch"
-                advance(self.store, "exhausted" if row.recoveries >= 2 else "reopen", reason, unit=ref,
-                        failure=reason, recoveries=min(2, row.recoveries + 1))
+                advance(self.store, "reopen", reason, unit=ref, failure=row.failure + "\n" + reason)
         return self
 
     def step(self):
@@ -124,8 +111,10 @@ class Run:
         state = cursor.state
         if state in TERMINAL:
             return state
-        kickoff = store.read(cursor.kickoff)
-        if state == "ALIGN":
+        if cursor.decision and (state != "EXECUTE" or store.read(cursor.decision)["gate"] != "UNIT"):
+            decisions.decide(store, self.provider, self.user)
+        elif state == "ALIGN":
+            kickoff = store.read(cursor.kickoff)
             facts = {**questions.user_words(store), "Runtime": questions.runtime(kickoff["setup"])}
             ref, answer = inference.call(store, self.provider, questions.build("ALIGN", facts))
             advance(store, "aligned", ref, vision=ref, requestedChange=None)
@@ -174,10 +163,9 @@ class Run:
                         store.unit(ref, UnitRow())
                         advance(store, "create", cursor.B, unit=ref)
             scheduler.execute(store, self.provider, self.capacity)
-            failures = {r: {"state": u.state, "reason": u.failure} for r, u in store.units().items()
-                        if u.state != "DONE"}
-            if failures:
-                incomplete(store, "Units incomplete: " + str(failures))
+            decisions.ask_unit(store)
+            if store.cursor().decision:
+                decisions.decide(store, self.provider, self.user)
             else:
                 advance(store, "finished", "Every unit integrated")
         elif state == "WAVE-VERIFY":
@@ -192,25 +180,14 @@ class Run:
             flow_review.step(store, self.provider)
         elif state in ("PRODUCT-JUDGE", "PRODUCT-FACTS"):
             judgment.step(store, self.provider)
-        return store.cursor().state
-
-    def resume_planning(self):
-        if self._lease.closed:
-            raise ValueError("Reopen the stopped run before resuming planning")
-        cursor = self.store.cursor()
-        stops = [(r, b) for r, _, b in self.store.records("planning_stop")
-                 if b["revision"] == cursor.revision and b["vision"] == cursor.vision]
-        if cursor.state != "INCOMPLETE" or cursor.B or self.store.units() or not stops:
-            raise ValueError("Only a stopped pre-B planning correction can resume")
-        ref, stop = stops[-1]
-        with self.store.transaction():
-            resumed = self.store.record("planning_resume", {
-                "vision": cursor.vision, "revision": cursor.revision, "stop": ref})
-            advance(self.store, "resume-" + stop["stage"], resumed, failure="")
+        cursor = store.cursor()
+        if cursor.failure:
+            with store.transaction():
+                store.cursor(replace(cursor, failure=""))
+        return cursor.state
 
     def run(self, wait=None):
         import time
-        from dataclasses import replace
 
         from .providers import ProviderFailure
 
@@ -221,6 +198,8 @@ class Run:
             while cursor.state not in TERMINAL:
                 try:
                     self.step()
+                except decisions.Waiting:
+                    break
                 except (ProviderFailure, proof.UncertainCleanup) as error:
                     receipt = getattr(error, "receipt", None)
                     reason = str(error) + (f"; receipt: {receipt}" if receipt else "")
@@ -230,14 +209,16 @@ class Run:
                         break
                     wait(delay)
                     delay = min(900, delay * 2)
+                except (ValueError, RuntimeError, OSError) as error:
+                    if self.store.cursor().decision:
+                        break
+                    decisions.request(self.store, self.store.cursor().state, {
+                        "step": self.store.cursor().state, "tried": [f"{type(error).__name__}: {error}"],
+                        "affects": [], "recommendation": "", "options": ["Try again", "Give direction", "Stop"]})
+                    cursor = self.store.cursor()
                 else:
                     cursor = self.store.cursor()
-                    if cursor.failure:
-                        with self.store.transaction():
-                            cursor = self.store.cursor(replace(cursor, failure=""))
                     delay = 60
-        except (ValueError, RuntimeError, OSError) as error:
-            incomplete(self.store, f"{type(error).__name__}: {error}")
         finally:
             self._lease.close()
         return self.store.cursor()
