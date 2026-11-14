@@ -1,4 +1,4 @@
-# SELDON BLUEPRINT v1.8 — how Seldon builds large dreams
+# SELDON BLUEPRINT v1.9 — how Seldon builds large dreams
 
 > **Status: RATIFIED v1 by Oren, 2026-11-11 ("Ratify it"). Written by Fable at Oren's request. Binding on every builder (Fable, Opus, Codex, any other agent).**
 > **Sprint rule (Oren, 2026-11-11):** *we are a one-person startup; we sprint all the time and do not work like a dinosaur with endless ceremonies.* Every rule below exists because a real run failed without it. A rule that slows work without preventing a failure gets deleted.
@@ -10,6 +10,7 @@
 > **v1.6 (Oren, 2026-11-13, "Ok you can ratify"):** two execution rules from the P10 bird's-eye (Fable + Astra) after M2 exit cohort #4 reached 4/10 on five different walls: every check has one owner and a declared level; every check run is hermetic (§3.1). Notes: `work/ladder/design-review/birds-eye-2026-11-13-{fable,astra}.md`.
 > **v1.7 (Oren, 2026-11-13, "Ok, I accept both re. 15 and process.py changes"):** M3 wording from Fable's design (REC-15): wave-exclusive scopes with the latest path owner; B binds the accepted commitments, other changes go through STEER and show at check-in; VALIDATE per accepted commitment, quality per area; placeholders name their commitment; §8.4 C15 reading for folded commits. §5: processes.py may replace its bootstrap with a suspended start. Notes: `work/ladder/design-review/m3-design-2026-11-13.md`.
 > **v1.8 (Oren, 2026-11-13, "no hard caps on budget anywhere, but later efficiency debrief"):** R15: no size, time or count limit refuses a question, fails a unit or ends a run; limits only route (split, recover, steer, ask the user). §3.2: the end of the steering chain is a user question. P11: efficiency debrief after each cohort or fight. §5: every hard cap dropped. Addendum (Oren, same day, "Can never fail basically ... worst case planner out of usage and can continue when usage back"): a run never fails; every stop is a user question or a resumable pause. Notes: `work/ladder/design-review/no-hard-caps-2026-11-13-fable.md`.
+> **v1.9 (Oren, 2026-11-14, "Yes ratify"):** Rule 3 from Fable's cohort-m2c review: RED is an observation, not a declaration. Code records whether each check failed without the unit's product and never refuses on it; the unit JUDGE decides whether a check that passed there is enough for its requirement. `establishes`/`preserves` leave the check record (§3.1), the PROVING row (§3.2) and §8.1's reading of C14. Evidence: c04, d02, d05, e03-e05 (T-141). Notes: `work/ladder/design-review/cohort-m2c-2026-11-14-fable.md` §3, §5.
 > **Place:** directly under `CHARTER.md`. The charter says *what* Seldon must do. This says *what shape the machine has* so that it holds at size. If they conflict, the charter wins and the conflict goes to Oren the same day. It waives no C# or I#; a piece not built yet is still a registered Deviation (charter §8).
 > **Only Oren changes this document.** Builders propose edits with run evidence.
 > **Supersedes** `CLEAN-CORE-DESIGN.md` where they differ. `CLEAN-CORE-DECISION.md` stays in force (clean core, question rules, taste, leeway, hygiene).
@@ -48,7 +49,7 @@ These six are the load-bearing parts. Work that serves none of them waits.
 | **Contract** | One agreement between areas or units: an API, schema, file format, shared type, UI structure, command line. Exactly one provider; named consumers. |
 | **Decision** | A recorded choice and its reason (architecture, research, user). |
 | **Feature / Requirement** | The story and acceptance; the observable obligation. |
-| **Check** | An ordinary command and what it proves. Declares `establishes` (must fail before the work, pass after) or `preserves` (must pass before and after). Levels: unit, contract, wave, walkthrough. Every check declares its level and has exactly one owner: the unit whose scope holds its file. A unit check is proven inside its unit; a wave check runs only on the integrated product and only its owner repairs it. Every check run observes an exact commit in its own disposable checkout that code cleans afterwards; scratch and evidence live outside the product files; code never refuses a run for what a check left behind. |
+| **Check** | An ordinary command and what it proves. Code observes whether it fails without the work (RED) and passes with it; it declares no mode. Levels: unit, contract, wave, walkthrough. Every check declares its level and has exactly one owner: the unit whose scope holds its file. A unit check is proven inside its unit; a wave check runs only on the integrated product and only its owner repairs it. Every check run observes an exact commit in its own disposable checkout that code cleans afterwards; scratch and evidence live outside the product files; code never refuses a run for what a check left behind. |
 | **Wave** | A goal and its units. Ends in an integrated, running, proven product. |
 | **Unit** (the charter's bead) | One agent session's worth of work: a path scope, its requirements and checks, the contracts it provides and consumes, its dependencies. A unit's scope is exclusive among the units of its wave. A later wave's unit may take paths an earlier unit owned. The owner of a path is the latest unit whose scope holds it; that owner inherits the checks stored there and may change one only when its plan names it. |
 
@@ -67,8 +68,8 @@ B approves the architecture, the wave outline and wave 1. What the user's approv
 |---|---|---|
 | READY | code | Dependencies integrated, consumed contracts available, scope free. |
 | WORKING | one worker session | Writes checks and product inside its scope, runs them, inspects its own results. Returns its patch with a handoff: notes, concerns, deviations, findings. These reach the planner at STEER (C10, C16). |
-| PROVING | code | Diff stays in scope. `establishes` checks fail on the unit's base without its product changes, or, if an earlier unit of the same wave already makes them pass there, fail on the wave's start commit; they pass with them. `preserves` checks pass both times. |
-| JUDGING | LLM, this unit only | Are the checks meaningful for these requirements? Any stub, mock or missing behaviour? |
+| PROVING | code | Diff stays in scope. Every check of the unit runs on the unit's base without its product changes and, if it passed there, on the wave's start commit; code records those results and never refuses on them. All checks pass with the product. |
+| JUDGING | LLM, this unit only | Are the checks meaningful for these requirements? Any stub, mock or missing behaviour? Is the observed RED enough: a requirement new in this unit needs a check that failed without the product; a check that passed there proves preservation only. |
 | INTEGRATING | code | Merge into the wave candidate; affected checks rerun on the new commit. |
 | DONE | | |
 
@@ -163,7 +164,7 @@ Later pieces attach at one named place each: research (C7) as a unit kind; open-
 
 ## 8. Ratified decisions (Oren, 2026-11-11)
 
-1. **R9's reading of C14 is confirmed:** code proves, per unit, that the tests fail without the work and pass with it. Writing tests in a separate session is Seldon's choice (C13).
+1. **R9's reading of C14 is confirmed (v1.9 wording):** code observes, per unit, whether the tests fail without the work and pass with it; the unit judge decides whether the observed RED is the right reason for each requirement. Writing tests in a separate session is Seldon's choice (C13).
 2. **The L3 confirmation dream is the ANC system:** active noise cancellation on this PC with the Andiamo interface, accelerometer and microphone inputs, hardware driver control, performance simulation, data recording with a local storage server, real-time ANC, and code for the ADSP-21569 evaluation board if PC latency is not good enough. Brief: `work/ladder/L3-DREAM-ANC.md` in the dev workspace.
 3. **Who builds Seldon:**
 
