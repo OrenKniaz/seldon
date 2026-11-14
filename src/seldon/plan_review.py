@@ -13,12 +13,19 @@ def briefs(document, words):
     agreements = dict(zip((c["handle"] for c in outline["contracts"]),
                           plan.select(document, "contract").values(), strict=True))
     coverage = plan.coverage(document)
+    writers = plan.owners(document)
+    areas = dict(zip(plan.select(document, "area"), outline["areas"], strict=True))
     result = {}
-    for area, area_ref in zip(outline["areas"], plan.select(document, "area"), strict=True):
+    for area_ref, area in areas.items():
         owned = {r: u for r, u in units.items() if u["area"] == area_ref}
         requirements = {r for u in owned.values() for r in u["requirements"]}
         features = {f for r in requirements for f in document["nodes"][r]["body"]["features"]}
-        checks = {r for r, w in plan.owners(document).items() if w in owned}
+        checks = {r for r, w in writers.items() if w in owned}
+
+        def links(refs):
+            return {"checks": [r for r in refs if r in checks], "provenElsewhere": [
+                {"area": areas[units[writers[r]]["area"]]["handle"],
+                 "purpose": document["nodes"][r]["body"]["purpose"]} for r in refs if r not in checks]}
         refs = set(owned) | requirements | features | checks
         refs.update(r for r, o in plan.select(document, "obligation").items() if o["owner"] in owned)
         nodes = {r: n for r, n in document["nodes"].items() if r in refs}
@@ -33,10 +40,8 @@ def briefs(document, words):
                 "integrates": [c["handle"] for c in contracts if removed.intersection(
                     units[agreements[c["handle"]]["provider"]]["requirements"])]}}
         for r, c in plan.select(document, "criterion").items():
-            nodes[r] = {"kind": "criterion", "body": {
-                **c, "checks": [ref for ref in c["checks"] if ref in checks]}}
-        trace = {r: {"checks": [c for c in row["checks"] if c in checks],
-                     "units": [u for u in row["units"] if u in owned]}
+            nodes[r] = {"kind": "criterion", "body": {**c, **links(c["checks"])}}
+        trace = {r: {**links(row["checks"]), "units": [u for u in row["units"] if u in owned]}
                  for r, row in coverage.items() if r in requirements or r.startswith("quality:")}
         result[area["handle"]] = questions.build("REVIEW", {
             "Review subject": area["handle"], "Approved vision": vision, "Area": area,

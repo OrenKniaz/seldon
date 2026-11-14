@@ -144,9 +144,8 @@ def local_plan(area, contracts, answer, vision, single_area):
     for edit in answer["edits"]:
         if edit["kind"] in relations:
             field, kind = relations[edit["kind"]]
-            if any(handles.get(r) != kind and not (
-                    kind == "requirement" and r in contracts
-                    and endpoint(area["handle"], contracts[r]))
+            if any(handles.get(r) != kind and not (kind == "requirement" and r in contracts
+                    and endpoint(area["handle"], contracts[r]) == "consumer")
                    for r in edit["typedBody"][field]):
                 raise ValueError(f"Local {field} must name this area's {kind} handles")
         if edit["kind"] == "obligation":

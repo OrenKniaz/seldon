@@ -1569,6 +1569,13 @@ def test_large_judge_journey(tmp_path):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("mode", ["foreign", "progress", "fixed-point"])
+def test_rule2_journeys(tmp_path, mode):
+    from test_review import rule2_journey
+    rule2_journey(tmp_path / "rule2", mode)
+
+
+@pytest.mark.fast
 def test_clean_core_golden(tmp_path):
     """One-unit C protects the actual approved delivery path; parallel/fan-in catches serialization.
 
@@ -2300,6 +2307,7 @@ def clean_core_golden(root):
     for key in ("TEMP", "TMP", "TMPDIR"):
         os.environ[key] = str(root)
     began = time.monotonic()
+    __import__("test_contract_owner").contract_owner_journeys(root / "contract-owner")
     __import__('test_proof').hermetic_journey(root / 'hermetic')
     __import__("test_architect").user_words_journeys(root / "user-words")
     __import__("test_architect").check_owner_journeys(root / "check-owner")

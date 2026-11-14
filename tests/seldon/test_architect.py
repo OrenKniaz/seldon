@@ -146,7 +146,7 @@ def area_product_journey(tmp_path):
 
 
 def area_recovery_journey(tmp_path, mode):
-    """Contract gaps get one architectural correction; oversized answers split without losing work.
+    """Contract gaps return to architecture until an outline repeats; large answers split without loss.
 
     Successful fixed-size planning cannot catch DETAIL inventing interfaces, repeated architecture
     loops or truncation at a unit ceiling. The split is checked at B; delivery uses the same merged
@@ -158,7 +158,10 @@ def area_recovery_journey(tmp_path, mode):
         if mode == "unresolved":
             run.run()
             assert run_state(str(run.project))["status"] == "WAITING"
-            assert "after one ARCHITECT re-ask" in str(run_state(str(run.project))["waitingFor"])
+            waiting = run_state(str(run.project))["waitingFor"]
+            assert waiting["gate"] == "DETAIL"
+            shown = "\n".join(waiting["subject"]["tried"])
+            assert "same outline" in shown and "second value needs the first value's format" in shown
             assert not any(b["gate"] == "B" for _, _, b in run.store.records("decision_request"))
         else:
             if mode == "split":
@@ -384,7 +387,7 @@ def review_links_journeys(root):
 
     Existing adequate reviewers ignore foreign ids, hiding merge-derived links the area cannot resolve.
     Their repaired reviews also cannot catch a count ending a run before the user sees the open gap.
-    Keep g04's interface answer verbatim; a small server supplies its two consumed HTTP agreements.
+    Retain g04's HTTP consumer checks; remove its obsolete provider-owned integration instructions.
     """
     # shelflife-26e68f0-g04: recorded answer r47 (interface DETAIL, first valid answer).
     interface_detail = {'edits': [{'kind': 'feature',
@@ -509,7 +512,7 @@ def review_links_journeys(root):
                                                   'resources are cleaned up.',
                               'level': 'wave',
                               'mode': 'establishes',
-                              'purpose': 'Provider-owned integration check for page-assets, '
+                              'purpose': 'Consumer integration check '
                                          'consuming http-items and http-errors. Catch mismatched '
                                          'asset routes, API envelopes or mutation refresh behavior '
                                          'hidden by controlled local responses. Use the canonical '
@@ -543,9 +546,7 @@ def review_links_journeys(root):
                                 'page/actions, not extra editing screens or backend behavior. The '
                                 'local check must exercise actual browser assets and save all states '
                                 'needed for visual judgment. Its fixture proves UI behavior only. '
-                                'Author exactly one provider-owned page-assets wave check against '
-                                'the integrated canonical server; its absence in this checkout is '
-                                'expected and must not block local evidence. Use the supplied '
+                                'Use the supplied '
                                 'runtime paths without installs or downloads. Link consumed '
                                 'contracts to their provider requirements through the contract '
                                 'handles, not guessed foreign requirement names. Backend validation, '
@@ -560,8 +561,7 @@ def review_links_journeys(root):
      'verdict': 'planned',
      'why': 'One owner covers the complete interface scope without introducing internal contracts or '
             'serial handoffs. Local browser evidence establishes owned behavior and visual states; '
-            'one provider-owned wave check establishes page-assets integration with the consumed '
-            'HTTP contracts. Backend, importer and fresh-folder delivery criteria remain with their '
+            'Backend, importer and fresh-folder delivery criteria remain with their '
             'respective owners.'}
     correction = "Explain how API failure feedback preserves entered values"
 
@@ -1169,6 +1169,11 @@ def recorded_detail_journeys(root):
     print(f"Recorded DETAIL journeys: {time.monotonic()-began:.2f}s", flush=True)
 
 
+@pytest.mark.fast
+def test_recorded_detail_journeys(tmp_path):
+    recorded_detail_journeys(tmp_path / "recorded-detail")
+
+
 def architect_journeys(tmp_path):
     """Contract delivery and local planning recovery share the canonical plan and recorder."""
     began = time.monotonic()
@@ -1176,7 +1181,7 @@ def architect_journeys(tmp_path):
     correction_journeys(tmp_path / "corrections")
     recorded_detail_journeys(tmp_path / "recorded")
     area_product_journey(tmp_path)
-    for mode in ("gap", "unresolved", "split"):
+    for mode in ("gap", "split"):
         area_recovery_journey(tmp_path, mode)
     print(f"ARCHITECT contract journeys: {time.monotonic()-began:.2f}s", flush=True)
 

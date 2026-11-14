@@ -6,20 +6,14 @@ from . import architecture, inference, plan, plan_review, questions
 from .states import advance
 
 
-def resume_id(store):
-    rows = [b["request"] for _, _, b in store.records("approval")
-            if "step" in b["subject"] and b.get("choice") in ("approve", "revise")]
-    return rows[-1] if rows else None
-
-
 def gap(store, corrections):
     cursor = store.cursor()
-    resumed = resume_id(store)
-    if any(b["vision"] == cursor.vision and b.get("resume") == resumed
+    outline = store.plan(cursor.revision)["architecture"]
+    if any(b["vision"] == cursor.vision and b.get("outline") == outline
            for _, _, b in store.records("architecture_gap")):
-        raise ValueError("Remains after one ARCHITECT re-ask: " + str(corrections))
+        raise ValueError("Architecture gap remains with the same outline: " + str(corrections))
     with store.transaction():
-        ref = store.record("architecture_gap", {"vision": cursor.vision, "resume": resumed,
+        ref = store.record("architecture_gap", {"vision": cursor.vision, "outline": outline,
                            "gap": str(architecture.DetailCorrection(corrections))})
         advance(store, "contract-gap", ref)
 
@@ -28,7 +22,8 @@ def step(store, provider, capacity):
     cursor = store.cursor()
     outline = store.plan(cursor.revision)["architecture"]
     vision = store.read(cursor.vision)["answer"]
-    resumed = resume_id(store)
+    resumed = next((b["request"] for _, _, b in reversed(store.records("approval"))
+                    if "step" in b["subject"] and b.get("choice") in ("approve", "revise")), None)
     done, refs = {}, []
     repairs = [(r, b["corrections"]) for r, _, b in store.records("review_repair")
                if b["revision"] == cursor.revision]

@@ -63,6 +63,84 @@ class ReviewProvider(AreaProvider):
         return json.dumps(answer)
 
 
+def rule2_journey(root, mode):
+    """Foreign quality proof stays visible; changed gaps replan and a repeated outline asks at DETAIL.
+
+    The c05 twin's importer reviewer needs delivery's API/UI check in both criterion and trace views.
+    Existing local-link reviews miss that omission, and their single-gap repair misses a second,
+    unrelated gap being refused by a count instead of answered by ARCHITECT.
+    """
+    from test_architect import area_recovery_journey
+
+    if mode == "fixed-point":
+        area_recovery_journey(root, "unresolved")
+        return
+
+    class Rule2Provider(AreaProvider):
+        def __init__(self, slot, mode):
+            super().__init__(slot, 3, "gap")
+            self.rule2_mode = mode
+
+        def __call__(self, question):
+            kind, facts = question["kind"], question["facts"]
+            if kind == "REVIEW" and facts["Review subject"] != "architecture":
+                checks = plan.select(facts["Plan"], "check")
+                rows = [*plan.select(facts["Plan"], "criterion").values(),
+                        *(row for r, row in facts["Trace coverage"].items() if r.startswith("quality:"))]
+                missing = self.rule2_mode == "foreign" and any(not any(
+                    c["area"] == "area-003" and "API" in c["purpose"] and "UI" in c["purpose"] for c in
+                    [*[{**checks[r], "area": facts["Review subject"]} for r in row["checks"]],
+                     *row.get("provenElsewhere", [])]) for row in rows)
+                return json.dumps({"answer": {"verdict": "gap" if missing else "adequate",
+                    "gaps": [{"target": "quality", "correction": "Name delivery's API/UI check"}]
+                            if missing else [], "why": "Review the supplied quality proof locations"}})
+            answer = json.loads(super().__call__(question))["answer"]
+            if kind == "ARCHITECT":
+                if self.rule2_mode == "foreign" and not answer["contracts"]:
+                    answer["contracts"] = [
+                        {"handle": f"link-{i}", "kind": "file-format", "text": "UTF-8 value-NNN.",
+                         "provider": f"area-{i:03}", "consumers": [f"area-{i+1:03}"]} for i in (1, 2)]
+                if self.rule2_mode == "progress" and self.arch_calls == 2:
+                    answer["contracts"] = answer["contracts"][:1]
+            if kind == "DETAIL":
+                area = facts["Area"]["handle"]
+                if self.rule2_mode == "progress" and self.arch_calls == 2 and area == "area-002":
+                    answer = {"verdict": "contract_gap",
+                              "need": "The API needs delivery's consuming agreement"}
+                if self.rule2_mode == "foreign" and answer["verdict"] == "planned":
+                    check = next(e for e in answer["edits"] if e["kind"] == "check")
+                    if area == "area-003":
+                        check = deepcopy(check)
+                        check["targetHandle"] += "-wave"
+                        check["typedBody"].update(level="wave",
+                                                  command=[*check["typedBody"]["command"], "--api-ui"])
+                        answer["edits"].append(check)
+                    check["typedBody"]["purpose"] = {
+                        "area-001": "Parse the imported CSV rows", "area-002": "Persist imported rows",
+                        "area-003": "Import CSV via the API and display the rows in the browser UI"}[area]
+                    answer["quality"] = [{"criterion": i, "checks": [check["targetHandle"]]} for i in (1, 2)]
+            return json.dumps({"answer": {**answer, "why": "Answer the current area agreement gap"}})
+
+    run, base = start(root / mode, mode="gap")
+    run.provider = Rule2Provider(base.slot, mode)
+    try:
+        while run.store.cursor().state != "B":
+            run.step()
+        review = run.store.read(run.store.cursor().review)
+        assert review["answer"] == {"verdict": "adequate", "gaps": []}
+        assert not run.store.records("review_repair")
+        if mode == "progress":
+            gaps = [b["gap"] for _, _, b in run.store.records("architecture_gap")]
+            assert any("second value needs the first" in g for g in gaps)
+            assert any("API needs delivery's consuming agreement" in g for g in gaps)
+        else:
+            importer = run.store.read(review["subjects"]["area-001"])["answer"]
+            assert importer["verdict"] == "adequate"
+        assert run.step() == "EXECUTE" and run.store.cursor().B
+    finally:
+        run.close()
+
+
 def review_journeys(root):
     """Architecture is reviewed before three concurrent area verdicts and one B; gaps replan their owners.
 
