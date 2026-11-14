@@ -166,10 +166,6 @@ def local_plan(area, contracts, answer, vision, single_area):
             if isinstance(dep, int):
                 if dep > len(answer["units"]):
                     raise ValueError("Dependencies must name local unit positions")
-            else:
-                plan.safe_path(dep)
-                if "*" in dep or "?" in dep:
-                    raise ValueError("A file prerequisite must name a concrete file")
         for field, side in (("provides", "provider"), ("consumes", "consumer")):
             if len(set(unit[field])) != len(unit[field]):
                 raise ValueError(f"Name each existing contract once in {field}")
@@ -212,7 +208,7 @@ def local_plan(area, contracts, answer, vision, single_area):
                     raise ValueError(f"{path}: needs one planned file owner in {area['handle']}")
                 owner, = writers
                 if owner != ref and owner not in unit["dependencies"] and path not in files:
-                    raise ValueError(f"{ref}: reading {path} needs a dependency edge to {owner}")
+                    original["dependencies"].append(path)
 
 
 def subdivision(parent, answer, known_contracts):

@@ -76,11 +76,11 @@ PROMPTS = {
               "Trace quality criteria by their supplied 1-based positions. Commands are argv. "
               "Checks run automatically; Seldon judges visual quality from saved screenshots. "
               "If the answer exceeds the small list bounds, return subdivide with narrower sub-areas "
-              "covering this responsibility and their contracts. If an agreement or needed scope is missing, "
-              "return contract_gap and the need; do not invent an agreement. " + AGREED_LITERALS,
+              "covering this responsibility and their contracts. Missing or unagreed contracts or scope "
+              "return contract_gap; ARCHITECT settles proposals within commitments. " + AGREED_LITERALS,
     "REVIEW": "Does this area's plan deliver its part of the accepted scope and quality bar? "
               "Check its records, agreements and trace coverage. "
-              "Judge only the supplied subject. Name concrete gaps only. "
+              "Target missing or unagreed shared contracts at architecture; other gaps name local records. "
               + AGREED_LITERALS,
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "CONTRACT": "What contract text resolves this worker's need within the accepted commitments? "

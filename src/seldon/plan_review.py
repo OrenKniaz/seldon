@@ -139,7 +139,8 @@ def step(store, provider, capacity):
     refs["architecture"] = next(b["answer"] for _, _, b in reversed(store.records("area_review"))
                                 if b["subject"] == "architecture" and b["basis"] == outline_question)
     answers = {s: store.read(r)["answer"] for s, r in refs.items()}
-    gaps = [{**g, "area": s} for s, a in answers.items() for g in a["gaps"]]
+    gaps = [{**g, "area": "architecture" if g["target"] == "architecture" else s}
+            for s, a in answers.items() for g in a["gaps"]]
     not_judged = {s: {"reason": a["why"], "neededFacts": a["neededFacts"]}
                   for s, a in answers.items() if a["verdict"] == "not judged"}
     verdict = "gap" if gaps else "not judged" if not_judged else "adequate"

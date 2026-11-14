@@ -109,6 +109,13 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
             print(json.dumps(question["schema"], indent=2))
             return 0
         cursor = loop.run()
+        # A question persisted mid-step ends run() WAITING before the user callback; resume so the
+        # (simulated) owner sees it, as the front door would. Stop when the owner gives no new words.
+        while os.environ.get("SELDON_SIM_USER") and cursor.decision:
+            before = cursor.decision
+            cursor = loop.run()
+            if cursor.decision == before:
+                break
         # A run never fails (R15): it ends with an outcome or waits on one question; print whichever it is.
         from seldon.frontdoor import state
         outcomes = loop.store.records("outcome")

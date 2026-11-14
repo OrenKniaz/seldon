@@ -79,6 +79,9 @@ def step(store, provider, capacity):
     def collect(pending, correction=None):
         nonlocal outline
         leaves, failures, gaps = [], {}, {}
+        if correction and "architecture" in correction[1]:
+            pending, gaps = [], correction[1]
+            refs.append(correction[0])
         with ThreadPoolExecutor(max_workers=capacity) as pool:
             while pending:
                 batch, pending = pending, []

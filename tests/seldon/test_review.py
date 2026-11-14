@@ -214,6 +214,112 @@ def review_journeys(root):
     print(f"Area REVIEW adequate/local/cross/three-repair limit: {time.monotonic()-began:.2f}s", flush=True)
 
 
+def plan_contract_gap_journey(slot, case):
+    """A late shared-semantics gap reaches its contract owner, not endless area DETAIL.
+
+    Outline-only review misses j04's gap discovered from an area's integrated check. The fixed-point
+    twin protects accepted commitments; the local-read twin catches needless structural re-asks.
+    """
+    from seldon import architecture
+    from seldon.decisions import Waiting
+    from test_journey import VISION
+
+    need = ("Supply an agreed query-semantics contract covering search matching, the calendar-date "
+            "basis and expiry-window inclusion rules; the vision lists these only as proposals.")
+    agreement = ("Search is a case-insensitive name substring; use the server's local calendar date, "
+                 "include overdue items through today plus DAYS, and exclude undated items.")
+    if case == "accepted":
+        need += " This would change the accepted case-sensitive search and overdue exclusion commitments."
+    if case == "derived":
+        run, provider = prepare(slot, "ask", 2)
+        provider.plan_fault = lambda body: body["units"][1].update(reads=["unit-001/value.txt"])
+    else:
+        run, base = start(slot, 3, "sizing")
+
+        class ContractProvider(AreaProvider):
+            def __init__(self):
+                super().__init__(base.slot, 3, "sizing")
+                self.vision = deepcopy(VISION)
+                self.vision["unknowns"] = ["Proposed: " + agreement]
+                if case == "accepted":
+                    self.vision["scopeIn"].append("Keep search case-sensitive; never include overdue items.")
+
+            def areas(self):
+                return [{"handle": f"area-{i:03}", "responsibility": "Deliver named values",
+                         "scope": [f"unit-{i:03}/**"],
+                         "commitments": list(architecture.commitments(self.vision))} for i in (1, 2, 3)]
+
+            def __call__(self, question):
+                kind, facts = question["kind"], question["facts"]
+                if kind == "ALIGN":
+                    return json.dumps({"answer": {**self.vision, "why": "The query proposals remain open"}})
+                if kind == "REVIEW":
+                    missing = facts["Review subject"] == "area-002" and not facts["Contracts"]
+                    return json.dumps({"answer": {"verdict": "gap" if missing else "adequate",
+                        "gaps": [{"target": "architecture", "correction": need}] if missing else [],
+                        "why": "The integrated query check needs agreed semantics"}})
+                reply = json.loads(super().__call__(question))
+                if kind == "ARCHITECT" and "Architecture correction" in facts and case != "accepted":
+                    reply["answer"]["contracts"] = [{"handle": "query-semantics", "kind": "api",
+                        "text": agreement, "provider": "area-001", "consumers": ["area-002"]}]
+                    reply["answer"]["decisions"] = [{"choice": "Settle the proposed query semantics",
+                        "origin": "architecture",
+                        "reason": "Makes the accepted query behaviour consistent across areas",
+                        "areas": ["area-001", "area-002"]}]
+                if kind == "DETAIL" and facts["Area"]["handle"] == "area-002" and facts["Contracts"]:
+                    check = deepcopy(next(e for e in reply["answer"]["edits"] if e["kind"] == "check"))
+                    check["targetHandle"] = "query-integration"
+                    check["typedBody"].update(level="wave", requirements=["new:r002", "query-semantics"])
+                    reply["answer"]["edits"].append(check)
+                if kind == "DETAIL" and facts["Area"]["handle"] == "area-003":
+                    reply["answer"]["units"][0].update(consumes=[], reads=[], dependencies=[])
+                return json.dumps(reply)
+
+        run.provider = provider = ContractProvider()
+    shown = []
+
+    def user(item):
+        shown.append(item)
+        if item["gate"] != "A":
+            raise Waiting()
+        return approve(item)
+
+    run.user = user
+    try:
+        run.run()
+        pending = run_state(str(run.project))["waitingFor"]
+        requests = [b for _, _, b in run.store.records("decision_request")]
+        if case == "accepted":
+            assert pending["gate"] == "REPAIR" and need in str(pending["subject"])
+            assert len(requests) == 2 and not run.store.cursor().B
+            assert not run.store.records("outcome")
+            assert run.store.plan(run.store.cursor().revision)["nodes"]["vision"]["body"]["scopeIn"] == (
+                provider.vision["scopeIn"])
+            # Lineage exposes a fresh-words question before ending this session; next turn delivers it.
+            run.close()
+            run = Run.reopen(slot / "product", provider, user)
+            run.run()
+            assert shown[-1]["request"] == pending["request"]
+            assert len([i for i in shown if i["gate"] == "REPAIR"]) == 1
+            assert run_state(str(run.project))["waitingFor"] == pending
+            return
+        assert pending["gate"] == "B" and [b["gate"] for b in requests] == ["A", "B"]
+        document = run.store.plan(run.store.cursor().revision)
+        assert run.store.read(run.store.cursor().review)["answer"] == {"verdict": "adequate", "gaps": []}
+        if case == "derived":
+            assert plan.select(document, "unit")["u002"]["dependencies"] == ["u001"]
+            assert not run.store.records("detail_correction")
+        else:
+            assert len(run.store.records("architecture_gap")) == 1
+            contract, = plan.select(document, "contract").values()
+            assert contract["text"] == agreement and contract["consumers"] == ["u002"]
+            crossing, = plan.assigned(document)[None].values()
+            assert set(crossing["requirements"]) == {"n002", "n005"}
+            assert not any("Merge correction" in q["facts"] for q in provider.detail_calls)
+    finally:
+        run.close()
+
+
 def uncertain_review_journey(root):
     """Unknown review facts remain visible through B, reopen and C; an area can resolve from real facts.
 

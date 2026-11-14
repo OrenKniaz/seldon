@@ -1772,6 +1772,13 @@ def test_rule2_journeys(tmp_path, mode):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("case", ["missing", "accepted", "derived"])
+def test_plan_contract_gap_journey(tmp_path, case):
+    from test_review import plan_contract_gap_journey
+    plan_contract_gap_journey(tmp_path / case, case)
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("mode", ["d04", "d05", "corrections", "fixed-point"])
 def test_rule1b_journeys(tmp_path, mode):
     from contract_binding_journey import rule1b_journey
@@ -2720,9 +2727,12 @@ def clean_core_golden(root):
     from test_fixups import blocked_owner_journeys, owner_repair_journeys
     from contract_fix_journey import contract_fix_journey
     from test_architect import agreed_literals_journey, architect_journeys
-    from test_review import recorded_review_journey, review_journeys, uncertain_review_journey
+    from test_review import (plan_contract_gap_journey, recorded_review_journey, review_journeys,
+                             uncertain_review_journey)
 
     root.mkdir(parents=True)
+    for case in ("missing", "accepted", "derived"):
+        plan_contract_gap_journey(root / ("plan-contract-" + case), case)
     for answer in ("direction", "dev"):
         ask_now_journey(root / ("ask-now-" + answer), answer)
     for mode in ("done", "pending", "user", "f01"):
