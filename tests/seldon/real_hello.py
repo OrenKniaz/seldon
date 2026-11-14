@@ -71,7 +71,25 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
 
     def yes(request):
         print(json.dumps({"scriptedDecision": request}, ensure_ascii=False), flush=True)
-        return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
+        if request["gate"] in ("A", "B", "CHECK-IN", "C") or not os.environ.get("SELDON_SIM_USER"):
+            return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
+        # Simulated owner (Oren 11-14): a cheap model answers unit/step questions from the dream only.
+        # It never waives Seldon; a run that needed it is not a planner-autonomous C (counted apart).
+        prompt = ("You are the product owner of this dream. Answer the builder's question in 1-3 plain "
+                  "sentences, as the owner would, from the dream alone. Give direction or say 'try again'. "
+                  "Never approve skipping a check, weakening a requirement, or dropping work.\n\nDream:\n"
+                  + dream + "\n\nQuestion:\n" + json.dumps(request["subject"], ensure_ascii=False)[:20000])
+        try:
+            answer = slot / "calls" / "sim-user.txt"
+            subprocess.run([*setup["codexCommand"], "exec", "--skip-git-repo-check", "--ephemeral",
+                            "--sandbox", "read-only", "--model", os.environ["SELDON_SIM_USER"],
+                            "-c", 'model_reasoning_effort="low"', "--output-last-message", str(answer), "-"],
+                           input=prompt, capture_output=True, text=True, encoding="utf-8", timeout=600)
+            words = answer.read_text("utf-8").strip() if answer.exists() else ""
+        except (OSError, subprocess.TimeoutExpired):
+            words = ""
+        print(json.dumps({"simUserAnswer": words, "gate": request["gate"]}, ensure_ascii=False), flush=True)
+        return words or {"request": request["request"], "subject": request["subject"], "choice": "approve"}
 
     loop = (Run.reopen(slot / "product", provider, yes) if reopen else
             Run(slot / "product", slot / "workers", dream, setup, provider, yes))
