@@ -272,7 +272,8 @@ def planning_direction(slot, architecture, monkeypatch, capsys):
         assert words in json.dumps(following[0]["facts"])
         assert gap in json.dumps(following[0]["facts"])
         if not architecture:
-            assert len(verdicts) == 4  # Three gap verdicts followed by the repaired plan.
+            # The repaired plan is reviewed after the owner's words (unchanged plans keep verdicts, T-172).
+            assert any(verdicts[-1] is q for q in following)
         assert len([b for _, _, b in run.store.records("decision_request")
                     if "step" in b["subject"]]) == 1
         if not architecture:
@@ -286,7 +287,7 @@ def planning_direction(slot, architecture, monkeypatch, capsys):
             output = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
             summary = next(row["planSummary"] for row in output if "planSummary" in row)
             assert summary["units"] and summary["checkCount"]
-            assert summary["reviewRounds"] == 3 and len(summary["ownerQuestions"]) == 1
+            assert summary["reviewRounds"] >= 1 and len(summary["ownerQuestions"]) == 1
             assert output[-1]["state"] == "B" and not output[-1]["ownerAccepted"]
             run = Run.reopen(slot / "product", provider, approve)
             assert run.store.cursor().state == "B" and not run.store.units()

@@ -14,6 +14,8 @@ def briefs(store, document, words):
                           (c["handle"] for c in outline["contracts"]), strict=True))
     writers = plan.owners(document)
     areas = dict(zip(plan.select(document, "area"), outline["areas"], strict=True))
+    area_of = {r: areas[u["area"]]["handle"] for r, u in units.items()}
+    bound = {agreements[r]: c for r, c in plan.select(document, "contract").items()}
     result = {}
     for area_ref, area in areas.items():
         owned = {r: u for r, u in units.items() if u["area"] == area_ref}
@@ -24,8 +26,12 @@ def briefs(store, document, words):
         refs.update(r for r, o in plan.select(document, "obligation").items() if o["owner"] in owned)
         nodes = {r: n for r, n in document["nodes"].items() if r in refs}
         participants = [area["handle"], *area.get("ancestors", [])]
-        contracts = [c for c in outline["contracts"]
-                     if any(architecture.endpoint(a, c) for a in participants)]
+        # A subject consumes the agreements its merged units bind, not the outline's guess (T-172).
+        contracts = [{**c, "provider": area_of[b["provider"]],
+                      "consumers": sorted({area_of[u] for u in b["consumers"] if u in area_of})}
+                     for c in outline["contracts"] for b in [bound[c["handle"]]]
+                     if {b["provider"], *b["consumers"]} & owned.keys()]
+        providers = sorted({c["provider"] for c in contracts} - {area["handle"]})
         for r in checks:
             check = nodes[r]["body"]
             nodes[r] = {**nodes[r], "body": {**check,
@@ -35,7 +41,8 @@ def briefs(store, document, words):
             nodes[r] = {"kind": "criterion", "body": {k: v for k, v in c.items() if k != "checks"}}
         result[area["handle"]] = questions.build("REVIEW", {
             "Review subject": area["handle"], "Approved vision": vision, "Area": area,
-            "User's words": words, "Peer checks": questions.peer_checks(store, outline, area),
+            "User's words": words, "Peer checks": questions.peer_checks(store, outline, area, {
+                p: store.read(document["areaDetails"][p])["answer"] for p in providers}),
             "Wave goal": outline["waves"][0]["goal"], "Contracts": contracts,
             "Decisions": [d for d in outline["decisions"] if set(d["areas"]) & set(participants)],
             "Plan": {"nodes": nodes}, "Proof map": plan.proof_map(
@@ -132,10 +139,12 @@ def step(store, provider, capacity):
     def ask(subject):
         try:
             question = pending[subject]
-            # Canonical DETAIL records survive global handle renumbering when another area grows.
-            basis = {"detail": document["areaDetails"][subject], "peers": {
-                        p["owner"]: document["areaDetails"][p["owner"]]
-                        for p in question["facts"]["Peer checks"]},
+            # Area-local answer content survives renumbering and re-emission under new record ids.
+            def content(area):
+                answer = store.read(document["areaDetails"][area])["answer"]
+                return {k: v for k, v in answer.items() if k != "why"}
+            basis = {"detail": content(subject), "peers": {
+                        p["owner"]: content(p["owner"]) for p in question["facts"]["Peer checks"]},
                      "facts": {k: v for k, v in question["facts"].items()
                                if k not in ("Plan", "Proof map", "Correction owners")}}
             return review(store, provider, question, basis)

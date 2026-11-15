@@ -241,19 +241,21 @@ def architect_brief(vision, words, gap=None, previous=None):
     return build("ARCHITECT", facts)
 
 
-def peer_checks(store, outline, area):
-    providers = {c["provider"] for c in outline["contracts"]
-                 if set([area["handle"], *area.get("ancestors", [])]) & set(c["consumers"])}
-    areas, latest = architecture.index(outline["areas"]), {}
-    for _, _, body in store.records("area_detail"):
-        if (body["area"] in providers and not body.get("failure") and not body.get("architecture")
-                and body["basis"]["vision"] == store.cursor().vision
-                and body["basis"]["area"] == areas[body["area"]]):
-            answer = store.read(body["answer"])["answer"]
-            if answer["verdict"] == "planned":
-                latest[body["area"]] = answer
+def peer_checks(store, outline, area, answers=None):
+    # REVIEW passes the merged plan's provider answers; DETAIL reads the latest eligible ones.
+    if answers is None:
+        providers = {c["provider"] for c in outline["contracts"]
+                     if set([area["handle"], *area.get("ancestors", [])]) & set(c["consumers"])}
+        areas, answers = architecture.index(outline["areas"]), {}
+        for _, _, body in store.records("area_detail"):
+            if (body["area"] in providers and not body.get("failure") and not body.get("architecture")
+                    and body["basis"]["vision"] == store.cursor().vision
+                    and body["basis"]["area"] == areas[body["area"]]):
+                answer = store.read(body["answer"])["answer"]
+                if answer["verdict"] == "planned":
+                    answers[body["area"]] = answer
     return [{"check": owner + "/" + e["targetHandle"], "owner": owner, "peer": True, **e["typedBody"]}
-            for owner, answer in latest.items() for e in answer["edits"] if e["kind"] == "check"]
+            for owner, answer in answers.items() for e in answer["edits"] if e["kind"] == "check"]
 
 
 def detail_brief(store, outline, area):

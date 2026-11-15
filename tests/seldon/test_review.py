@@ -461,3 +461,76 @@ def recorded_review_journey(root):
         print("Recorded y01 ARCHITECT/DETAIL/area REVIEW -> corrected B; architecture not judged", flush=True)
     finally:
         run.close()
+
+
+def existing_agreement_journey(root, case):
+    """T-172 b01 twin: REVIEW receives agreements the merged plan binds, not the outline's endpoints.
+
+    DETAIL may consume an existing contract the outline did not list for its area (b01 r190
+    "server-command absent"). Endpoint-aligned fixtures hide that projection, so the reviewer
+    calls the agreement missing and the run rewrites its architecture. The missing twin keeps a
+    genuinely absent agreement routed to ARCHITECT. A sibling re-emitting an identical plan under a
+    new record keeps its own and its consumer's verdicts; record-id bases re-ask both.
+    """
+    assets = {"handle": "assets", "kind": "file-format", "text": "Static assets live under assets/.",
+              "provider": "area-001", "consumers": ["area-002"]}
+
+    class AgreementProvider(AreaProvider):
+        def __init__(self, slot):
+            super().__init__(slot, 3, "contracts")
+            self.barrier, self.interrupted, self.reviews = None, True, []
+
+        def __call__(self, question):
+            kind, facts = question["kind"], question["facts"]
+            if kind == "REVIEW" and facts["Review subject"] != "architecture":
+                self.reviews.append(deepcopy(question))
+                gaps = []
+                if facts["Review subject"] == "area-003":
+                    agreed = {c["handle"]: c for c in facts["Contracts"]}
+                    if "assets" not in agreed:
+                        gaps = [{"target": "architecture", "correction": "Agree where static assets live"}]
+                    else:
+                        assert "area-003" in agreed["assets"]["consumers"]
+                        peer = next(p["check"] for p in facts["Peer checks"] if p["owner"] == "area-001")
+                        if not any("restart" in c["purpose"] for c in
+                                   plan.select(facts["Plan"], "check").values()):
+                            gaps = [{"target": "area-003", "correction": "Read the assets after restart"},
+                                    {"target": peer, "correction": "Confirm the assets check covers restart"}]
+                return json.dumps({"answer": {"verdict": "gap" if gaps else "adequate", "gaps": gaps,
+                                              "why": "Review the supplied agreements"}})
+            reply = json.loads(super().__call__(question))
+            answer = reply["answer"]
+            if kind == "ARCHITECT" and (case == "existing" or "Architecture correction" in facts):
+                answer["contracts"].append(dict(assets))
+            # AreaProvider's units consume every non-link agreement, so area-003 binds assets too.
+            if kind == "DETAIL" and "Merge correction" in facts and facts["Area"]["handle"] == "area-003":
+                next(e for e in answer["edits"] if e["kind"] == "check")["typedBody"]["purpose"] += (
+                    " after restart")
+            return json.dumps(reply)
+
+    run, base = start(root / case)
+    run.provider = provider = AgreementProvider(base.slot)
+    try:
+        for _ in range(40):
+            if run.store.cursor().state == "B":
+                break
+            run.step()
+        reviews = [b for _, _, b in run.store.records("plan_review")]
+        assert reviews[-1]["answer"] == {"verdict": "adequate", "gaps": []}
+        assert provider.arch_calls == (1 if case == "existing" else 2)
+        assert len(run.store.records("architecture_gap")) == (0 if case == "existing" else 1)
+        document = run.store.plan(run.store.cursor().revision)
+        units = plan.select(document, "unit")
+        agreement = next(c for c in plan.select(document, "contract").values() if c["text"] == assets["text"])
+        assert any(units[u]["area"] == units[c]["area"] for u in agreement["consumers"]
+                   for c in units if "unit-003/**" in units[c]["scope"])
+        if case == "existing":
+            first, final = reviews[0]["subjects"], reviews[-1]["subjects"]
+            assert first["area-001"] == final["area-001"] and first["area-002"] == final["area-002"]
+            assert [q["facts"]["Review subject"] for q in provider.reviews[3:]] == ["area-003"]
+        assert run.step() == "EXECUTE" and run.store.cursor().B
+        calls = {k: sum(q["kind"] == k for _, _, q in run.store.records("question"))
+                 for k in ("ARCHITECT", "DETAIL", "REVIEW")}
+        print(f"existing-agreement {case}: calls {calls}", flush=True)
+    finally:
+        run.close()

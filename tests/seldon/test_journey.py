@@ -649,8 +649,11 @@ def records_and_skeleton_journey(slot):
             while revised.store.cursor().state != "B":
                 revised.step()
             document = revised.store.plan(revised.store.cursor().revision)
+            details = {a: revised.store.read(r) for a, r in document["areaDetails"].items()}
         finally:
             revised.close()
+        # areaDetails name records of the store that planned them; carry them with the plan.
+        document["areaDetails"] = {a: run.store.record("area_answer", b) for a, b in details.items()}
         revision = run.store.revision(document, run.store.cursor().revision)
         run.store.cursor(replace(run.store.cursor(), state="ARCH-REVIEW", B=None, review=None, revision=revision))
         assert run.store.unit("u001").judgment == before["u001"].judgment
@@ -1779,6 +1782,13 @@ def test_plan_contract_gap_journey(tmp_path, case):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("case", ["existing", "missing"])
+def test_existing_agreement_journey(tmp_path, case):
+    from test_review import existing_agreement_journey
+    existing_agreement_journey(tmp_path, case)
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("mode", ["d04", "d05", "corrections", "fixed-point"])
 def test_rule1b_journeys(tmp_path, mode):
     from contract_binding_journey import rule1b_journey
@@ -2749,6 +2759,8 @@ def clean_core_golden(root):
     root.mkdir(parents=True)
     for case in ("missing", "accepted", "derived"):
         plan_contract_gap_journey(root / ("plan-contract-" + case), case)
+    for case in ("existing", "missing"):
+        __import__("test_review").existing_agreement_journey(root / "existing-agreement", case)
     for answer in ("direction", "dev"):
         ask_now_journey(root / ("ask-now-" + answer), answer)
     for mode in ("done", "pending", "user", "f01"):
