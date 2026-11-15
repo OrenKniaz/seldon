@@ -70,9 +70,10 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
             setup["providers"]["worker_first_effort"] = os.environ["SELDON_FIRST_EFFORT"]
         # Cohort model arm (Oren 11-15: no top model in cohorts; small models show where Seldon helps).
         for role, config in setup["providers"].items():
-            if isinstance(config, dict) and "model" in config and role != "decider":
+            if isinstance(config, dict) and "model" in config:
                 config["model"] = os.environ.get("SELDON_ROLE_MODEL", config["model"])
-                config["effort"] = os.environ.get("SELDON_ROLE_EFFORT", config["effort"])
+                if role != "decider":
+                    config["effort"] = os.environ.get("SELDON_ROLE_EFFORT", config["effort"])
         (slot / "setup.json").write_text(json.dumps(setup, indent=2), encoding="utf-8")
     provider = Provider(slot / "calls", setup)
 
