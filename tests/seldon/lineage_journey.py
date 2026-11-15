@@ -280,7 +280,7 @@ def planning_direction(slot, architecture, monkeypatch, capsys):
             import real_hello
             (slot / "setup.json").write_text(json.dumps(provider.setup), encoding="utf-8")
             run.close()
-            monkeypatch.setattr(real_hello, "Codex", lambda *_: provider)
+            monkeypatch.setattr(real_hello, "Provider", lambda *_: provider)
             monkeypatch.setenv("SELDON_STOP_AT_B", "1")
             monkeypatch.delenv("SELDON_SIM_USER", raising=False)
             assert real_hello.run(slot, False, reopen=True) == 0

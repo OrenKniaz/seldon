@@ -1,21 +1,38 @@
-"""C1/C11/C18/C20/I10; R8/R12/R13: thin recorded Codex calls and native session resume."""
+"""C1/C11/C18/C20/I10; R8/R12/R13: thin recorded provider calls (Codex or Claude) and session resume."""
 
 import json
 import os
 import shutil
 import subprocess
 import sys
+import types
 import uuid
 from pathlib import Path
 
+from . import claude
 from .processes import execute
 from .store import encode
 
-ROLES = {role: {"provider": "codex", "model": "gpt-6.1-sol", "effort": effort, "timeout": timeout}
-         for role, (effort, timeout) in {"planner": ("medium", 180), "reviewer": ("medium", 180),
-             "judge": ("medium", 180), "build": ("high", 1800),
-             "demo": ("high", 300), "decider": ("low", 90)}.items()}
-ROLES["check"] = {"timeout": 300}
+
+def roles(provider="codex"):
+    table = {role: {"provider": provider, "effort": effort, "timeout": timeout,
+                    "model": claude.MODELS[role] if provider == "claude" else "gpt-6.1-sol"}
+             for role, (effort, timeout) in {"planner": ("medium", 180), "reviewer": ("medium", 180),
+                 "judge": ("medium", 180), "build": ("high", 1800),
+                 "demo": ("high", 300), "decider": ("low", 90)}.items()}
+    return {**table, "check": {"timeout": 300}}
+
+
+ROLES = roles()
+# Pause, never charge: the provider's own terminal event says the account, login or network is unavailable.
+PAUSE_WORDS = ("unauthorized", "unauthenticated", "authentication", "not authenticated", "not logged in",
+    "invalid_api_key", "invalid api key", "failed to authenticate", "forbidden", "log in", "login",
+    "http 401", "http 403", "permission_denied", "permission denied", "access denied", "access is denied",
+    "approval denied", "operation not permitted", "logged out", "token has expired", "usage limit",
+    "usage_limit_reached", "rate limit", "insufficient_quota", "hit your", "credit balance", "offline",
+    "connection", "failed to connect", "error sending request", "error trying to connect",
+    "dns error", "network", "service unavailable", "provider down", "server overloaded", "overloaded",
+    "http 429", "http 5", "api error: 401", "api error: 403", "api error: 429", "api error: 5")
 
 
 class ProviderFailure(RuntimeError):
@@ -51,7 +68,8 @@ def session_id(output):
 
 def setup_facts():
     """CODE observes installed tools; no model discovery or installation."""
-    node, codex = shutil.which("node"), shutil.which("codex")
+    node, codex, claude_exe = shutil.which("node"), shutil.which("codex"), shutil.which("claude")
+    provider = os.environ.get("SELDON_PROVIDER", "codex")
     command, version = None, None
     if codex:
         entry = Path(codex).parent / "node_modules/@openai/codex/bin/codex.js"
@@ -60,12 +78,15 @@ def setup_facts():
             version = json.loads((entry.parent.parent / "package.json").read_text())["version"]
         elif Path(codex).suffix.lower() == ".exe" or os.name != "nt":
             command = [codex]
+    if provider == "claude":
+        version = claude_exe and subprocess.run([claude_exe, "--version"], capture_output=True, text=True,
+                                                timeout=60).stdout.strip()
     return {"python": {"path": sys.executable, "version": sys.version}, "node": node,
-            "codexCommand": command,
+            "codexCommand": command, "claudeCommand": [claude_exe] if claude_exe else None,
             "providers": {"worker_first_effort": "high", **{
                 role: {**label, "version": version, "freshCall": True,
                 "independence": "fresh same-provider call" if role == "reviewer" else "same-provider"}
-                for role, label in ROLES.items()}},
+                for role, label in roles(provider).items()}},
             "scriptedUser": True, "userOrigin": "dev runner scripted yes; not owner acceptance"}
 
 
@@ -90,7 +111,55 @@ def terminal_answer(output):
     return final
 
 
-class Codex:
+def native_errors(output):
+    """Denial is the provider's own terminal event, never stderr noise."""
+    found = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") in ("turn.failed", "error"):
+            found.append(encode(event))
+    return found
+
+
+def codex_command(setup, config, folder, worker, session, images):
+    command = [*setup["codexCommand"], "exec"]
+    command += ["resume", session] if session else ["--cd", str(config["cwd"])]
+    command += ["--json", "--skip-git-repo-check", "--ignore-user-config",
+               "--model", config["model"], "-c", 'model_reasoning_effort=' + encode(config["effort"]),
+               "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"',
+               "--output-schema", str(folder / "schema.json")]
+    # Full access (Oren 2026-11-14: "We are not a security app"). The Codex Windows sandbox re-minted a
+    # worktree's capability SID mid-session and denied writes to existing files (T-136); scope is still
+    # enforced by Seldon from the observed diff (R6), proof runs in disposable checkouts.
+    options = ['project_doc_max_bytes=0', 'developer_instructions=""', 'web_search="disabled"',
+               'model_instructions_file=' + encode(str(folder / "instructions.txt"))]
+    options += [key + '=false' for key in ('skills.include_instructions', 'skills.bundled.enabled',
+        'plugins._default.enabled', 'features.apps', 'features.multi_agent', 'features.memory_tool',
+        'features.sleep_tool', 'tools.update_plan.enabled')]
+    if not worker:
+        command += ["--ephemeral"]
+        options += ['features.shell_tool=false', 'features.code_mode_host=false']
+    command += [arg for option in options for arg in ("-c", option)]
+    return command + [f"--image={path}" for path in images] + ["-"]
+
+
+NATIVE = {"codex": types.SimpleNamespace(command=codex_command, prompt=lambda images: "",
+                                         answer=terminal_answer, session=session_id, errors=native_errors,
+                                         usage=lambda output: None),
+          "claude": claude}
+
+
+def recorded(folder):
+    """The native stream reader of one recorded call folder (its invocation names the provider)."""
+    invocation = Path(folder) / "invocation.json"
+    return NATIVE[json.loads(invocation.read_text("utf-8"))["provider"].get("provider", "codex")
+                  if invocation.is_file() else "codex"]
+
+
+class Provider:
     def __init__(self, root, setup, timeout=None):
         self.root, self.setup, self.timeout = Path(root), setup, timeout
         self.root.mkdir(exist_ok=True)
@@ -100,15 +169,17 @@ class Codex:
                 else self.setup["providers"][role_for(kind, context)]["timeout"])
 
     def prepare(self, question):
-        if not self.setup["codexCommand"]:
-            raise ProviderFailure("Codex executable unavailable; install/authenticate Codex before resuming",
-                                  False, True)
+        role = role_for(question["kind"], {})
+        config = dict(self.setup["providers"][role])
+        name = config.setdefault("provider", "codex")
+        native = NATIVE[name]
+        if not self.setup.get(name + "Command"):
+            raise ProviderFailure(f"{name.title()} executable unavailable; install/authenticate {name} "
+                                  "before resuming", False, True)
         folder = self.root / ("call-" + uuid.uuid4().hex)
         folder.mkdir()
         cwd = folder
         worker = question["kind"] == "WORK"
-        role = role_for(question["kind"], {})
-        config = dict(self.setup["providers"][role])
         if worker:
             cwd = Path(question["execution"]["cwd"])
             config["effort"] = ("medium" if "Guide path" in question["facts"]
@@ -121,36 +192,17 @@ class Codex:
             "Other calls are read-only. No provider launches, installs, commits or global changes. "
             "REVIEW is a fresh same-provider review.")
         (folder / "instructions.txt").write_text(instructions, encoding="utf-8")
+        images = []
+        for index, source in enumerate(question.get("images", [])):
+            images.append(folder / f"image-{index}.png")
+            shutil.copyfile(source, images[-1])
         from .questions import labelled
         prompt = (instructions + "\n" + question["prompt"] + "\n\n" + labelled(question["facts"])
                   + "\n\nAnswer schema\n" + encode(question["schema"])
-                  + "\n\nExample\n" + encode(question["examples"][0]))
+                  + "\n\nExample\n" + encode(question["examples"][0]) + native.prompt(images))
         (folder / "prompt.txt").write_text(prompt, encoding="utf-8")
         session = question.get("execution", {}).get("session")
-        command = [*self.setup["codexCommand"], "exec"]
-        command += ["resume", session] if session else ["--cd", str(cwd)]
-        command += ["--json", "--skip-git-repo-check", "--ignore-user-config",
-                   "--model", config["model"], "-c", 'model_reasoning_effort=' + encode(config["effort"]),
-                   "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"',
-                   "--output-schema", str(folder / "schema.json")]
-        # Full access (Oren 2026-11-14: "We are not a security app"). The Codex Windows sandbox re-minted a
-        # worktree's capability SID mid-session and denied writes to existing files (T-136); scope is still
-        # enforced by Seldon from the observed diff (R6), proof runs in disposable checkouts.
-        options = ['project_doc_max_bytes=0', 'developer_instructions=""', 'web_search="disabled"',
-                   'model_instructions_file=' + encode(str(folder / "instructions.txt"))]
-        options += [key + '=false' for key in ('skills.include_instructions', 'skills.bundled.enabled',
-            'plugins._default.enabled', 'features.apps', 'features.multi_agent', 'features.memory_tool',
-            'features.sleep_tool', 'tools.update_plan.enabled')]
-        if not worker:
-            command += ["--ephemeral"]
-            options += ['features.shell_tool=false', 'features.code_mode_host=false']
-        command += [arg for option in options for arg in ("-c", option)]
-        images = question.get("images", [])
-        for index, source in enumerate(images):
-            attached = folder / f"image-{index}.png"
-            shutil.copyfile(source, attached)
-            command.append(f"--image={attached}")
-        command += ["-"]
+        command = native.command(self.setup, {**config, "cwd": cwd}, folder, worker, session, images)
         metadata = {"command": command, "commandLine": subprocess.list2cmdline(command),
                     "cwd": str(cwd), "timeout": self.timeout_for(question["kind"], {}),
                     "role": role, "provider": config}
@@ -162,46 +214,38 @@ class Codex:
 
     def invoke(self, question, started):
         folder, invocation = self.prepare(question)
+        name = invocation["provider"]["provider"]
+        native = NATIVE[name]
         started(folder)
         result = execute(invocation["command"], invocation["cwd"], invocation["timeout"],
                          folder / "prompt.txt", output_dir=folder)
         for stream in ("stdout", "stderr"):
             (folder / (stream + ".bin")).write_bytes(result[stream])
+        output = result["stdout"].decode("utf-8", errors="replace")
         receipt = {k: v for k, v in result.items() if k not in ("stdout", "stderr")}
         receipt.update(role=invocation["role"], timeout=invocation["timeout"])
+        if used := native.usage(output):
+            receipt["usage"] = used
         (folder / "result.json").write_text(encode(receipt), encoding="utf-8")
-        output = result["stdout"].decode("utf-8", errors="replace")
         diagnostics = output + "\n" + result["stderr"].decode("utf-8", errors="replace")
         try:
             if result["timedOut"] or not result["cleanupVerified"]:
                 raise RuntimeError("Provider cleanup unverified" if not result["cleanupVerified"]
                                    else "Provider timed out")
-            raw = terminal_answer(output)
+            raw = native.answer(output)
         except RuntimeError as error:
-            native_errors = []  # denial is the provider's own terminal event, never stderr noise
-            for line in output.splitlines():
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(event, dict) and event.get("type") in ("turn.failed", "error"):
-                    native_errors.append(encode(event))
-            paused = not result["timedOut"] and any(word in "\n".join(native_errors).lower() for word in (
-                "unauthorized", "unauthenticated", "authentication", "not authenticated", "not logged in",
-                "invalid_api_key", "forbidden", "log in", "login", "http 401", "http 403",
-                "permission_denied", "permission denied", "access denied", "access is denied",
-                "approval denied", "operation not permitted", "logged out", "usage limit",
-                "usage_limit_reached", "rate limit", "insufficient_quota", "hit your", "offline",
-                "connection", "failed to connect", "error sending request", "error trying to connect",
-                "dns error", "network", "service unavailable", "provider down", "server overloaded",
-                "http 429", "http 5"))
+            failures = "\n".join(native.errors(output)).lower()
+            paused = not result["timedOut"] and any(word in failures for word in PAUSE_WORDS)
             unavailable = question.get("execution", {}).get("session") and any(
                 term in diagnostics.lower() for term in ("session not found", "no session found",
-                                                        "thread not found", "resume is not supported"))
+                    "thread not found", "resume is not supported", "no conversation found"))
             failure_type = ResumeUnavailable if unavailable and not paused else ProviderFailure
             if result["timedOut"] and result["cleanupVerified"] and question["kind"] == "WORK":
                 failure_type = Deadline
-            raise failure_type(f"Codex invocation failed: {error}; {diagnostics[-4096:]}",
+            raise failure_type(f"{name.title()} invocation failed: {error}; {diagnostics[-4096:]}",
                 not paused, result["cleanupVerified"], str(folder / "result.json")) from error
         (folder / "answer.txt").write_text(raw, encoding="utf-8")
-        return raw, session_id(output)
+        return raw, native.session(output)
+
+
+Codex = Provider  # earlier name, kept for callers that patch or build it

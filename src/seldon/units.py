@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import decisions, fixups, gitwork, inference, plan, proof, questions, recovery
-from .providers import Deadline, ProviderFailure, ResumeUnavailable, session_id, terminal_answer
+from .providers import Deadline, ProviderFailure, ResumeUnavailable, recorded
 from .schema import validate
 from .states import advance
 
@@ -27,7 +27,7 @@ def recovered_report(store, ref):
         if receipt.is_file():
             result = json.loads(receipt.read_text("utf-8"))
             if result.get("cleanupVerified") and not result.get("timedOut"):
-                raw = terminal_answer((folder / "stdout.bin").read_text("utf-8", errors="replace"))
+                raw = recorded(folder).answer((folder / "stdout.bin").read_text("utf-8", errors="replace"))
                 question = json.loads((folder / "question.json").read_text("utf-8"))
                 validate(json.loads(raw), question["schema"])
                 questions.validate_discoveries(store.plan(store.cursor().revision), json.loads(raw)["answer"])
@@ -41,7 +41,7 @@ def thread_from_recording(store, ref):
     if unit.callFolder:
         stream = Path(unit.callFolder) / "stdout.bin"
         if stream.is_file():
-            thread = session_id(stream.read_text("utf-8", errors="replace"))
+            thread = recorded(unit.callFolder).session(stream.read_text("utf-8", errors="replace"))
             if thread:
                 with store.transaction():
                     store.unit(ref, replace(store.unit(ref), thread=thread))

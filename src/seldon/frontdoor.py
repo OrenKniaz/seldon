@@ -119,7 +119,7 @@ def drive(run):
     os.environ["SELDON_EVIDENCE_DIR"] = str(root / "evidence")
     with opened(run) as store:
         setup = store.read(store.cursor().kickoff)["setup"]
-    provider = providers.Codex(root / "calls", setup)
+    provider = providers.Provider(root / "calls", setup)
     response = json.loads(sys.stdin.read() or "null")
 
     def user(request):

@@ -707,7 +707,7 @@ def records_and_skeleton_journey(slot):
         run.close()
 
 
-def prepare(slot, mode, count, capacity=6, worker_first_effort=None):
+def prepare(slot, mode, count, capacity=6, worker_first_effort=None, claude=False):
     slot.mkdir(parents=True)
     (slot / "mode").write_text(mode)
     (slot / "native.py").write_text(NATIVE, encoding="utf-8")
@@ -719,6 +719,10 @@ def prepare(slot, mode, count, capacity=6, worker_first_effort=None):
     provider = Scripted(slot, mode, count)
     if worker_first_effort:
         provider.setup["providers"]["worker_first_effort"] = worker_first_effort
+    if claude:  # WORK through the Claude stream shape (`claude -p` stub replaying the native worker)
+        (slot / "claude.py").write_text(CLAUDE, encoding="utf-8")
+        provider.setup["providers"]["build"]["provider"] = "claude"
+        provider.setup["claudeCommand"] = [sys.executable, "-S", "-B", str(slot / "claude.py"), str(slot)]
     if mode == "check-deadline":
         provider.setup["providers"]["check"]["timeout"] = 2
     decisions = set()
@@ -1490,6 +1494,79 @@ def test_provider_recovery_journey(tmp_path, monkeypatch):
         launches = [json.loads(line) for line in (slot / "launch-unit-001.jsonl").read_text().splitlines()]
         assert len(launches) == 2 and launches[1]["resumed"]
         assert launches[0]["thread"] == launches[1]["thread"]
+    finally:
+        run.close()
+
+
+CLAUDE = r'''
+import contextlib, io, json, runpy, sys
+from pathlib import Path
+slot, args = Path(sys.argv[1]), sys.argv[2:]
+prompt = sys.stdin.buffer.read()
+folder = next(f for f in (slot / "calls").glob("call-*") if (f / "prompt.txt").read_bytes() == prompt)
+assert json.loads(args[args.index("--json-schema") + 1]) == json.loads((folder / "schema.json").read_text("utf-8"))
+if (slot / "claude-usage").exists() and not (slot / "usage-back").exists():
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                      "result": "Claude AI usage limit reached: you've hit your limit"}), flush=True)
+    sys.exit(1)
+sys.argv = [sys.argv[0], str(slot), "--output-schema", str(folder / "schema.json"),
+            *(["resume", args[args.index("--resume") + 1]] if "--resume" in args else [])]
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    runpy.run_path(str(slot / "native.py"), run_name="__main__")
+for event in map(json.loads, buffer.getvalue().splitlines()):
+    if event["type"] == "thread.started":
+        print(json.dumps({"type": "system", "subtype": "init", "session_id": event["thread_id"]}))
+    elif event["type"] == "item.completed":
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "",
+                          "structured_output": json.loads(event["item"]["text"]),
+                          "usage": {"input_tokens": 3, "cache_read_input_tokens": 5, "output_tokens": 7}}))
+'''
+
+
+@pytest.mark.parametrize("fault", ["deadline", "usage"])
+def test_claude_provider_journey(tmp_path, monkeypatch, fault):
+    """WORK on the Claude stream reaches C: a deadline resumes its session, a usage limit pauses.
+
+    The Codex journeys miss a second provider's stream shape (session id, structured result,
+    error result) and its resume flag; the stub replays the native worker behind that shape.
+    """
+    from seldon import providers
+
+    slot = tmp_path / fault
+    run, _ = prepare(slot, "pause", 1, claude=True)
+    execute, faulted, paused = providers.execute, [], []
+
+    def deadline(*args, **kwargs):
+        result = execute(*args, **kwargs)
+        question = json.loads((kwargs["output_dir"] / "question.json").read_text("utf-8"))
+        if fault == "deadline" and "Guide path" not in question["facts"] and not faulted:
+            faulted.append(True)
+            return {**result, "timedOut": True}
+        return result
+
+    def usage_back(seconds):
+        assert not run.store.records("unit_failure") and "usage limit" in run.store.cursor().failure
+        paused.append(seconds)
+        (slot / "usage-back").touch()
+
+    if fault == "usage":
+        (slot / "claude-usage").touch()
+    monkeypatch.setattr(providers, "execute", deadline)
+    try:
+        cursor = run.run(wait=usage_back if fault == "usage" else
+                         lambda _: pytest.fail("Own deadline must recover, never pause"))
+        assert cursor.state == "SCRIPTED_C"
+        unit = run.store.units()["u001"]
+        launches = [json.loads(line) for line in (slot / "launch-unit-001.jsonl").read_text().splitlines()]
+        if fault == "deadline":
+            assert unit.recoveries == 1 and len(run.store.records("unit_failure")) == 1
+            assert launches[1]["resumed"] and launches[0]["thread"] == launches[1]["thread"]
+        else:
+            assert paused and unit.recoveries == 0 and not run.store.records("unit_failure")
+        receipts = [json.loads(p.read_text("utf-8")) for p in (slot / "calls").glob("call-*/result.json")]
+        assert {"input_tokens": 8, "cached_input_tokens": 5, "output_tokens": 7} in [
+            r.get("usage") for r in receipts]
     finally:
         run.close()
 

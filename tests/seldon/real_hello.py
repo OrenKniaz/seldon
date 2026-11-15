@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from seldon.run import Run
-from seldon.providers import Codex, setup_facts
+from seldon.providers import Provider, setup_facts
 
 DREAM = ('Build a tiny web page with one Play button. When I click Play, the page shows '
          'the text "Hello, world!". A single static HTML file is enough. '
@@ -23,7 +23,7 @@ def main():
         stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("slot", type=Path, help="new slot folder under C:/seldon/tests/m1")
-    parser.add_argument("--dry-run", action="store_true", help="prepare ALIGN; never launch Codex")
+    parser.add_argument("--dry-run", action="store_true", help="prepare ALIGN; never launch a provider")
     parser.add_argument("--dream-file", type=Path, help="dream text instead of hello-world")
     parser.add_argument("--reopen", action="store_true", help="resume this slot's canonical run")
     parser.add_argument("--runs", type=Path, help="override RUNS.md for an offline diagnostic")
@@ -69,7 +69,7 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
         if os.environ.get("SELDON_FIRST_EFFORT"):  # cohort A/B arm for first product WORK effort
             setup["providers"]["worker_first_effort"] = os.environ["SELDON_FIRST_EFFORT"]
         (slot / "setup.json").write_text(json.dumps(setup, indent=2), encoding="utf-8")
-    provider = Codex(slot / "calls", setup)
+    provider = Provider(slot / "calls", setup)
 
     asked = {}
 
@@ -93,10 +93,18 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
                   + dream + "\n\nQuestion:\n" + json.dumps(request["subject"], ensure_ascii=False)[:20000])
         try:
             answer = slot / "calls" / "sim-user.txt"
-            subprocess.run([*setup["codexCommand"], "exec", "--skip-git-repo-check", "--ephemeral",
-                            "--sandbox", "read-only", "--model", os.environ["SELDON_SIM_USER"],
-                            "-c", 'model_reasoning_effort="low"', "--output-last-message", str(answer), "-"],
-                           input=prompt, capture_output=True, text=True, encoding="utf-8", timeout=600)
+            if setup["providers"]["decider"].get("provider") == "claude":  # read-only Haiku, no tools
+                words = subprocess.run([*setup["claudeCommand"], "-p", "--model", "claude-haiku-5-5",
+                    "--effort", "low", "--safe-mode", "--strict-mcp-config", "--no-session-persistence",
+                    "--tools", ""], input=prompt, capture_output=True, text=True, encoding="utf-8",
+                    timeout=600).stdout.strip()
+                answer.write_text(words, encoding="utf-8")
+            else:
+                subprocess.run([*setup["codexCommand"], "exec", "--skip-git-repo-check", "--ephemeral",
+                                "--sandbox", "read-only", "--model", os.environ["SELDON_SIM_USER"],
+                                "-c", 'model_reasoning_effort="low"', "--output-last-message", str(answer),
+                                "-"], input=prompt, capture_output=True, text=True, encoding="utf-8",
+                               timeout=600)
             words = answer.read_text("utf-8").strip() if answer.exists() else ""
         except (OSError, subprocess.TimeoutExpired):
             words = ""
