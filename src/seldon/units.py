@@ -96,9 +96,10 @@ def work(store, provider, ref):
                         {"owner": c["contract"], "correction": c["text"]} for c in correction["changes"]]},
                         key=key, charged=True)
         return
-    foreign = [d for d in answer["discoveries"] if d["owner"] != ref]
+    deferred = not plan.assigned(document)[ref] and not fixups.active(store, ref)
+    foreign = [d for d in answer["discoveries"] if d["owner"] != ref or deferred]
     if foreign and fixups.handoff(store, ref, report, {**answer, "discoveries": foreign}):
-        if not any(d["owner"] == ref for d in answer["discoveries"]):
+        if deferred or not any(d["owner"] == ref for d in answer["discoveries"]):
             return
     if answer["outcome"] == "blocked" and any(d["owner"] == ref for d in answer["discoveries"]):
         recovery.recover(store, ref, str(answer["discoveries"]), cause=report, direct=True)

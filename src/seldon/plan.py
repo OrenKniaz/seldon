@@ -8,11 +8,9 @@ from .schema import BODIES, PLAN, VISION
 from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
-GUIDE_WORK = ("Write the walkthrough from contracts; reference belongs in README. Link guide-relative "
-              "paths. One argv fence (JSON string array) runs from the product root: read examples, create "
-              "fixtures, run documented commands and services, wait for readiness, check expected results "
-              "and clean up in finally. Save UI evidence in SELDON_EVIDENCE_DIR; other fences are prose. "
-              "Seldon proves the walkthrough on the integrated product at WAVE-VERIFY.")
+GUIDE_WORK = ("Author a walkthrough from contracts with guide-relative links and one JSON argv fence. "
+              "WAVE-VERIFY runs it at the integrated root: fixtures, documented operations, assertions, "
+              "UI evidence in SELDON_EVIDENCE_DIR and finally cleanup. Reference belongs in README.")
 
 
 def safe_path(value):

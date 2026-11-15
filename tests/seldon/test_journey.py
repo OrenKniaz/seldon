@@ -1974,8 +1974,8 @@ finally:
 def guide_walkthrough_journey(slot, wrong=False):
     """A first-wave guide reaches C with integrated proof; a wrong launch gets one guide fixup.
 
-    Catches a serial guide tail and unit proof against absent peers. The existing value-only golden
-    cannot expose these; changing the documented launch must break wave proof and return to its owner.
+    Catches Terra's self-owned integrated-proof blocker despite a complete authored guide. Existing
+    peer-blocker journeys miss self ownership; the wrong launch must still return to its wave owner.
     """
     import socket
     with socket.socket() as listener:
@@ -2000,9 +2000,18 @@ def guide_walkthrough_journey(slot, wrong=False):
         '    other = slot / ("launch-unit-001.jsonl" if guide else "launch-docs.jsonl")\n'
         '    while not other.exists():\n        time.sleep(0.01)\n'
         '    assert not Path("unit-001/value.txt").exists()\n'
-        '\nif guide:\n'), encoding='utf-8')
+        '\nif guide:\n').replace(
+        'print(json.dumps({"type":"item.completed"',
+        'if guide and turn == 1:\n'
+        '    answer["answer"].update(outcome="blocked", discoveries=[{\n'
+        '        "owner": "guide", "correction": "The product lacks server and page files. "\n'
+        '        "Run the integrated walkthrough and inspect screenshots at WAVE-VERIFY."}])\n'
+        'print(json.dumps({"type":"item.completed"'), encoding='utf-8')
     try:
         _, rows, _ = finish(run)
+        assert {b['gate'] for _, k, b in rows if k == 'decision_request'} == {'A', 'B', 'CHECK-IN', 'C'}
+        assert any(b['unit'] == b['owner'] == 'guide' and b['disposition'] == 'wave verify'
+                   for _, k, b in rows if k == 'discovery')
         assert not [b for _, k, b in rows if k == 'unit_failure' and b['unit'] == 'guide']
         fixups = [b for _, k, b in rows if k == 'unit_fixup']
         if wrong:
@@ -2852,6 +2861,7 @@ def clean_core_golden(root):
     agreed_literals_journey(root / "agreed-literals")
     blocked_owner_journeys(root / "blocked-owner")
     guide_links_journey(root / "guide-links")
+    guide_walkthrough_journey(root / "guide-stage", wrong=True)
     recorded_artifact_journey(root / "recorded-artifacts")
     recorded_judgment_journey(root / "recorded-judgment")
     recorded_sizes = recorded_minimal_journey(root / "recorded-minimal")

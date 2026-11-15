@@ -70,7 +70,9 @@ def state(run: str):
 
 def spawn(run, response=None):
     run = str(Path(run).resolve())
-    flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    # A hidden console, not DETACHED_PROCESS: a console-less venv launcher makes Windows open a visible
+    # console for the real interpreter and every console child (T-177).
+    flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
              if os.name == "nt" else 0)
     with (side(run) / "controller.log").open("ab") as log:
         options = dict(stdin=subprocess.PIPE, stdout=log, stderr=log, creationflags=flags)

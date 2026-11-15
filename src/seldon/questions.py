@@ -332,7 +332,8 @@ def work_brief(store, ref):
     facts = {"Unit": contract["instructions"], "Write scope": contract["scope"],
              "Check paths": contract["checkPaths"],
              "Requirements": requirement_facts(document, contract["requirements"]),
-             "Quality bar": document["nodes"]["vision"]["body"]["quality"],
+             "Quality bar": [c["criterion"] for r, c in plan.select(document, "criterion").items()
+                             if ref in plan.traced_units(document, plan.traced_checks(document, r))],
              "Unit evidence": UNIT_EVIDENCE, "Checks": plan.assigned(document)[ref]}
     facts.update(agreement_facts(document, ref))
     refs = []
@@ -348,7 +349,6 @@ def work_brief(store, ref):
         facts["Wave checks to write, not run here"] = wave_checks
     if ref == "guide":
         facts["Guide path"] = plan.GUIDE_PATH
-        facts["Reader's starting directory"] = str(store.root.parent.resolve())
         vision = document["nodes"]["vision"]["body"]
         facts["Readers"] = vision["users"]
         facts["What the reader came to do"] = vision["understanding"]

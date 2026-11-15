@@ -67,7 +67,8 @@ def handoff(store, ref, report, answer, *, key=None, charged=False):
             owner = contracts[owner]["provider"] if contract_change else owner
             if contract_change and store.unit(owner).state != "DONE":
                 continue
-            if owner not in owners or owner == ref:
+            if owner not in owners or (owner == ref and
+                                       (planning.assigned(document)[ref] or active(store, ref))):
                 return False
             named = store.unit(owner)
             if (named.state != "DONE" or not named.integrated
