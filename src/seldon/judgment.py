@@ -16,7 +16,8 @@ def subjects(document, kind):
 
 
 def trace(document, kind, subject, store=None):
-    return (guide.checks(store.root.parent) if store else {}) if subject == "tryItGuide" else \
+    return ({r: c for r, c in guide.checks(store.root.parent).items() if r != "guide:paths"}
+            if store else {}) if subject == "tryItGuide" else \
         plan.traced_checks(document, subject)
 
 

@@ -2105,7 +2105,7 @@ def test_hermetic_work_journey(tmp_path, first_effort):
 
 
 @pytest.mark.fast
-@pytest.mark.parametrize("surface", ["browser", "server"])
+@pytest.mark.parametrize("surface", ["browser", "server", "broken-guide"])
 def test_check_kit_journey(tmp_path, surface):
     """Real browser/server delivery catches absent helpers and leaks missed by file-only checks."""
     from kit_journey import kit_journey

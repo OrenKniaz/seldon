@@ -56,7 +56,8 @@ def kit_journey(slot, surface):
     """Catch missing baseline kit, machine-bound delivery and leaked browser/server trees.
 
     Existing value-file journeys never import delivered helpers or start real Edge and a server.
-    The failing worker assertion also proves cleanup on the ordinary check failure path.
+    A JSON-fenced guide must supply actual execution to PRODUCT; argv-only journeys miss this trace bug.
+    The broken twin protects real failure routing instead of accepting path existence.
     """
     run, provider = prepare(slot, 'kit', 1)
     original = provider.__class__.__call__
@@ -70,19 +71,60 @@ def kit_journey(slot, surface):
             return json.dumps(answer)
 
     provider.__class__ = KitProvider
+    invoke = provider.invoke
+    judged = []
+
+    def require_walkthrough(question, started):
+        if question['kind'] == 'PRODUCT' and question['targets'] == ['tryItGuide']:
+            facts = question['facts']
+            observations = facts['Final observations']
+            assert len(observations) == 1
+            observation = observations[0]
+            assert observation['command'] == ['python', '-S', '-B', 'unit-001/check.py']
+            assert observation['exitCode'] == 0 and observation['ranOnDeliveredRevision']
+            assert observation['executionStarted'] and observation['cleanupVerified']
+            assert 'parent, descendant, port and data cleaned' in observation['stdout']
+            assert facts['Check artifacts']
+            assert 'guide:paths' not in facts['Checks']
+            if surface == 'browser':
+                assert len(question['images']) == 2
+            judged.append(question)
+        return invoke(question, started)
+
+    provider.invoke = require_walkthrough
     native = slot / 'native.py'
-    source = CHECK.replace('MODE', json.dumps(surface))
-    wrapper = ("import subprocess\nsubprocess.run(['node', 'unit-001/check.cjs'], check=True)\n"
+    source = CHECK.replace('MODE', json.dumps('server' if surface == 'broken-guide' else surface))
+    wrapper = ("import os, subprocess, sys\nfrom pathlib import Path\n"
+               "result = subprocess.run(['node', 'unit-001/check.cjs'], capture_output=True, text=True)\n"
+               "print(result.stdout, end=''); print(result.stderr, end='', file=sys.stderr)\n"
+               "result.check_returncode()\n"
+               "Path(os.environ['SELDON_EVIDENCE_DIR'], 'walkthrough.txt').write_text(result.stdout)\n"
                "print('observed value-001')\n")
     worker = ('    Path(name, "server.cjs").write_text(' + repr(PRODUCT) + ')\n'
               '    Path(name, "check.cjs").write_text(' + repr(source) + ')\n'
               '    source = ' + repr(wrapper) + '\n')
-    native.write_text(native.read_text('utf-8').replace(
+    native.write_text(native.read_text('utf-8').replace('```argv', '```json').replace(
+        '    path.write_text("Try it yourself',
+        '    command = ["python", "-S", "-B", "unit-001/check.py"]\n'
+        '    path.write_text("Try it yourself').replace(
         'command = [sys.executable,', 'command = ["python",').replace(
         '    Path(name, "check.py").write_text(source)',
         worker + '    Path(name, "check.py").write_text(source)'), encoding='utf-8')
+    if surface == 'broken-guide':
+        native.write_text(native.read_text().replace(
+            'command = ["python", "-S", "-B", "unit-001/check.py"]',
+            "command = ['python', '-B', '-c', \"raise AssertionError('broken guide walkthrough')\"]"))
     try:
+        if surface == 'broken-guide':
+            while run.store.cursor().state != 'WAVE-VERIFY':
+                run.step()
+            assert run.step() == 'EXECUTE'
+            gaps = [b for _, _, b in run.store.records('unit_fixup')]
+            assert gaps and 'broken guide walkthrough' in str(gaps)
+            assert not judged and not run.store.cursor().publication
+            return
         cursor, rows, units = finish(run)
+        assert judged
         assert units['u001'].recoveries == 0
         observations = [b for _, kind, b in rows if kind == 'observation' and b['check'] == 'n003']
         red = [b for b in observations if b['purpose'] == 'T']
@@ -92,9 +134,8 @@ def kit_journey(slot, surface):
             if kind == 'observation' and b in green])
         assert all('parent, descendant, port and data cleaned' in b['stdout'] for b in green)
         if surface == 'browser':
-            assert all(len(b['evidenceFiles']) == 2 for b in green)
-            assert all(Path(ref).read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
-                       for b in green for ref in b['evidenceFiles'])
+            assert all(sum(Path(ref).read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+                           for ref in b['evidenceFiles']) == 2 for b in green)
         assert cursor.finalCommit == cursor.candidate and not cursor.failure
         delivered = [p for p in run.project.rglob('*') if p.is_file()
                      and '.git' not in p.parts and '.seldon' not in p.parts]

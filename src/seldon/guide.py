@@ -20,17 +20,15 @@ def checks(root):
         str(PurePosixPath(plan.GUIDE_PATH).parent), path))) for path in paths]
     for path in paths:
         (Path(root) / path).resolve().relative_to(Path(root).resolve())
-    commands = []
-    for language, block in blocks:
-        if language.strip() != "argv":
-            continue
-        command = json.loads(block)
+    commands = [json.loads(block) for language, block in blocks if language.strip() in ("argv", "json")]
+    for command in commands:
         if not isinstance(command, list) or not command or any(type(a) is not str or not a for a in command):
             raise ValueError("Guide argv must contain nonempty strings")
-        commands.append(command)
-    probe = ("import json, subprocess, sys; from pathlib import Path; "
-             "[subprocess.run(c, check=True) for c in json.loads(sys.argv[1])]; "
-             "missing=[p for p in sys.argv[2:] if not Path(p).exists()]; "
-             "print('Guide paths:', sys.argv[2:], 'missing:', missing); sys.exit(bool(missing))")
-    return {"tryItGuide:000": {"command": [sys.executable, "-B", "-c", probe, json.dumps(commands), *paths],
-                               "requirements": [], "purpose": "Walk the delivered try-it guide"}}
+    probe = ("import sys; from pathlib import Path; "
+             "missing=[p for p in sys.argv[1:] if not Path(p).exists()]; "
+             "print('Guide paths:', sys.argv[1:], 'missing:', missing); sys.exit(bool(missing))")
+    return {**{f"tryItGuide:{i:03}": {"command": command, "requirements": [],
+                                     "purpose": "Walk the delivered try-it guide"}
+               for i, command in enumerate(commands)},
+            "guide:paths": {"command": [sys.executable, "-B", "-c", probe, *paths],
+                            "requirements": [], "purpose": "Check guide paths"}}

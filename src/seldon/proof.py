@@ -70,8 +70,9 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
                 observations.append(store.record("observation", body))
             if not cleanup_verified:
                 raise UncertainCleanup("Command cleanup unverified: " + str(body))
-            gitwork.clean(checkout, commit)
-            dirty = False
+            if not walkthrough:
+                gitwork.clean(checkout, commit)
+            dirty = walkthrough
     finally:
         # Never reset/reuse a workspace whose descendants may still be running.
         if not cleanup_verified:
