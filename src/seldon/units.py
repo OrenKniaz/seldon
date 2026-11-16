@@ -186,7 +186,8 @@ def judge_wave(store, provider, observations):
     cursor, document = store.cursor(), plan.execution(store)
     batch, trees = {}, {}
     for ref, contract in plan.select(document, "unit").items():
-        if not (plan.wave_requirements(document, ref) or contract["handed"]):
+        # The guide has no source verdict: PRODUCT compares its walkthrough with the product.
+        if ref == "guide" or not (plan.wave_requirements(document, ref) or contract["handed"]):
             continue
         row = store.unit(ref)
         tree = gitwork.scope_tree(store.root.parent, cursor.candidate, contract["scope"], cursor.scratch)
