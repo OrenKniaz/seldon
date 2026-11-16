@@ -21,7 +21,7 @@ VISION = {
     "scopeOut": [],
     "improvements": [],
     "quality": [{"criterion": "Clear output", "verification": "Read the real command output"}],
-    "unknowns": [],
+    "alternatives": [{"label": "Show all values", "means": "List values without naming one"}],
 }
 
 NATIVE = r"""
@@ -207,7 +207,8 @@ class Scripted:
                 ],
                 "contracts": [],
                 "decisions": [],
-                "waves": [{"goal": "Deliver the complete values"}],
+                "waves": [{"goal": "Deliver the complete values",
+                           "commitments": ["scopeIn:1", "quality:1"]}],
             }
             if self.mode in ("contracts", "parallel-contract", "coach-facts", "wave-gap", "see-proof", "see-proof-gap", "contract-fanout"):
                 answer["contracts"] = [

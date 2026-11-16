@@ -16,9 +16,11 @@ def choice(*values):
 
 TEXT = {"type": "string", "minLength": 1}
 REFS = array(TEXT)
+OPTION = obj(label=TEXT, means=TEXT)
+ASK = obj(question=TEXT, options=array(OPTION, 2))
 VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT,
              users=array(TEXT, 1), scopeIn=array(TEXT, 1), scopeOut=REFS, improvements=REFS,
-             quality=array(obj(criterion=TEXT, verification=TEXT), 1), unknowns=REFS)
+             quality=array(obj(criterion=TEXT, verification=TEXT), 1), alternatives=array(OPTION, 1))
 FEATURE = obj(story=TEXT, acceptance=TEXT)
 POSITION = {"type": "integer", "minimum": 1}
 BODIES = {
@@ -46,8 +48,8 @@ PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
 # Architecture names areas, never work units. DETAIL owns only its local records.
 AREA = obj(handle=TEXT, responsibility=TEXT, scope=array(TEXT, 1), commitments=array(TEXT, 1))
 AREA_CONTRACT = obj(handle=TEXT, **BODIES["contract"]["properties"])
-ARCHITECT = obj(areas=array(AREA, 1), contracts=array(AREA_CONTRACT),
-                decisions=array(BODIES["decision"]), waves=array(obj(goal=TEXT), 1))
+ARCHITECT = obj(areas=array(AREA), contracts=array(AREA_CONTRACT),
+                decisions=array(BODIES["decision"]), waves=array(obj(goal=TEXT, commitments=REFS), 1))
 DETAIL_PLAN = obj(verdict=choice("planned"),
     edits=array({"anyOf": [obj(kind=choice(k), targetHandle=TEXT, typedBody=PLAN_BODIES[k])
                            for k in ("feature", "requirement")]}, 1),
@@ -61,7 +63,8 @@ def answer_schema(kind, targets=(), owners=()):
     payload = {
         "ALIGN": VISION, "ARCHITECT": ARCHITECT,
         "DETAIL": DETAIL_PLAN,
-        "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
+        "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear", *targets,
+                                    "Other", "Stop", "Unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
         "WORK": obj(outcome=choice("done", "question"), summary=TEXT,
                     checkPaths=REFS, checks=array(obj(purpose=TEXT, command=array(TEXT, 1),
@@ -74,6 +77,8 @@ def answer_schema(kind, targets=(), owners=()):
     }[kind]
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
     alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
+                    (payload, obj(scope=TEXT)) if kind == "ARCHITECT" else
+                    (payload, obj(ask=ASK)) if kind == "COACH" else
                     (payload, uncertain) if kind in ("JUDGE", "FLOW", "PRODUCT", "REVIEW") else
                     (payload,))
     return obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})

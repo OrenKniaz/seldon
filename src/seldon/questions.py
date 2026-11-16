@@ -52,6 +52,8 @@ PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
              "Keep every exact value the user stated verbatim in the scopeIn item it belongs to; "
              "improving never paraphrases an exact value. "
+             "Name 1-3 alternatives the user may prefer to this vision: smaller, bigger, or another "
+             "answer to what their words leave open. "
              + ALIGN_DESIGN,
     "ARCHITECT": 'What areas, agreements and wave goals deliver the accepted vision? Split it the way a '
                  'small team would start on the same morning: each area is work one builder finishes alone, '
@@ -69,8 +71,11 @@ PROMPTS = {
               "Name a missing accepted promise and its correction.",
     "COACH": "Answer this worker's question using the accepted requirements, contracts and tools. "
              "Give practical guidance so the worker can continue within its scope. "
-             "Answer yes or no first when the question allows it. " + DEFECT_HANDOFF,
-    "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
+             "Answer yes or no first when the question allows it. "
+             "If the vision, decisions and results do not settle it, return ask: one question, "
+             "2-4 options, your recommendation first. " + DEFECT_HANDOFF,
+    "DECIDE": "Which displayed option do the user's verbatim words choose? Other for their own "
+              "direction, Stop to end the dream, Unclear when you cannot tell.",
     "WORK": "Deliver this whole unit inside its scope. Write and run your own checks for the "
             "acceptance sentences; declare each check's command, plus checkPaths "
             "including helpers needed without the product. Code observes RED without product and GREEN "
@@ -99,7 +104,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
         "ALIGN": {"size": "tiny", "understanding": "A personal greeting", "users": ["CLI user"],
                   "scopeIn": ["Greet a supplied name"], "scopeOut": [], "improvements": [],
                   "quality": [{"criterion": "Clear output", "verification": "Run with a name"}],
-                  "unknowns": []},
+                  "alternatives": [{"label": "Greet everyone", "means": "Use a greeting without a name"}]},
         "ARCHITECT": example_architecture(), "DETAIL": example_detail(),
         "REVIEW": {"verdict": "adequate", "gaps": []},
         "DECIDE": {"choice": "approve"},
@@ -143,7 +148,8 @@ def example_architecture():
             "text": 'GET /api/greeting?name=<URL-encoded name>: 200 JSON {"message":"Hello, <name>!"}; '
                     'empty/missing name: 400 JSON {"error":"Name required"}. Page / submits a labelled '
                     'name input and displays message or error in its result region. Same origin; no auth.'}],
-        "decisions": [], "waves": [{"goal": "Deliver the greeting API and its page"}]}
+        "decisions": [], "waves": [{"goal": "Deliver the greeting API and its page",
+                                    "commitments": ["scopeIn:1", "quality:1"]}]}
 
 
 def example_detail():

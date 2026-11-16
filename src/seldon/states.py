@@ -7,14 +7,14 @@ RUN = {
     "NEW": {"start": "ALIGN"},
     "ALIGN": {"aligned": "A"},
     "A": {"approve": "ARCHITECT", "revise": "ALIGN"},
-    "ARCHITECT": {"outlined": "DETAIL"},
+    "ARCHITECT": {"outlined": "DETAIL", "scope": "ALIGN"},
     "DETAIL": {"detailed": "REVIEW", "contract-gap": "ARCHITECT"},
-    "REVIEW": {"reviewed": "B", "gap": "REPAIR"},
+    "REVIEW": {"reviewed": "B", "planned": "EXECUTE", "gap": "REPAIR"},
     "REPAIR": {"area-gap": "DETAIL"},
     "B": {"approve": "EXECUTE", "revise": "REPAIR"},
     "EXECUTE": {"finished": "WAVE-VERIFY"},
     "WAVE-VERIFY": {"passed": "FLOW-JUDGE", "rework": "EXECUTE"},
-    "CHECK-IN": {"approve": "PRODUCT-JUDGE"},
+    "CHECK-IN": {"approve": "PRODUCT-JUDGE", "next": "ARCHITECT", "last": "PRODUCT-JUDGE"},
     "FLOW-JUDGE": {"satisfied": "CHECK-IN", "gap": "EXECUTE"},
     "PRODUCT-JUDGE": {"satisfied": "C", "gap": "EXECUTE"},
     "C": {"approve": "ACCEPTED", "scripted": "SCRIPTED_C"},
@@ -29,7 +29,7 @@ UNIT = {
     "PROVING": {"proven": "JUDGING", "recover": "REWORK", "asked": "ASKED"},
     "JUDGING": {"approved": "INTEGRATING", "recover": "REWORK", "asked": "ASKED"},
     "INTEGRATING": {"integrated": "DONE", "recover": "REWORK", "asked": "ASKED"},
-    "DONE": {"recover": "REWORK", "asked": "ASKED"},
+    "DONE": {"recover": "REWORK", "asked": "ASKED", "extend": "WAITING"},
     "REWORK": {"retry": "WORKING"},
     "ASKED": {"again": "REWORK", "drop": "DROPPED"}, "DROPPED": {},
 }
@@ -40,7 +40,10 @@ def advance(store, event, cause, unit=None, **updates):
         row = store.unit(unit) if unit else store.cursor()
         table = UNIT if unit else RUN
         target = ("STOPPED" if not unit and event == "stop" and row.state not in
-                  ("ACCEPTED", "SCRIPTED_C", "STOPPED") else table[row.state].get(event))
+                  ("ACCEPTED", "SCRIPTED_C", "STOPPED") else
+                  "ARCHITECT" if not unit and event == "steer" and row.state in
+                  ("ARCHITECT", "DETAIL", "REVIEW", "REPAIR", "PRODUCT-JUDGE", "C") else
+                  table[row.state].get(event))
         if target is None:
             raise ValueError(f"Illegal {'unit' if unit else 'run'} move: {row.state} + {event}")
         if "state" in updates:

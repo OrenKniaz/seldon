@@ -25,6 +25,8 @@ class RunRow:
     scratch: str = ""
     candidate: str = ""
     waveStart: str = ""
+    wave: int = 1
+    waived: bool = False
     revision: int | None = None
     vision: str | None = None
     review: str | None = None
@@ -47,6 +49,7 @@ class RunRow:
 @dataclass(frozen=True)
 class UnitRow:
     lineage: str = ""
+    wave: int = 0
     state: str = "NEW"
     base: str | None = None
     worktree: str | None = None
@@ -158,7 +161,7 @@ class Store:
         row = self.db.execute("SELECT body FROM recovery WHERE id=?", (ref,)).fetchone()
         state = json.loads(row[0]) if row else {}
         return state if state and not state.get("resolved") else dict(
-            rounds=0, stage=0, question=None, answer=None, attempts=[], seen=[])
+            rounds=0, stage=0, question=None, answer=None, attempts=[], seen=[], coached=False)
 
     def unit(self, ref, value=None):
         if value is not None:

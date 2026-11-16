@@ -85,6 +85,7 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
                             value = await call('state', run=run)
                             assert value['state'] != 'STOPPED', value
                             if (value['controller'] == 'idle' and value['state'] == expected
+                                    and (expected == 'ACCEPTED' or value['waitingFor'] is not None)
                                     and (previous is None or value['waitingFor']['request'] != previous)):
                                 return value
                             await anyio.sleep(.05)

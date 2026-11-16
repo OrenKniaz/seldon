@@ -207,13 +207,16 @@
       ],
       "waves": [
         {
-          "goal": "Establish the canonical service and persistence boundary while the interface, importer and delivery surfaces develop against the agreed contracts."
+          "goal": "Establish the canonical service and persistence boundary while the interface, importer and delivery surfaces develop against the agreed contracts.",
+          "commitments": []
         },
         {
-          "goal": "Connect the local page and CSV entry point to the same canonical persisted inventory."
+          "goal": "Connect the local page and CSV entry point to the same canonical persisted inventory.",
+          "commitments": []
         },
         {
-          "goal": "Deliver the coherent fresh-folder application with documented local operation and the accepted usability, recovery and durability outcomes."
+          "goal": "Deliver the coherent fresh-folder application with documented local operation and the accepted usability, recovery and durability outcomes.",
+          "commitments": []
         }
       ]
     },
@@ -1175,10 +1178,15 @@
           ],
           "size": "medium",
           "understanding": "A complete, modest local pantry application: one dependable SQLite-backed service, one thoughtfully designed responsive page and one interoperable CSV importer.",
-          "unknowns": [],
           "users": [
             "Household members checking what they have, using items and spotting food that needs attention.",
             "The household member importing inventory and running the application locally."
+          ],
+          "alternatives": [
+            {
+              "label": "Use one greeting control",
+              "means": "Combine the greetings under one control"
+            }
           ]
         },
         "kind": "vision"

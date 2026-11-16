@@ -380,9 +380,14 @@
           ],
           "size": "small",
           "understanding": "Build a polished, dependency-free Foundation page where three independently implemented Play controls each reveal their specified message.",
-          "unknowns": [],
           "users": [
             "Visitors opening the page locally with a mouse, touch or keyboard."
+          ],
+          "alternatives": [
+            {
+              "label": "Use one greeting control",
+              "means": "Combine the greetings under one control"
+            }
           ]
         },
         "kind": "vision"
