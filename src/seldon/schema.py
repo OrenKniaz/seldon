@@ -66,7 +66,7 @@ def answer_schema(kind, targets=(), owners=()):
         "WORK": obj(outcome=choice("done", "question"), summary=TEXT,
                     checkPaths=REFS, checks=array(obj(purpose=TEXT, command=array(TEXT, 1),
                         expectedEvidence=TEXT)),
-                    discoveries=array(obj(owner=TEXT, correction=TEXT))),
+                    discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
         "COACH": obj(guidance=TEXT),
         "JUDGE": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
         "DEMO": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),

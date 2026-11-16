@@ -106,13 +106,22 @@ else:
         source += "assert not Path('unit-002/value.txt').exists(), 'integrated mismatch'\n"
     if mode == 'wave-gap' and name == 'unit-002' and turn == 1:
         source += "assert not Path('unit-001/value.txt').exists(), 'integrated mismatch'\n"
+    if mode.startswith('defect-'):
+        if name == 'unit-001':
+            source += "assert Path('unit-002/peer.txt').read_text() == 'correct', 'peer defect'\n"
+        else:
+            Path(name, 'peer.txt').write_text('correct' if turn > 1 and mode != 'defect-fails' else 'broken')
     Path(name, 'check.py').write_text(source)
     Path(name, 'value.txt').write_text(value)
     if mode == 'scope' and turn == 1 and name == 'unit-001':
         Path('unowned.txt').write_text('outside scope')
     if mode == 'scope' and turn > 1:
         Path('unowned.txt').unlink(missing_ok=True)
-    answer['discoveries'] = [{'owner': 'future check-in', 'correction': 'Keep the saved values visible'}]
+    answer['discoveries'] = [{'owner': 'u'+name.split('-')[1], 'correction': 'Keep the saved values visible'}]
+    if mode.startswith('defect-') and name == 'unit-001':
+        answer['discoveries'] = [{'owner': 'u002', 'correction': 'Write correct into unit-002/peer.txt'}]
+        if mode == 'defect-question':
+            answer.update(outcome='question', summary='May u002 fix the peer defect?')
     answer['checkPaths'] = [name+'/check.py']
     answer['checks'] = [{'purpose':'Read the actual persistent value',
         'command':[sys.executable,'-B',name+'/check.py'],
@@ -220,6 +229,8 @@ class Scripted:
                 units[0]["provides"] = ["values"]
             if self.mode in ("kill-work", "wave-fault") and len(units) > 1:
                 units[1]["dependencies"] = [1]
+            if self.mode.startswith("defect-"):
+                units[0]["dependencies"] = [2]
             answer = {"verdict": "planned", "edits": edits, "units": units}
         elif kind == "REVIEW":
             answer = {"verdict": "adequate", "gaps": []}
@@ -375,7 +386,7 @@ def journey(slot, mode="normal", count=1):
             assert run.store.records("unit_fixup")
         finish(run)
         if mode == "normal":
-            assert any(b["owner"] == "future check-in" for _, _, b in run.store.records("discovery"))
+            assert any(b["discoveries"] for _, _, b in run.store.records("worker_checks"))
         if mode == "parallel-contract":
             assert provider.calls.count("ARCHITECT") == 1
             assert not run.store.records("detail_correction")
@@ -549,3 +560,57 @@ def test_check_kit_golden(tmp_path, surface, monkeypatch):
     if surface == "broken-guide":
         monkeypatch.setenv("SELDON_TEST_GUIDE_FAULT", str(tmp_path / "guide-fault"))
     kit_journey(tmp_path / "kit", surface)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("outcome", ["done", "question", "fails"])
+def test_defect_reaches_owner_journey(tmp_path, outcome):
+    """A real failing peer check delivers its writer's correction to the named file owner.
+
+    Existing wave faults repair their writer and miss lost discoveries, premature local
+    proof and forced writer routing. The failed-fix twin protects the owner's recovery
+    and durable user wait: an ineffective fix must never publish or loop forever.
+    """
+    from seldon.decisions import Waiting
+    from seldon.frontdoor import state
+
+    slot = tmp_path / "defect"
+    run, provider = prepare(slot, "defect-" + outcome, 2)
+    try:
+        while run.store.cursor().state != "WAVE-VERIFY":
+            run.step()
+        assert run.store.unit("u001").state == "DONE"
+        original = gitwork.blobs(run.project, run.store.cursor().candidate, ["unit-001/**"])
+        assert (run.project / "unit-002/peer.txt").read_text() == "broken"
+        run.step()
+        fixup, = [b for _, _, b in run.store.records("unit_fixup")]
+        assert fixup["owner"] == "u002"
+        gap, = fixup["gaps"]
+        assert gap["subject"] == "u001:check:1" and gap["units"] == ["u002"]
+        assert "Write correct into unit-002/peer.txt" in gap["correction"]
+        assert "peer defect" in run.store.read(gap["source"])["stderr"]
+        if outcome == "fails":
+            with pytest.raises(Waiting):
+                while True:
+                    run.step()
+            assert state(str(run.project))["status"] == "WAITING"
+            request, = [b for _, _, b in run.store.records("decision_request") if b["gate"] == "UNIT"]
+            assert request["subject"]["unit"] == "u002"
+            assert run.store.unit("u001").state == "DONE"
+            candidate = run.store.cursor().candidate
+            run.close()
+            run = Run.reopen(slot / "product", provider, approve)
+            with pytest.raises(Waiting):
+                run.step()
+            assert run.store.cursor().candidate == candidate
+            assert run.store.read(run.store.cursor().decision) == request
+            (slot / "mode").write_text("defect-done")
+            run.user = lambda item: ("Try again: correct peer.txt" if item["gate"] == "UNIT" else approve(item))
+        finish(run)
+        assert (run.project / "unit-002/peer.txt").read_text() == "correct"
+        assert gitwork.blobs(run.project, run.store.cursor().candidate, ["unit-001/**"]) == original
+        assert "COACH" not in provider.calls
+        if outcome != "fails":
+            assert not any(b["gate"] == "UNIT" for _, _, b in run.store.records("decision_request"))
+    finally:
+        run.close()

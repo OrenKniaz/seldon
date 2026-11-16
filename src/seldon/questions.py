@@ -41,6 +41,11 @@ AVAILABLE_TOOLS = (
     "async ({url}) => browser(url, async ({page, shot}) => { await page.goto(url); await shot('ready'); })); "
     "Run with node checks/example.cjs. Adjust require paths relative to your scoped check file.")
 
+DEFECT_HANDOFF = (
+    "A defect in a file outside your write scope is its owner's to fix: leave the file alone, "
+    "keep your check honest, name the owner and the correction in discoveries and return done. "
+    "Seldon delivers it and reruns your checks on the integrated product.")
+
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
              "Keep every exact value the user stated verbatim in the scopeIn item it belongs to; "
@@ -62,13 +67,13 @@ PROMPTS = {
               "Name a missing accepted promise and its correction.",
     "COACH": "Answer this worker's question using the accepted requirements, contracts and tools. "
              "Give practical guidance so the worker can continue within its scope. "
-             "Answer yes or no first when the question allows it.",
+             "Answer yes or no first when the question allows it. " + DEFECT_HANDOFF,
     "DECIDE": "Do the user's verbatim words approve, revise or decline this displayed subject?",
     "WORK": "Deliver this whole unit inside its scope. Write and run your own checks for the "
             "acceptance sentences; declare each check's command, plus checkPaths "
             "including helpers needed without the product. Code observes RED without product and GREEN "
             "with it. Return a question in summary for missing facts or requirement meaning. Save visual evidence "
-            "in SELDON_EVIDENCE_DIR.",
+            "in SELDON_EVIDENCE_DIR. " + DEFECT_HANDOFF,
     "JUDGE": "Judge only the supplied acceptance sentences by their meaning: delivered, exercised by "
              "a meaningful check with the supplied execution observations, and no stub replacing that behaviour? "
              "A gap quotes the acceptance sentence it breaks; other suggestions are notes. "
@@ -262,9 +267,9 @@ def work_brief(store, ref):
     if unit.failure:
         facts["Exact failure"] = unit.failure
         facts["Read current patch"] = ["git", "diff", "--binary", unit.base]
-    facts["Correction owners"] = [ref, *contract["dependencies"]]
+    facts["Correction owners"] = {r: u["scope"] for r, u in plan.select(document, "unit").items()}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
-                 images=images(store, refs))
+                 images=images(store, refs), owners=facts["Correction owners"])
 
 
 def execution_facts(store, ref, peers=()):
@@ -278,7 +283,7 @@ def execution_facts(store, ref, peers=()):
         "Evidence": [{"record": r, **b} for r, _, b in store.records("observation")
                      if b["unit"] in peers],
         "Runtime": runtime(store.read(store.cursor().kickoff)["setup"]),
-        "Proof owner": "WAVE-VERIFY" if (wave := plan.wave_requirements(document, ref)) else ref,
+        "Proof owner": "WAVE-VERIFY" if (wave := plan.wave_requirements(document, ref)) or units[ref]["handed"] else ref,
         "Wave requirements": wave,
         "Execution": "Your peers are building their units right now from the same contracts; their files "
             "are not in this worktree. Build to the contract text. Run what you can here. A check that needs "

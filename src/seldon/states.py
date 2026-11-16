@@ -29,7 +29,7 @@ UNIT = {
     "WAITING": {"ready": "READY", "recover": "WAITING", "asked": "ASKED"},
     "READY": {"start": "WORKING", "recover": "READY", "asked": "ASKED"},
     "WORKING": {"returned": "PROVING", "recover": "REWORK", "asked": "ASKED",
-                "reopen": "WORKING", "wait-owner": "WAITING"},
+                "reopen": "WORKING"},
     "PROVING": {"proven": "JUDGING", "recover": "REWORK", "asked": "ASKED"},
     "JUDGING": {"approved": "INTEGRATING", "recover": "REWORK", "asked": "ASKED"},
     "INTEGRATING": {"integrated": "DONE", "recover": "REWORK", "asked": "ASKED"},

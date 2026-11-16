@@ -63,7 +63,6 @@ class UnitRow:
     judgment: str | None = None
     integrated: str | None = None
     waiting: str = ""
-    waitingFor: list[str] = field(default_factory=list)
 
 
 @lru_cache(maxsize=None)
@@ -95,8 +94,6 @@ def checked(value, model):
 def decoded(body, model):
     value = json.loads(body)
     value.setdefault("lineage", "")
-    if model is UnitRow:
-        value.setdefault("waitingFor", [])  # Runs saved before owner handoffs have no dynamic wait.
     if set(value) != {f.name for f in fields(model)}:
         raise ValueError(f"Stored {model.__name__} has unknown or missing fields")
     result = model(**value)

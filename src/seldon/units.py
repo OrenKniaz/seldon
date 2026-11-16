@@ -64,10 +64,11 @@ def work(store, provider, ref):
     else:
         answer = store.read(report)["answer"]
     store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
-    if answer["outcome"] == "question":
+    if answer["outcome"] == "question" and not any(d["owner"] != ref for d in answer["discoveries"]):
         text, document = answer["summary"], plan.execution(store)
         source, guidance = inference.call(store, provider, questions.build("COACH", {
             "Worker's question": text, "Execution facts": questions.execution_facts(store, ref),
+            "Correction owners": {r: u["scope"] for r, u in plan.select(document, "unit").items()},
             "Requirements": questions.requirement_facts(
                 document, plan.select(document, "unit")[ref]["requirements"]),
             **questions.agreement_facts(document, ref)}))
@@ -75,10 +76,8 @@ def work(store, provider, ref):
         return
     with store.transaction():
         store.record("worker_checks", {"unit": ref, "report": report,
-            "checkPaths": answer["checkPaths"], "checks": answer["checks"]})
-        for discovery in answer["discoveries"]:
-            store.record("discovery", {"unit": ref, "report": report, "disposition": "pending check-in",
-                                        **discovery})
+            "checkPaths": answer["checkPaths"], "checks": answer["checks"],
+            "discoveries": answer["discoveries"]})
         advance(store, "returned", report, unit=ref, report=report)
 
 
@@ -116,7 +115,7 @@ def run_unit(store, provider, ref):
                 contract = plan.select(document, "unit")[ref]
                 checks = plan.assigned(document, local=True)[ref]
                 integrated_checks = dict(checks)
-                if assignment:
+                if assignment and not contract["handed"]:
                     all_checks = plan.select(document, "check")
                     integrated_checks.update({g["subject"]: all_checks[g["subject"]]
                         for g in assignment["gaps"]

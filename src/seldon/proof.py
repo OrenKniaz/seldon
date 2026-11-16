@@ -95,9 +95,11 @@ def gaps(store, candidate, observations):
         if body["commit"] != candidate:
             raise ValueError("Check gaps require observations from the candidate commit")
         if failures(store, [ref]):
-            owners = [plan.select(document, "check")[body["check"]]["owner"]]
+            writer = plan.select(document, "check")[body["check"]]["owner"]
+            handed = plan.select(document, "unit")[writer]["handed"]
+            owners = list(handed) or [writer]
             result.append({"subject": body["check"], "kind": "check", "commit": candidate,
-                           "units": owners, "correction": explain([body]), "source": ref})
+                           "units": owners, "correction": "\n".join([*handed.values(), explain([body])]), "source": ref})
     return result
 
 

@@ -24,7 +24,7 @@ def execute(store, provider, capacity, user):
             for ref, row in rows.items():
                 if ref in running or row.state in ("DONE", "ASKED", "DROPPED"):
                     continue
-                unmet = [d for d in contracts[ref]["dependencies"] + row.waitingFor if rows[d].state != "DONE"]
+                unmet = [d for d in contracts[ref]["dependencies"] if rows[d].state != "DONE"]
                 conflict = [r for r in running
                             if plan.overlaps(contracts[ref]["scope"], contracts[r]["scope"])]
                 reason = ("Dependencies not DONE: " + ", ".join(unmet) if unmet else
@@ -38,7 +38,7 @@ def execute(store, provider, capacity, user):
                     continue
                 if row.state == "WAITING":
                     advance(store, "ready", "Dependencies DONE and scope available", unit=ref,
-                            waiting="", waitingFor=[])
+                            waiting="")
                 running[ref] = pool.submit(units.run_unit, store, provider, ref)
             if not running:
                 if store.cursor().decision:

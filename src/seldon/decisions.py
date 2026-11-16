@@ -21,7 +21,7 @@ def ask_unit(store, recommendation=""):
                 tried.append(row.failure)
             affected = {ref}
             while added := {r for r, u in store.units().items() if r not in affected
-                    and affected.intersection(plan.select(document, "unit")[r]["dependencies"] + u.waitingFor)}:
+                    and affected.intersection(plan.select(document, "unit")[r]["dependencies"])}:
                 affected.update(added)
             request(store, "UNIT", {"unit": ref,
                 "tried": tried,

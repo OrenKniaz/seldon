@@ -10,7 +10,6 @@ def plan(store, gaps):
     cursor = store.cursor()
     document = planning.execution(store)
     owners = planning.select(document, "unit")
-    checks = planning.select(document, "check")
     assignments = {}
     for gap in gaps:
         if (set(gap) != {"subject", "kind", "commit", "units", "correction", "source"}
@@ -19,8 +18,6 @@ def plan(store, gaps):
                 or not isinstance(gap["units"], list) or not gap["units"]):
             raise ValueError("Fixup requires a concrete current-candidate Gap and its owning units")
         store.read(gap["source"])
-        if gap["kind"] == "check" and gap["subject"] in checks:
-            gap = {**gap, "units": [checks[gap["subject"]]["owner"]]}
         for ref in dict.fromkeys(gap["units"]):
             if ref not in owners or store.unit(ref).state != "DONE":
                 raise ValueError(f"{ref}: a Gap must name its DONE approved owner")
@@ -47,23 +44,22 @@ def active(store, ref):
     return None
 
 
-def apply(store, gaps, *, key=None, charged=False):
+def apply(store, gaps):
     """Atomically admit local rework; filesystem preparation happens in the resumable unit loop."""
     assignments = plan(store, gaps)
     if not assignments:
         return []
     with store.transaction():
-        refs, seen = [], set()
+        refs = []
         for ref, assignment in assignments.items():
             cause = store.record("unit_fixup", assignment)
             refs.append(cause)
             failure = "\n".join(g["correction"] for g in assignment["gaps"])
             gap = assignment["gaps"][0]
             acceptance = "check" if gap["kind"] == "check" else store.cursor().state.split("-")[0]
-            origin = key or "gap:" + acceptance + ":" + gap["subject"]
-            recovery.recover(store, ref, failure, key=origin, cause=cause, charged=charged or origin in seen,
+            origin = "gap:" + acceptance + ":" + gap["subject"] + ":" + ref
+            recovery.recover(store, ref, failure, key=origin, cause=cause,
                              base=assignment["base"], worktree=None, callFolder=None, callAttempt=None)
-            seen.add(origin)
         cursor = store.cursor()
         if cursor.state != "EXECUTE":
             event = "rework" if cursor.state == "WAVE-VERIFY" else "gap"

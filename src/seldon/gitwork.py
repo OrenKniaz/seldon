@@ -154,7 +154,8 @@ def snapshots(root, base, scope, check_paths, scratch):
     changed = [p for p, _, _ in changes]
     bad = [p for p in changed if not matches(safe_path(p), scope)]
     if bad:
-        raise ValueError("Out-of-scope writes: " + ", ".join(bad))
+        from .questions import DEFECT_HANDOFF
+        raise ValueError("Out-of-scope writes: " + ", ".join(bad) + ". " + DEFECT_HANDOFF)
     product, tests = import_commits(root, base, [changes, [c for c in changes if matches(c[0], check_paths)]])
     return tests, product, changed
 

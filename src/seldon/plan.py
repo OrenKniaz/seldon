@@ -61,6 +61,8 @@ def execution(store):
     latest = {b["unit"]: b for _, _, b in store.records("worker_checks")}
     for ref, unit in select(document, "unit").items():
         declaration = latest.get(ref, {"checkPaths": [], "checks": []})
+        unit["handed"] = {d["owner"]: d["correction"] for d in declaration.get("discoveries", [])
+                          if d["owner"] != ref}
         unit["checkPaths"] = [p for p in declaration["checkPaths"] if matches(p, unit["scope"])]
         for i, check in enumerate(declaration["checks"], 1):
             document["nodes"][f"{ref}:check:{i}"] = {"kind": "check", "body": {
@@ -71,7 +73,8 @@ def execution(store):
 def assigned(document, *, local=False):
     result = {r: {} for r in select(document, "unit")}
     for ref, check in select(document, "check").items():
-        if not local or not wave_requirements(document, check["owner"]):
+        if not local or not (select(document, "unit")[check["owner"]]["handed"]
+                            or wave_requirements(document, check["owner"])):
             result[check["owner"]][ref] = check
     return result
 
