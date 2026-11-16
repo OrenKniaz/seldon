@@ -63,8 +63,6 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
         store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
     if answer.get("verdict") == "uncertain" and kind == "JUDGE":
         answer = {**answer, "verdict": "not judged", "gaps": []}
-    elif answer.get("verdict") == "uncertain" and kind == "DEMO":
-        raise questions.MissingFacts("Unresolved facts: " + "; ".join(answer["neededFacts"]))
     return result, answer
 
 

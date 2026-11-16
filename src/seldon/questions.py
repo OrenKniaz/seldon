@@ -80,22 +80,15 @@ PROMPTS = {
              "a meaningful check with the supplied execution observations, and no stub replacing that behaviour? "
              "A gap quotes the acceptance sentence it breaks; other suggestions are notes. "
              + JUDGMENT_LEEWAY,
-    "DEMO": "Does this requirement's demonstrated behavior meet its obligation "
-            "without stubs, mocks or missing behavior? Inspect final observations and screenshots. "
-            "Identify the real user path and the observed evidence that exercised it "
-            "(a browser interaction for a UI). " + JUDGMENT_LEEWAY,
-    "PRODUCT": "Does this quality criterion hold in the delivered experience? "
-               "Inspect its traced final evidence. A UI that works but is plain or forgettable "
+    "PRODUCT": "Do all these area criteria hold in the delivered experience? Each gap names its criterion "
+               "as target and its responsible unit or contract owners. "
+               "Inspect the traced final evidence. A UI that works but is plain or forgettable "
                "does not meet an accepted distinctive visual direction. " + JUDGMENT_LEEWAY,
 }
 
 
-class MissingFacts(ValueError):
-    pass
-
-
 def build(kind, facts, targets=(), execution=None, images=(), owners=()):
-    if kind in ("ARCHITECT", "DETAIL", "WORK", "COACH"):
+    if kind in ("ARCHITECT", "DETAIL", "WORK", "COACH") and not (kind == "WORK" and execution.get("session") and facts.get("Exact failure")):
         facts = {**facts, "Available tools and skills": AVAILABLE_TOOLS}
     if kind == "ALIGN":
         facts = {**facts, "Design guidance used by UI workers": CRAFT}
@@ -114,7 +107,6 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
         "WORK": {"outcome": "done", "summary": "Implemented and checked the acceptance",
                  "checkPaths": [], "checks": [], "discoveries": []},
         "JUDGE": {"verdict": "satisfied", "gaps": []},
-        "DEMO": {"verdict": "satisfied", "gaps": []},
         "PRODUCT": {"verdict": "satisfied", "gaps": []},
     }[kind]
     example["why"] = ("The responsibilities, agreements and waves cover the accepted promises"
@@ -257,7 +249,8 @@ def work_brief(store, ref):
     refs = []
     if assignment := fixups.active(store, ref):
         repair, refs = repair_facts(store, assignment)
-        facts.update(repair)
+        if any(g["kind"] != "check" for g in assignment["gaps"]):
+            facts.update(repair)
     if ref == "guide":
         facts["Guide path"] = plan.GUIDE_PATH
         vision = document["nodes"]["vision"]["body"]
@@ -267,6 +260,9 @@ def work_brief(store, ref):
         facts["Exact failure"] = unit.failure
         facts["Read current patch"] = ["git", "diff", "--binary", unit.base]
     facts["Correction owners"] = {r: u["scope"] for r, u in plan.select(document, "unit").items()}
+    if unit.thread and unit.failure:
+        facts = {k: facts[k] for k in ("Exact failure", "Write scope", "Correction owners",
+                                     "Correction observations") if k in facts}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
                  images=images(store, refs), owners=facts["Correction owners"])
 

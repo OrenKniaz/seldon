@@ -28,9 +28,10 @@ def endpoint(unit, contract):
 
 
 def contracts_for(document, unit):
-    units = plan.select(document, "unit")
-    return {r: c for r, c in plan.select(document, "contract").items()
-            if endpoint(unit, c) or units[unit]["area"] == units[c["provider"]]["area"]}
+    units, contracts = (plan.select(document, k) for k in ("unit", "contract"))
+    providers = {unit} | {c["provider"] for c in contracts.values() if unit in c["consumers"]}
+    return {r: c for r, c in contracts.items()
+            if c["provider"] in providers or units[unit]["area"] == units[c["provider"]]["area"]}
 
 
 def crossed_contracts(document, requirements):

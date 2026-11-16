@@ -79,12 +79,13 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
                     assert not result.is_error, result
                     return json.loads(result.content[0].text)
 
-                async def wait(run, expected):
+                async def wait(run, expected, previous=None):
                     with anyio.fail_after(55):
                         while True:
                             value = await call('state', run=run)
                             assert value['state'] != 'STOPPED', value
-                            if value['controller'] == 'idle' and value['state'] == expected:
+                            if (value['controller'] == 'idle' and value['state'] == expected
+                                    and (previous is None or value['waitingFor']['request'] != previous)):
                                 return value
                             await anyio.sleep(.05)
 
@@ -95,7 +96,7 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
                 a = await wait(run, 'A')
                 old = a['waitingFor']['request']
                 await call('answer', run=run, request=old, words='Revise the dream: name the exact value')
-                a = await wait(run, 'A')
+                a = await wait(run, 'A', previous=old)
                 current = a['waitingFor']['request']
                 assert current != old
                 await call('answer', error=current, run=run, request=old, words='Yes to the old vision')

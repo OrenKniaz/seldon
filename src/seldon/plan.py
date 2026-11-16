@@ -8,11 +8,10 @@ from .schema import BODIES, PLAN, VISION
 from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
-GUIDE_WORK = ("Write docs/try-it.md for the reader: the shortest path from a fresh copy to using the "
-              "product, with the exact commands and what they will see, from the accepted vision and "
-              "contracts. Leave one walkthrough check under docs/try-it/ for WAVE-VERIFY that repeats that "
-              "walk on its own from temporary data, saves a screenshot of what the reader sees to "
-              "SELDON_EVIDENCE_DIR, and stops what it started; declare it. Nothing in the guide is for a machine.")
+GUIDE_WORK = ("The page is absent from your worktree and no contract names its fields. "
+              "Write docs/try-it.md and declare a docs/try-it/ WAVE-VERIFY check from contracts: start with "
+              "temporary data, open the page, import/API, check the promised text, save a screenshot to "
+              "SELDON_EVIDENCE_DIR, and stop what you started; leave unseen forms to the page owner's check.")
 
 
 def safe_path(value):

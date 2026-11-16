@@ -1,9 +1,10 @@
-"""C3/C15/I2/I10; R2/R9/R11: one final subject, traced facts, local fixup, code ANDs."""
+"""C3/C15/I2/I10; R2/R9/R11: one area question, criterion verdicts, local fixup, code ANDs."""
 
 from dataclasses import replace
 from pathlib import Path
 
-from . import fixups, gitwork, inference, plan, proof, questions
+from . import fixups, gitwork, inference, plan, questions
+from .schema import answer_schema
 from .states import advance
 
 
@@ -37,7 +38,8 @@ def current(verdict, trees):
     return verdict["scopeTrees"] == {r: trees[r] for r in verdict["scopeTrees"]}
 
 
-def brief(store, kind, subject, *, trees=None):
+def brief(store, kind, selected, *, trees=None):
+    subject = selected[0]
     cursor = store.cursor()
     document = plan.execution(store)
     checks = trace(document, kind, subject)
@@ -50,8 +52,7 @@ def brief(store, kind, subject, *, trees=None):
     verdicts = []
     for ref in owned:
         verdict = store.read(store.unit(ref).judgment)
-        unchanged = verdict["scopeTree"] == trees[ref]
-        if not unchanged:
+        if verdict["scopeTree"] != trees[ref]:
             raise ValueError(f"{ref} needs its unit JUDGE on the changed scope before final judgment")
         if "answer" in verdict:
             verdicts.append({"unit": ref, "commit": verdict["commit"], **verdict["answer"]})
@@ -60,9 +61,9 @@ def brief(store, kind, subject, *, trees=None):
         body = store.read(ref)
         item.update(workingDirectory=body["cwd"], commit=body["commit"], ranOnDeliveredRevision=True,
                     **{k: body[k] for k in ("executionStarted", "cleanupVerified", "timedOut")})
-    body = subjects(document, kind)[subject]
-    obligation = {k: body[k] for k in ("criterion", "verification")}
-    facts = {"Subject": obligation, "Checks": checks, "Final observations": final,
+    criteria = {s: {k: subjects(document, kind)[s][k] for k in ("criterion", "verification")}
+                for s in selected}
+    facts = {"Criteria": criteria, "Checks": checks, "Final observations": final,
              "Source judgment": verdicts,
              "Source availability": "Source is judged at the unit; source text is unavailable "
                                     "after integration.",
@@ -88,8 +89,25 @@ def brief(store, kind, subject, *, trees=None):
         facts["Walkthrough check sources"] = {p: b.decode("utf-8", errors="replace") for p, b in
             gitwork.blobs(store.root.parent, cursor.finalCommit,
                           plan.select(document, "unit")["guide"]["checkPaths"]).items()}
-    images = questions.images(store, refs)
-    return questions.build(kind, facts, [subject], images=images)
+    question = questions.build(kind, facts, selected, images=questions.images(store, refs))
+    return {**question, "schema": review_schema(document, kind)}
+
+
+def review_schema(document, kind):
+    return answer_schema(kind, sorted(subjects(document, kind)),
+                         sorted([*plan.select(document, "unit"), *plan.select(document, "contract")]))
+
+
+def corrections(store, subject, source, answer):
+    contracts = plan.select(plan.execution(store), "contract")
+    owners = {}
+    for gap in answer["gaps"]:
+        for owner in gap["owners"]:
+            owners.setdefault(owner, []).append(gap["correction"])
+    return [{"subject": owner if owner in contracts else subject, "kind": "flow",
+             "commit": store.cursor().candidate,
+             "units": [contracts[owner]["provider"] if owner in contracts else owner],
+             "correction": "; ".join(items), "source": source} for owner, items in owners.items()]
 
 
 def ready(answer):
@@ -129,35 +147,33 @@ def step(store, provider):
                                     for f in ("requirementVerdicts", "qualityVerdicts")})
         store.cursor(cursor)
     done = {store.read(r)["subject"] for r in cursor.qualityVerdicts}
-    selected = [s for s in subjects(document, kind) if s not in done]
-    batch, replies = {}, {}
-    for subject in selected:
-        question = brief(store, kind, subject, trees=trees)
-        refs = [r for r in cursor.finalObservations
-                if store.read(r)["check"] in trace(document, kind, subject)]
-        failed = proof.failures(store, refs)
-        if failed:
-            answer = {"verdict": "gap", "gaps": [{"target": subject, "correction": proof.explain(failed)}],
-                      "why": "A traced check failed on the final commit"}
-            result = store.record("check_gap", {"subject": subject, "observations": refs,
-                                              "commit": cursor.candidate, "answer": answer})
-            replies[subject] = result, answer
-        else:
-            batch[subject] = question
-    replies.update(inference.batch(store, provider, batch))
+    groups = {}
+    for subject, body in subjects(document, kind).items():
+        groups.setdefault(body.get("area", subject), []).append(subject)
+    selected = {area: ss for area, ss in groups.items() if set(ss) - done}
+    replies = inference.batch(store, provider, {
+        area: brief(store, kind, ss, trees=trees) for area, ss in selected.items()})
     gaps = []
     with store.transaction():
-        for subject in selected:
-            result, answer = replies[subject]
+        for area, ss in selected.items():
+            result, answer = replies[area]
             if answer["verdict"] == "uncertain":
                 answer = {**answer, "verdict": "not judged", "gaps": []}
-            if not ready(answer):
-                gaps.append({"subject": subject, "kind": "flow", "source": result,
-                             "units": list(owners(document, kind, subject)), "commit": cursor.candidate,
-                             "correction": str(answer)})
-            else:
+            result = store.record("area_verdict", {"area": area, "source": result, "answer": answer,
+                "commit": cursor.candidate, "observations": [r for r in cursor.finalObservations
+                                 if store.read(r)["check"] in trace(document, kind, ss[0])]})
+            gaps.extend(corrections(store, area, result, answer))
+            for subject in ss:
+                if subject in done:
+                    continue
+                targeted = [g for g in answer["gaps"] if g["target"] == subject]
+                individual = {**answer, "gaps": targeted, "verdict": (
+                    "not judged" if answer["verdict"] == "not judged" else
+                    "gap" if targeted else "satisfied")}
+                if not ready(individual):
+                    continue
                 ref = store.record("subject_verdict", {"subject": subject, "kind": kind,
-                    "commit": cursor.candidate, "answer": answer, "source": result,
+                    "commit": cursor.candidate, "answer": individual, "source": result,
                     "scopeTrees": {r: trees[r] for r in owners(document, kind, subject)}})
                 row = store.cursor()
                 store.cursor(replace(row, qualityVerdicts=row.qualityVerdicts + [ref]))

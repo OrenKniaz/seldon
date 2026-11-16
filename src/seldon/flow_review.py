@@ -3,7 +3,6 @@
 from dataclasses import replace
 
 from . import architecture, fixups, inference, judgment, plan, proof, questions
-from .schema import answer_schema
 from .states import advance
 
 
@@ -66,10 +65,10 @@ def brief(store, feature):
         "kind": "FLOW",
         "prompt": "Does this feature's observed user flow meet each requirement across its contracts? "
                   "Name only responsible correction owners for each gap; name a crossed contract "
-                  "when its agreement needs correction. Judge the observations and screenshots. "
+                  "when its agreement needs correction. Owners may also be units or contracts outside "
+                  "this feature. Judge the observations and screenshots. "
                   + questions.JUDGMENT_LEEWAY,
-        "facts": facts, "targets": list(requirements), "schema": answer_schema(
-            "FLOW", requirements, [*facts["Correction owners"], *facts["Crossed contracts"]]),
+        "facts": facts, "targets": list(requirements), "schema": judgment.review_schema(document, "FLOW"),
         "examples": [{"answer": {"verdict": "satisfied", "gaps": [],
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
         "execution": {}, "images": images}
@@ -88,17 +87,7 @@ def review(store, feature, source, answer):
         verdict = store.record("feature_verdict", {
             "feature": feature, "commit": cursor.candidate, "answer": answer,
             "source": source, "scopeTrees": trees, "observations": refs})
-        corrections = {}
-        for gap in answer["gaps"]:
-            for owner in gap["owners"]:
-                corrections.setdefault(owner, []).append(gap["correction"])
-        document = plan.execution(store)
-        contracts = architecture.crossed_contracts(document, requirements)
-        gaps = [{"subject": owner if owner in contracts else feature, "kind": "flow",
-                 "commit": cursor.candidate,
-                 "units": [contracts[owner]["provider"] if owner in contracts else owner],
-                 "correction": "; ".join(items), "source": verdict}
-                for owner, items in corrections.items()]
+        gaps = judgment.corrections(store, feature, verdict, answer)
     return {"verdict": verdict, "gaps": gaps}
 
 

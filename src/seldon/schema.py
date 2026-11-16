@@ -69,13 +69,12 @@ def answer_schema(kind, targets=(), owners=()):
                     discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
         "COACH": obj(guidance=TEXT),
         "JUDGE": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
-        "DEMO": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
         "FLOW": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
-        "PRODUCT": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
+        "PRODUCT": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
     }[kind]
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
     alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
-                    (payload, uncertain) if kind in ("JUDGE", "DEMO", "FLOW", "PRODUCT", "REVIEW") else
+                    (payload, uncertain) if kind in ("JUDGE", "FLOW", "PRODUCT", "REVIEW") else
                     (payload,))
     return obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
 

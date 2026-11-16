@@ -34,6 +34,11 @@ q = json.loads(schema.with_name('question.json').read_text('utf-8'))
 facts = q['facts']
 name = facts['Write scope'][0].split('/')[0]
 mode = (slot/'mode').read_text()
+context = slot/('context-'+name+'.json')
+if q['execution'].get('session') and 'Exact failure' in facts:
+    facts = {**json.loads(context.read_text()), **facts}
+else:
+    context.write_text(json.dumps(facts))
 if mode == 'parallel-contract':
     assert ('Design guidance used by UI workers' in facts) == (name == 'unit-002')
 counter = slot/('turn-'+name)
@@ -87,6 +92,19 @@ else:
     source = ('from pathlib import Path\nimport os\n'
         + f"assert Path('{name}/value.txt').read_text() == '{value}'\n"
         + f"print('observed {value}')\n")
+    if mode == 'contracts':
+        if number == 1:
+            Path(name, 'items.json').write_text(json.dumps({'items': ['value-001']}))
+        elif number == 2:
+            agreements = {c['text'] for label in ('Contracts consumed', 'Area contracts')
+                          for c in facts.get(label, {}).values()}
+            assert 'JSON response: {"items": ["value-001"]}.' in agreements
+            source += ("import json\n"
+                "assert json.loads(Path('unit-001/items.json').read_text())['items'] == ['value-001']\n")
+        else:
+            assert not any(c['provider'] == 'u001' for label in
+                           ('Contracts provided', 'Contracts consumed', 'Area contracts')
+                           for c in facts.get(label, {}).values())
     if mode == 'contract-fanout' and number >= 3:
         assert 'UTF-8 text: value-001.' in str(facts['Contracts consumed'])
         source += "assert Path('unit-001/value.txt').read_text() == 'value-001'\n"
@@ -148,6 +166,11 @@ class Scripted:
 
     def invoke(self, q, started):
         if q["kind"] == "WORK":
+            if self.mode == "wave-fault" and "Exact failure" in q["facts"]:
+                assert q["execution"]["session"]
+                assert "Correction observations" not in q["facts"]
+                assert "integrated mismatch" in q["facts"]["Exact failure"]
+                assert "Requirements" not in q["facts"]
             if self.parallel:
                 self.parallel.wait(timeout=60)  # Hang guard, not a timing assertion.
                 if plan.GUIDE_PATH in q["facts"]["Write scope"]:
@@ -165,6 +188,7 @@ class Scripted:
                 answer["quality"][0]["criterion"] = "Visual direction: a clear, deliberate reader page"
         elif kind == "ARCHITECT":
             groups = (
+                [[n] for n in range(1, self.count + 1)] if self.mode == "contracts" else
                 [[1], [2], [3]] if self.mode == "coach-facts" else
                 [[1, 2], [3, 4]] if self.mode == "contract-fanout" else [[1], [2]]
                 if self.mode in ("contracts", "parallel-contract", "wave-gap", "see-proof", "see-proof-gap", "contract-fanout")
@@ -197,6 +221,12 @@ class Scripted:
                                       ["area-3"] if self.mode == "coach-facts" else ["area-2"]),
                     }
                 ]
+                if self.mode == "contracts":
+                    answer["contracts"].append({
+                        "handle": "items", "kind": "api",
+                        "text": 'JSON response: {"items": ["value-001"]}.',
+                        "provider": "area-1", "consumers": [],
+                    })
         elif kind == "DETAIL":
             numbers = [int(scope.split("/")[0].split("-")[1]) for scope in facts["Area"]["scope"]]
             edits, units = [], []
@@ -323,12 +353,14 @@ class Scripted:
                             ],
                         )
                 if (kind == "PRODUCT" and self.mode == "product-fault"
-                        and facts["Subject"]["criterion"] == VISION["quality"][0]["criterion"]
+                        and any(c["criterion"] == VISION["quality"][0]["criterion"]
+                                for c in facts["Criteria"].values())
                         and kind not in self.gaps):
                     self.gaps.add(kind)
                     answer.update(
                         verdict="gap",
-                        gaps=[{"target": q["targets"][0], "correction": "Make the accepted output clear"}],
+                        gaps=[{"target": q["targets"][0], "correction": "Make the accepted output clear",
+                               "owners": ["u001", "u002"]}],
                     )
         else:
             raise AssertionError(kind)
@@ -486,7 +518,8 @@ def journey(slot, mode="normal", count=1):
             assert agreement["consumers"] == ["u003", "u004", "guide"]
             assert all(run.store.unit(ref).recoveries == 0 for ref in ("u003", "u004"))
         if mode == "contracts":
-            assert len(plan.select(plan.execution(run.store), "contract")) == 1
+            assert not run.store.records("unit_fixup")
+            assert not any(b.get("next") == "REWORK" for _, _, b in run.store.records("transition"))
             import re
             from seldon.store import encode
 
@@ -527,7 +560,7 @@ def journey(slot, mode="normal", count=1):
         ("unit-rework", 1),
         ("review-gap", 1),
         ("schema-fix", 1),
-        ("contracts", 2),
+        ("contracts", 3),
         ("contract-fanout", 4),
         ("parallel-contract", 2),
         ("wave-fault", 2),
@@ -554,6 +587,8 @@ def test_thin_plan_golden(tmp_path, mode, count):
     and preserve one explicit provider when its area has multiple units. Single-unit cases miss this.
     Recorded contract questions protect stable-prefix ordering and lossless section rendering;
     scripted answers alone never inspect the prompt supplied to the native provider.
+    A consumer's real JSON check needs its provider's sibling API agreement to reach C without
+    repair; one-contract journeys miss that blind spot and unrelated units must not receive it.
     Backend/page briefs catch craft guidance leaking to peers without the visual commitment.
     Factual questions require COACH with execution facts; wave-owned gaps must integrate before repair.
     A real sibling read from an early unit catches running integrated acceptance before integration.
@@ -688,5 +723,108 @@ def test_defect_reaches_owner_journey(tmp_path, outcome):
         assert "COACH" not in provider.calls
         if outcome != "fails":
             assert not any(b["gate"] == "UNIT" for _, _, b in run.store.records("decision_request"))
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("fault", ["criterion-gap", "area-uncertain", "outside-unit",
+                                   "outside-contract", "resume-unavailable"])
+def test_judge_once_golden(tmp_path, fault):
+    """Protect area-to-criterion truth and real correction recovery through C.
+
+    Single-criterion golden misses a lost second verdict or uncertainty promoted to success;
+    traced-owner gaps miss routing to DONE peers outside the feature. Resume-only repairs
+    miss a new session receiving a delta without the original contracts and requirements.
+    """
+    from seldon.providers import ResumeUnavailable
+    from seldon import judgment
+
+    slot = tmp_path / fault
+    run, provider = prepare(slot, "contracts", 2)
+    planted, resumed, fresh = [], [], []
+    schemas = {}
+
+    class Fault:
+        def invoke(self, q, started):
+            kind, facts = q["kind"], q["facts"]
+            if kind == "WORK":
+                if "Exact failure" in facts:
+                    if q["execution"].get("session"):
+                        assert set(facts) == {"Exact failure", "Write scope", "Correction owners",
+                                              "Correction observations"}
+                        assert facts["Correction observations"]
+                        resumed.append(q)
+                        if fault == "resume-unavailable":
+                            raise ResumeUnavailable("Recorded session no longer available", False, True)
+                    else:
+                        assert facts["Requirements"] and facts["Execution facts"]
+                        assert facts["Contract authority"]
+                        assert facts.get("Contracts provided") or facts.get("Contracts consumed")
+                        fresh.append(q)
+                return provider.invoke(q, started)
+            answer = json.loads(provider(q))["answer"]
+            if kind == "ALIGN":
+                answer["quality"].append({"criterion": "Readable saved label",
+                                          "verification": "Observe the saved value label"})
+            if kind == "ARCHITECT":
+                for area in answer["areas"]:
+                    area["commitments"].append("quality:2")
+                if fault == "outside-contract":
+                    answer["areas"].append({"handle": "area-3", "responsibility": "Read third value",
+                        "scope": ["unit-003/**"], "commitments": ["scopeIn:1", "quality:1", "quality:2"]})
+                    answer["contracts"][0]["consumers"] = ["area-3"]
+            if kind in ("FLOW", "PRODUCT"):
+                if kind in schemas:
+                    assert schemas[kind] == q["schema"]
+                schemas[kind] = q["schema"]
+                document = plan.execution(run.store)
+                if not planted:
+                    if kind == "PRODUCT" and fault in ("criterion-gap", "area-uncertain", "resume-unavailable") and "tryItGuide" not in q["targets"] and "u001" in judgment.owners(document, kind, q["targets"][0]):
+                        area = plan.select(document, "criterion")[q["targets"][0]]["area"]
+                        criteria = {r for r,b in plan.select(document, "criterion").items() if b["area"] == area}
+                        assert set(facts["Criteria"]) == set(q["targets"]) == criteria
+                        assert len(criteria) == 2
+                        target = q["targets"][-1]
+                        owner = "u001"
+                    elif kind == "FLOW" and fault in ("outside-unit", "outside-contract") and all("value-002" in b["acceptance"] for b in facts["Requirements"].values()):
+                        target = q["targets"][0]
+                        assert "u001" not in facts["Correction owners"]
+                        owner = (next(iter(plan.select(document, "contract")))
+                                 if fault == "outside-contract" else "u001")
+                    else:
+                        return json.dumps({"answer": answer}), None
+                    planted.append((kind, target, owner))
+                    if fault == "area-uncertain":
+                        answer = {"verdict": "uncertain", "neededFacts": ["Visual observation unavailable"], "why": "Need the missing observation"}
+                    else:
+                        answer.update(verdict="gap", gaps=[{"target": target, "owners": [owner],
+                                      "correction": "Exercise the saved value label"}])
+            return json.dumps({"answer": answer}), None
+
+    run.provider = Fault()
+    try:
+        finish(run)
+        assert planted
+        document = plan.execution(run.store)
+        rows = {run.store.read(r)["subject"]: run.store.read(r) for r in run.store.cursor().qualityVerdicts}
+        assert set(rows) == {*plan.select(document, "criterion"), "tryItGuide"}
+        if fault == "area-uncertain":
+            target = planted[0][1]
+            area = plan.select(document, "criterion")[target]["area"]
+            for r,b in plan.select(document, "criterion").items():
+                if b["area"] == area:
+                    assert rows[r]["answer"]["verdict"] == "not judged"
+                    assert "Visual observation unavailable" in judgment.not_judged(run.store)[r]
+            assert not run.store.records("outcome")[-1][2]["verification_complete"]
+        else:
+            assignments = [b for _,_,b in run.store.records("unit_fixup")]
+            owner = planted[0][2]
+            expected = plan.select(document, "contract")[owner]["provider"] if fault == "outside-contract" else owner
+            assert {b["owner"] for b in assignments} == {expected}
+            assert resumed
+            assert all(r["answer"]["verdict"] == "satisfied" for r in rows.values())
+            if fault == "resume-unavailable":
+                assert fresh and run.store.records("resume_unavailable")
     finally:
         run.close()
