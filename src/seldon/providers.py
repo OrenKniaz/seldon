@@ -9,7 +9,7 @@ import types
 import uuid
 from pathlib import Path
 
-from . import claude, questions
+from . import claude
 from .processes import execute
 from .store import encode
 
@@ -169,6 +169,7 @@ class Provider:
                 else self.setup["providers"][role_for(kind, context)]["timeout"])
 
     def prepare(self, question):
+        from .questions import labelled  # late: questions imports this module through recovery
         role = role_for(question["kind"], {})
         config = dict(self.setup["providers"][role])
         native = NATIVE[name := config.setdefault("provider", "codex")]
@@ -196,7 +197,7 @@ class Provider:
             shutil.copyfile(source, images[-1])
         prompt = "\n\n".join((instructions + "\n" + question["prompt"],
             "Answer schema\n" + encode(question["schema"]), "Example\n" + encode(question["examples"][0]),
-            questions.labelled(dict(sorted(question["facts"].items(), key=lambda item: item[0] not in (
+            labelled(dict(sorted(question["facts"].items(), key=lambda item: item[0] not in (
                 "Contract authority", "Contracts provided", "Contracts consumed", "Area contracts",
                 "Contracts", "Crossed contracts", "Decisions")))))) + native.prompt(images)
         (folder / "prompt.txt").write_text(prompt, encoding="utf-8")

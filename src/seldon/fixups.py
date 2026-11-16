@@ -56,7 +56,8 @@ def apply(store, gaps):
             refs.append(cause)
             failure = "\n".join(g["correction"] for g in assignment["gaps"])
             gap = assignment["gaps"][0]
-            acceptance = "check" if gap["kind"] == "check" else store.cursor().state.split("-")[0]
+            acceptance = ("check" if gap["kind"] == "check" or store.cursor().state == "WAVE-VERIFY"
+                          else store.cursor().state.split("-")[0])
             origin = "gap:" + acceptance + ":" + gap["subject"] + ":" + ref
             recovery.recover(store, ref, failure, key=origin, cause=cause,
                              base=assignment["base"], worktree=None, callFolder=None, callAttempt=None)

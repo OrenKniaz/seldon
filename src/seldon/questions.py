@@ -282,7 +282,7 @@ def execution_facts(store, ref, peers=()):
         "Units": {u: {"scope": units[u]["scope"], "state": store.unit(u).state,
                        "commit": store.unit(u).integrated} for u in peers},
         "Runtime": runtime(store.read(store.cursor().kickoff)["setup"]),
-        "Proof owner": "WAVE-VERIFY" if (wave := plan.wave_requirements(document, ref)) or units[ref]["handed"] else ref,
+        "Proof owner": "WAVE-VERIFY" if (wave := plan.wave_requirements(document, ref)) or units[ref]["handed"] or ref == "guide" else ref,
         "Wave requirements": wave,
         "Execution": "Your peers are building their units right now from the same contracts; their files "
             "are not in this worktree. Build to the contract text. Run what you can here. A check that needs "

@@ -197,7 +197,7 @@ class Run:
                         break
                     wait(delay)
                     delay = min(900, delay * 2)
-                except (ValueError, RuntimeError, OSError) as error:
+                except Exception as error:  # any fault parks as a question; the store stays resumable (R15)
                     if self.store.cursor().decision:
                         break
                     decisions.request(self.store, self.store.cursor().state, {

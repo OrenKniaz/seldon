@@ -137,6 +137,9 @@ def run_unit(store, provider, ref):
                     advance(store, "proven", observations, unit=ref)
                 elif unit.state == "JUDGING":
                     if ref == "guide":
+                        if (not gitwork.blobs(unit.worktree, unit.P, [plan.GUIDE_PATH]).get(plan.GUIDE_PATH, b"").strip()
+                                or not plan.assigned(document).get("guide")):
+                            raise ValueError("Write docs/try-it.md and declare its walkthrough check")
                         result = store.record("guide_written", {"commit": unit.P, "path": plan.GUIDE_PATH,
                             "scopeTree": gitwork.scope_tree(unit.worktree, unit.P, contract["scope"],
                                                             store.cursor().scratch)})
@@ -175,7 +178,7 @@ def run_unit(store, provider, ref):
                     raise
             except proof.UncertainCleanup:
                 raise
-            except (ValueError, RuntimeError, OSError) as error:
+            except Exception as error:  # a code fault recovers or asks; it never ends the run (R15)
                 recovery.recover(store, ref, str(error))
     finally:
         store.close()
@@ -206,7 +209,7 @@ def judge_wave(store, provider, observations):
             "observations": [r for r in observations if store.read(r)["unit"] == ref]})
         with store.transaction():
             store.unit(ref, replace(store.unit(ref), judgment=result))
-        if answer["verdict"] == "gap":
+        if not questions.satisfied(answer) and answer["verdict"] != "not judged":
             gaps.append({"subject": ref, "kind": "flow", "commit": cursor.candidate,
                          "units": [ref], "correction": str(answer), "source": result})
     return gaps
