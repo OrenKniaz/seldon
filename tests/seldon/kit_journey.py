@@ -1,7 +1,9 @@
 """C14/C26: admitted mechanics support workers proving real products through C."""
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
 
 from seldon import proof
@@ -56,21 +58,10 @@ def kit_journey(slot, surface):
     """Catch missing baseline kit, machine-bound delivery and leaked browser/server trees.
 
     Existing value-file journeys never import delivered helpers or start real Edge and a server.
-    A JSON-fenced guide must supply actual execution to PRODUCT; argv-only journeys miss this trace bug.
-    The broken twin protects real failure routing instead of accepting path existence.
+    Declared guide checks must supply final execution and source to PRODUCT.
+    Value-only journeys miss server lifecycle failures; the broken twin protects owner repair.
     """
     run, provider = prepare(slot, 'kit', 1)
-    original = provider.__class__.__call__
-
-    class KitProvider(provider.__class__):
-        def __call__(self, question):
-            answer = json.loads(original(self, question))
-            if question['kind'] == 'DETAIL' and answer['answer'].get('verdict') == 'planned':
-                for unit in answer['answer']['units']:
-                    unit['checkPaths'].append('unit-001/check.cjs')
-            return json.dumps(answer)
-
-    provider.__class__ = KitProvider
     invoke = provider.invoke
     judged = []
 
@@ -80,12 +71,14 @@ def kit_journey(slot, surface):
             observations = facts['Final observations']
             assert len(observations) == 1
             observation = observations[0]
-            assert observation['command'] == ['python', '-S', '-B', 'unit-001/check.py']
+            assert observation['command'] == [sys.executable, '-B', 'docs/try-it/check.py']
             assert observation['exitCode'] == 0 and observation['ranOnDeliveredRevision']
             assert observation['executionStarted'] and observation['cleanupVerified']
             assert 'parent, descendant, port and data cleaned' in observation['stdout']
             assert facts['Check artifacts']
-            assert 'guide:paths' not in facts['Checks']
+            assert set(facts['Checks']) == {'guide:check:1'}
+            assert facts['Walkthrough check sources']['docs/try-it/check.py'].replace('\r\n', '\n') == guide_source
+            assert facts['Guide file']['text'].replace('\r\n', '\n') == guide_text.strip()
             if surface == 'browser':
                 assert len(question['images']) == 2
             judged.append(question)
@@ -103,30 +96,56 @@ def kit_journey(slot, surface):
     worker = ('    Path(name, "server.cjs").write_text(' + repr(PRODUCT) + ')\n'
               '    Path(name, "check.cjs").write_text(' + repr(source) + ')\n'
               '    source = ' + repr(wrapper) + '\n')
-    native.write_text(native.read_text('utf-8').replace('```argv', '```json').replace(
-        '    path.write_text("Try it yourself',
-        '    command = ["python", "-S", "-B", "unit-001/check.py"]\n'
-        '    path.write_text("Try it yourself').replace(
-        'command = [sys.executable,', 'command = ["python",').replace(
-        '    Path(name, "check.py").write_text(source)',
-        worker + '    Path(name, "check.py").write_text(source)'), encoding='utf-8')
-    if surface == 'broken-guide':
+    native.write_text(native.read_text('utf-8').replace(
+        "    Path(name, 'check.py').write_text(source)",
+        worker + "    Path(name, 'check.py').write_text(source)"), encoding='utf-8')
+    native.write_text(native.read_text().replace(
+        "answer['checkPaths'] = [name+'/check.py']",
+        "answer['checkPaths'] = [name+'/check.py',name+'/check.cjs','checks/kit/serve.cjs',"
+        "'checks/kit/browser.cjs']").replace(
+        "'command':[sys.executable,'-B',name+'/check.py']",
+        "'command':[sys.executable,'-B','-m',name+'.check']"))
+    guide_text = "Start the server, read the API value-001, then stop the server.\n"
+    if surface == 'server':
+        guide_text += '```json\n["python", "unit-001/server.py"]\n```\nLeave it running while using the product.\n'
+        server = ("from http.server import HTTPServer, SimpleHTTPRequestHandler\n"
+                  "HTTPServer(('127.0.0.1', 0), SimpleHTTPRequestHandler).serve_forever()\n")
         native.write_text(native.read_text().replace(
-            'command = ["python", "-S", "-B", "unit-001/check.py"]',
-            "command = ['python', '-B', '-c', \"raise AssertionError('broken guide walkthrough')\"]"))
+            '    Path(name, "server.cjs").write_text(',
+            '    Path(name, "server.py").write_text(' + repr(server) + ')\n'
+            '    Path(name, "server.cjs").write_text('))
+    guide_source = wrapper
+    if surface == 'broken-guide':
+        guide_source = ("import os\nfrom pathlib import Path\n"
+                        "assert not Path(os.environ['SELDON_TEST_GUIDE_FAULT']).exists(), "
+                        "'broken guide walkthrough'\n") + wrapper
+    text = native.read_text()
+    start = text.index("    Path(facts['Guide path']).write_text(")
+    end = text.index("    answer['checkPaths']", start)
+    native.write_text(text[:start] + "    Path(facts['Guide path']).write_text(" + repr(guide_text) + ")\n"
+        + "    Path('docs/try-it/check.py').write_text(" + repr(guide_source) + ")\n" + text[end:])
     try:
         if surface == 'broken-guide':
             while run.store.cursor().state != 'WAVE-VERIFY':
                 run.step()
+            Path(os.environ['SELDON_TEST_GUIDE_FAULT']).touch()
             assert run.step() == 'EXECUTE'
             gaps = [b for _, _, b in run.store.records('unit_fixup')]
-            assert gaps and 'broken guide walkthrough' in str(gaps)
+            assert len(gaps) == 1 and gaps[0]['owner'] == 'guide'
+            assert 'broken guide walkthrough' in str(gaps)
+            assert gaps[0]['gaps'][0]['subject'] == 'guide:check:1'
             assert not judged and not run.store.cursor().publication
             return
         cursor, rows, units = finish(run)
         assert judged
         assert units['u001'].recoveries == 0
-        observations = [b for _, kind, b in rows if kind == 'observation' and b['check'] == 'n003']
+        assert not any(b['gate'] == 'UNIT' for _, _, b in run.store.records('decision_request'))
+        guide = [b for _, _, b in run.store.records('observation') if b['unit'] == 'guide']
+        assert guide and all(b['exitCode'] == 0 for b in guide if b['purpose'] in ('P', 'final'))
+        assert any(b['purpose'] == 'final' for b in guide)
+        assert units['guide'].recoveries == 0
+        assert not any(b['owner'] == 'guide' for _, _, b in run.store.records('unit_fixup'))
+        observations = [b for _, kind, b in rows if kind == 'observation' and b['check'] == 'u001:check:1']
         red = [b for b in observations if b['purpose'] == 'T']
         assert red and all(b['exitCode'] != 0 and 'Product exited' in b['stderr'] for b in red)
         green = [b for b in observations if b['purpose'] in ('P', 'final')]

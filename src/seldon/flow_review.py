@@ -18,7 +18,7 @@ def trace(document, feature):
 
 def evidence(store, feature):
     cursor = store.cursor()
-    document = store.plan(cursor.revision)
+    document = plan.execution(store)
     requirements, checks = trace(document, feature)
     refs = [r for r in cursor.finalObservations if store.read(r)["check"] in checks]
     if (not requirements or cursor.finalCommit != cursor.candidate
@@ -45,19 +45,18 @@ def row(body):
 
 
 def brief(store, feature, *, resolve=None):
-    cursor = store.cursor()
-    document = store.plan(cursor.revision)
+    document = plan.execution(store)
     requirements, checks, refs, _, verdicts = evidence(store, feature)
     facts = {
         "Feature": {k: document["nodes"][feature]["body"][k] for k in ("story", "acceptance")},
-        "Requirements": {r: {k: b[k] for k in ("obligation", "design", "contract")}
+        "Requirements": {r: {k: b[k] for k in ("acceptance",)}
                          for r, b in requirements.items()},
         "Checks": {r: {k: c[k] for k in ("purpose", "expectedEvidence", "requirements")}
                    for r, c in checks.items()},
         "Final observations": [row(store.read(r)) for r in refs],
         # Same fields as final rows: commands can carry check source, which is judged once at the unit.
         "Wave-start observations": [row(b) for _, _, b in store.records("observation")
-            if b["purpose"] == "wave-start" and b["check"] in checks and checks[b["check"]]["level"] == "wave"],
+            if b["purpose"] == "wave-start" and b["check"] in checks],
         "Crossed contracts": architecture.crossed_contracts(document, requirements),
         "Correction owners": {u: {k: plan.select(document, "unit")[u][k]
                                    for k in ("instructions", "scope", "requirements")}
@@ -74,7 +73,6 @@ def brief(store, feature, *, resolve=None):
         "facts": facts, "targets": list(requirements), "schema": answer_schema(
             "FLOW", requirements, [*facts["Correction owners"], *facts["Crossed contracts"]]),
         "examples": [{"answer": {"verdict": "satisfied", "gaps": [],
-                     "assessments": questions.assessments(requirements, final=True),
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
         "execution": {}, "images": images}
     if resolve is not None:
@@ -83,20 +81,10 @@ def brief(store, feature, *, resolve=None):
     return question
 
 
-def validate(answer, targets):
-    if answer["verdict"] != "uncertain":
-        if sorted(a["target"] for a in answer["assessments"]) != sorted(targets):
-            raise ValueError("Assess every requirement of this feature exactly once")
-        if any(not (a["meaningful"] and a["noStubsMocksMissing"])
-               and a["target"] not in {g["target"] for g in answer["gaps"]} for a in answer["assessments"]):
-            raise ValueError("A negative assessment needs a correction and its responsible approved owners")
-
-
 def review(store, feature, source, answer, *, reasked=False):
     """Consume one recorded FLOW answer; the caller owns dispatch, cursor updates and fixups."""
     cursor = store.cursor()
     requirements, _, refs, trees, _ = evidence(store, feature)
-    validate(answer, requirements)
     if answer["verdict"] == "uncertain":
         if not reasked:
             pending = store.record("judge_uncertain", {
@@ -104,7 +92,7 @@ def review(store, feature, source, answer, *, reasked=False):
                 "source": source, "answer": answer, "scopeTrees": trees,
                 "questionBytes": len(encode(brief(store, feature)).encode("utf-8"))})
             return {"verdict": None, "pending": pending, "gaps": []}
-        answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
+        answer = {**answer, "verdict": "not judged", "gaps": []}
     else:
         answer = {**answer, "verdict": "gap" if answer["gaps"] else "satisfied"}
     with store.transaction():
@@ -115,7 +103,7 @@ def review(store, feature, source, answer, *, reasked=False):
         for gap in answer["gaps"]:
             for owner in gap["owners"]:
                 corrections.setdefault(owner, []).append(gap["correction"])
-        document = store.plan(cursor.revision)
+        document = plan.execution(store)
         contracts = architecture.crossed_contracts(document, requirements)
         gaps = [{"subject": owner if owner in contracts else feature, "kind": "flow",
                  "commit": cursor.candidate,
@@ -128,7 +116,7 @@ def review(store, feature, source, answer, *, reasked=False):
 def requirement_verdicts(store, verdicts):
     """AND all flows reaching a requirement, once, for canonical closure and C eligibility."""
     cursor = store.cursor()
-    document = store.plan(cursor.revision)
+    document = plan.execution(store)
     features = {store.read(r)["feature"]: r for r in verdicts}
     if len(features) != len(verdicts) or set(features) != set(plan.select(document, "feature")):
         raise ValueError("Requirement closure needs one verdict for every feature")
@@ -143,8 +131,11 @@ def requirement_verdicts(store, verdicts):
                 if row["commit"] != cursor.candidate or not judgment.ready(row["answer"]):
                     raise ValueError("Requirement closure needs current satisfied or not judged flows")
                 answer = row["answer"]
-                answers.append({"answer": {**answer, "assessments": [
-                    a for a in answer["assessments"] if a["target"] == subject]}})
+                answers.append({"answer": {**answer,
+                    "verdict": ("not judged" if answer["verdict"] == "not judged" else
+                                "gap" if any(g["target"] == subject for g in answer["gaps"])
+                                else "satisfied"),
+                    "gaps": [g for g in answer["gaps"] if g["target"] == subject]}})
             owned = plan.traced_units(document, plan.traced_checks(document, subject))
             body = {
                 "subject": subject, "kind": "FLOW", "commit": cursor.candidate, "sources": sources,
@@ -155,10 +146,8 @@ def requirement_verdicts(store, verdicts):
 
 
 def step(store, provider):
-    if not judgment.refresh_units(store, provider):
-        return
     cursor = store.cursor()
-    document = store.plan(cursor.revision)
+    document = plan.execution(store)
     trees = judgment.scope_trees(store, plan.select(document, "unit"))
     with store.transaction():
         refs = []
@@ -178,7 +167,7 @@ def step(store, provider):
         f for f in plan.select(document, "feature") if f not in done]
     batch = {f: brief(store, f, resolve=pending["answer"]["neededFacts"] if pending else None)
              for f in selected}
-    replies = inference.batch(store, provider, batch, check=lambda a, q: validate(a, q["targets"]))
+    replies = inference.batch(store, provider, batch)
     gaps, uncertain, verdicts = [], [], list(cursor.demoVerdicts)
     with store.transaction():
         for feature, (result, answer) in replies.items():

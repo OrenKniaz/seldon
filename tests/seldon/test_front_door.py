@@ -40,7 +40,7 @@ else:
 
 
 @pytest.mark.fast
-def test_chat_controls_and_continuity(tmp_path, capsys):
+def test_chat_controls_and_continuity_golden(tmp_path, capsys):
     """Words reach DECIDE, stale A cannot answer B, and pause preserves completed work.
 
     Catches a chat server driving transitions or losing work on disconnect; the golden journey

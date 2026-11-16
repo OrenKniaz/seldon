@@ -7,7 +7,7 @@ from . import gitwork, plan, proof
 
 def verify(store, candidate):
     cursor = store.cursor()
-    document = store.plan(cursor.revision)
+    document = plan.execution(store)
     assignments = plan.assigned(document)
     owned = plan.select(document, "unit")
 
@@ -22,5 +22,4 @@ def verify(store, candidate):
     capacity = store.read(cursor.kickoff)["capacity"]
     with ThreadPoolExecutor(max_workers=capacity) as pool:
         results = list(pool.map(observe_unit, owned))
-    wave = proof.observe(store, store.root.parent, candidate, assignments[None], "final")
-    return [ref for refs in results for ref in refs] + wave
+    return [ref for refs in results for ref in refs]

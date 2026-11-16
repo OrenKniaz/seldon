@@ -1,15 +1,10 @@
 """R9: runtime writes belong to observations, never the published source candidate."""
 
 import json
-import time
 from pathlib import Path
 
-from seldon import gitwork, plan, proof, wave_verify
-from seldon.providers import ROLES
-from seldon.store import RunRow, Store
-
-from test_journey import VISION, finish, planned, prepare
-
+from seldon import gitwork
+from test_journey import finish, prepare
 
 RUNTIME = r'''
 import base64, json, os, shutil, tempfile, time
@@ -41,42 +36,12 @@ finally:
 '''
 
 
-def wave_timing(root):
-    """Measure four ordinary parallel commands through the same real wave observer."""
-    project, scratch = root / 'product', root / 'scratch'
-    project.mkdir(parents=True)
-    scratch.mkdir()
-    base = gitwork.init(project)
-    document = plan.create(VISION, planned(4, 'hermetic'))
-    for number in range(1, 5):
-        folder = project / f'unit-{number:03}'
-        folder.mkdir()
-        (folder / 'check.py').write_text("print('observed value')\n")
-    gitwork.git(project, 'add', '--all')
-    candidate = gitwork.commit(project, gitwork.git(project, 'write-tree'), base)
-    gitwork.checkout(project, candidate)
-    store = Store(project)
-    try:
-        kickoff = store.record('kickoff', {'setup': {'providers': ROLES}, 'capacity': 4})
-        store.cursor(RunRow(kickoff=kickoff, scratch=str(scratch), candidate=candidate,
-                            revision=store.revision(document)))
-        start = time.monotonic()
-        refs = wave_verify.verify(store, candidate)
-        seconds = time.monotonic() - start
-        assert len(refs) == 4 and not proof.failures(store, refs)
-        (root / 'wave4-seconds.txt').write_text(f'{seconds:.3f}')
-        print(f'hermetic wave-of-4: {seconds:.3f}s', flush=True)
-    finally:
-        store.close()
-
-
 def hermetic_journey(root):
     """Reach C despite runtime writes, with concurrent fixtures and durable judge images.
 
     Catches shared-checkout interference and checks corrupting the candidate or later proof.
     Existing workers only read source; their evidence checks miss scratch and transient races.
     """
-    wave_timing(root / 'timing')
     slot = root / 'delivery'
     run, _ = prepare(slot, 'hermetic', 4)
     native = slot / 'native.py'
@@ -84,9 +49,9 @@ def hermetic_journey(root):
     tail = ("\nPath(__file__).with_name('value.txt').write_text('runtime corruption')\n"
             "Path(__file__).with_name('.runtime-output').write_text('left by check')\n")
     native.write_text(native.read_text().replace(
-        '    Path(name, "check.py").write_text(source)',
+        "    Path(name, 'check.py').write_text(source)",
         f'    source = {prefix!r} + source + {tail!r}\n'
-        '    Path(name, "check.py").write_text(source)'))
+        "    Path(name, 'check.py').write_text(source)"))
     try:
         while run.store.cursor().state != 'WAVE-VERIFY':
             assert not run.store.cursor().decision, run.store.records('unit_failure')
@@ -113,7 +78,8 @@ def hermetic_journey(root):
             for value in cwd.glob('unit-*/value.txt'):
                 assert value.read_text() == 'value-' + value.parent.name.split('-')[1]
         for _, kind, question in rows:
-            if kind == 'question' and question['kind'] in ('JUDGE', 'FLOW', 'PRODUCT'):
+            if (kind == 'question' and question['kind'] in ('JUDGE', 'FLOW', 'PRODUCT')
+                    and question['targets'] != ['tryItGuide']):
                 assert question['images']
                 assert all(Path(p).read_bytes().startswith(b'\x89PNG') for p in question['images'])
         assert not list(run.project.glob('unit-*/.runtime-output'))

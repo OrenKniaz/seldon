@@ -56,27 +56,13 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
     def recorded(body):
         return store.record("provider_reply", {"attempt": attempt, "finishedAt": time.time(), **body})
 
-    def validate(answer):
-        if kind == "WORK":
-            questions.validate_discoveries(store.plan(store.cursor().revision), answer)
-        if kind in ("JUDGE", "DEMO", "PRODUCT"):
-            if sorted(a["target"] for a in answer["assessments"]) != sorted(question["targets"]):
-                raise ValueError("Assess the exact requested subjects, each once")
-        if (kind != "FLOW" and answer.get("verdict") == "satisfied"
-                and not questions.satisfied(answer, final=kind != "JUDGE")):
-            raise ValueError("A negative assessment requires a gap verdict and correction: " + str(answer))
-        check(answer)
-
-    answer = questions.ask(invoke, question, recorded, validate, retries=retries)
+    answer = questions.ask(invoke, question, recorded, check, retries=retries)
     with store.transaction():
         result = store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit,
                                          "answer": answer, "binding": binding})
         store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
     if answer.get("verdict") == "uncertain" and kind == "JUDGE":
-        if "Requested facts" not in question["facts"]:
-            reask = {**question, "facts": {**question["facts"], "Requested facts": answer["neededFacts"]}}
-            return call(store, provider, reask, unit, check)
-        answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
+        answer = {**answer, "verdict": "not judged", "gaps": []}
     elif answer.get("verdict") == "uncertain" and kind == "DEMO":
         raise questions.MissingFacts("Unresolved facts: " + "; ".join(answer["neededFacts"]))
     return result, answer

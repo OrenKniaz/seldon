@@ -14,11 +14,7 @@ def choice(*values):
     return {"type": "string", "enum": list(values)}
 
 
-def small(item, minimum=0, maximum=12):
-    return {**array(item, minimum), "maxItems": maximum}
-
-
-TEXT = {"type": "string", "minLength": 1, "maxLength": 8192}
+TEXT = {"type": "string", "minLength": 1}
 REFS = array(TEXT)
 VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT,
              users=array(TEXT, 1), scopeIn=array(TEXT, 1), scopeOut=REFS, improvements=REFS,
@@ -27,112 +23,61 @@ FEATURE = obj(story=TEXT, acceptance=TEXT)
 POSITION = {"type": "integer", "minimum": 1}
 BODIES = {
     "area": obj(responsibility=TEXT, scope=array(TEXT, 1)),
-    "contract": obj(
-        kind=choice("api", "schema", "file-format", "shared-type", "ui-structure", "command-line"),
-        text=TEXT, provider=TEXT, consumers=REFS),
+    "contract": obj(kind=TEXT, text=TEXT, provider=TEXT, consumers=REFS),
     "decision": obj(choice=TEXT, reason=TEXT, origin=choice("architecture", "research", "user"),
                     areas=array(TEXT, 1)),
-    "obligation": obj(what=TEXT, owner=TEXT, closingRequirement=TEXT),
     "feature": obj(**FEATURE["properties"], vision=array(choice("vision"), 1)),
-    "requirement": obj(obligation=TEXT, design=TEXT, contract=TEXT, features=array(TEXT, 1)),
-    "check": obj(purpose=TEXT, level=choice("unit", "wave"),
-                 command=array(TEXT, 1),
-                 requiredEnvironment=REFS, expectedEvidence=TEXT,
-                 requirements=array(TEXT, 1), integrates=REFS),
-    "unit": obj(instructions=TEXT, scope=array(TEXT, 1), checkPaths=array(TEXT, 1),
-                requirements=REFS, dependencies=REFS, area=TEXT, provides=REFS, consumes=REFS, reads=REFS),
+    "requirement": obj(acceptance=TEXT, features=array(TEXT, 1)),
+    "unit": obj(instructions=TEXT, scope=array(TEXT, 1),
+                requirements=REFS, dependencies=REFS, area=TEXT),
 }
 GAP = obj(target=TEXT, correction=TEXT)
 PLAN_BODIES = {**BODIES, "feature": FEATURE,
-               "check": obj(**{k: v for k, v in BODIES["check"]["properties"].items()
-                               if k != "integrates"}),
                "contract": obj(**{**BODIES["contract"]["properties"],
-                                  "provider": POSITION, "consumers": array(POSITION)}),
-               "obligation": obj(what=TEXT, owner=POSITION, closingRequirement=TEXT)}
+                                  "provider": POSITION, "consumers": array(POSITION)})}
+PLANNED_UNIT = obj(scope=array(TEXT, 1), requirements=array(TEXT, 1),
+                   dependencies=array(POSITION), instructions=TEXT)
 PLAN = obj(edits=array({"anyOf": [obj(kind=choice(kind), targetHandle=TEXT,
                                      typedBody=body)
                                   for kind, body in PLAN_BODIES.items() if kind != "unit"]}, 1),
-           units=array(obj(scope=array(TEXT, 1), checkPaths=array(TEXT, 1), requirements=array(TEXT, 1),
-                           dependencies=array(POSITION), instructions=TEXT, area=TEXT,
-                           provides=REFS, consumes=REFS, reads=REFS), 1),
-           skeleton=array(POSITION),
-           quality=array(obj(criterion={"type": "integer", "minimum": 1},
-                             checks=array(TEXT, 1)), 1))
+           units=array({"anyOf": [obj(**PLANNED_UNIT["properties"], area=TEXT),
+                                 obj(**PLANNED_UNIT["properties"], area=TEXT, provides=REFS)]}, 1))
 
 # Architecture names areas, never work units. DETAIL owns only its local records.
-AREA = obj(handle=TEXT, responsibility=TEXT, scope={**small(TEXT, 1), "description":
-    "Complete disjoint ownership: product paths, this area's check subtree, and any shared check "
-    "helpers it owns. DETAIL may divide this scope but cannot enlarge it."}, commitments=small(TEXT, 1))
-AREA_CONTRACT = obj(handle=TEXT, **{**BODIES["contract"]["properties"], "consumers": small(TEXT, 1)})
-ARCHITECT = obj(areas=small(AREA, 1), contracts=small(AREA_CONTRACT, maximum=24),
-                decisions=small(BODIES["decision"]), waves=small(obj(goal=TEXT), 1, 8))
+AREA = obj(handle=TEXT, responsibility=TEXT, scope=array(TEXT, 1), commitments=array(TEXT, 1))
+AREA_CONTRACT = obj(handle=TEXT, **BODIES["contract"]["properties"])
+ARCHITECT = obj(areas=array(AREA, 1), contracts=array(AREA_CONTRACT),
+                decisions=array(BODIES["decision"]), waves=array(obj(goal=TEXT), 1))
 DETAIL_PLAN = obj(verdict=choice("planned"),
-    edits=small({"anyOf": [obj(kind=choice(k), targetHandle=TEXT, typedBody=PLAN_BODIES[k])
-                           for k in ("feature", "requirement", "check", "obligation")]}, 1, 48),
-    units=small(obj(**{k: (small({"anyOf": [POSITION, TEXT]}) if k == "dependencies" else v)
-                      for k, v in PLAN["properties"]["units"]["items"]["properties"].items()
-                      if k != "area"}), 1),
-    quality=small(obj(criterion=POSITION, checks=small(TEXT, 1))))
-DETAIL_SPLIT = obj(verdict=choice("subdivide"), subareas=small(AREA, 2),
-                   contracts=small(AREA_CONTRACT, maximum=24))
+    edits=array({"anyOf": [obj(kind=choice(k), targetHandle=TEXT, typedBody=PLAN_BODIES[k])
+                           for k in ("feature", "requirement")]}, 1),
+    units=array({"anyOf": [PLANNED_UNIT, obj(**PLANNED_UNIT["properties"], provides=REFS)]}, 1))
+DETAIL_SPLIT = obj(verdict=choice("subdivide"), subareas=array(AREA, 2), contracts=array(AREA_CONTRACT))
 DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 
 
-def bounded(contract):
-    """Planning lists and text stay small, including nested trace links and argv."""
-    if isinstance(contract, dict):
-        result = {k: bounded(v) for k, v in contract.items()}
-        if result.get("type") == "array":
-            result.setdefault("maxItems", 12)
-        if result.get("type") == "string" and "maxLength" in result:
-            result["maxLength"] = min(2048, result["maxLength"])
-        return result
-    return [bounded(v) for v in contract] if isinstance(contract, list) else contract
-
-
-ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT, DETAIL_GAP = (
-    bounded(s) for s in (ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT, DETAIL_GAP))
-
-
-# Fixed source obligations are assessed by every product unit JUDGE, independently of criteria.
-SOURCE_TARGETS = (
-    "No stubs, mocks or missing behaviour in this unit",
-    "Meaningful tests for this unit's requirements",
-    "This unit owns its stated responsibility",
-    "No reliance on sibling implementation files without an explicit dependency",
-)
-
-
-def answer_schema(kind, targets=(), owners=(), *, source=SOURCE_TARGETS):
-    assessment = obj(target=choice(*targets) if targets else TEXT, meaningful={"type": "boolean"},
-                     noStubsMocksMissing={"type": "boolean"}, why=TEXT)
-    if kind == "JUDGE":
-        assessment = {"anyOf": [obj(**{**assessment["properties"], "target": choice(
-            *(t for t in targets if (t in source) == source_only))},
-            **({} if source_only else {"baselineDemonstrated": {"type": "boolean"}}))
-            for source_only in (False, True)]}
+def answer_schema(kind, targets=(), owners=()):
     gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1))
     payload = {
         "ALIGN": VISION, "ARCHITECT": ARCHITECT,
         "DETAIL": DETAIL_PLAN,
         "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
-        "WORK": obj(outcome=choice("done", "blocked"), summary=TEXT,
+        "WORK": obj(outcome=choice("done", "question"), summary=TEXT,
+                    checkPaths=REFS, checks=array(obj(purpose=TEXT, command=array(TEXT, 1),
+                        expectedEvidence=TEXT)),
                     discoveries=array(obj(owner=TEXT, correction=TEXT))),
-        "CONTRACT": obj(verdict=choice("corrected"), changes=array(
-            obj(contract=choice(*targets), text=TEXT), 1), decision=TEXT),
-        "JUDGE": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
-        "DEMO": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
-        "FLOW": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(gap)),
-        "PRODUCT": obj(verdict=choice("satisfied", "gap"), assessments=array(assessment), gaps=array(GAP)),
+        "COACH": obj(guidance=TEXT),
+        "JUDGE": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
+        "DEMO": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
+        "FLOW": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
+        "PRODUCT": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
     }[kind]
     uncertain = obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1))
-    alternatives = ((payload, obj(verdict=choice("user"))) if kind == "CONTRACT" else
-                    (payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
+    alternatives = ((payload, DETAIL_SPLIT, DETAIL_GAP) if kind == "DETAIL" else
                     (payload, uncertain) if kind in ("JUDGE", "DEMO", "FLOW", "PRODUCT", "REVIEW") else
                     (payload,))
-    result = obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
-    return bounded(result) if kind in ("ARCHITECT", "DETAIL") else result
+    return obj(answer={"anyOf": [obj(**item["properties"], why=TEXT) for item in alternatives]})
 
 
 def validate(value, contract, path="answer"):
@@ -159,14 +104,12 @@ def validation_errors(value, contract, path="answer"):
     elif kind == "array":
         if len(value) < contract.get("minItems", 0):
             errors.append(f"{path}: too few items")
-        if len(value) > contract.get("maxItems", len(value)):
-            errors.append(f"{path}: too many items; subdivide this area")
         for index, child in enumerate(value):
             errors += validation_errors(child, contract["items"], f"{path}[{index}]")
     elif kind == "string":
         if "enum" in contract and value not in contract["enum"]:
             errors.append(f"{path}: expected one of {contract['enum']}")
-        if not contract.get("minLength", 0) <= len(value) <= contract.get("maxLength", len(value)):
+        if len(value) < contract.get("minLength", 0):
             errors.append(f"{path}: invalid text length")
     elif kind == "integer" and value < contract.get("minimum", value):
         errors.append(f"{path}: out of range")

@@ -5,7 +5,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from . import gitwork, guide, plan
+from . import gitwork, plan
 from .processes import execute
 from .providers import ROLES
 
@@ -19,8 +19,7 @@ class UncertainCleanup(RuntimeError):
 
 def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
     observations = []
-    walkthrough = unit == "guide" and purpose in ("wave-start", "final")
-    if not declarations and not walkthrough:
+    if not declarations:
         return observations
     setup = store.read(store.cursor().kickoff)["setup"]
     timeout = setup.get("providers", {}).get("check", ROLES["check"])["timeout"]
@@ -31,18 +30,7 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
         _observer.checkout = checkout
     else:
         gitwork.checkout(checkout, commit)
-    if walkthrough:
-        try:
-            declarations = guide.checks(checkout)
-        except ValueError as error:
-            return [store.record("observation", {
-                "check": "guide:format", "unit": unit, "commit": commit, "purpose": purpose,
-                "requirements": [], "command": [], "cwd": str(checkout),
-                "scopeTree": scope_tree, "evidenceFiles": [], "executionStarted": False,
-                "timedOut": False, "cleanupVerified": True, "exitCode": None,
-                "stdout": "", "stderr": str(error)})]
-    cleanup_verified = True
-    dirty = False
+    cleanup_verified, dirty = True, False
     try:
         for ref, check in declarations.items():
             runtime = scratch / ("check-" + uuid.uuid4().hex)
@@ -70,9 +58,8 @@ def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=No
                 observations.append(store.record("observation", body))
             if not cleanup_verified:
                 raise UncertainCleanup("Command cleanup unverified: " + str(body))
-            if not walkthrough:
-                gitwork.clean(checkout, commit)
-            dirty = walkthrough
+            gitwork.clean(checkout, commit)
+            dirty = False
     finally:
         # Never reset/reuse a workspace whose descendants may still be running.
         if not cleanup_verified:
@@ -101,15 +88,14 @@ def explain(failed):
 
 def gaps(store, candidate, observations):
     """Return observed check failures to the fixup owner; never change a unit or the run."""
-    document = store.plan(store.cursor().revision)
+    document = plan.execution(store)
     result = []
     for ref in observations:
         body = store.read(ref)
         if body["commit"] != candidate:
             raise ValueError("Check gaps require observations from the candidate commit")
         if failures(store, [ref]):
-            owners = (["guide"] if body["unit"] == "guide" else
-                      list(plan.traced_units(document, {body["check"]: body})))
+            owners = [plan.select(document, "check")[body["check"]]["owner"]]
             result.append({"subject": body["check"], "kind": "check", "commit": candidate,
                            "units": owners, "correction": explain([body]), "source": ref})
     return result
@@ -128,14 +114,12 @@ def prove(store, ref, contract, checks):
             store.unit(ref, unit)
     observations = []
     try:
-        red = observe(store, root, unit.T, checks, "T", ref)
+        red = observe(store, root, unit.T, plan.assigned(plan.execution(store))[ref], "T", ref)
         observations.extend(red)
-        baseline = {store.read(r)["check"]: checks[store.read(r)["check"]]
+        baseline = {store.read(r)["check"]: store.read(r)
                     for r in red if store.read(r)["exitCode"] == 0 and not failures(store, [r])}
-        document = store.plan(store.cursor().revision)
-        baseline.update({r: c for r, c in plan.assigned(document)[None].items()
-                         if plan.owner(document, r) == ref})
-        if baseline or ref == "guide":
+        document = plan.execution(store)
+        if baseline:
             # Remove product only; keep every unit's check machinery as it stands at T (T-104).
             mechanics = [p for u in plan.select(document, "unit").values() for p in u["checkPaths"]]
             start = gitwork.check_commit(root, store.cursor().waveStart, unit.T,

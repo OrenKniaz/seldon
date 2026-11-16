@@ -21,7 +21,7 @@ def ask_unit(store, recommendation=""):
                 tried.append(row.failure)
             affected = {ref}
             while added := {r for r, u in store.units().items() if r not in affected
-                    and affected.intersection(plan.prerequisites(document, r) + u.waitingFor)}:
+                    and affected.intersection(plan.select(document, "unit")[r]["dependencies"] + u.waitingFor)}:
                 affected.update(added)
             request(store, "UNIT", {"unit": ref,
                 "tried": tried,
@@ -43,6 +43,8 @@ def request(store, gate, subject):
         cursor = store.cursor()
         if cursor.decision:
             return
+        if gate == "CHECK-IN":
+            subject = {**subject, "open gaps": [b for _, _, b in store.records("open_gap")]}
         key = None
         if gate == "UNIT" or "step" in subject:
             key, subject = recovery.subject(store, gate, subject)
@@ -99,10 +101,7 @@ def decide(store, provider, user):
         elif choice == "decline":
             stop(store, words)
         elif "step" in item["subject"]:
-            if cursor.state == "ARCH-REVIEW":
-                advance(store, "contract-gap", raw, decision=None, failure="", requestedChange=raw)
-            else:
-                store.cursor(replace(cursor, decision=None, failure="", requestedChange=raw))
+            store.cursor(replace(cursor, decision=None, failure="", requestedChange=raw))
         elif choice == "revise":
             advance(store, "revise", raw, decision=None, failure="", requestedChange=raw)
         elif cursor.state in fields:

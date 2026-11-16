@@ -11,10 +11,8 @@ from . import (
     fixups,
     flow_review,
     gitwork,
-    guide,
     inference,
     judgment,
-    obligations,
     plan,
     plan_review,
     proof,
@@ -31,19 +29,17 @@ TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED"}
 
 def eligible(store):
     cursor = store.cursor()
-    document = store.plan(cursor.revision)
+    document = plan.execution(store)
     if (not cursor.B or not cursor.checkin or cursor.finalCommit != cursor.candidate
             or any(u.state != "DONE" for u in store.units().values())):
         raise ValueError("C requires every unit DONE and final integrated proof after check-in")
     observations = [store.read(r) for r in cursor.finalObservations]
-    checks = set(plan.select(document, "check")) | set(guide.checks(store.root.parent))
+    checks = set(plan.select(document, "check"))
     green = {o["check"] for o in observations if o["commit"] == cursor.candidate and o["exitCode"] == 0}
     covered = {r for o in observations if o["check"] in green for r in o["requirements"]}
     if (checks != green or set(plan.select(document, "requirement")) - covered
             or proof.failures(store, cursor.finalObservations)):
         raise ValueError("Every requirement and check needs passing execution on the final commit")
-    if pending := obligations.remaining(store):
-        raise ValueError(f"Close open skeleton obligations with final-commit requirement verdicts: {pending}")
     if any(not row.judgment for row in store.units().values()):
         raise ValueError("C requires current unit judgments after contract changes")
     verdicts = [store.read(r) for r in cursor.demoVerdicts]
@@ -125,7 +121,6 @@ class Run:
                             "review": store.read(cursor.review)} if state == "B" else
                            {"commit": cursor.candidate,
                             "units": {r: u.state for r, u in store.units().items()},
-                            "contractChanges": [b for _, _, b in store.records("contract_revision")],
                             **({"notJudged": judgment.not_judged(store), "deviation": "DV6"}
                                if state == "C" else {})})
                 decisions.request(store, state, subject)
@@ -136,15 +131,13 @@ class Run:
             result, answer = inference.call(store, self.provider,
                 questions.architect_brief(vision, questions.user_words(store),
                                          gaps[-1]["gap"] if gaps else None,
-                                         store.plan(cursor.revision)["architecture"] if gaps else None),
+                                         plan.execution(store)["architecture"] if gaps else None),
                 check=lambda a: architecture.outline(a, vision))
             document = {"architecture": {k: v for k, v in answer.items() if k != "why"},
                         "nodes": {"vision": {"kind": "vision", "body": vision}}}
             with store.transaction():
                 revision = store.revision(document, cursor.revision)
                 advance(store, "outlined", result, revision=revision)
-        elif state == "ARCH-REVIEW":
-            plan_review.arch_review(store, self.provider)
         elif state == "DETAIL":
             detail.step(store, self.provider, self.capacity)
         elif state == "REVIEW":
@@ -155,7 +148,7 @@ class Run:
             if not plan.approved(store):
                 raise ValueError("Execution requires B for this exact plan and review")
             with store.transaction():
-                for ref in plan.select(store.plan(cursor.revision), "unit"):
+                for ref in plan.select(plan.execution(store), "unit"):
                     if store.unit(ref) is None:
                         store.unit(ref, UnitRow())
                         advance(store, "create", cursor.B, unit=ref)

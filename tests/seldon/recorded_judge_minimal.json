@@ -11,21 +11,6 @@
     "examples": [
       {
         "answer": {
-          "assessments": [
-            {
-              "baselineDemonstrated": true,
-              "meaningful": true,
-              "noStubsMocksMissing": true,
-              "target": "n006",
-              "why": "The real interaction asserts the required observable behavior"
-            },
-            {
-              "meaningful": true,
-              "noStubsMocksMissing": true,
-              "target": "quality:002",
-              "why": "The real interaction asserts the required observable behavior"
-            }
-          ],
           "gaps": [],
           "verdict": "satisfied",
           "why": "The observed interaction and check sources support this answer"
@@ -117,152 +102,76 @@
     },
     "images": [],
     "kind": "JUDGE",
-    "prompt": "For each requirement: are its checks meaningful; did they actually exercise the requirement at P (not skipped, not empty, not asserting nothing); is anything a stub, mock or missing? Read the check sources, RED output at T or wave start, passing P output and screenshots. For each requirement set baselineDemonstrated only if every establishes check failed on T or wave start because the required PRODUCT behavior was absent, and every preserves check exercised existing behavior on its baseline. A missing product can demonstrate RED; a missing check helper or broken test environment cannot. For each unit quality target, judge whether it holds in this unit's own source. A structural criterion spanning units applies locally: this unit owns its responsibility and depends on no sibling files without a declared dependency. Exit codes are CODE facts; interpret their meaning. A no on any obligation is a gap. Unrequested improvements that support the accepted experience and keep its meaning, constraints and commitments are fine; reject one only by citing the accepted obligation or material consequence it breaks.",
+    "prompt": "Judge only the supplied acceptance sentences by their meaning: delivered, exercised by a meaningful check with the supplied execution observations, and no stub replacing that behaviour? A gap quotes the acceptance sentence it breaks; other suggestions are notes. Unrequested improvements that support the accepted experience and keep its meaning, constraints and commitments are fine; reject one only by citing the accepted obligation or material consequence it breaks.",
     "schema": {
-      "additionalProperties": false,
+      "type": "object",
       "properties": {
         "answer": {
           "anyOf": [
             {
-              "additionalProperties": false,
+              "type": "object",
               "properties": {
-                "assessments": {
-                  "items": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "baselineDemonstrated": {
-                            "type": "boolean"
-                          },
-                          "meaningful": {
-                            "type": "boolean"
-                          },
-                          "noStubsMocksMissing": {
-                            "type": "boolean"
-                          },
-                          "target": {
-                            "enum": [
-                              "n006"
-                            ],
-                            "type": "string"
-                          },
-                          "why": {
-                            "maxLength": 8192,
-                            "minLength": 1,
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "target",
-                          "meaningful",
-                          "noStubsMocksMissing",
-                          "why",
-                          "baselineDemonstrated"
-                        ],
-                        "type": "object"
-                      },
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "meaningful": {
-                            "type": "boolean"
-                          },
-                          "noStubsMocksMissing": {
-                            "type": "boolean"
-                          },
-                          "target": {
-                            "enum": [
-                              "quality:002"
-                            ],
-                            "type": "string"
-                          },
-                          "why": {
-                            "maxLength": 8192,
-                            "minLength": 1,
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "target",
-                          "meaningful",
-                          "noStubsMocksMissing",
-                          "why"
-                        ],
-                        "type": "object"
-                      }
-                    ]
-                  },
-                  "minItems": 0,
-                  "type": "array"
+                "verdict": {
+                  "type": "string",
+                  "enum": [
+                    "satisfied",
+                    "gap"
+                  ]
                 },
                 "gaps": {
+                  "type": "array",
                   "items": {
-                    "additionalProperties": false,
+                    "type": "object",
                     "properties": {
-                      "correction": {
-                        "maxLength": 8192,
-                        "minLength": 1,
-                        "type": "string"
-                      },
                       "target": {
-                        "maxLength": 8192,
-                        "minLength": 1,
-                        "type": "string"
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "correction": {
+                        "type": "string",
+                        "minLength": 1
                       }
                     },
                     "required": [
                       "target",
                       "correction"
                     ],
-                    "type": "object"
+                    "additionalProperties": false
                   },
-                  "minItems": 0,
-                  "type": "array"
-                },
-                "verdict": {
-                  "enum": [
-                    "satisfied",
-                    "gap"
-                  ],
-                  "type": "string"
+                  "minItems": 0
                 },
                 "why": {
-                  "maxLength": 8192,
-                  "minLength": 1,
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1
                 }
               },
               "required": [
                 "verdict",
-                "assessments",
                 "gaps",
                 "why"
               ],
-              "type": "object"
+              "additionalProperties": false
             },
             {
-              "additionalProperties": false,
+              "type": "object",
               "properties": {
-                "neededFacts": {
-                  "items": {
-                    "maxLength": 8192,
-                    "minLength": 1,
-                    "type": "string"
-                  },
-                  "minItems": 1,
-                  "type": "array"
-                },
                 "verdict": {
+                  "type": "string",
                   "enum": [
                     "uncertain"
-                  ],
-                  "type": "string"
+                  ]
+                },
+                "neededFacts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1
                 },
                 "why": {
-                  "maxLength": 8192,
-                  "minLength": 1,
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1
                 }
               },
               "required": [
@@ -270,7 +179,7 @@
                 "neededFacts",
                 "why"
               ],
-              "type": "object"
+              "additionalProperties": false
             }
           ]
         }
@@ -278,7 +187,7 @@
       "required": [
         "answer"
       ],
-      "type": "object"
+      "additionalProperties": false
     },
     "targets": [
       "n006",

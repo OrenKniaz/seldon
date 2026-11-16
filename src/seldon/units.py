@@ -5,7 +5,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, fixups, gitwork, inference, plan, proof, questions, recovery
+from . import fixups, gitwork, inference, plan, proof, questions, recovery
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, recorded
 from .schema import validate
 from .states import advance
@@ -15,36 +15,32 @@ def recovered_report(store, ref):
     unit = store.unit(ref)
     if unit.report:
         return unit.report
-    if unit.callAttempt:
-        replies = [b for _, _, b in store.records("provider_reply")
-                   if b["attempt"] == unit.callAttempt and not b["errors"]]
-        if replies:
-            return store.record("answer", {"unit": ref, "attempt": unit.callAttempt, "kind": "WORK",
-                "answer": json.loads(replies[-1]["rawAnswer"])["answer"], "recovered": True})
-    if unit.callFolder:
+    replies = [b for _, _, b in store.records("provider_reply")
+               if b["attempt"] == unit.callAttempt and not b["errors"]] if unit.callAttempt else []
+    if replies:
+        raw = replies[-1]["rawAnswer"]
+    elif unit.callFolder:
         folder = Path(unit.callFolder)
         receipt = folder / "result.json"
-        if receipt.is_file():
-            result = json.loads(receipt.read_text("utf-8"))
-            if result.get("cleanupVerified") and not result.get("timedOut"):
-                raw = recorded(folder).answer((folder / "stdout.bin").read_text("utf-8", errors="replace"))
-                question = json.loads((folder / "question.json").read_text("utf-8"))
-                validate(json.loads(raw), question["schema"])
-                questions.validate_discoveries(store.plan(store.cursor().revision), json.loads(raw)["answer"])
-                return store.record("answer", {"unit": ref, "attempt": unit.callAttempt, "kind": "WORK",
-                    "answer": json.loads(raw)["answer"], "recovered": True})
-    return None
+        result = json.loads(receipt.read_text("utf-8")) if receipt.is_file() else {}
+        if not result.get("cleanupVerified") or result.get("timedOut"):
+            return None
+        raw = recorded(folder).answer((folder / "stdout.bin").read_text("utf-8", errors="replace"))
+        question = json.loads((folder / "question.json").read_text("utf-8"))
+        validate(json.loads(raw), question["schema"])
+    else:
+        return None
+    return store.record("answer", {"unit": ref, "attempt": unit.callAttempt, "kind": "WORK",
+        "answer": json.loads(raw)["answer"], "recovered": True})
 
 
 def thread_from_recording(store, ref):
     unit = store.unit(ref)
-    if unit.callFolder:
-        stream = Path(unit.callFolder) / "stdout.bin"
-        if stream.is_file():
-            thread = recorded(unit.callFolder).session(stream.read_text("utf-8", errors="replace"))
-            if thread:
-                with store.transaction():
-                    store.unit(ref, replace(store.unit(ref), thread=thread))
+    stream = Path(unit.callFolder) / "stdout.bin" if unit.callFolder else None
+    thread = recorded(unit.callFolder).session(stream.read_text("utf-8", errors="replace")) if stream and stream.is_file() else None
+    if thread:
+        with store.transaction():
+            store.unit(ref, replace(store.unit(ref), thread=thread))
 
 
 def work(store, provider, ref):
@@ -64,49 +60,22 @@ def work(store, provider, ref):
                 row = store.unit(ref)
                 store.unit(ref, replace(row, thread=None,
                                         failure=row.failure + "\nResume unavailable: " + str(error)))
-            question = questions.work_brief(store, ref)
-            question["execution"]["session"] = None
-            question["facts"]["Session recovery"] = "Resume unavailable; use this brief, patch and failure."
-            report, answer = inference.call(store, provider, question, unit=ref)
+            report, answer = inference.call(store, provider, questions.work_brief(store, ref), unit=ref)
     else:
         answer = store.read(report)["answer"]
     store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
-    document = store.plan(store.cursor().revision)
-    contracts = plan.select(document, "unit")[ref]
-    if discoveries := [d for d in answer["discoveries"]
-                       if d["owner"] in contracts["consumes"] + contracts["provides"]]:
-        with store.integration_lock:
-            result, correction = inference.call(store, provider,
-                questions.contract_brief(store, ref, discoveries))
-            with store.transaction():
-                if correction["verdict"] == "user":
-                    recovery.recover(store, ref, str(discoveries) + "\n" + correction["why"],
-                                     cause=result, direct=True)
-                else:
-                    key = recovery.lineage(store, ref)
-                    shape = plan.contract_texts(store.plan(store.cursor().revision), correction["changes"])
-                    texts = plan.select(shape, "contract")
-                    current = plan.select(store.plan(store.cursor().revision), "contract")
-                    if recovery.failed(store, result, ref, shape=texts, direct=texts == current):
-                        advance(store, "asked", result, unit=ref, failure=str(discoveries))
-                        decisions.ask_unit(store, correction["why"])
-                        return
-                    plan.correct_contracts(store, result, correction)
-                    fixups.handoff(store, ref, report, {"outcome": "blocked", "discoveries": [
-                        {"owner": c["contract"], "correction": c["text"]} for c in correction["changes"]]},
-                        key=key, charged=True)
+    if answer["outcome"] == "question":
+        text, document = answer["summary"], plan.execution(store)
+        source, guidance = inference.call(store, provider, questions.build("COACH", {
+            "Worker's question": text, "Execution facts": questions.execution_facts(store, ref),
+            "Requirements": questions.requirement_facts(
+                document, plan.select(document, "unit")[ref]["requirements"]),
+            **questions.agreement_facts(document, ref)}))
+        recovery.recover(store, ref, guidance["guidance"], cause=source)
         return
-    deferred = not plan.assigned(document)[ref] and not fixups.active(store, ref)
-    foreign = [d for d in answer["discoveries"] if d["owner"] != ref or deferred]
-    if foreign and fixups.handoff(store, ref, report, {**answer, "discoveries": foreign}):
-        if deferred or not any(d["owner"] == ref for d in answer["discoveries"]):
-            return
-    if answer["outcome"] == "blocked" and any(d["owner"] == ref for d in answer["discoveries"]):
-        recovery.recover(store, ref, str(answer["discoveries"]), cause=report, direct=True)
-        return
-    if answer.get("outcome") != "done":
-        raise ValueError("Worker could not complete this unit: " + str(answer))
     with store.transaction():
+        store.record("worker_checks", {"unit": ref, "report": report,
+            "checkPaths": answer["checkPaths"], "checks": answer["checks"]})
         for discovery in answer["discoveries"]:
             store.record("discovery", {"unit": ref, "report": report, "disposition": "pending check-in",
                                         **discovery})
@@ -139,18 +108,19 @@ def integrate(store, ref, checks):
 
 
 def run_unit(store, provider, ref):
-    document = store.plan(store.cursor().revision)
-    contract = plan.select(document, "unit")[ref]
-    checks = plan.assigned(document)[ref]
     assignment = fixups.active(store, ref)
-    integrated_checks = dict(checks)
-    if assignment:
-        all_checks = plan.select(document, "check")
-        integrated_checks.update({g["subject"]: all_checks[g["subject"]] for g in assignment["gaps"]
-                                  if g["kind"] == "check" and g["subject"] in all_checks})
     try:
         while (unit := store.unit(ref)).state not in ("DONE", "ASKED", "DROPPED", "WAITING"):
             try:
+                document = plan.execution(store)
+                contract = plan.select(document, "unit")[ref]
+                checks = plan.assigned(document, local=True)[ref]
+                integrated_checks = dict(checks)
+                if assignment:
+                    all_checks = plan.select(document, "check")
+                    integrated_checks.update({g["subject"]: all_checks[g["subject"]]
+                        for g in assignment["gaps"]
+                        if g["kind"] == "check" and g["subject"] in all_checks})
                 if unit.state == "READY":
                     base = store.cursor().candidate
                     root = gitwork.admit(store.root.parent, store.cursor().scratch, base)
@@ -175,8 +145,17 @@ def run_unit(store, provider, ref):
                                                             store.cursor().scratch)})
                     else:
                         result, answer = inference.call(store, provider, questions.judge_brief(store, ref))
-                        if answer["verdict"] != "not judged" and not questions.satisfied(answer):
-                            raise ValueError("Judgment gap: " + str(answer))
+                        if not questions.satisfied(answer):
+                            prior = [b for _, _, b in store.records("unit_gap")
+                                     if b["unit"] == ref and b["base"] == unit.base]
+                            gap = store.record("unit_gap", {"unit": ref, "base": unit.base,
+                                "commit": unit.P, "answer": answer, "source": result})
+                            if not prior and not plan.wave_requirements(document, ref):
+                                advance(store, "recover", gap, unit=ref, failure=str(answer),
+                                        report=None, T=None, P=None, observations=[], judgment=None)
+                                continue
+                            store.record("open_gap", {"unit": ref, "commit": unit.P,
+                                "label": "open gap", "answer": answer, "source": result})
                         result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,
                             "source": result, "scopeTree": gitwork.scope_tree(
                                 unit.worktree, unit.P, contract["scope"], store.cursor().scratch)})

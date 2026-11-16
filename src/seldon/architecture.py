@@ -27,20 +27,10 @@ def endpoint(unit, contract):
     return "consumer" if unit in contract["consumers"] else None
 
 
-def own_consumes(area, contracts, refs):
-    """Redundant structure is normalised, never refused (T-111, T-113): a unit listing its own area's
-    contract under consumes already has that text as an area fact, so code drops the endpoint."""
-    return [r for r in refs if not (r in contracts and endpoint(area["handle"], contracts[r]) == "provider")]
-
-
 def contracts_for(document, unit):
     units = plan.select(document, "unit")
     return {r: c for r, c in plan.select(document, "contract").items()
             if endpoint(unit, c) or units[unit]["area"] == units[c["provider"]]["area"]}
-
-
-def area_decisions(document, area):
-    return {r: d for r, d in plan.select(document, "decision").items() if area in d["areas"]}
 
 
 def crossed_contracts(document, requirements):
@@ -60,34 +50,17 @@ def validate(document):
         if set(decision["areas"]) - areas.keys():
             raise ValueError(f"{ref}: decisions must name existing areas")
     for ref, contract in contracts.items():
-        consumers = contract["consumers"]
-        if (contract["provider"] not in units or set(consumers) - units.keys()
-                or contract["provider"] in consumers or len(set(consumers)) != len(consumers)):
-            raise ValueError(f"{ref}: name one existing provider and distinct existing consumers")
+        consumers = contract["consumers"] = list(dict.fromkeys(
+            r for r in contract["consumers"] if r != contract["provider"]))
+        if contract["provider"] not in units or set(consumers) - units.keys():
+            raise ValueError(f"{ref}: name existing provider and consumer units")
         if any(units[u]["area"] == units[contract["provider"]]["area"] for u in consumers):
             raise ValueError(f"{ref}: consumer endpoints must cross area boundaries; "
                              "use the providing area's contract text without consuming it")
-        providers = [r for r, u in units.items() if ref in u["provides"]]
-        readers = {r for r, u in units.items() if ref in u["consumes"]}
-        if providers != [contract["provider"]] or readers != set(consumers):
-            raise ValueError(f"{ref}: bind exactly its one provider and every named consumer")
     for ref, unit in units.items():
         if unit["area"] not in areas or not all(
                 any(plan.contains(s, p) for s in areas[unit["area"]]["scope"]) for p in unit["scope"]):
             raise ValueError(f"{ref}: keep unit scopes inside its named area scopes")
-        for field in ("provides", "consumes"):
-            if len(set(unit[field])) != len(unit[field]) or set(unit[field]) - contracts.keys():
-                raise ValueError(f"{ref}: name each existing contract once in {field}")
-        for path in unit["reads"]:
-            plan.safe_path(path)
-            if "*" in path or "?" in path:
-                raise ValueError(f"{ref}: reads must name a concrete file: {path}")
-            owners = [r for r, u in units.items() if path in u["scope"] or plan.matches(path, u["scope"])]
-            if len(owners) != 1:
-                raise ValueError(f"{ref}: {path} needs one planned file owner")
-            owner, = owners
-            if owner != ref and owner not in plan.prerequisites(document, ref):
-                raise ValueError(f"{ref}: reading {path} needs an explicit dependency edge to {owner}")
 
 
 def stale_consumers(before, after):
@@ -123,23 +96,22 @@ def outline(answer, vision=None):
             if ref < other and plan.overlaps(area["scope"], sibling["scope"]):
                 raise ValueError("Areas need disjoint write scopes")
     for ref, contract in contracts.items():
-        readers = contract["consumers"]
-        if (contract["provider"] not in areas or set(readers) - areas.keys()
-                or contract["provider"] in readers or len(set(readers)) != len(readers)):
-            raise ValueError(f"{ref}: name one existing provider area and distinct existing consumer areas")
+        readers = contract["consumers"] = list(dict.fromkeys(
+            r for r in contract["consumers"] if r != contract["provider"]))
+        if contract["provider"] not in areas or set(readers) - areas.keys():
+            raise ValueError(f"{ref}: name existing provider and consumer areas")
     if any(set(d["areas"]) - areas.keys() for d in answer["decisions"]):
         raise ValueError("Decisions must name existing areas")
     return areas, contracts
 
 
-def local_plan(area, contracts, answer, vision, single_area):
+def local_plan(area, contracts, answer, vision):
     """Check ownership before merging; canonical trace validation runs on the merged document."""
-    plan.recorded_levels(answer)
     validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_PLAN)
     handles = {e["targetHandle"]: e["kind"] for e in answer["edits"]}
     if len(handles) != len(answer["edits"]):
         raise ValueError("Each local record needs a distinct handle")
-    relations = {"requirement": ("features", "feature"), "check": ("requirements", "requirement")}
+    relations = {"requirement": ("features", "feature")}
     for edit in answer["edits"]:
         if edit["kind"] in relations:
             field, kind = relations[edit["kind"]]
@@ -147,68 +119,30 @@ def local_plan(area, contracts, answer, vision, single_area):
                     and endpoint(area["handle"], contracts[r]) != "provider")
                    for r in edit["typedBody"][field]):
                 raise ValueError(f"Local {field} must name this area's {kind} handles")
-        if edit["kind"] == "obligation":
-            item = edit["typedBody"]
-            if (item["owner"] > len(answer["units"])
-                    or item["closingRequirement"] not in answer["units"][item["owner"]-1]["requirements"]):
-                raise ValueError("A skeleton obligation needs an owner and its closing requirement")
     for unit in answer["units"]:
-        for path in [*unit["scope"], *unit["checkPaths"]]:
+        for path in unit["scope"]:
             plan.safe_path(path)
-        missing = [p for p in [*unit["scope"], *unit["checkPaths"]]
+        missing = [p for p in unit["scope"]
                    if not any(plan.contains(s, p) for s in area["scope"])]
         if missing:
             raise ContractGap(f"Area {area['handle']}: keep work inside its named area scopes; "
                               f"ARCHITECT must assign missing scope for {missing}", [area["handle"]])
         if any(handles.get(r) != "requirement" for r in unit["requirements"]):
             raise ValueError("Units must own local requirement handles")
-        for dep in unit["dependencies"]:
-            if isinstance(dep, int):
-                if dep > len(answer["units"]):
-                    raise ValueError("Dependencies must name local unit positions")
-        for field, side in (("provides", "provider"), ("consumes", "consumer")):
-            if len(set(unit[field])) != len(unit[field]):
-                raise ValueError(f"Name each existing contract once in {field}")
-            for ref in (own_consumes(area, contracts, unit[field]) if field == "consumes" else unit[field]):
-                if ref not in contracts or (side == "provider"
-                                           and endpoint(area["handle"], contracts[ref]) != side):
-                    raise ValueError(f"{ref}: bind an existing contract with its agreed provider")
-    for quality in answer["quality"]:
-        if quality["criterion"] > len(vision["quality"]):
-            raise ValueError("Quality coverage must name an accepted criterion position")
-        if any(handles.get(r) != "check" for r in quality["checks"]):
-            raise ValueError("Quality coverage must name local checks")
-    # External contract text does not turn a local check into integrated proof.
+        if any(dep > len(answer["units"]) for dep in unit["dependencies"]):
+            raise ValueError("Dependencies must name local unit positions")
     nodes = {"vision": {"kind": "vision", "body": {
         k: v for k, v in vision.items() if k != "why"}}}
     nodes.update({e["targetHandle"]: {"kind": e["kind"], "body": {
-        **e["typedBody"], **({"vision": ["vision"]} if e["kind"] == "feature" else {}),
-        **({"owner": f"unit:{e['typedBody']['owner']}"} if e["kind"] == "obligation" else {})}}
+        **e["typedBody"], **({"vision": ["vision"]} if e["kind"] == "feature" else {})}}
         for e in answer["edits"]})
-    units = {f"unit:{i}": {**u, "scope": plan.owned_scope(u), "area": area["handle"],
-             "dependencies": [f"unit:{d}" for d in u["dependencies"] if isinstance(d, int)]}
+    units = {f"unit:{i}": {**{k: v for k, v in u.items() if k != "provides"}, "area": area["handle"],
+             "dependencies": [f"unit:{d}" for d in u["dependencies"]]}
              for i, u in enumerate(answer["units"], 1)}
     nodes.update({r: {"kind": "unit", "body": u} for r, u in units.items()})
     document = {"nodes": nodes}
-    plan.validate_records(document, contracts)
+    plan.validate_records(document)
     plan.validate_owned_work(document)
-    if single_area:
-        from . import obligations
-        document["skeleton"] = list(units) if len(units) > 1 else []
-        obligations.validate(document)
-    for (ref, unit), original in zip(units.items(), answer["units"], strict=True):
-        files = [d for d in original["dependencies"] if isinstance(d, str)]
-        for path in [*unit["reads"], *files]:
-            plan.safe_path(path)
-            if "*" in path or "?" in path:
-                raise ValueError(f"{path}: reads and file prerequisites must name a concrete file")
-            if plan.matches(path, area["scope"]):
-                writers = [r for r, u in units.items() if plan.matches(path, u["scope"])]
-                if len(writers) != 1:
-                    raise ValueError(f"{path}: needs one planned file owner in {area['handle']}")
-                owner, = writers
-                if owner != ref and owner not in unit["dependencies"] and path not in files:
-                    original["dependencies"].append(path)
 
 
 def subdivision(parent, answer, known_contracts):

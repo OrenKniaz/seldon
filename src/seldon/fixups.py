@@ -1,27 +1,26 @@
 """C18/C23; R7/R8/R9: recorded gaps reopen only their approved owning units."""
 
-from . import gitwork, recovery
 from . import plan as planning
+from . import recovery
 from .states import advance
 
 
 def plan(store, gaps):
     """Assign corrections by the producer's owners, without another semantic question."""
     cursor = store.cursor()
-    document = store.plan(cursor.revision)
+    document = planning.execution(store)
     owners = planning.select(document, "unit")
     checks = planning.select(document, "check")
     assignments = {}
     for gap in gaps:
         if (set(gap) != {"subject", "kind", "commit", "units", "correction", "source"}
-                or gap["kind"] not in ("flow", "check", "blocked") or gap["commit"] != cursor.candidate
+                or gap["kind"] not in ("flow", "check") or gap["commit"] != cursor.candidate
                 or not isinstance(gap["correction"], str) or not gap["correction"].strip()
                 or not isinstance(gap["units"], list) or not gap["units"]):
             raise ValueError("Fixup requires a concrete current-candidate Gap and its owning units")
         store.read(gap["source"])
         if gap["kind"] == "check" and gap["subject"] in checks:
-            gap = {**gap, "units": [planning.owner(document, gap["subject"])]}
-        # Guide walkthrough/format checks are produced at verification, outside the planned check nodes.
+            gap = {**gap, "units": [checks[gap["subject"]]["owner"]]}
         for ref in dict.fromkeys(gap["units"]):
             if ref not in owners or store.unit(ref).state != "DONE":
                 raise ValueError(f"{ref}: a Gap must name its DONE approved owner")
@@ -41,59 +40,11 @@ def active(store, ref):
         if body["owner"] == ref:
             if body["base"] != row.base:
                 return None
-            if (not planning.contract_descendant(store, body["revision"])
+            if (body["revision"] != store.cursor().revision
                     or body["approval"] != store.cursor().B):
                 raise ValueError("Fixup requires its approved plan and owner")
             return body
     return None
-
-
-def handoff(store, ref, report, answer, *, key=None, charged=False):
-    """Only a blocker already present in this unit's base waits for its owner."""
-    if answer["outcome"] != "blocked" or not answer["discoveries"]:
-        return False
-    # Serialize candidate selection with integration, and owner admission with other handoffs.
-    with store.integration_lock, store.transaction():
-        cursor = store.cursor()
-        document = store.plan(cursor.revision)
-        owners = planning.select(document, "unit")
-        contracts = planning.select(document, "contract")
-        contract_change = all(d["owner"] in contracts for d in answer["discoveries"])
-        row = store.unit(ref)
-        key = key or recovery.lineage(store, ref)
-        gaps, wave = [], set()
-        for discovery in answer["discoveries"]:
-            owner = discovery["owner"]
-            owner = contracts[owner]["provider"] if contract_change else owner
-            if contract_change and store.unit(owner).state != "DONE":
-                continue
-            if owner not in owners or (owner == ref and
-                                       (planning.assigned(document)[ref] or active(store, ref))):
-                return False
-            named = store.unit(owner)
-            if (named.state != "DONE" or not named.integrated
-                    or not contract_change and not gitwork.contains(
-                        store.root.parent, named.integrated, row.base)):
-                wave.add(owner)
-                continue
-            gaps.append({"subject": owner, "kind": "blocked", "commit": cursor.candidate,
-                         "units": [owner], "correction": discovery["correction"], "source": report})
-        for discovery in answer["discoveries"]:
-            store.record("discovery", {"unit": ref, "report": report,
-                "disposition": "wave verify" if discovery["owner"] in wave else "owner fixup", **discovery})
-        if not charged and (gaps or contract_change):
-            recovery.failed(store, report, ref, key=key)
-        if not gaps:
-            advance(store, "reopen" if contract_change else "returned", report, unit=ref,
-                    report=None if contract_change else report, callFolder=None, callAttempt=None)
-            return True
-        advance(store, "wait-owner", report, unit=ref,
-                waitingFor=list(dict.fromkeys(r for g in gaps for r in g["units"])),
-                report=None, callFolder=None, callAttempt=None, worktree=None,
-                T=None, P=None, observations=[], judgment=None,
-                lineage=key)
-        apply(store, gaps, key=key, charged=True)
-    return True
 
 
 def apply(store, gaps, *, key=None, charged=False):

@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 
-from . import architecture, inference, plan, plan_review, questions, recovery
+from . import architecture, inference, plan, questions, recovery
 from .states import advance
 
 
@@ -36,8 +36,7 @@ def step(store, provider, capacity):
                 for r, c in architecture.index(outline["contracts"]).items()}
             basis = {"vision": cursor.vision, "commit": cursor.candidate, "area": area,
                      "contracts": local, "facts": {k: v for k, v in question["facts"].items()
-                                                 if k not in ("Peer checks", "User's words")},
-                     "singleArea": len(outline["areas"]) == 1}
+                                                 if k not in ("Peer checks", "User's words")}}
             prior = [(r, b) for r, _, b in store.records("area_detail") if b.get("basis") == basis
                      and (not b.get("failure") and not b.get("architecture") or
                           b["revision"] == cursor.revision)]
@@ -58,7 +57,7 @@ def step(store, provider, capacity):
                 if answer.get("verdict") == "subdivide":
                     architecture.subdivision(area, answer, architecture.index(outline["contracts"]))
                 elif answer.get("verdict") == "planned":
-                    architecture.local_plan(area, local, answer, vision, basis["singleArea"])
+                    architecture.local_plan(area, local, answer, vision)
 
             body = {"revision": cursor.revision, "area": area["handle"], "basis": basis, "resume": resumed,
                     "correction": correction[0] if correction else None}
@@ -136,7 +135,4 @@ def step(store, provider, capacity):
             leaves.extend(replacements.values())
     with store.transaction():
         revision = store.revision(compiled, cursor.revision)
-        reviewed = plan_review.architecture_brief(compiled, questions.user_words(store))
-        has_review = any(b["subject"] == "architecture" and b["basis"] == reviewed
-                         for _, _, b in store.records("area_review"))
-        advance(store, "detailed" if has_review else "outline-changed", refs, revision=revision)
+        advance(store, "detailed", refs, revision=revision)

@@ -3,7 +3,7 @@
 from dataclasses import replace
 from pathlib import Path
 
-from . import fixups, gitwork, guide, inference, plan, proof, questions
+from . import fixups, gitwork, inference, plan, proof, questions
 from .states import advance
 
 
@@ -15,15 +15,12 @@ def subjects(document, kind):
         "verification": plan.GUIDE_WORK, "checks": []}}
 
 
-def trace(document, kind, subject, store=None):
-    return ({r: c for r, c in guide.checks(store.root.parent).items() if r != "guide:paths"}
-            if store else {}) if subject == "tryItGuide" else \
-        plan.traced_checks(document, subject)
+def trace(document, kind, subject):
+    return (plan.assigned(document)["guide"] if subject == "tryItGuide" else
+            plan.traced_checks(document, subject))
 
 
 def owners(document, kind, subject):
-    if subject == "tryItGuide":
-        return {"guide": plan.select(document, "unit")["guide"]}
     return plan.traced_units(document, trace(document, kind, subject))
 
 
@@ -42,8 +39,8 @@ def current(verdict, trees):
 
 def brief(store, kind, subject, *, resolve=None, trees=None):
     cursor = store.cursor()
-    document = store.plan(cursor.revision)
-    checks = trace(document, kind, subject, store)
+    document = plan.execution(store)
+    checks = trace(document, kind, subject)
     refs = [r for r in cursor.finalObservations if store.read(r)["check"] in checks]
     if (cursor.finalCommit != cursor.candidate or {store.read(r)["check"] for r in refs} != set(checks)
             or any(store.read(r)["commit"] != cursor.finalCommit for r in refs)):
@@ -89,6 +86,9 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
         facts["Guide file"] = {"path": plan.GUIDE_PATH, "commit": cursor.finalCommit,
                                "text": gitwork.git(store.root.parent, "show",
                                                    f"{cursor.finalCommit}:{plan.GUIDE_PATH}")}
+        facts["Walkthrough check sources"] = {p: b.decode("utf-8", errors="replace") for p, b in
+            gitwork.blobs(store.root.parent, cursor.finalCommit,
+                          plan.select(document, "unit")["guide"]["checkPaths"]).items()}
     images = questions.images(store, refs)
     if resolve is not None:
         facts["Requested facts"] = [{"request": item, "observations": list(checks),
@@ -98,7 +98,7 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
 
 def ready(answer):
     # DV6: deferred judgment is visible at C; it is never satisfaction.
-    return questions.satisfied(answer, final=True) or answer["verdict"] == "not judged"
+    return questions.satisfied(answer) or answer["verdict"] == "not judged"
 
 
 def not_judged(store):
@@ -119,47 +119,14 @@ def combined(verdicts):
     return {"verdict": ("gap" if not all(ready(a) for a in answers) else
                         "not judged" if any(a["verdict"] == "not judged" for a in answers) else "satisfied"),
             "gaps": [g for a in answers for g in a["gaps"]],
-            "assessments": [item for a in answers for item in a["assessments"]],
             "neededFacts": [fact for a in answers for fact in a.get("neededFacts", [])],
             "why": "Combined recorded subject verdicts; unresolved facts remain not judged (DV6)"}
 
 
-def refresh_units(store, provider):
-    cursor = store.cursor()
-    document = store.plan(cursor.revision)
-    if not plan.approved(store):
-        raise ValueError("Final judgment requires B for this exact plan and review")
-    trees = scope_trees(store, plan.select(document, "unit"))
-    for ref, unit in plan.select(document, "unit").items():
-        row = store.unit(ref)
-        verdict = store.read(row.judgment) if row.judgment else None
-        targets = set(unit["requirements"]) | (set(questions.SOURCE_TARGETS) if ref != "guide" else set())
-        assessed = ({a["target"] for a in verdict.get("answer", {}).get("assessments", [])}
-                    if verdict else set())
-        if (verdict and verdict["scopeTree"] == trees[ref]
-                and (targets <= assessed or verdict.get("answer", {}).get("verdict") == "not judged")):
-            continue
-        refs = [r for r in cursor.finalObservations if store.read(r)["unit"] == ref]
-        evidence = [r for r in row.observations if store.read(r)["purpose"] != "P"] + refs
-        result, answer = inference.call(store, provider, questions.judge_brief(
-            store, ref, cursor.candidate, evidence))
-        if answer["verdict"] != "not judged" and not questions.satisfied(answer):
-            fixups.apply(store, [{"subject": ref, "kind": "flow", "source": result,
-                "units": [ref], "commit": cursor.candidate, "correction": str(answer)}])
-            return False
-        result = store.record("unit_verdict", {"commit": cursor.candidate, "scopeTree": trees[ref],
-                                               "answer": answer, "source": result})
-        with store.transaction():
-            store.unit(ref, replace(row, judgment=result))
-    return True
-
-
 def step(store, provider):
-    if not refresh_units(store, provider):
-        return
     cursor = store.cursor()
     kind = "PRODUCT"
-    document = store.plan(cursor.revision)
+    document = plan.execution(store)
     trees = scope_trees(store, plan.select(document, "unit"))
     with store.transaction():
         cursor = replace(cursor, **{f: [r for r in getattr(cursor, f) if current(store.read(r), trees)]
@@ -175,11 +142,11 @@ def step(store, provider):
         question = brief(store, kind, subject, trees=trees,
                          resolve=pending["answer"]["neededFacts"] if pending else None)
         refs = [r for r in cursor.finalObservations
-                if store.read(r)["check"] in trace(document, kind, subject, store)]
+                if store.read(r)["check"] in trace(document, kind, subject)]
         failed = proof.failures(store, refs)
         if failed:
             answer = {"verdict": "gap", "gaps": [{"target": subject, "correction": proof.explain(failed)}],
-                      "assessments": [], "why": "A traced check failed on the final commit"}
+                      "why": "A traced check failed on the final commit"}
             result = store.record("check_gap", {"subject": subject, "observations": refs,
                                               "commit": cursor.candidate, "answer": answer})
             replies[subject] = result, answer
@@ -191,7 +158,7 @@ def step(store, provider):
         for subject in selected:
             result, answer = replies[subject]
             if pending and answer["verdict"] == "uncertain":
-                answer = {**answer, "verdict": "not judged", "assessments": [], "gaps": []}
+                answer = {**answer, "verdict": "not judged", "gaps": []}
             if answer["verdict"] == "uncertain":
                 uncertain.append(store.record("judge_uncertain", {"subject": subject, "kind": kind,
                     "commit": cursor.candidate, "source": result, "answer": answer}))
