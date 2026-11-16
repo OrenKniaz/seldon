@@ -1,4 +1,5 @@
 """C14/C26: admitted mechanics support workers proving real products through C."""
+from test_journey import unit_ref
 
 import json
 import os
@@ -138,14 +139,14 @@ def kit_journey(slot, surface):
             return
         cursor, rows, units = finish(run)
         assert judged
-        assert units['u001'].recoveries == 0
+        assert units[unit_ref(run, 1)].recoveries == 0
         assert not any(b['gate'] == 'UNIT' for _, _, b in run.store.records('decision_request'))
         guide = [b for _, _, b in run.store.records('observation') if b['unit'] == 'guide']
         assert guide and all(b['exitCode'] == 0 for b in guide if b['purpose'] in ('P', 'final'))
         assert any(b['purpose'] == 'final' for b in guide)
         assert units['guide'].recoveries == 0
         assert not any(b['owner'] == 'guide' for _, _, b in run.store.records('unit_fixup'))
-        observations = [b for _, kind, b in rows if kind == 'observation' and b['check'] == 'u001:check:1']
+        observations = [b for _, kind, b in rows if kind == 'observation' and b['check'] == unit_ref(run, 1) + ':check:1']
         red = [b for b in observations if b['purpose'] == 'T']
         assert red and all(b['exitCode'] != 0 and 'Product exited' in b['stderr'] for b in red)
         green = [b for b in observations if b['purpose'] in ('P', 'final')]

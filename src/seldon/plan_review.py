@@ -1,4 +1,4 @@
-"""C11/R2: one bounded review pass over acceptance, one repair, leftovers visible at B."""
+"""C11/R2: one bounded review of each wave, one repair, remaining gaps visible in its review."""
 
 from . import architecture, inference, plan, questions
 from .states import advance
@@ -30,7 +30,8 @@ def step(store, provider, capacity):
         "subjects": {s: r for s, (r, _) in replies.items()},
         "answer": {"verdict": "gap" if gaps else "not judged" if unknown else "adequate", "gaps": gaps},
         "notJudged": unknown, "reviewTier": "same-provider review"})
-    advance(store, "gap" if gaps and not cursor.repairs else "reviewed", ref, review=ref)
+    event = "gap" if gaps and not cursor.repairs else "reviewed" if cursor.wave == 1 else "planned"
+    advance(store, event, ref, review=ref)
 
 
 def repair(store):
@@ -43,4 +44,4 @@ def repair(store):
         corrections = {a["handle"]: [{"error": words, "otherSide": {}}]
                        for a in store.plan(cursor.revision)["architecture"]["areas"]}
     ref = store.record("review_repair", {"revision": cursor.revision, "corrections": corrections})
-    advance(store, "area-gap", ref, repairs=cursor.repairs + 1, decision=None, requestedChange=None)
+    advance(store, "area-gap", ref, repairs=cursor.repairs + 1, requestedChange=None)

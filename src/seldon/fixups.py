@@ -37,8 +37,7 @@ def active(store, ref):
         if body["owner"] == ref:
             if body["base"] != row.base:
                 return None
-            if (body["revision"] != store.cursor().revision
-                    or body["approval"] != store.cursor().B):
+            if body["approval"] != store.cursor().B:
                 raise ValueError("Fixup requires its approved plan and owner")
             return body
     return None
@@ -60,7 +59,8 @@ def apply(store, gaps):
                           else store.cursor().state.split("-")[0])
             origin = "gap:" + acceptance + ":" + gap["subject"] + ":" + ref
             recovery.recover(store, ref, failure, key=origin, cause=cause,
-                             base=assignment["base"], worktree=None, callFolder=None, callAttempt=None)
+                             base=assignment["base"], wave=store.cursor().wave,
+                             worktree=None, callFolder=None, callAttempt=None)
         cursor = store.cursor()
         if cursor.state != "EXECUTE":
             event = "rework" if cursor.state == "WAVE-VERIFY" else "gap"

@@ -1,3 +1,4 @@
+from test_journey import unit_ref
 import json
 
 from copy import deepcopy
@@ -75,7 +76,7 @@ def unit_lineage(slot):
     native.write_text(text)
     try:
         first = waiting(run)
-        assert all(run.store.unit(r).state == "DONE" for r in ("u002", "u003", "u004"))
+        assert all(run.store.unit(r).state == "DONE" for r in (unit_ref(run, 2), unit_ref(run, 3), unit_ref(run, 4)))
         run = recurrence(run, provider, first)
     finally:
         run.close()

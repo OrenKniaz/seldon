@@ -5,7 +5,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import fixups, gitwork, inference, plan, proof, questions, recovery
+from . import decisions, fixups, gitwork, inference, plan, proof, questions, recovery
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, recorded
 from .schema import validate
 from .states import advance
@@ -65,14 +65,12 @@ def work(store, provider, ref):
         answer = store.read(report)["answer"]
     store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
     if answer["outcome"] == "question" and not any(d["owner"] != ref for d in answer["discoveries"]):
-        text, document = answer["summary"], plan.execution(store)
-        source, guidance = inference.call(store, provider, questions.build("COACH", {
-            "Worker's question": text, "Execution facts": questions.execution_facts(store, ref),
-            "Correction owners": {r: u["scope"] for r, u in plan.select(document, "unit").items()},
-            "Requirements": questions.requirement_facts(
-                document, plan.select(document, "unit")[ref]["requirements"]),
-            **questions.agreement_facts(document, ref)}))
-        recovery.recover(store, ref, guidance["guidance"], cause=source)
+        text = answer["summary"]
+        recovery.recover(store, ref, text, cause=report, direct=True)
+        subject = decisions.coach(store, provider, {"unit": ref, "failure": text,
+            "tried": [text]})
+        if subject:
+            decisions.request(store, "UNIT", subject)
         return
     with store.transaction():
         store.record("worker_checks", {"unit": ref, "report": report,
@@ -190,7 +188,7 @@ def judge_wave(store, provider, observations):
     batch, trees = {}, {}
     for ref, contract in plan.select(document, "unit").items():
         # The guide has no source verdict: PRODUCT compares its walkthrough with the product.
-        if ref == "guide" or not (plan.wave_requirements(document, ref) or contract["handed"]):
+        if store.unit(ref).state == "DROPPED" or ref == "guide" or not (plan.wave_requirements(document, ref) or contract["handed"]):
             continue
         row = store.unit(ref)
         tree = gitwork.scope_tree(store.root.parent, cursor.candidate, contract["scope"], cursor.scratch)

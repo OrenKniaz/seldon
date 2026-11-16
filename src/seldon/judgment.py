@@ -3,7 +3,7 @@
 from dataclasses import replace
 from pathlib import Path
 
-from . import fixups, gitwork, inference, plan, questions
+from . import architecture, fixups, gitwork, inference, plan, questions
 from .schema import answer_schema
 from .states import advance
 
@@ -11,17 +11,39 @@ from .states import advance
 def subjects(document, kind):
     if kind == "FLOW":
         return plan.select(document, "requirement")
-    return {**plan.select(document, "criterion"), "tryItGuide": {
+    areas = dict(zip((a["handle"] for a in document["architecture"]["areas"]),
+                     plan.select(document, "area"), strict=True))
+    commitments = {ref: {"criterion": text,
+        "verification": "Trace the accepted experience end to end across its areas",
+        "areas": [areas[a["handle"]] for a in document["architecture"]["areas"]
+                  if ref in a["commitments"]]}
+        for ref, text in architecture.commitments(document["nodes"]["vision"]["body"]).items()
+        if ref.startswith(("scopeIn:", "improvements:"))}
+    return {**plan.select(document, "criterion"), **commitments, "tryItGuide": {
         "criterion": "The try-it guide is usable from the delivered directory",
         "verification": plan.GUIDE_WORK, "checks": []}}
 
 
 def trace(document, kind, subject):
+    body = subjects(document, kind)[subject]
+    if "areas" in body:
+        return {r: c for r, c in plan.select(document, "check").items()
+                if c["owner"] == "guide" or
+                plan.select(document, "unit")[c["owner"]]["area"] in body["areas"]}
     return (plan.assigned(document)["guide"] if subject == "tryItGuide" else
             plan.traced_checks(document, subject))
 
 
 def owners(document, kind, subject):
+    body = subjects(document, kind)[subject]
+    if "areas" in body:
+        return {r: u for r, u in plan.select(document, "unit").items()
+                if r == "guide" or u["area"] in body["areas"]}
+    if kind == "FLOW":
+        return {r: u for r, u in plan.select(document, "unit").items()
+                if subject in u["requirements"]}
+    if "area" in body:
+        return {r: u for r, u in plan.select(document, "unit").items() if u["area"] == body["area"]}
     return plan.traced_units(document, trace(document, kind, subject))
 
 
@@ -29,8 +51,11 @@ def scope_trees(store, owned):
     cursor = store.cursor()
     trees = {b["unit"]: b["scopeTree"] for r in cursor.finalObservations for b in [store.read(r)]
              if b["unit"] in owned and b["commit"] == cursor.candidate}
-    if set(trees) != set(owned):
-        raise ValueError("Every reached unit needs its scope tree observed on the final commit")
+    if missing := set(owned) - trees.keys():
+        units = plan.select(plan.execution(store), "unit")
+        for ref in missing:
+            trees[ref] = gitwork.scope_tree(store.root.parent, cursor.candidate,
+                                           units[ref]["scope"], cursor.scratch)
     return trees
 
 
@@ -51,6 +76,9 @@ def brief(store, kind, selected, *, trees=None):
     trees = trees if trees is not None else scope_trees(store, owned)
     verdicts = []
     for ref in owned:
+        if store.unit(ref).state == "DROPPED":
+            verdicts.append({"unit": ref, "why": "left out by the user"})
+            continue
         verdict = store.read(store.unit(ref).judgment)
         if verdict["scopeTree"] != trees[ref]:
             raise ValueError(f"{ref} needs its unit JUDGE on the changed scope before final judgment")
@@ -63,11 +91,19 @@ def brief(store, kind, selected, *, trees=None):
                     **{k: body[k] for k in ("executionStarted", "cleanupVerified", "timedOut")})
     criteria = {s: {k: subjects(document, kind)[s][k] for k in ("criterion", "verification")}
                 for s in selected}
-    facts = {"Criteria": criteria, "Checks": checks, "Final observations": final,
+    facts = {"Left out by the user": plan.left_out(store), "Criteria": criteria, "Checks": checks, "Final observations": final,
              "Source judgment": verdicts,
              "Source availability": "Source is judged at the unit; source text is unavailable "
                                     "after integration.",
              "Reader's starting directory": str(store.root.parent.resolve())}
+    body = subjects(document, kind)[subject]
+    if "areas" in body:
+        features = {f for u in plan.select(document, "unit").values() if u["area"] in body["areas"]
+                    for r in u["requirements"]
+                    for f in plan.select(document, "requirement")[r]["features"]}
+        facts["Feature verdicts"] = [{"feature": row["feature"],
+            **plan.select(document, "feature")[row["feature"]], "answer": row["answer"]}
+            for ref in cursor.demoVerdicts for row in [store.read(ref)] if row["feature"] in features]
     artifacts = {}
     outputs = [item[key] for item in final for key in ("stdout", "stderr")]
     for ref in refs:
@@ -90,6 +126,11 @@ def brief(store, kind, selected, *, trees=None):
             gitwork.blobs(store.root.parent, cursor.finalCommit,
                           plan.select(document, "unit")["guide"]["checkPaths"]).items()}
     question = questions.build(kind, facts, selected, images=questions.images(store, refs))
+    if "areas" in body:
+        question["prompt"] = ("Was this accepted commitment delivered end to end across its areas? "
+            "Passing features alone may leave a gap between them. Use the feature verdicts and guide "
+            "walkthrough evidence; name the responsible correction owners for any behaviour gap. "
+            + questions.JUDGMENT_LEEWAY)
     return {**question, "schema": review_schema(document, kind)}
 
 

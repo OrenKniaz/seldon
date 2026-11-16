@@ -1,6 +1,8 @@
 """C1/C9/C12/C23; R3/R4: bounded area corrections preserve valid siblings and one approval plan."""
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import replace
 
 from . import architecture, inference, plan, questions, recovery
 from .states import advance
@@ -17,7 +19,23 @@ def gap(store, corrections, source):
 
 def step(store, provider, capacity):
     cursor = store.cursor()
-    outline = store.plan(cursor.revision)["architecture"]
+    previous = store.plan(cursor.revision)
+    outline = previous["architecture"]
+    architects = [b for _, _, b in store.records("answer") if b["kind"] == "ARCHITECT"]
+    question = store.read(store.read(architects[-1]["attempt"])["question"])
+    baseline = question["facts"].get("Previous architecture", outline)
+    pending = architecture.detail_areas(outline, cursor.wave, baseline)
+    # Make newly written contract text canonical before any consumer plans against it.
+    updated = deepcopy(previous)
+    for ref, contract in plan.select(updated, "contract").items():
+        current = architecture.index(outline["contracts"])[ref]
+        contract.update(kind=current["kind"], text=current["text"])
+    if updated != previous:
+        with store.transaction():
+            revision = store.revision(updated, cursor.revision)
+            cursor = replace(store.cursor(), revision=revision)
+            store.cursor(cursor)
+        previous = updated
     vision = store.read(cursor.vision)["answer"]
     resumed = next((b["words"] for _, _, b in reversed(store.records("approval"))
                     if "step" in b["subject"] and b["choice"] in ("approve", "revise")), None)
@@ -33,7 +51,9 @@ def step(store, provider, capacity):
                 "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
                 "consumers": [area["handle"] if a in area.get("ancestors", []) else a
                               for a in c["consumers"]]}
-                for r, c in architecture.index(outline["contracts"]).items()}
+                for r, c in architecture.index(outline["contracts"]).items()
+                if c["provider"] in [area["handle"], *area.get("ancestors", [])]
+                or set(c["consumers"]).intersection([area["handle"], *area.get("ancestors", [])])}
             basis = {"vision": cursor.vision, "commit": cursor.candidate, "area": area,
                      "contracts": local, "facts": {k: v for k, v in question["facts"].items()
                                                  if k not in ("Peer checks", "User's words")}}
@@ -109,15 +129,16 @@ def step(store, provider, capacity):
             return None, failures
         return leaves, failures
 
-    leaves, failures = collect(outline["areas"], review_correction)
+    leaves, failures = collect(pending, review_correction)
     if leaves is None:
         return
     while True:
         try:
             if failures:
                 raise architecture.DetailCorrection(failures)
-            compiled = plan.add_guide(plan.merge(vision, outline, leaves))
-            compiled["areaDetails"] = {a["handle"]: done[a["handle"]]["answer"] for a in outline["areas"]}
+            compiled = plan.add_guide(plan.merge(vision, outline, leaves, previous, cursor.wave), cursor.wave)
+            compiled["areaDetails"] = {**previous.get("areaDetails", {}),
+                **{a["handle"]: done[a["handle"]]["answer"] for a, _ in leaves}}
             break
         except architecture.ContractGap as error:
             gap(store, {a: [{"error": str(error), "otherSide": {}}] for a in error.areas}, refs)

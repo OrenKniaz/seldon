@@ -4,7 +4,7 @@ import fnmatch
 from graphlib import TopologicalSorter
 from pathlib import PurePosixPath
 
-from .schema import BODIES, PLAN, VISION
+from .schema import BODIES, VISION
 from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
@@ -58,7 +58,9 @@ def execution(store):
     document = deepcopy(store.plan(store.cursor().revision))
     latest = {b["unit"]: b for _, _, b in store.records("worker_checks")}
     for ref, unit in select(document, "unit").items():
-        declaration = latest.get(ref, {"checkPaths": [], "checks": []})
+        row = store.unit(ref)
+        declaration = ({} if row and row.state == "DROPPED" else latest).get(
+            ref, {"checkPaths": [], "checks": []})
         unit["handed"] = {d["owner"]: d["correction"] for d in declaration.get("discoveries", [])
                           if d["owner"] != ref}
         unit["checkPaths"] = [p for p in declaration["checkPaths"] if matches(p, unit["scope"])]
@@ -66,6 +68,23 @@ def execution(store):
             document["nodes"][f"{ref}:check:{i}"] = {"kind": "check", "body": {
                 **check, "owner": ref, "requirements": unit["requirements"]}}
     return document
+
+
+def acceptance(document, ref):
+    requirements = select(document, "unit")[ref]["requirements"]
+    last = max((int(r.split(".")[0]) for r in requirements), default=0)
+    return [r for r in requirements if r.startswith(f"{last}.")]
+
+
+def left_out(store):
+    document = execution(store)
+    return {ref: {"requirements": {r: document["nodes"][r]["body"]["acceptance"]
+                                  for r in unit["requirements"]},
+                  "commitments": next(a["commitments"] for a in document["architecture"]["areas"]
+                                      if a["handle"] == unit["area"]),
+                  "reason": "left out by the user"}
+            for ref, unit in select(document, "unit").items()
+            if store.unit(ref) and store.unit(ref).state == "DROPPED"}
 
 
 def assigned(document, *, local=False):
@@ -110,127 +129,110 @@ def coverage(document):
             for checks in [traced_checks(document, r)]}
 
 
-def create(vision, answer):
-    validate_schema({k: v for k, v in answer.items() if k != "why"}, PLAN)
-    vision = {field: vision[field] for field in VISION["properties"]}
-    nodes = {"vision": {"kind": "vision", "body": vision}}
-    handles = {e["targetHandle"]: f"n{i:03}" for i, e in enumerate(answer["edits"], 1)}
-    if len(handles) != len(answer["edits"]):
-        raise ValueError("Each planned record needs its own handle")
-    relations = {"feature": "vision", "requirement": "features", "decision": "areas"}
-    for edit in answer["edits"]:
-        body = dict(edit["typedBody"])
-        relation = relations.get(edit["kind"])
-        if relation:
-            body[relation] = (["vision"] if relation == "vision" else
-                              [handles.get(r, r) for r in body[relation]])
-        if edit["kind"] == "contract":
-            body.update(provider=f"u{body['provider']:03}",
-                        consumers=[f"u{r:03}" for r in body["consumers"]])
-        nodes[handles[edit["targetHandle"]]] = {"kind": edit["kind"], "body": body}
-    for i, unit in enumerate(answer["units"], 1):
-        nodes[f"u{i:03}"] = {"kind": "unit", "body": {**{k: v for k, v in unit.items() if k != "provides"},
-            "requirements": [handles.get(r, r) for r in unit["requirements"]],
-            "area": handles.get(unit["area"], unit["area"]),
-            "dependencies": [f"u{d:03}" for d in unit["dependencies"]]}}
-    document = {"nodes": nodes}
-    validate(document)
-    return document
-
-
-def merge(vision, architecture, leaves):
-    """CODE assigns global handles, unit positions and contract endpoints."""
+def merge(vision, architecture, leaves, previous=None, wave=1):
+    """Accumulate one wave; a scope keeps its owner and its earlier requirements."""
+    from copy import deepcopy
     from . import architecture as owner
 
-    edits, units = [], []
-    endpoints, feature_handles = {}, {}
-    emitted = set()
+    document = deepcopy(previous) if previous else {"nodes": {}}
+    nodes = document["nodes"]
+    nodes["vision"] = {"kind": "vision", "body": {k: vision[k] for k in VISION["properties"]}}
+    units = select(document, "unit")
+    endpoints = {r: {"provides": [c["provider"]], "consumes": [u for u in c["consumers"] if u != "guide"]}
+                 for r, c in select(document, "contract").items()}
+    feature_handles = {}
     for area, answer in leaves:
-        # An inherited endpoint is still an explicit agreement with the parent responsibility.
         local_contracts = {r: {**c,
             "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
             "consumers": [area["handle"] if a in area.get("ancestors", []) else a for a in c["consumers"]]}
             for r, c in owner.index(architecture["contracts"]).items()}
         owner.local_plan(area, local_contracts, answer, vision)
-        offset = len(units)
-        handles = {e["targetHandle"]: f"{area['handle']}/{e['targetHandle']}" for e in answer["edits"]}
-        # Equal feature records with the same proposed handle are one story across areas.
-        # Different stories may freely reuse a local handle; no semantic text matching is used.
+        handles = {e["targetHandle"]: f"{wave}.{area['handle']}.{e['kind']}{i}"
+                   for i, e in enumerate(answer["edits"], 1)}
         for edit in answer["edits"]:
             if edit["kind"] == "feature":
-                ref = edit["targetHandle"]
-                prior = feature_handles.setdefault(ref, [])
+                key = edit["targetHandle"]
+                prior = feature_handles.setdefault(key, [])
                 shared = next((h for body, h in prior if body == edit["typedBody"]), None)
                 if shared:
-                    handles[ref] = shared
+                    handles[key] = shared
                 else:
-                    prior.append((edit["typedBody"], handles[ref]))
+                    prior.append((edit["typedBody"], handles[key]))
         for edit in answer["edits"]:
-            if handles[edit["targetHandle"]] in emitted:
-                continue
-            emitted.add(handles[edit["targetHandle"]])
-            body = dict(edit["typedBody"])
-            relation = {"requirement": "features"}.get(edit["kind"])
-            if relation:
-                refs = body[relation]
-                body[relation] = [handles.get(r, r) for r in refs if r in handles]
-            edits.append({**edit, "targetHandle": handles[edit["targetHandle"]], "typedBody": body})
-        for unit in answer["units"]:
-            position = len(units) + 1
-            # Area containment is already checked in architecture.local_plan.
-            units.append({**unit, "area": area["handle"],
-                          "requirements": [handles[r] for r in unit["requirements"]],
-                          "dependencies": [d + offset for d in unit["dependencies"]]})
-            for ref, contract in local_contracts.items():
-                bound = endpoints.setdefault(ref, {"provides": [], "consumes": []})
-                if area["handle"] in contract["consumers"]:
-                    bound["consumes"].append(position)
+            body = deepcopy(edit["typedBody"])
+            if edit["kind"] == "feature":
+                body["vision"] = ["vision"]
+            else:
+                body["features"] = [handles[r] for r in body["features"]]
+            ref = handles[edit["targetHandle"]]
+            # A re-detail in this wave replaces its own records, never a finished wave's.
+            nodes[ref] = {"kind": edit["kind"], "body": body}
+        local_units = {}
+        for i, unit in enumerate(answer["units"], 1):
+            ref = next((r for r, u in units.items() if set(u["scope"]) == set(unit["scope"])), None)
+            if ref is None:
+                number = 1
+                while (ref := f"{wave}.{area['handle']}.{number}") in units or ref in local_units.values():
+                    number += 1
+            local_units[i] = ref
+        for i, unit in enumerate(answer["units"], 1):
+            ref = local_units[i]
+            before = units.get(ref, {"requirements": [], "dependencies": []})
+            body = {k: deepcopy(v) for k, v in unit.items() if k != "provides"}
+            body.update(area=area["handle"],
+                        requirements=list(dict.fromkeys([*before["requirements"],
+                                                         *(handles[r] for r in unit["requirements"])])),
+                        dependencies=list(dict.fromkeys([*before["dependencies"],
+                                                         *(local_units[d] for d in unit["dependencies"])])))
+            nodes[ref] = {"kind": "unit", "body": body}
+            units[ref] = body
+            for handle, contract in local_contracts.items():
+                bound = endpoints.setdefault(handle, {"provides": [], "consumes": []})
+                if area["handle"] in contract["consumers"] and ref not in bound["consumes"]:
+                    bound["consumes"].append(ref)
                 if (contract["provider"] == area["handle"]
-                        and (len(answer["units"]) == 1 or ref in unit.get("provides", []))):
-                    bound["provides"].append(position)
-    if set(a["handle"] for a, _ in leaves) != set(owner.index(architecture["areas"])):
-        raise ValueError("Detail every area exactly once")
+                        and (len(answer["units"]) == 1 or handle in unit.get("provides", []))
+                        and ref not in bound["provides"]):
+                    bound["provides"].append(ref)
     for area in architecture["areas"]:
-        edits.append({"kind": "area", "targetHandle": area["handle"], "typedBody": {
-            "responsibility": area["responsibility"], "scope": list(area["scope"])}})
+        ref = area["handle"]
+        nodes[ref] = {"kind": "area", "body": {
+            "responsibility": area["responsibility"], "scope": list(area["scope"])}}
+        if "guide" in units and units["guide"]["area"] == ref:
+            nodes[ref]["body"]["scope"].extend(units["guide"]["scope"])
+        for i, criterion in enumerate(vision["quality"], 1):
+            if f"quality:{i}" in area["commitments"]:
+                nodes[f"quality:{i:03}:{ref}"] = {
+                    "kind": "criterion", "body": {**criterion, "area": ref}}
     corrections = {}
-
-    def correct(areas, error, facts):
-        for area in sorted(set(areas)):
-            item = {"error": error, "otherSide": facts}
-            if item not in corrections.setdefault(area, []):
-                corrections[area].append(item)
-
     for contract in architecture["contracts"]:
         bound = endpoints.get(contract["handle"], {"provides": [], "consumes": []})
+        if not bound["provides"] and not any(
+                contract["provider"] in {a["handle"], *a.get("ancestors", [])} for a, _ in leaves):
+            continue  # A later agreement has no implementing unit yet.
         if len(bound["provides"]) != 1:
-            participants = {a["handle"] for a, _ in leaves
-                            if contract["provider"] in {a["handle"], *a.get("ancestors", [])}}
-            correct(participants,
-                    f"{contract['handle']}: bind exactly one provider",
-                    {"contract": contract["text"]})
+            for area, _ in leaves:
+                if contract["provider"] in {area["handle"], *area.get("ancestors", [])}:
+                    corrections.setdefault(area["handle"], []).append({
+                        "error": f"{contract['handle']}: bind exactly one provider",
+                        "otherSide": {"contract": contract["text"]}})
             continue
-        edits.append({"kind": "contract", "targetHandle": contract["handle"], "typedBody": {
+        nodes[contract["handle"]] = {"kind": "contract", "body": {
             "kind": contract["kind"], "text": contract["text"],
-            "provider": bound["provides"][0], "consumers": bound["consumes"]}})
+            "provider": bound["provides"][0], "consumers": bound["consumes"]}}
     for i, decision in enumerate(architecture["decisions"]):
-        edits.append({"kind": "decision", "targetHandle": f"architecture-decision:{i}",
-                      "typedBody": decision})
-    for position, unit in enumerate(units, 1):
-        for other, writer in enumerate(units, 1):
-            if (position < other and unit["area"] != writer["area"]
-                    and overlaps(unit["scope"], writer["scope"])):
-                correct([unit["area"], writer["area"]], "Scope ownership overlaps; assign disjoint scopes",
-                        {unit["area"]: unit["scope"], writer["area"]: writer["scope"]})
+        nodes[f"architecture-decision:{i}"] = {"kind": "decision", "body": deepcopy(decision)}
+    for ref, unit in units.items():
+        for other, writer in units.items():
+            if ref < other and overlaps(unit["scope"], writer["scope"]):
+                for area in {unit["area"], writer["area"]}:
+                    corrections.setdefault(area, []).append({
+                        "error": "Scope ownership overlaps; assign disjoint scopes",
+                        "otherSide": {unit["area"]: unit["scope"], writer["area"]: writer["scope"]}})
     if corrections:
         raise owner.DetailCorrection(corrections)
-    document = create(vision, {"edits": edits, "units": units})
-    document["architecture"] = architecture
-    for ref, area in zip(select(document, "area"), architecture["areas"], strict=True):
-        for index, criterion in enumerate(vision["quality"], 1):
-            if f"quality:{index}" in area["commitments"]:
-                document["nodes"][f"quality:{index:03}:{ref}"] = {
-                    "kind": "criterion", "body": {**criterion, "area": ref}}
+    document["architecture"] = deepcopy(architecture)
+    validate(document)
     return document
 
 
@@ -295,23 +297,47 @@ def validate(document):
     return coverage(document)
 
 
-def add_guide(document):
+def add_guide(document, wave=1):
     from copy import deepcopy
     result = deepcopy(document)
     area = next(iter(select(result, "area")))
     result["nodes"][area]["body"]["scope"].extend([GUIDE_PATH, "docs/try-it/**"])
-    for ref in select(result, "contract"):
-        result["nodes"][ref]["body"]["consumers"].append("guide")
+    current = {r for r, u in select(result, "unit").items()
+               if any(q.startswith(f"{wave}.") for q in u["requirements"])}
+    for contract in select(result, "contract").values():
+        contract["consumers"] = [u for u in contract["consumers"] if u != "guide"]
+        if current.intersection([contract["provider"], *contract["consumers"]]):
+            contract["consumers"].append("guide")
     result["nodes"]["guide"] = {"kind": "unit", "body": {
         "scope": [GUIDE_PATH, "docs/try-it/**"], "requirements": [],
         "area": area, "dependencies": [],
-        "instructions": GUIDE_WORK}}
+        "instructions": GUIDE_WORK + "\nThis wave: " + document["architecture"]["waves"][wave - 1]["goal"]}}
     return result
+
+
+def built(store):
+    """Facts from the finished wave, without turning worker reports into verdicts."""
+    cursor = store.cursor()
+    document = store.plan(cursor.revision)
+    units = select(document, "unit")
+    finished = max((row.wave for row in store.units().values()), default=cursor.wave)
+    rows = {}
+    for ref, row in store.units().items():
+        if row.wave != finished:
+            continue
+        answer = store.read(row.report)["answer"] if row.report else {}
+        rows[ref] = {"scope": units[ref]["scope"], "summary": answer.get("summary", ""),
+                     "discoveries": answer.get("discoveries", []),
+                     "open gaps": [b for _, _, b in store.records("open_gap") if b["unit"] == ref]}
+    words = store.read(cursor.checkin)["words"] if cursor.checkin else None
+    if isinstance(words, str):
+        words = store.read(words)["words"]
+    return {"Previous architecture": document["architecture"], "Finished wave": rows,
+            "User check-in": words, "Remaining waves": document["architecture"]["waves"][finished:]}
 
 
 def approved(store):
     cursor = store.cursor()
     subject = store.read(cursor.B)["subject"]
-    return (subject["revision"] == cursor.revision
-            and subject["plan"] == store.plan(subject["revision"])
-            and subject["review"] == store.read(cursor.review))
+    vision = subject["plan"]["nodes"]["vision"]["body"]
+    return vision == {k: v for k, v in store.read(cursor.vision)["answer"].items() if k != "why"}

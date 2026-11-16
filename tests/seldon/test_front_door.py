@@ -3,6 +3,7 @@
 import json
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import anyio
@@ -10,7 +11,7 @@ import pytest
 from mcp import ClientSession
 from mcp.shared.memory import create_client_server_memory_streams
 
-from seldon.frontdoor import server
+from seldon.frontdoor import opened, server, side
 
 from test_journey import NATIVE, Scripted
 
@@ -28,8 +29,8 @@ if question['kind'] == 'WORK':
 else:
     if question['kind'] == 'DECIDE':
         words = question['facts']["User's words"]
-        choice = ('revise' if words.startswith('Revise') else
-                  'decline' if words.startswith('No') else 'approve')
+        choice = ('Other' if words.startswith('Revise') else
+                  'Stop' if words.startswith('No') else question['targets'][0])
         answer = json.dumps({'answer': {'choice': choice, 'why': words}})
     else:
         answer = Scripted(slot, 'kill-work', 2)(question)
@@ -84,7 +85,9 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
                         while True:
                             value = await call('state', run=run)
                             assert value['state'] != 'STOPPED', value
-                            if (value['controller'] == 'idle' and value['state'] == expected
+                            target = ((value['waitingFor'] or {}).get('gate')
+                                      if expected in ('A', 'B', 'CHECK-IN', 'C') else value['state'])
+                            if (value['controller'] == 'idle' and target == expected
                                     and (expected == 'ACCEPTED' or value['waitingFor'] is not None)
                                     and (previous is None or value['waitingFor']['request'] != previous)):
                                 return value
@@ -95,6 +98,7 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
                 await call('start', dream='Read two named values', folder=run)
                 await call('start', error='new folder', dream='Read values', folder=run)
                 a = await wait(run, 'A')
+                assert a['waitingFor']['ask']['options'][0]['label'] == 'Build this'
                 old = a['waitingFor']['request']
                 await call('answer', run=run, request=old, words='Revise the dream: name the exact value')
                 a = await wait(run, 'A', previous=old)
@@ -121,8 +125,8 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
                 try:
                     paused = await call('pause', run=run)
                     assert paused['controller'] == 'idle' and paused['waitingFor'] is None
-                    assert paused['units']['u001']['state'] == 'DONE'
-                    assert paused['units']['u002']['state'] != 'DONE'
+                    assert paused['units']['1.area-1.1']['state'] == 'DONE'
+                    assert paused['units']['1.area-1.2']['state'] != 'DONE'
                     assert kernel.WaitForSingleObject(handle, 5000) == 0, 'Worker survived pause'
                 finally:
                     kernel.CloseHandle(handle)
@@ -167,3 +171,122 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
     anyio.run(journey)
     with capsys.disabled():
         print(f'Front door journey: {time.monotonic() - began:.2f}s', flush=True)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize('fault', ['live', 'restart'])
+def test_answer_file_continuity_journey(tmp_path, fault):
+    """An answer preserves live work and survives a controller loss before its decision commits.
+
+    Catches SIGTERM-on-answer and destructive reads of the answer carrier. The existing chat journey
+    answers only idle gates and intentionally pauses its worker, so neither fault is visible there.
+    The framed request is the R17 producer handoff fixture; ordinary gates use decisions.request.
+    """
+    slot = tmp_path / 'provider'
+    slot.mkdir()
+    (slot / 'mode').write_text('kill-work')
+    native = NATIVE.replace('time.sleep(30)',
+        "while not (slot/'resume').exists(): time.sleep(.02)")
+    (slot / 'native.py').write_text(native, encoding='utf-8')
+    paths = [str(Path(__file__).resolve().parents[2] / 'src'), str(Path(__file__).resolve().parent)]
+    fake = FAKE.replace('SOURCE_PATHS', repr(paths)).replace(
+        "choice = ('Other'", "if words == 'Keep my answer through restart' and not (slot/'release').exists():\n"
+        "            (slot/'deciding').write_text('answer read, not committed')\n"
+        "            import time\n"
+        "            while not (slot/'release').exists(): time.sleep(.02)\n"
+        "        choice = ('Other'")
+    (slot / 'fake.py').write_text(fake, encoding='utf-8')
+    setup = Scripted(slot, 'kill-work', 2).setup
+    setup['codexCommand'] = [sys.executable, '-B', str(slot / 'fake.py'), str(slot)]
+    run = str(tmp_path / 'product')
+
+    async def journey():
+        low = server(setup=lambda: setup)._lowlevel_server
+        async with (create_client_server_memory_streams() as (client, service),
+                    anyio.create_task_group() as tasks):
+            tasks.start_soon(low.run, *service, low.create_initialization_options())
+            async with ClientSession(*client) as session:
+                await session.initialize()
+
+                async def call(tool, **arguments):
+                    result = await session.call_tool(tool, {'run': run, **arguments})
+                    assert not result.is_error, result
+                    return json.loads(result.content[0].text)
+
+                async def wait(gate):
+                    with anyio.fail_after(90):
+                        while True:
+                            value = await call('state')
+                            if value['controller'] == 'idle' and value['waitingFor'] \
+                                    and value['waitingFor']['gate'] == gate:
+                                return value['waitingFor']['request']
+                            await anyio.sleep(.02)
+
+                try:
+                    result = await session.call_tool('start', {'dream': 'Read two named values', 'folder': run})
+                    assert not result.is_error, result
+                    a = await wait('A')
+                    words = 'Keep my answer through restart' if fault == 'restart' else 'Build this'
+                    await call('answer', request=a, words=words)
+                    if fault == 'restart':
+                        with anyio.fail_after(30):
+                            while not (slot / 'deciding').exists():
+                                await anyio.sleep(.02)
+                        assert json.loads((side(run) / 'answer.json').read_text()) == {
+                            'request': a, 'words': words}
+                        await call('pause')
+                        (slot / 'release').write_text('Resume the interrupted decision')
+                        await call('resume')
+                    b = await wait('B')
+                    # The next request discards the old carrier; replay must not approve B as well.
+                    assert not (side(run) / 'answer.json').exists()
+                    with opened(run) as store:
+                        approvals = [row for _, _, row in store.records('approval') if row['request'] == a]
+                        assert len(approvals) == 1
+                    await call('answer', request=b, words='Build this plan')
+                    with anyio.fail_after(40):
+                        while not (slot / 'kill-ready').exists():
+                            await anyio.sleep(.02)
+                    if fault == 'live':
+                        # Publish the sibling producer's framed request while the real worker is held.
+                        ask = {'question': 'How should we continue?', 'options': [
+                            {'label': 'Continue this work', 'means': 'Keep the accepted scope', 'effect': 'direct'},
+                            {'label': 'Change direction', 'means': 'Explain a new approach', 'effect': 'direct'}]}
+                        with opened(run) as store, store.transaction():
+                            request = store.record('decision_request', {'gate': 'EXECUTE',
+                                'subject': {'step': 'EXECUTE'}, 'origin': 'user', 'ask': ask})
+                            store.cursor(replace(store.cursor(), decision=request))
+                        shown = await call('state')
+                        assert shown['status'] == 'RUNNING' and shown['units']['1.area-1.2']['state'] == 'WORKING'
+                        assert shown['waitingFor']['ask'] == {'question': ask['question'], 'options': [
+                            {'label': 'Continue this work', 'means': 'Keep the accepted scope'},
+                            {'label': 'Change direction', 'means': 'Explain a new approach'},
+                            {'label': 'Other', 'means': 'Your own words'}]}
+                        assert 'never pick for the user' in shown['next']
+                        controller = (side(run) / 'controller.json').read_text()
+                        stale = await session.call_tool('answer', {'run': run, 'request': a, 'words': 'Old answer'})
+                        assert stale.is_error and request in str(stale.content)
+                        await call('answer', request=request, words='Continue this work')
+                        assert (side(run) / 'controller.json').read_text() == controller
+                        assert (await call('state'))['controller'] == 'running'
+                    (slot / 'resume').write_text('Finish in the original worker session')
+                    for gate in ('CHECK-IN', 'C'):
+                        request = await wait(gate)
+                        await call('answer', request=request, words='Yes, I accept')
+                    with anyio.fail_after(40):
+                        while (await call('state'))['controller'] != 'idle':
+                            await anyio.sleep(.02)
+                    accepted = await call('state')
+                    assert accepted['status'] == 'ACCEPTED' and accepted['units']['1.area-1.2']['state'] == 'DONE'
+                    assert (Path(run) / 'unit-002/value.txt').read_text() == 'value-002'
+                    with opened(run) as store:
+                        assert not any(row['event'] == 'reopen' and row['unit'] == '1.area-1.2'
+                                       for _, _, row in store.records('transition'))
+                        if fault == 'live':
+                            assert any(row['words'] == 'Continue this work'
+                                       for _, _, row in store.records('user_words'))
+                finally:
+                    await call('pause')
+            tasks.cancel_scope.cancel()
+
+    anyio.run(journey)

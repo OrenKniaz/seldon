@@ -47,8 +47,6 @@ def recover(store, ref, failure, *, key=None, cause=None, direct=False, charged=
         advance(store, "asked" if asked else "recover", cause, unit=ref, failure=failure,
                 lineage=key, recoveries=store.recovery(key)["rounds"],
                 report=None, T=None, P=None, observations=[], judgment=None, **updates)
-        if asked:
-            decisions.ask_unit(store, "Change the approach: " + failure)
         return asked
 
 
@@ -64,8 +62,7 @@ def planning(store, cause, shape, event=None, **updates):
         body = store.read(cause)
         decisions.request(store, store.cursor().state, {"step": store.cursor().state,
             "tried": [body.get("gap") or str(body.get("corrections", cause))],
-            "recommendation": "Change the approach to the unresolved plan",
-            "options": ["Try again", "Give direction", "Stop"]})
+            "recommendation": "Change the approach to the unresolved plan"})
     raise decisions.Waiting()
 
 
@@ -81,5 +78,5 @@ def subject(store, gate, body):
 def answered(store, subject, answer):
     if key := subject.get("lineage"):
         state = store.recovery(key)
-        state.update(answer=answer, question=None, waiting=False)
+        state.update(answer=answer, question=None, waiting=False, coached=False)
         store.recovery(key, state)

@@ -7,7 +7,7 @@ from collections import Counter
 
 import pytest
 
-from seldon import gitwork, plan
+from seldon import gitwork, judgment, plan
 from seldon.run import Run
 from test_journey import approve, finish, prepare
 
@@ -16,13 +16,13 @@ def final_fanout_journey(slot, stage, case):
     mode = ("demo-gap" if stage == "FLOW" else "product-gap") if case == "gaps" else "fanout"
     run, provider = prepare(slot, mode, 3)
     try:
-        while run.store.cursor().state != stage + "-JUDGE":
-            assert not run.store.cursor().decision
+        while (run.store.cursor().state != stage + "-JUDGE"
+               or run.store.cursor().decision):
             run.step()
         cursor = run.store.cursor()
         document = run.store.plan(cursor.revision)
         subjects = list(plan.select(document, "feature") if stage == "FLOW" else
-                        {**plan.select(document, "criterion"), "tryItGuide": {}})
+                        judgment.subjects(document, "PRODUCT"))
         targets = [tuple(r for r, b in plan.select(document, "requirement").items()
                          if f in b["features"]) for f in subjects] if stage == "FLOW" else [
                              (s,) for s in subjects]

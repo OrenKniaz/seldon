@@ -1,4 +1,5 @@
 """C15/R9: final evidence belongs to its integrated candidate; fanout survives restart."""
+from test_journey import unit_ref
 import pytest
 from seldon import gitwork, plan, proof, wave_verify
 from test_journey import prepare
@@ -32,7 +33,7 @@ def test_failed_integrated_candidate_routes_its_check_owner(tmp_path):
         gitwork.checkout(run.project,broken)
         observations = wave_verify.verify(run.store,broken)
         gaps = proof.gaps(run.store,broken,observations)
-        failure, = [g for g in gaps if g['units'] == ['u002']]
+        failure, = [g for g in gaps if g['units'] == [unit_ref(run, 2)]]
         assert failure['commit'] == broken and broken != previous
         assert 'AssertionError' in run.store.read(failure['source'])['stderr']
         assert all(run.store.read(r)['commit'] == broken for r in observations)

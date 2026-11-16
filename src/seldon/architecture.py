@@ -29,6 +29,8 @@ def endpoint(unit, contract):
 
 def contracts_for(document, unit):
     units, contracts = (plan.select(document, k) for k in ("unit", "contract"))
+    if unit == "guide":
+        return {r: c for r, c in contracts.items() if unit in c["consumers"]}
     providers = {unit} | {c["provider"] for c in contracts.values() if unit in c["consumers"]}
     return {r: c for r, c in contracts.items()
             if c["provider"] in providers or units[unit]["area"] == units[c["provider"]]["area"]}
@@ -83,7 +85,42 @@ def commitments(vision):
             for i, value in enumerate(vision[field], 1)}
 
 
+def merge(previous, answer):
+    """STEER may resend the horizon or name only the changed handles."""
+    if "scope" in answer:
+        return answer
+    result = deepcopy(previous)
+    for field in ("areas", "contracts"):
+        items = index(result[field])
+        for item in answer.get(field, []):
+            items[item["handle"]] = {**items.get(item["handle"], {}), **deepcopy(item)}
+        result[field] = list(items.values())
+    for decision in answer.get("decisions", []):
+        if decision not in result["decisions"]:
+            result["decisions"].append(deepcopy(decision))
+    if answer.get("waves"):
+        result["waves"] = deepcopy(answer["waves"])
+    return result
+
+
+def detail_areas(outline, wave, previous=None):
+    active = set(outline["waves"][wave - 1]["commitments"])
+    old = index(previous["contracts"]) if previous else {}
+    old = {r: {**c, "consumers": sorted(c["consumers"])} for r, c in old.items()}
+    changed = {a for c in outline["contracts"]
+               if old.get(c["handle"]) != {**c, "consumers": sorted(c["consumers"])}
+               for a in c["consumers"]} if previous else set()
+    return [a for a in outline["areas"] if active.intersection(a["commitments"])
+            or changed.intersection([a["handle"], *a.get("ancestors", [])])]
+
+
 def outline(answer, vision=None):
+    if "scope" in answer:
+        return answer
+    assigned_waves = {r for w in answer["waves"] for r in w["commitments"]}
+    accepted = commitments(vision) if vision is not None else {
+        r: None for a in answer["areas"] for r in a["commitments"]}
+    answer["waves"][-1]["commitments"].extend(r for r in accepted if r not in assigned_waves)
     validate_schema({k: v for k, v in answer.items() if k != "why"}, ARCHITECT)
     areas, contracts = index(answer["areas"]), index(answer["contracts"])
     assigned = {r for a in areas.values() for r in a["commitments"]}
@@ -160,7 +197,8 @@ def subdivision(parent, answer, known_contracts):
                 any(plan.contains(s, p) for s in parent["scope"]) for p in child["scope"])):
             raise ValueError("Sub-area scopes must narrow the parent area")
     local = {"areas": answer["subareas"], "contracts": answer["contracts"],
-             "decisions": [], "waves": [{"goal": "Detail the parent responsibility"}]}
+             "decisions": [], "waves": [{"goal": "Detail the parent responsibility",
+                                         "commitments": parent["commitments"]}]}
     outline(local)
     if index(answer["contracts"]).keys() & known_contracts.keys():
         raise ValueError("Each new contract needs a distinct handle")

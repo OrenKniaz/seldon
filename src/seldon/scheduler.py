@@ -13,15 +13,20 @@ def execute(store, provider, capacity, user):
     running = {}
     with ThreadPoolExecutor(max_workers=capacity) as pool:
         while True:
-            decisions.ask_unit(store)
             if user and store.cursor().decision:
                 try:
-                    with store.integration_lock:
-                        decisions.decide(store, provider, user)
+                    decisions.decide(store, provider, user)
                 except decisions.Waiting:
-                    user = None
+                    pass
+            if store.cursor().state == "STOPPED":
+                return
             rows = store.units()
+            coaching = any(rows[r].state == "ASKED" for r in running)
             for ref, row in rows.items():
+                if (row.state == "ASKED" and ref not in running and not coaching
+                        and not store.cursor().decision and len(running) < capacity):
+                    running[ref] = pool.submit(decisions.ask_unit, store, provider, ref)
+                    coaching = True
                 if ref in running or row.state in ("DONE", "ASKED", "DROPPED"):
                     continue
                 unmet = [d for d in contracts[ref]["dependencies"] if rows[d].state != "DONE"]
@@ -43,9 +48,9 @@ def execute(store, provider, capacity, user):
             if not running:
                 if store.cursor().decision:
                     raise decisions.Waiting()
-                if pending := [r for r, u in rows.items() if u.state not in ("DONE", "DROPPED")]:
+                if pending := [r for r, u in rows.items() if u.state not in ("DONE", "DROPPED", "ASKED")]:
                     raise ValueError("No unit can progress: " + ", ".join(pending))
                 return
-            wait(running.values(), return_when=FIRST_COMPLETED)
+            wait(running.values(), timeout=2, return_when=FIRST_COMPLETED)
             for ref in [r for r, future in running.items() if future.done()]:
                 running.pop(ref).result()

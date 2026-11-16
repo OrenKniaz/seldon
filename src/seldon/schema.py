@@ -63,7 +63,7 @@ def answer_schema(kind, targets=(), owners=()):
     payload = {
         "ALIGN": VISION, "ARCHITECT": ARCHITECT,
         "DETAIL": DETAIL_PLAN,
-        "DECIDE": obj(choice=choice("approve", "revise", "decline", "unclear", *targets,
+        "DECIDE": obj(choice=choice(*targets,
                                     "Other", "Stop", "Unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
         "WORK": obj(outcome=choice("done", "question"), summary=TEXT,

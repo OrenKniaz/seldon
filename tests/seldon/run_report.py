@@ -18,6 +18,93 @@ def encode(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def signals(records, document):
+    """Observations, never a score or a substitute for ladder acceptance."""
+    by_ref = {r: b for r, _, b in records}
+    requests = {r: b for r, k, b in records if k == "decision_request"}
+    words = {b["request"]: b["words"] for _, k, b in records if k == "user_words"}
+    shown = [{"request": r, **b, "answer": words.get(r), "answered": r in words}
+             for r, b in requests.items()]
+    answers = {b["attempt"]: b["answer"] for _,k,b in records if k == "answer"}
+    coached = [{"question": by_ref[b["question"]]["facts"], "answer": answers[r]}
+               for r,k,b in records if k == "attempt" and b["operation"] == "COACH"
+               and "guidance" in answers.get(r, {})]
+    opened, progress, completed, redone, wave = set(), [], set(), set(), 1
+    largest, rounds, planning_before_steer = {}, {}, 0
+    check_seconds = {}
+    per_wave = {}
+    starts = {b["attempt"]: Path(b["folder"]) for _, k, b in records if k == "call_started"}
+    for r, kind, b in records:
+        if kind == "decision_request":
+            opened.add(r)
+        elif kind == "user_words":
+            opened.discard(b["request"])
+        elif kind == "transition":
+            if b["unit"] is None and b["input"] == "WAVE-VERIFY":
+                rounds[wave] = rounds.get(wave, 0) + 1
+            unit = b["unit"]
+            if unit and b["next"] == "DONE":
+                completed.add(unit)
+                if opened:
+                    progress.append({"unit": unit, "questions": sorted(opened)})
+            if b["event"] == "extend":
+                completed.discard(unit)
+            if unit in completed and b["next"] == "WORKING":
+                redone.add(unit)
+            if not unit and b["input"] == "CHECK-IN" and b["event"] == "next":
+                wave += 1
+        elif kind == "observation" and b["purpose"] == "final":
+            check_seconds[wave] = check_seconds.get(wave, 0) + b["seconds"]
+        elif kind == "question":
+            maxima = largest.setdefault(wave, {})
+            maxima[b["kind"]] = max(maxima.get(b["kind"], 0), len(encode(b).encode("utf-8")))
+        elif kind == "attempt":
+            if opened and b["operation"] in ("ARCHITECT", "DETAIL", "REVIEW"):
+                planning_before_steer += 1
+            entry = per_wave.setdefault(wave, {"calls": 0, "freshTokens": 0, "usageUnknownCalls": 0})
+            entry["calls"] += 1
+            folder = starts.get(r)
+            usage = None
+            if folder and (folder / "result.json").exists():
+                usage = json.loads((folder / "result.json").read_text("utf-8")).get("usage")
+                if usage is None and (folder / "stdout.bin").exists():
+                    for line in (folder / "stdout.bin").read_text("utf-8").splitlines():
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            continue
+                        if event.get("type") == "turn.completed":
+                            usage = event.get("usage")
+            if usage is None:
+                entry["usageUnknownCalls"] += 1
+            else:
+                entry["freshTokens"] += (usage["input_tokens"] - usage.get("cached_input_tokens", 0)
+                                         + usage["output_tokens"])
+    for entry in per_wave.values():
+        if entry["usageUnknownCalls"]:
+            entry["freshTokens"] = None
+    architecture = document.get("architecture", {})
+    return ["User questions: " + encode(shown), "Planner-answered questions: " + encode(coached),
+            "Work while questions open: " + encode(progress),
+            "Recovery: " + encode({"doneUnitsRedone": sorted(redone),
+                "workingReopens": sum(k == "transition" and b["event"] == "reopen" for _,k,b in records)}),
+            "Waves closed: " + encode({"planned": len(architecture.get("waves", [])),
+                "closed": sum(k == "transition" and b["unit"] is None and b["input"] == "CHECK-IN"
+                              and b["event"] in ("approve", "next", "last") for _,k,b in records)}),
+            "Calls and fresh tokens per wave: " + encode(per_wave),
+            "M3 section 2 signals: " + encode({
+                "waveVerify": {"roundsPerWave": rounds, "checkProcessSecondsPerWave": check_seconds,
+                               "wallSecondsPerRound": None},
+                "largestQuestionsPerWave": largest,
+                "longestControllerIdleSeconds": None,
+                "planningCallsWhileQuestionOpen": planning_before_steer,
+                "steers": sum(k == "transition" and b["event"] == "steer" for _,k,b in records),
+                "steersChangingUntouchedAreas": None,
+                "askedToShownSeconds": None,
+                "unknownReason": "Store has no check-start/transition timestamps or per-area steer intent; "
+                                 "process seconds overlap and are not wall time"})]
+
+
 def report(slot):
     slot = Path(slot).resolve()
     databases = list(slot.glob("**/.seldon/state.sqlite3"))
@@ -75,6 +162,7 @@ def report(slot):
               f"Final judgment: {len(final)} calls; {final_bytes} bytes.",
               f"Final commit: {cursor['finalCommit']}; observed checks: {len(cursor['finalObservations'])}.",
               "Usage is unknown unless recorded in native result/stream artifacts."]
+    lines += signals(records, plan)
     for _, kind, body in records:
         if kind == "feature_verdict" and body["answer"]["gaps"]:
             lines.append("Feature gaps: " + encode(body["answer"]["gaps"]))

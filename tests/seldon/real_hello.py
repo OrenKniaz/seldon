@@ -18,6 +18,22 @@ DREAM = ('Build a tiny web page with one Play button. When I click Play, the pag
          'No server, no accounts, no dependencies.')
 
 
+def scripted_answer(request, store, script):
+    # Count canonical answers so restarting the rig does not replay check-in 1.
+    requests = {r: b for r, _, b in store.records("decision_request")}
+    previous = {b["request"]: b["words"] for _, _, b in store.records("user_words")}
+    if request["request"] in previous:
+        return previous[request["request"]]
+    prior = sum(requests[ref]["gate"] == request["gate"] for ref in previous)
+    entries = script.get(request["gate"], [])
+    words = entries[prior] if prior < len(entries) else "first"
+    if words == "first":
+        options = request["ask"]["options"]
+        option = options[0]
+        words = option["label"] if isinstance(option, dict) else option
+    return words
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
@@ -25,6 +41,7 @@ def main():
     parser.add_argument("slot", type=Path, help="new slot folder under C:/seldon/tests/m1")
     parser.add_argument("--dry-run", action="store_true", help="prepare ALIGN; never launch a provider")
     parser.add_argument("--dream-file", type=Path, help="dream text instead of hello-world")
+    parser.add_argument("--brief", type=Path, help="ladder JSON brief, including its scripted user")
     parser.add_argument("--reopen", action="store_true", help="resume this slot's canonical run")
     parser.add_argument("--runs", type=Path, help="override RUNS.md for an offline diagnostic")
     args = parser.parse_args()
@@ -34,8 +51,13 @@ def main():
     if not args.reopen:
         slot.mkdir(parents=True)
     try:
-        dream = args.dream_file.read_text("utf-8").strip() if args.dream_file else DREAM
-        return run(slot, args.dry_run, dream, args.reopen)
+        brief = json.loads(args.brief.read_text("utf-8")) if args.brief else {}
+        dream = brief.get("message") or (args.dream_file.read_text("utf-8").strip() if args.dream_file else DREAM)
+        if brief.get("profile"):
+            dream += "\n\nAudience and preferences:\n" + json.dumps(brief["profile"], ensure_ascii=False)
+        if brief.get("oracleInterface"):
+            dream += "\n\nShared black-box interface:\n" + json.dumps(brief["oracleInterface"], ensure_ascii=False)
+        return run(slot, args.dry_run, dream, args.reopen, brief.get("scriptedUser", {}))
     finally:
         # A diagnostic must never replace the delivery result or its exception.
         try:
@@ -45,7 +67,7 @@ def main():
             print(f"Dev-run report failed: {error}", file=sys.stderr)
 
 
-def run(slot, dry_run, dream=DREAM, reopen=False):
+def run(slot, dry_run, dream=DREAM, reopen=False, script=None):
     temp = slot / "temp"
     temp.mkdir(exist_ok=reopen)
     for key in ("TEMP", "TMP", "TMPDIR"):
@@ -77,45 +99,16 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
         (slot / "setup.json").write_text(json.dumps(setup, indent=2), encoding="utf-8")
     provider = Provider(slot / "calls", setup)
 
-    asked = {}
+    script = script or json.loads(os.environ.get("SELDON_USER_SCRIPT", "{}"))
 
     def yes(request):
         print(json.dumps({"scriptedDecision": request}, ensure_ascii=False), flush=True)
         if request["gate"] == "B" and os.environ.get("SELDON_STOP_AT_B") == "1":
             from seldon.decisions import Waiting
             raise Waiting()
-        subject = request["subject"].get("unit") or request["subject"].get("step") or request["gate"]
-        asked[subject] = asked.get(subject, 0) + (request["gate"] not in ("A", "B", "CHECK-IN", "C"))
-        # The simulated owner answers one subject at most twice; a third ask ends the session WAITING
-        # with the question shown (a real owner would decide differently; the rig must not loop, h01 11-14).
-        if (request["gate"] in ("A", "B", "CHECK-IN", "C") or not os.environ.get("SELDON_SIM_USER")
-                or asked[subject] > 2):
-            return {"request": request["request"], "subject": request["subject"], "choice": "approve"}
-        # Simulated owner (Oren 11-14): a cheap model answers unit/step questions from the dream only.
-        # It never waives Seldon; a run that needed it is not a planner-autonomous C (counted apart).
-        prompt = ("You are the product owner of this dream. Answer the builder's question in 1-3 plain "
-                  "sentences, as the owner would, from the dream alone. Give direction or say 'try again'. "
-                  "Never approve skipping a check, weakening a requirement, or dropping work.\n\nDream:\n"
-                  + dream + "\n\nQuestion:\n" + json.dumps(request["subject"], ensure_ascii=False)[:20000])
-        try:
-            answer = slot / "calls" / "sim-user.txt"
-            if setup["providers"]["decider"].get("provider") == "claude":  # read-only Haiku, no tools
-                words = subprocess.run([*setup["claudeCommand"], "-p", "--model", "claude-haiku-5-5",
-                    "--effort", "low", "--safe-mode", "--strict-mcp-config", "--no-session-persistence",
-                    "--tools", ""], input=prompt, capture_output=True, text=True, encoding="utf-8",
-                    timeout=600).stdout.strip()
-                answer.write_text(words, encoding="utf-8")
-            else:
-                subprocess.run([*setup["codexCommand"], "exec", "--skip-git-repo-check", "--ephemeral",
-                                "--sandbox", "read-only", "--model", os.environ["SELDON_SIM_USER"],
-                                "-c", 'model_reasoning_effort="low"', "--output-last-message", str(answer),
-                                "-"], input=prompt, capture_output=True, text=True, encoding="utf-8",
-                               timeout=600)
-            words = answer.read_text("utf-8").strip() if answer.exists() else ""
-        except (OSError, subprocess.TimeoutExpired):
-            words = ""
+        words = scripted_answer(request, loop.store, script)
         print(json.dumps({"simUserAnswer": words, "gate": request["gate"]}, ensure_ascii=False), flush=True)
-        return words or {"request": request["request"], "subject": request["subject"], "choice": "approve"}
+        return words
 
     loop = (Run.reopen(slot / "product", provider, yes) if reopen else
             Run(slot / "product", slot / "workers", dream, setup, provider, yes))
@@ -130,7 +123,7 @@ def run(slot, dry_run, dream=DREAM, reopen=False):
         cursor = loop.run()
         # A question persisted mid-step ends run() WAITING before the user callback; resume so the
         # (simulated) owner sees it, as the front door would. Stop when the owner gives no new words.
-        while os.environ.get("SELDON_SIM_USER") and cursor.decision:
+        while cursor.decision:
             before = cursor.decision
             cursor = loop.run()
             if cursor.decision == before:

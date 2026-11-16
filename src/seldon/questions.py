@@ -58,12 +58,13 @@ PROMPTS = {
     "ARCHITECT": 'What areas, agreements and wave goals deliver the accepted vision? Split it the way a '
                  'small team would start on the same morning: each area is work one builder finishes alone, '
                  'at the same time as the others, from the contract text. Put into contracts everything two '
-                 'areas must agree on (routes and payloads, data rules, file names, commands, page '
-                 "structure), complete enough that neither side needs to see the other's files. A "
-                 'session-sized app is usually 2-4 areas; a truly tiny one is 1. Give every commitment '
-                 'handle to one area, and give areas disjoint path scopes.',
-    "DETAIL": 'What features, requirements and units deliver this area? Each requirement has one plain-words '
-              'acceptance sentence. Assign disjoint scopes, requirements, contracts and dependencies to '
+                 'areas must agree on. Wave 1 is the thinnest path that runs end to end. Assign '
+                 'commitments to waves; write in full only the contracts the next wave needs, '
+                 'leaving later contracts as a handle and one line. Give every commitment to an area '
+                 'and give areas disjoint path scopes. With built results, name only what changes; '
+                 'a change to accepted scope returns scope for the user.',
+    "DETAIL": 'What features, requirements and units deliver this wave in this area? Each requirement '
+              'has one plain-words acceptance sentence. Assign disjoint scopes, requirements and dependencies to '
               'session-sized units. Subdivide if needed; a missing agreement returns a contract_gap to the '
               'planner. Normally the area is one unit. Use more only when they can be built at the same '
               "time. Name a dependency only when a unit cannot be written until another unit's files exist.",
@@ -75,7 +76,8 @@ PROMPTS = {
              "If the vision, decisions and results do not settle it, return ask: one question, "
              "2-4 options, your recommendation first. " + DEFECT_HANDOFF,
     "DECIDE": "Which displayed option do the user's verbatim words choose? Other for their own "
-              "direction, Stop to end the dream, Unclear when you cannot tell.",
+              "direction, Stop to end the dream, Unclear when you cannot tell. When Waive is available, "
+              "use it only when the user approves continuing and says later check-ins need no answer.",
     "WORK": "Deliver this whole unit inside its scope. Write and run your own checks for the "
             "acceptance sentences; declare each check's command, plus checkPaths "
             "including helpers needed without the product. Code observes RED without product and GREEN "
@@ -107,7 +109,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
                   "alternatives": [{"label": "Greet everyone", "means": "Use a greeting without a name"}]},
         "ARCHITECT": example_architecture(), "DETAIL": example_detail(),
         "REVIEW": {"verdict": "adequate", "gaps": []},
-        "DECIDE": {"choice": "approve"},
+        "DECIDE": {"choice": next(iter(targets), "Unclear")},
         "COACH": {"guidance": "Use the declared contract and write a check of the acceptance sentence."},
         "WORK": {"outcome": "done", "summary": "Implemented and checked the acceptance",
                  "checkPaths": [], "checks": [], "discoveries": []},
@@ -171,7 +173,7 @@ def user_words(store):
     return {"Dream": dream, **({"Requested change": changes} if changes else {})}
 
 
-def architect_brief(vision, words, gap=None, previous=None):
+def architect_brief(vision, words, gap=None, previous=None, built=None):
     facts = {"Approved vision": {k: v for k, v in vision.items() if k != "why"},
              "User's words": words,
              "Commitment handles": architecture.commitments(vision),
@@ -182,30 +184,49 @@ def architect_brief(vision, words, gap=None, previous=None):
     if gap:
         facts["Architecture correction"] = gap
         facts["Previous architecture"] = previous
-    return build("ARCHITECT", facts)
+    if built is not None:
+        facts.update(built)
+    question = build("ARCHITECT", facts)
+    if previous is not None or built is not None:
+        question["schema"]["properties"]["answer"]["anyOf"][0]["required"] = ["why"]
+    return question
 
 
 def detail_brief(store, outline, area):
     cursor = store.cursor()
     vision = store.read(cursor.vision)["answer"]
     participants = [area["handle"], *area.get("ancestors", [])]
-    contracts = {c["handle"]: c for c in outline["contracts"]}
+    contracts = {c["handle"]: c for c in outline["contracts"]
+                 if c["provider"] in participants or set(participants).intersection(c["consumers"])}
     listing = gitwork.git(store.root.parent, "ls-tree", "-r", "--name-only", cursor.candidate).splitlines()
     files = [p for p in listing if plan.matches(p, area["scope"])]
     goals = architecture.commitments(vision)
+    active = set(outline["waves"][cursor.wave - 1]["commitments"])
+    commitments = [r for r in area["commitments"] if r in active]
+    document = store.plan(cursor.revision)
+    existing = {}
+    for ref, unit in plan.select(document, "unit").items():
+        if unit["area"] == area["handle"] and ref != "guide":
+            row = store.unit(ref)
+            existing[ref] = {"scope": unit["scope"], "acceptance": [
+                document["nodes"][r]["body"]["acceptance"] for r in unit["requirements"]],
+                "last worker summary": store.read(row.report)["answer"]["summary"]
+                if row and row.report else ""}
     facts = {"User's words": user_words(store),
-             "Approved scope": {"scopeIn": [goals[r] for r in area["commitments"]
+             "Approved scope": {"scopeIn": [goals[r] for r in commitments
                                            if not r.startswith("quality:")],
-                               "scopeOut": vision["scopeOut"], "quality": vision["quality"]},
-             "Accepted commitments": {r: goals[r] for r in area["commitments"]},
+                               "scopeOut": vision["scopeOut"], "quality": [goals[r]
+                                   for r in area["commitments"] if r.startswith("quality:")]},
+             "Accepted commitments": {r: goals[r] for r in commitments},
              "Area": {k: area[k] for k in ("handle", "responsibility", "scope")},
-             "Current wave": outline["waves"][0],
+             "Current wave": outline["waves"][cursor.wave - 1],
+             "What exists here": existing,
              "Contracts": {r: {"kind": c["kind"], "text": c["text"],
                               "side": "provider" if c["provider"] in participants else "consumer"}
                            for r, c in contracts.items()},
              "Decisions": [{k: d[k] for k in ("choice", "reason")} for d in outline["decisions"]
                            if area["handle"] in d["areas"]],
-             "Product in this area": {"files": files[:64], "additionalFiles": max(0, len(files) - 64)},
+             "Product in this area": {"files": files},
              "Runtime": runtime(store.read(cursor.kickoff)["setup"])}
     return build("DETAIL", facts)
 
@@ -314,7 +335,7 @@ def judge_brief(store, ref, commit=None, observations=None):
     refs = list(dict.fromkeys(refs))
     root = store.root.parent if commit else unit.worktree
     commit = commit or unit.P
-    requirements = requirement_facts(document, contract["requirements"])
+    requirements = requirement_facts(document, plan.acceptance(document, ref))
     sources = gitwork.blobs(root, commit, [*contract["scope"], *contract["checkPaths"]])
     checks, product, binaries = {}, {}, {}
     for path, content in sources.items():
@@ -353,6 +374,11 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
         answer = None
         try:
             decoded = json.loads(raw)
+            if original["kind"] == "ARCHITECT" and original["facts"].get("Previous architecture"):
+                patch = decoded["answer"]
+                if "scope" not in patch:
+                    decoded["answer"] = {**architecture.merge(
+                        original["facts"]["Previous architecture"], patch), "why": patch["why"]}
             validate(decoded, question["schema"])
             answer = decoded["answer"]
             if answer.get("verdict") != "uncertain":

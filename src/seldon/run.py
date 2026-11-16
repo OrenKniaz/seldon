@@ -1,4 +1,4 @@
-"""C1/C8/C15/C23/I6; R7/R9/R11: one wave of independent unit lifecycles, then final proof."""
+"""C1/C8/C15/C17/C23; R10/R11: plan each wave from the integrated product, then final proof."""
 
 import os
 from dataclasses import replace
@@ -30,17 +30,17 @@ TERMINAL = {"ACCEPTED", "SCRIPTED_C", "STOPPED"}
 def eligible(store):
     cursor = store.cursor()
     document = plan.execution(store)
-    if (not cursor.B or not cursor.checkin or cursor.finalCommit != cursor.candidate
-            or any(u.state != "DONE" for u in store.units().values())):
-        raise ValueError("C requires every unit DONE and final integrated proof after check-in")
+    checkin = store.read(cursor.checkin)["subject"] if cursor.checkin else {}
+    if (not cursor.B or checkin.get("commit") != cursor.candidate
+            or checkin.get("wave") != cursor.wave or cursor.finalCommit != cursor.candidate
+            or any(u.state not in ("DONE", "DROPPED") for u in store.units().values())):
+        raise ValueError("C requires every unit DONE or DROPPED and final proof after check-in")
     observations = [store.read(r) for r in cursor.finalObservations]
     checks = set(plan.select(document, "check"))
     green = {o["check"] for o in observations if o["commit"] == cursor.candidate and o["exitCode"] == 0}
-    covered = {r for o in observations if o["check"] in green for r in o["requirements"]}
-    if (checks != green or set(plan.select(document, "requirement")) - covered
-            or proof.failures(store, cursor.finalObservations)):
-        raise ValueError("Every requirement and check needs passing execution on the final commit")
-    if any(not row.judgment for row in store.units().values()):
+    if checks != green or proof.failures(store, cursor.finalObservations):
+        raise ValueError("Every declared check needs passing execution on the final commit")
+    if any(not row.judgment for row in store.units().values() if row.state != "DROPPED"):
         raise ValueError("C requires current unit judgments after contract changes")
     verdicts = [store.read(r) for r in cursor.demoVerdicts]
     trees = judgment.scope_trees(store, plan.select(document, "unit"))
@@ -107,34 +107,66 @@ class Run:
         state = cursor.state
         if state in TERMINAL:
             return state
+        if state in ("A", "B", "C") and not cursor.decision:
+            subject = ({"vision": store.read(cursor.vision)["answer"]} if state == "A" else
+                       {"revision": cursor.revision, "vision": cursor.vision,
+                        "plan": store.plan(cursor.revision), "review": store.read(cursor.review)}
+                       if state == "B" else
+                       {"commit": cursor.candidate,
+                        "units": {r: u.state for r, u in store.units().items()},
+                        "notJudged": judgment.not_judged(store), "leftOut": plan.left_out(store), "deviation": "DV6"})
+            decisions.request(store, state, subject)
+            cursor = store.cursor()
         if cursor.decision and (state != "EXECUTE" or store.read(cursor.decision)["gate"] != "UNIT"):
-            decisions.decide(store, self.provider, self.user)
-        elif state == "ALIGN":
+            try:
+                decisions.decide(store, self.provider, self.user)
+            except decisions.Waiting:
+                if decisions.holds(store):
+                    raise
+            if store.cursor().state != state or not store.cursor().decision:
+                return store.cursor().state
+        cursor = store.cursor()
+        if state == "ALIGN":
             kickoff = store.read(cursor.kickoff)
             facts = {**questions.user_words(store), "Runtime": questions.runtime(kickoff["setup"])}
+            if cursor.requestedChange:
+                facts["Requested change"] = store.read(cursor.requestedChange)
             ref, answer = inference.call(store, self.provider, questions.build("ALIGN", facts))
             advance(store, "aligned", ref, vision=ref, requestedChange=None)
-        elif state in ("A", "B", "CHECK-IN", "C"):
-            if not cursor.decision:
-                subject = ({"vision": store.read(cursor.vision)["answer"]} if state == "A" else
-                           {"revision": cursor.revision, "plan": store.plan(cursor.revision),
-                            "review": store.read(cursor.review)} if state == "B" else
-                           {"commit": cursor.candidate,
-                            "units": {r: u.state for r, u in store.units().items()},
-                            **({"notJudged": judgment.not_judged(store), "deviation": "DV6"}
-                               if state == "C" else {})})
-                decisions.request(store, state, subject)
-            decisions.decide(store, self.provider, self.user)
+        elif state == "CHECK-IN":
+            waves = plan.execution(store)["architecture"]["waves"]
+            more = cursor.wave < len(waves)
+            with store.transaction():
+                decisions.request(store, state, {
+                    "commit": cursor.candidate, "wave": cursor.wave,
+                    "built": plan.built(store)["Finished wave"],
+                    "next wave goal": waves[cursor.wave]["goal"] if more else None})
+                advance(store, "next" if more else "last", cursor.candidate,
+                        **({"wave": cursor.wave + 1, "waveStart": cursor.candidate, "repairs": 0}
+                           if more else {}))
         elif state == "ARCHITECT":
+            finished = max((u.wave for u in store.units().values()), default=0)
+            if cursor.wave == finished:
+                cursor = advance(store, "steer", cursor.requestedChange or cursor.candidate,
+                                 wave=finished + 1, waveStart=cursor.candidate, repairs=0)
             vision = store.read(cursor.vision)["answer"]
+            previous = store.plan(cursor.revision) if cursor.revision else None
+            built = plan.built(store) if cursor.wave > 1 else None
+            outline = previous["architecture"] if previous else None
             gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
             result, answer = inference.call(store, self.provider,
                 questions.architect_brief(vision, questions.user_words(store),
                                          gaps[-1]["gap"] if gaps else None,
-                                         plan.execution(store)["architecture"] if gaps else None),
-                check=lambda a: architecture.outline(a, vision))
-            document = {"architecture": {k: v for k, v in answer.items() if k != "why"},
-                        "nodes": {"vision": {"kind": "vision", "body": vision}}}
+                                         outline if gaps or built else None, built=built),
+                check=lambda a: architecture.outline(architecture.merge(outline, a)
+                                                     if built else a, vision))
+            answer = architecture.merge(outline, answer) if built else answer
+            if "scope" in answer:
+                advance(store, "scope", result, requestedChange=result)
+                return store.cursor().state
+            document = dict(previous) if built else {
+                "nodes": {"vision": {"kind": "vision", "body": vision}}}
+            document["architecture"] = {k: v for k, v in answer.items() if k != "why"}
             with store.transaction():
                 revision = store.revision(document, cursor.revision)
                 advance(store, "outlined", result, revision=revision)
@@ -145,15 +177,25 @@ class Run:
         elif state == "REPAIR":
             plan_review.repair(store)
         elif state == "EXECUTE":
+            if decisions.holds(store):
+                raise decisions.Waiting()
             if not plan.approved(store):
-                raise ValueError("Execution requires B for this exact plan and review")
+                raise ValueError("Execution requires B for the accepted vision")
             with store.transaction():
-                for ref in plan.select(plan.execution(store), "unit"):
-                    if store.unit(ref) is None:
-                        store.unit(ref, UnitRow())
+                for ref, body in plan.select(plan.execution(store), "unit").items():
+                    row = store.unit(ref)
+                    if row is None:
+                        store.unit(ref, UnitRow(wave=cursor.wave))
                         advance(store, "create", cursor.B, unit=ref)
+                    elif row.state == "DONE" and row.wave < cursor.wave and (
+                            ref == "guide" or any(r.startswith(f"{cursor.wave}.")
+                                                  for r in body["requirements"])):
+                        advance(store, "extend", cursor.revision, unit=ref,
+                                **{k: v for k, v in vars(UnitRow(wave=cursor.wave,
+                                    base=cursor.candidate)).items() if k != "state"})
             scheduler.execute(store, self.provider, self.capacity, self.user)
-            advance(store, "finished", "Every unit integrated")
+            if store.cursor().state not in TERMINAL:
+                advance(store, "finished", "Every unit integrated or dropped")
         elif state == "WAVE-VERIFY":
             observations = wave_verify.verify(store, cursor.candidate)
             gaps = proof.gaps(store, cursor.candidate, observations)

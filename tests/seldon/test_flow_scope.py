@@ -1,4 +1,5 @@
 """R7: FLOW repairs its named owner even when another unit shares the feature."""
+from test_journey import unit_ref
 import json
 import pytest
 from seldon import plan
@@ -17,7 +18,7 @@ class RequirementFlow(Scripted):
                                       for row in q['facts']['Final observations']):
             target = next(r for r, body in q['facts']['Requirements'].items()
                           if 'value-001' in body['acceptance'])
-            reply['answer'].update(verdict='gap', gaps=[{'target': target, 'owners': ['u001'],
+            reply['answer'].update(verdict='gap', gaps=[{'target': target, 'owners': [self.refs[1]],
                 'correction': 'Make the blocked interaction ready and exercise it'}])
         return json.dumps(reply)
 
@@ -42,12 +43,12 @@ def test_requirement_gap_preserves_other_feature_owner_to_c(tmp_path):
         document = plan.execution(run.store)
         features = [r['features'] for r in plan.select(document,'requirement').values()]
         assert features[0] == features[1]
-        before = run.store.unit('u002')
+        before = run.store.unit(unit_ref(run, 2))
         assert run.step() == 'EXECUTE'
-        assert run.store.unit('u001').state == 'REWORK'
-        assert run.store.unit('u002') == before
+        assert run.store.unit(unit_ref(run, 1)).state == 'REWORK'
+        assert run.store.unit(unit_ref(run, 2)) == before
         finish(run)
-        assert run.store.unit('u002') == before
+        assert run.store.unit(unit_ref(run, 2)) == before
         assert (run.project/'unit-001/interaction.txt').read_text() == 'ready'
     finally:
         run.close()

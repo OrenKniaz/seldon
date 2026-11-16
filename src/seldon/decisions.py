@@ -1,4 +1,4 @@
-"""C8/C21/I6; R11/R12: subject-bound approvals."""
+"""C8/C16/C20; R17: planner first, concrete choices, and only dependent work waits."""
 
 from dataclasses import replace
 
@@ -10,25 +10,118 @@ class Waiting(Exception):
     """The next words belong to a future chat turn."""
 
 
-def ask_unit(store, recommendation=""):
-    if store.cursor().decision:
-        return
-    document = store.plan(store.cursor().revision)
-    for ref, row in store.units().items():
-        if row.state == "ASKED":
-            tried = [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
-            if not tried or tried[-1] != row.failure:
-                tried.append(row.failure)
-            affected = {ref}
-            while added := {r for r, u in store.units().items() if r not in affected
-                    and affected.intersection(plan.select(document, "unit")[r]["dependencies"])}:
-                affected.update(added)
-            request(store, "UNIT", {"unit": ref,
-                "tried": tried,
-                "affects": sorted(affected - {ref}), "recommendation": recommendation or row.failure,
-                "drop": "Dropping is not available yet; try again, give direction, or use stop",
-                "options": ["Try again", "Give direction", "Stop the dream"]})
-            return
+def holds(store):
+    cursor = store.cursor()
+    if not cursor.decision:
+        return False
+    item = store.read(cursor.decision)
+    if item["gate"] == "UNIT":
+        return False
+    if item["gate"] == "CHECK-IN":
+        return cursor.state in ("EXECUTE", "C")
+    return cursor.state == item["subject"].get("step", item["gate"])
+
+
+def affected(store, ref):
+    contracts = plan.select(plan.execution(store), "unit")
+    refs = {ref}
+    while added := {r for r, u in contracts.items() if r not in refs
+                    and refs.intersection(u["dependencies"])}:
+        refs.update(added)
+    return refs
+
+
+def again(store, subject, source, direction):
+    ref = subject["unit"]
+    for owner, unit in store.units().items():
+        if unit.state == "ASKED" and recovery.lineage(store, owner) == recovery.lineage(store, ref):
+            advance(store, "again", source, unit=owner, thread=None,
+                    base=unit.base if unit.worktree else store.cursor().candidate,
+                    callFolder=None, callAttempt=None,
+                    failure=unit.failure + "\nDirection: " + direction)
+
+
+def coach(store, provider, subject):
+    """Runs outside integration and database locks, including when submitted by the scheduler."""
+    ref = subject.get("unit")
+    document = plan.execution(store) if store.cursor().revision else {}
+    facts = {"Unresolved work": subject, "Earlier user answers": questions.user_words(store),
+             "Vision": store.read(store.cursor().vision) if store.cursor().vision else None,
+             "Decisions": document.get("architecture", {}).get("decisions", []),
+             "User answers": [b for _, _, b in store.records("user_words")]}
+    if ref:
+        facts.update({"Execution facts": questions.execution_facts(store, ref),
+            "Requirements": questions.requirement_facts(document,
+                plan.select(document, "unit")[ref]["requirements"]),
+            **questions.agreement_facts(document, ref)})
+    else:
+        facts["Requirements and agreements"] = document
+    source, answer = inference.call(store, provider, questions.build("COACH", facts))
+    with store.transaction():
+        key, subject = recovery.subject(store, "UNIT" if ref else subject["step"], subject)
+        history = store.recovery(key)
+        if "guidance" in answer and not history["coached"]:
+            history.update(coached=True, waiting=False)
+            store.recovery(key, history)
+            direction = store.record("planner_answer", {"subject": subject, "source": source,
+                "guidance": answer["guidance"], "words": answer["guidance"], "origin": "planner"})
+            if ref:
+                again(store, subject, source, answer["guidance"])
+            else:
+                store.record("approval", {"request": store.cursor().decision, "subject": subject,
+                    "words": direction, "choice": "revise", "origin": "planner"})
+                store.cursor(replace(store.cursor(), decision=None, requestedChange=direction, failure=""))
+            return None
+        ask = answer.get("ask") or {"question": "How should we continue?", "options": [
+            {"label": "Try the planner's new approach", "means": answer["guidance"]}]}
+        ask = {"question": ask["question"], "options": [
+            {**o, "effect": "direct"} for o in ask["options"]]}
+        if ref:
+            ask["options"].append(option("Leave this out", "Leave out this unit and its dependents", "drop"))
+        elif "guidance" in answer:
+            ask["options"].append(option("Stop", "Stop the dream", "stop"))
+        return {**subject, "ask": ask, "planner": source}
+
+
+def ask_unit(store, provider, ref):
+    try:
+        row = store.unit(ref)
+        tried = [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
+        subject = {"unit": ref, "tried": tried, "failure": row.failure,
+                   "affects": sorted(affected(store, ref) - {ref}), "recommendation": row.failure}
+        if subject := coach(store, provider, subject):
+            request(store, "UNIT", subject)
+    finally:
+        store.close()
+
+
+def option(label, means, effect):
+    return {"label": label, "means": means, "effect": effect}
+
+
+def gate_ask(store, gate, subject):
+    if "ask" in subject:
+        return subject["ask"]
+    if gate == "A":
+        opts = [option("Build this", "Build the proposed vision", "approve")]
+        opts += [{**o, "effect": "direct"} for o in subject["vision"]["alternatives"]]
+    elif gate == "B":
+        opts = [option("Build this plan", "Approve the plan", "approve"),
+                option("Build it and do not stop at check-ins", "Approve and waive later check-ins", "waive")]
+    elif gate == "CHECK-IN":
+        opts = [option("approve", "Continue with the proposed next work", "approve"),
+                option("ask for changes", "Describe the changes you want", "direct"),
+                option("stop", "End the dream here", "stop")]
+    elif gate == "C":
+        opts = [option("accept", "Accept the demonstrated product", "approve"),
+                option("ask for changes", "Describe the changes you want", "direct"),
+                option("stop", "End without accepting the product", "stop")]
+    elif subject.get("options"):  # Code faults have fixed choices, never a semantic COACH call.
+        opts = [option("Try again", "Retry the interrupted step", "direct"),
+                option("Stop", "Stop the dream", "stop")]
+    else:
+        return None  # A planning question is coached by decide before it reaches the user.
+    return {"question": f"How should we continue at {gate}?", "options": opts}
 
 
 def stop(store, words):
@@ -41,15 +134,24 @@ def stop(store, words):
 def request(store, gate, subject):
     with store.transaction():
         cursor = store.cursor()
-        if cursor.decision:
+        waived = gate == "CHECK-IN" and cursor.waived
+        if cursor.decision and not waived:
             return
         if gate == "CHECK-IN":
             subject = {**subject, "open gaps": [b for _, _, b in store.records("open_gap")]}
         key = None
         if gate == "UNIT" or "step" in subject:
             key, subject = recovery.subject(store, gate, subject)
+        ask = gate_ask(store, gate, subject)
         ref = store.record("decision_request", {"gate": gate, "subject": subject,
+            **({"ask": ask} if ask else {}),
             "origin": store.read(cursor.kickoff)["setup"].get("userOrigin", "user")})
+        if waived:
+            approval = store.record("approval", {"request": ref, "subject": subject,
+                "words": store.record("user_words", {"request": ref, "words": "waived by the user",
+                    "origin": "user waiver"}), "choice": "approve"})
+            store.cursor(replace(cursor, checkin=approval))
+            return
         store.cursor(replace(cursor, decision=ref))
         if key:
             state = store.recovery(key)
@@ -61,52 +163,86 @@ def decide(store, provider, user):
     cursor = store.cursor()
     ref = cursor.decision
     item = store.read(ref)
+    if "ask" not in item:
+        subject = coach(store, provider, item["subject"])
+        if subject is None:
+            return
+        with store.transaction():
+            store.cursor(replace(store.cursor(), decision=None))
+            request(store, item["gate"], subject)
+        return decide(store, provider, user)
     words = user({"request": ref, **item})
     scripted = store.read(cursor.kickoff)["setup"].get("scriptedUser", False)
     if scripted and item["gate"] not in ("A", "B", "CHECK-IN", "C") and isinstance(words, dict):
         raise Waiting()
     raw = store.record("user_words", {"request": ref, "words": words, "origin": item["origin"]})
+    direction, interpretation = str(words), None
     if isinstance(words, dict):
         if (set(words) != {"request", "subject", "choice"} or words["request"] != ref
                 or words["subject"] != item["subject"]
                 or words["choice"] not in ("approve", "revise", "decline")):
             raise ValueError("Decision response must bind to this displayed request and subject")
-        answer, interpretation = words, None
+        choice = words["choice"]
+        effect = {"approve": "approve", "revise": "direct", "decline": "stop"}[choice]
     else:
-        interpretation, answer = inference.call(store, provider, questions.build("DECIDE", {
-            "Decision": item["gate"], "Displayed subject": item["subject"], "User's words": words}))
+        options = item["ask"]["options"]
+        normal = lambda text: "".join(text.casefold().split())
+        picked = next((o for o in options if normal(o["label"]) == normal(words)), None)
+        if picked is None:
+            interpretation, answer = inference.call(store, provider, questions.build("DECIDE", {
+                "Decision": item["gate"], "Displayed subject": item["subject"],
+                "Displayed options": item["ask"], "User's words": words},
+                targets=[o["label"] for o in options] + (["Waive"] if item["gate"] == "CHECK-IN" else [])))
+            picked = next((o for o in options if o["label"] == answer["choice"]), None)
+            choice = answer["choice"]
+            if picked is None and choice not in ("Other", "Stop", "Waive"):
+                with store.transaction():
+                    store.cursor(replace(store.cursor(), failure=answer["why"]))
+                raise Waiting()
+        choice = picked["label"] if picked else choice
+        effect = (picked["effect"] if picked else
+                  {"Other": "direct", "Stop": "stop", "Waive": "waive"}[choice])
+        if picked:
+            direction = picked["label"] + ": " + picked["means"]
     with store.transaction():
-        if store.cursor().decision != ref:
+        cursor = store.cursor()
+        if cursor.decision != ref:
             raise ValueError("Decision changed; obtain a fresh response")
-        choice = answer["choice"]
+        directed = (store.record("decision_direction", {"words": direction, "verbatim": raw})
+                    if effect == "direct" and direction != str(words) else raw)
         approval = store.record("approval", {"request": ref, "subject": item["subject"],
-            "words": raw, "interpretation": interpretation, "scripted": scripted, "choice": choice})
-        fields = {"A": "A", "B": "B", "CHECK-IN": "checkin"}
-        hold = (item["gate"] == "UNIT" and choice == "decline" or choice == "revise"
-                and item["gate"] in ("CHECK-IN", "C"))
-        if not hold and choice != "decline":
-            recovery.answered(store, item["subject"], raw)
-        if hold:
-            store.cursor(replace(cursor, failure=(item["subject"]["drop"] if item["gate"] == "UNIT" else
-                "Changes after B arrive with steering (M3); approve or stop")))
-        elif item["gate"] == "UNIT":
-            ref = item["subject"]["unit"]
-            for owner, unit in store.units().items():
-                if unit.state == "ASKED" and unit.lineage == store.unit(ref).lineage:
-                    advance(store, "again", raw, unit=owner, thread=None,
-                            base=unit.base if unit.worktree else cursor.candidate,
-                            callFolder=None, callAttempt=None,
-                            failure=unit.failure + "\nUser direction: " + str(words))
-            store.cursor(replace(cursor, decision=None, failure=""))
-        elif choice == "decline":
+            "words": directed, "userWords": raw, "interpretation": interpretation, "scripted": scripted,
+            "choice": "revise" if effect == "direct" else choice, "effect": effect})
+        recovery.answered(store, item["subject"], raw)
+        if effect == "stop":
             stop(store, words)
+            return
+        updates = {"decision": None, "failure": ""}
+        if effect == "waive":
+            updates["waived"] = True
+        if item["gate"] == "UNIT":
+            if effect == "drop":
+                for owner in sorted(affected(store, item["subject"]["unit"])):
+                    row = store.unit(owner)
+                    if row.state == "WAITING":
+                        advance(store, "asked", approval, unit=owner)
+                    if store.unit(owner).state == "ASKED":
+                        advance(store, "drop", approval, unit=owner, waiting="")
+            else:
+                again(store, item["subject"], raw, direction)
+            store.cursor(replace(store.cursor(), **updates))
         elif "step" in item["subject"]:
-            store.cursor(replace(cursor, decision=None, failure="", requestedChange=raw))
-        elif choice == "revise":
-            advance(store, "revise", raw, decision=None, failure="", requestedChange=raw)
-        elif cursor.state in fields:
-            advance(store, "approve", approval, decision=None, **{fields[cursor.state]: approval})
-        elif cursor.state == "C":
+            store.cursor(replace(cursor, **updates, requestedChange=directed))
+        elif effect == "direct":
+            advance(store, "revise" if item["gate"] in ("A", "B") else "steer", raw,
+                    **updates, requestedChange=directed)
+        elif item["gate"] in ("A", "B", "CHECK-IN"):
+            field = {"A": "A", "B": "B", "CHECK-IN": "checkin"}[item["gate"]]
+            if cursor.state == item["gate"]:
+                advance(store, "approve", approval, **updates, **{field: approval})
+            else:
+                store.cursor(replace(cursor, **updates, **{field: approval}))
+        elif item["gate"] == "C":
             from .run import eligible
             from .judgment import not_judged
             eligible(store)
@@ -117,6 +253,3 @@ def decide(store, provider, user):
                 "reason": "Scripted C, not owner acceptance" if scripted else "User accepted the demo commit",
                 "nextAction": None, "failed": [], "blocked": []})
             advance(store, "scripted" if scripted else "approve", outcome, decision=None)
-
-    if hold:
-        raise Waiting()

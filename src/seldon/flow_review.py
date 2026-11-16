@@ -25,11 +25,15 @@ def evidence(store, feature):
         raise ValueError("Flow review needs every traced check on the final candidate")
     if proof.failures(store, refs):
         raise ValueError("Return failed checks as check Gaps before flow review")
-    owned = plan.traced_units(document, checks)
+    owned = {r: u for r, u in plan.select(document, "unit").items()
+             if set(requirements).intersection(u["requirements"])}
     trees = judgment.scope_trees(store, owned)
     verdicts = []
     for ref in owned:
         row = store.unit(ref)
+        if row.state == "DROPPED":
+            verdicts.append({"unit": ref, "why": "left out by the user"})
+            continue
         verdict = store.read(row.judgment) if row.judgment else None
         if not verdict or verdict["scopeTree"] != trees[ref]:
             raise ValueError(f"{ref} needs its own unit JUDGE before flow review")
@@ -46,6 +50,7 @@ def brief(store, feature):
     document = plan.execution(store)
     requirements, checks, refs, _, verdicts = evidence(store, feature)
     facts = {
+        "Left out by the user": plan.left_out(store),
         "Feature": {k: document["nodes"][feature]["body"][k] for k in ("story", "acceptance")},
         "Requirements": {r: {k: b[k] for k in ("acceptance",)}
                          for r, b in requirements.items()},
@@ -114,7 +119,7 @@ def requirement_verdicts(store, verdicts):
                                 "gap" if any(g["target"] == subject for g in answer["gaps"])
                                 else "satisfied"),
                     "gaps": [g for g in answer["gaps"] if g["target"] == subject]}})
-            owned = plan.traced_units(document, plan.traced_checks(document, subject))
+            owned = judgment.owners(document, "FLOW", subject)
             body = {
                 "subject": subject, "kind": "FLOW", "commit": cursor.candidate, "sources": sources,
                 "scopeTrees": {u: trees[u] for u in owned}, "answer": judgment.combined(answers)}
