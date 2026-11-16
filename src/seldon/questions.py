@@ -30,7 +30,9 @@ CRAFT = (
 JUDGMENT_LEEWAY = (
     "Unrequested improvements that support the accepted experience and keep its meaning, constraints and "
     "commitments are fine; reject one only by citing the accepted obligation or material consequence "
-    "it breaks.")
+    "it breaks. Judge meaning, not wording: a gap is behaviour or quality a user would miss. "
+    "Proof this machine cannot give (cutting the network, another OS, real devices) is not a gap "
+    "when the product and its observations plainly meet the meaning; name the limit in why.")
 
 AVAILABLE_TOOLS = (
     "Available tools and skills: checks/kit/browser.cjs exports browser(url, async ({page, shot, errors}) "
