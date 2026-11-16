@@ -146,7 +146,8 @@ def _scope_tree(root, entries, scratch):
 def snapshots(root, base, scope, check_paths, scratch):
     root = Path(root)
     # Include ignored new files too: the observed worktree, not the worker's declared file list.
-    git(root, "add", "--all", "--force", "--", ".", ":!.seldon")
+    # Bytecode caches are byproducts of running code, not anyone's writes.
+    git(root, "add", "--all", "--force", "--", ".", ":!.seldon", ":(exclude,glob)**/__pycache__/**")
     fields = git(root, "diff", "--cached", "--no-renames", "--raw", "--no-abbrev", "-z",
                  base).split("\0")
     changes = [(path, header.split()[1], header.split()[3])
@@ -155,7 +156,8 @@ def snapshots(root, base, scope, check_paths, scratch):
     bad = [p for p in changed if not matches(safe_path(p), scope)]
     if bad:
         from .questions import DEFECT_HANDOFF
-        raise ValueError("Out-of-scope writes: " + ", ".join(bad) + ". " + DEFECT_HANDOFF)
+        raise ValueError("Out-of-scope writes: " + ", ".join(bad) + ". Remove files you created "
+                         "outside your write scope. " + DEFECT_HANDOFF)
     product, tests = import_commits(root, base, [changes, [c for c in changes if matches(c[0], check_paths)]])
     return tests, product, changed
 
