@@ -22,7 +22,9 @@ CRAFT = (
     "Instead: deliberate type with real hierarchy from fonts available offline; a confident palette with "
     "strong contrast; generous rhythm in spacing; motion that is brief, purposeful and honors "
     "reduced-motion; "
-    "words a person would actually say. No TODOs, no partial implementations.")
+    "words a person would actually say. No TODOs, no partial implementations. "
+    "A finished page opens with a clean browser console: give it an icon (for example "
+    "<link rel=\"icon\" href=\"data:,\">) and serve every file it requests.")
 
 # Owner decision: accepted-experience leeway applies to unit and final judgments.
 JUDGMENT_LEEWAY = (
