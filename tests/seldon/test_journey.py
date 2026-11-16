@@ -503,7 +503,7 @@ def journey(slot, mode="normal", count=1):
                 assert sections[:3] == stable
                 assert set(sections) == {*stable, *(questions.labelled({k: v}) for k, v in facts.items())}
                 if question["kind"] == "JUDGE" and "Contracts consumed" in facts:
-                    assert prompt.index("\n\nContracts consumed\n") < prompt.index("\n\nProof execution\n")
+                    assert prompt.index("\n\nContracts consumed\n") < prompt.index("\n\nObservations\n")
                 if question["kind"] == "FLOW":
                     assert prompt.index("\n\nCrossed contracts\n") < prompt.index("\n\nFinal observations\n")
                 assert json.loads((folder / "question.json").read_text("utf-8")) == question
