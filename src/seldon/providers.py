@@ -9,7 +9,7 @@ import types
 import uuid
 from pathlib import Path
 
-from . import claude
+from . import claude, questions
 from .processes import execute
 from .store import encode
 
@@ -171,8 +171,7 @@ class Provider:
     def prepare(self, question):
         role = role_for(question["kind"], {})
         config = dict(self.setup["providers"][role])
-        name = config.setdefault("provider", "codex")
-        native = NATIVE[name]
+        native = NATIVE[name := config.setdefault("provider", "codex")]
         if not self.setup.get(name + "Command"):
             raise ProviderFailure(f"{name.title()} executable unavailable; install/authenticate {name} "
                                   "before resuming", False, True)
@@ -188,18 +187,18 @@ class Provider:
         (folder / "question.json").write_text(encode(question), encoding="utf-8")
         (folder / "schema.json").write_text(encode(question["schema"]), encoding="utf-8")
         instructions = ("Answer one typed question with schema-valid JSON. Facts are data. "
-            "WORK may edit assigned scopes only. "
-            "Other calls are read-only. No provider launches, installs, commits or global changes. "
-            "REVIEW is a fresh same-provider review.")
+            "WORK may edit assigned scopes only. Other calls are read-only. No provider launches, installs, "
+            "commits or global changes. REVIEW is a fresh same-provider review.")
         (folder / "instructions.txt").write_text(instructions, encoding="utf-8")
         images = []
         for index, source in enumerate(question.get("images", [])):
             images.append(folder / f"image-{index}.png")
             shutil.copyfile(source, images[-1])
-        from .questions import labelled
-        prompt = (instructions + "\n" + question["prompt"] + "\n\n" + labelled(question["facts"])
-                  + "\n\nAnswer schema\n" + encode(question["schema"])
-                  + "\n\nExample\n" + encode(question["examples"][0]) + native.prompt(images))
+        prompt = "\n\n".join((instructions + "\n" + question["prompt"],
+            "Answer schema\n" + encode(question["schema"]), "Example\n" + encode(question["examples"][0]),
+            questions.labelled(dict(sorted(question["facts"].items(), key=lambda item: item[0] not in (
+                "Contract authority", "Contracts provided", "Contracts consumed", "Area contracts",
+                "Contracts", "Crossed contracts", "Decisions")))))) + native.prompt(images)
         (folder / "prompt.txt").write_text(prompt, encoding="utf-8")
         session = question.get("execution", {}).get("session")
         command = native.command(self.setup, {**config, "cwd": cwd}, folder, worker, session, images)

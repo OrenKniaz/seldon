@@ -137,11 +137,12 @@ def run_unit(store, provider, ref):
                     advance(store, "proven", observations, unit=ref)
                 elif unit.state == "JUDGING":
                     if ref == "guide":
-                        if not gitwork.git(unit.worktree, "show", f"{unit.P}:{plan.GUIDE_PATH}").strip():
-                            raise ValueError("Write the try-it guide for the integrated product")
                         result = store.record("guide_written", {"commit": unit.P, "path": plan.GUIDE_PATH,
                             "scopeTree": gitwork.scope_tree(unit.worktree, unit.P, contract["scope"],
                                                             store.cursor().scratch)})
+                    elif plan.wave_requirements(document, ref) or contract["handed"]:
+                        advance(store, "approved", unit.P, unit=ref, judgment=None)
+                        continue
                     else:
                         result, answer = inference.call(store, provider, questions.judge_brief(store, ref))
                         if not questions.satisfied(answer):
@@ -149,7 +150,7 @@ def run_unit(store, provider, ref):
                                      if b["unit"] == ref and b["base"] == unit.base]
                             gap = store.record("unit_gap", {"unit": ref, "base": unit.base,
                                 "commit": unit.P, "answer": answer, "source": result})
-                            if not prior and not plan.wave_requirements(document, ref):
+                            if not prior:
                                 advance(store, "recover", gap, unit=ref, failure=str(answer),
                                         report=None, T=None, P=None, observations=[], judgment=None)
                                 continue
@@ -178,3 +179,33 @@ def run_unit(store, provider, ref):
                 recovery.recover(store, ref, str(error))
     finally:
         store.close()
+
+
+def judge_wave(store, provider, observations):
+    """Judge deferred source with its integrated proof; route concrete gaps to its owner."""
+    cursor, document = store.cursor(), plan.execution(store)
+    batch, trees = {}, {}
+    for ref, contract in plan.select(document, "unit").items():
+        if not (plan.wave_requirements(document, ref) or contract["handed"]):
+            continue
+        row = store.unit(ref)
+        tree = gitwork.scope_tree(store.root.parent, cursor.candidate, contract["scope"], cursor.scratch)
+        if (row.judgment and store.read(row.judgment)["scopeTree"] == tree
+                and store.read(row.judgment)["answer"]["verdict"] != "gap"):
+            continue
+        trees[ref] = tree
+        refs = [r for r in observations if store.read(r)["unit"] == ref]
+        batch[ref] = questions.judge_brief(store, ref, cursor.candidate, refs)
+    gaps = []
+    for ref, (source, answer) in inference.batch(store, provider, batch).items():
+        if answer["verdict"] == "uncertain":
+            answer = {**answer, "verdict": "not judged", "gaps": []}
+        result = store.record("unit_verdict", {"commit": cursor.candidate, "answer": answer,
+            "source": source, "scopeTree": trees[ref],
+            "observations": [r for r in observations if store.read(r)["unit"] == ref]})
+        with store.transaction():
+            store.unit(ref, replace(store.unit(ref), judgment=result))
+        if answer["verdict"] == "gap":
+            gaps.append({"subject": ref, "kind": "flow", "commit": cursor.candidate,
+                         "units": [ref], "correction": str(answer), "source": result})
+    return gaps

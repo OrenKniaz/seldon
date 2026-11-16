@@ -71,8 +71,7 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
 def batch(store, provider, pending, check=lambda answer, question: None):
     """Record independent replies on one candidate; only the controller applies their outcomes."""
     cursor = store.cursor()
-    bindings = {s: [cursor.candidate, cursor.revision, q["kind"], s,
-                   "Requested facts" in q["facts"]] for s, q in pending.items()}
+    bindings = {s: [cursor.candidate, cursor.revision, q["kind"], s] for s, q in pending.items()}
     recorded = {tuple(b["binding"]): (r, b["answer"]) for r, _, b in store.records("answer")
                 if b.get("binding")}
 

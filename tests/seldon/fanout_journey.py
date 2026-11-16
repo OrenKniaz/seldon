@@ -90,11 +90,7 @@ def final_fanout_journey(slot, stage, case):
             class Remaining:
                 def invoke(self, question, started):
                     if case == "uncertain" and question["kind"] == stage:
-                        assert "Requested facts" in question["facts"]
-                        calls[tuple(question["targets"])] += 1
-                        return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
-                            "The visual observation remains unavailable"],
-                            "why": "Still not observed"}}), None
+                        raise AssertionError("No new evidence exists for another judgment")
                     return provider.invoke(question, started)
             run.provider = Remaining()
             finish(run)

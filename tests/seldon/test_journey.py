@@ -61,11 +61,6 @@ elif mode == 'coach-facts' and name == 'unit-001' and turn == 1:
 elif name == 'docs':
     command = [sys.executable, '-B', 'docs/try-it/check.py']
     Path('docs/try-it').mkdir(parents=True, exist_ok=True)
-    execution = facts['Execution facts']
-    peers = {ref: row for ref, row in execution['Units'].items() if ref != 'guide'}
-    assert peers and all(row['state'] == 'DONE' for row in peers.values())
-    values = [p for p in execution['Paths present'] if p.endswith('/value.txt')]
-    assert len(values) == len(peers) and all(Path(p).read_text().startswith('value-') for p in values)
     Path(facts['Guide path']).write_text('Read the saved value in unit-001/value.txt. Observe value-001.\n')
     Path('docs/try-it/check.py').write_text("from pathlib import Path\n"
         "assert Path('unit-001/value.txt').read_text() == 'value-001'\nprint('observed value-001')\n")
@@ -83,11 +78,11 @@ else:
     if mode == 'coach-facts' and name == 'unit-003':
         guidance = facts['Exact failure']
         assert 'WAVE-VERIFY' in guidance
-        assert 'Evidence\n[]' in guidance
+        assert 'Worktree' in guidance and 'Runtime' in guidance
         assert execution['Proof owner'] == 'WAVE-VERIFY'
     if mode == 'coach-facts' and name == 'unit-001':
         guidance = facts['Exact failure']
-        assert 'Evidence\n[]' in guidance
+        assert 'Worktree' in guidance and 'Runtime' in guidance
     value = 'value-'+str(number).zfill(3)
     source = ('from pathlib import Path\nimport os\n'
         + f"assert Path('{name}/value.txt').read_text() == '{value}'\n"
@@ -100,6 +95,8 @@ else:
     source += "if os.environ.get('SELDON_EVIDENCE_DIR'):\n"
     source += "    evidence = Path(os.environ['SELDON_EVIDENCE_DIR'])\n"
     source += "    evidence.joinpath('value.json').write_text('observed persistence')\n"
+    if mode == 'see-proof-gap' and name == 'unit-002' and turn == 1:
+        source = source.replace('observed value-002', 'unlabelled value-002')
     if mode == 'proof-failure' and name == 'unit-001' and turn == 1:
         source += 'raise AssertionError("actual failed product assertion")\n'
     if mode == 'wave-fault' and name == 'unit-001' and turn == 1:
@@ -144,15 +141,18 @@ class Scripted:
         self.native = Codex(self.slot / "calls", self.setup)
         self.calls = []
         self.gaps = set()
-        self.parallel = Barrier(2) if mode == "parallel-contract" else None
+        self.parallel = Barrier(3) if mode == "parallel-contract" else None
 
     def timeout_for(self, kind, context):
         return 30
 
     def invoke(self, q, started):
         if q["kind"] == "WORK":
-            if self.parallel and plan.GUIDE_PATH not in q["facts"]["Write scope"]:
+            if self.parallel:
                 self.parallel.wait(timeout=60)  # Hang guard, not a timing assertion.
+                if plan.GUIDE_PATH in q["facts"]["Write scope"]:
+                    assert q["facts"]["What the reader came to do"] == VISION["understanding"]
+                    assert "value-001" in str(q["facts"]["Contracts consumed"])
             return self.native.invoke(q, started)
         return self(q), None
 
@@ -167,7 +167,7 @@ class Scripted:
             groups = (
                 [[1], [2], [3]] if self.mode == "coach-facts" else
                 [[1, 2], [3, 4]] if self.mode == "contract-fanout" else [[1], [2]]
-                if self.mode in ("contracts", "parallel-contract", "wave-gap", "contract-fanout")
+                if self.mode in ("contracts", "parallel-contract", "wave-gap", "see-proof", "see-proof-gap", "contract-fanout")
                 else [list(range(i, min(i + 10, self.count + 1))) for i in range(1, self.count + 1, 10)]
             )
             answer = {
@@ -185,7 +185,7 @@ class Scripted:
                 "decisions": [],
                 "waves": [{"goal": "Deliver the complete values"}],
             }
-            if self.mode in ("contracts", "parallel-contract", "coach-facts", "wave-gap", "contract-fanout"):
+            if self.mode in ("contracts", "parallel-contract", "coach-facts", "wave-gap", "see-proof", "see-proof-gap", "contract-fanout"):
                 answer["contracts"] = [
                     {
                         "handle": "values",
@@ -265,11 +265,10 @@ class Scripted:
             }
             if kind == "JUDGE":
                 observations = facts["Observations"]
-                if facts["Proof execution"]["Proof owner"] != "WAVE-VERIFY":
-                    assert any(o["purpose"] == "P" and o["exitCode"] == 0 for o in observations)
+                assert any(o["purpose"] in ("P", "final") and o["exitCode"] == 0 for o in observations)
                 for r in q["targets"]:
                     assert any(
-                        r in o["requirements"] and o["purpose"] == "T" and o["exitCode"] != 0
+                        r in o["requirements"] and o["purpose"] in ("T", "wave-start") and o["exitCode"] != 0
                         for o in observations
                     )
                 if (self.mode in ("unit-gap", "unit-rework") and "value-001" in str(facts["Requirements"])
@@ -289,9 +288,26 @@ class Scripted:
                                 }
                             ],
                         )
+                if self.mode in ("see-proof", "see-proof-gap") and "value-002" in str(facts["Requirements"]):
+                    assert any(o["purpose"] == "final" and o["exitCode"] == 0 for o in observations)
+                    if any("unlabelled value-002" in o["stdout"] for o in observations
+                           if o["purpose"] == "final"):
+                        answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                            "correction": "The reader output omits the saved value label"}])
             else:
                 obs = facts["Final observations"]
                 assert obs and all(o["exitCode"] == 0 for o in obs)
+                if self.mode in ("see-proof", "see-proof-gap"):
+                    for verdict in facts["Source judgment"]:
+                        assert verdict["verdict"] == "satisfied" and verdict["why"]
+                        assert verdict["gaps"] == []
+                    if "value-002" in str(facts):
+                        assert any(v["unit"] == "u002" for v in facts["Source judgment"])
+                if self.mode == "unit-gap":
+                    for verdict in facts["Source judgment"]:
+                        if verdict["unit"] == "u001":
+                            assert verdict["verdict"] == "gap" and verdict["why"]
+                            assert "The check is incomplete" in str(verdict["gaps"])
                 if kind == "FLOW" and self.mode == "flow-fault" and "value-001" in str(facts["Requirements"]):
                     if kind not in self.gaps:
                         self.gaps.add(kind)
@@ -373,13 +389,30 @@ def journey(slot, mode="normal", count=1):
             candidate = run.store.cursor().candidate
             run.close()
             run = Run.reopen(slot / "product", provider, approve)
+        if mode == "see-proof-gap":
+            from seldon import fixups
+
+            while run.store.cursor().state != "WAVE-VERIFY":
+                run.step()
+            unaffected = run.store.unit("u001")
+
+            class Interrupted(BaseException):
+                pass
+
+            def interrupt(store, gaps):
+                assert "saved value label" in str(gaps)
+                raise Interrupted()
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(fixups, "apply", interrupt)
+                with pytest.raises(Interrupted):
+                    run.step()
+            run.close()
+            run = Run.reopen(slot / "product", provider, approve)
         if mode == "wave-gap":
             while run.store.cursor().state != "WAVE-VERIFY":
                 run.step()
             assert all(u.state == "DONE" for u in run.store.units().values())
-            gap = run.store.records("unit_gap")[0][2]
-            assert gap["commit"] == run.store.unit("u002").P
-            assert any(b["patch"] == gap["commit"] for _, _, b in run.store.records("publication"))
+            assert run.store.unit("u002").judgment is None
             assert not any(b.get("unit") == "u002" and b["next"] == "REWORK"
                            for _, _, b in run.store.records("transition"))
             run.step()
@@ -391,15 +424,21 @@ def journey(slot, mode="normal", count=1):
             assert provider.calls.count("ARCHITECT") == 1
             assert not run.store.records("detail_correction")
             assert not run.store.records("architecture_gap")
-            assert not any("Dependencies" in b["reason"] for _, _, b in run.store.records("unit_wait")
-                           if b["unit"] != "guide")
-            transitions = [b for _, _, b in run.store.records("transition") if b.get("unit") in ("u001", "u002")]
+            assert not any("Dependencies" in b["reason"] for _, _, b in run.store.records("unit_wait"))
+            transitions = [b for _, _, b in run.store.records("transition")
+                           if b.get("unit") in ("u001", "u002", "guide")]
             working = {b["unit"]: i for i, b in enumerate(transitions) if b["next"] == "WORKING"}
-            assert set(working) == {"u001", "u002"}
+            assert set(working) == {"u001", "u002", "guide"}
             assert all(b["next"] == "WORKING" for b in transitions[min(working.values()):max(working.values())+1])
+            walkthrough = [b for _, _, b in run.store.records("observation") if b["unit"] == "guide"]
+            assert any(b["purpose"] == "T" and b["exitCode"] != 0
+                       and "unit-001/value.txt" in b["stderr"] for b in walkthrough)
+            assert any(b["purpose"] == "final" and b["exitCode"] == 0
+                       and b["commit"] == run.store.cursor().candidate for b in walkthrough)
+            assert not any(b["purpose"] == "P" for b in walkthrough)
             agreement, = plan.select(plan.execution(run.store), "contract").values()
             assert len(agreement["text"]) == 3000 and agreement["kind"] == "data rule"
-            assert agreement["consumers"] == ["u002"]
+            assert agreement["consumers"] == ["u002", "guide"]
         if count == 50:
             assert run.store.cursor().candidate == candidate
             assert len(run.store.units()) == 51
@@ -424,6 +463,12 @@ def journey(slot, mode="normal", count=1):
             assert not any(b["errors"] for _, _, b in run.store.records("provider_reply"))
             checkin = next(b for _, _, b in run.store.records("decision_request") if b["gate"] == "CHECK-IN")
             assert bool(checkin["subject"]["open gaps"]) == (mode == "unit-gap")
+        if mode == "see-proof-gap":
+            assignment = next(b for _, _, b in run.store.records("unit_fixup") if b["owner"] == "u002")
+            assert "saved value label" in str(assignment["gaps"])
+            assert run.store.unit("u001") == unaffected
+            assert any("observed value-002" in run.store.read(r)["stdout"]
+                       for r in run.store.cursor().finalObservations)
         if mode in ("wave-fault", "flow-fault", "product-fault"):
             assert run.store.records("unit_fixup")
             assert (slot / "turn-unit-002").read_text() == ("2" if mode == "product-fault" else "1")
@@ -438,10 +483,30 @@ def journey(slot, mode="normal", count=1):
             document = plan.execution(run.store)
             agreement, = plan.select(document, "contract").values()
             assert agreement["provider"] == "u001"
-            assert agreement["consumers"] == ["u003", "u004"]
+            assert agreement["consumers"] == ["u003", "u004", "guide"]
             assert all(run.store.unit(ref).recoveries == 0 for ref in ("u003", "u004"))
         if mode == "contracts":
             assert len(plan.select(plan.execution(run.store), "contract")) == 1
+            import re
+            from seldon.store import encode
+
+            for _, _, question in run.store.records("question"):
+                folder, _ = provider.native.prepare(question)
+                prompt = (folder / "prompt.txt").read_text("utf-8")
+                instructions = (folder / "instructions.txt").read_text("utf-8")
+                facts = question["facts"]
+                headings = ["Answer schema", "Example", *facts]
+                sections = re.split(r"\n\n(?=(?:" + "|".join(map(re.escape, headings)) + r")\n)", prompt)
+                stable = [instructions + "\n" + question["prompt"],
+                          "Answer schema\n" + encode(question["schema"]),
+                          "Example\n" + encode(question["examples"][0])]
+                assert sections[:3] == stable
+                assert set(sections) == {*stable, *(questions.labelled({k: v}) for k, v in facts.items())}
+                if question["kind"] == "JUDGE" and "Contracts consumed" in facts:
+                    assert prompt.index("\n\nContracts consumed\n") < prompt.index("\n\nProof execution\n")
+                if question["kind"] == "FLOW":
+                    assert prompt.index("\n\nCrossed contracts\n") < prompt.index("\n\nFinal observations\n")
+                assert json.loads((folder / "question.json").read_text("utf-8")) == question
         if mode == "review-gap":
             assert provider.calls.count("REVIEW") == 2
             b = next(b for _, _, b in run.store.records("decision_request") if b["gate"] == "B")
@@ -467,6 +532,8 @@ def journey(slot, mode="normal", count=1):
         ("parallel-contract", 2),
         ("wave-fault", 2),
         ("wave-gap", 2),
+        ("see-proof", 2),
+        ("see-proof-gap", 2),
         ("flow-fault", 2),
         ("product-fault", 2),
         ("proof-failure", 2),
@@ -477,14 +544,23 @@ def journey(slot, mode="normal", count=1):
 def test_thin_plan_golden(tmp_path, mode, count):
     """Real worker checks reach C through thin intent, local recovery and strict integrated reviews.
 
+    The parallel-contract twin catches a guide waiting on product work or proving its
+    walkthrough before integration; value-only sequential journeys miss that barrier.
+
     Success alone misses worker questions, persistent unit/plan gaps and final-only failures.
     The two-area contract journey catches serialized contract peers and rejected long agreements;
     ordinary journeys do not exercise provider-in-consumers normalization or simultaneous WORKING.
     Multi-unit areas catch consumer briefs lost when DETAIL omits redundant endpoints,
     and preserve one explicit provider when its area has multiple units. Single-unit cases miss this.
+    Recorded contract questions protect stable-prefix ordering and lossless section rendering;
+    scripted answers alone never inspect the prompt supplied to the native provider.
     Backend/page briefs catch craft guidance leaking to peers without the visual commitment.
     Factual questions require COACH with execution facts; wave-owned gaps must integrate before repair.
     A real sibling read from an early unit catches running integrated acceptance before integration.
+    Integrated JUDGE evidence and its verdict reaching FLOW/PRODUCT catch blind source judgment;
+    a semantic gap on GREEN proof must rework its owner, even after interruption before fixup.
+    Check-failure twins miss semantic gaps and replay of an already-recorded semantic reply.
+    The persistent local-gap twin also requires final judges to see the actual negative finding.
     Fifty units and reopen catch a hidden size ceiling or replay of already integrated work.
     """
     began = time.monotonic()

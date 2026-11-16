@@ -37,7 +37,7 @@ def current(verdict, trees):
     return verdict["scopeTrees"] == {r: trees[r] for r in verdict["scopeTrees"]}
 
 
-def brief(store, kind, subject, *, resolve=None, trees=None):
+def brief(store, kind, subject, *, trees=None):
     cursor = store.cursor()
     document = plan.execution(store)
     checks = trace(document, kind, subject)
@@ -47,13 +47,14 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
         raise ValueError("Judge evidence requires every traced check on the final commit")
     owned = owners(document, kind, subject)
     trees = trees if trees is not None else scope_trees(store, owned)
-    satisfied = 0
+    verdicts = []
     for ref in owned:
         verdict = store.read(store.unit(ref).judgment)
         unchanged = verdict["scopeTree"] == trees[ref]
         if not unchanged:
             raise ValueError(f"{ref} needs its unit JUDGE on the changed scope before final judgment")
-        satisfied += int(verdict.get("answer", {}).get("verdict") == "satisfied")
+        if "answer" in verdict:
+            verdicts.append({"unit": ref, "commit": verdict["commit"], **verdict["answer"]})
     final = questions.observed(store, refs)
     for item, ref in zip(final, refs):
         body = store.read(ref)
@@ -62,9 +63,7 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
     body = subjects(document, kind)[subject]
     obligation = {k: body[k] for k in ("criterion", "verification")}
     facts = {"Subject": obligation, "Checks": checks, "Final observations": final,
-             "Source judgment": ("source judged at every reached unit: "
-                                 f"{satisfied} of {len(set(owned) - {'guide'})} satisfied, "
-                                 "scope trees unchanged since those verdicts"),
+             "Source judgment": verdicts,
              "Source availability": "Source is judged at the unit; source text is unavailable "
                                     "after integration.",
              "Reader's starting directory": str(store.root.parent.resolve())}
@@ -90,9 +89,6 @@ def brief(store, kind, subject, *, resolve=None, trees=None):
             gitwork.blobs(store.root.parent, cursor.finalCommit,
                           plan.select(document, "unit")["guide"]["checkPaths"]).items()}
     images = questions.images(store, refs)
-    if resolve is not None:
-        facts["Requested facts"] = [{"request": item, "observations": list(checks),
-                                    "screenshots": images} for item in resolve]
     return questions.build(kind, facts, [subject], images=images)
 
 
@@ -132,15 +128,11 @@ def step(store, provider):
         cursor = replace(cursor, **{f: [r for r in getattr(cursor, f) if current(store.read(r), trees)]
                                     for f in ("requirementVerdicts", "qualityVerdicts")})
         store.cursor(cursor)
-    pending = store.read(cursor.pendingJudge) if cursor.pendingJudge else None
-    if pending and (pending["kind"] != kind or pending["commit"] != cursor.candidate):
-        raise ValueError("Pending PRODUCT facts require their original candidate")
     done = {store.read(r)["subject"] for r in cursor.qualityVerdicts}
-    selected = [pending["subject"]] if pending else [s for s in subjects(document, kind) if s not in done]
+    selected = [s for s in subjects(document, kind) if s not in done]
     batch, replies = {}, {}
     for subject in selected:
-        question = brief(store, kind, subject, trees=trees,
-                         resolve=pending["answer"]["neededFacts"] if pending else None)
+        question = brief(store, kind, subject, trees=trees)
         refs = [r for r in cursor.finalObservations
                 if store.read(r)["check"] in trace(document, kind, subject)]
         failed = proof.failures(store, refs)
@@ -153,16 +145,13 @@ def step(store, provider):
         else:
             batch[subject] = question
     replies.update(inference.batch(store, provider, batch))
-    gaps, uncertain = [], []
+    gaps = []
     with store.transaction():
         for subject in selected:
             result, answer = replies[subject]
-            if pending and answer["verdict"] == "uncertain":
-                answer = {**answer, "verdict": "not judged", "gaps": []}
             if answer["verdict"] == "uncertain":
-                uncertain.append(store.record("judge_uncertain", {"subject": subject, "kind": kind,
-                    "commit": cursor.candidate, "source": result, "answer": answer}))
-            elif not ready(answer):
+                answer = {**answer, "verdict": "not judged", "gaps": []}
+            if not ready(answer):
                 gaps.append({"subject": subject, "kind": "flow", "source": result,
                              "units": list(owners(document, kind, subject)), "commit": cursor.candidate,
                              "correction": str(answer)})
@@ -174,10 +163,6 @@ def step(store, provider):
                 store.cursor(replace(row, qualityVerdicts=row.qualityVerdicts + [ref]))
         if gaps:
             fixups.apply(store, gaps)
-        elif pending:
-            advance(store, "resolved", list(replies), pendingJudge=None)
-        elif uncertain:
-            advance(store, "uncertain", list(replies), pendingJudge=uncertain[0])
         else:
             cursor = store.cursor()
             verdict = store.record("product_verdict", {"commit": cursor.candidate,

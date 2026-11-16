@@ -157,14 +157,16 @@ class Run:
         elif state == "WAVE-VERIFY":
             observations = wave_verify.verify(store, cursor.candidate)
             gaps = proof.gaps(store, cursor.candidate, observations)
+            if not gaps:
+                gaps = units.judge_wave(store, self.provider, observations)
             if gaps:
                 fixups.apply(store, gaps)
             else:
                 advance(store, "passed", observations, finalCommit=cursor.candidate,
                         finalObservations=observations)
-        elif state in ("FLOW-JUDGE", "FLOW-FACTS"):
+        elif state == "FLOW-JUDGE":
             flow_review.step(store, self.provider)
-        elif state in ("PRODUCT-JUDGE", "PRODUCT-FACTS"):
+        elif state == "PRODUCT-JUDGE":
             judgment.step(store, self.provider)
         cursor = store.cursor()
         if cursor.failure:

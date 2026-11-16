@@ -36,7 +36,8 @@ def contracts_for(document, unit):
 def crossed_contracts(document, requirements):
     units = plan.select(document, "unit")
     return {r: c for r, c in plan.select(document, "contract").items()
-            if any(set(requirements) & set(units[u]["requirements"]) for u in c["consumers"])}
+            if any(set(requirements) & set(units[u]["requirements"])
+                   for u in [c["provider"], *c["consumers"]])}
 
 
 def validate(document):

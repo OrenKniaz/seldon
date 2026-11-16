@@ -238,10 +238,7 @@ def agreement_facts(document, ref):
 def repair_facts(store, assignment):
     refs = [r for g in assignment["gaps"] for r in
             store.read(g["source"]).get("observations", [g["source"]]) if "evidenceFiles" in store.read(r)]
-    return {"Scoped corrections": {"owner": assignment["owner"], "writeScope": assignment["scope"],
-        "corrections": [g["correction"] for g in assignment["gaps"]], "gaps": assignment["gaps"]},
-        "Failing observations": observed(store, refs),
-        "Historical observations": observed(store, assignment["observations"])}, refs
+    return {"Correction observations": observed(store, refs)}, refs
 
 
 def work_brief(store, ref):
@@ -278,12 +275,12 @@ def execution_facts(store, ref, peers=()):
     document, unit = plan.execution(store), store.unit(ref)
     units = plan.select(document, "unit")
     peers = {ref, *peers, *units[ref]["dependencies"]}
-    files = gitwork.git(unit.worktree, "ls-tree", "-r", "--name-only", unit.base).splitlines()
+    scopes = [p for u in peers for p in units[u]["scope"]]
+    files = [p for p in gitwork.git(unit.worktree, "ls-tree", "-r", "--name-only", unit.base).splitlines()
+             if plan.matches(p, scopes)]
     return {"Base": unit.base, "Worktree": unit.worktree, "Paths present": files,
-        "Units": {u: {"scope": units[u]["scope"], **{k: v for k, v in vars(store.unit(u)).items()
-                    if k != "failure"}} for u in peers},
-        "Evidence": [{"record": r, **b} for r, _, b in store.records("observation")
-                     if b["unit"] in peers],
+        "Units": {u: {"scope": units[u]["scope"], "state": store.unit(u).state,
+                       "commit": store.unit(u).integrated} for u in peers},
         "Runtime": runtime(store.read(store.cursor().kickoff)["setup"]),
         "Proof owner": "WAVE-VERIFY" if (wave := plan.wave_requirements(document, ref)) or units[ref]["handed"] else ref,
         "Wave requirements": wave,
@@ -310,9 +307,9 @@ def judge_brief(store, ref, commit=None, observations=None):
     unit = store.unit(ref)
     document = plan.execution(store)
     contract = plan.select(document, "unit")[ref]
-    refs = list(observations if observations is not None else unit.observations)
-    if assignment := fixups.active(store, ref):
-        refs += [r for r in assignment["observations"] if store.read(r)["purpose"] in ("T", "wave-start")]
+    refs = ([r for r in unit.observations if store.read(r)["purpose"] in ("T", "wave-start")]
+            + list(observations) if observations is not None else list(unit.observations))
+    refs = list(dict.fromkeys(refs))
     root = store.root.parent if commit else unit.worktree
     commit = commit or unit.P
     requirements = requirement_facts(document, contract["requirements"])
@@ -330,15 +327,10 @@ def judge_brief(store, ref, commit=None, observations=None):
             product[path] = text
     facts = {"Unit responsibility": contract["instructions"],
              "Requirements": requirements, "Checks": plan.assigned(document)[ref],
-             "Proof execution": execution_facts(store, ref),
              "Check sources": checks,
-             "Binary files at P (bytes)": binaries,
-             "Product files at P": product,
+             "Binary files (bytes)": binaries,
+             "Product files": product,
              "Observations": observed(store, refs)}
-    if assignment:
-        repair, failing = repair_facts(store, assignment)
-        facts.update(repair)
-        refs += failing
     facts.update(agreement_facts(document, ref))
     return build("JUDGE", facts, requirements,
                  images=images(store, refs))

@@ -5,7 +5,6 @@ from dataclasses import replace
 from . import architecture, fixups, inference, judgment, plan, proof, questions
 from .schema import answer_schema
 from .states import advance
-from .store import encode
 
 
 def trace(document, feature):
@@ -35,7 +34,7 @@ def evidence(store, feature):
         verdict = store.read(row.judgment) if row.judgment else None
         if not verdict or verdict["scopeTree"] != trees[ref]:
             raise ValueError(f"{ref} needs its own unit JUDGE before flow review")
-        verdicts.append(verdict["answer"]["verdict"])
+        verdicts.append({"unit": ref, "commit": verdict["commit"], **verdict["answer"]})
     return requirements, checks, refs, trees, verdicts
 
 
@@ -44,7 +43,7 @@ def row(body):
                                  "executionStarted", "cleanupVerified", "timedOut")}
 
 
-def brief(store, feature, *, resolve=None):
+def brief(store, feature):
     document = plan.execution(store)
     requirements, checks, refs, _, verdicts = evidence(store, feature)
     facts = {
@@ -61,8 +60,7 @@ def brief(store, feature, *, resolve=None):
         "Correction owners": {u: {k: plan.select(document, "unit")[u][k]
                                    for k in ("instructions", "scope", "requirements")}
                               for u in plan.traced_units(document, checks)},
-        "Source judgment": {"allSatisfied": all(v == "satisfied" for v in verdicts),
-                            "anyNotJudged": "not judged" in verdicts, "scopeTreesUnchanged": True}}
+        "Source judgment": verdicts}
     images = questions.images(store, refs)
     question = {
         "kind": "FLOW",
@@ -75,23 +73,14 @@ def brief(store, feature, *, resolve=None):
         "examples": [{"answer": {"verdict": "satisfied", "gaps": [],
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
         "execution": {}, "images": images}
-    if resolve is not None:
-        facts["Requested facts"] = [{"request": item, "observations": list(checks), "screenshots": images}
-                                    for item in resolve]
     return question
 
 
-def review(store, feature, source, answer, *, reasked=False):
+def review(store, feature, source, answer):
     """Consume one recorded FLOW answer; the caller owns dispatch, cursor updates and fixups."""
     cursor = store.cursor()
     requirements, _, refs, trees, _ = evidence(store, feature)
     if answer["verdict"] == "uncertain":
-        if not reasked:
-            pending = store.record("judge_uncertain", {
-                "subject": feature, "kind": "FLOW", "commit": cursor.candidate,
-                "source": source, "answer": answer, "scopeTrees": trees,
-                "questionBytes": len(encode(brief(store, feature)).encode("utf-8"))})
-            return {"verdict": None, "pending": pending, "gaps": []}
         answer = {**answer, "verdict": "not judged", "gaps": []}
     else:
         answer = {**answer, "verdict": "gap" if answer["gaps"] else "satisfied"}
@@ -110,7 +99,7 @@ def review(store, feature, source, answer, *, reasked=False):
                  "units": [contracts[owner]["provider"] if owner in contracts else owner],
                  "correction": "; ".join(items), "source": verdict}
                 for owner, items in corrections.items()]
-    return {"verdict": verdict, "pending": None, "gaps": gaps}
+    return {"verdict": verdict, "gaps": gaps}
 
 
 def requirement_verdicts(store, verdicts):
@@ -158,32 +147,20 @@ def step(store, provider):
                     "feature_verdict", {**row, "commit": cursor.candidate, "reusedFrom": ref}))
         store.cursor(replace(cursor, demoVerdicts=refs))
     cursor = store.cursor()
-    pending = store.read(cursor.pendingJudge) if cursor.pendingJudge else None
-    if pending and (pending["kind"] != "FLOW" or pending["commit"] != cursor.candidate
-                    or not judgment.current(pending, trees)):
-        raise ValueError("Pending FLOW facts require their original candidate and scope trees")
     done = {store.read(r)["feature"] for r in cursor.demoVerdicts}
-    selected = [pending["subject"]] if pending else [
-        f for f in plan.select(document, "feature") if f not in done]
-    batch = {f: brief(store, f, resolve=pending["answer"]["neededFacts"] if pending else None)
-             for f in selected}
+    selected = [f for f in plan.select(document, "feature") if f not in done]
+    batch = {f: brief(store, f) for f in selected}
     replies = inference.batch(store, provider, batch)
-    gaps, uncertain, verdicts = [], [], list(cursor.demoVerdicts)
+    gaps, verdicts = [], list(cursor.demoVerdicts)
     with store.transaction():
         for feature, (result, answer) in replies.items():
-            reviewed = review(store, feature, result, answer, reasked=bool(pending))
+            reviewed = review(store, feature, result, answer)
             gaps.extend(reviewed["gaps"])
-            if reviewed["pending"]:
-                uncertain.append(reviewed["pending"])
-            elif not reviewed["gaps"]:
+            if not reviewed["gaps"]:
                 verdicts.append(reviewed["verdict"])
         store.cursor(replace(store.cursor(), demoVerdicts=verdicts))
         if gaps:
             fixups.apply(store, gaps)
-        elif pending:
-            advance(store, "resolved", list(replies), pendingJudge=None)
-        elif uncertain:
-            advance(store, "uncertain", list(replies), pendingJudge=uncertain[0])
         else:
             closures = requirement_verdicts(store, verdicts)
             advance(store, "satisfied", verdicts, requirementVerdicts=closures)

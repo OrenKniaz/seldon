@@ -9,9 +9,8 @@ from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_WORK = ("Write docs/try-it.md for the reader: the shortest path from a fresh copy to using the "
-              "product, with the exact commands and what they will see. The product is in your worktree: "
-              "follow your own guide as that reader would (start what it starts, use the page and the API, "
-              "stop it) and fix what trips you. Then leave one check under docs/try-it/ that repeats that "
+              "product, with the exact commands and what they will see, from the accepted vision and "
+              "contracts. Leave one walkthrough check under docs/try-it/ for WAVE-VERIFY that repeats that "
               "walk on its own from temporary data, saves a screenshot of what the reader sees to "
               "SELDON_EVIDENCE_DIR, and stops what it started; declare it. Nothing in the guide is for a machine.")
 
@@ -73,7 +72,8 @@ def execution(store):
 def assigned(document, *, local=False):
     result = {r: {} for r in select(document, "unit")}
     for ref, check in select(document, "check").items():
-        if not local or not (select(document, "unit")[check["owner"]]["handed"]
+        if not local or not (check["owner"] == "guide"
+                            or select(document, "unit")[check["owner"]]["handed"]
                             or wave_requirements(document, check["owner"])):
             result[check["owner"]][ref] = check
     return result
@@ -266,7 +266,7 @@ def validate_owned_work(document):
         if any(d not in units or d == ref for d in unit["dependencies"]):
             raise ValueError(f"{ref}: unknown or self dependency")
         if ref != "guide" and overlaps(unit["scope"], [GUIDE_PATH, "docs/try-it/**"]):
-            raise ValueError(f"{ref}: {GUIDE_PATH} belongs to the CODE-created last unit")
+            raise ValueError(f"{ref}: {GUIDE_PATH} belongs to the guide unit")
         for other, owner in units.items():
             if (ref < other and unit["area"] == owner["area"]
                     and overlaps(unit["scope"], owner["scope"])):
@@ -301,13 +301,11 @@ def add_guide(document):
     result = deepcopy(document)
     area = next(iter(select(result, "area")))
     result["nodes"][area]["body"]["scope"].extend([GUIDE_PATH, "docs/try-it/**"])
-    consumed = [r for r, c in select(result, "contract").items()
-                if select(result, "unit")[c["provider"]]["area"] != area]
-    for ref in consumed:
+    for ref in select(result, "contract"):
         result["nodes"][ref]["body"]["consumers"].append("guide")
     result["nodes"]["guide"] = {"kind": "unit", "body": {
         "scope": [GUIDE_PATH, "docs/try-it/**"], "requirements": [],
-        "area": area, "dependencies": list(select(result, "unit")),
+        "area": area, "dependencies": [],
         "instructions": GUIDE_WORK}}
     return result
 

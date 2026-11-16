@@ -40,7 +40,6 @@ class RunRow:
     finalObservations: list[str] = field(default_factory=list)
     demoVerdicts: list[str] = field(default_factory=list)
     productVerdict: str | None = None
-    pendingJudge: str | None = None
     requirementVerdicts: list[str] = field(default_factory=list)
     qualityVerdicts: list[str] = field(default_factory=list)
 
@@ -214,8 +213,7 @@ class Store:
                             judgment.owners(document, self.read(r)["kind"], self.read(r)["subject"]))]
                     fields["demoVerdicts"] = [r for r in cursor.demoVerdicts if not affected.intersection(
                         self.read(r)["scopeTrees"])]
-                    self.cursor(replace(cursor, **fields, productVerdict=None,
-                                        pendingJudge=None))
+                    self.cursor(replace(cursor, **fields, productVerdict=None))
             return row.lastrowid
 
     def plan(self, revision):

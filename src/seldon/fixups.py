@@ -63,6 +63,6 @@ def apply(store, gaps):
         cursor = store.cursor()
         if cursor.state != "EXECUTE":
             event = "rework" if cursor.state == "WAVE-VERIFY" else "gap"
-            advance(store, event, refs, pendingJudge=None, finalCommit=None, finalObservations=[],
+            advance(store, event, refs, finalCommit=None, finalObservations=[],
                     productVerdict=None, checkin=None)
     return refs
