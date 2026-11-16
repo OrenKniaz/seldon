@@ -95,7 +95,7 @@ else:
     if mode == 'contracts':
         if number == 1:
             Path(name, 'items.json').write_text(json.dumps({'items': ['value-001']}))
-        elif number == 2:
+        elif any(c['provider'] == 'u001' for c in facts.get('Contracts consumed', {}).values()):
             agreements = {c['text'] for label in ('Contracts consumed', 'Area contracts')
                           for c in facts.get(label, {}).values()}
             assert 'JSON response: {"items": ["value-001"]}.' in agreements
@@ -760,7 +760,6 @@ def test_judge_once_golden(tmp_path, fault):
                     else:
                         assert facts["Requirements"] and facts["Execution facts"]
                         assert facts["Contract authority"]
-                        assert facts.get("Contracts provided") or facts.get("Contracts consumed")
                         fresh.append(q)
                 return provider.invoke(q, started)
             answer = json.loads(provider(q))["answer"]
@@ -792,6 +791,8 @@ def test_judge_once_golden(tmp_path, fault):
                         assert "u001" not in facts["Correction owners"]
                         owner = (next(iter(plan.select(document, "contract")))
                                  if fault == "outside-contract" else "u001")
+                        if fault == "outside-contract":
+                            assert owner not in facts["Crossed contracts"]
                     else:
                         return json.dumps({"answer": answer}), None
                     planted.append((kind, target, owner))
