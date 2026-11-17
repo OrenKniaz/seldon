@@ -101,7 +101,16 @@ def ask_unit(store, provider, ref):
         tried = [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
         subject = {"unit": ref, "tried": tried, "failure": row.failure,
                    "affects": sorted(affected(store, ref) - {ref}), "recommendation": row.failure}
-        if subject := coach(store, provider, subject):
+        if checks := recovery.repeated(store, ref):
+            # Like a repeated step fault: the same approach again would only loop (R15, R17).
+            subject["ask"] = {"question": f"This is Seldon's fault: {ref} failed the same checks again "
+                f"({', '.join(checks)}) after the approach you chose. Expected them to pass; got the "
+                "failure shown. We recommend Pause until Seldon is fixed.",
+                "options": [option("Pause", "Pause here; your work is saved and can resume", "pause"),
+                            option("Try again", "Retry this unit if its cause has been fixed", "direct"),
+                            option("Leave this out", "Leave out this unit and its dependents", "drop")]}
+            request(store, "UNIT", subject)
+        elif subject := coach(store, provider, subject):
             request(store, "UNIT", subject)
     finally:
         store.close()

@@ -147,19 +147,20 @@ class Run:
                            if more else {}))
         elif state == "ARCHITECT":
             finished = max((u.wave for u in store.units().values()), default=0)
-            if cursor.wave == finished:
+            if cursor.wave == finished and cursor.finalCommit == cursor.candidate:
                 cursor = advance(store, "steer", cursor.requestedChange or cursor.candidate,
                                  wave=finished + 1, waveStart=cursor.candidate, repairs=0)
+            replan = cursor.wave == finished  # a plan gap re-plans the unverified wave in place
             vision = store.read(cursor.vision)["answer"]
             previous = store.plan(cursor.revision) if cursor.revision else None
-            built = plan.built(store) if cursor.wave > 1 else None
+            built = plan.built(store) if cursor.wave > 1 and not replan else None
             outline = previous["architecture"] if previous else None
             gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
             def consume(result, answer):
                 if "scope" in answer:
                     advance(store, "scope", result, requestedChange=result)
                     return
-                document = dict(previous) if built else {
+                document = dict(previous) if built or replan else {
                     "nodes": {"vision": {"kind": "vision", "body": vision}}}
                 document["architecture"] = {k: v for k, v in answer.items() if k != "why"}
                 revision = store.revision(document, cursor.revision)
@@ -169,8 +170,8 @@ class Run:
                 questions.architect_brief(vision, questions.user_words(store),
                                          gaps[-1]["gap"] if gaps else None,
                                          outline if gaps or built else None, built=built),
-                check=lambda a: architecture.outline(a, vision), consume=consume,
-                field="areas/contracts/decisions/waves")
+                check=lambda a: architecture.outline(a, vision),
+                consume=consume, field="areas/contracts/decisions/waves")
         elif state == "DETAIL":
             detail.step(store, self.provider, self.capacity)
         elif state == "REVIEW":
@@ -202,7 +203,9 @@ class Run:
             gaps = proof.gaps(store, cursor.candidate, observations)
             if not gaps:
                 gaps = units.judge_wave(store, self.provider, observations)
-            if gaps:
+            if planned := [g for g in gaps if g["kind"] == "plan"]:
+                fixups.replan(store, planned)
+            elif gaps:
                 fixups.apply(store, gaps)
             else:
                 advance(store, "passed", observations, finalCommit=cursor.candidate,

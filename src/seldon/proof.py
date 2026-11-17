@@ -17,6 +17,14 @@ class UncertainCleanup(RuntimeError):
     pass
 
 
+class Failed(ValueError):
+    """Failing checks keep their names, so a repeat of the same failure is recognised (R15)."""
+
+    def __init__(self, message, failed):
+        super().__init__(message + explain(failed))
+        self.checks = sorted({body["check"] for body in failed})
+
+
 def observe(store, root, commit, declarations, purpose, unit=None, scope_tree=None):
     observations = []
     if not declarations:
@@ -96,10 +104,16 @@ def gaps(store, candidate, observations):
             raise ValueError("Check gaps require observations from the candidate commit")
         if failures(store, [ref]):
             writer = plan.select(document, "check")[body["check"]]["owner"]
-            handed = plan.select(document, "unit")[writer]["handed"]
-            owners = list(handed) or [writer]
-            result.append({"subject": body["check"], "kind": "check", "commit": candidate,
-                           "units": owners, "correction": "\n".join([*handed.values(), explain([body])]), "source": ref})
+            units = plan.select(document, "unit")
+            handed = units[writer]["handed"]
+            # Work its writer hands to no unit of this wave is a plan gap, never a wrong owner's fixup.
+            # An area named before the planner gave it a unit now means that unit.
+            owners = [r for o in handed for r in [u for u, b in units.items()
+                                                  if b["area"] == o and u != "guide"] or [o]]
+            unowned = [o for o in owners if o not in units]
+            result.append({"subject": body["check"], "kind": "plan" if unowned else "check",
+                           "commit": candidate, "units": unowned or owners or [writer],
+                           "correction": "\n".join([*handed.values(), explain([body])]), "source": ref})
     return result
 
 
@@ -137,7 +151,7 @@ def prove(store, ref, contract, checks):
         with store.transaction():
             store.unit(ref, replace(store.unit(ref), observations=observations))
         if bad:
-            raise ValueError("Proof failed: " + explain(bad))
+            raise Failed("Proof failed: ", bad)
     except UncertainCleanup:
         raise
     except (ValueError, RuntimeError, OSError):

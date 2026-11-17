@@ -67,3 +67,18 @@ def apply(store, gaps):
             advance(store, event, refs, finalCommit=None, finalObservations=[],
                     productVerdict=None, checkin=None)
     return refs
+
+
+def replan(store, gaps):
+    """A failure whose fix no unit of this wave can hold is a plan gap: the planner gives it an owner."""
+    cursor = store.cursor()
+    text = "\n".join(
+        f"Wave {cursor.wave} check {g['subject']} failed on the integrated product. Expected: a unit of "
+        f"this wave owns the work it needs; got: its writer hands that work to {', '.join(g['units'])}, "
+        "which no unit of this wave holds. Give the work an owner in this wave: bring the commitment "
+        "that owns it into this wave so a unit builds it. Writer's report and failure: " + g["correction"]
+        for g in gaps)
+    ref = store.record("architecture_gap", {"vision": cursor.vision, "source": [g["source"] for g in gaps],
+                                            "outline": store.plan(cursor.revision)["architecture"],
+                                            "gap": text})
+    recovery.planning(store, ref, sorted([g["subject"], *g["units"]] for g in gaps), "plan-gap")

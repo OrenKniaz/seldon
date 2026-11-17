@@ -35,12 +35,13 @@ def failed(store, cause, unit=None, *, key=None, shape=None, direct=False):
     return asked
 
 
-def recover(store, ref, failure, *, key=None, cause=None, direct=False, charged=False, **updates):
+def recover(store, ref, failure, *, key=None, cause=None, direct=False, charged=False, checks=None,
+            **updates):
     with store.transaction():
         row = store.unit(ref)
         cause = cause or store.record("unit_failure", {
             "unit": ref, "state": row.state, "failure": failure,
-            "evidence": row.observations, "attempt": row.callAttempt})
+            "evidence": row.observations, "attempt": row.callAttempt, "checks": checks})
         key = key or lineage(store, ref)
         asked = store.recovery(key).get("waiting", False) if charged else failed(
             store, cause, ref, key=key, direct=direct)
@@ -48,6 +49,22 @@ def recover(store, ref, failure, *, key=None, cause=None, direct=False, charged=
                 lineage=key, recoveries=store.recovery(key)["rounds"],
                 report=None, T=None, P=None, observations=[], judgment=None, **updates)
         return asked
+
+
+def repeated(store, unit):
+    """The checks that failed again after the user chose an approach; None for a new failure."""
+    state = store.recovery(lineage(store, unit))
+    if not state["answer"] or not state["attempts"]:
+        return None
+
+    def failed_checks(ref):
+        body = store.read(ref)
+        return body.get("checks") or sorted(g["subject"] for g in body.get("gaps", [])) or None
+
+    answered = int(state["answer"][1:])
+    last = failed_checks(state["attempts"][-1])
+    earlier = [failed_checks(r) for r in state["attempts"][:-1] if int(r[1:]) < answered]
+    return last if last and last in earlier else None
 
 
 def planning(store, cause, shape, event=None, **updates):

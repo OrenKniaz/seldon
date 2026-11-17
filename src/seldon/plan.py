@@ -10,8 +10,9 @@ from .schema import validate as validate_schema
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_WORK = ("The page is absent from your worktree and no contract names its fields. "
               "Write docs/try-it.md and declare a docs/try-it/ WAVE-VERIFY check from contracts: start with "
-              "temporary data, open the page, import/API, check the promised text, save a screenshot to "
-              "SELDON_EVIDENCE_DIR, and stop what you started; leave unseen forms to the page owner's check.")
+              "temporary data, use the product as this wave's commitments promise, check the promised text, "
+              "save a screenshot to SELDON_EVIDENCE_DIR, and stop what you started; leave unseen forms to the "
+              "page owner's check. Walk through only this wave's commitments; a later wave extends the guide.")
 
 
 def safe_path(value):
@@ -304,9 +305,12 @@ def add_guide(document, wave=1):
     result["nodes"][area]["body"]["scope"].extend([GUIDE_PATH, "docs/try-it/**"])
     current = {r for r, u in select(result, "unit").items()
                if any(q.startswith(f"{wave}.") for q in u["requirements"])}
-    for contract in select(result, "contract").values():
+    readers = {c["handle"]: c["consumers"] for c in document["architecture"]["contracts"]}
+    for handle, contract in select(result, "contract").items():
         contract["consumers"] = [u for u in contract["consumers"] if u != "guide"]
-        if current.intersection([contract["provider"], *contract["consumers"]]):
+        # An agreement whose consumer areas have no unit yet belongs to a later wave's walkthrough.
+        later = readers.get(handle) and not contract["consumers"]
+        if current.intersection([contract["provider"], *contract["consumers"]]) and not later:
             contract["consumers"].append("guide")
     result["nodes"]["guide"] = {"kind": "unit", "body": {
         "scope": [GUIDE_PATH, "docs/try-it/**"], "requirements": [],

@@ -292,19 +292,34 @@ def work_brief(store, ref):
         if any(g["kind"] != "check" for g in assignment["gaps"]):
             facts.update(repair)
     if ref == "guide":
-        facts["Guide path"] = plan.GUIDE_PATH
+        # The walkthrough proves this wave's promises only (M3 rule 10), never the whole dream.
         vision = document["nodes"]["vision"]["body"]
-        facts["Readers"] = vision["users"]
-        facts["What the reader came to do"] = vision["understanding"]
+        goals = architecture.commitments(vision)
+        wave = document["architecture"]["waves"][unit.wave - 1]["commitments"]
+        del facts["User's words"]
+        facts.update({"Guide path": plan.GUIDE_PATH, "Readers": vision["users"],
+                      "This wave's commitments": {r: goals[r] for r in wave if not r.startswith("quality:")},
+                      "Quality bar": [goals[r]["criterion"] for r in wave if r.startswith("quality:")]})
     if unit.failure:
         facts["Exact failure"] = unit.failure
         facts["Read current patch"] = ["git", "diff", "--binary", unit.base]
-    facts["Correction owners"] = {r: u["scope"] for r, u in plan.select(document, "unit").items()}
+    facts["Correction owners"] = owners(document)
     if unit.thread and unit.failure:
         facts = {k: facts[k] for k in ("Exact failure", "Write scope", "Correction owners",
                                      "Correction observations") if k in facts}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
                  images=images(store, refs), owners=facts["Correction owners"])
+
+
+def owners(document):
+    """Units own their scopes; work no unit of this wave holds goes to the planner."""
+    units = plan.select(document, "unit")
+    built = {u["area"] for u in units.values()}
+    planner = "No unit yet: Seldon's planner gives this work an owner"
+    return {**{r: u["scope"] for r, u in units.items()},
+            **{r: {"scope": a["scope"], "owner": planner}
+               for r, a in plan.select(document, "area").items() if r not in built},
+            "none": "No listed scope holds the fix: " + planner}
 
 
 def execution_facts(store, ref, peers=()):

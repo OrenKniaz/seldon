@@ -35,7 +35,7 @@ def step(store, provider, capacity):
         "subjects": {s: r for s, (r, _) in replies.items()},
         "answer": {"verdict": "gap" if questions.must_fix({"gaps": gaps}) else "not judged" if unknown else "adequate", "gaps": gaps},
         "notJudged": unknown, "reviewTier": "same-provider review"})
-    event = "gap" if questions.must_fix({"gaps": gaps}) and not cursor.repairs else "reviewed" if cursor.wave == 1 else "planned"
+    event = "gap" if questions.must_fix({"gaps": gaps}) and not cursor.repairs else "reviewed" if not cursor.B else "planned"
     advance(store, event, ref, review=ref)
 
 

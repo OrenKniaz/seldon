@@ -97,7 +97,7 @@ def integrate(store, ref, checks):
             observations = proof.observe(store, unit.worktree, commit, checks, "integrated", ref)
             bad = proof.failures(store, observations)
             if bad:
-                raise ValueError("Integrated checks failed: " + proof.explain(bad))
+                raise proof.Failed("Integrated checks failed: ", bad)
         except proof.UncertainCleanup:
             raise
         except (ValueError, RuntimeError, OSError):
@@ -187,7 +187,7 @@ def run_unit(store, provider, ref):
             except proof.UncertainCleanup:
                 raise
             except Exception as error:  # a code fault recovers or asks; it never ends the run (R15)
-                recovery.recover(store, ref, str(error))
+                recovery.recover(store, ref, str(error), checks=getattr(error, "checks", None))
     finally:
         store.close()
 

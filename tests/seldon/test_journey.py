@@ -519,7 +519,7 @@ class Scripted:
             if self.parallel:
                 self.parallel.wait(timeout=60)  # Hang guard, not a timing assertion.
                 if plan.GUIDE_PATH in q["facts"]["Write scope"]:
-                    assert q["facts"]["What the reader came to do"] == VISION["understanding"]
+                    assert q["facts"]["This wave's commitments"] == {"scopeIn:1": VISION["scopeIn"][0]}
                     assert "value-001" in str(q["facts"]["Contracts consumed"])
             return self.native.invoke(q, started)
         return self(q), None
@@ -1893,5 +1893,151 @@ def test_judge_notes_reach_c_without_rework(tmp_path, severity):
         assert not run.store.records("unit_fixup") and not run.store.records("unit_gap")
         assert all(int((original.slot / ("turn-unit-" + str(n).zfill(3))).read_text()) == 1
                    for n in (1, 2))
+    finally:
+        run.close()
+
+
+LATER_GUIDE = r"""
+    walk_import = mode == 'later-forced' or 'Import values' in json.dumps(facts)
+    Path('docs/try-it/check.py').write_text("from pathlib import Path\n"
+        "assert Path('unit-001/value.txt').read_text() == 'value-001'\nprint('observed value-001')\n"
+        + ("assert Path('unit-002/value.txt').exists(), 'Expected unit-002/value.txt from the importer'\n"
+           "print('observed import')\n" if walk_import else ""))
+    if 'importer' in facts.get('Exact failure', ''):
+        later = next((r for r, v in facts['Correction owners'].items()
+                      if isinstance(v, dict) and 'unit-002/**' in v['scope']), None)
+        # Terra named the closest listed owner when the real owner was not listed (t01).
+        answer['discoveries'] = [{'owner': later or owner(1), 'correction': 'Build unit-002/value.txt, the importer'}]
+"""
+
+
+class LaterWave(Scripted):
+    """ShelfLife t01 shape: wave 1 builds the reader, the importer area waits for wave 2."""
+
+    def __call__(self, q):
+        kind, facts = q["kind"], q["facts"]
+        if kind == "ARCHITECT":
+            first = {"goal": "Read the saved values", "commitments": ["scopeIn:1", "quality:1"]}
+            later = {"goal": "Import values", "commitments": ["scopeIn:2"]}
+            previous = facts.get("Previous architecture")
+            if "Finished wave" in facts:
+                answer = {**{k: previous[k] for k in ("areas", "contracts", "decisions")},
+                          "waves": facts["Remaining waves"]}
+            elif "Architecture correction" in facts:
+                assert "no unit of this wave holds" in facts["Architecture correction"]
+                assert "area-2" in facts["Architecture correction"]
+                answer = {**{k: previous[k] for k in ("areas", "contracts", "decisions")},
+                          "waves": [{**first, "commitments": first["commitments"] + later["commitments"]}]}
+            else:
+                answer = {"areas": [
+                    {"handle": "area-1", "responsibility": "Read saved values", "scope": ["unit-001/**"],
+                     "commitments": ["scopeIn:1", "quality:1"]},
+                    {"handle": "area-2", "responsibility": "Import values", "scope": ["unit-002/**"],
+                     "commitments": ["scopeIn:2"]}],
+                    "contracts": [{"handle": "values-file", "kind": "file", "provider": "area-1",
+                                   "consumers": ["area-2"],
+                                   "text": "Wave 2 agreement: Import values reuse the saved value format."}],
+                    "decisions": [], "waves": [first, later]}
+            answer["why"] = "The importer follows the reader"
+            return json.dumps({"answer": answer})
+        answer = json.loads(super().__call__(q))["answer"]
+        if kind == "ALIGN":
+            answer["scopeIn"].append("Import values from a file")
+            answer["understanding"] = "Read named values and Import values from a file"
+        return json.dumps({"answer": answer})
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("forced", [False, True])
+def test_later_wave_piece_journey(tmp_path, forced):
+    """A wave's walkthrough proves that wave; work no unit of the wave owns goes to the planner.
+
+    ShelfLife t01: the wave-1 guide walked the wave-2 importer, its check was routed to the
+    backend, whose scope cannot hold the importer, and 10 COACH calls looped. The clean twin
+    keeps the importer out of the wave-1 walkthrough and adds it in wave 2. The forced twin
+    walks it anyway: the planner brings the importer into wave 1 and no wrong owner is assigned.
+    """
+    slot = tmp_path / "later"
+    run, _ = prepare(slot, "later-forced" if forced else "later", 2)
+    native = slot / "native.py"
+    source = native.read_text()
+    start = source.index("    Path('docs/try-it/check.py').write_text(")
+    end = source.index("    answer['checkPaths'] = ['docs/try-it/check.py']")
+    native.write_text(source[:start] + LATER_GUIDE + source[end:], encoding="utf-8")
+    run.provider = LaterWave(slot, "later", 2)
+    briefs = []
+    original = run.provider.invoke
+
+    def invoke(q, started):
+        if q["kind"] == "WORK" and plan.GUIDE_PATH in q["facts"]["Write scope"] and "Readers" in q["facts"]:
+            briefs.append(q["facts"])
+        return original(q, started)
+
+    run.provider.invoke = invoke
+    try:
+        finish(run)
+        store = run.store
+        reader = unit_ref(run, 1)
+        assert not any(b["owner"] == reader for _, _, b in store.records("unit_fixup"))
+        first = briefs[0]
+        assert "scopeIn:2" not in first["This wave's commitments"]
+        assert "User's words" not in first and "Import values" not in str(first.get("Contracts consumed"))
+        importer = unit_ref(run, 2)
+        guide = [store.read(r) for r in store.cursor().finalObservations
+                 if store.read(r)["check"].startswith("guide:")]
+        assert guide and all("observed import" in o["stdout"] for o in guide)
+        gaps = store.records("architecture_gap")
+        if forced:
+            # One plan gap, then the planner gave the importer a wave-1 unit.
+            assert len(gaps) == 1 and "Expected: a unit of this wave owns" in gaps[0][2]["gap"]
+            assert importer.startswith("1.") and store.unit(importer).wave == 1
+            assert store.cursor().wave == 1
+        else:
+            assert not gaps and not store.records("unit_fixup")
+            assert importer.startswith("2.") and store.cursor().wave == 2
+            assert "scopeIn:2" in briefs[-1]["This wave's commitments"]
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+def test_repeated_unit_failure_pauses_journey(tmp_path):
+    """The same failing check after the user's chosen approach recommends a pause, not that approach.
+
+    ShelfLife t01 offered "Try the planner's new approach" five times for one unchanged failure;
+    the step-fault twin covers planning steps only.
+    """
+    from seldon.decisions import Waiting
+
+    slot = tmp_path / "repeat"
+    run, provider = prepare(slot)
+    native = slot / "native.py"
+    native.write_text(native.read_text().replace("    Path(name, 'check.py').write_text(source)",
+        "    source += \"raise AssertionError('reader unavailable')\\n\"\n"
+        "    Path(name, 'check.py').write_text(source)"))
+    shown = []
+
+    def user(item):
+        if item["gate"] != "UNIT":
+            return approve(item)
+        shown.append(item)
+        if len(shown) == 1:
+            return item["ask"]["options"][0]["label"]
+        raise Waiting()
+
+    run.user = user
+    try:
+        with pytest.raises(Waiting):
+            while True:
+                run.step()
+        first, again = shown[0], shown[-1]
+        assert first["ask"]["options"][0]["label"] == "Try the planner's new approach"
+        ask = again["ask"]
+        assert ask["options"][0] == {"label": "Pause", "means": "Pause here; your work is saved and can resume",
+                                     "effect": "pause"}
+        assert "Seldon's fault" in ask["question"] and ":check:1" in ask["question"]
+        assert "reader unavailable" in again["subject"]["failure"]
+        assert provider.calls.count("COACH") == 2  # planner once, then the user; never the same approach again
+        assert run.store.cursor().decision == again["request"]
     finally:
         run.close()

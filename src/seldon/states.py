@@ -13,7 +13,7 @@ RUN = {
     "REPAIR": {"area-gap": "DETAIL"},
     "B": {"approve": "EXECUTE", "revise": "REPAIR"},
     "EXECUTE": {"finished": "WAVE-VERIFY"},
-    "WAVE-VERIFY": {"passed": "FLOW-JUDGE", "rework": "EXECUTE"},
+    "WAVE-VERIFY": {"passed": "FLOW-JUDGE", "rework": "EXECUTE", "plan-gap": "ARCHITECT"},
     "CHECK-IN": {"next": "ARCHITECT", "last": "PRODUCT-JUDGE"},
     "FLOW-JUDGE": {"satisfied": "CHECK-IN", "gap": "EXECUTE"},
     "PRODUCT-JUDGE": {"satisfied": "C", "gap": "EXECUTE"},
