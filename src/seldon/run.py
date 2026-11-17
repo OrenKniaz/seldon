@@ -114,6 +114,7 @@ class Run:
                        if state == "B" else
                        {"commit": cursor.candidate,
                         "units": {r: u.state for r, u in store.units().items()},
+                        "notes": judgment.notes(store),
                         "notJudged": judgment.not_judged(store), "leftOut": plan.left_out(store), "deviation": "DV6"})
             decisions.request(store, state, subject)
             cursor = store.cursor()

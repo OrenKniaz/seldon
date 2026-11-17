@@ -6,6 +6,7 @@ from pathlib import Path
 from . import architecture, fixups, gitwork, inference, plan, questions
 from .schema import answer_schema
 from .states import advance
+from . import features
 
 
 def subjects(document, kind):
@@ -142,7 +143,7 @@ def review_schema(document, kind):
 def corrections(store, subject, source, answer):
     contracts = plan.select(plan.execution(store), "contract")
     owners = {}
-    for gap in answer["gaps"]:
+    for gap in questions.must_fix(answer):
         for owner in gap["owners"]:
             owners.setdefault(owner, []).append(gap["correction"])
     return [{"subject": owner if owner in contracts else subject, "kind": "flow",
@@ -167,6 +168,18 @@ def not_judged(store):
                                   for ref, row in store.units().items() if row.judgment])
                      if v["answer"].get("verdict") == "not judged"})
     return deferred
+
+
+def notes(store):
+    """Show recorded nonblocking findings alongside the verdict at C."""
+    cursor = store.cursor()
+    refs = [*cursor.demoVerdicts, *cursor.qualityVerdicts,
+            *(u.judgment for u in store.units().values() if u.judgment)]
+    if cursor.review:
+        refs.append(cursor.review)
+    return [{"source": ref, **gap} for ref in refs
+            for gap in store.read(ref).get("answer", {}).get("gaps", [])
+            if not features.blocking(gap)]
 
 
 def combined(verdicts):
@@ -210,7 +223,7 @@ def step(store, provider):
                 targeted = [g for g in answer["gaps"] if g["target"] == subject]
                 individual = {**answer, "gaps": targeted, "verdict": (
                     "not judged" if answer["verdict"] == "not judged" else
-                    "gap" if targeted else "satisfied")}
+                    "gap" if questions.must_fix({"gaps": targeted}) else "satisfied")}
                 if not ready(individual):
                     continue
                 ref = store.record("subject_verdict", {"subject": subject, "kind": kind,

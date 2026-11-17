@@ -366,7 +366,7 @@ class Scripted:
                 answer = {
                     "verdict": "gap",
                     "gaps": [
-                        {
+                        {"severity": "must-fix",
                             "target": "plan",
                             "correction": "Keep the accepted persistent value in the requirement sentence.",
                         }
@@ -404,7 +404,7 @@ class Scripted:
                         answer.update(
                             verdict="gap",
                             gaps=[
-                                {
+                                {"severity": "must-fix",
                                     "target": r,
                                     "correction": facts["Requirements"][r]["acceptance"]
                                     + (" The observed RED does not demonstrate this requirement."
@@ -416,7 +416,7 @@ class Scripted:
                     assert any(o["purpose"] == "final" and o["exitCode"] == 0 for o in observations)
                     if any("unlabelled value-002" in o["stdout"] for o in observations
                            if o["purpose"] == "final"):
-                        answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                        answer.update(verdict="gap", gaps=[{"severity": "must-fix", "target": q["targets"][0],
                             "correction": "The reader output omits the saved value label"}])
             else:
                 obs = facts["Final observations"]
@@ -439,7 +439,7 @@ class Scripted:
                         answer.update(
                             verdict="gap",
                             gaps=[
-                                {
+                                {"severity": "must-fix",
                                     "target": r,
                                     "correction": "Exercise the promised reader",
                                     "owners": list(facts["Correction owners"]),
@@ -453,7 +453,7 @@ class Scripted:
                     self.gaps.add(kind)
                     answer.update(
                         verdict="gap",
-                        gaps=[{"target": q["targets"][0], "correction": "Make the accepted output clear",
+                        gaps=[{"severity": "must-fix", "target": q["targets"][0], "correction": "Make the accepted output clear",
                                "owners": [self.refs[1], self.refs[2]]}],
                     )
         else:
@@ -919,7 +919,7 @@ def test_judge_once_golden(tmp_path, fault):
                     if fault == "area-uncertain":
                         answer = {"verdict": "uncertain", "neededFacts": ["Visual observation unavailable"], "why": "Need the missing observation"}
                     else:
-                        answer.update(verdict="gap", gaps=[{"target": target, "owners": [owner],
+                        answer.update(verdict="gap", gaps=[{"severity": "must-fix", "target": target, "owners": [owner],
                                       "correction": "Exercise the saved value label"}])
             return json.dumps({"answer": answer}), None
 
@@ -1263,7 +1263,7 @@ def test_planner_asks_and_drop_journey(tmp_path, kept_gap):
                     "why": "The user must choose the scope"}})
             if q["kind"] == "PRODUCT" and any("unlabelled value-002" in o["stdout"]
                     for o in q["facts"]["Final observations"]):
-                return json.dumps({"answer": {"verdict": "gap", "gaps": [{
+                return json.dumps({"answer": {"verdict": "gap", "gaps": [{"severity": "must-fix",
                     "target": q["targets"][0], "owners": [unit_ref(run, 2)],
                     "correction": "Restore the saved value label"}], "why": "Kept output loses its label"}})
             if q["kind"] == "FLOW" and not q["facts"]["Final observations"]:
@@ -1478,7 +1478,7 @@ def test_cross_area_commitment_golden(tmp_path, missing):
                 carried = any("carried value-001" in o["stdout"] for o in guide)
                 checked.append((q["targets"][0], carried))
                 if not carried:
-                    answer.update(verdict="gap", gaps=[{"target": q["targets"][0],
+                    answer.update(verdict="gap", gaps=[{"severity": "must-fix", "target": q["targets"][0],
                         "owners": [unit_ref(run, 2)], "correction": "Carry value-001 through unit-002/carried.txt"}])
             return json.dumps({"answer": answer}), None
 
@@ -1602,3 +1602,45 @@ def test_scale_five_wave_golden(tmp_path):
                 db.close()
         finally:
             stop(child)
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("severity", ["nit", "pre-existing"])
+def test_judge_notes_reach_c_without_rework(tmp_path, severity):
+    """Nonblocking findings survive REVIEW, source, flow and product to C with no repairs.
+
+    Catches polish or a peer's old defect reopening a healthy owner; existing must-fix
+    recovery journeys prove blocking gaps but never carry a note through final closure.
+    """
+    run, original = prepare(tmp_path / "notes", count=2)
+
+    class Notes(Scripted):
+        def __call__(self, q):
+            answer = json.loads(super().__call__(q))["answer"]
+            if q["kind"] in ("REVIEW", "JUDGE", "FLOW", "PRODUCT"):
+                gap = {"target": next(iter(q["targets"]), "plan"), "severity": severity,
+                       "correction": q["kind"] + ": " + (
+                           "A small requirement remains unproven in this delivered app"
+                           if severity == "nit" else
+                           "The peer's old unit-002 file has a pre-existing formatting issue")}
+                if q["kind"] in ("FLOW", "PRODUCT"):
+                    gap["owners"] = [self.refs[2]]
+                answer.update(verdict="gap", gaps=[gap])
+            return json.dumps({"answer": answer})
+
+    run.provider = Notes(original.slot, count=2)
+    shown = []
+    def user(item):
+        if item["gate"] == "C":
+            shown.extend(item["subject"]["notes"])
+        return approve(item)
+    run.user = user
+    try:
+        finish(run)
+        assert {n["correction"].split(":")[0] for n in shown} == {"REVIEW", "JUDGE", "FLOW", "PRODUCT"}
+        assert all(n["severity"] == severity for n in shown)
+        assert not run.store.records("unit_fixup") and not run.store.records("unit_gap")
+        assert all(int((original.slot / ("turn-unit-" + str(n).zfill(3))).read_text()) == 1
+                   for n in (1, 2))
+    finally:
+        run.close()

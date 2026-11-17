@@ -2,6 +2,7 @@
 
 from . import architecture, inference, plan, questions
 from .states import advance
+from . import features
 
 
 def step(store, provider, capacity):
@@ -28,9 +29,9 @@ def step(store, provider, capacity):
                for area, (_, a) in replies.items() if a["verdict"] == "uncertain"}
     ref = store.record("plan_review", {"revision": cursor.revision,
         "subjects": {s: r for s, (r, _) in replies.items()},
-        "answer": {"verdict": "gap" if gaps else "not judged" if unknown else "adequate", "gaps": gaps},
+        "answer": {"verdict": "gap" if questions.must_fix({"gaps": gaps}) else "not judged" if unknown else "adequate", "gaps": gaps},
         "notJudged": unknown, "reviewTier": "same-provider review"})
-    event = "gap" if gaps and not cursor.repairs else "reviewed" if cursor.wave == 1 else "planned"
+    event = "gap" if questions.must_fix({"gaps": gaps}) and not cursor.repairs else "reviewed" if cursor.wave == 1 else "planned"
     advance(store, event, ref, review=ref)
 
 
@@ -38,6 +39,8 @@ def repair(store):
     cursor = store.cursor()
     corrections = {}
     for gap in store.read(cursor.review)["answer"]["gaps"] if cursor.review else []:
+        if not features.blocking(gap):
+            continue
         corrections.setdefault(gap["area"], []).append({"error": gap["correction"], "otherSide": {}})
     if cursor.requestedChange:
         words = store.read(cursor.requestedChange)["words"]

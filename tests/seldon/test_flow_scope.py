@@ -18,7 +18,7 @@ class RequirementFlow(Scripted):
                                       for row in q['facts']['Final observations']):
             target = next(r for r, body in q['facts']['Requirements'].items()
                           if 'value-001' in body['acceptance'])
-            reply['answer'].update(verdict='gap', gaps=[{'target': target, 'owners': [self.refs[1]],
+            reply['answer'].update(verdict='gap', gaps=[{"severity": "must-fix", 'target': target, 'owners': [self.refs[1]],
                 'correction': 'Make the blocked interaction ready and exercise it'}])
         return json.dumps(reply)
 

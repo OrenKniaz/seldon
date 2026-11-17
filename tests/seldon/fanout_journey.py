@@ -61,7 +61,7 @@ def final_fanout_journey(slot, stage, case):
                 return json.dumps({"answer": {"verdict": "uncertain", "neededFacts": [
                     "The visual observation remains unavailable"], "why": "Need more facts"}})
             if case == "gaps" and target in targets[:2]:
-                reply["answer"].update(verdict="gap", gaps=[{
+                reply["answer"].update(verdict="gap", gaps=[{"severity": "must-fix",
                     "owners": [f"u{targets.index(target)+1:03}"],
                     "target": question["targets"][0], "correction": "Correct " + str(target)}])
             return json.dumps(reply)

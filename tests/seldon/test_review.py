@@ -16,7 +16,7 @@ def test_review_leftovers_survive_b_and_reopen(tmp_path, verdict):
             if q['kind'] == 'REVIEW':
                 body = {'verdict':verdict,'why':'The reader interaction remains unproven'}
                 if verdict == 'gap':
-                    body['gaps'] = [{'target':'plan','correction':'Exercise the reader interaction'}]
+                    body['gaps'] = [{"severity": "must-fix", 'target':'plan','correction':'Exercise the reader interaction'}]
                 else:
                     body['neededFacts'] = ['An observation of the reader interaction']
                 return json.dumps({'answer':body})

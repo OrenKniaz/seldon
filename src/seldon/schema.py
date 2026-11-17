@@ -33,7 +33,8 @@ BODIES = {
     "unit": obj(instructions=TEXT, scope=array(TEXT, 1),
                 requirements=REFS, dependencies=REFS, area=TEXT),
 }
-GAP = obj(target=TEXT, correction=TEXT)
+SEVERITY = choice("must-fix", "nit", "pre-existing")
+GAP = obj(target=TEXT, correction=TEXT, severity=SEVERITY)
 PLAN_BODIES = {**BODIES, "feature": FEATURE,
                "contract": obj(**{**BODIES["contract"]["properties"],
                                   "provider": POSITION, "consumers": array(POSITION)})}
@@ -59,7 +60,7 @@ DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 
 
 def answer_schema(kind, targets=(), owners=()):
-    gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1))
+    gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1), severity=SEVERITY)
     payload = {
         "ALIGN": VISION, "ARCHITECT": obj(**{**ARCHITECT["properties"],
             "waves": array(ARCHITECT["properties"]["waves"]["items"])}),

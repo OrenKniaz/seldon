@@ -68,11 +68,7 @@ def brief(store, feature):
     images = questions.images(store, refs)
     question = {
         "kind": "FLOW",
-        "prompt": "Does this feature's observed user flow meet each requirement across its contracts? "
-                  "Name only responsible correction owners for each gap; name a crossed contract "
-                  "when its agreement needs correction. Owners may also be units or contracts outside "
-                  "this feature. Judge the observations and screenshots. "
-                  + questions.JUDGMENT_LEEWAY,
+        "prompt": questions.PROMPTS["FLOW"],
         "facts": facts, "targets": list(requirements), "schema": judgment.review_schema(document, "FLOW"),
         "examples": [{"answer": {"verdict": "satisfied", "gaps": [],
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
@@ -87,7 +83,7 @@ def review(store, feature, source, answer):
     if answer["verdict"] == "uncertain":
         answer = {**answer, "verdict": "not judged", "gaps": []}
     else:
-        answer = {**answer, "verdict": "gap" if answer["gaps"] else "satisfied"}
+        answer = {**answer, "verdict": "gap" if questions.must_fix(answer) else "satisfied"}
     with store.transaction():
         verdict = store.record("feature_verdict", {
             "feature": feature, "commit": cursor.candidate, "answer": answer,
@@ -116,7 +112,7 @@ def requirement_verdicts(store, verdicts):
                 answer = row["answer"]
                 answers.append({"answer": {**answer,
                     "verdict": ("not judged" if answer["verdict"] == "not judged" else
-                                "gap" if any(g["target"] == subject for g in answer["gaps"])
+                                "gap" if any(g["target"] == subject for g in questions.must_fix(answer))
                                 else "satisfied"),
                     "gaps": [g for g in answer["gaps"] if g["target"] == subject]}})
             owned = judgment.owners(document, "FLOW", subject)

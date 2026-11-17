@@ -78,7 +78,7 @@ class Waves(Scripted):
                        for r in u["requirements"])
             if wave not in self.gaps:
                 self.gaps.add(wave)
-                answer.update(verdict="gap", gaps=[{
+                answer.update(verdict="gap", gaps=[{"severity": "must-fix",
                     "target": "plan", "correction": "Preserve the existing saved values."}])
         return json.dumps({"answer": answer})
 

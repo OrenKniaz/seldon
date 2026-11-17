@@ -4,6 +4,7 @@ import json
 
 from . import architecture, fixups, gitwork, plan
 from .schema import answer_schema, validate
+from . import features
 
 # Owner decision: ALIGN improves craft within scope, with observable quality and a distinctive UI direction.
 ALIGN_DESIGN = (
@@ -32,7 +33,10 @@ JUDGMENT_LEEWAY = (
     "commitments are fine; reject one only by citing the accepted obligation or material consequence "
     "it breaks. Judge meaning, not wording: a gap is behaviour or quality a user would miss. "
     "Proof this machine cannot give (cutting the network, another OS, real devices) is not a gap "
-    "when the product and its observations plainly meet the meaning; name the limit in why.")
+    "when the product and its observations plainly meet the meaning; name the limit in why. "
+    "must-fix means a user would miss accepted behaviour or quality; nit means polish a user would "
+    "hardly notice; pre-existing means not caused by this unit's change. "
+    "A small requirement left unproven in an otherwise delivered app is a nit note at C.")
 
 AVAILABLE_TOOLS = (
     "Available tools and skills: checks/kit/browser.cjs exports browser(url, async ({page, shot, errors}) "
@@ -69,7 +73,7 @@ PROMPTS = {
               'planner. Normally the area is one unit. Use more only when they can be built at the same '
               "time. Name a dependency only when a unit cannot be written until another unit's files exist.",
     "REVIEW": "Do the planned requirements and responsibilities cover the accepted commitments? "
-              "Name a missing accepted promise and its correction.",
+              "Name a missing accepted promise and its correction. " + JUDGMENT_LEEWAY,
     "COACH": "Answer this worker's question using the accepted requirements, contracts and tools. "
              "Give practical guidance so the worker can continue within its scope. "
              "Answer yes or no first when the question allows it. "
@@ -87,6 +91,10 @@ PROMPTS = {
              "a meaningful check with the supplied execution observations, and no stub replacing that behaviour? "
              "A gap quotes the acceptance sentence it breaks; other suggestions are notes. "
              + JUDGMENT_LEEWAY,
+    "FLOW": "Does this feature's observed user flow meet each requirement across its contracts? "
+            "Name only responsible correction owners for each gap; name a crossed contract "
+            "when its agreement needs correction. Owners may also be units or contracts outside "
+            "this feature. Judge the observations and screenshots. " + JUDGMENT_LEEWAY,
     "PRODUCT": "Do all these area criteria hold in the delivered experience? Each gap names its criterion "
                "as target and its responsible unit or contract owners. "
                "Inspect the traced final evidence. A UI that works but is plain or forgettable "
@@ -115,6 +123,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
                  "checkPaths": [], "checks": [], "discoveries": []},
         "JUDGE": {"verdict": "satisfied", "gaps": []},
         "PRODUCT": {"verdict": "satisfied", "gaps": []},
+        "FLOW": {"verdict": "satisfied", "gaps": []},
     }[kind]
     example["why"] = ("The responsibilities, agreements and waves cover the accepted promises"
                       if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
@@ -384,6 +393,9 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
             if answer.get("verdict") != "uncertain":
                 if answer.get("verdict") == "gap" and not answer["gaps"]:
                     raise ValueError("A gap verdict must name its correction")
+                if "gaps" in answer:
+                    answer = {**answer, "verdict": ("gap" if must_fix(answer) else
+                              "adequate" if original["kind"] == "REVIEW" else "satisfied")}
                 check(answer)
         except architecture.ContractGap:
             record({"rawAnswer": raw, "errors": ["Needs an architecture correction"]})
@@ -400,5 +412,9 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
         question = {**original, "facts": {**original["facts"], "Exact corrections": rejected}}
 
 
+def must_fix(answer):
+    return [g for g in answer["gaps"] if features.blocking(g)]
+
+
 def satisfied(answer):
-    return answer.get("verdict") == "satisfied" and not answer["gaps"]
+    return answer.get("verdict") in ("satisfied", "gap") and not must_fix(answer)
