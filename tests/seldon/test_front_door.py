@@ -20,10 +20,11 @@ FAKE = '''
 import json, runpy, sys
 from pathlib import Path
 sys.path[:0] = SOURCE_PATHS
-from test_journey import Scripted
+from test_journey import Scripted, strict_schema
 slot = Path(sys.argv[1])
 schema = Path(sys.argv[sys.argv.index('--output-schema') + 1])
 question = json.loads(schema.with_name('question.json').read_text('utf-8'))
+strict_schema(question['schema'])
 if question['kind'] == 'WORK':
     runpy.run_path(str(slot / 'native.py'), run_name='__main__')
 else:

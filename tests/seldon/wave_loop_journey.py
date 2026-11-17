@@ -31,8 +31,10 @@ class Waves(Scripted):
             if not facts["Remaining waves"]:
                 previous = deepcopy(previous)
                 previous["waves"].append({"goal": "Polish the extension", "commitments": ["scopeIn:2"]})
-                return json.dumps({"answer": {"waves": previous["waves"], "why": "Apply the C direction"}})
-            return json.dumps({"answer": {"why": "Continue from the built product"}})
+                return json.dumps({"answer": {"areas": [], "contracts": [], "decisions": [],
+                    "waves": previous["waves"], "why": "Apply the C direction"}})
+            return json.dumps({"answer": {"areas": [], "contracts": [], "decisions": [],
+                "waves": [], "why": "Continue from the built product"}})
         if kind == "JUDGE":
             for wave in (3, 2):
                 sentence = f"Read extension-{wave}.txt."

@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 from . import inference, plan, questions, recovery
+from .providers import ProviderFailure
 from .states import advance
 
 
@@ -99,6 +100,27 @@ def option(label, means, effect):
     return {"label": label, "means": means, "effect": effect}
 
 
+def step_fault(store, provider, error):
+    step = store.cursor().state
+    cause = error.__cause__ if isinstance(error.__cause__, ProviderFailure) else error
+    failure = f"{type(cause).__name__}: {cause}"
+    key = recovery.lineage(store)
+    shape = {"step": step, "failure": failure}
+    repeated = shape in store.recovery(key)["seen"]
+    cause = store.record("step_failure", shape)
+    recovery.failed(store, cause, shape=shape)
+    subject = {"step": step, "tried": [failure], "failure": failure}
+    if repeated:
+        subject["ask"] = {"question": "This is Seldon's fault: the same step failed again after "
+            "the planner's new approach. We recommend Stop to pause here until Seldon is fixed.",
+            "options": [option("Stop", "Pause here; your work is saved and can resume", "pause"),
+                        option("Try again", "Retry this step if its cause has been fixed", "direct")]}
+    else:
+        subject = coach(store, provider, subject)
+    if subject:
+        request(store, step, subject)
+
+
 def gate_ask(store, gate, subject):
     if "ask" in subject:
         return subject["ask"]
@@ -116,9 +138,6 @@ def gate_ask(store, gate, subject):
         opts = [option("accept", "Accept the demonstrated product", "approve"),
                 option("ask for changes", "Describe the changes you want", "direct"),
                 option("stop", "End without accepting the product", "stop")]
-    elif subject.get("options"):  # Code faults have fixed choices, never a semantic COACH call.
-        opts = [option("Try again", "Retry the interrupted step", "direct"),
-                option("Stop", "Stop the dream", "stop")]
     else:
         return None  # A planning question is coached by decide before it reaches the user.
     return {"question": f"How should we continue at {gate}?", "options": opts}
@@ -204,6 +223,8 @@ def decide(store, provider, user):
                   {"Other": "direct", "Stop": "stop", "Waive": "waive"}[choice])
         if picked:
             direction = picked["label"] + ": " + picked["means"]
+    if effect == "pause":
+        raise Waiting()  # Keep the displayed request and step intact for a later answer.
     with store.transaction():
         cursor = store.cursor()
         if cursor.decision != ref:

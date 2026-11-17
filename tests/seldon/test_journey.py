@@ -10,7 +10,7 @@ from threading import Barrier
 import pytest
 
 from seldon import gitwork, plan, questions
-from seldon.providers import ROLES, Codex
+from seldon.providers import ROLES, Codex, ProviderFailure
 from seldon.run import Run
 
 
@@ -21,7 +21,8 @@ def test_wave_loop_golden(tmp_path, fault):
 
     The fault twin breaks an old reader with a new format and repairs its owner, then steers
     at C. One-wave and planning-only journeys miss stale bases, reused sessions and check-in
-    consent lost as the cursor advances. Waived requests must still have durable approvals.
+    consent lost as the cursor advances. The strict provider rejects STEER before execution
+    if any nested object makes fields optional. Empty changes must preserve the built product.
     """
     from wave_loop_journey import journey
 
@@ -219,6 +220,24 @@ print(json.dumps({'type':'turn.completed'}), flush=True)
 """
 
 
+def strict_schema(schema, path="schema"):
+    """Codex's pre-invocation rejection, shared by scripted planning and native WORK."""
+    if schema.get("type") == "object":
+        missing = schema["properties"].keys() - set(schema.get("required", []))
+        reason = (f"'{path}.required' is required to include every key in properties. "
+                  f"Missing '{next(iter(sorted(missing)))}'." if missing else
+                  f"'{path}.additionalProperties' is required to be false."
+                  if schema.get("additionalProperties") is not False else None)
+        if reason:
+            raise RuntimeError("Codex 400 Invalid schema for response_format 'codex_output_schema': " + reason)
+        for name, child in schema["properties"].items():
+            strict_schema(child, f"{path}.properties.{name}")
+    if "items" in schema:
+        strict_schema(schema["items"], path + ".items")
+    for index, child in enumerate(schema.get("anyOf", [])):
+        strict_schema(child, f"{path}.anyOf.{index}")
+
+
 class Scripted:
     def __init__(self, slot, mode="normal", count=1):
         self.slot, self.mode, self.count = Path(slot), mode, count
@@ -238,6 +257,7 @@ class Scripted:
         return 30
 
     def invoke(self, q, started):
+        strict_schema(q["schema"])
         if q["kind"] == "WORK":
             if self.mode == "wave-fault" and "Exact failure" in q["facts"]:
                 assert q["execution"]["session"]
@@ -253,6 +273,7 @@ class Scripted:
         return self(q), None
 
     def __call__(self, q):
+        strict_schema(q["schema"])
         kind, facts = q["kind"], q["facts"]
         self.calls.append(kind)
         if kind == "ALIGN":
@@ -1006,7 +1027,8 @@ def test_progressive_wave_plan_journey(tmp_path, steering):
                    for row in built["Finished wave"].values())
         previous = before["architecture"]
         changed = {**previous["contracts"][0], "text": "Saved values and export: UTF-8 CSV, name,value header."}
-        partial = {"contracts": [changed], "why": "Export the built values"}
+        partial = {"areas": [], "contracts": [changed], "decisions": [], "waves": [],
+                   "why": "Export the built values"}
         resent = {**deepcopy(previous), "contracts": [changed, *deepcopy(previous["contracts"][1:])],
                   "why": partial["why"]}
         merged = architecture.merge(previous, partial)
@@ -1293,10 +1315,10 @@ def test_planner_asks_and_drop_journey(tmp_path, kept_gap):
 
 @pytest.mark.fast
 def test_step_fault_and_waiver_journey(tmp_path):
-    """A real controller fault offers a retry without COACH; a waiver records each check-in.
+    """An identical invocation fault after planner guidance recommends a resumable Stop.
 
-    Worker-failure twins miss the deterministic fault route and the single decision slot
-    being consumed by a waived check-in. Whole-run waived progression is waveLoop's owner.
+    Worker-failure twins miss controller faults that encourage endless user retries.
+    Reopen and a later successful call must retain the decision and allow waived check-ins.
     """
     from seldon import decisions
 
@@ -1304,23 +1326,41 @@ def test_step_fault_and_waiver_journey(tmp_path):
     run, _ = prepare(slot)
 
     class Fault(Scripted):
-        failed = False
+        fixed = False
         def __call__(self, q):
-            if q["kind"] == "ARCHITECT" and not self.failed:
-                self.failed = True
-                raise RuntimeError("controller fault")
-            assert q["kind"] not in ("COACH", "DECIDE")
+            if q["kind"] == "ARCHITECT" and not self.fixed:
+                receipt = slot / f"failure-{time.time_ns()}.json"
+                receipt.write_text('{"cleanupVerified": true}')
+                raise ProviderFailure("Codex invocation failed: 400 Invalid schema for response_format "
+                    "'codex_output_schema': 'schema.properties.answer.anyOf.0.required' is required "
+                    "to include every key in properties. Missing 'areas'.", True, True, str(receipt))
+            assert q["kind"] != "DECIDE"
             return super().__call__(q)
 
     provider = Fault(slot)
     run.provider = provider
+    def user(item):
+        if "step" in item["subject"]:
+            raise decisions.Waiting()
+        return approve(item)
+    run.user = user
     try:
         run.run()
         item = run.store.read(run.store.cursor().decision)
         assert item["subject"]["step"] == "ARCHITECT"
-        assert [o["label"] for o in item["ask"]["options"]] == ["Try again", "Stop"]
+        assert run.store.records("planner_answer")
+        assert "Seldon's fault" in item["ask"]["question"]
+        assert "recommend Stop" in item["ask"]["question"]
+        assert "400 Invalid schema" in str(item["subject"]["tried"])
+        assert [o["label"] for o in item["ask"]["options"]] == ["Stop", "Try again"]
         assert decisions.holds(run.store)
+        request = run.store.cursor().decision
         run.close()
+        run = Run.reopen(slot / "product", provider, lambda item: "Stop")
+        run.run()
+        assert run.store.cursor().state == "ARCHITECT" and run.store.cursor().decision == request
+        run.close()
+        provider.fixed = True
         run = Run.reopen(slot / "product", provider,
             lambda item: "Try again" if "step" in item["subject"] else approve(item))
         while run.store.cursor().state != "B":

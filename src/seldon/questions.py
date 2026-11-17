@@ -186,10 +186,7 @@ def architect_brief(vision, words, gap=None, previous=None, built=None):
         facts["Previous architecture"] = previous
     if built is not None:
         facts.update(built)
-    question = build("ARCHITECT", facts)
-    if previous is not None or built is not None:
-        question["schema"]["properties"]["answer"]["anyOf"][0]["required"] = ["why"]
-    return question
+    return build("ARCHITECT", facts)
 
 
 def detail_brief(store, outline, area):

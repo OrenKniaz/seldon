@@ -242,9 +242,7 @@ class Run:
                 except Exception as error:  # any fault parks as a question; the store stays resumable (R15)
                     if self.store.cursor().decision:
                         break
-                    decisions.request(self.store, self.store.cursor().state, {
-                        "step": self.store.cursor().state, "tried": [f"{type(error).__name__}: {error}"],
-                        "affects": [], "recommendation": "", "options": ["Try again", "Give direction", "Stop"]})
+                    decisions.step_fault(self.store, self.provider, error)
                     cursor = self.store.cursor()
                 else:
                     cursor = self.store.cursor()

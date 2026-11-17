@@ -61,7 +61,8 @@ DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 def answer_schema(kind, targets=(), owners=()):
     gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1))
     payload = {
-        "ALIGN": VISION, "ARCHITECT": ARCHITECT,
+        "ALIGN": VISION, "ARCHITECT": obj(**{**ARCHITECT["properties"],
+            "waves": array(ARCHITECT["properties"]["waves"]["items"])}),
         "DETAIL": DETAIL_PLAN,
         "DECIDE": obj(choice=choice(*targets,
                                     "Other", "Stop", "Unclear")),
