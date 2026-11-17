@@ -205,32 +205,35 @@ def step(store, provider):
     for subject, body in subjects(document, kind).items():
         groups.setdefault(body.get("area", subject), []).append(subject)
     selected = {area: ss for area, ss in groups.items() if set(ss) - done}
-    replies = inference.batch(store, provider, {
-        area: brief(store, kind, ss, trees=trees) for area, ss in selected.items()})
     gaps = []
+    def consume(area, result, answer):
+        ss = selected[area]
+        if answer["verdict"] == "uncertain":
+            answer = {**answer, "verdict": "not judged", "gaps": []}
+        result = store.record("area_verdict", {"area": area, "source": result, "answer": answer,
+            "commit": cursor.candidate, "observations": [r for r in cursor.finalObservations
+                             if store.read(r)["check"] in trace(document, kind, ss[0])]})
+        local_gaps = corrections(store, area, result, answer)
+        for subject in ss:
+            if subject in done:
+                continue
+            targeted = [g for g in answer["gaps"] if g["target"] == subject]
+            individual = {**answer, "gaps": targeted, "verdict": (
+                "not judged" if answer["verdict"] == "not judged" else
+                "gap" if questions.must_fix({"gaps": targeted}) else "satisfied")}
+            if not ready(individual):
+                continue
+            ref = store.record("subject_verdict", {"subject": subject, "kind": kind,
+                "commit": cursor.candidate, "answer": individual, "source": result,
+                "scopeTrees": {r: trees[r] for r in owners(document, kind, subject)}})
+            row = store.cursor()
+            store.cursor(replace(row, qualityVerdicts=row.qualityVerdicts + [ref]))
+        gaps.extend(local_gaps)
+
+    inference.batch(store, provider, {
+        area: brief(store, kind, ss, trees=trees) for area, ss in selected.items()},
+        consume=consume, field="gaps.target/owners")
     with store.transaction():
-        for area, ss in selected.items():
-            result, answer = replies[area]
-            if answer["verdict"] == "uncertain":
-                answer = {**answer, "verdict": "not judged", "gaps": []}
-            result = store.record("area_verdict", {"area": area, "source": result, "answer": answer,
-                "commit": cursor.candidate, "observations": [r for r in cursor.finalObservations
-                                 if store.read(r)["check"] in trace(document, kind, ss[0])]})
-            gaps.extend(corrections(store, area, result, answer))
-            for subject in ss:
-                if subject in done:
-                    continue
-                targeted = [g for g in answer["gaps"] if g["target"] == subject]
-                individual = {**answer, "gaps": targeted, "verdict": (
-                    "not judged" if answer["verdict"] == "not judged" else
-                    "gap" if questions.must_fix({"gaps": targeted}) else "satisfied")}
-                if not ready(individual):
-                    continue
-                ref = store.record("subject_verdict", {"subject": subject, "kind": kind,
-                    "commit": cursor.candidate, "answer": individual, "source": result,
-                    "scopeTrees": {r: trees[r] for r in owners(document, kind, subject)}})
-                row = store.cursor()
-                store.cursor(replace(row, qualityVerdicts=row.qualityVerdicts + [ref]))
         if gaps:
             fixups.apply(store, gaps)
         else:

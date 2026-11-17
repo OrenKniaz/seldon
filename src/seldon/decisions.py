@@ -5,6 +5,7 @@ from pathlib import Path
 import traceback
 
 from . import inference, plan, questions, recovery
+from .answers import ConsumptionFailure
 from .providers import ProviderFailure
 from .states import advance
 
@@ -59,8 +60,9 @@ def coach(store, provider, subject):
             **questions.agreement_facts(document, ref)})
     else:
         facts["Requirements and agreements"] = document
-    source, answer = inference.call(store, provider, questions.build("COACH", facts))
-    with store.transaction():
+    response = None
+    def consume(source, answer):
+        nonlocal subject, response
         key, subject = recovery.subject(store, "UNIT" if ref else subject["step"], subject)
         history = store.recovery(key)
         if "guidance" in answer and not history["coached"]:
@@ -83,7 +85,14 @@ def coach(store, provider, subject):
             ask["options"].append(option("Leave this out", "Leave out this unit and its dependents", "drop"))
         elif "guidance" in answer:
             ask["options"].append(option("Stop", "Stop the dream", "stop"))
-        return {**subject, "ask": ask, "planner": source}
+        response = {**subject, "ask": ask, "planner": source}
+    try:
+        inference.call(store, provider, questions.build("COACH", facts), consume=consume, field="guidance/ask")
+    except ConsumptionFailure as error:
+        cause, shape = record_fault(store, error)
+        recovery.failed(store, cause, shape=shape)
+        response = {**subject, "failure": shape["failure"], "ask": pause_ask(str(error))}
+    return response
 
 
 def ask_unit(store, provider, ref):
@@ -102,13 +111,11 @@ def option(label, means, effect):
     return {"label": label, "means": means, "effect": effect}
 
 
-def step_fault(store, provider, error):
+def record_fault(store, error):
     step = store.cursor().state
     cause = error.__cause__ if isinstance(error.__cause__, ProviderFailure) else error
     failure = f"{type(cause).__name__}: {cause}"
-    key = recovery.lineage(store)
     shape = {"step": step, "failure": failure}
-    repeated = shape in store.recovery(key)["seen"]
     frames = [f for f in traceback.extract_tb(cause.__traceback__)
               if Path(__file__).parent == Path(f.filename).parent
               and Path(f.filename).name != "processes.py"
@@ -117,13 +124,25 @@ def step_fault(store, provider, error):
                 if frames else None)
     cause = store.record("step_failure", {**shape, "exceptionType": type(cause).__name__,
         "message": str(cause), "location": location})
+    return cause, shape
+
+
+def pause_ask(reason):
+    return {"question": "This is Seldon's fault: recovery did not resolve this step. "
+        f"We recommend Stop to pause here until Seldon is fixed.\n{reason}",
+        "options": [option("Stop", "Pause here; your work is saved and can resume", "pause"),
+                    option("Try again", "Retry this step if its cause has been fixed", "direct")]}
+
+
+def step_fault(store, provider, error):
+    cause, shape = record_fault(store, error)
+    step, failure = shape["step"], shape["failure"]
+    key = recovery.lineage(store)
+    repeated = shape in store.recovery(key)["seen"]
     recovery.failed(store, cause, shape=shape)
     subject = {"step": step, "tried": [failure], "failure": failure}
     if repeated:
-        subject["ask"] = {"question": "This is Seldon's fault: the same step failed again after "
-            "the planner's new approach. We recommend Stop to pause here until Seldon is fixed.",
-            "options": [option("Stop", "Pause here; your work is saved and can resume", "pause"),
-                        option("Try again", "Retry this step if its cause has been fixed", "direct")]}
+        subject["ask"] = pause_ask(str(error))
     else:
         subject = coach(store, provider, subject)
     if subject:
@@ -217,19 +236,25 @@ def decide(store, provider, user):
         normal = lambda text: "".join(text.casefold().split())
         picked = next((o for o in options if normal(o["label"]) == normal(words)), None)
         if picked is None:
-            interpretation, answer = inference.call(store, provider, questions.build("DECIDE", {
+            selection = {}
+            def consume(source, answer):
+                choice = answer["choice"]
+                picked = next((o for o in options if o["label"] == choice), None)
+                effect = picked["effect"] if picked else {
+                    "Other": "direct", "Stop": "stop", "Waive": "waive", "Unclear": None}[choice]
+                selection.update(picked=picked, choice=choice, effect=effect, why=answer["why"])
+            interpretation, _ = inference.call(store, provider, questions.build("DECIDE", {
                 "Decision": item["gate"], "Displayed subject": item["subject"],
                 "Displayed options": item["ask"], "User's words": words},
-                targets=[o["label"] for o in options] + (["Waive"] if item["gate"] == "CHECK-IN" else [])))
-            picked = next((o for o in options if o["label"] == answer["choice"]), None)
-            choice = answer["choice"]
-            if picked is None and choice not in ("Other", "Stop", "Waive"):
+                targets=[o["label"] for o in options] + (["Waive"] if item["gate"] == "CHECK-IN" else [])),
+                consume=consume, field="choice")
+            picked, choice, effect = (selection[k] for k in ("picked", "choice", "effect"))
+            if effect is None:
                 with store.transaction():
-                    store.cursor(replace(store.cursor(), failure=answer["why"]))
+                    store.cursor(replace(store.cursor(), failure=selection["why"]))
                 raise Waiting()
-        choice = picked["label"] if picked else choice
-        effect = (picked["effect"] if picked else
-                  {"Other": "direct", "Stop": "stop", "Waive": "waive"}[choice])
+        else:
+            choice, effect = picked["label"], picked["effect"]
         if picked:
             direction = picked["label"] + ": " + picked["means"]
     if effect == "pause":

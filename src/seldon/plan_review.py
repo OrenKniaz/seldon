@@ -23,10 +23,14 @@ def step(store, provider, capacity):
             "Area": area, "Units": units,
             "Plan": {r: document["nodes"][r] for r in requirements | features},
             "Contracts": {r: c for u in units for r, c in architecture.contracts_for(document, u).items()}})
-    replies = inference.batch(store, provider, pending)
-    gaps = [{**g, "area": area} for area, (_, a) in replies.items() for g in a.get("gaps", [])]
-    unknown = {area: {"reason": a["why"], "neededFacts": a["neededFacts"]}
-               for area, (_, a) in replies.items() if a["verdict"] == "uncertain"}
+    projections = {}
+    def consume(area, source, answer):
+        projections[area] = ([{**g, "area": area} for g in answer.get("gaps", [])],
+            {"reason": answer["why"], "neededFacts": answer["neededFacts"]}
+            if answer["verdict"] == "uncertain" else None)
+    replies = inference.batch(store, provider, pending, consume=consume, field="verdict/gaps")
+    gaps = [g for gs, _ in projections.values() for g in gs]
+    unknown = {area: unknown for area, (_, unknown) in projections.items() if unknown}
     ref = store.record("plan_review", {"revision": cursor.revision,
         "subjects": {s: r for s, (r, _) in replies.items()},
         "answer": {"verdict": "gap" if questions.must_fix({"gaps": gaps}) else "not judged" if unknown else "adequate", "gaps": gaps},

@@ -66,12 +66,17 @@ PROMPTS = {
                  'commitments to waves; write in full only the contracts the next wave needs, '
                  'leaving later contracts as a handle and one line. Give every commitment to an area '
                  'and give areas disjoint path scopes. With built results, name only what changes; '
-                 'a change to accepted scope returns scope for the user.',
+                 'a change to accepted scope returns scope for the user.\n'
+                 'waves: the full horizon, completed waves included; when steering, remaining waves '
+                 'alone also work, and an empty list keeps the horizon.\n'
+                 'areas/contracts: handles merge with existing entries when steering; empty lists keep them.',
     "DETAIL": 'What features, requirements and units deliver this wave in this area? Each requirement '
               'has one plain-words acceptance sentence. Assign disjoint scopes, requirements and dependencies to '
               'session-sized units. Subdivide if needed; a missing agreement returns a contract_gap to the '
               'planner. Normally the area is one unit. Use more only when they can be built at the same '
-              "time. Name a dependency only when a unit cannot be written until another unit's files exist.",
+              "time. Name a dependency only when a unit cannot be written until another unit's files exist.\n"
+              "edits: requirement features refer to feature targetHandle values in this answer.\n"
+              "units: requirements use local requirement handles; dependencies use one-based unit positions.",
     "REVIEW": "Do the planned requirements and responsibilities cover the accepted commitments? "
               "Name a missing accepted promise and its correction. " + JUDGMENT_LEEWAY,
     "COACH": "Answer this worker's question using the accepted requirements, contracts and tools. "
@@ -86,7 +91,9 @@ PROMPTS = {
             "acceptance sentences; declare each check's command, plus checkPaths "
             "including helpers needed without the product. Code observes RED without product and GREEN "
             "with it. Return a question in summary for missing facts or requirement meaning. Save visual evidence "
-            "in SELDON_EVIDENCE_DIR. " + DEFECT_HANDOFF,
+            "in SELDON_EVIDENCE_DIR.\n"
+            "checkPaths: paths of checks and helpers inside your scope; Seldon uses them to run checks without product.\n"
+            "discoveries: Seldon sends each correction to its named owner, then reruns your checks. " + DEFECT_HANDOFF,
     "JUDGE": "Judge only the supplied acceptance sentences by their meaning: delivered, exercised by "
              "a meaningful check with the supplied execution observations, and no stub replacing that behaviour? "
              "A gap quotes the acceptance sentence it breaks; other suggestions are notes. "
@@ -371,7 +378,7 @@ class AnswerRejected(ValueError):
         self.answer = answer
 
 
-def ask(provider, question, record, check=lambda answer: None, retries=2):
+def ask(provider, question, record, retries=2):
     original = question
     rejected = []
     for attempt in range(retries + 1):
@@ -380,26 +387,8 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
         answer = None
         try:
             decoded = json.loads(raw)
-            if original["kind"] == "ARCHITECT" and original["facts"].get("Previous architecture"):
-                patch = decoded["answer"]
-                if "scope" not in patch:
-                    facts = original["facts"]
-                    previous = facts["Previous architecture"]
-                    finished = len(previous["waves"]) - len(facts.get("Remaining waves", previous["waves"]))
-                    decoded["answer"] = {**architecture.merge(
-                        previous, patch, completed=previous["waves"][:finished]), "why": patch["why"]}
             validate(decoded, question["schema"])
             answer = decoded["answer"]
-            if answer.get("verdict") != "uncertain":
-                if answer.get("verdict") == "gap" and not answer["gaps"]:
-                    raise ValueError("A gap verdict must name its correction")
-                if "gaps" in answer:
-                    answer = {**answer, "verdict": ("gap" if must_fix(answer) else
-                              "adequate" if original["kind"] == "REVIEW" else "satisfied")}
-                check(answer)
-        except architecture.ContractGap:
-            record({"rawAnswer": raw, "errors": ["Needs an architecture correction"]})
-            raise
         except (ValueError, KeyError) as error:
             errors = str(error).splitlines()
         record({"rawAnswer": raw, "errors": errors})

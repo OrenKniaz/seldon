@@ -44,6 +44,15 @@ def thread_from_recording(store, ref):
 
 
 def work(store, provider, ref):
+    def consume(report, answer):
+        store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
+        if answer["outcome"] == "question" and not any(d["owner"] != ref for d in answer["discoveries"]):
+            return
+        store.record("worker_checks", {"unit": ref, "report": report,
+            "checkPaths": answer["checkPaths"], "checks": answer["checks"],
+            "discoveries": answer["discoveries"]})
+        advance(store, "returned", report, unit=ref, report=report)
+
     report = recovered_report(store, ref)
     if report is None:
         thread_from_recording(store, ref)
@@ -51,7 +60,8 @@ def work(store, provider, ref):
         store.record("writer_start", {"unit": ref, "session": store.unit(ref).thread,
                                       "startedAt": time.time()})
         try:
-            report, answer = inference.call(store, provider, question, unit=ref)
+            report, answer = inference.call(store, provider, question, unit=ref, consume=consume,
+                                           field="outcome/checkPaths/checks/discoveries")
         except ResumeUnavailable as error:
             if not error.cleanup_verified:
                 raise
@@ -60,10 +70,11 @@ def work(store, provider, ref):
                 row = store.unit(ref)
                 store.unit(ref, replace(row, thread=None,
                                         failure=row.failure + "\nResume unavailable: " + str(error)))
-            report, answer = inference.call(store, provider, questions.work_brief(store, ref), unit=ref)
+            report, answer = inference.call(store, provider, questions.work_brief(store, ref), unit=ref,
+                consume=consume, field="outcome/checkPaths/checks/discoveries")
     else:
-        answer = store.read(report)["answer"]
-    store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
+        report, answer = inference.call(store, provider, questions.work_brief(store, ref), unit=ref,
+            consume=consume, field="outcome/checkPaths/checks/discoveries", retained=report)
     if answer["outcome"] == "question" and not any(d["owner"] != ref for d in answer["discoveries"]):
         text = answer["summary"]
         recovery.recover(store, ref, text, cause=report, direct=True)
@@ -72,11 +83,6 @@ def work(store, provider, ref):
         if subject:
             decisions.request(store, "UNIT", subject)
         return
-    with store.transaction():
-        store.record("worker_checks", {"unit": ref, "report": report,
-            "checkPaths": answer["checkPaths"], "checks": answer["checks"],
-            "discoveries": answer["discoveries"]})
-        advance(store, "returned", report, unit=ref, report=report)
 
 
 def integrate(store, ref, checks):
@@ -145,21 +151,25 @@ def run_unit(store, provider, ref):
                         advance(store, "approved", unit.P, unit=ref, judgment=None)
                         continue
                     else:
-                        result, answer = inference.call(store, provider, questions.judge_brief(store, ref))
-                        if not questions.satisfied(answer):
-                            prior = [b for _, _, b in store.records("unit_gap")
-                                     if b["unit"] == ref and b["base"] == unit.base]
-                            gap = store.record("unit_gap", {"unit": ref, "base": unit.base,
-                                "commit": unit.P, "answer": answer, "source": result})
-                            if not prior:
-                                advance(store, "recover", gap, unit=ref, failure=str(answer),
-                                        report=None, T=None, P=None, observations=[], judgment=None)
-                                continue
-                            store.record("open_gap", {"unit": ref, "commit": unit.P,
-                                "label": "open gap", "answer": answer, "source": result})
-                        result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,
-                            "source": result, "scopeTree": gitwork.scope_tree(
-                                unit.worktree, unit.P, contract["scope"], store.cursor().scratch)})
+                        tree = gitwork.scope_tree(unit.worktree, unit.P, contract["scope"], store.cursor().scratch)
+                        def consume(result, answer):
+                            if not questions.satisfied(answer):
+                                prior = [b for _, _, b in store.records("unit_gap")
+                                         if b["unit"] == ref and b["base"] == unit.base]
+                                gap = store.record("unit_gap", {"unit": ref, "base": unit.base,
+                                    "commit": unit.P, "answer": answer, "source": result})
+                                if not prior:
+                                    advance(store, "recover", gap, unit=ref, failure=str(answer),
+                                            report=None, T=None, P=None, observations=[], judgment=None)
+                                    return
+                                store.record("open_gap", {"unit": ref, "commit": unit.P,
+                                    "label": "open gap", "answer": answer, "source": result})
+                            result = store.record("unit_verdict", {"commit": unit.P, "answer": answer,
+                                "source": result, "scopeTree": tree})
+                            advance(store, "approved", result, unit=ref, judgment=result)
+                        inference.call(store, provider, questions.judge_brief(store, ref),
+                                       consume=consume, field="verdict/gaps")
+                        continue
                     advance(store, "approved", result, unit=ref, judgment=result)
                 elif unit.state == "INTEGRATING":
                     integrate(store, ref, integrated_checks)
@@ -199,7 +209,7 @@ def judge_wave(store, provider, observations):
         refs = [r for r in observations if store.read(r)["unit"] == ref]
         batch[ref] = questions.judge_brief(store, ref, cursor.candidate, refs)
     gaps = []
-    for ref, (source, answer) in inference.batch(store, provider, batch).items():
+    def consume(ref, source, answer):
         if answer["verdict"] == "uncertain":
             answer = {**answer, "verdict": "not judged", "gaps": []}
         result = store.record("unit_verdict", {"commit": cursor.candidate, "answer": answer,
@@ -210,4 +220,5 @@ def judge_wave(store, provider, observations):
         if not questions.satisfied(answer) and answer["verdict"] != "not judged":
             gaps.append({"subject": ref, "kind": "flow", "commit": cursor.candidate,
                          "units": [ref], "correction": str(answer), "source": result})
+    inference.batch(store, provider, batch, consume=consume, field="verdict/gaps")
     return gaps

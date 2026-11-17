@@ -3,6 +3,7 @@
 from copy import deepcopy
 
 from . import plan
+from .answers import Mismatch
 from .schema import ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT
 from .schema import validate as validate_schema
 
@@ -73,10 +74,12 @@ def stale_consumers(before, after):
             for c in (old.get(r), new.get(r)) if c for u in c["consumers"]}
 
 
-def index(items):
+def index(items, field="areas/contracts"):
     result = {item["handle"]: item for item in items}
-    if len(result) != len(items):
-        raise ValueError("Give each area or contract a distinct handle")
+    if any(item != result[item["handle"]] for item in items):
+        raise Mismatch(field, f"Seldon expected one entry per handle in {field}; got "
+                       f"conflicting entries among {len(items)} entries for {len(result)} handles. "
+                       "Send one agreed entry per handle.")
     return result
 
 
@@ -91,7 +94,8 @@ def merge(previous, answer, completed=()):
         return answer
     result = deepcopy(previous)
     for field in ("areas", "contracts"):
-        items = index(result[field])
+        items = index(result[field], field)
+        index(answer.get(field, []), field)
         for item in answer.get(field, []):
             items[item["handle"]] = {**items.get(item["handle"], {}), **deepcopy(item)}
         result[field] = list(items.values())
@@ -124,12 +128,17 @@ def outline(answer, vision=None):
     assigned_waves = {r for w in answer["waves"] for r in w["commitments"]}
     accepted = commitments(vision) if vision is not None else {
         r: None for a in answer["areas"] for r in a["commitments"]}
+    if not answer["waves"]:
+        raise Mismatch("waves", "Seldon expected a wave horizon; got no waves. Send at least "
+                       "one wave with its goal and commitments; when steering, an empty list keeps the horizon.")
     answer["waves"][-1]["commitments"].extend(r for r in accepted if r not in assigned_waves)
     validate_schema({k: v for k, v in answer.items() if k != "why"}, ARCHITECT)
-    areas, contracts = index(answer["areas"]), index(answer["contracts"])
+    areas, contracts = index(answer["areas"], "areas"), index(answer["contracts"], "contracts")
+    answer["areas"], answer["contracts"] = list(areas.values()), list(contracts.values())
     assigned = {r for a in areas.values() for r in a["commitments"]}
     if vision is not None and assigned != set(commitments(vision)):
-        raise ValueError("Assign every accepted commitment to an area, using its supplied handle")
+        raise Mismatch("areas.commitments", f"Seldon expected the accepted commitment handles "
+            f"{list(accepted)}; got {sorted(assigned)}. Send every accepted handle assigned to an area.")
     if areas.keys() & contracts.keys():
         raise ValueError("Area and contract handles must be distinct")
     for ref, area in areas.items():
@@ -137,14 +146,19 @@ def outline(answer, vision=None):
             plan.safe_path(path)
         for other, sibling in areas.items():
             if ref < other and plan.overlaps(area["scope"], sibling["scope"]):
-                raise ValueError("Areas need disjoint write scopes")
+                raise Mismatch("areas.scope", f"Seldon expected disjoint write scopes; got "
+                    f"{ref} {area['scope']} overlapping {other} {sibling['scope']}. "
+                    "Send scopes with one area owning each path.")
     for ref, contract in contracts.items():
         readers = contract["consumers"] = list(dict.fromkeys(
             r for r in contract["consumers"] if r != contract["provider"]))
         if contract["provider"] not in areas or set(readers) - areas.keys():
-            raise ValueError(f"{ref}: name existing provider and consumer areas")
+            raise Mismatch("contracts.provider/consumers", f"Seldon expected area handles "
+                f"{list(areas)} for {ref}; got provider {contract['provider']} and consumers {readers}. "
+                "Send the handles of the areas that provide and consume this contract.")
     if any(set(d["areas"]) - areas.keys() for d in answer["decisions"]):
-        raise ValueError("Decisions must name existing areas")
+        raise Mismatch("decisions.areas", f"Seldon expected area handles {list(areas)}; got "
+            f"{[d['areas'] for d in answer['decisions']]}. Send existing area handles for each decision.")
     return areas, contracts
 
 
@@ -153,7 +167,8 @@ def local_plan(area, contracts, answer, vision):
     validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_PLAN)
     handles = {e["targetHandle"]: e["kind"] for e in answer["edits"]}
     if len(handles) != len(answer["edits"]):
-        raise ValueError("Each local record needs a distinct handle")
+        raise Mismatch("edits.targetHandle", f"Seldon expected distinct local record handles; got "
+            f"{[e['targetHandle'] for e in answer['edits']]}. Send each local handle once.")
     relations = {"requirement": ("features", "feature")}
     for edit in answer["edits"]:
         if edit["kind"] in relations:
@@ -161,7 +176,9 @@ def local_plan(area, contracts, answer, vision):
             if any(handles.get(r) != kind and not (kind == "requirement" and r in contracts
                     and endpoint(area["handle"], contracts[r]) != "provider")
                    for r in edit["typedBody"][field]):
-                raise ValueError(f"Local {field} must name this area's {kind} handles")
+                raise Mismatch(f"edits.typedBody.{field}", f"Seldon expected this area's {kind} "
+                    f"handles {[h for h, k in handles.items() if k == kind]}; got {edit['typedBody'][field]}. "
+                    "Send the matching local handles from this answer's edits.")
     for unit in answer["units"]:
         for path in unit["scope"]:
             plan.safe_path(path)
@@ -171,9 +188,13 @@ def local_plan(area, contracts, answer, vision):
             raise ContractGap(f"Area {area['handle']}: keep work inside its named area scopes; "
                               f"ARCHITECT must assign missing scope for {missing}", [area["handle"]])
         if any(handles.get(r) != "requirement" for r in unit["requirements"]):
-            raise ValueError("Units must own local requirement handles")
+            raise Mismatch("units.requirements", f"Seldon expected local requirement handles "
+                f"{[h for h, k in handles.items() if k == 'requirement']}; got {unit['requirements']}. "
+                "Send requirement handles from this answer's edits.")
         if any(dep > len(answer["units"]) for dep in unit["dependencies"]):
-            raise ValueError("Dependencies must name local unit positions")
+            raise Mismatch("units.dependencies", f"Seldon expected positions 1 through "
+                f"{len(answer['units'])}; got {unit['dependencies']}. Send one-based positions "
+                "of the units this unit depends on.")
     nodes = {"vision": {"kind": "vision", "body": {
         k: v for k, v in vision.items() if k != "why"}}}
     nodes.update({e["targetHandle"]: {"kind": e["kind"], "body": {

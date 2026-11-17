@@ -4,11 +4,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
-from . import questions
+from . import architecture, features, questions
+from .answers import ConsumptionFailure, Mismatch
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, role_for
 
 
-def call(store, provider, question, unit=None, check=lambda answer: None, retries=2, binding=None):
+def call(store, provider, question, unit=None, check=lambda answer: None, retries=2, binding=None,
+         consume=lambda source, answer: None, field="answer", retained=None):
     setup = store.read(store.cursor().kickoff)["setup"]
     kind = question["kind"]
     attempt = None
@@ -56,17 +58,60 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
     def recorded(body):
         return store.record("provider_reply", {"attempt": attempt, "finishedAt": time.time(), **body})
 
-    answer = questions.ask(invoke, question, recorded, check, retries=retries)
-    with store.transaction():
-        result = store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit,
-                                         "answer": answer, "binding": binding})
-        store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
-    if answer.get("verdict") == "uncertain" and kind == "JUDGE":
-        answer = {**answer, "verdict": "not judged", "gaps": []}
-    return result, answer
+    original, correction = question, None
+    while True:
+        if retained:
+            body = store.read(retained)
+            attempt, answer = body.get("attempt"), body["answer"]
+        else:
+            answer = questions.ask(invoke, question, recorded, retries=retries)
+        try:
+            # Only answer-to-record work belongs here; provider calls and execution stay outside.
+            # Roll back partial records so an exact correction never applies an answer twice.
+            with store.transaction():
+                if kind == "ARCHITECT" and original["facts"].get("Previous architecture") and "scope" not in answer:
+                    facts = original["facts"]
+                    previous = facts["Previous architecture"]
+                    finished = len(previous["waves"]) - len(facts.get("Remaining waves", previous["waves"]))
+                    answer = {**architecture.merge(previous, answer, completed=previous["waves"][:finished]),
+                              "why": answer["why"]}
+                if answer.get("verdict") != "uncertain":
+                    if answer.get("verdict") == "gap" and not answer["gaps"]:
+                        raise Mismatch("gaps", "Seldon expected the corrections behind a gap verdict; "
+                            "got an empty gaps list. Send the gaps, or a satisfied verdict.")
+                    if "gaps" in answer:
+                        answer = {**answer, "verdict": ("gap" if questions.must_fix(answer) else
+                                  "adequate" if kind == "REVIEW" else "satisfied")}
+                    check(answer)
+                if answer.get("verdict") == "uncertain" and kind == "JUDGE":
+                    answer = {**answer, "verdict": "not judged", "gaps": []}
+                result = retained or store.record("answer", {"attempt": attempt, "kind": kind, "unit": unit,
+                    "answer": answer, "binding": binding})
+                consume(result, answer)
+                if not retained:
+                    store.record("attempt_end", {"attempt": attempt, "result": result, "finishedAt": time.time()})
+            return result, answer
+        except architecture.ContractGap:
+            raise  # A missing agreement is a planner decision, not an unusable answer.
+        except Exception as error:
+            failed_field = error.field if isinstance(error, Mismatch) else field
+            reason = (error.reason if isinstance(error, Mismatch) else
+                f"Seldon could not use {kind}.{failed_field}: "
+                + (str(error) if isinstance(error, ValueError) else
+                   f"unexpected {type(error).__name__} while turning this field into records. "
+                   "Send this field using the supplied handles and facts; if it repeats, pause for a Seldon fix."))
+            store.record("consumption_failure", {"attempt": attempt, "kind": kind,
+                "field": failed_field, "reason": reason, "exceptionType": type(error).__name__,
+                "answer": answer})
+            if correction is not None or not features.enabled("answerRepair"):
+                raise ConsumptionFailure(f"Seldon's fault using {kind}.{failed_field}: {reason}") from error
+            correction = {"Rejected answer": answer, "Errors": [reason]}
+            retained = None
+            question = {**original, "facts": {**original["facts"], "Exact corrections": [correction]}}
 
 
-def batch(store, provider, pending, check=lambda answer, question: None):
+def batch(store, provider, pending, check=lambda answer, question: None,
+          consume=lambda subject, source, answer: None, field="answer"):
     """Record independent replies on one candidate; only the controller applies their outcomes."""
     cursor = store.cursor()
     bindings = {s: [cursor.candidate, cursor.revision, q["kind"], s] for s, q in pending.items()}
@@ -76,8 +121,10 @@ def batch(store, provider, pending, check=lambda answer, question: None):
     def ask(subject):
         try:
             question = pending[subject]
-            return recorded.get(tuple(bindings[subject])) or call(store, provider, question,
-                check=lambda a: check(a, question), binding=bindings[subject])
+            retained = recorded.get(tuple(bindings[subject]))
+            return call(store, provider, question, check=lambda a: check(a, question),
+                binding=bindings[subject], consume=lambda r, a: consume(subject, r, a), field=field,
+                retained=retained[0] if retained else None)
         finally:
             store.close()
 

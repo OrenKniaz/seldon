@@ -140,14 +140,16 @@ def step(store, provider):
     done = {store.read(r)["feature"] for r in cursor.demoVerdicts}
     selected = [f for f in plan.select(document, "feature") if f not in done]
     batch = {f: brief(store, f) for f in selected}
-    replies = inference.batch(store, provider, batch)
+    reviewed = {}
+    inference.batch(store, provider, batch,
+        consume=lambda feature, source, answer: reviewed.update({feature: review(store, feature, source, answer)}),
+        field="gaps.target/owners")
     gaps, verdicts = [], list(cursor.demoVerdicts)
     with store.transaction():
-        for feature, (result, answer) in replies.items():
-            reviewed = review(store, feature, result, answer)
-            gaps.extend(reviewed["gaps"])
-            if not reviewed["gaps"]:
-                verdicts.append(reviewed["verdict"])
+        for result in reviewed.values():
+            gaps.extend(result["gaps"])
+            if not result["gaps"]:
+                verdicts.append(result["verdict"])
         store.cursor(replace(store.cursor(), demoVerdicts=verdicts))
         if gaps:
             fixups.apply(store, gaps)

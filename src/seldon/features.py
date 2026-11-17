@@ -2,6 +2,7 @@
 
 Each switch lives at the one point where behaviour branches; it is deleted once an A/B decides (R16).
 Switches: severity (judge gap severity; off = every gap blocks, as before 11-17).
+answerRepair (one exact correction for answer consumption failures; off = report immediately).
 """
 import os
 

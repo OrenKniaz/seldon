@@ -15,6 +15,170 @@ from seldon.run import Run
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("repeat", [False, True])
+def test_answer_consumption_repair_golden(tmp_path, repeat):
+    """An unusable but schema-valid architecture is corrected before asking the user.
+
+    Duplicate handles used to spend schema retries with no consumption record or useful
+    expected/got context. The repeat twin protects against endless exact-fix retries and
+    proves the real COACH/user route recommends a resumable pause. Schema-only twins
+    cannot exercise this producer-to-plan boundary.
+    """
+    from seldon import decisions
+
+    slot = tmp_path / "answer-repair"
+    run, _ = prepare(slot)
+    questions_seen, user_questions = [], []
+
+    class Mismatch(Scripted):
+        def __call__(self, q):
+            raw = super().__call__(q)
+            if q["kind"] == "ARCHITECT":
+                questions_seen.append(q)
+                if repeat or "Exact corrections" not in q["facts"]:
+                    body = json.loads(raw)
+                    conflict = {**body["answer"]["areas"][0], "responsibility": "A conflicting responsibility"}
+                    body["answer"]["areas"].append(conflict)
+                    return json.dumps(body)
+                # An identical repeated entry has one sensible meaning; normalise it.
+                body = json.loads(raw)
+                body["answer"]["areas"].append(deepcopy(body["answer"]["areas"][0]))
+                return json.dumps(body)
+            if q["kind"] == "COACH":
+                assert "ARCHITECT" in str(q["facts"]["Unresolved work"])
+                assert "areas" in str(q["facts"]["Unresolved work"])
+                return json.dumps({"answer": {"guidance": "Send distinct area handles",
+                                               "why": "The area list repeats a handle"}})
+            return raw
+
+    run.provider = Mismatch(slot)
+    def user(item):
+        if "step" in item["subject"]:
+            user_questions.append(item)
+            raise decisions.Waiting()
+        return approve(item)
+    run.user = user
+    try:
+        run.run()
+        failures = [b for _, _, b in run.store.records("consumption_failure")]
+        assert failures and all(b["kind"] == "ARCHITECT" and b["field"] == "areas"
+                                for b in failures)
+        reason = failures[0]["reason"]
+        assert "expected" in reason and "got" in reason and "Send" in reason
+        assert reason in str(questions_seen[1]["facts"]["Exact corrections"])
+        if repeat:
+            assert len(questions_seen) == 4 and len(failures) == 4
+            assert run.store.records("planner_answer") and len(user_questions) == 1
+            item = user_questions[0]
+            assert reason in str(item["subject"])
+            assert reason in item["ask"]["question"]
+            assert "Seldon's fault" in item["ask"]["question"]
+            assert "pause" in item["ask"]["question"]
+            assert item["ask"]["options"][0]["effect"] == "pause"
+        else:
+            assert len(questions_seen) == 2 and len(failures) == 1
+            assert not user_questions and not run.store.records("step_failure")
+            assert run.store.cursor().state == "SCRIPTED_C"
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("off", [False, True])
+def test_consumption_crash_rollback_and_switch_journey(tmp_path, monkeypatch, off):
+    """A crash after plan insertion rolls back and teaches the same question its context.
+
+    A schema-valid answer can fail inside Seldon's projection after writes have begun.
+    Existing input-error twins fail before writing and miss partial plan publication.
+    The off twin proves the cohort switch routes directly to existing planner recovery.
+    """
+    if off:
+        monkeypatch.setenv("SELDON_OFF", "answerRepair")
+    else:
+        monkeypatch.delenv("SELDON_OFF", raising=False)
+    slot = tmp_path / "consumption-crash"
+    run, _ = prepare(slot)
+    original = run.store.revision
+    failed, seen = [], []
+    def interrupted(document, parent=None):
+        revision = original(document, parent)
+        if not failed:
+            failed.append(revision)
+            raise IndexError("list index out of range")
+        return revision
+    monkeypatch.setattr(run.store, "revision", interrupted)
+
+    class Planner(Scripted):
+        def __call__(self, q):
+            if q["kind"] == "ARCHITECT":
+                seen.append(q)
+            if failed and q["kind"] in ("ARCHITECT", "COACH"):
+                assert run.store.cursor().revision is None
+                assert run.store.db.execute("SELECT count(*) FROM plan_revision").fetchone()[0] == 0
+                assert not [b for _, _, b in run.store.records("answer") if b["kind"] == "ARCHITECT"]
+            return super().__call__(q)
+    run.provider = Planner(slot)
+    try:
+        run.run()
+        assert run.store.cursor().state == "SCRIPTED_C"
+        failures = [b for _, _, b in run.store.records("consumption_failure")]
+        assert len(failures) == 1 and failures[0]["exceptionType"] == "IndexError"
+        reason = failures[0]["reason"]
+        assert "ARCHITECT" in reason and "waves" in reason and "Send" in reason
+        assert "list index out of range" not in reason
+        assert len(seen) == 2
+        assert bool(run.store.records("planner_answer")) == off
+        assert (reason in str(seen[1]["facts"].get("Exact corrections"))) == (not off)
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+def test_coach_consumption_failure_parks_golden(tmp_path, monkeypatch):
+    """If Seldon cannot consume COACH either, its saved question recommends pause.
+
+    Ordinary step-fault twins assume coaching works; a bug applying its guidance used
+    to escape the recovery handler itself, leaving no helpful question to resume from.
+    """
+    from seldon import decisions
+    slot = tmp_path / "coach-crash"
+    run, _ = prepare(slot)
+    record = run.store.record
+    def broken(kind, body):
+        ref = record(kind, body)
+        if kind == "planner_answer":
+            raise IndexError("list index out of range")
+        return ref
+    monkeypatch.setattr(run.store, "record", broken)
+    class Planner(Scripted):
+        def __call__(self, q):
+            raw = super().__call__(q)
+            if q["kind"] == "ARCHITECT":
+                body = json.loads(raw)
+                body["answer"]["waves"] = []
+                return json.dumps(body)
+            return raw
+    run.provider = Planner(slot)
+    def user(item):
+        if "step" in item["subject"]:
+            raise decisions.Waiting()
+        return approve(item)
+    run.user = user
+    try:
+        run.run()
+        request = run.store.read(run.store.cursor().decision)
+        assert "COACH.guidance/ask" in request["ask"]["question"]
+        assert "IndexError" in request["ask"]["question"]
+        assert "list index out of range" not in request["ask"]["question"]
+        assert request["ask"]["options"][0]["effect"] == "pause"
+        assert not run.store.records("planner_answer")
+        assert len([b for _, _, b in run.store.records("consumption_failure") if b["kind"] == "COACH"]) == 2
+        assert len(run.store.records("step_failure")) == 2
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("fault", [False, True])
 def test_wave_loop_golden(tmp_path, fault):
     """An unanswered check-in allows planning but holds new work; its answer grows the product.

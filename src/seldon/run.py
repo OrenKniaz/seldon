@@ -132,8 +132,8 @@ class Run:
             facts = {**questions.user_words(store), "Runtime": questions.runtime(kickoff["setup"])}
             if cursor.requestedChange:
                 facts["Requested change"] = store.read(cursor.requestedChange)
-            ref, answer = inference.call(store, self.provider, questions.build("ALIGN", facts))
-            advance(store, "aligned", ref, vision=ref, requestedChange=None)
+            inference.call(store, self.provider, questions.build("ALIGN", facts),
+                consume=lambda ref, a: advance(store, "aligned", ref, vision=ref, requestedChange=None))
         elif state == "CHECK-IN":
             waves = plan.execution(store)["architecture"]["waves"]
             more = cursor.wave < len(waves)
@@ -155,22 +155,22 @@ class Run:
             built = plan.built(store) if cursor.wave > 1 else None
             outline = previous["architecture"] if previous else None
             gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
-            result, answer = inference.call(store, self.provider,
+            def consume(result, answer):
+                if "scope" in answer:
+                    advance(store, "scope", result, requestedChange=result)
+                    return
+                document = dict(previous) if built else {
+                    "nodes": {"vision": {"kind": "vision", "body": vision}}}
+                document["architecture"] = {k: v for k, v in answer.items() if k != "why"}
+                revision = store.revision(document, cursor.revision)
+                advance(store, "outlined", result, revision=revision)
+
+            inference.call(store, self.provider,
                 questions.architect_brief(vision, questions.user_words(store),
                                          gaps[-1]["gap"] if gaps else None,
                                          outline if gaps or built else None, built=built),
-                check=lambda a: architecture.outline(architecture.merge(outline, a)
-                                                     if built else a, vision))
-            answer = architecture.merge(outline, answer) if built else answer
-            if "scope" in answer:
-                advance(store, "scope", result, requestedChange=result)
-                return store.cursor().state
-            document = dict(previous) if built else {
-                "nodes": {"vision": {"kind": "vision", "body": vision}}}
-            document["architecture"] = {k: v for k, v in answer.items() if k != "why"}
-            with store.transaction():
-                revision = store.revision(document, cursor.revision)
-                advance(store, "outlined", result, revision=revision)
+                check=lambda a: architecture.outline(a, vision), consume=consume,
+                field="areas/contracts/decisions/waves")
         elif state == "DETAIL":
             detail.step(store, self.provider, self.capacity)
         elif state == "REVIEW":

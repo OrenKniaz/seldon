@@ -75,14 +75,15 @@ def step(store, provider, capacity):
 
             def validate(answer):
                 if answer.get("verdict") == "subdivide":
-                    architecture.subdivision(area, answer, architecture.index(outline["contracts"]))
+                    architecture.expand(outline, area, answer)
                 elif answer.get("verdict") == "planned":
                     architecture.local_plan(area, local, answer, vision)
 
             body = {"revision": cursor.revision, "area": area["handle"], "basis": basis, "resume": resumed,
                     "correction": correction[0] if correction else None}
             try:
-                result, answer = inference.call(store, provider, question, check=validate)
+                result, answer = inference.call(store, provider, question, check=validate,
+                                                field="edits/units/subareas")
                 body["answer"] = result
                 if answer.get("verdict") == "contract_gap":
                     body["architecture"] = answer["need"]
