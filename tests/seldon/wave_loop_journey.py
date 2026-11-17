@@ -33,8 +33,15 @@ class Waves(Scripted):
                 previous["waves"].append({"goal": "Polish the extension", "commitments": ["scopeIn:2"]})
                 return json.dumps({"answer": {"areas": [], "contracts": [], "decisions": [],
                     "waves": previous["waves"], "why": "Apply the C direction"}})
-            return json.dumps({"answer": {"areas": [], "contracts": [], "decisions": [],
-                "waves": [], "why": "Continue from the built product"}})
+            # Terra returned the remaining horizon, with full area/contract records.
+            # Translate its domain handles to this executable product; preserve the answer shape.
+            recorded = json.loads((Path(__file__).parent / "fixtures" /
+                                   "shelflife-wave2-steer.json").read_text(encoding="utf-8"))
+            answer = recorded["answer"]
+            for field in ("areas", "contracts", "decisions"):
+                answer[field] = deepcopy(previous[field])
+            answer["waves"] = deepcopy(facts["Remaining waves"])
+            return json.dumps(recorded)
         if kind == "JUDGE":
             for wave in (3, 2):
                 sentence = f"Read extension-{wave}.txt."

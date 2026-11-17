@@ -1,6 +1,8 @@
 """C8/C16/C20; R17: planner first, concrete choices, and only dependent work waits."""
 
 from dataclasses import replace
+from pathlib import Path
+import traceback
 
 from . import inference, plan, questions, recovery
 from .providers import ProviderFailure
@@ -107,7 +109,11 @@ def step_fault(store, provider, error):
     key = recovery.lineage(store)
     shape = {"step": step, "failure": failure}
     repeated = shape in store.recovery(key)["seen"]
-    cause = store.record("step_failure", shape)
+    frames = [f for f in traceback.extract_tb(cause.__traceback__)
+              if Path(__file__).parent == Path(f.filename).parent]
+    location = f"src/seldon/{Path(frames[-1].filename).name}:{frames[-1].lineno}" if frames else None
+    cause = store.record("step_failure", {**shape, "exceptionType": type(cause).__name__,
+        "message": str(cause), "location": location})
     recovery.failed(store, cause, shape=shape)
     subject = {"step": step, "tried": [failure], "failure": failure}
     if repeated:

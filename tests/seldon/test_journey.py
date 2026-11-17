@@ -22,7 +22,8 @@ def test_wave_loop_golden(tmp_path, fault):
     The fault twin breaks an old reader with a new format and repairs its owner, then steers
     at C. One-wave and planning-only journeys miss stale bases, reused sessions and check-in
     consent lost as the cursor advances. The strict provider rejects STEER before execution
-    if any nested object makes fields optional. Empty changes must preserve the built product.
+    if any nested object makes fields optional. Recorded remaining-only STEER answers must
+    preserve completed waves; empty-delta stubs missed the real wave-2 IndexError.
     """
     from wave_loop_journey import journey
 
@@ -1317,7 +1318,8 @@ def test_planner_asks_and_drop_journey(tmp_path, kept_gap):
 def test_step_fault_and_waiver_journey(tmp_path):
     """An identical invocation fault after planner guidance recommends a resumable Stop.
 
-    Worker-failure twins miss controller faults that encourage endless user retries.
+    Worker-failure twins miss controller faults that encourage endless user retries,
+    and message-only records hide the owning source location from store triage.
     Reopen and a later successful call must retain the decision and allow waived check-ins.
     """
     from seldon import decisions
@@ -1348,6 +1350,11 @@ def test_step_fault_and_waiver_journey(tmp_path):
         run.run()
         item = run.store.read(run.store.cursor().decision)
         assert item["subject"]["step"] == "ARCHITECT"
+        failures = [body for _, _, body in run.store.records("step_failure")]
+        assert failures and all(body["exceptionType"] == "ProviderFailure" for body in failures)
+        assert all(body["failure"] == "ProviderFailure: " + body["message"] for body in failures)
+        assert all(body["location"].startswith("src/seldon/inference.py:") and
+                   int(body["location"].rsplit(":", 1)[1]) > 0 for body in failures)
         assert run.store.records("planner_answer")
         assert "Seldon's fault" in item["ask"]["question"]
         assert "recommend Stop" in item["ask"]["question"]

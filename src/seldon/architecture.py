@@ -85,7 +85,7 @@ def commitments(vision):
             for i, value in enumerate(vision[field], 1)}
 
 
-def merge(previous, answer):
+def merge(previous, answer, completed=()):
     """STEER may resend the horizon or name only the changed handles."""
     if "scope" in answer:
         return answer
@@ -99,7 +99,11 @@ def merge(previous, answer):
         if decision not in result["decisions"]:
             result["decisions"].append(deepcopy(decision))
     if answer.get("waves"):
-        result["waves"] = deepcopy(answer["waves"])
+        waves = deepcopy(answer["waves"])
+        prefix = list(completed)
+        if waves[:len(prefix)] == prefix:
+            waves = waves[len(prefix):]
+        result["waves"] = deepcopy(prefix) + waves
     return result
 
 

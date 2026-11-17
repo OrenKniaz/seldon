@@ -374,8 +374,11 @@ def ask(provider, question, record, check=lambda answer: None, retries=2):
             if original["kind"] == "ARCHITECT" and original["facts"].get("Previous architecture"):
                 patch = decoded["answer"]
                 if "scope" not in patch:
+                    facts = original["facts"]
+                    previous = facts["Previous architecture"]
+                    finished = len(previous["waves"]) - len(facts.get("Remaining waves", previous["waves"]))
                     decoded["answer"] = {**architecture.merge(
-                        original["facts"]["Previous architecture"], patch), "why": patch["why"]}
+                        previous, patch, completed=previous["waves"][:finished]), "why": patch["why"]}
             validate(decoded, question["schema"])
             answer = decoded["answer"]
             if answer.get("verdict") != "uncertain":
