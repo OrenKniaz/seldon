@@ -1,0 +1,2448 @@
+{
+  "origin": "ShelfLife Terra 2026-11-17 main15682aa s01; store after r452, first EXECUTE fault r439. Snapshot projection retains recorded rows, current plan and referenced execution records. Objects are the exact integrated candidate, not a synthetic product.",
+  "cursor": {
+    "A": "r12",
+    "B": "r185",
+    "candidate": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+    "checkin": null,
+    "decision": "r451",
+    "demoVerdicts": [],
+    "failure": "",
+    "finalCommit": null,
+    "finalObservations": [],
+    "kickoff": "r1",
+    "lineage": "planning:r7",
+    "productVerdict": null,
+    "publication": null,
+    "qualityVerdicts": [],
+    "repairs": 1,
+    "requestedChange": "r448",
+    "requirementVerdicts": [],
+    "review": "r181",
+    "revision": 6,
+    "scratch": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\workers",
+    "state": "EXECUTE",
+    "vision": "r7",
+    "waived": false,
+    "wave": 1,
+    "waveStart": "c876c7f0e7c036acb6c0cf6c67fd2ec49050ea43"
+  },
+  "document": {
+    "architecture": {
+      "areas": [
+        {
+          "commitments": [
+            "scopeIn:2",
+            "scopeIn:3",
+            "scopeIn:4",
+            "scopeIn:5",
+            "scopeIn:6",
+            "quality:4"
+          ],
+          "handle": "backend",
+          "responsibility": "Own the local HTTP server, item persistence, validation, and API concurrency.",
+          "scope": [
+            "server.py",
+            "pantry_db.py",
+            "checks/backend/**"
+          ]
+        },
+        {
+          "commitments": [
+            "scopeIn:7",
+            "scopeIn:8",
+            "scopeIn:9",
+            "improvements:1",
+            "improvements:2",
+            "quality:1",
+            "quality:2",
+            "quality:3"
+          ],
+          "handle": "ui",
+          "responsibility": "Own the responsive pantry page and its accessible interactions.",
+          "scope": [
+            "web/**",
+            "checks/ui/**"
+          ]
+        },
+        {
+          "commitments": [
+            "scopeIn:1",
+            "scopeIn:10",
+            "scopeIn:11",
+            "quality:5",
+            "quality:6"
+          ],
+          "handle": "import-integration",
+          "responsibility": "Own CSV import, fresh-folder instructions, and end-to-end integration checks.",
+          "scope": [
+            "import_items.py",
+            "README.md",
+            "checks/integration/**"
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "consumers": [
+            "ui",
+            "import-integration"
+          ],
+          "handle": "page-serving",
+          "kind": "static files",
+          "provider": "backend",
+          "text": "Bind only to 127.0.0.1; GET / serves web/index.html. Files referenced by that page are served from web/ at their corresponding root-relative paths with appropriate content types. The page and assets require no external network access or build step."
+        },
+        {
+          "consumers": [
+            "ui",
+            "import-integration"
+          ],
+          "handle": "item-list",
+          "kind": "HTTP API",
+          "provider": "backend",
+          "text": "GET /api/items returns 200 JSON as an array of objects with id, name, quantity, unit, expires and created_at. Dates use YYYY-MM-DD; absent expiry is null. Sort by expiry ascending, nulls last, with id ascending as the tie-breaker. Optional q is a case-insensitive literal substring of name; optional expiring_within is a nonnegative integer number of days and includes expired items and items expiring through that many calendar days from local today, excluding null expiry. Filters combine. Invalid query input returns 400 JSON {\"error\":\"...\"}. UI uses same-origin requests and handles a non-success response or network failure visibly."
+        },
+        {
+          "consumers": [
+            "ui"
+          ],
+          "handle": "item-mutations",
+          "kind": "HTTP API",
+          "provider": "backend",
+          "text": "Later wave: agree on item creation, updates, consumption, deletion, validation errors and atomic concurrency."
+        },
+        {
+          "consumers": [
+            "import-integration"
+          ],
+          "handle": "shared-storage",
+          "kind": "Python interface",
+          "provider": "backend",
+          "text": "pantry_db.py exposes init_db(db_path) and create_item(db_path, fields). init_db creates the schema if absent and preserves existing data. create_item validates and atomically inserts one item into that same schema and returns its item dictionary, including id and created_at. fields is a dict with required name and quantity and optional unit and expires; omitted unit defaults to \"\" and omitted expires to None. Name is a nonblank string of 1\u201380 characters, quantity is an integer >= 0 excluding booleans, unit is a string, and expires is None or a real YYYY-MM-DD calendar date. Unknown fields or invalid values raise ValueError with a human-readable message and insert nothing; storage failures propagate. The importer converts CSV quantity text to an integer and an empty expiry to None before calling create_item, counts conversion or ValueError failures as skipped rows, and does not treat storage failures as invalid rows. The server uses this same initialization, validation and insertion boundary."
+        },
+        {
+          "consumers": [
+            "ui",
+            "import-integration"
+          ],
+          "handle": "fresh-folder-integration",
+          "kind": "operational interface",
+          "provider": "backend",
+          "text": "In a fresh project folder, place server.py and pantry_db.py at the root and the page at web/index.html with its local assets under web/. From that root run python server.py --port PORT --db PATH; the server creates or opens the SQLite file at PATH and serves http://127.0.0.1:PORT/. GET /api/items returns the JSON array defined by item-list. The page behavior for populated and empty arrays is defined by list-presentation. Use only supplied local files and Python 3.12 standard library at runtime."
+        },
+        {
+          "consumers": [
+            "import-integration"
+          ],
+          "handle": "list-presentation",
+          "kind": "page behavior",
+          "provider": "ui",
+          "text": "On loading /, request GET /api/items from the same origin. For a populated array, visibly render each item's name and quantity; for an empty array, visibly show an empty-pantry message. Keep the page usable and show a visible error if the request fails."
+        }
+      ],
+      "decisions": [
+        {
+          "areas": [
+            "backend",
+            "ui"
+          ],
+          "choice": "Use a same-origin JSON API and serve local page assets directly from web/.",
+          "origin": "architecture",
+          "reason": "This enables an offline vertical slice without a build step or cross-origin setup."
+        },
+        {
+          "areas": [
+            "backend",
+            "ui"
+          ],
+          "choice": "Treat the seven-day window as inclusive of expired items through local today plus seven calendar days.",
+          "origin": "architecture",
+          "reason": "The page must show upcoming expiries and clearly mark expired items."
+        },
+        {
+          "areas": [
+            "backend",
+            "import-integration"
+          ],
+          "choice": "Keep one backend-owned persistence and validation implementation for both server and importer.",
+          "origin": "architecture",
+          "reason": "A canonical producer boundary prevents the importer and API from disagreeing about valid records or database layout."
+        }
+      ],
+      "waves": [
+        {
+          "commitments": [
+            "scopeIn:2",
+            "scopeIn:3",
+            "scopeIn:4",
+            "scopeIn:7"
+          ],
+          "goal": "Run the thinnest offline vertical slice: start the server against SQLite, load the responsive page, and display the real item-list response, including an empty pantry."
+        },
+        {
+          "commitments": [
+            "scopeIn:5",
+            "scopeIn:6",
+            "scopeIn:8",
+            "scopeIn:9",
+            "improvements:1",
+            "improvements:2",
+            "quality:1",
+            "quality:2",
+            "quality:3",
+            "quality:4"
+          ],
+          "goal": "Complete pantry actions, search and expiry views, accessible feedback, visual design, persistence and concurrency behavior."
+        },
+        {
+          "commitments": [
+            "scopeIn:1",
+            "scopeIn:10",
+            "scopeIn:11",
+            "quality:5",
+            "quality:6"
+          ],
+          "goal": "Complete CSV import and prove the documented fresh-folder, offline workflow across importer, database, server and page."
+        }
+      ]
+    },
+    "areaDetails": {
+      "backend": "r151",
+      "import-integration": "r155",
+      "ui": "r159"
+    },
+    "nodes": {
+      "1.backend.1": {
+        "body": {
+          "area": "backend",
+          "dependencies": [],
+          "instructions": "Implement the page-serving, shared-storage and item-list contracts using Python 3.12 standard library only; keep mutation HTTP endpoints for the later wave. Check persistence and validation through the canonical create_item producer and the real HTTP list consumer, including filtering, ordering and invalid queries, and check local asset serving. Do not create or modify the page or importer.",
+          "requirements": [
+            "1.backend.requirement2",
+            "1.backend.requirement3",
+            "1.backend.requirement4"
+          ],
+          "scope": [
+            "server.py",
+            "pantry_db.py",
+            "checks/backend/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "1.backend.feature1": {
+        "body": {
+          "acceptance": "The local server serves the supplied page and its assets and returns persisted pantry items through the agreed list API.",
+          "story": "As a household user, I can open ShelfLife locally and see my stored pantry items.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "1.backend.requirement2": {
+        "body": {
+          "acceptance": "Starting the server with a port and database path serves the supplied page and local assets on 127.0.0.1 without external dependencies or a build step.",
+          "features": [
+            "1.backend.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "1.backend.requirement3": {
+        "body": {
+          "acceptance": "The shared database interface preserves existing items and atomically creates valid items while rejecting invalid fields without inserting them.",
+          "features": [
+            "1.backend.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "1.backend.requirement4": {
+        "body": {
+          "acceptance": "The item-list API returns persisted items with the agreed fields, ordering and combined filters, or a JSON error for invalid query input.",
+          "features": [
+            "1.backend.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "1.import-integration.1": {
+        "body": {
+          "area": "import-integration",
+          "dependencies": [],
+          "instructions": "Own the README and a focused end-to-end check for this wave using the supplied contracts and local check helpers. Exercise the real shared-storage producer, server API, and page in a fresh-folder layout; verify both empty and populated states, clean up temporary processes and data, and check for missing local assets or browser errors. Do not implement CSV import or the final try-it guide in this wave.",
+          "requirements": [
+            "1.import-integration.requirement2",
+            "1.import-integration.requirement3"
+          ],
+          "scope": [
+            "README.md",
+            "checks/integration/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "1.import-integration.feature1": {
+        "body": {
+          "acceptance": "A household can follow local instructions to start ShelfLife and see its real pantry contents or an empty-pantry message.",
+          "story": "Run and verify the first offline ShelfLife vertical slice from a fresh folder.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "1.import-integration.requirement2": {
+        "body": {
+          "acceptance": "The README explains the required local files and how to start the server with a chosen port and SQLite path using Python 3.12 without a build step or external dependencies.",
+          "features": [
+            "1.import-integration.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "1.import-integration.requirement3": {
+        "body": {
+          "acceptance": "A fresh-folder integration check starts the server with temporary storage and confirms that the page displays both an empty pantry and an item inserted through the shared storage interface and returned by the real item-list API.",
+          "features": [
+            "1.import-integration.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "1.ui.1": {
+        "body": {
+          "area": "ui",
+          "dependencies": [],
+          "instructions": "Implement the thin read-only vertical slice using local assets without a build step or external network access. Follow the page-serving, item-list, list-presentation, and fresh-folder-integration contracts; use forest green, warm cream, restrained harvest orange, offline-available typography, and generous spacing. Check populated, empty, and failed requests and responsive keyboard usability, including the real server-to-page integration when the contracted server files are available. Leave mutations, search, expiry filtering, and their controls for a later wave.",
+          "requirements": [
+            "1.ui.requirement2",
+            "1.ui.requirement3",
+            "1.ui.requirement4"
+          ],
+          "scope": [
+            "web/**",
+            "checks/ui/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "1.ui.feature1": {
+        "body": {
+          "acceptance": "The local pantry page displays the current item list or an understandable empty or error state on phone and desktop screens.",
+          "story": "As a household member, I want to see the contents of my pantry when I open ShelfLife.",
+          "vision": [
+            "vision"
+          ]
+        },
+        "kind": "feature"
+      },
+      "1.ui.requirement2": {
+        "body": {
+          "acceptance": "Opening the page requests the same-origin item list and visibly shows every returned item's name and quantity, or an empty-pantry message when there are no items.",
+          "features": [
+            "1.ui.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "1.ui.requirement3": {
+        "body": {
+          "acceptance": "If the item-list request fails or returns a non-success response, the page remains usable and visibly explains that the pantry could not be loaded.",
+          "features": [
+            "1.ui.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "1.ui.requirement4": {
+        "body": {
+          "acceptance": "The page is readable and keyboard usable at phone and desktop widths, has visible focus and no horizontal scrolling at 375 pixels, and uses the agreed offline pantry-led visual style.",
+          "features": [
+            "1.ui.feature1"
+          ]
+        },
+        "kind": "requirement"
+      },
+      "architecture-decision:0": {
+        "body": {
+          "areas": [
+            "backend",
+            "ui"
+          ],
+          "choice": "Use a same-origin JSON API and serve local page assets directly from web/.",
+          "origin": "architecture",
+          "reason": "This enables an offline vertical slice without a build step or cross-origin setup."
+        },
+        "kind": "decision"
+      },
+      "architecture-decision:1": {
+        "body": {
+          "areas": [
+            "backend",
+            "ui"
+          ],
+          "choice": "Treat the seven-day window as inclusive of expired items through local today plus seven calendar days.",
+          "origin": "architecture",
+          "reason": "The page must show upcoming expiries and clearly mark expired items."
+        },
+        "kind": "decision"
+      },
+      "architecture-decision:2": {
+        "body": {
+          "areas": [
+            "backend",
+            "import-integration"
+          ],
+          "choice": "Keep one backend-owned persistence and validation implementation for both server and importer.",
+          "origin": "architecture",
+          "reason": "A canonical producer boundary prevents the importer and API from disagreeing about valid records or database layout."
+        },
+        "kind": "decision"
+      },
+      "backend": {
+        "body": {
+          "responsibility": "Own the local HTTP server, item persistence, validation, and API concurrency.",
+          "scope": [
+            "server.py",
+            "pantry_db.py",
+            "checks/backend/**",
+            "docs/try-it.md",
+            "docs/try-it/**"
+          ]
+        },
+        "kind": "area"
+      },
+      "fresh-folder-integration": {
+        "body": {
+          "consumers": [
+            "1.ui.1",
+            "1.import-integration.1",
+            "guide"
+          ],
+          "kind": "operational interface",
+          "provider": "1.backend.1",
+          "text": "In a fresh project folder, place server.py and pantry_db.py at the root and the page at web/index.html with its local assets under web/. From that root run python server.py --port PORT --db PATH; the server creates or opens the SQLite file at PATH and serves http://127.0.0.1:PORT/. GET /api/items returns the JSON array defined by item-list. The page behavior for populated and empty arrays is defined by list-presentation. Use only supplied local files and Python 3.12 standard library at runtime."
+        },
+        "kind": "contract"
+      },
+      "guide": {
+        "body": {
+          "area": "backend",
+          "dependencies": [],
+          "instructions": "The page is absent from your worktree and no contract names its fields. Write docs/try-it.md and declare a docs/try-it/ WAVE-VERIFY check from contracts: start with temporary data, open the page, import/API, check the promised text, save a screenshot to SELDON_EVIDENCE_DIR, and stop what you started; leave unseen forms to the page owner's check.\nThis wave: Run the thinnest offline vertical slice: start the server against SQLite, load the responsive page, and display the real item-list response, including an empty pantry.",
+          "requirements": [],
+          "scope": [
+            "docs/try-it.md",
+            "docs/try-it/**"
+          ]
+        },
+        "kind": "unit"
+      },
+      "import-integration": {
+        "body": {
+          "responsibility": "Own CSV import, fresh-folder instructions, and end-to-end integration checks.",
+          "scope": [
+            "import_items.py",
+            "README.md",
+            "checks/integration/**"
+          ]
+        },
+        "kind": "area"
+      },
+      "item-list": {
+        "body": {
+          "consumers": [
+            "1.ui.1",
+            "1.import-integration.1",
+            "guide"
+          ],
+          "kind": "HTTP API",
+          "provider": "1.backend.1",
+          "text": "GET /api/items returns 200 JSON as an array of objects with id, name, quantity, unit, expires and created_at. Dates use YYYY-MM-DD; absent expiry is null. Sort by expiry ascending, nulls last, with id ascending as the tie-breaker. Optional q is a case-insensitive literal substring of name; optional expiring_within is a nonnegative integer number of days and includes expired items and items expiring through that many calendar days from local today, excluding null expiry. Filters combine. Invalid query input returns 400 JSON {\"error\":\"...\"}. UI uses same-origin requests and handles a non-success response or network failure visibly."
+        },
+        "kind": "contract"
+      },
+      "item-mutations": {
+        "body": {
+          "consumers": [
+            "1.ui.1",
+            "guide"
+          ],
+          "kind": "HTTP API",
+          "provider": "1.backend.1",
+          "text": "Later wave: agree on item creation, updates, consumption, deletion, validation errors and atomic concurrency."
+        },
+        "kind": "contract"
+      },
+      "list-presentation": {
+        "body": {
+          "consumers": [
+            "1.import-integration.1",
+            "guide"
+          ],
+          "kind": "page behavior",
+          "provider": "1.ui.1",
+          "text": "On loading /, request GET /api/items from the same origin. For a populated array, visibly render each item's name and quantity; for an empty array, visibly show an empty-pantry message. Keep the page usable and show a visible error if the request fails."
+        },
+        "kind": "contract"
+      },
+      "page-serving": {
+        "body": {
+          "consumers": [
+            "1.ui.1",
+            "1.import-integration.1",
+            "guide"
+          ],
+          "kind": "static files",
+          "provider": "1.backend.1",
+          "text": "Bind only to 127.0.0.1; GET / serves web/index.html. Files referenced by that page are served from web/ at their corresponding root-relative paths with appropriate content types. The page and assets require no external network access or build step."
+        },
+        "kind": "contract"
+      },
+      "quality:001:ui": {
+        "body": {
+          "area": "ui",
+          "criterion": "The interface has a distinctive pantry-led visual direction: deep forest green, warm cream, and a restrained harvest-orange accent, with deliberate offline-available typography and generous spacing.",
+          "verification": "Open the served page at desktop and phone widths and inspect its hierarchy, palette, spacing, and text contrast."
+        },
+        "kind": "criterion"
+      },
+      "quality:002:ui": {
+        "body": {
+          "area": "ui",
+          "criterion": "Pantry actions, search, expiry filtering, validation, empty states, and API errors are understandable and usable by keyboard.",
+          "verification": "Use the page with keyboard only, observe visible focus and inline messages, and exercise successful and failed API interactions."
+        },
+        "kind": "criterion"
+      },
+      "quality:003:ui": {
+        "body": {
+          "area": "ui",
+          "criterion": "The page fits a 375px viewport without horizontal scrolling and adapts to desktop.",
+          "verification": "Inspect the page at 375px and a desktop viewport, including forms and populated lists."
+        },
+        "kind": "criterion"
+      },
+      "quality:004:backend": {
+        "body": {
+          "area": "backend",
+          "criterion": "The API preserves data and enforces input and concurrency rules.",
+          "verification": "Exercise the specified endpoints, restart against the same SQLite file, and send two simultaneous consumes of the last unit; verify exactly one succeeds."
+        },
+        "kind": "criterion"
+      },
+      "quality:005:import-integration": {
+        "body": {
+          "area": "import-integration",
+          "criterion": "The importer and server share the same database and report invalid or unreadable input as specified.",
+          "verification": "Import a CSV containing valid and invalid rows, inspect the summary and API results, and separately try an unreadable file."
+        },
+        "kind": "criterion"
+      },
+      "quality:006:import-integration": {
+        "body": {
+          "area": "import-integration",
+          "criterion": "A fresh-folder setup runs without external dependencies or network access, and the page loads without missing requested files or console errors.",
+          "verification": "Follow the README using the supplied Python runtime with networking disabled except loopback; open the page and inspect its console and requests."
+        },
+        "kind": "criterion"
+      },
+      "shared-storage": {
+        "body": {
+          "consumers": [
+            "1.import-integration.1",
+            "guide"
+          ],
+          "kind": "Python interface",
+          "provider": "1.backend.1",
+          "text": "pantry_db.py exposes init_db(db_path) and create_item(db_path, fields). init_db creates the schema if absent and preserves existing data. create_item validates and atomically inserts one item into that same schema and returns its item dictionary, including id and created_at. fields is a dict with required name and quantity and optional unit and expires; omitted unit defaults to \"\" and omitted expires to None. Name is a nonblank string of 1\u201380 characters, quantity is an integer >= 0 excluding booleans, unit is a string, and expires is None or a real YYYY-MM-DD calendar date. Unknown fields or invalid values raise ValueError with a human-readable message and insert nothing; storage failures propagate. The importer converts CSV quantity text to an integer and an empty expiry to None before calling create_item, counts conversion or ValueError failures as skipped rows, and does not treat storage failures as invalid rows. The server uses this same initialization, validation and insertion boundary."
+        },
+        "kind": "contract"
+      },
+      "ui": {
+        "body": {
+          "responsibility": "Own the responsive pantry page and its accessible interactions.",
+          "scope": [
+            "web/**",
+            "checks/ui/**"
+          ]
+        },
+        "kind": "area"
+      },
+      "vision": {
+        "body": {
+          "alternatives": [
+            {
+              "label": "Smaller",
+              "means": "Deliver the API and CSV importer first, deferring the web UI."
+            },
+            {
+              "label": "Different expiry window",
+              "means": "Make the Expiring soon window user-selectable instead of fixed at 7 days."
+            },
+            {
+              "label": "Bigger",
+              "means": "Add household management features such as item categories and import from the UI."
+            }
+          ],
+          "improvements": [
+            "Make the primary pantry tasks immediately apparent, with concise labels and feedback after actions.",
+            "Keep the page useful during loading, empty, validation-error, and API-failure states without obscuring the pantry list."
+          ],
+          "quality": [
+            {
+              "criterion": "The interface has a distinctive pantry-led visual direction: deep forest green, warm cream, and a restrained harvest-orange accent, with deliberate offline-available typography and generous spacing.",
+              "verification": "Open the served page at desktop and phone widths and inspect its hierarchy, palette, spacing, and text contrast."
+            },
+            {
+              "criterion": "Pantry actions, search, expiry filtering, validation, empty states, and API errors are understandable and usable by keyboard.",
+              "verification": "Use the page with keyboard only, observe visible focus and inline messages, and exercise successful and failed API interactions."
+            },
+            {
+              "criterion": "The page fits a 375px viewport without horizontal scrolling and adapts to desktop.",
+              "verification": "Inspect the page at 375px and a desktop viewport, including forms and populated lists."
+            },
+            {
+              "criterion": "The API preserves data and enforces input and concurrency rules.",
+              "verification": "Exercise the specified endpoints, restart against the same SQLite file, and send two simultaneous consumes of the last unit; verify exactly one succeeds."
+            },
+            {
+              "criterion": "The importer and server share the same database and report invalid or unreadable input as specified.",
+              "verification": "Import a CSV containing valid and invalid rows, inspect the summary and API results, and separately try an unreadable file."
+            },
+            {
+              "criterion": "A fresh-folder setup runs without external dependencies or network access, and the page loads without missing requested files or console errors.",
+              "verification": "Follow the README using the supplied Python runtime with networking disabled except loopback; open the page and inspect its console and requests."
+            }
+          ],
+          "scopeIn": [
+            "Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step.",
+            "Backend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.",
+            "Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at.",
+            "GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).",
+            "POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.",
+            "Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404. Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).",
+            "UI (served at /): one responsive page that works at phone and desktop sizes.",
+            "\"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails.",
+            "Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design.",
+            "Import: `python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file.",
+            "Done means: the server, UI and importer work together from a fresh folder; a short README explains how to run them."
+          ],
+          "scopeOut": [
+            "Multiple households, accounts, synchronization, and hosted deployment.",
+            "Third-party packages, runtime network dependencies, and a build pipeline.",
+            "Additional pantry features beyond the specified API, UI, and CSV import."
+          ],
+          "size": "medium",
+          "understanding": "A dependable, private local pantry tracker that makes it easy for one household to see what needs attention and keep quantities current.",
+          "users": [
+            "Members of one household managing a shared local pantry."
+          ]
+        },
+        "kind": "vision"
+      }
+    }
+  },
+  "records": [
+    [
+      1,
+      "kickoff",
+      {
+        "capacity": 16,
+        "setup": {
+          "claudeCommand": [
+            "C:\\Users\\oren\\.local\\bin\\claude.EXE"
+          ],
+          "codexCommand": [
+            "C:\\nvm4w\\nodejs\\node.EXE",
+            "C:\\Users\\oren\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+          ],
+          "commit": "15682aa92ef7e70179be43339fffab929d8c9a1c",
+          "evidenceDirectory": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\browser-evidence",
+          "node": "C:\\nvm4w\\nodejs\\node.EXE",
+          "providers": {
+            "build": {
+              "effort": "medium",
+              "freshCall": true,
+              "independence": "same-provider",
+              "model": "gpt-6.1-terra",
+              "provider": "codex",
+              "timeout": 1800,
+              "version": "0.164.0"
+            },
+            "check": {
+              "freshCall": true,
+              "independence": "same-provider",
+              "timeout": 300,
+              "version": "0.164.0"
+            },
+            "decider": {
+              "effort": "low",
+              "freshCall": true,
+              "independence": "same-provider",
+              "model": "gpt-6.1-terra",
+              "provider": "codex",
+              "timeout": 90,
+              "version": "0.164.0"
+            },
+            "demo": {
+              "effort": "medium",
+              "freshCall": true,
+              "independence": "same-provider",
+              "model": "gpt-6.1-terra",
+              "provider": "codex",
+              "timeout": 300,
+              "version": "0.164.0"
+            },
+            "judge": {
+              "effort": "medium",
+              "freshCall": true,
+              "independence": "same-provider",
+              "model": "gpt-6.1-terra",
+              "provider": "codex",
+              "timeout": 180,
+              "version": "0.164.0"
+            },
+            "planner": {
+              "effort": "medium",
+              "freshCall": true,
+              "independence": "same-provider",
+              "model": "gpt-6.1-terra",
+              "provider": "codex",
+              "timeout": 180,
+              "version": "0.164.0"
+            },
+            "reviewer": {
+              "effort": "medium",
+              "freshCall": true,
+              "independence": "fresh same-provider call",
+              "model": "gpt-6.1-terra",
+              "provider": "codex",
+              "timeout": 180,
+              "version": "0.164.0"
+            },
+            "worker_first_effort": "medium"
+          },
+          "python": {
+            "path": "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+            "version": "3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]"
+          },
+          "questionContract": "b9975066e5d69d6a93c1f9453fc47ea5bb9b2f661bddbdf8d830a0b444c85a7f",
+          "runtimeSource": "2f5eb4a7d6589aa9ec0665d8d3ab539b9c223c3827131ea498e889e1f96ba59e",
+          "scriptedUser": true,
+          "userOrigin": "dev runner scripted yes; not owner acceptance"
+        },
+        "words": "Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step.\n\nBackend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.\n- Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at.\n- GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).\n- POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.\n- Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404. Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).\n\nUI (served at /): one responsive page that works at phone and desktop sizes.\n- \"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails.\n- Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design.\n\nImport: `python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file.\n\nDone means: the server, UI and importer work together from a fresh folder; a short README explains how to run them."
+      }
+    ],
+    [
+      3,
+      "question",
+      {
+        "examples": [
+          {
+            "answer": {
+              "alternatives": [
+                {
+                  "label": "Greet everyone",
+                  "means": "Use a greeting without a name"
+                }
+              ],
+              "improvements": [],
+              "quality": [
+                {
+                  "criterion": "Clear output",
+                  "verification": "Run with a name"
+                }
+              ],
+              "scopeIn": [
+                "Greet a supplied name"
+              ],
+              "scopeOut": [],
+              "size": "tiny",
+              "understanding": "A personal greeting",
+              "users": [
+                "CLI user"
+              ],
+              "why": "The observed interaction and check sources support this answer"
+            }
+          }
+        ],
+        "execution": {},
+        "facts": {
+          "Design guidance used by UI workers": "For a UI, follow the accepted visual direction with deliberate typography, spacing, contrast, clear language and purposeful accessible interaction. Inspect the real result. A UI must look designed by someone with a point of view, following the accepted visual direction. Avoid the default AI look: a system-font stack as the whole typography, a centered column on off-white, a generic pill button, purple gradients, cards in cards, gray text on color, bounce easing. Instead: deliberate type with real hierarchy from fonts available offline; a confident palette with strong contrast; generous rhythm in spacing; motion that is brief, purposeful and honors reduced-motion; words a person would actually say. No TODOs, no partial implementations. A finished page opens with a clean browser console: give it an icon (for example <link rel=\"icon\" href=\"data:,\">) and serve every file it requests.",
+          "Dream": "Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step.\n\nBackend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.\n- Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at.\n- GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).\n- POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.\n- Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404. Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).\n\nUI (served at /): one responsive page that works at phone and desktop sizes.\n- \"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails.\n- Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design.\n\nImport: `python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file.\n\nDone means: the server, UI and importer work together from a fresh folder; a short README explains how to run them.",
+          "Runtime": {
+            "node": "C:\\nvm4w\\nodejs\\node.EXE",
+            "python": {
+              "path": "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+              "version": "3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]"
+            }
+          }
+        },
+        "images": [],
+        "kind": "ALIGN",
+        "prompt": "What improved dream should we agree to? Recommend size and an observable quality bar. Keep every exact value the user stated verbatim in the scopeIn item it belongs to; improving never paraphrases an exact value. Name 1-3 alternatives the user may prefer to this vision: smaller, bigger, or another answer to what their words leave open. Improve the dream toward the most beautiful, simplest, most delightful version of what was asked, within scope. Beauty means craft, not extra requirements. Every quality criterion must be observable with the supplied runtime. A product with a user interface states one distinctive visual direction as a quality criterion.",
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "answer": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "alternatives": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "label": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "means": {
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "means"
+                        ],
+                        "type": "object"
+                      },
+                      "minItems": 1,
+                      "type": "array"
+                    },
+                    "improvements": {
+                      "items": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "minItems": 0,
+                      "type": "array"
+                    },
+                    "quality": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "criterion": {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "verification": {
+                            "minLength": 1,
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "criterion",
+                          "verification"
+                        ],
+                        "type": "object"
+                      },
+                      "minItems": 1,
+                      "type": "array"
+                    },
+                    "scopeIn": {
+                      "items": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "minItems": 1,
+                      "type": "array"
+                    },
+                    "scopeOut": {
+                      "items": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "minItems": 0,
+                      "type": "array"
+                    },
+                    "size": {
+                      "enum": [
+                        "tiny",
+                        "small",
+                        "medium",
+                        "large"
+                      ],
+                      "type": "string"
+                    },
+                    "understanding": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "users": {
+                      "items": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "minItems": 1,
+                      "type": "array"
+                    },
+                    "why": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "size",
+                    "understanding",
+                    "users",
+                    "scopeIn",
+                    "scopeOut",
+                    "improvements",
+                    "quality",
+                    "alternatives",
+                    "why"
+                  ],
+                  "type": "object"
+                }
+              ]
+            }
+          },
+          "required": [
+            "answer"
+          ],
+          "type": "object"
+        },
+        "targets": []
+      }
+    ],
+    [
+      4,
+      "attempt",
+      {
+        "deadline": 1794903032.2822015,
+        "operation": "ALIGN",
+        "provider": {
+          "effort": "medium",
+          "freshCall": true,
+          "independence": "same-provider",
+          "model": "gpt-6.1-terra",
+          "provider": "codex",
+          "timeout": 180,
+          "version": "0.164.0"
+        },
+        "question": "r3",
+        "retryOf": null,
+        "startedAt": 1794902852.2822015,
+        "unit": null
+      }
+    ],
+    [
+      7,
+      "answer",
+      {
+        "answer": {
+          "alternatives": [
+            {
+              "label": "Smaller",
+              "means": "Deliver the API and CSV importer first, deferring the web UI."
+            },
+            {
+              "label": "Different expiry window",
+              "means": "Make the Expiring soon window user-selectable instead of fixed at 7 days."
+            },
+            {
+              "label": "Bigger",
+              "means": "Add household management features such as item categories and import from the UI."
+            }
+          ],
+          "improvements": [
+            "Make the primary pantry tasks immediately apparent, with concise labels and feedback after actions.",
+            "Keep the page useful during loading, empty, validation-error, and API-failure states without obscuring the pantry list."
+          ],
+          "quality": [
+            {
+              "criterion": "The interface has a distinctive pantry-led visual direction: deep forest green, warm cream, and a restrained harvest-orange accent, with deliberate offline-available typography and generous spacing.",
+              "verification": "Open the served page at desktop and phone widths and inspect its hierarchy, palette, spacing, and text contrast."
+            },
+            {
+              "criterion": "Pantry actions, search, expiry filtering, validation, empty states, and API errors are understandable and usable by keyboard.",
+              "verification": "Use the page with keyboard only, observe visible focus and inline messages, and exercise successful and failed API interactions."
+            },
+            {
+              "criterion": "The page fits a 375px viewport without horizontal scrolling and adapts to desktop.",
+              "verification": "Inspect the page at 375px and a desktop viewport, including forms and populated lists."
+            },
+            {
+              "criterion": "The API preserves data and enforces input and concurrency rules.",
+              "verification": "Exercise the specified endpoints, restart against the same SQLite file, and send two simultaneous consumes of the last unit; verify exactly one succeeds."
+            },
+            {
+              "criterion": "The importer and server share the same database and report invalid or unreadable input as specified.",
+              "verification": "Import a CSV containing valid and invalid rows, inspect the summary and API results, and separately try an unreadable file."
+            },
+            {
+              "criterion": "A fresh-folder setup runs without external dependencies or network access, and the page loads without missing requested files or console errors.",
+              "verification": "Follow the README using the supplied Python runtime with networking disabled except loopback; open the page and inspect its console and requests."
+            }
+          ],
+          "scopeIn": [
+            "Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step.",
+            "Backend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.",
+            "Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at.",
+            "GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).",
+            "POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.",
+            "Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404. Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).",
+            "UI (served at /): one responsive page that works at phone and desktop sizes.",
+            "\"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails.",
+            "Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design.",
+            "Import: `python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file.",
+            "Done means: the server, UI and importer work together from a fresh folder; a short README explains how to run them."
+          ],
+          "scopeOut": [
+            "Multiple households, accounts, synchronization, and hosted deployment.",
+            "Third-party packages, runtime network dependencies, and a build pipeline.",
+            "Additional pantry features beyond the specified API, UI, and CSV import."
+          ],
+          "size": "medium",
+          "understanding": "A dependable, private local pantry tracker that makes it easy for one household to see what needs attention and keep quantities current.",
+          "users": [
+            "Members of one household managing a shared local pantry."
+          ],
+          "why": "The requested outcome combines a persistent concurrent API, an accessible responsive interface, and a CSV importer, but remains bounded to one local household and a small set of workflows."
+        },
+        "attempt": "r4",
+        "binding": null,
+        "kind": "ALIGN",
+        "unit": null
+      }
+    ],
+    [
+      11,
+      "user_words",
+      {
+        "origin": "dev runner scripted yes; not owner acceptance",
+        "request": "r10",
+        "words": "Build this"
+      }
+    ],
+    [
+      184,
+      "user_words",
+      {
+        "origin": "dev runner scripted yes; not owner acceptance",
+        "request": "r183",
+        "words": "Build this plan"
+      }
+    ],
+    [
+      185,
+      "approval",
+      {
+        "choice": "Build this plan",
+        "effect": "approve",
+        "interpretation": null,
+        "request": "r183",
+        "scripted": true,
+        "subject": {
+          "plan": {
+            "architecture": {
+              "areas": [
+                {
+                  "commitments": [
+                    "scopeIn:2",
+                    "scopeIn:3",
+                    "scopeIn:4",
+                    "scopeIn:5",
+                    "scopeIn:6",
+                    "quality:4"
+                  ],
+                  "handle": "backend",
+                  "responsibility": "Own the local HTTP server, item persistence, validation, and API concurrency.",
+                  "scope": [
+                    "server.py",
+                    "pantry_db.py",
+                    "checks/backend/**"
+                  ]
+                },
+                {
+                  "commitments": [
+                    "scopeIn:7",
+                    "scopeIn:8",
+                    "scopeIn:9",
+                    "improvements:1",
+                    "improvements:2",
+                    "quality:1",
+                    "quality:2",
+                    "quality:3"
+                  ],
+                  "handle": "ui",
+                  "responsibility": "Own the responsive pantry page and its accessible interactions.",
+                  "scope": [
+                    "web/**",
+                    "checks/ui/**"
+                  ]
+                },
+                {
+                  "commitments": [
+                    "scopeIn:1",
+                    "scopeIn:10",
+                    "scopeIn:11",
+                    "quality:5",
+                    "quality:6"
+                  ],
+                  "handle": "import-integration",
+                  "responsibility": "Own CSV import, fresh-folder instructions, and end-to-end integration checks.",
+                  "scope": [
+                    "import_items.py",
+                    "README.md",
+                    "checks/integration/**"
+                  ]
+                }
+              ],
+              "contracts": [
+                {
+                  "consumers": [
+                    "ui",
+                    "import-integration"
+                  ],
+                  "handle": "page-serving",
+                  "kind": "static files",
+                  "provider": "backend",
+                  "text": "Bind only to 127.0.0.1; GET / serves web/index.html. Files referenced by that page are served from web/ at their corresponding root-relative paths with appropriate content types. The page and assets require no external network access or build step."
+                },
+                {
+                  "consumers": [
+                    "ui",
+                    "import-integration"
+                  ],
+                  "handle": "item-list",
+                  "kind": "HTTP API",
+                  "provider": "backend",
+                  "text": "GET /api/items returns 200 JSON as an array of objects with id, name, quantity, unit, expires and created_at. Dates use YYYY-MM-DD; absent expiry is null. Sort by expiry ascending, nulls last, with id ascending as the tie-breaker. Optional q is a case-insensitive literal substring of name; optional expiring_within is a nonnegative integer number of days and includes expired items and items expiring through that many calendar days from local today, excluding null expiry. Filters combine. Invalid query input returns 400 JSON {\"error\":\"...\"}. UI uses same-origin requests and handles a non-success response or network failure visibly."
+                },
+                {
+                  "consumers": [
+                    "ui"
+                  ],
+                  "handle": "item-mutations",
+                  "kind": "HTTP API",
+                  "provider": "backend",
+                  "text": "Later wave: agree on item creation, updates, consumption, deletion, validation errors and atomic concurrency."
+                },
+                {
+                  "consumers": [
+                    "import-integration"
+                  ],
+                  "handle": "shared-storage",
+                  "kind": "Python interface",
+                  "provider": "backend",
+                  "text": "pantry_db.py exposes init_db(db_path) and create_item(db_path, fields). init_db creates the schema if absent and preserves existing data. create_item validates and atomically inserts one item into that same schema and returns its item dictionary, including id and created_at. fields is a dict with required name and quantity and optional unit and expires; omitted unit defaults to \"\" and omitted expires to None. Name is a nonblank string of 1\u201380 characters, quantity is an integer >= 0 excluding booleans, unit is a string, and expires is None or a real YYYY-MM-DD calendar date. Unknown fields or invalid values raise ValueError with a human-readable message and insert nothing; storage failures propagate. The importer converts CSV quantity text to an integer and an empty expiry to None before calling create_item, counts conversion or ValueError failures as skipped rows, and does not treat storage failures as invalid rows. The server uses this same initialization, validation and insertion boundary."
+                },
+                {
+                  "consumers": [
+                    "ui",
+                    "import-integration"
+                  ],
+                  "handle": "fresh-folder-integration",
+                  "kind": "operational interface",
+                  "provider": "backend",
+                  "text": "In a fresh project folder, place server.py and pantry_db.py at the root and the page at web/index.html with its local assets under web/. From that root run python server.py --port PORT --db PATH; the server creates or opens the SQLite file at PATH and serves http://127.0.0.1:PORT/. GET /api/items returns the JSON array defined by item-list. The page behavior for populated and empty arrays is defined by list-presentation. Use only supplied local files and Python 3.12 standard library at runtime."
+                },
+                {
+                  "consumers": [
+                    "import-integration"
+                  ],
+                  "handle": "list-presentation",
+                  "kind": "page behavior",
+                  "provider": "ui",
+                  "text": "On loading /, request GET /api/items from the same origin. For a populated array, visibly render each item's name and quantity; for an empty array, visibly show an empty-pantry message. Keep the page usable and show a visible error if the request fails."
+                }
+              ],
+              "decisions": [
+                {
+                  "areas": [
+                    "backend",
+                    "ui"
+                  ],
+                  "choice": "Use a same-origin JSON API and serve local page assets directly from web/.",
+                  "origin": "architecture",
+                  "reason": "This enables an offline vertical slice without a build step or cross-origin setup."
+                },
+                {
+                  "areas": [
+                    "backend",
+                    "ui"
+                  ],
+                  "choice": "Treat the seven-day window as inclusive of expired items through local today plus seven calendar days.",
+                  "origin": "architecture",
+                  "reason": "The page must show upcoming expiries and clearly mark expired items."
+                },
+                {
+                  "areas": [
+                    "backend",
+                    "import-integration"
+                  ],
+                  "choice": "Keep one backend-owned persistence and validation implementation for both server and importer.",
+                  "origin": "architecture",
+                  "reason": "A canonical producer boundary prevents the importer and API from disagreeing about valid records or database layout."
+                }
+              ],
+              "waves": [
+                {
+                  "commitments": [
+                    "scopeIn:2",
+                    "scopeIn:3",
+                    "scopeIn:4",
+                    "scopeIn:7"
+                  ],
+                  "goal": "Run the thinnest offline vertical slice: start the server against SQLite, load the responsive page, and display the real item-list response, including an empty pantry."
+                },
+                {
+                  "commitments": [
+                    "scopeIn:5",
+                    "scopeIn:6",
+                    "scopeIn:8",
+                    "scopeIn:9",
+                    "improvements:1",
+                    "improvements:2",
+                    "quality:1",
+                    "quality:2",
+                    "quality:3",
+                    "quality:4"
+                  ],
+                  "goal": "Complete pantry actions, search and expiry views, accessible feedback, visual design, persistence and concurrency behavior."
+                },
+                {
+                  "commitments": [
+                    "scopeIn:1",
+                    "scopeIn:10",
+                    "scopeIn:11",
+                    "quality:5",
+                    "quality:6"
+                  ],
+                  "goal": "Complete CSV import and prove the documented fresh-folder, offline workflow across importer, database, server and page."
+                }
+              ]
+            },
+            "areaDetails": {
+              "backend": "r151",
+              "import-integration": "r155",
+              "ui": "r159"
+            },
+            "nodes": {
+              "1.backend.1": {
+                "body": {
+                  "area": "backend",
+                  "dependencies": [],
+                  "instructions": "Implement the page-serving, shared-storage and item-list contracts using Python 3.12 standard library only; keep mutation HTTP endpoints for the later wave. Check persistence and validation through the canonical create_item producer and the real HTTP list consumer, including filtering, ordering and invalid queries, and check local asset serving. Do not create or modify the page or importer.",
+                  "requirements": [
+                    "1.backend.requirement2",
+                    "1.backend.requirement3",
+                    "1.backend.requirement4"
+                  ],
+                  "scope": [
+                    "server.py",
+                    "pantry_db.py",
+                    "checks/backend/**"
+                  ]
+                },
+                "kind": "unit"
+              },
+              "1.backend.feature1": {
+                "body": {
+                  "acceptance": "The local server serves the supplied page and its assets and returns persisted pantry items through the agreed list API.",
+                  "story": "As a household user, I can open ShelfLife locally and see my stored pantry items.",
+                  "vision": [
+                    "vision"
+                  ]
+                },
+                "kind": "feature"
+              },
+              "1.backend.requirement2": {
+                "body": {
+                  "acceptance": "Starting the server with a port and database path serves the supplied page and local assets on 127.0.0.1 without external dependencies or a build step.",
+                  "features": [
+                    "1.backend.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "1.backend.requirement3": {
+                "body": {
+                  "acceptance": "The shared database interface preserves existing items and atomically creates valid items while rejecting invalid fields without inserting them.",
+                  "features": [
+                    "1.backend.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "1.backend.requirement4": {
+                "body": {
+                  "acceptance": "The item-list API returns persisted items with the agreed fields, ordering and combined filters, or a JSON error for invalid query input.",
+                  "features": [
+                    "1.backend.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "1.import-integration.1": {
+                "body": {
+                  "area": "import-integration",
+                  "dependencies": [],
+                  "instructions": "Own the README and a focused end-to-end check for this wave using the supplied contracts and local check helpers. Exercise the real shared-storage producer, server API, and page in a fresh-folder layout; verify both empty and populated states, clean up temporary processes and data, and check for missing local assets or browser errors. Do not implement CSV import or the final try-it guide in this wave.",
+                  "requirements": [
+                    "1.import-integration.requirement2",
+                    "1.import-integration.requirement3"
+                  ],
+                  "scope": [
+                    "README.md",
+                    "checks/integration/**"
+                  ]
+                },
+                "kind": "unit"
+              },
+              "1.import-integration.feature1": {
+                "body": {
+                  "acceptance": "A household can follow local instructions to start ShelfLife and see its real pantry contents or an empty-pantry message.",
+                  "story": "Run and verify the first offline ShelfLife vertical slice from a fresh folder.",
+                  "vision": [
+                    "vision"
+                  ]
+                },
+                "kind": "feature"
+              },
+              "1.import-integration.requirement2": {
+                "body": {
+                  "acceptance": "The README explains the required local files and how to start the server with a chosen port and SQLite path using Python 3.12 without a build step or external dependencies.",
+                  "features": [
+                    "1.import-integration.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "1.import-integration.requirement3": {
+                "body": {
+                  "acceptance": "A fresh-folder integration check starts the server with temporary storage and confirms that the page displays both an empty pantry and an item inserted through the shared storage interface and returned by the real item-list API.",
+                  "features": [
+                    "1.import-integration.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "1.ui.1": {
+                "body": {
+                  "area": "ui",
+                  "dependencies": [],
+                  "instructions": "Implement the thin read-only vertical slice using local assets without a build step or external network access. Follow the page-serving, item-list, list-presentation, and fresh-folder-integration contracts; use forest green, warm cream, restrained harvest orange, offline-available typography, and generous spacing. Check populated, empty, and failed requests and responsive keyboard usability, including the real server-to-page integration when the contracted server files are available. Leave mutations, search, expiry filtering, and their controls for a later wave.",
+                  "requirements": [
+                    "1.ui.requirement2",
+                    "1.ui.requirement3",
+                    "1.ui.requirement4"
+                  ],
+                  "scope": [
+                    "web/**",
+                    "checks/ui/**"
+                  ]
+                },
+                "kind": "unit"
+              },
+              "1.ui.feature1": {
+                "body": {
+                  "acceptance": "The local pantry page displays the current item list or an understandable empty or error state on phone and desktop screens.",
+                  "story": "As a household member, I want to see the contents of my pantry when I open ShelfLife.",
+                  "vision": [
+                    "vision"
+                  ]
+                },
+                "kind": "feature"
+              },
+              "1.ui.requirement2": {
+                "body": {
+                  "acceptance": "Opening the page requests the same-origin item list and visibly shows every returned item's name and quantity, or an empty-pantry message when there are no items.",
+                  "features": [
+                    "1.ui.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "1.ui.requirement3": {
+                "body": {
+                  "acceptance": "If the item-list request fails or returns a non-success response, the page remains usable and visibly explains that the pantry could not be loaded.",
+                  "features": [
+                    "1.ui.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "1.ui.requirement4": {
+                "body": {
+                  "acceptance": "The page is readable and keyboard usable at phone and desktop widths, has visible focus and no horizontal scrolling at 375 pixels, and uses the agreed offline pantry-led visual style.",
+                  "features": [
+                    "1.ui.feature1"
+                  ]
+                },
+                "kind": "requirement"
+              },
+              "architecture-decision:0": {
+                "body": {
+                  "areas": [
+                    "backend",
+                    "ui"
+                  ],
+                  "choice": "Use a same-origin JSON API and serve local page assets directly from web/.",
+                  "origin": "architecture",
+                  "reason": "This enables an offline vertical slice without a build step or cross-origin setup."
+                },
+                "kind": "decision"
+              },
+              "architecture-decision:1": {
+                "body": {
+                  "areas": [
+                    "backend",
+                    "ui"
+                  ],
+                  "choice": "Treat the seven-day window as inclusive of expired items through local today plus seven calendar days.",
+                  "origin": "architecture",
+                  "reason": "The page must show upcoming expiries and clearly mark expired items."
+                },
+                "kind": "decision"
+              },
+              "architecture-decision:2": {
+                "body": {
+                  "areas": [
+                    "backend",
+                    "import-integration"
+                  ],
+                  "choice": "Keep one backend-owned persistence and validation implementation for both server and importer.",
+                  "origin": "architecture",
+                  "reason": "A canonical producer boundary prevents the importer and API from disagreeing about valid records or database layout."
+                },
+                "kind": "decision"
+              },
+              "backend": {
+                "body": {
+                  "responsibility": "Own the local HTTP server, item persistence, validation, and API concurrency.",
+                  "scope": [
+                    "server.py",
+                    "pantry_db.py",
+                    "checks/backend/**",
+                    "docs/try-it.md",
+                    "docs/try-it/**"
+                  ]
+                },
+                "kind": "area"
+              },
+              "fresh-folder-integration": {
+                "body": {
+                  "consumers": [
+                    "1.ui.1",
+                    "1.import-integration.1",
+                    "guide"
+                  ],
+                  "kind": "operational interface",
+                  "provider": "1.backend.1",
+                  "text": "In a fresh project folder, place server.py and pantry_db.py at the root and the page at web/index.html with its local assets under web/. From that root run python server.py --port PORT --db PATH; the server creates or opens the SQLite file at PATH and serves http://127.0.0.1:PORT/. GET /api/items returns the JSON array defined by item-list. The page behavior for populated and empty arrays is defined by list-presentation. Use only supplied local files and Python 3.12 standard library at runtime."
+                },
+                "kind": "contract"
+              },
+              "guide": {
+                "body": {
+                  "area": "backend",
+                  "dependencies": [],
+                  "instructions": "The page is absent from your worktree and no contract names its fields. Write docs/try-it.md and declare a docs/try-it/ WAVE-VERIFY check from contracts: start with temporary data, open the page, import/API, check the promised text, save a screenshot to SELDON_EVIDENCE_DIR, and stop what you started; leave unseen forms to the page owner's check.\nThis wave: Run the thinnest offline vertical slice: start the server against SQLite, load the responsive page, and display the real item-list response, including an empty pantry.",
+                  "requirements": [],
+                  "scope": [
+                    "docs/try-it.md",
+                    "docs/try-it/**"
+                  ]
+                },
+                "kind": "unit"
+              },
+              "import-integration": {
+                "body": {
+                  "responsibility": "Own CSV import, fresh-folder instructions, and end-to-end integration checks.",
+                  "scope": [
+                    "import_items.py",
+                    "README.md",
+                    "checks/integration/**"
+                  ]
+                },
+                "kind": "area"
+              },
+              "item-list": {
+                "body": {
+                  "consumers": [
+                    "1.ui.1",
+                    "1.import-integration.1",
+                    "guide"
+                  ],
+                  "kind": "HTTP API",
+                  "provider": "1.backend.1",
+                  "text": "GET /api/items returns 200 JSON as an array of objects with id, name, quantity, unit, expires and created_at. Dates use YYYY-MM-DD; absent expiry is null. Sort by expiry ascending, nulls last, with id ascending as the tie-breaker. Optional q is a case-insensitive literal substring of name; optional expiring_within is a nonnegative integer number of days and includes expired items and items expiring through that many calendar days from local today, excluding null expiry. Filters combine. Invalid query input returns 400 JSON {\"error\":\"...\"}. UI uses same-origin requests and handles a non-success response or network failure visibly."
+                },
+                "kind": "contract"
+              },
+              "item-mutations": {
+                "body": {
+                  "consumers": [
+                    "1.ui.1",
+                    "guide"
+                  ],
+                  "kind": "HTTP API",
+                  "provider": "1.backend.1",
+                  "text": "Later wave: agree on item creation, updates, consumption, deletion, validation errors and atomic concurrency."
+                },
+                "kind": "contract"
+              },
+              "list-presentation": {
+                "body": {
+                  "consumers": [
+                    "1.import-integration.1",
+                    "guide"
+                  ],
+                  "kind": "page behavior",
+                  "provider": "1.ui.1",
+                  "text": "On loading /, request GET /api/items from the same origin. For a populated array, visibly render each item's name and quantity; for an empty array, visibly show an empty-pantry message. Keep the page usable and show a visible error if the request fails."
+                },
+                "kind": "contract"
+              },
+              "page-serving": {
+                "body": {
+                  "consumers": [
+                    "1.ui.1",
+                    "1.import-integration.1",
+                    "guide"
+                  ],
+                  "kind": "static files",
+                  "provider": "1.backend.1",
+                  "text": "Bind only to 127.0.0.1; GET / serves web/index.html. Files referenced by that page are served from web/ at their corresponding root-relative paths with appropriate content types. The page and assets require no external network access or build step."
+                },
+                "kind": "contract"
+              },
+              "quality:001:ui": {
+                "body": {
+                  "area": "ui",
+                  "criterion": "The interface has a distinctive pantry-led visual direction: deep forest green, warm cream, and a restrained harvest-orange accent, with deliberate offline-available typography and generous spacing.",
+                  "verification": "Open the served page at desktop and phone widths and inspect its hierarchy, palette, spacing, and text contrast."
+                },
+                "kind": "criterion"
+              },
+              "quality:002:ui": {
+                "body": {
+                  "area": "ui",
+                  "criterion": "Pantry actions, search, expiry filtering, validation, empty states, and API errors are understandable and usable by keyboard.",
+                  "verification": "Use the page with keyboard only, observe visible focus and inline messages, and exercise successful and failed API interactions."
+                },
+                "kind": "criterion"
+              },
+              "quality:003:ui": {
+                "body": {
+                  "area": "ui",
+                  "criterion": "The page fits a 375px viewport without horizontal scrolling and adapts to desktop.",
+                  "verification": "Inspect the page at 375px and a desktop viewport, including forms and populated lists."
+                },
+                "kind": "criterion"
+              },
+              "quality:004:backend": {
+                "body": {
+                  "area": "backend",
+                  "criterion": "The API preserves data and enforces input and concurrency rules.",
+                  "verification": "Exercise the specified endpoints, restart against the same SQLite file, and send two simultaneous consumes of the last unit; verify exactly one succeeds."
+                },
+                "kind": "criterion"
+              },
+              "quality:005:import-integration": {
+                "body": {
+                  "area": "import-integration",
+                  "criterion": "The importer and server share the same database and report invalid or unreadable input as specified.",
+                  "verification": "Import a CSV containing valid and invalid rows, inspect the summary and API results, and separately try an unreadable file."
+                },
+                "kind": "criterion"
+              },
+              "quality:006:import-integration": {
+                "body": {
+                  "area": "import-integration",
+                  "criterion": "A fresh-folder setup runs without external dependencies or network access, and the page loads without missing requested files or console errors.",
+                  "verification": "Follow the README using the supplied Python runtime with networking disabled except loopback; open the page and inspect its console and requests."
+                },
+                "kind": "criterion"
+              },
+              "shared-storage": {
+                "body": {
+                  "consumers": [
+                    "1.import-integration.1",
+                    "guide"
+                  ],
+                  "kind": "Python interface",
+                  "provider": "1.backend.1",
+                  "text": "pantry_db.py exposes init_db(db_path) and create_item(db_path, fields). init_db creates the schema if absent and preserves existing data. create_item validates and atomically inserts one item into that same schema and returns its item dictionary, including id and created_at. fields is a dict with required name and quantity and optional unit and expires; omitted unit defaults to \"\" and omitted expires to None. Name is a nonblank string of 1\u201380 characters, quantity is an integer >= 0 excluding booleans, unit is a string, and expires is None or a real YYYY-MM-DD calendar date. Unknown fields or invalid values raise ValueError with a human-readable message and insert nothing; storage failures propagate. The importer converts CSV quantity text to an integer and an empty expiry to None before calling create_item, counts conversion or ValueError failures as skipped rows, and does not treat storage failures as invalid rows. The server uses this same initialization, validation and insertion boundary."
+                },
+                "kind": "contract"
+              },
+              "ui": {
+                "body": {
+                  "responsibility": "Own the responsive pantry page and its accessible interactions.",
+                  "scope": [
+                    "web/**",
+                    "checks/ui/**"
+                  ]
+                },
+                "kind": "area"
+              },
+              "vision": {
+                "body": {
+                  "alternatives": [
+                    {
+                      "label": "Smaller",
+                      "means": "Deliver the API and CSV importer first, deferring the web UI."
+                    },
+                    {
+                      "label": "Different expiry window",
+                      "means": "Make the Expiring soon window user-selectable instead of fixed at 7 days."
+                    },
+                    {
+                      "label": "Bigger",
+                      "means": "Add household management features such as item categories and import from the UI."
+                    }
+                  ],
+                  "improvements": [
+                    "Make the primary pantry tasks immediately apparent, with concise labels and feedback after actions.",
+                    "Keep the page useful during loading, empty, validation-error, and API-failure states without obscuring the pantry list."
+                  ],
+                  "quality": [
+                    {
+                      "criterion": "The interface has a distinctive pantry-led visual direction: deep forest green, warm cream, and a restrained harvest-orange accent, with deliberate offline-available typography and generous spacing.",
+                      "verification": "Open the served page at desktop and phone widths and inspect its hierarchy, palette, spacing, and text contrast."
+                    },
+                    {
+                      "criterion": "Pantry actions, search, expiry filtering, validation, empty states, and API errors are understandable and usable by keyboard.",
+                      "verification": "Use the page with keyboard only, observe visible focus and inline messages, and exercise successful and failed API interactions."
+                    },
+                    {
+                      "criterion": "The page fits a 375px viewport without horizontal scrolling and adapts to desktop.",
+                      "verification": "Inspect the page at 375px and a desktop viewport, including forms and populated lists."
+                    },
+                    {
+                      "criterion": "The API preserves data and enforces input and concurrency rules.",
+                      "verification": "Exercise the specified endpoints, restart against the same SQLite file, and send two simultaneous consumes of the last unit; verify exactly one succeeds."
+                    },
+                    {
+                      "criterion": "The importer and server share the same database and report invalid or unreadable input as specified.",
+                      "verification": "Import a CSV containing valid and invalid rows, inspect the summary and API results, and separately try an unreadable file."
+                    },
+                    {
+                      "criterion": "A fresh-folder setup runs without external dependencies or network access, and the page loads without missing requested files or console errors.",
+                      "verification": "Follow the README using the supplied Python runtime with networking disabled except loopback; open the page and inspect its console and requests."
+                    }
+                  ],
+                  "scopeIn": [
+                    "Build ShelfLife, a small local pantry tracker for one household. Python 3.12 standard library only (sqlite3, http.server, csv, json); no third-party packages, no network access at runtime, no build step.",
+                    "Backend: `python server.py --port PORT --db PATH` serves a JSON API and the web UI on 127.0.0.1.",
+                    "Items have: id, name (1-80 chars), quantity (integer >= 0), unit (text, optional), expires (YYYY-MM-DD or null), created_at.",
+                    "GET /api/items (optional ?expiring_within=DAYS, ?q=TEXT name search) returns items sorted by expiry (nulls last).",
+                    "POST /api/items creates; PATCH /api/items/{id} updates quantity/name/unit/expires; POST /api/items/{id}/consume {\"amount\": n} reduces quantity (never below 0; 409 if amount exceeds quantity); DELETE /api/items/{id}.",
+                    "Invalid input returns 400 with {\"error\": \"...\"}; unknown id 404. Data persists in the SQLite file across restarts. Concurrent requests must not corrupt data or lose updates (two simultaneous consumes of the last unit: exactly one succeeds).",
+                    "UI (served at /): one responsive page that works at phone and desktop sizes.",
+                    "\"Expiring soon\" section (next 7 days, expired items clearly marked), full list with search and an expiry filter, add-item form with inline validation messages, consume and delete actions, empty state and a visible error state when the API fails.",
+                    "Keyboard accessible with visible focus; readable contrast; no horizontal scrolling at 375px. Clean, calm visual design.",
+                    "Import: `python import_items.py FILE.csv --db PATH` loads rows (name,quantity,unit,expires) into the same database, skipping invalid rows and printing one summary line \"imported N, skipped M\" (exit 0), or exit 2 with an error on an unreadable file.",
+                    "Done means: the server, UI and importer work together from a fresh folder; a short README explains how to run them."
+                  ],
+                  "scopeOut": [
+                    "Multiple households, accounts, synchronization, and hosted deployment.",
+                    "Third-party packages, runtime network dependencies, and a build pipeline.",
+                    "Additional pantry features beyond the specified API, UI, and CSV import."
+                  ],
+                  "size": "medium",
+                  "understanding": "A dependable, private local pantry tracker that makes it easy for one household to see what needs attention and keep quantities current.",
+                  "users": [
+                    "Members of one household managing a shared local pantry."
+                  ]
+                },
+                "kind": "vision"
+              }
+            }
+          },
+          "review": {
+            "answer": {
+              "gaps": [
+                {
+                  "area": "backend",
+                  "correction": "Add backend requirements and an assigned implementation unit for POST creation, PATCH updates, POST consumption and DELETE, including 400 validation errors, 404 for unknown IDs, 409 for excessive consumption, persistence and atomic concurrent updates. Verify the endpoints across a restart and demonstrate that exactly one of two simultaneous consumes of the last unit succeeds.",
+                  "target": "scopeIn:5, scopeIn:6 and quality:4; backend plan and unit responsibilities"
+                },
+                {
+                  "area": "ui",
+                  "correction": "Add a UI-owned requirement and implementation responsibility for the responsive pantry page, including the expiring-soon section, search and expiry filter, add form with inline validation, consume and delete actions, and accessible loading, empty, error, and action-feedback states. Coordinate the mutation API contract needed to make those actions work.",
+                  "target": "Accepted UI commitments scopeIn:7\u20139, improvements:1\u20132, and quality:2\u20133"
+                },
+                {
+                  "area": "ui",
+                  "correction": "Include the accepted forest-green, warm-cream, harvest-orange visual direction, offline-available typography, generous spacing, and desktop and phone visual verification in the UI requirements.",
+                  "target": "Accepted visual commitment quality:1"
+                },
+                {
+                  "area": "import-integration",
+                  "correction": "Add an importer requirement and owned integration check for `python import_items.py FILE.csv --db PATH`: import valid rows into the server\u2019s database, skip invalid rows, print exactly `imported N, skipped M` and exit 0, and report an unreadable file with exit 2. Verify the summary and API results with mixed valid and invalid rows and test an unreadable file separately.",
+                  "target": "Import integration requirements and checks"
+                },
+                {
+                  "area": "import-integration",
+                  "correction": "Include the importer and README in the fresh-folder delivery contract and verify that the documented setup runs the server, page, and importer together using only supplied files and the Python 3.12 standard library, without external network access or missing page assets.",
+                  "target": "Fresh-folder integration and guide"
+                }
+              ],
+              "verdict": "gap"
+            },
+            "notJudged": {},
+            "reviewTier": "same-provider review",
+            "revision": 6,
+            "subjects": {
+              "backend": "r173",
+              "import-integration": "r179",
+              "ui": "r176"
+            }
+          },
+          "revision": 6,
+          "vision": "r7"
+        },
+        "userWords": "r184",
+        "words": "r184"
+      }
+    ],
+    [
+      219,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "docs/try-it/wave-verify.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs"
+        ],
+        "checks": [
+          {
+            "command": [
+              "node",
+              "--check",
+              "docs/try-it/wave-verify.cjs"
+            ],
+            "expectedEvidence": "Exit 0; the check has valid JavaScript syntax.",
+            "purpose": "Verify the check can be parsed."
+          },
+          {
+            "command": [
+              "node",
+              "docs/try-it/wave-verify.cjs"
+            ],
+            "expectedEvidence": "On the integrated product, exit 0 after checking the empty pantry, CSV import, API response, visible item and quantity, local asset loading, and 375px and desktop layouts; screenshots are saved to SELDON_EVIDENCE_DIR.",
+            "purpose": "Prove the offline vertical slice from a fresh database through import and the real API to the page."
+          }
+        ],
+        "discoveries": [],
+        "report": "r216",
+        "unit": "guide"
+      }
+    ],
+    [
+      236,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "checks/integration/fresh-folder.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs"
+        ],
+        "checks": [
+          {
+            "command": [
+              "node",
+              "--check",
+              "checks/integration/fresh-folder.cjs"
+            ],
+            "expectedEvidence": "The check parses successfully.",
+            "purpose": "Verify the integration check is syntactically valid."
+          },
+          {
+            "command": [
+              "node",
+              "checks/integration/fresh-folder.cjs"
+            ],
+            "expectedEvidence": "With the integrated product and SELDON_EVIDENCE_DIR set, the check passes and saves empty and populated screenshots at phone and desktop widths. Without the product, it fails on missing server.py.",
+            "purpose": "Verify fresh-folder startup, empty and populated page states, shared-storage insertion through the real API, and absence of failed local requests and browser errors."
+          }
+        ],
+        "discoveries": [],
+        "report": "r233",
+        "unit": "1.import-integration.1"
+      }
+    ],
+    [
+      252,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "checks/backend/test_backend.py",
+          "checks/backend/test_peer_page.py"
+        ],
+        "checks": [
+          {
+            "command": [
+              "python",
+              "checks/backend/test_backend.py"
+            ],
+            "expectedEvidence": "Two tests pass, covering canonical creation and validation, persistence across restart, HTTP ordering and filters, invalid queries, and fixture page and asset serving.",
+            "purpose": "Protect the storage-to-HTTP integration and local file serving against lost data, invalid inserts, incorrect lists, and broken static paths."
+          },
+          {
+            "command": [
+              "python",
+              "checks/backend/test_peer_page.py"
+            ],
+            "expectedEvidence": "Passes when the supplied web/index.html and its referenced local HTML assets are present and served successfully. Currently fails because the peer page is not in this worktree.",
+            "purpose": "Check the actual peer page and its referenced local assets through the server."
+          }
+        ],
+        "discoveries": [],
+        "report": "r249",
+        "unit": "1.backend.1"
+      }
+    ],
+    [
+      259,
+      "unit_failure",
+      {
+        "attempt": "r198",
+        "evidence": [
+          "r255",
+          "r256",
+          "r257",
+          "r258"
+        ],
+        "failure": "Proof failed: [{'check': '1.backend.1:check:2', 'purpose': 'P', 'command': ['python', 'checks/backend/test_peer_page.py'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': 'Traceback (most recent call last):\\r\\n  File \"C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-0481c538eb114b288d334696e3a1052c\\\\checks\\\\backend\\\\test_peer_page.py\", line 49, in <module>\\r\\n    assert status == 200 and \\'text/html\\' in ctype, \\'peer page is not served\\'\\r\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\r\\nAssertionError: peer page is not served\\r\\n'}]",
+        "state": "PROVING",
+        "unit": "1.backend.1"
+      }
+    ],
+    [
+      270,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "checks/backend/test_peer_page.py",
+          "checks/backend/test_backend.py"
+        ],
+        "checks": [
+          {
+            "command": [
+              "python",
+              "checks/backend/test_peer_page.py"
+            ],
+            "expectedEvidence": "The supplied page and its referenced local assets return successfully. The check currently fails because web/index.html is absent from this worktree.",
+            "purpose": "Verify the peer page and its local assets through the real server."
+          },
+          {
+            "command": [
+              "python",
+              "checks/backend/test_backend.py"
+            ],
+            "expectedEvidence": "Two tests pass for storage, the HTTP list, persistence, and fixture page and asset serving.",
+            "purpose": "Verify the backend independently of the peer page."
+          }
+        ],
+        "discoveries": [
+          {
+            "correction": "1.ui.1",
+            "owner": "1.ui.1"
+          }
+        ],
+        "report": "r267",
+        "unit": "1.backend.1"
+      }
+    ],
+    [
+      284,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "checks/ui/presentation.cjs",
+          "checks/ui/integration.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs"
+        ],
+        "checks": [
+          {
+            "command": [
+              "node",
+              "checks/ui/presentation.cjs"
+            ],
+            "expectedEvidence": "Passes populated and empty rendering, HTTP and network errors, keyboard retry, focus, and viewport checks; saves screenshots in SELDON_EVIDENCE_DIR.",
+            "purpose": "Protect the page\u2019s read-only behavior, recovery, and responsive keyboard usability."
+          },
+          {
+            "command": [
+              "node",
+              "checks/ui/integration.cjs"
+            ],
+            "expectedEvidence": "With the contracted server and storage files present, seeds an item through pantry_db and verifies it appears on the page served by server.py; saves a screenshot.",
+            "purpose": "Prove the real storage-to-server-to-page integration rather than relying only on fixture responses."
+          }
+        ],
+        "discoveries": [],
+        "report": "r281",
+        "unit": "1.ui.1"
+      }
+    ],
+    [
+      329,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "docs/try-it/wave-verify.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs"
+        ],
+        "checks": [
+          {
+            "command": [
+              "node",
+              "docs/try-it/wave-verify.cjs"
+            ],
+            "expectedEvidence": "Exit 0 after verifying the empty pantry, CSV import, API response, populated page, local assets and responsive layouts; screenshots are saved to SELDON_EVIDENCE_DIR.",
+            "purpose": "Verify the fresh-database vertical slice through the importer, API and browser."
+          }
+        ],
+        "discoveries": [
+          {
+            "correction": "Provide import_items.py at the project root with the specified CSV-to-shared-database behavior, then rerun the guide check.",
+            "owner": "1.import-integration.1"
+          }
+        ],
+        "report": "r326",
+        "unit": "guide"
+      }
+    ],
+    [
+      343,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "checks/integration/fresh-folder.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs"
+        ],
+        "checks": [
+          {
+            "command": [
+              "node",
+              "checks/integration/fresh-folder.cjs"
+            ],
+            "expectedEvidence": "With SELDON_EVIDENCE_DIR set, the check passes against the integrated product and saves empty and populated screenshots at phone and desktop widths; without the product files, it fails.",
+            "purpose": "Verify fresh-folder startup, shared-storage insertion, API and page rendering, and absence of failed local requests and browser errors."
+          }
+        ],
+        "discoveries": [],
+        "report": "r340",
+        "unit": "1.import-integration.1"
+      }
+    ],
+    [
+      358,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "checks/ui/icon.py",
+          "checks/ui/presentation.cjs",
+          "checks/ui/integration.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs",
+          "checks/backend/test_peer_page.py"
+        ],
+        "checks": [
+          {
+            "command": [
+              "python",
+              "checks/ui/icon.py"
+            ],
+            "expectedEvidence": "The page references a same-origin icon served as SVG. The check failed before the correction and passed afterward.",
+            "purpose": "Catch an icon reference that cannot be fetched as a local server asset."
+          },
+          {
+            "command": [
+              "python",
+              "checks/backend/test_peer_page.py"
+            ],
+            "expectedEvidence": "The peer page and all its referenced HTML assets are served successfully.",
+            "purpose": "Verify the reported integration failure is resolved."
+          },
+          {
+            "command": [
+              "node",
+              "checks/ui/presentation.cjs"
+            ],
+            "expectedEvidence": "Populated, empty, failure, recovery, responsive and keyboard checks pass, with screenshots saved to SELDON_EVIDENCE_DIR.",
+            "purpose": "Verify the icon change preserves page behavior."
+          },
+          {
+            "command": [
+              "node",
+              "checks/ui/integration.cjs"
+            ],
+            "expectedEvidence": "The real server displays an item created through shared storage and serves the icon successfully.",
+            "purpose": "Verify the integrated server-to-page path."
+          }
+        ],
+        "discoveries": [],
+        "report": "r355",
+        "unit": "1.ui.1"
+      }
+    ],
+    [
+      395,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "docs/try-it/wave-verify.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs"
+        ],
+        "checks": [
+          {
+            "command": [
+              "node",
+              "docs/try-it/wave-verify.cjs"
+            ],
+            "expectedEvidence": "Currently fails because import_items.py is absent; it can pass the import step only when the importer is delivered.",
+            "purpose": "Verify the guide\u2019s end-to-end import and page flow."
+          }
+        ],
+        "discoveries": [
+          {
+            "correction": "Defer the guide\u2019s importer-dependent check until import_items.py is delivered, or align the guide check with this wave\u2019s explicit exclusion of CSV import.",
+            "owner": "guide"
+          }
+        ],
+        "report": "r392",
+        "unit": "1.import-integration.1"
+      }
+    ],
+    [
+      427,
+      "worker_checks",
+      {
+        "checkPaths": [
+          "docs/try-it/wave-verify.cjs",
+          "checks/kit/browser.cjs",
+          "checks/kit/serve.cjs"
+        ],
+        "checks": [
+          {
+            "command": [
+              "node",
+              "docs/try-it/wave-verify.cjs"
+            ],
+            "expectedEvidence": "Exit 0 after verifying the empty pantry and a shared-storage item through the API and page, with screenshots saved to SELDON_EVIDENCE_DIR.",
+            "purpose": "Verify this wave\u2019s offline vertical slice, including responsive layouts and local asset loading."
+          }
+        ],
+        "discoveries": [],
+        "report": "r424",
+        "unit": "guide"
+      }
+    ],
+    [
+      437,
+      "unit_failure",
+      {
+        "attempt": "r421",
+        "evidence": [
+          "r430",
+          "r432"
+        ],
+        "failure": "Integrated checks failed: [{'check': '1.import-integration.1:check:1', 'purpose': 'integrated', 'command': ['node', 'docs/try-it/wave-verify.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:16:14] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:14] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: offline local assets must load successfully\\n+ actual - expected\\n\\n+ [\\n+   \\'failed request: http://127.0.0.1:59752/api/items\\'\\n+ ]\\n- []\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\docs\\\\try-it\\\\wave-verify.cjs:41:14)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\docs\\\\try-it\\\\wave-verify.cjs:14:5\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\docs\\\\try-it\\\\wave-verify.cjs:9:3 {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: [Array],\\n  expected: [],\\n  operator: \\'deepStrictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+        "state": "INTEGRATING",
+        "unit": "guide"
+      }
+    ],
+    [
+      447,
+      "user_words",
+      {
+        "origin": "dev runner scripted yes; not owner acceptance",
+        "request": "r446",
+        "words": "Provide the question"
+      }
+    ],
+    [
+      452,
+      "user_words",
+      {
+        "origin": "dev runner scripted yes; not owner acceptance",
+        "request": "r451",
+        "words": "Stop"
+      }
+    ],
+    [
+      453,
+      "user_words",
+      {
+        "origin": "dev runner scripted yes; not owner acceptance",
+        "request": "r451",
+        "words": "Stop"
+      }
+    ]
+  ],
+  "units": [
+    [
+      "1.backend.1",
+      {
+        "P": "c17a1d0cacb9390c85a0a47966491344703f10dc",
+        "T": "cc0a1ee0ec76a350b7e77462e609207b9d992bb3",
+        "base": "c876c7f0e7c036acb6c0cf6c67fd2ec49050ea43",
+        "callAttempt": "r264",
+        "callFolder": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\calls\\call-03190253ac084dffbf1f74d29bd3f607",
+        "failure": "",
+        "integrated": "ccfae84d8e736192e093dfad9c83a4d9f4ff0d56",
+        "judgment": null,
+        "lineage": "unit:1.backend.1",
+        "observations": [
+          "r273",
+          "r274"
+        ],
+        "recoveries": 1,
+        "report": "r267",
+        "state": "DONE",
+        "thread": "01a1e88f-6c19-7323-9525-53f96be68f57",
+        "waiting": "",
+        "wave": 1,
+        "worktree": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\workers\\worker-6fc337984dc44e81993e56f2b2aaa68a"
+      }
+    ],
+    [
+      "1.import-integration.1",
+      {
+        "P": null,
+        "T": null,
+        "base": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+        "callAttempt": null,
+        "callFolder": null,
+        "failure": "Provide import_items.py at the project root with the specified CSV-to-shared-database behavior, then rerun the guide check.\n[{'check': 'guide:check:1', 'purpose': 'final', 'command': ['node', 'docs/try-it/wave-verify.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:15:28] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:29] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:15:31] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: import failed: python: can\\'t open file \\'C:\\\\\\\\seldon\\\\\\\\tests\\\\\\\\m1\\\\\\\\shelflife-main-15682aa-s01\\\\\\\\workers\\\\\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\\\\\import_items.py\\': [Errno 2] No such file or directory\\r\\n\\n\\n2 !== 0\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\docs\\\\try-it\\\\wave-verify.cjs:28:14)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\docs\\\\try-it\\\\wave-verify.cjs:15:5\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-74d68ca6ca6e4b83955faf317d431d5c\\\\docs\\\\try-it\\\\wave-verify.cjs:10:3 {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: 2,\\n  expected: 0,\\n  operator: \\'strictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+        "integrated": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+        "judgment": null,
+        "lineage": "gap:check:guide:check:1:1.import-integration.1",
+        "observations": [],
+        "recoveries": 2,
+        "report": null,
+        "state": "ASKED",
+        "thread": "01a1e88f-6c5b-7350-8aae-04caa937a5b2",
+        "waiting": "",
+        "wave": 1,
+        "worktree": null
+      }
+    ],
+    [
+      "1.ui.1",
+      {
+        "P": "3be512751414c13f8695de01eb121abad5821d1b",
+        "T": "9954f8cbe27ebf65e6ac6f0223d76a0e0ef920c8",
+        "base": "f0c5a3da8844119792c4ae05e184330ea99c507c",
+        "callAttempt": "r313",
+        "callFolder": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\calls\\call-eecbb6268e4c4f2da31de79eb674ea8f",
+        "failure": "",
+        "integrated": "578462226dfd44988f872d4b0c7a300b644cb488",
+        "judgment": null,
+        "lineage": "gap:check:1.backend.1:check:1:1.ui.1",
+        "observations": [
+          "r361",
+          "r362",
+          "r363",
+          "r364",
+          "r366",
+          "r367"
+        ],
+        "recoveries": 1,
+        "report": "r355",
+        "state": "DONE",
+        "thread": "01a1e88f-6d2c-7fb3-8902-2c83c0f895a8",
+        "waiting": "",
+        "wave": 1,
+        "worktree": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\workers\\worker-ba8c93b013a74b339410621a4bf2dab6"
+      }
+    ],
+    [
+      "guide",
+      {
+        "P": null,
+        "T": null,
+        "base": "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+        "callAttempt": "r421",
+        "callFolder": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\calls\\call-6eee93024d704ec08f77aa38a0064785",
+        "failure": "Integrated checks failed: [{'check': '1.import-integration.1:check:1', 'purpose': 'integrated', 'command': ['node', 'docs/try-it/wave-verify.cjs'], 'executionStarted': True, 'timedOut': False, 'cleanupVerified': True, 'exitCode': 1, 'stdout': '', 'stderr': '127.0.0.1 - - [17/Nov/2026 10:16:14] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:14] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET / HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /style.css HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /app.js HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /api/items HTTP/1.1\" 200 -\\r\\n127.0.0.1 - - [17/Nov/2026 10:16:16] \"GET /icon.svg HTTP/1.1\" 200 -\\r\\nAssertionError [ERR_ASSERTION]: offline local assets must load successfully\\n+ actual - expected\\n\\n+ [\\n+   \\'failed request: http://127.0.0.1:59752/api/items\\'\\n+ ]\\n- []\\n\\n    at browser.viewports.width (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\docs\\\\try-it\\\\wave-verify.cjs:41:14)\\n    at async browser (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\checks\\\\kit\\\\browser.cjs:29:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\docs\\\\try-it\\\\wave-verify.cjs:14:5\\n    at async serve (C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\checks\\\\kit\\\\serve.cjs:30:12)\\n    at async C:\\\\seldon\\\\tests\\\\m1\\\\shelflife-main-15682aa-s01\\\\workers\\\\worker-b4d900f03c384c4eb0ab7c5daeaec50f\\\\docs\\\\try-it\\\\wave-verify.cjs:9:3 {\\n  generatedMessage: false,\\n  code: \\'ERR_ASSERTION\\',\\n  actual: [Array],\\n  expected: [],\\n  operator: \\'deepStrictEqual\\',\\n  diff: \\'simple\\'\\n}\\n'}]",
+        "integrated": "094daf1106111e3f7a904796f337af4cb195f65b",
+        "judgment": null,
+        "lineage": "gap:check:1.import-integration.1:check:1:guide",
+        "observations": [],
+        "recoveries": 2,
+        "report": null,
+        "state": "ASKED",
+        "thread": "01a1e88f-6ce8-7872-9155-cda7f26f7e7d",
+        "waiting": "",
+        "wave": 1,
+        "worktree": "C:\\seldon\\tests\\m1\\shelflife-main-15682aa-s01\\workers\\worker-b04917402c11415a843e5cf7eb21837a"
+      }
+    ]
+  ],
+  "recoveries": [
+    [
+      "planning:r7",
+      {
+        "answer": "r447",
+        "attempts": [
+          "r439",
+          "r450"
+        ],
+        "coached": false,
+        "question": "r451",
+        "rounds": 2,
+        "seen": [
+          {
+            "failure": "RuntimeError: fatal: not a tree object\n",
+            "step": "EXECUTE"
+          },
+          {
+            "failure": "RuntimeError: fatal: not a tree object\n",
+            "step": "EXECUTE"
+          }
+        ],
+        "stage": 1,
+        "waiting": true
+      }
+    ],
+    [
+      "unit:1.backend.1",
+      {
+        "answer": null,
+        "attempts": [
+          "r259"
+        ],
+        "coached": false,
+        "question": null,
+        "resolved": "r277",
+        "rounds": 1,
+        "seen": [],
+        "stage": 0,
+        "waiting": false
+      }
+    ],
+    [
+      "gap:check:1.backend.1:check:1:1.ui.1",
+      {
+        "answer": null,
+        "attempts": [
+          "r303"
+        ],
+        "coached": false,
+        "question": null,
+        "rounds": 1,
+        "seen": [],
+        "stage": 0,
+        "waiting": false
+      }
+    ],
+    [
+      "gap:check:1.import-integration.1:check:2:1.import-integration.1",
+      {
+        "answer": null,
+        "attempts": [
+          "r305"
+        ],
+        "coached": false,
+        "question": null,
+        "rounds": 1,
+        "seen": [],
+        "stage": 0,
+        "waiting": false
+      }
+    ],
+    [
+      "gap:check:guide:check:2:guide",
+      {
+        "answer": null,
+        "attempts": [
+          "r307"
+        ],
+        "coached": false,
+        "question": null,
+        "rounds": 1,
+        "seen": [],
+        "stage": 0,
+        "waiting": false
+      }
+    ],
+    [
+      "gap:check:guide:check:1:1.import-integration.1",
+      {
+        "answer": null,
+        "attempts": [
+          "r383",
+          "r415"
+        ],
+        "coached": false,
+        "question": null,
+        "rounds": 2,
+        "seen": [],
+        "stage": 1,
+        "waiting": true
+      }
+    ],
+    [
+      "gap:check:1.import-integration.1:check:1:guide",
+      {
+        "answer": null,
+        "attempts": [
+          "r413",
+          "r437"
+        ],
+        "coached": false,
+        "question": null,
+        "rounds": 2,
+        "seen": [],
+        "stage": 1,
+        "waiting": true
+      }
+    ]
+  ],
+  "objects": [
+    [
+      "77425c8c5a347b01ed5e829539fa8d5322bd8c1e",
+      "commit",
+      "eJyNy0EOAiEMQNE9p2DvpkMLtIkx3sETFChxknEwI97fxHgAV3/z/jzMfLQGWUQwakGTTsSoWOPSMVIOC6diVoq4px62Tx8zUwohpNYbkTB3zqFRgZoVAUoiqoWYnb7nfRz+Zlsbuz+/vr1uo+p28UsWEkAM6E8QAFwdj8c6p/09uJ+rure16bQPCrc8lg=="
+    ],
+    [
+      "8013c62d686b6af0ecf70b82798b0c50a6edad89",
+      "blob",
+      "eJxNUsFu2zAMvQvYPzwgx7lK0h425FqgwIBi3ZbdZ9miY6GypEr0kvz9aKsNBl0Iku+R71EbHEfyw7MbSKlbiDyHAh974/0VZ8cjflx5jAEPen8PEywcFxSWyGQL77ps8lXje0Qy/as5EVyQsveGXQwNutl5KwBKDWIGXZhyMB6B+BzzK/oYAvVLL1yRLFmyWqnNBr/mAB4JhfJfykp9CzAYMpURQ/SWcoPkTU9oa4dO13bdsE0mcL7+sV1N8UpTMcgxcu1ywdJFjzz5tac9U7f9L9eA44kEmasPIgllTsk7stUhmFJI3JjDQrziW42nHCcZKIzLqAb9GGMhWT3FXCdLaHgRkdfFjj+fHROsYdOZQs1aoIuZkqeDUm3bllGleoWbUtzdrXxfd7udxLZDFa3Lmxe2hwWm1EuigJE5Hbbb/f0XvZO3PyyYLeK7u2YiOcKUZjmMxu+b4egzGaaydn0sBze832g5ZhT6WqeLK+zCCYPz9OG4KC8yfxGrceSY5O9ULx85+8+P+pP6B5qh33U="
+    ],
+    [
+      "208721045ffb6582b7fc231840195120baff9d94",
+      "tree",
+      "eJwzMQAChaTE5OzUvBQG9dDm2sv/EvyXSNZuv/fuQHivtFWpCVhFZl5JanpRYklmfh6D/sF9Mj219klOZx993cJ5cvYzX5HpEFXZmSUME777v1lcfPGQk9hLP69bAb+3+XX/hsiWZjLM45q+Najbvy3neb+uzerfTI8DdLMA0SA3uQ=="
+    ],
+    [
+      "2755837dd3fe604fa4197db7deeec0578d1b3a75",
+      "tree",
+      "eJwzNDAwMzFRKEktLolPSkzOTs1L0SuoZCje4VLWERF++8HR+VcXP7hyOCarf6ohktKC1NSi+ILE9FSQ4vtNeYfz3ZImbpvjN7ej5OfmhhfJ+wFCsSc4"
+    ],
+    [
+      "73b84476885857dbe0c59fd5a3e0d4c35c6a8f95",
+      "blob",
+      "eJytWG1v2zYQ/m5g/4Ew0JLabMV2G6wLphVYG2xFs7Zo034JAoGW6IQLTSok1dgo8t93R1m2JCvJss4trOh4vDvePfdCD4fD45WwmXSC+EtBMq6NlhlXpLAmLzNhCb/gUjtPOLEC6E7Yr0CVGggLK9wlWRiVCxsPh8OBXBbGepJzL7xcivr90vsizpQU2tek6qHkPC69VDX1b2f0YGHNkhTcX8Lqho98gNeayV02tziTXYmtWFfOwfBMOLelrLd/erEsFlJtzWqaWGrpvXB+MPj4/v0pSYJGlqbIn6ZRDCc16qtgUVxwC+dwZ7PzwWCQKe4c+Z2DDTpntZD4FL5ecSeiowGBTy4W4Df/uWBOqMWGiB98jf2yAH21cbAXLeJ2/VpakXlj1yxqb+B5/koJrstKHgoA7wZCh9Ma4+uzbFk1X4od38JYgnoxooxW0Y2LNR0RWnDt7TrN5/jesDqID0GIM1OsWfDYQZAyauitKDtNrLlEb8ScRvHyKpeW3ceDT6lzsYov/VLBlhsrvUi9WHlGf1VSXwEuVTJ0fq0AjUL4Ibm0YpEMDxwwxplzw9/gNEJnJpf6IqGlX4xf0Id01ps7GucmX5NvJDPK2CNyYYXQ5PZe8a4QGcSgDfgYqSkivUKYMhn30mhWOx1hRNve7MSjHel8vq9jCRkMsoMW1Mfwq21YrAzH5BUrMKfiZxt5HQWYkKCix6DYXStwEO0aFEtIB7CWbfd3RVaZClLfGS3ux7jzpgHuGwnGVJkfVw8WEe4CqYNToMRzABBjdDr7OZ7Avyk4dhJFbb5gEFaCpNpzITw+MVlYdDaFZN9msufW92by7kC7OhR/MIXQ7AzqUPBy6fkc86SdauMx6saAe8u2tkRhJZ+36OjH8xHJbvJkGwxcz03pk4be18df3n0+OQlLwtqepXYRSLECWK4vBJtOJp10l4vWCcE6pcDl0hENUMDwtfm3LllwqRj9VDUNsQKc5CQvLWRK5ceyoO1AAKD2RTXjnUEbgnTMjNZQHjFn2pFteg8rPLolnkb7QvFjhS+tbi2JVSYKT95/OrYWcnxvG8qMnRKiYPHksAPp1nFzmQf3hIPCMRsIMnutoOPhu13bioMXdik1+IP1wXnDdMOlZ7UrDu9mrBNxayfkQDBzFNpxw1h0PnA3+nr85+nph1e7mPSHZBeRhhl7EUfp0HCvS6iBjP5xfEo3BrS4oCMXRsPcklQbwNiaxLqcGOTtBqgl3JdutCPA1kuBdZBROIKH44xP14WgUYMHUJc35C7A60r1GZ4pEyzYehFLeVqPU2khrJMOdGQi/cqVzEPdT7nOU3RnqmCxiw1vcr6Gc9ZzVYx/xIHaMAmJwKT4cp5zoo8Iq/b9tNuHX7lQnjNYcImOolg6A9m/5L4hCQa6utRDGd8kHKTucleCRuQbxdpIjwj9S6orAjXjCVay6xKagvRrWJjBq1gVMMY4eEMj2Hga3TYiL0U+fZSmNydvieG+o2gCrzh7IUsGuWY03Vf9rKt59ugzWpmJjurpA4oUUOyjFeGuhxW9aCrSJt0A4HGqCgXjfVfXbbs1SB2QGkbEb7dNEWRvZ3N1RX98Md1j6C3E+GlubO86taXoSG4zjP+b3OkOOFj57lXRDgCdTWaH48lsPPuFfofqK21udOXxdimpOl6YfMo5XifYJgjJ5hltyircP4T1Hznc4Bz7wlUpQt/q6XcP4KKW++gxrpqHGsRNec2qUpp6KKUjEgbnDTixr9ADXsgDNMJ1Z9nqSMfgLMVqYTMYSfq43kCr4UWhZDU/H+ANkrZ13yMducMI7BjaBz49g9o3qgpT9YAiFnJ4VGfY+b+T13fQl9fJUp68fRpgBCNQilGWOnlGI7hO9mr/Pm1PZodN0efttIYGa9fVva9r0Xi6raAN6jQ+7CMHZCf86XWCk2qN6mTavTPuYzpYkITvPsDWQHoQQS8pdLlKTD/s+yD1vAmpR0CrjamejVit9qB1RgXmJe0GNMyCD2XUIyN/N5x6wNyZU/iFCMMI3khVikp9ilcViHfvnefO7L8raN+b7XgPPwi/BezFos05p9tfAGhlyCOs3F3//wdrKwseMDb8lrBv6J7SnY1PZgL+H7R/FjibnCO0n0NgB3CnSFNsQGlKkoTQNF1Cs09TWsVw+3MVUln0w+AfOGoYdQ=="
+    ],
+    [
+      "df826ec36f466291b69c4e9d8874f9b380e863bf",
+      "blob",
+      "eJyNVk1v20YQvQvof1josiQiryUDQYsAOhSJ0RzcWEjVXAyDoMihuPCS3OwOYwtF/3tnlqRIWm5R+iByvt+b2Vkvl8uPJWRPAksQFsAJmx5BpHUuNHphmiw14vP+9zuReg8kwdI17bEM9g5I6cH9AKeWy+WicE0lSqyMsqkjudCVbRwG/12QLHpJiWhVZjTU2HnZFEujD4PHjj4HW99kT4Dnr/ZgXZOB92fJ6fyKUNlCGzh/6wq6+K0zFL6ra0hCMm+NxsXi6/39XmxD1ihJOEKSxMqBb8wPiGJ2o0r9w83jYpEZYkL8GtiIRmTxh4WgJ4dCJImuNSZJ5MEUvZwf31pwFO2sj0cVWSrmwFMZD4/nUCU1gorxmDrE9BgirgS9rUSK6Pwkevgm71xnGHXKs44jkypI1REwkt5lMha64FhC14IkmdMW5UpIXR1JB4aYmniUDorRZbsV0uj6SXZ2X5oaztnIhBOOpc0RqtRaqPOIP+LF4llTbUPj1B64N6k7fdIOMmzcKYpp9ARWtosXzLuRUN1PZ8DvE6rpSx00ZYnk5uZntaa/DWFbxxNSeAa2nSkh5N86rajdD5uuAf2csc156NSuoeKjBxo6BS+QtZgeDBBp/TGwJ2bw6oqD05tHF/FrHIT5oReFQSNIsbgWMj8o/53GEGT8uBLZc77lcWTDvGlxO8n96fbblz/v7oIKnHtD1aFDdxqpKBonEm6xS+sjRJv1Op53htvVR7GNMUSn9qJuMDR1bsqPSzU1/Gtb8+G6da5xUQ9ewAuhyGU885kVMzzTLma0RhCSrKlr6rhu6lc96/njdMyH2sSX8fg5UJynmQZeMrAo7v8IZV56cUjlDYCN1Pr9WDaP9Nz6P0DnOg9shTM6wc7Hlw9OGPN5NIZKUzVZgurzfr/7ODJwQcCI//3/oJcT0Pr63oKnk/vb7Z6jhOP22pJ2nG1qwrbtnKjiQRS9ZY2tq89OijBj61ejgNxLSGk4I0lokJBd7U+WJntiQ23KX8UudJ0a829AMtPMqhmyZkihV92FtQ1cy+tJA/jCcthb88K6Wa/DxSYRXvCa7ynJ56IPI8fbr5//0OBczgIir4N++cevNKoA4LV2BJVD1uQQyRaLq1/kZOnwaQzWnLl3C1txjp0unJBpuKKiYDonrcfHlQZzVQPSfR0gjkKflVARvEISaHDEc5f2g/gr/P4t52t6zm0yEivedY7K0AbTNnD9ZkGXhPfBCtkhH7l9owjrdE35dsN/IZf/gXSutJMz3llFS4PTd/1ijIa9RsAr0uF0igbdc0r0jofrp8U/Rqy30g=="
+    ],
+    [
+      "2fc1be1c8c7d3f6242cde2f5b409c99be64d1497",
+      "tree",
+      "eJwzNDAwMzFRSCtKLc7QTcvPSUkt0kvOKmawUrv2anH76bemZhP/5Pyxt2nynlEKAGDVEjY="
+    ],
+    [
+      "3a26d6eaa387cbed353691fc6cfc3f3c824b9875",
+      "blob",
+      "eJytV1tv2zYUfg+w/0AEQyVhNu20G1o4SAusa7e9bMMWYBhcI6ElymIqiSpJ2TFs/fedQ1IXK+46DEMeIh6e68dzcyxLbQjTmitDbojin2qheBiUMuELR55po0Rsguj6IrbcqX7Cmer+Wj69loPripnsCQMSe5aDrtiu/GNfxs0TzjgTeXJXKRlzPdC6VnIHzg7ZKZ19FGbmb2j8MGAHwpafYbb0ltXzKikRGnSRKq5lvuXh3V0iVMkKPiEoSukgvr3JZIkCzkfKyy397a/bn379hRyPJHD3QYeWEhtRsvztLhnIxLsk7PEGqwhZqmnxMTG8qBCa0Dr0IEUZSk1NUYFHYQT+6IznaS5SPrWC0yDCWJgGGZLWZWwEuFcwkIvI4YIQo/b2PyGpVCT0NkXOiUzJMrCQKFrtA9BdsRLY75I1nleRlyPoWiyr/XuQGvmG6E2sOvCtJ1vXPB3cQx3NRatpHJ/TEez4OjinpL04KB7XSostX0BQNW+84g7UDCGyQv6G7ZjwyRAu3cMggMOIp9NKKoNfB/xoHC1ZW0rCDGtmDhSqP+XC8BfBauJBcZCHh1rlE4KsPwjVROTmdQcbIQ5tVgl4X88/4mh5wO0KPjBrndspN3EW3n+N+psZqJiB+ULf+9haH7CEKaQ5y8NWBdWGmVpPyPP5HMJAsWkuwEZRY23Uccx5EpzoUdzUquycoA9aluGAo+k/vcmE8+qdNevcBQcxPZcrsFjynQVkzSAecEYZTSCtzX5o1In58g0tiC2iFdtA5ekM04IrJZUe49qiljKR1+A1oLZcDQNCFRRiCLAFcG2QEYKeEH9Gda0wrWptkfZ3FJwJo2ZBeopnDaM31Dp0yx9Ncx9FnzHpULTW2lc99Z4QkZL+waxB6pD6U5gM4SDfkGAWROTZMzJ6WEih1zfk2/k8OtFIzgU0EmzIgOjCPE2o5uTkQM4lS/4hf89ksIUC3/e9VL97cqhQUD2N9UyK26CpBx+4Cw61m6DpmxsS/Pju9jR722SyZjfSSMRvzDGsFJ+zrcdRh4+tmVNAhofZjNxmnEAHrmAYZUwTlivOkj0p2VZsmOHJNcm5IQIyXpTCCJZ3GZcCQWd0WL0Dr7n5fo9ZFc5spRxLScI3C9d7SPTGAgNEk4lygzeiPGZc8ejoWYQmcc6ZOsIdS5KjNjL+GCHnXtYKNKRCaXSMFzMRUXsCZP0jhQdEABprsBVarHMenCaC76RQkWEgSsM3iuGcmXZV/SRpROl3jm7Yh20HXgbTOJicvE4gCmy/RO/1NQxEWZBuFBF/hXDCcUJiQNzwO4zkuqWGIEiZ2myXV6voesgyvIEZcolT/XJBLn/uoyCapWCzvJyQS0iP0gizB5YXL+Fcg35kf2BKXzbRyO1+Vvn+383QblxEaBXm/YL4ccbLWCbwiIB1bdJXY6CHaeow7No5NPN7nTHFE2iqUkHaeJQxBtfgsGd5KduncCXptCRAGpW7fytMrm7w2E7+eZ+Ql+a83BgI5uoLjMv5ivo96gzgwb+Qbh9kAu9xJiWxN4Vn6KOiOmsdHoY/stjA07Bcwz7x36piXL8f1i9efljP/rcaq2RV59hazsLVz+G2+/shrAH2qVs/2xak3QYAXcSmCyyn7eB3U/YLBhyTV49R9+p40c/yM8oagHor+A4LWS/I8rATicmwxL6bQDcVmwwe4dV8jnz+6ur5q/np3aqHy3012FJZnrf77ekiONi8vRzsnqqwnciX4nijnOCKHJ+sl81Fc+GWaRozXMhcWeEItMUjc+4qzV1A7+l+FzwK8xZ+0kBdXV2jx19duL+/AZq8TwM="
+    ],
+    [
+      "90f74feca373d1c24216e94e4ada50fbb64e8bfb",
+      "tree",
+      "eJwzNDAwMzFRSCrKLy9OLdJLzipmsLlXoclb/Ypvwvr3j/fqBTIc3HPouSFEGVBJWSpY0f8JHnOYj56cc+T+xjlZ0mHxnl2vXwIAcbAgww=="
+    ],
+    [
+      "3cde78290d7bea0e90afefe3bd2e5100c1bcc2e7",
+      "blob",
+      "eJydVVFv2zgMfi/Q/6ADBlgGXDXbDYciQQd0TQ4o0NuCddhLUXSeQ8dqZcknyU2zzP99lGTZyXoPh+XJkT6SH8mP1OkpuXz99vTyzV9T8k2rjQFNWy0ykputLAjdNfkaMmIqZTMCWittupScvyOMsYzsnjhsGqWtycgK8pXgErqUHR8VShpLSkPOiYZ/W66BJlKtYFqaJM1Ik9vqxZU7dJfqpZVCq9nxUa1WrQAGzz4kogLJspWF5UoeJlBUUDzuU0T87W7DV7aaktdvziYZqYCvKzslZ5NJd5cdH5Hf+8XMMcCfE/x1+LHDKu2cx1AJvH50BFyO7EFxSRutCjCGgXxi1x8vL64vlsv5xecL8uMHVoBVqoYV1xTrkdTmpBH5dqMd2wQPmHfnSxIDaKVChskhdPx3UigNyR0rRW7/yRsq8xoZvwtZ9+VmGowST8AcT+MhKasR7Ny7ro/83UlGPCINRHhJaIkJPXNjzQ02hnqaaRrIsaY1FUXZIEZjxTC7PRAz2CIagh0w69F/cwEePjLwhj0FzLS15VmSMqt5TSOlsTZOUp5FyeVqSOeQ7q/JJU1ePKL82YNRMtlP8w8HSImtUHBEwoYs3GTQ5ArD5UKQ5VB1IlSBJ1vyDUqsP9GtlFyuo1SDSg9byZ0TWTg55Zuc22EWfFBWYNCatzUTOeq+oqFMu6LKpQQxdXKB1RoSJ2/UJWpsSqxucYgtr0G1qPdxVH1YAdbfaf/P6m1QbuTjNsDAJZJjmPUSL+gwX1MyTNrt5K5L47pworybBYfOFTNg51DmrbCfAyEa+aT7MCVp4j68l6T35poW3AY5+W9WY5KITF/YuwSUcLXoIc5+51vYHzC7bYDiRjs/J0kIlR5EGHDwjPpMZ6SLUUJ13GYcNlGv3Fi/iCmVWGGvcfz3hv5mcT3/+OF+8eVqvvhwubifX32aRTPUZf0YByRY4ybTULTa8CcIDR2IIB4rQ0Os2ASiyrEh6ciI9I2MrfjSY274d6DRYPR8CC80gHQZu3fB7dFxZCLLr692rgrdyatBGcwv3Y41cv0VZVG2QjjpvMiiix//g6HTWLTsZnGJ2VbL3nrppsTgRssLoLe0f87SIIC9AGtllXswsLO9vR/J/374XPdxJUeebvL7OJTeZ+jgAQqbHiiAhNHC5mMqUfCBR4DTvf3xvt8KcSBw6YwPq4/eJ90R3GN+r+xIISDX0bMPhshfprUQCjk6D8dHrlw/ATrPjr4="
+    ],
+    [
+      "ff90489c03c5c99cc4dfb19c6a1b565f498aebe9",
+      "blob",
+      "eJylVm1v2zYQ/l6g/+EGFBWFKpKT7gWw4QJBnK3BsjWI860YEkU6x5xpUiMpO4Gg/74jKcl2vHxaAkQReXzu7rnnjsoyuDj9Mbs4+3kMBvUGWa6fNgnk5kUWwJpaiwQqpW0CZW7zGdf0yss2hukXSNM0gUZjXr7QNj0El9jG6ft3WQYOB0z9aCy3tUUDjYNps8bhtBOwS4RKq7IuLOTCKNBYIN+Q4c232zvIZQnzy+vZtz/vZ+d35/ezq1vCLZQ0FhYGpmT+T801skiqEscLE8UJqOMN5Teq3C6PttxiFE96VIn2yITW3PHGVPlWJuAfc2KmPbIsllyU95RQgcbsoTZKFnhsjhuU1gRstHd8jaq2VAKBWB1bW9rXJiP0NTcY4NdEncAUnx2tLu9QskUtC8uVPKhmscRi1ZeKTKMs2hWM3j+P6Me5baiwzft3ACF4o4qVZ4V4SAs6bXHuYDVzEUC3nwpuLEo2SiA6PfslHdHvKcUI+TbnFhwBLFiSQbDl8ikKEMGRy4HcdHh5WWpikcWpW+9xJG7hJjDAaFuJDToRdmcKoXbr8T52p1uCX5h0vSotritXQ+bqn/6tuGTKpHZdlZzyohANilLJE0/gSXSARXR6qonVdJ1Xjl4XAz1SjZXICzwXgkVB6sTx3GpKlbnXOD408W0QDW114MaLyfHh9OacmO+jvxLvPTWCE5+nTjkl2pxKW46h011K+Hah9Bp+mFKVt1x+PosShwtAL6Xamq+c9ARW10hytiVXY4i4XKLmtrdEuRlDQ83do9JC4rtyfJBQ8rpBx30ybbufDcoSSy+i/yygTzb1Kol8FYmUoY4J0ASisw9La6txlg36Gn8IJD94R4JUusi5qDVOBkAWodZKE5x/Ol9Nb0WQfnECXahWvwTl91HX0nLneUaiT6Xashg+DT0zCZZENbDJJO5PAvAFsM5FTCNOq+0Q175JCBGfub2g/vbVkrUQ/RHH1KULjz3cdCPS2bpKf2gOz7YP8QHyXrhfpiGJY9QodDG4eUDZGDMkFu3Q9hjZsWL4k8wdLeePxP7cv6U2jC/2h2uodf7MTpOOvpM9+uIddAiVhb5eoC2WzJX5E3R3SRPctNQzahXDIy2vhsNt/0+R00Fgvo5UAo/pX1KZrwOp0d1LhT7nCD5+hKPdEHgw6GnqddG7CVH6ycx+GvVJdNsaba1lZ+PH7Jt35rgTpr8+PUoLC05pioHnnTTI6JWqjlp8umvx+LhQKy4EDjPEz7vI5mbl1qkjvkfZzdVsN6F2XmkAZneR+/trRDOnOZob7es6BlepsbmtjSd25Mh+pfHpmxrv1Wg1IhQCc1lXvmuw3JNjCygM7ifqBTqMPhcFOxnyoATmV7/9fnV97W6ido+eN1VT9K0YXc5vL76+KYhXyvDj7bBrDoPai4nk82b69KEkBH0K0TfQQcj/N+DuQZefXnsdDKKk74Gi1oYc9jcCCas4LDOdbumffwGx+TCx"
+    ],
+    [
+      "9e0a97b5528b4f866ce78f2d3cabfb02e3502d6a",
+      "tree",
+      "eJwzNDAwMzFRyEzOz9MrqGQo9/39ud7A1vuKbWBpOp+P6b4NzSGGUCV5JanpRYklmUCVyVnFDJv+OCxVmOSSyNZUsWL58ePen32kjkOVFhSlFqfmlSDUqspt2WQbYFDfa7pN0iNI4/6S/Wv3AQDfIi9c"
+    ],
+    [
+      "774dfbf37f303d4bd43d5175670e4c35beb08354",
+      "blob",
+      "eJyNVVFr2zAQfjfsP4i8SGapkhTGRlkeBhvboFvL2u2lFCPb51hUljxJbhvG/vtOsuM4WVemQi3dnU5333d3mc1m74gyhVBEFkaTpnOe5EAsiKIWuQLia2u6TY1fIE40+A/sPVgiXBS1Qnu7xc8G+Gw2SyprGlL7RvFWWDQlsmmN9eTT9ZfzyyjpTVrhayXznfoSj8mwd6a4Az+eury1pgDnRsl23Hpo2koqGM+ygd5/ZxW65xZ+doApDXqUmhZ0kny7uLgm6/gsy7LgIstStHZG3QNLQ/Cgvbs5vU0KJZwjnxEdtk8iPUsIrhIqkmVSS59lzIGqBnlYrmvBoqtRn+5VaMlri5fX5KvRMPqqhS4xFOeF9V5soss5wd2cCO+tm7iPZ7xfysKzXjnqZBXukPWaUCX1HSXoltBAMCVS91f5BjyjFhSdE0pT7lolPZs8cBzo5FaQ0DRJHqSvRw74NQSQhd2+lxYKb+yWpbFMmrb3Gs17dnn/6Q3CfoIbnngudckYXZ2+5kv8W2GQy3SfYCRz3ZtiROGrsTZZerO6jUZDyQSbsX74ZeCe3WD9cHiEovOhwDH7vqJ5uw1QnJwE57hz3rKwTaOwzAdRLBlMKSULQsucu5+IG9D0dk6Kh3IdCisYlqbz68nb7z/8+Pr9/DyqwNonVH122Ex7KCpjSRYYs0JvgK2WyyN+kOidl9YohXBKR7TxsaoOTcOyQjog3zod+uSDtcayIXkCj5hFSdODOwfB7FZkcWgkVtHa+/ZssRiZOvsVQPu9QLjCKwGGVWQZm6s12j0RVlhhZCBbOyNsRVFi85RQmBIY7Xx18uYourBytLs7kMJjAa0nF1cxv78fC0FxpwBaxpev9h5BHYf2DFqlLCPMsVEnYcUZuu6HxaGUVwAlC1nu5ThXAOs4qmOThTYdTzw6dwFuRhc0jdrw6D8s0GTeN/k4xUWc2CfGyg0WUT/mw+ClYwj/R+av8cnfE1pfPUPrkNpIJ0bqOxcm0uly+axljcRDP2gyfNXjGM78tsXejvNMNvhLs3D3m5ePjaJPecrpW1THQXdUTfvxYaXGMXY1ASfihs0TCS57XK5+fCRDCAPHldRCqUlT7LrPg21Q5+HglV73IHCw7kF7kfwBV+JFjw=="
+    ],
+    [
+      "b2fc40a520924461068278a8a7c7c74bf34c1ac7",
+      "blob",
+      "eJxtU02P2yAQvUfqf0C+gCuHdE+7SrQ99EvqtdtbNoowUIetAw5MNmtF/u8djB2nTS8WDG/evJl5ls4GICIE7YE8Eq8PR+M1o9YpvUzhRQBvJNB8NZM9+hwacbJPrZXdTYrcmVptG++kDmFKaQTsbrAxOEGw1Ku+xnC++G2weoxz+XLFVnp3wvB/wMPLCGcioErCcvL4kZxnhIiTMEMptqZNCztnaUFoH/G8aeNlPm+ch3g6x0OXYqrsI0qA6BaNsOBbHg61AU03BRkKnY++LkjEfDG+u5QlJAlXJWqObfMXZywbcEj7Nx8qn3KC1gqzLjNnk+w1ncsoyuyjTpJItqosQhtW05VLrwXoLVLvGT5x4avX9R2qPmdW7HW2zL5b0JUXYJwlpRY2ZAXJDkdkMNBmy3u8Ha0BRILBxy7HsqqMDNpKp4ytlvQIvx5oN2hP1uG4HlGz2AIPIOAYCvKhIMNdae9HeL+XYXusH+I40UZUuiAIdR6zw87B9VzH1IjilYZP7U/9BozeNERzHoHfnGdDzYvIvQC5Y1c8tZMCEEhLp1pMNNZq3/PmBVncUK+fw/PT5v09ibNZ/MuutG6+9mMYe1hvJkzyIzbFBg/McVf1PPlxNEIaavpGU7g6aqwY/YHY5GYfRyM8WiWgcmyCCKv6boi50ttEUSrydjnLuew773X1Ix3J+0iK52ik9Ddz/WbgM/646Ma7Fap5N/sDWQBo7g=="
+    ],
+    [
+      "251eb4b23d50307f8d35b619485228dfa4bfadbe",
+      "blob",
+      "eJy1Vt1u2zYUvi+wdzgDikneFMpJWrRQmg7YkKLbxTos2YohDRBGom0mNKmSlB3XMLDX2OvtSXYORcty7A5tgSEXscjv/H7nh6XRzsPE+xpOwYr3jbQiTbSpREGHyeDkURkgI7cDGLnNdc39ZAdAhxsId05YvwNqj3PnrSz9Bn1jzRwv+nDG8jvp83jDytuefWsMqSaLzApn1AwF5uKGEEp4mKIpvE9qUzeKe1ElWVAsnKfALq/WilDzLJil8FlpBYLPw1maogBJuQGcvoTlI+g0sLpxE7pmjVVoEUCOYP0Np6doOOe1zKUXU3Q6yLaY1i8CjLhUjRV0SzbY3CL6teBV+nR4PDjBM99YHa6ErtKk0XyGIvxGocwJrPao1MLPjb1DlZ3we+ZMeSc8q9BvaxZp8BYeWDwaDjNYJj8a7YX2BxeLWiQFJLyulSy5l0bnt87oZNVJb/n28/mbXxgRqsdytOg5JKa1XyTwPeYbCrhcaj4VRfKbqEChHakcsvK+4fjTL4rjDBotfZHccuuSFTrUwt9wpOwbeDG2XOqXfYnhWiJZXQ2Ca5SVWL9SUQEskzwpEqkrcc8mfqpQnKipGRZTkcQfdOb8QglWOjre/KYbiQqZm41Jz/rn6jKSfbUm/2syuMvlk+GTXS4jfd4udvD7mSDdJOneSj/BxiAXBpjWRE75WOT4+d09xga7SAoiIL249zl97QHd9jG3WGautLL2BG3PQuZWIZA2gpHDruPVK1R0vtBlGvrw1kidUmNmwcJgEOPECionH81MLyVUXil3qBDSruf4nEsPWszhV2um0ok09jsB2u5lSjpMV4qpSw6PnrEh/h2Ghg/AtjRCtkP1tgUSOhWuqe2LPO/EisfLqJRXFSpw6YDVxvrVdVv6rTtxJqWoJIPo8bJGLjJwE0qAsNZYt+qi2IgSio2F/2FxgalNt7phwAjyyth1m0Kcomk3eaQuVYPNnG5NGAyc9MK0odnYYsFh+xwYK8dSQx+8rZpNiZ6055wyyBj6kNyYaoE+Sa2FDc6inbzn7+U79+786ttjoI6NH9vdGg+H+UOj6CJXe40y8hKtlqbRweLRQ9lKiPosyLdZznC8YAJcU5bI16hRoAyvYMIdcCiV4DpQbsLg3OKCuEoxcxqL42CzKjrUyFhI23KZywo3nhnB5fGzpxkcHj0fXg06arfIdcL/IcWcquZcfhDpMshmMBFyPPHF8+Fw1VnYErSCHKde+KJS6YqlJy1mXDUYVNo2VGXKZooa2PrHmRLhGzveKPU2BPniFALl4QsJuJ5gEX3AicQVGOyMkTJz4B4et4GtrvdHcycWN4bbitWhjZILfpN8ka+89HIm1p6GcqX6L0YIcAcz6WTYieRp/IC1bQiY/c6u4v/1U6FdViefQ8ifprHQlg9IB0ED26JmX6G1hvYVWXwThDLrHgjZZrFvVVz0O8I+y++3AjuiUZX+56+/fdsti00o7CPF9enUfmYR7E6DTysF2k1xU9IEvEAW+BjHzv9bZj3ltPjXnD141O3jnaZV37fdR+rJf+XuDCMl+S+bDm2507NqFoeTKy7bpihommW98ZTFcxp1veOr9dyK4xSH9jhNfv8JugCytgfi/qMNXNLEQF50Reu4RkFM8qY/McflncNYkKY4eFf4etBcKXocfcryL5XZnA/iQwK3dnh2tCsibOHO63DUXiC6tobWBhP3EospEHKIOgYnXz2iv38BRD5Lnw=="
+    ],
+    [
+      "93493575dae3c6a52ace92b7dd151249bde493b2",
+      "tree",
+      "eJwzNDAwMzFRKCmq1M0s0ctNYUh783Mpw3Hz1C2Vxis6bA11km3ZFU0MgACqhsHQgWvvjMyK11KlR5jPuG847ff4iyoAVRAaRA=="
+    ],
+    [
+      "66ecf9a500c73765b47933a8883d312c633d0721",
+      "blob",
+      "eJx1U9GK2zAQfBf0Hxb6WMdxLtCW3HFQAoVC4aBJ+3pe2+uziCzppHVS/31XdpJryx15iLzSjmZnRu9hH0bYdWTa77olMK5GY0alvgbXA0LrTEMBamcZtdX2CcpI4Ugh92OZQenRchgfm+r8rXvvAj9qpj6mEqBtoDxRtZTdMNiNUmVZxk75kTtn4QoGi0XqhM9FUci6qWCGzuOzEbR1alPqwZOFu47Zb5bL1c2nvJDfapOalvcgeNwRROxJGPd+YIGGL2DpBA0yVhhllzFwBOo9j7fTeY9PUu7cYBrpHc+1dDno88Ec9lK8YrTayBEKUUeBqohPJLxkvJjDjp2faUyjwUlzB1sO5sM2V2rvIOEGQjPBZVDLmkmk3u5+zcBxqDvAKEpj7w3ldTyWs26yUlamy54H4ad5zAarOaPfXgeK6gE5ZuvMY33Ibop1sSg+LorVrNw3K1Y44RVAVOm1RZNBm0y+SjZ7/apN/9kKL8ze9iopNvfJnYHSIl4CQg2sMogH7b0sizKHH2QcNi9+sBMBCdJIU4a0/F+mnt2YOCcNk0t4RG2wEvWQ3woIer2cJrjP4WdMkkfyGJL6V2c9ilutC7LZ6OhdnDA5aDS3cCCarf03CLqF0Q1wEnKJdqD0VFIpXHT564GlkFxe2ZQNN7BcZiVDLhym0OiaQBhUg06BZPL5O/UHY5lCQQ=="
+    ],
+    [
+      "31400abd986978eb1a75c403cc47b0cb4ee3f425",
+      "tree",
+      "eJwzNDAwMzFRKE8sS9UtSy3KTKvUS84qZrBuqFvx0VwjOLNmyxH5b/7flDyrMwBD4BC8"
+    ],
+    [
+      "3b807ea8f1372853697cb4c41ff64ff622497b68",
+      "blob",
+      "eJydVltv2zYUfg/Q/3AKBJXcKpKTbEvgzi26LsH6tGIJHAxO1tASFbGhSZWk4riu/vsOSUlWnMvWAoZB8dy/c2OSwIQqw1LCQXOW0hEQUBS/6Lw0S8iIITOiaQTvTybA5qVUJoJ3Hz9EQEQGMyUXmiqUEBlVTFzFW6kU2gDReG1gjJQvFVM0DITM6MhfJ9oolppg8LrhzvU9zlyvySUxxT0Ge7lmWemSLMTJUqT1Pc60YDz7VCqZUt3Tip7c0D5zHCf4SwuaXuvkmqGbliNOP/eE2oCfEmt4WsGtkGj0C8IBjN/AaguALAhr7IfToFyaQooggsDdqLhc2o+dHYu1Pa3sofZ32czd2LTUSUmEUctYf+HM0P3gAnPiLa0qxSOXu9+Zqju7AD6IbIb+W/ziz5KJsOFDvRsK0XkrxKnBaHWJshYv731OTVqEl9vWVJ2QkiUoMteXjYxPdIwYER62wrE2xFQ6gr3h8C5fRml55Hi99k7is5YiHEQwxeACQRddQcK8sumgvk5bV710k4DQodBCUpIrrGJdSKxfqpRUug9MC01OGK/QOsY5vXjdkKxojH4ENudU26Q0p74CAJZD+LyhxGg8HNiIldFnzBTWG3gFQRIM4MULuMMGz8djwNOgsx+XlUZ46a2hSmA3Nuwj2F7dkaxbwAHqwWP+WqU0u+v1hiHP8pSZh7T7JDnF2kHhILBafaYxsjdj+AmzvWnvj9PTj87ImrUeNRddYL2QfGKdaUW5JFn4EOmKmt+WpwhamLiy+CbkuX4Vvh35wsbz4K0rUySYwo6rl57yran8l8g7I4oiHRzjIGGDOGdKG0ymNXQsVbiyLuOkDG6YZjNOg00/bZWFTTft3CnQts5SffNID2oyLzlOHX2zlsl1vFDozzEmyc64EKm2H8icRtg1wjCzjCrBTERvSxxK+lycvZscTY7++nD8N/xJjI72D6KSpNfR3nB/uDP8ZWe4ey42nfLjHctgDN04DdfzaRp4hk8OGT+mvCPNXMpm2KUrKlKZIbaIT2Xywz44/aHQGuuGwjCCS38JvhptPfS4cMGoXrk3yubEzqE+m6xMjPtlbsdG8k8X0y42/zUrSzwOt5NOzfcOtv8/2jpUrXinfmOyPQyNw5dTcWWKCHafYJoOL2JXBRBsJDz4D6mubGD/4Ie77J5Rm/5bkuIAyQnXtP6+3vGOyuvw4ZY+n+0fnM+StU6mJ16JTXXQZboNDZiG1sq6laSC0CfmhtGFKzeZw3S1YJkpRojGzxEUlF0VGMTh7l6NITWk3b3DYY82HNYXg9707zmtqZk0yk/YVxq2ljovHgmW3hBeITyhfytkMq3mVOB6bA5HnLpvnSrJ+Zl1C34dAxOCKveFOFwWUrGvUhjcGhKfEzmXCyAGe6n1Inbx1OVtb3c8Pr5KWVYcfcruVdR6aft92mzp9olkQZacJjayZuM+oaLdD40SmeecCQpc2pep5Tbar3xblqCr1D7m8orzbrTaTLUh6tGPZtSXo/9vIoi5vAqDu89kzBf6hCPKP5M9Vu5J3JWhbbW2/mLrZD3Amk3dvHJw+I3ZGnFXnoCbr3mtxvSWmff4iMX5sev24bOtZ1v/Atcc1JU="
+    ],
+    [
+      "97e61497a97857344d4eb81920ae9ba87fc3193d",
+      "blob",
+      "eJylVV1P2zAUfa/U/3DXlyRSiJD2gtCyqYNsqgZlawOCp8pJbou1xA62M9pN+++z89UkhUpobmlT+36cc3x1mEwmF4RxRmOSQk6YEjuQiguyQYh4wRIidt5kMhmPaJZzoSAhChXNcDxaC55BzJnCrUppBHVAnHJJ2aZNkE8pVfh+PDKvBNdAGVWrJLKTaJUT9eicj0eg1zNVj02yXSd5ujzDWLWxDhAJSeTqvzrNrCTycItxodC2LOtiEUzDAMLp56sAZl9gfhNCcD9bhkvQNTMJ9j7TLJrAbB4GX4MFfF/MrqeLB/gWPLjASIYQBvdhWWF+e3XlwlOhJaJq12a0R/2aheY4zMVtTgXKctuFWKBWMlmRQZyjGTh7saqwlQHeiODCmmKayEY4ugbGFVAtnFSExWhX51okGisHuACJqt504AT+WIaa5YLV0DHPBrL5rmFafzsCC0Ilwh1JCwyE4MK2gm2u7wWTUtIa0Hkp2V4kt5ShJW5omWL9IPDrbG+jQVbIHLe316KsC/SqDvIbFsMaAwyHmlWopBKlYObQ7Hh6g+Z2uZciK6Mc+Ahnp0fVmZvRyQqpIEIguhqLUsJ+mvJ6uoGvQV97xvX52SnEj0QQraXoolO7HO2GuKOBVniZMkha7T7AcRw/msAeFoYbougvNOVwg+J1USqljShH29yaaW9aGDvoVGyuqWYw5ww7tQ5b1vEHXV8dQyq69B70Orm+Prm8LJ2qvMsiTRtAZmmLG9TNiZB6lP3W3Dzz4BmDo5KvuciIaoA5A/NY19nePtKBd37De9DpJRb7CNzGmKvO0dv5a7tIXxcBSs82d1AV7pjQgHz5wPiz3f4wH791pleo2Omy/W/7jgshNUS/5+Oz+TJYhMZnbxrbPuouXUd14G56dRsswf7kwv7tWO7hbXTXGzp0xkCgKgQrzdamiV+x8VKiB5g/06T6R+L3S/v9Hn7Z6GVwdXf/BRR+B9B49A97KWWl"
+    ],
+    [
+      "d02f336d581a3e248a63b90be4e7cc31e8b19073",
+      "blob",
+      "eJzNV1tv2zYUfg+Q/8BlD6QAW3GzAhu6+WHtsrVA1hapu2EIAoKWjmyuEqmQlB1j6H/fOZRky5e2WJ/mPEQiz/U7V11cXNzYTJUj5kDlY2vKDauVCW7DXs5mb5kHtwKXXlxcnJ/pqrYuMOUWtXIezs8KZyuWWRPgMZR6zjqCrLRem8WWIVcBgq5ge/C3t2b7UuFN2NTgO3nLEOq0VdsLfK48kDW38NCADy+VyUtwIzZbktGoii7fRZZOSK3CcmDRW3zdKvQPpQ7wXUfZuBIJ0+hRTx5f5IMfscY8NDbAiMh8jXznZ1s5LUwyn9PZn9fP2TTqEVIWugQpk9SBt+UKRELiwQR2yfga5pwYzs+yUnnPOmfEaR+TZ+dnDH85FBgKk0uCTngoixHzQYUGbVypsoGeMBKroNAYIk3zpqq9aElSMJnNQfAmFOMfeLLjIIFplI8m19Z4EK30kzRLBB0t5i8o8iaMZxg9PmJc1YhQpoK25pKU/8iyJSEZpp9ReCjsBswiLDm550QJRpA3SXLIu2P14vBuTfina4dRbrkJ7R7F3MrfrmcRwiFmGF+ErI9yvE4piQaydUH38ZRNp4xfqlpfoo7K84GgrRWl9kHGa0FsGFW3SfbpHITGmd1ZK5oJSqbLPvdErzRJS8RE14Jf8mSQXJ+x8NCwfQVcmxwe02WoSv4pecaGyJVqj7lRYnBXIIMlCTuOhFm3R0kBEMkpVGLMwTnrxNPJ0y/g0SVylEqVLuebAMfx3k/cq8nkv2Tttv2kC6w7L+lZRI1GVZDcTe7Jub3cthn2szHGAlT1/0jqQa61vaHNtkEAsFMd5YJTlY/wtt1ORKYR+wBQy3mpzAcZ+4afzlwD0XadBUnk2HK7w9hS6LVrKnhCwfVT3pLzgxBr6mNBtMoTNmb/8AfqHfBYa4dy5FqHpTb8I6GuzCaitUrYN1P2hBV4tmLadLanrXmYfweuxVxSGhv6H0RxHdONvzJIr/MWm1YEBIT60MRcbTpYSMcCrT2ybsTuXlsD95QeR/5Ffu1jQRDVCeO6wiJKLBflM63Ftoi60xwyXanyqIw+7eCBlaxqfGBzYArFGgOLWLwIX4AFuEOvB54jhaDHAwqS2s920Q3RNCPJWdcwu2Uhn8vYrxKmPMvnJ+zP56mza1moLFiMxbSfyemtXZ8IpV2TWXc55pPAlyQmAj5QKqAoeISswbLg765vrl/MmM5HjIqXygBntA4bGuQ6YG4SQoAzM8PaDZBLFdivt29+Z7F22JvbX65v2fO/ejr26h17/f7mZsCoc54chxxzeJeWJ/w1ADjNt0l1h/T3mDpphkO/sGUuTgSj95r8HPgbjyl/WpHtyR0nf/lQ4Ffl5bfsha1oVyFiluuiANxbMkQiWKZWFqvHYoSL0q4xCeJih+sg5gVWks6imSWuh9DuJD491hAsSZ5ud8KUHtJ4+hUgRNe72PD7oXPYO/LTdUM/sa+eFkHtLSqoVMywgVDqUdG8JI0A/jSNQA7ghccM6sDErhRH7L3RtGrFt1gGSPTJcRh3uqeTyQibYeye/FkcFMgTm8J+5+IfvzA1DwRfkWACLGnXTpoXldJm21hi/3eIcr/Ypz+7RVPh3Hobb/q4tHSpyrFsOgLBx2PahbEh0tycYuegD4mHBrHL44T4PG8+56fpkWg7mly7nBOj39nS7d6pxsLG/4JusfN09933w/TUJ4IQ/MnV9+kE/56g+shITiSjfhnfE9K3sxYg0rF3G/9JTB1YtVDFL4SCSUklKWVcxKQkxKXs97EW//OzfwH2rBLh"
+    ],
+    [
+      "91393aafb0b4f0607cd42ff8ec9b35ad488f4b16",
+      "tree",
+      "eJwzNDAwMzFRSCwo0MsqZpA7UbEprMa4brLtrPAj3HF6zR6+1wwhKjKT8/P0isvSGS7cFAlaee7rXPmq8oIfgos0FjBvOwBTk5eSWqGXUZKbw7C/SaxB+uXHI7fOT5XeFDjh34QLIpVQVcUllTmpesnFxQwXmLuY33xcwvq6ODux5+/K8/9PFzMBANVjPCs="
+    ],
+    [
+      "1ec878b2567c337e933d9a57c40b5e2e83484dd6",
+      "blob",
+      "eJyVVVtO3DAU/R+pe7hVKyVRIfwXSoUQUitRhFqkqn8Y52ZixmMH2xkaoZHYRjfQhbGSXjtxMuExol+T8T0+577NtbIOuFYOlYNPUGjeLOkzv2nQtD9QInfapMm7miln2t0emWT7sxmzreJQNoo7oRVIzYrzgEozuJtBZM0tuiPnjLhqHKYJM4LtXjW2TXYgcaZBzzWCHf52x4M7yQVbCDUHRux6AUJBqxsDnTMP938Tf5U+g14goWgM2po+kO6zWyYclOh4lSZ7rBZ7wuHSdpIAooT0bYTnepGBq4y+BYW3cGKMD/w7UiaItGRCYhEvdkKBa1AZeK6tVummwpExrM2FDb9puJU9I/VVrZgUxUC0IRZSY7CWjONxJWRhcCoRSHOJau6qrM9GdHOJ1rI5blaXG2QOTyT6f2lSiFUUgwjPuWTWnrGlv5hYx1xjk8cYoRSaLxffTj3mwDqj1fzw11giEBZwWbs2P9jrrQf14Zl2la8qNY2rEGyFcoUWrhtytkVH2PpwkIrRs7pGVaS9cu/tGlBSoafxSmHdlmAbOcbqodNAu/6I9lIbSMdigy67oo8pHpqOavmyphSk6TFPxQatyKQ640tUljLryTzsKduuP05663SWvDn3548FbxqqlXDtK0Qj9BnhaEo2UFMHftAOUPPQ/3mEZPABupNG0Qx9hkt4fzf8X1/CR0jGckFIYd8JPpSdQYucC8XsjYQbbq2f7yQPj200863EGa0JSNFPYzZulG2z938D9orR2jpYP5EEG1moh/s/LuzbzXU4GbFziYwGg1fIFx2IXFXYbWqmirA02ZwJtTltcX9648vB0B53OrRDQOaurUMg/Xk8ngQZjgbT4yUffRkArChOVmQ9pRohZSJNuBR8QU/G+Mpk04zFwmMwbVsbayiFYlLSq/GaN6pkMuxi6pL1bPOR238z+wdv2Gpl"
+    ],
+    [
+      "d0d91452a9cef59d1f7a7770f811a228a003b6c0",
+      "blob",
+      "eJw9T8uOwjAMvK/EP1jmTN7bFajpgTN8REVDE236UBoaPp+El2SNR+PR2K6XtYf74MdFo41xPlCaUiJJkin0VDDGaHYgrM6k43TXyIBBpXJhUwdziZBcF63GLIA1rrfxxUP2coFwdd5r3PK9NFIgbeq5jRY6jWcpgLNVqTNnIIUtpCIKCnjJiYACA9uVdnqO1B+pEJYYpn+TM82+ldX1I+zeh/x+Be9Gc2lnjWG6jV3ZXX5pNj8PqbNFaw=="
+    ],
+    [
+      "bf8216801be9f1c4dacf951bb25190fe90d01479",
+      "blob",
+      "eJyFVUtu2zAQ3QfoHabqspFVp5sWkAQEiJEULeIgP8BLWhpbrClSIGm52uUG3RToputeoDfKSToULVlOBXRhieJ8yPfmzTh+navMNhVCYUuRnsTuBYLJdRKgDNwGsjw9AYhLtAyygmmDNgm2dhV+CA4GyUpMgprjrlLaBpApaVGS447ntkhyrHmGYftxClxyy5kITcYEJtN/0tgCSwwzJZQeZHoz/fge3595b8HlBjSKJODkEEChcZUEkfuYmHodgANFxpKtMaKNt99K8TLS2EagKRBtH99uTTJjvK/lVmB6V6BYfeErhOenH7BQWw0Vk1Y3p8AsMFgTXxnGkfd2cSbTvLJgdEY5WVVNvpoAclyhTuPIG4nayHMbL1XetGHuGzVkghmTBCUz1u20VyFrzuvOtNOsgs4ecilRB2nMOvNSM5n3mAJgmrNQsKUDfQBTqBIpyhCWo8CwZHqzDyp4nqOkiugt+T7/+kPXJ/8U+jRxxI5z9NeSylLMOQhuiRcolUZa08FcQnMgcZ8xjghfy0LkafCiYFwOQXdcGMwsV72JUyI1xCkwXzZJUFH1w7Ys+0BPYxpXXSQ2uNRq1/EwBvrn9w70Yv5wC1fzh7vZ1fzLBdycX9/fLuKoSuNiCjw/Pu9SqRxW9DiNl1R2LFPN14V1kimI5Ukc0RaBnQ5u0+Ig4VfNgDgua9K/0g2sFRrSm1ByDTvWTOAOEXYFZSQ+KWuNQJlJGBsEqgFRbiyoFWCNFG1cySbtdTuuX+qKC7E1VjPH7agChs5mSwPCpxpuf2Ua6Bcq2akrPSrxmK/dqf/6ttcfO1AgW+212ZoO4CiX18m4arz+RmXjDCPC6e/iE4VOqVyuPS9jqrq/msHscXa7uDhfwKfrx9n1/byTzNleMsOz5vvWcGBrNCSPsw7xsMe68+W2XFLrj1Xq3RSiXqHHHdajGZy/n7IdGbym4VkpUiDut5Zb0/Qq6IEay+yWhuU92xAPrTbV5kWDPz/9fiG6o7rEkWvydkXdYg/zz/e7V8Vg3Hgs7fPzbHYDjuLL+fyCFp+uL+9oTa8esk/phq2fssSo+6N7dfLq5C8W9VPB"
+    ],
+    [
+      "d0038a03ecf1a405eb736b618cfda9cfffcb7302",
+      "blob",
+      "eJylV0tv4zYQvi+w/4HIIkBSRIFelmz50ltP7aFd9E5Jo5i7kuhSVBy38H/vDEm9/Ei2KIIYFuV5fTPzzTBTUmr2DytkLZXXFTtoIGO1eNnpLfO8SirodMa+BJsIopCOCgW8wZMqrSJY04lUvH1BqS/5JoYwoaNatHRQrAvIyy07ffoJbeTyzevE36J9yfC7KkF5eERvc1ke8QcNVy+izZi/ZTkvvr8o2bdlxl65enB2H7fW0+HQ+oenlWy1V/FG1MeM3X1VkPcYi2a//nH3xP4EVfKWP7GOt53XgRIVWeVD3BkT7Q5PMeQTyypZ9J33KjqR14A/kb224UT7N9bJWpRTpO6dJ6uqA8RptTfxPB8U36PoQZR6l7FGtA9BEPr7tydW8Lp4CHz/nnksXu/fHtF5G7cnWmuH91oaLQ3v9A54abBzeGktEf1gdMXiQIKPCxnU1oIiUFHzDiihGVuH5F8pun3NEaeqBnzkmG00rqHpMlZAq0Ft2be+06I6egXiikcZ6/a8AC8HfQBot+yF7zNGERmjOVYAeanhTXslFFgRWkjMZCtbOEvOLyAxWkqGzYN5eXAO5rIu3RFWCmIRGkRr0OiVRz6Y6vGe/RiaybSHCH6fsmkxsWX5uFQXkzqHt7I2h5yNyLVSU95nYkF4zYvJCdFqJVFkRPZFCYyDPj3EFc80IJR137SIcVAp5j+vK3UDe4PtymC752VpbKVYKsxn69g5C0fIlTycuRnQ2yuAXngeJOS5Kd2hNoLn1XbqQPwLNme2ULy9CfIS07UV3QVPbBc+MeoF+QqqquXBo97AIm+PB+w5mH42xHJRKHdfRQMd+w0O7HfZ8Pbueu20UjW8tvqWuBQ1b/YPcUr9l7wenliaYONdxO+H1yttRVjNuMkYgGawcW7/Oj5DlWAZ7C3XvXmOHqKNP+bNJTIx9bZ0L52coDKmHFm1dY3NajsOFQ8Coasg2QnbiwqwDMUrIj6kImM7UZbUznO6/QIhrMvE6O56Ujnp4DmyTq9Rh/M9sFZGL+2jYyvFS9F3VMv3ZybKDS/TzZZpSTSSkoyrnGB9by3voK5u2B6tWWMXo2KcCgNdRqnt34qEwvvJWGiNfePqhqlBQ5xOcc0nwYXBReABcov9SOz/GQxVUgUQDi5kOZAi02KOde/utu8isP4AABuyF80Atg8GeM+1qYnfdfdIYXkti+9TyUUUAQFOVTeYj6OLkIpNUsVjSB7y/zQH0/WiVmJ/ykq4okwYEX2Qk0gSL0QGIiaRVbAQcf4vnOFpztcwkpOttoUTUeQgqIHfKrehWKL7qR4SQ7Xv7CK2kVehU4/OaXWcBrl15VYZjbQfrSztG6Tmkzzyh9nbQUEOezS6UGaeQjvfPxrlixkEbbkY7g65IWwL3unC6GwenUkMkyBcUnKU3Jjr0QXbjsbavsnNSjNnSv/qZA5C0nLYYVTmFIieafBYxqRYKdkDzP7CYi06VK+PNQwLzDxpt1Yvo/V/op/zDkjfkIJ4sQOErvt+cBc0Dnktb+DmZJ2PUbcgBTbBRvavHqtW6OMZ5MYrs+oZ5zPbINv5SIupnd+Z+M+d5rqnHJwNuWQeb7yI9330nUIchHLZBI7HfhiA8GKHGheLwch+dldZj5P4WYFt8TnbBB8x9DBSbnKB4xhTyzNwaNdz2snZ2RWm6FVHEnsp7D7pPMt2lJBzigw3qzROKScV3gTt+4/xnnJkCSpaXblY/Ic7xI929Ik5L4nts0oo7NRiJ+rSlahdeFmA0/oiybcvET83UArOHmYFnNAi84haz65yi+ubb7bIE3v/0pXaGXBxvxjRshxzGm8Rt68NDrMoXPDCyvXJ6dYqGNgF8+TWuWF1C5erm320WV8taX5k3gufx7nmvBlZaWVVsNPnT58//Qtn/Xwo"
+    ],
+    [
+      "5ed0799935ab3e9f4483a3c51f35472186beebb9",
+      "tree",
+      "eJwzNDAwMzFRCHJ1dPF11ctNYWgQPqabkZ314c137qbKbp6AZW/XdpoYAIFCckZqcnYxg0K7Ikv879Sm7X+UJRwkAxV2/Z87BaIgJT+5mGGyp2nprcfHlmqdm7T9rqiQ594nkzcZQiwpSMwrKaqMT0nSK6hkmP5MZPrKinATX78dkgrrZq+oPyxpC1VXnFpUlloEUnRB3zg3QspOpSt5J/eT52cMX2ycUAyxqzw1iWGipdX6DVs+JNRc0f/xZrbpWo9+bzEAfMRSxA=="
+    ]
+  ]
+}

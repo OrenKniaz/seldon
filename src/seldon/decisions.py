@@ -110,8 +110,11 @@ def step_fault(store, provider, error):
     shape = {"step": step, "failure": failure}
     repeated = shape in store.recovery(key)["seen"]
     frames = [f for f in traceback.extract_tb(cause.__traceback__)
-              if Path(__file__).parent == Path(f.filename).parent]
-    location = f"src/seldon/{Path(frames[-1].filename).name}:{frames[-1].lineno}" if frames else None
+              if Path(__file__).parent == Path(f.filename).parent
+              and Path(f.filename).name != "processes.py"
+              and not (Path(f.filename).name == "gitwork.py" and f.name == "git")]
+    location = (f"src/seldon/{Path(frames[-1].filename).name}:{frames[-1].lineno} {frames[-1].name}"
+                if frames else None)
     cause = store.record("step_failure", {**shape, "exceptionType": type(cause).__name__,
         "message": str(cause), "location": location})
     recovery.failed(store, cause, shape=shape)

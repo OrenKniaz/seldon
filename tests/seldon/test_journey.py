@@ -31,6 +31,93 @@ def test_wave_loop_golden(tmp_path, fault):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("missing_object", [False, True])
+def test_recorded_shelflife_repair_coaching_journey(tmp_path, missing_object):
+    """A reopened repair without a worktree reaches its UNIT question on the recorded base.
+
+    ShelfLife r439 failed before COACH because cwd=None queried Seldon's repo. Existing
+    repair journeys kept a worktree and missed this recorded ASKED state. A lost Git object
+    twin must park with the actual execution_facts caller, rather than git()'s generic raise.
+    """
+    import base64
+    import zlib
+    from seldon import decisions
+    from seldon.store import Store
+
+    fixture = json.loads((Path(__file__).parent / "fixtures/shelflife_not_tree.json").read_text())
+    project = tmp_path / "product"
+    project.mkdir()
+    gitwork.git(project, "init", "--quiet")
+    for oid, kind, packed in fixture["objects"]:
+        assert gitwork.git(project, "hash-object", "-t", kind, "-w", "--stdin",
+                           data=zlib.decompress(base64.b64decode(packed))) == oid
+    candidate = fixture["cursor"]["candidate"]
+    gitwork.git(project, "update-ref", "HEAD", candidate)
+    gitwork.checkout(project, candidate)
+    store = Store(project)
+    # Rehydrate the recorded snapshot; only local filesystem addresses and the paused
+    # controller decision change. No units, patches or recovery outcomes are invented.
+    def relocate(value):
+        if isinstance(value, str):
+            old = "C:/seldon/tests/m1/shelflife-main-15682aa-s01"
+            for spelling in (old, old.replace("/", "\\"), old.replace("/", "\\\\")):
+                value = value.replace(spelling, str(tmp_path))
+            return value
+        if isinstance(value, list):
+            return [relocate(v) for v in value]
+        if isinstance(value, dict):
+            return {k: relocate(v) for k, v in value.items()}
+        return value
+    for ref, kind, body in fixture["records"]:
+        store.db.execute("INSERT INTO record VALUES (?,?,?)", (ref, kind, json.dumps(relocate(body))))
+    for table, rows in (("unit", fixture["units"]), ("recovery", fixture["recoveries"])):
+        for ref, body in rows:
+            store.db.execute(f"INSERT INTO {table} VALUES (?,?)", (ref, json.dumps(relocate(body))))
+    cursor = relocate(fixture["cursor"])
+    cursor["decision"] = None
+    store.db.execute("INSERT INTO run VALUES (1,?)", (json.dumps(cursor),))
+    store.db.execute("INSERT INTO plan_revision VALUES (?,NULL,?)",
+                     (cursor["revision"], json.dumps(fixture["document"])))
+    store.close()
+    if missing_object:
+        obj = project / ".git/objects" / candidate[:2] / candidate[2:]
+        obj.chmod(0o666)
+        obj.unlink()
+    calls = []
+    def provider(q):
+        assert q["kind"] == "COACH"
+        calls.append(q)
+        return json.dumps({"answer": {"ask": {"question": "How should this repair continue?",
+            "options": [{"label": "Repair the owner", "means": "Continue with the recorded correction"},
+                        {"label": "Clarify", "means": "Explain the outstanding result"}]},
+            "why": "The unresolved repair needs direction"}})
+    def user(item):
+        raise decisions.Waiting()
+    run = Run.reopen(project, provider, user)
+    try:
+        run.run()
+        request = run.store.read(run.store.cursor().decision)
+        failures = run.store.records("step_failure")
+        if missing_object:
+            assert request["gate"] == "EXECUTE" and failures
+            body = failures[-1][2]
+            assert "not a tree object" in body["message"]
+            assert body["location"].startswith("src/seldon/questions.py:")
+            assert body["location"].endswith(" execution_facts")
+        else:
+            assert request["gate"] == "UNIT" and not failures
+            facts = calls[0]["facts"]["Execution facts"]
+            assert facts["Base"] == candidate and facts["Worktree"] is None
+            assert facts["Paths present"] == ["README.md", "checks/integration/fresh-folder.cjs"]
+            assert request["subject"]["unit"] == "1.import-integration.1"
+        assert len(calls) == (0 if missing_object else 1)
+        assert run.store.cursor().candidate == candidate
+        assert run.store.unit("1.backend.1").state == "DONE"
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 def test_architect_scope_returns_to_vision_journey(tmp_path):
     """An architect's scope discovery reaches ALIGN and A before any worker can start.
 
@@ -1354,7 +1441,7 @@ def test_step_fault_and_waiver_journey(tmp_path):
         assert failures and all(body["exceptionType"] == "ProviderFailure" for body in failures)
         assert all(body["failure"] == "ProviderFailure: " + body["message"] for body in failures)
         assert all(body["location"].startswith("src/seldon/inference.py:") and
-                   int(body["location"].rsplit(":", 1)[1]) > 0 for body in failures)
+                   int(body["location"].rsplit(":", 1)[1].split()[0]) > 0 for body in failures)
         assert run.store.records("planner_answer")
         assert "Seldon's fault" in item["ask"]["question"]
         assert "recommend Stop" in item["ask"]["question"]

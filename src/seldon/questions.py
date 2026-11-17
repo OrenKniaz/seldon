@@ -305,7 +305,7 @@ def execution_facts(store, ref, peers=()):
     units = plan.select(document, "unit")
     peers = {ref, *peers, *units[ref]["dependencies"]}
     scopes = [p for u in peers for p in units[u]["scope"]]
-    files = [p for p in gitwork.git(unit.worktree, "ls-tree", "-r", "--name-only", unit.base).splitlines()
+    files = [p for p in gitwork.git(store.root.parent, "ls-tree", "-r", "--name-only", unit.base).splitlines()
              if plan.matches(p, scopes)]
     return {"Base": unit.base, "Worktree": unit.worktree, "Paths present": files,
         "Units": {u: {"scope": units[u]["scope"], "state": store.unit(u).state,
