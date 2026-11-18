@@ -55,7 +55,7 @@ def folded_brief(store, document, owner, observations):
     sample["sourceAcceptance"]["why"] = "The check fails on the missing reader and reloads real stored data."
     return questions.question("JUDGE", prompt, facts, folded_judge_schema(subjects_to_judge, owner),
         [{"findings": sample, "why": "The guide needs another observation."}], subjects_to_judge,
-        images=question["images"])
+        images=question["images"], context=question.get("renderContext"))
 
 
 def record_folded(store, owner, source, answer, tree, observations, question):
@@ -225,7 +225,10 @@ def brief(store, kind, selected, *, trees=None):
             paths = [p for p in paths if plan.matches(p, ["docs/try-it/**"])]
         facts["Walkthrough check sources"] = {p: b.decode("utf-8", errors="replace") for p, b in
             gitwork.blobs(store.root.parent, cursor.finalCommit, paths).items()}
-    question = questions.build(kind, facts, selected, images=questions.images(store, refs))
+    context = {"audience": document["nodes"]["vision"]["body"]["users"],
+               "productMode": "commitment" if "areas" in body else
+                              "guide" if subject == "tryItGuide" else "criterion"}
+    question = questions.build(kind, facts, selected, images=questions.images(store, refs), context=context)
     if "areas" in body:
         question["prompt"] = ("Was this accepted commitment delivered end to end across its areas? "
             "Passing features alone may leave a gap between them. Use the feature verdicts and guide "

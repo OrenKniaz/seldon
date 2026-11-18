@@ -136,16 +136,17 @@ PROMPTS = {
 }
 
 
-def question(kind, prompt, facts, schema, examples, targets=(), execution=None, images=()):
+def question(kind, prompt, facts, schema, examples, targets=(), execution=None, images=(), *, context=None):
     for example in examples:
         validate({"answer": example}, schema)
     return {"kind": kind, "prompt": prompt, "facts": facts, "targets": list(targets), "schema": schema,
             "examples": [{"answer": example} for example in examples],
-            "execution": execution or {}, "images": list(images)}
+            "execution": execution or {}, "images": list(images),
+            **({"renderContext": context} if context else {})}
 
 
 def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grown=False,
-          coach_contracts=False, sole_work=False):
+          coach_contracts=False, sole_work=False, context=None):
     if kind in ("ARCHITECT", "DETAIL", "WORK", "COACH") and not (kind == "WORK" and execution.get("session") and facts.get("Exact failure")):
         facts = {**facts, "Available tools and skills": AVAILABLE_TOOLS}
     if kind == "ALIGN":
@@ -190,7 +191,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
                    "Use ask for decisions that require the user.")
     return question(kind, prompt, facts, answer_schema(kind, targets, owners, grown=grown,
                     coach_contracts=coach_contracts),
-                    [example], targets, execution, images)
+                    [example], targets, execution, images, context=context)
 
 
 def align_round_brief(facts, *, sources, size_first=False):
@@ -209,7 +210,8 @@ def align_round_brief(facts, *, sources, size_first=False):
         "Give the changed outcome and why. Recommend done when the displayed defaults settle the product. "
         + ALIGN_DESIGN + ("\n" + SIZE_ESTIMATE if size_first else ""),
         {**facts, "Sources": sources, "Design guidance used by UI workers": CRAFT},
-        obj(answer=ALIGN_ROUND), [tiny_round_example(), consequential_round_example()])
+        obj(answer=ALIGN_ROUND), [tiny_round_example(), consequential_round_example()],
+        context={"sizeFirst": size_first})
 
 
 def check_align_round(answer, sources):
@@ -419,12 +421,330 @@ def detail_brief(store, outline, area):
         relevant = {handle for r in commitments for handle in goals[r]["constraints"]}
         facts["Applicable constraints"] = {c["handle"]: c for c in vision["constraints"]
                                            if c["handle"] in relevant or c["handle"] not in attached}
-    return build("DETAIL", facts, grown=grown)
+    return build("DETAIL", facts, grown=grown, context={"audience": vision["users"]})
 
 
 def labelled(facts):
     return "\n\n".join(label + "\n" + (value if isinstance(value, str) else
                           json.dumps(value, ensure_ascii=False, indent=2)) for label, value in facts.items())
+
+
+WORK_RECEIPT = {
+    "outcome": "done", "summary": "A reader can save a preference and see it after reopening the app. "
+                                  "I exercised that path locally.",
+    "checkPaths": ["checks/preferences.py"],
+    "checks": [{"purpose": "Reopen a saved preference", "command": ["python", "checks/preferences.py"],
+                "expectedEvidence": "The reopened app shows the value the reader saved.",
+                "requirements": ["remember-preference"]}],
+    "discoveries": [], "why": "Reopening exercises the stored value across two app sessions.",
+}
+WORK_OUTPUT = (
+    "After the work, return one JSON receipt. Summarize what a person can now do, what you exercised "
+    "locally and what remains for integration. For each new check give its command as an argument "
+    "array, purpose, expected evidence and requirement handles. In checkPaths include the scoped check "
+    "files and helpers needed to run without the product. Seldon observes the check on the baseline "
+    "and on the delivered product. Describe only results you observed.\n\n"
+    "Omitted existing checks keep running. To revise one, use its handle in update with its new declaration. "
+    "To retire one, give its handle in retire. List actual cross-scope corrections in discoveries. "
+    "If a missing fact or a decision about meaning prevents completion, return question with the specific "
+    "question in summary. Otherwise return done.")
+SOURCE_REVIEW = (
+    "Follow a promised action from its entry point to the result the person receives. Read the relevant "
+    "assertion and its baseline and delivered observations. Explain what the check can distinguish, "
+    "including a stub or a check that supplies its own answer. Code records which command ran and on which "
+    "revision.\n\nCode quality. Could the next engineer safely change this path? Inspect a concrete symbol "
+    "for understandable names, control flow, ownership of decisions and visible failure handling. Give a "
+    "short source-based judgment in why, with the file or symbol and its consequence. An improvement that "
+    "preserves the accepted meaning is welcome. A style preference belongs in why. A blocking gap needs "
+    "an accepted obligation and a material consequence.")
+SEVERITY_GUIDANCE = (
+    "Use must-fix for missing accepted behavior or quality, nit for minor polish or a small residual proof "
+    "limit in an otherwise delivered experience, and pre-existing for a defect the unit did not introduce. "
+    "When essential evidence is missing, use uncertain and name the smallest observation that would decide "
+    "it. State machine or device limits in why when the available evidence already establishes the meaning.")
+
+
+def take(facts, *keys):
+    return {key: facts.pop(key) for key in keys if key in facts}
+
+
+def reviewed_work(question, facts, context):
+    checks = question["schema"]["properties"]["answer"]["anyOf"][0]["properties"]["checks"]["items"]
+    output, receipt = WORK_OUTPUT, WORK_RECEIPT
+    if "anyOf" not in checks:  # Retained WORK calls predate check links and edits.
+        output = ("After the work, return one JSON receipt. Summarize what a person can now do, what you "
+                  "exercised locally and what remains for integration. For each check give its command as "
+                  "an argument array, purpose and expected evidence. In checkPaths include its scoped files "
+                  "and helpers. Describe only observed results. List actual cross-scope corrections in "
+                  "discoveries. For missing facts or decisions return question with the question in summary.")
+        receipt = {**receipt, "checks": [{k: v for k, v in receipt["checks"][0].items()
+                                          if k in checks["properties"]}]}
+    # Historical questions lack renderContext. Correction owners is the recorded ownership map.
+    owners = facts.get("Correction owners", {})
+    product_owners = [owner for owner, scope in owners.items()
+                      if isinstance(scope, list) and owner != "guide"]
+    sole = context.get("soleOwner", len(product_owners) == 1 and "guide" not in owners)
+    guide = context.get("guideRole")
+    if guide is None and ("Try-it guide" in facts or "Guide path" in facts):
+        guide = "owned" if sole or "Try-it guide" in facts else "separate"
+    audience = context.get("audience") or facts.get("Readers")
+    wave = context.get("wave", {})
+    if question["execution"].get("session") and facts.get("Exact failure"):
+        mission = "Continue the existing work. Settle the remaining problem within the assigned write scope."
+        opening = take(facts, "Exact failure", "Write scope")
+        return mission, opening, "", output, {"answer": receipt}
+
+    mission = ("Build the current wave's accepted outcome for the people below. Here is what matters "
+               "to them in their own words." if sole else
+               "Help the people below achieve the accepted feature outcome. Deliver the assigned part "
+               "of that experience. Here is the user's reason for wanting it.")
+    if guide == "separate":
+        mission = "Help the reader try this wave's outcome from a fresh checkout."
+    craft = ("Write code a senior engineer would be comfortable handing to the next maintainer. "
+             "Give operations names that explain their purpose. Keep the normal path easy to follow "
+             "and failure handling visible. Reuse the project's conventions. A reader should be able to "
+             "find where a behavior lives and change it in one place." if sole else
+             "Write code a senior engineer can trace, debug and change. Use names from the product, "
+             "give each decision one clear home, and keep error paths legible. Make your side of each "
+             "public agreement usable by the next owner.")
+    craft = "\n\n".join(filter(None, (craft, labelled(take(facts, "Quality bar",
+                                                         "Design guidance used by UI workers")))))
+    opening = {**({"Accepted audience": audience} if audience else {}),
+               **take(facts, "User's words"),
+               **({"Current wave": wave} if wave else {}),
+               **take(facts, "This wave's commitments", "Unit"),
+               **({"Accepted stories and results": context["stories"]} if context.get("stories") else {}),
+               **({"Applicable exact constraints": context["constraints"]}
+                  if context.get("constraints") else {})}
+    if audience:
+        facts.pop("Readers", None)
+    task = ("You own the complete experience, from its accepted entry points through the promised results. "
+            "Start it as the user would and exercise the promised result. Choose the simplest "
+            "implementation that supports the accepted behavior and its real failure cases." if sole else
+            "Deliver your part through its real entry point inside the listed write scope. Follow the "
+            "provided and consumed contracts. Use the paths actually present here. Declare checks that "
+            "need a peer's missing files for the integrated run. Run what you can here and say what awaits "
+            "integration. "
+            "Leave out-of-scope defects with their listed owner or planner destination, keep the check "
+            "faithful and return done when your own work is complete.")
+    if guide:
+        for key in ("Try-it guide", "Guide path"):
+            facts.pop(key, None)
+        if guide == "separate":
+            craft = ""
+            if opening.get("Unit", "").startswith(plan.GUIDE_WORK + "\nThis wave: ") and wave:
+                opening.pop("Unit")  # The wave goal and current guide brief already carry this assignment.
+            task = ("Write from this wave's public agreements. Where a peer's UI is unavailable, describe "
+                    "supported interactions and leave unseen form details to its owner. "
+                    "Declare the walkthrough for integrated WAVE-VERIFY.")
+        task += ("\n\nHelp the reader try this wave's outcome from a fresh checkout. In docs/try-it.md give "
+                 "the starting directory, inputs or how to create them, exact steps for each accepted "
+                 "surface, one runnable example per CLI command where applicable, and the result to look "
+                 "for. Declare a walkthrough whose command names its file under docs/try-it/. Use clean "
+                 "temporary data, execute those same steps where the required files are available, "
+                 "assert the promised result and stop what you start.")
+    task += ("\n\nUse the acceptance sentences to choose checks that exercise a real user path and would "
+             "detect the loss of the promised behavior. A walkthrough may cover several requirements. "
+             "Inspect an actual UI result where relevant and save visual evidence in SELDON_EVIDENCE_DIR.")
+    if "Execution facts" in facts:
+        facts["Execution facts"] = {k: v for k, v in facts["Execution facts"].items() if k != "Execution"}
+    return mission, opening, "\n\n".join(filter(None, (craft, task))), output, {"answer": receipt}
+
+
+def reviewed_judge(question, facts, context):
+    mission = ("Would the intended user get the assigned outcome from this implementation? "
+               "Use the delivered source and checks, recorded observations and attached images.")
+    opening = {**({"Accepted audience": context["audience"]} if context.get("audience") else {}),
+               **({"Accepted stories and results": context["stories"]} if context.get("stories") else {}),
+               **take(facts, "Unit responsibility")}
+    example = {"answer": {"verdict": "uncertain", "neededFacts": [
+        "What value appears after closing and reopening the app?"],
+        "why": "The check reads from the session that did the write. Settings.save has a clear persistence "
+               "boundary, but this observation cannot settle the promise about reopening."}}
+    task = ("Decide whether this unit delivers the supplied acceptance sentences. For a gap cite the "
+            "affected sentence, what a person would miss, the smallest sufficient correction and the "
+            "owner that can make it. Name a contract owner when the agreement itself must change.")
+    if "findings" in question["schema"]["properties"]["answer"].get("properties", {}):
+        task = ("On this delivered revision give a finding for every supplied subject under its exact "
+                "handle, including the feature, requirements, quality and guide subjects shown. Put the "
+                "code-quality assessment in sourceAcceptance. For tryItGuide, compare the actual "
+                "documented steps with the fresh-checkout walkthrough and its observed results. "
+                "Give each finding its own reason.")
+        findings = dict(question["examples"][0]["answer"]["findings"])
+        findings["sourceAcceptance"] = {**findings["sourceAcceptance"],
+            "why": "The restart check reaches Settings.load through the public command. One function reads "
+                   "the stored value, so a maintainer can find and change that decision."}
+        example = {"answer": {"findings": findings, "why": "The guide needs another observation."}}
+    output = "Return the verdict and reasons as one JSON object using the supplied targets and owners."
+    return mission, opening, "\n\n".join((SOURCE_REVIEW, task, SEVERITY_GUIDANCE)), output, example
+
+
+def reviewed_decision(question, facts, context):
+    kind = question["kind"]
+    example = question["examples"][0]
+    opening = {"Accepted audience": context["audience"]} if context.get("audience") else {}
+    task = ""
+    output = "Return one JSON receipt with the decision and its reason."
+    if kind == "ALIGN":
+        follow_up = "Previous proposal" in facts
+        grown = "vision" in question["schema"]["properties"]["answer"].get("properties", {})
+        if grown:
+            mission = ("Here is what the person chose. What changed for them since the last proposal?"
+                       if follow_up else
+                       "Who would use this, what action or decision matters most to them, and what would "
+                       "a noticeably better version let them do?")
+            opening.update(take(facts, "Selected choices", "Requested change", "Sources"))
+            if "Sources" in opening and facts.get("Dream") == opening["Sources"].get("kickoff"):
+                facts.pop("Dream")
+            opening.update(take(facts, "Dream"))
+            task = ("Rank stories by value. Carry forward settled stories, handles and citations. Attach "
+                    "exact required values to their supplied source and affected outcomes. Give each "
+                    "quality promise something observable, including a distinctive direction for a UI. "
+                    "Ask together only choices that materially change the product. Give two to four "
+                    "concrete options with consequences, recommendation first. Seldon supplies Other. "
+                    "Recommend done when settled. "
+                    "The user decides gate A. For an exact correction, address the rejected value and "
+                    "its source.")
+            if context.get("sizeFirst", SIZE_ESTIMATE in question["prompt"]):
+                task += ("\n\n" + SIZE_ESTIMATE + " Display micro/small/medium/big and use the schema values "
+                         "tiny/small/medium/large in the receipt.")
+            if follow_up:
+                example = question["examples"][-1]
+        else:
+            mission = "What improved experience can this person agree to?"
+            opening.update(take(facts, "Dream", "Requested change"))
+            task = ("Preserve exact values in their scope items. Name observable quality, recommend size "
+                    "and show one to three genuinely different alternatives where the words leave room. "
+                    + ALIGN_DESIGN)
+    elif kind == "ARCHITECT":
+        if "Finished wave" in facts:
+            mission = "What must change in the unfinished work to deliver the accepted outcome?"
+            opening.update(take(facts, "Finished wave", "User check-in"))
+            task = ("Preserve completed waves and owners. Describe only changed agreements, responsibilities "
+                    "or remaining waves. Return scope for a change requiring the user's decision.")
+            output += (" List the full wave horizon or only the remaining waves. An empty waves list keeps "
+                       "the horizon. Areas and contracts merge by handle, and empty lists keep them.")
+        else:
+            mission = "What is the first runnable delivery for this user, and who owns the work?"
+            vision = facts.get("Approved vision", {})
+            if vision.get("users"):
+                opening["Accepted audience"] = vision["users"]
+            goals = facts.get("Commitment handles", {})
+            if goals:
+                first = next((key for key in goals if key.startswith("scopeIn:")), next(iter(goals)))
+                # The approved vision supplies ordering, even when replay loads a sorted JSON record.
+                if vision.get("stories"):
+                    first = "scopeIn:" + vision["stories"][0]["handle"]
+                if first in goals:
+                    opening["First accepted outcome"] = {first: goals[first]}
+            task = ("Honor the accepted stages and size. Give one capable builder a coherent area when it "
+                    "fits. Split at independent responsibilities and write the agreements that enable "
+                    "concurrent work. Keep scopes disjoint with room for product and checks. Keep every "
+                    "commitment and exact constraint on the horizon. Detail next-wave contracts and leave "
+                    "later ones as handles and a sentence. In a multi-wave plan start with a runnable slice.")
+    elif kind == "DETAIL":
+        mission = "What should the user be able to do through this area in the current wave?"
+        opening.update(take(facts, "Current wave", "Area", "Applicable constraints"))
+        task = ("Describe the features and give each requirement one observable acceptance sentence. Trace "
+                "commitments and exact constraints. Give the work and its checks to one session-sized owner "
+                "unless another unit can build an independent piece now. Reserve dependencies for actual "
+                "file prerequisites. Return contract_gap for a missing agreement or subdivide at a real boundary.")
+        output += (" Cite Accepted commitments when the schema asks for them. Feature links use feature "
+                   "targetHandle values. Unit requirements use local requirement handles and dependencies "
+                   "use one-based unit positions.")
+    elif kind == "REVIEW":
+        mission = ("If the builders delivered exactly this plan, "
+                   "which accepted promise could the user still miss?")
+        opening.update(take(facts, "Review subject", "Area", "Accepted commitments"))
+        task = ("Trace each relevant commitment to a responsibility, an agreement where needed and an "
+                "observable acceptance sentence. For a material omission name the promise and the smallest "
+                "plan correction. Judge the supplied plan from plan facts.")
+        example = {"answer": {"verdict": "gap", "gaps": [{"target": "remember-preference",
+            "correction": ("Assign persistence to one owner and require the saved value "
+                           "to appear after restart."),
+            "severity": "must-fix"}], "why": "Saving within one session leaves reopening unassigned."}}
+    elif kind == "COACH":
+        mission = "What can this worker do next inside their scope?"
+        opening.update(take(facts, "Unresolved work"))
+        task = ("Answer yes or no first when possible. Resolve the question from accepted requirements, "
+                "decisions, the actual runtime and contract text. Escalate unresolved user choices with "
+                "two to four concrete options, recommendation first.")
+        if any("contract" in branch.get("properties", {})
+               for branch in question["schema"]["properties"]["answer"]["anyOf"]):
+            task += (" For a peer agreement, return its applicable text or identify the gap "
+                     "the planner must settle when the text is missing, incomplete or disputed.")
+        example = {"answer": {"guidance": "Yes. Reload through the documented command from the product root.",
+                             "why": "The recorded command accepts the saved profile path."}}
+    elif kind == "FLOW":
+        mission = "Follow the feature story from the person's first action to the accepted result."
+        opening.update(take(facts, "Feature"))
+        task = ("What do the observations and screenshots show at each handoff? Use the traced requirements, "
+                "crossed contracts, baseline and final observations and source judgments. Identify the "
+                "actual repair owner, including a unit or agreement outside this feature where responsible. "
+                "Use uncertain for a missing decisive observation.")
+    elif kind == "PRODUCT":
+        mission = "Does this delivered experience meet the named criterion for its intended audience?"
+        opening.update(take(facts, "Criteria"))
+        task = ("Use final observations and attached evidence to describe what the person sees or does. "
+                "For a visual criterion inspect the accepted visual direction.")
+        if context.get("productMode") == "commitment" or "Feature verdicts" in facts:
+            task += " Trace the join between feature results for the cross-area promise."
+        if context.get("productMode") == "guide" or "Guide file" in facts:
+            task += " Compare the delivered instructions with the observed clean-start journey."
+        task += " Use the supplied criterion and responsible owner for any correction. " + SEVERITY_GUIDANCE
+    else:  # DECIDE has either displayed options or a group-specific schema.
+        mission = "Which displayed option does the person's exact wording settle?"
+        opening.update(take(facts, "User's verbatim words", "User's words", "Decision", "Displayed subject",
+                            "Displayed groups", "Displayed options"))
+        if "Displayed groups" in opening:
+            task = ("Map each group to its own displayed option ID. Use other with the person's exact words "
+                    "for their own direction and leave text empty for every other selection. Mark unanswered "
+                    "or ambiguous groups unclear. Select done only on an explicit round decision.")
+        else:
+            task = ("Use Other for their own direction, Stop for an explicit stop and Unclear for ambiguity. "
+                    "Waive requires permission to continue and to skip answers at later check-ins, "
+                    "and is available only when offered.")
+            example = {"answer": {"choice": "Unclear", "why": "The words leave the displayed choice open."}}
+    if kind in ("FLOW", "PRODUCT"):
+        example = {"answer": {"verdict": "uncertain", "neededFacts": ["The value after reopening the app."],
+                             "why": "The delivered observation ends before the reader reopens the app."}}
+    if kind in ("ARCHITECT", "DETAIL", "COACH"):
+        facts.pop("Available tools and skills", None)  # Leave the builder tutorial with WORK.
+    return mission, opening, task, output, example
+
+
+def reviewed_brief(question, stdin_instruction, image_directions):
+    """Render the reviewed arm from recorded facts and presentation context only."""
+    from .store import encode
+
+    facts = dict(question["facts"])
+    kind = question["kind"]
+    context = question.get("renderContext", {})
+    if kind == "WORK":
+        mission, opening, task, output, example = reviewed_work(question, facts, context)
+    elif kind == "JUDGE":
+        mission, opening, task, output, example = reviewed_judge(question, facts, context)
+    else:
+        mission, opening, task, output, example = reviewed_decision(question, facts, context)
+    validate(example, question["schema"])
+    if repairs := take(facts, "Exact corrections", "Exact failure"):
+        opening.update(repairs)
+    keys = ("Write scope", "Requirements", "Subjects", "Contract authority", "Contracts provided",
+            "Contracts consumed", "Area contracts", "Planned contracts", "Decisions", "Runtime",
+            "Execution facts", "Existing checks", "Correction owners", "Crossed contracts",
+            "Wave-start observations", "Observations", "Final observations", "Check artifacts")
+    evidence = {**take(facts, *keys), **dict(sorted(facts.items()))}
+    label = ("Assignment facts" if kind == "WORK" else
+             "Evidence" if kind in ("JUDGE", "FLOW", "PRODUCT") else "Decision facts")
+    caption = ("Illustration from another assignment. Use the paths, handles and observations from yours."
+               if kind == "WORK" else "Illustrative receipt. Use the supplied facts and handles.")
+    return "\n\n".join(filter(None, (
+        mission,
+        "Call instruction\n" + stdin_instruction if stdin_instruction else "",
+        labelled(opening), task,
+        label + "\n\n" + labelled(evidence) if evidence else "",
+        image_directions.strip(), output, caption + "\n" + encode(example),
+        "Answer schema\n" + encode(question["schema"]))))
 
 
 def runtime(setup):
@@ -512,8 +832,14 @@ def work_brief(store, ref):
         facts["Try-it guide"] = plan.GUIDE_WALKTHROUGH
     if not sole:
         facts.update(agreement_facts(document, ref))
+    wave = document.get("architecture", {}).get("waves", [])
+    context = {**plan.prompt_context(document, plan.acceptance(document, ref)), "soleOwner": sole,
+               "guideRole": "separate" if ref == "guide" else
+                            "owned" if plan.guide_owner(document) == ref else "",
+               "wave": {"number": unit.wave, "goal": wave[unit.wave - 1]["goal"]} if wave else {}}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
-                 images=images(store, refs), owners=facts["Correction owners"], sole_work=sole)
+                 images=images(store, refs), owners=facts["Correction owners"], sole_work=sole,
+                 context=context)
 
 
 def owners(document):
@@ -591,7 +917,8 @@ def judge_brief(store, ref, commit=None, observations=None):
              "Observations": observed(store, refs)}
     facts.update(agreement_facts(document, ref))
     return build("JUDGE", facts, requirements, images=images(store, refs),
-                 owners=[ref, *architecture.contracts_for(document, ref)])
+                 owners=[ref, *architecture.contracts_for(document, ref)],
+                 context=plan.prompt_context(document, requirements))
 
 
 class AnswerRejected(ValueError):

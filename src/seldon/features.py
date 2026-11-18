@@ -9,12 +9,24 @@ checkContract (cross-unit check disputes go to the planner; repeated product che
 growPersona (proposal-aware development simulator; off = scripted menu or grouped transport control).
 askContracts (COACH resolves peer agreements or sends the gap back to the planner).
 sizeFirst (new kickoffs record effort-based planning and the SELDON_SPLIT experiment arm).
+prompts2 (mission-first briefs; off = original provider rendering). OFF BY DEFAULT until its replay
+A/B decides: SELDON_ON=prompts2 turns it on.
 """
 import os
 
 
+# Features still on trial: off unless SELDON_ON names them (an A/B has not decided yet).
+TRIAL = {"prompts2"}
+
+
+def _names(var):
+    return {n.strip() for n in os.environ.get(var, "").split(",") if n.strip()}
+
+
 def enabled(name):
-    return name not in {n.strip() for n in os.environ.get("SELDON_OFF", "").split(",")}
+    if name in TRIAL:
+        return name in _names("SELDON_ON") and name not in _names("SELDON_OFF")
+    return name not in _names("SELDON_OFF")
 
 
 def planning_setup():

@@ -72,7 +72,8 @@ def brief(store, feature):
         "facts": facts, "targets": list(requirements), "schema": judgment.review_schema(document, "FLOW"),
         "examples": [{"answer": {"verdict": "satisfied", "gaps": [],
                      "why": "The observed flow meets its acceptance across the supplied contracts"}}],
-        "execution": {}, "images": images}
+        "execution": {}, "images": images,
+        "renderContext": {"audience": document["nodes"]["vision"]["body"]["users"]}}
     return question
 
 

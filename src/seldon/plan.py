@@ -83,6 +83,24 @@ def sole_owner(document):
         return owner
 
 
+def prompt_context(document, requirements=()):
+    """Accepted audience and the features traced from this assignment's requirements."""
+    from . import architecture
+
+    vision = document["nodes"].get("vision", {}).get("body", {})
+    nodes = document["nodes"]
+    traced = dict.fromkeys(f for r in requirements for f in nodes[r]["body"]["features"])
+    stories = select(document, "feature")
+    goals = architecture.commitments(vision) if "stories" in vision else {}
+    relevant = {h for f in traced for h in stories[f].get("commitments", [])}
+    attached = {h for goal in goals.values() for h in goal.get("constraints", [])}
+    constraints = {h for key in relevant for h in goals.get(key, {}).get("constraints", [])}
+    return {"audience": vision.get("users", []),
+            "stories": {f: {k: stories[f][k] for k in ("story", "acceptance")} for f in traced},
+            "constraints": [c for c in vision.get("constraints", [])
+                            if c["handle"] in constraints or c["handle"] not in attached]}
+
+
 def guide_checks(document):
     """Find the declared walkthrough without borrowing the folded owner's product checks."""
     owner = guide_owner(document)
