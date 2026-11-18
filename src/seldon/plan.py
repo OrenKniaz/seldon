@@ -4,7 +4,7 @@ import fnmatch
 from graphlib import TopologicalSorter
 from pathlib import PurePosixPath
 
-from .schema import BODIES, VISION
+from .schema import BODIES, GROWN_FEATURE, vision_body, vision_contract
 from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
@@ -174,6 +174,13 @@ def coverage(document):
             for checks in [traced_checks(document, r)]}
 
 
+def edit_body(edit, grown):
+    body = edit["typedBody"]
+    if edit["kind"] == "feature" and not grown:
+        return {**body, "vision": ["vision"]}
+    return body
+
+
 def merge(vision, architecture, leaves, previous=None, wave=1):
     """Accumulate one wave; a scope keeps its owner and its earlier requirements."""
     from copy import deepcopy
@@ -181,7 +188,10 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
 
     document = deepcopy(previous) if previous else {"nodes": {}}
     nodes = document["nodes"]
-    nodes["vision"] = {"kind": "vision", "body": {k: vision[k] for k in VISION["properties"]}}
+    vision = vision_body(vision)
+    grown = "stories" in vision
+    nodes["vision"] = {"kind": "vision", "body": vision}
+    goals = owner.commitments(vision)
     units = select(document, "unit")
     endpoints = {r: {"provides": [c["provider"]], "consumes": [u for u in c["consumers"] if u != "guide"]}
                  for r, c in select(document, "contract").items()}
@@ -204,10 +214,8 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
                 else:
                     prior.append((edit["typedBody"], handles[key]))
         for edit in answer["edits"]:
-            body = deepcopy(edit["typedBody"])
-            if edit["kind"] == "feature":
-                body["vision"] = ["vision"]
-            else:
+            body = deepcopy(edit_body(edit, grown))
+            if edit["kind"] == "requirement":
                 body["features"] = [handles[r] for r in body["features"]]
             ref = handles[edit["targetHandle"]]
             # A re-detail in this wave replaces its own records, never a finished wave's.
@@ -245,9 +253,10 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
             "responsibility": area["responsibility"], "scope": list(area["scope"])}}
         if "guide" in units and units["guide"]["area"] == ref:
             nodes[ref]["body"]["scope"].extend(units["guide"]["scope"])
-        for i, criterion in enumerate(vision["quality"], 1):
-            if f"quality:{i}" in area["commitments"]:
-                nodes[f"quality:{i:03}:{ref}"] = {
+        for commitment, criterion in goals.items():
+            if commitment.startswith("quality:") and commitment in area["commitments"]:
+                handle = commitment if grown else f"quality:{int(commitment.split(':')[1]):03}"
+                nodes[f"{handle}:{ref}"] = {
                     "kind": "criterion", "body": {**criterion, "area": ref}}
     corrections = {}
     for contract in architecture["contracts"]:
@@ -282,8 +291,12 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
 
 
 def validate_records(document):
+    from . import architecture
+
     nodes = document["nodes"]
-    validate_schema(nodes["vision"]["body"], VISION)
+    vision = nodes["vision"]["body"]
+    validate_schema(vision, vision_contract(vision))
+    accepted = architecture.commitments(vision) if "stories" in vision else {}
     relation_types = {"feature": ("vision", "vision"), "requirement": ("features", "feature"),
                       "unit": ("requirements", "requirement")}
     for ref, node in nodes.items():
@@ -291,6 +304,12 @@ def validate_records(document):
             continue
         kind, body = node["kind"], node["body"]
         if kind == "criterion":
+            continue
+        if kind == "feature" and "commitments" in body:
+            validate_schema(body, GROWN_FEATURE, ref)
+            if unknown := set(body["commitments"]) - accepted.keys():
+                raise ValueError(f"{ref}: unknown accepted commitments {sorted(unknown)}. "
+                                 f"Use handles from {list(accepted)}.")
             continue
         validate_schema(body, BODIES[kind], ref)
         if kind in relation_types:
@@ -388,4 +407,4 @@ def approved(store):
     cursor = store.cursor()
     subject = store.read(cursor.B)["subject"]
     vision = subject["plan"]["nodes"]["vision"]["body"]
-    return vision == {k: v for k, v in store.read(cursor.vision)["answer"].items() if k != "why"}
+    return vision == vision_body(store.read(cursor.vision)["answer"])

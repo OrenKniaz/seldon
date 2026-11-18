@@ -11,7 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from seldon.run import Run
-from seldon.providers import Provider, setup_facts
+from seldon import features, questions, schema
+from seldon.decisions import Waiting
+from seldon.frontdoor import state
+from seldon.providers import Provider, ProviderFailure, setup_facts
 
 DREAM = ('Build a tiny web page with one Play button. When I click Play, the page shows '
          'the text "Hello, world!". A single static HTML file is enough. '
@@ -21,9 +24,9 @@ DREAM = ('Build a tiny web page with one Play button. When I click Play, the pag
 def scripted_answer(request, store, script):
     # Count canonical answers so restarting the rig does not replay check-in 1.
     requests = {r: b for r, _, b in store.records("decision_request")}
-    previous = {b["request"]: b["words"] for _, _, b in store.records("user_words")}
-    if request["request"] in previous:
-        return previous[request["request"]]
+    previous = {b["request"]: b for _, _, b in store.records("user_words")}
+    if "words" in (saved := previous.get(request["request"], {})):
+        return saved["words"]
     prior = sum(requests[ref]["gate"] == request["gate"] for ref in previous)
     entries = script.get(request["gate"], [])
     words = entries[prior] if prior < len(entries) else "first"
@@ -32,6 +35,55 @@ def scripted_answer(request, store, script):
         option = options[0]
         words = option["label"] if isinstance(option, dict) else option
     return words
+
+
+def transport_answer(request):
+    return [{"groupId": group["id"], "optionId": "done" if group["id"] == "round" else group["default"]}
+            for group in request["ask"]["groups"]]
+
+
+def persona_answer(display, persona, earlier, provider):
+    groups = display["ask"].get("groups")
+    prompt = ("Play this simulated owner. Judge only the proposal actually displayed. Prefer its "
+              "recommendations when they fit and choose a better option when they do not. If the "
+              "proposal misses something consequential, request it in your own words as Other. "
+              "Carry forward earlier requests without volunteering them a second time. Finish explicitly "
+              "only when the displayed product covers your goal and preference and respects your exclusion.")
+    if groups:
+        def selection(group):
+            ids = [o["id"] for o in group["options"] if o["id"] != "other"]
+            group_id = schema.choice(group["id"])
+            return {"anyOf": [schema.obj(groupId=group_id, optionId=schema.choice(*ids)),
+                              schema.obj(groupId=group_id, optionId=schema.choice("other"), text=schema.TEXT)]}
+
+        decision = next(g for g in groups if g["id"] == "round")
+        product = [selection(g) for g in groups if g["id"] != "round"]
+        fields = {"decision": selection(decision)}
+        example = {"decision": {"groupId": "round", "optionId": "done"}}
+        if product:
+            fields["choices"] = schema.array({"anyOf": product})
+            example["choices"] = []
+        prompt += (" Choose the round decision explicitly. If changing a default or adding Other text, "
+                   "request revision and wait to see it before selecting done. Use Other in the round "
+                   "decision when your request does not fit any product group. Send each group at most once.")
+    else:
+        fields = {"words": schema.TEXT}
+        example = {"words": "Please let me reopen an unfinished repair at the next shift."}
+        prompt += (" Reply with the exact menu label when choosing an option, including the approval label "
+                   "when finished. For Other, send only your own words.")
+    question = {"kind": "PERSONA", "schema": schema.obj(answer=schema.obj(**fields)), "prompt": prompt,
+                "examples": [{"answer": example}], "facts": {"Private persona": persona,
+                "Displayed request": display, "Earlier replies": earlier}}
+    answer = questions.ask(provider, question, lambda _: None)
+    if groups:
+        return [*answer.get("choices", []), answer["decision"]]
+    return answer["words"]
+
+
+def save_json(path, value):
+    staging = path.with_suffix(".tmp")
+    staging.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    staging.replace(path)
 
 
 def main():
@@ -100,22 +152,58 @@ def run(slot, dry_run, dream=DREAM, reopen=False, script=None):
     provider = Provider(slot / "calls", setup)
 
     script = script or json.loads(os.environ.get("SELDON_USER_SCRIPT", "{}"))
+    private = slot / "simulated-user.json"
+    if reopen and private.is_file():
+        script = json.loads(private.read_text("utf-8"))
+    elif not reopen and script:
+        save_json(private, script)
+    persona = script.get("persona") if features.enabled("growPersona") else None
 
     def yes(request):
         print(json.dumps({"scriptedDecision": request}, ensure_ascii=False), flush=True)
         if request["gate"] == "B" and os.environ.get("SELDON_STOP_AT_B") == "1":
-            from seldon.decisions import Waiting
             raise Waiting()
-        words = scripted_answer(request, loop.store, script)
-        print(json.dumps({"simUserAnswer": words, "gate": request["gate"]}, ensure_ascii=False), flush=True)
+        reply = slot / f"simulated-{request['request']}.json"
+        grouped = "groups" in request["ask"]
+        if request["gate"] == "A" and (persona or grouped or reply.is_file()):
+            mode = "scripted persona" if persona else "scripted transport control"
+            earlier = [body for _, _, body in loop.store.records("user_words")]
+            saved = json.loads(reply.read_text("utf-8")) if reply.is_file() else None
+            delivered = {body["replyId"] for body in earlier
+                         if body["request"] == request["request"] and body.get("replyId")}
+            if saved and (not grouped or saved["words"]["replyId"] not in delivered):
+                words, mode = saved["words"], saved["mode"]
+            else:
+                if persona:
+                    display = state(str(loop.project))["waitingFor"]
+                    history = [body.get("selections", body.get("words")) for body in earlier]
+                    try:
+                        judge = Provider(slot / "persona-calls", setup)
+                        words = persona_answer(display, persona, history, judge)
+                    except (ProviderFailure, questions.AnswerRejected) as error:
+                        print(f"Scripted persona could not answer {request['request']}: {error}",
+                              file=sys.stderr)
+                        raise Waiting() from error
+                else:
+                    words = transport_answer(request)
+                if grouped:
+                    reply_id = f"simulated-{request['request']}"
+                    if delivered:
+                        reply_id += f"-{len(delivered) + 1}"
+                    words = {"request": request["request"], "replyId": reply_id, "selections": words}
+                save_json(reply, {"words": words, "mode": mode})
+        else:
+            words = scripted_answer(request, loop.store, script)
+            mode = "scripted menu"
+        print(json.dumps({"simUserAnswer": words, "gate": request["gate"], "mode": mode},
+                         ensure_ascii=False), flush=True)
         return words
 
     loop = (Run.reopen(slot / "product", provider, yes) if reopen else
             Run(slot / "product", slot / "workers", dream, setup, provider, yes))
     try:
         if dry_run:
-            from seldon.questions import build
-            question = build("ALIGN", {"Dream": dream, "Runtime": setup})
+            question = questions.build("ALIGN", {"Dream": dream, "Runtime": setup})
             folder, invocation = provider.prepare(question)
             print(invocation["commandLine"] + ' < "' + str(folder / "prompt.txt") + '"')
             print(json.dumps(question["schema"], indent=2))
@@ -129,7 +217,6 @@ def run(slot, dry_run, dream=DREAM, reopen=False, script=None):
             if cursor.decision == before:
                 break
         # A run never fails (R15): it ends with an outcome or waits on one question; print whichever it is.
-        from seldon.frontdoor import state
         outcomes = loop.store.records("outcome")
         if cursor.state == "B" and os.environ.get("SELDON_STOP_AT_B") == "1":
             from seldon import plan

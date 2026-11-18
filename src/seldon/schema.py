@@ -21,7 +21,35 @@ ASK = obj(question=TEXT, options=array(OPTION, 2))
 VISION = obj(size=choice("tiny", "small", "medium", "large"), understanding=TEXT,
              users=array(TEXT, 1), scopeIn=array(TEXT, 1), scopeOut=REFS, improvements=REFS,
              quality=array(obj(criterion=TEXT, verification=TEXT), 1), alternatives=array(OPTION, 1))
+GROWN_VISION = obj(size=VISION["properties"]["size"], sizeWhy=TEXT, understanding=TEXT,
+    users=array(TEXT, 1), stories=array(obj(handle=TEXT, feature=TEXT, story=TEXT, outcome=TEXT,
+        constraints=REFS, sources=REFS), 1),
+    constraints=array(obj(handle=TEXT, value=TEXT, meaning=TEXT, source=TEXT)),
+    quality=array(obj(handle=TEXT, criterion=TEXT, verification=TEXT, constraints=REFS, sources=REFS), 1),
+    scopeOut=array(obj(outcome=TEXT, sources=REFS)))
+ALIGN_ROUND = obj(vision=GROWN_VISION, changed=TEXT,
+                  questions=array(obj(affects=TEXT, question=TEXT, options=array(OPTION, 2))),
+                  recommendation=choice("revise", "done"), why=TEXT)
+
+
+def vision_contract(vision):
+    return GROWN_VISION if "stories" in vision else VISION
+
+
+def vision_body(answer):
+    """Project a recorded round or a legacy ALIGN answer onto the body locked at A."""
+    body = answer.get("vision", answer)
+    return {key: body[key] for key in vision_contract(body)["properties"]}
+
+
+def batch_decision(groups):
+    return obj(selections=obj(**{group["id"]: obj(
+        optionId=choice(*dict.fromkeys([*(option["id"] for option in group["options"]), "other", "unclear"])),
+        text={"type": "string"}) for group in groups}), why=TEXT)
+
+
 FEATURE = obj(story=TEXT, acceptance=TEXT)
+GROWN_FEATURE = obj(**FEATURE["properties"], commitments=array(TEXT, 1))
 POSITION = {"type": "integer", "minimum": 1}
 BODIES = {
     "area": obj(responsibility=TEXT, scope=array(TEXT, 1)),
@@ -51,21 +79,28 @@ AREA = obj(handle=TEXT, responsibility=TEXT, scope=array(TEXT, 1), commitments=a
 AREA_CONTRACT = obj(handle=TEXT, **BODIES["contract"]["properties"])
 ARCHITECT = obj(areas=array(AREA), contracts=array(AREA_CONTRACT),
                 decisions=array(BODIES["decision"]), waves=array(obj(goal=TEXT, commitments=REFS), 1))
-DETAIL_PLAN = obj(verdict=choice("planned"),
-    edits=array({"anyOf": [obj(kind=choice(k), targetHandle=TEXT, typedBody=PLAN_BODIES[k])
-                           for k in ("feature", "requirement")]}, 1),
-    units=array({"anyOf": [PLANNED_UNIT, obj(**PLANNED_UNIT["properties"], provides=REFS)]}, 1))
+
+
+def detail_plan(feature):
+    return obj(verdict=choice("planned"), edits=array({"anyOf": [
+        obj(kind=choice("feature"), targetHandle=TEXT, typedBody=feature),
+        obj(kind=choice("requirement"), targetHandle=TEXT, typedBody=PLAN_BODIES["requirement"])]}, 1),
+        units=array({"anyOf": [PLANNED_UNIT, obj(**PLANNED_UNIT["properties"], provides=REFS)]}, 1))
+
+
+DETAIL_PLAN = detail_plan(FEATURE)
+GROWN_DETAIL_PLAN = detail_plan(GROWN_FEATURE)
 DETAIL_SPLIT = obj(verdict=choice("subdivide"), subareas=array(AREA, 2), contracts=array(AREA_CONTRACT))
 DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
 
 
-def answer_schema(kind, targets=(), owners=()):
+def answer_schema(kind, targets=(), owners=(), *, grown=False):
     gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1), severity=SEVERITY)
     payload = {
         "ALIGN": VISION, "ARCHITECT": obj(**{**ARCHITECT["properties"],
             "waves": array(ARCHITECT["properties"]["waves"]["items"])}),
-        "DETAIL": DETAIL_PLAN,
+        "DETAIL": GROWN_DETAIL_PLAN if grown else DETAIL_PLAN,
         "DECIDE": obj(choice=choice(*targets,
                                     "Other", "Stop", "Unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),

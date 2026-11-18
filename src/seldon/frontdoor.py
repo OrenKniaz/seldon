@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 from . import decisions, providers
 from .decisions import Waiting
@@ -20,6 +21,19 @@ from .store import Store
 RELAY = ("Show the question and options as written, recommendation first, using your own ask-user tool "
          "when you have one; relay the picked label or the user's own words through answer; "
          "never pick for the user.")
+ROUND_RELAY = ("Show the proposal, change summary, retained choices and defaults. "
+               "Present each group separately with Other, the size override and the round decision. "
+               "Use your multi-question tool or numbered chat. "
+               "Relay actual group and option IDs with verbatim Other text, or relay the user's own words. "
+               "A displayed default or untouched preselection is not a reply. "
+               "Use a fresh replyId per user turn and reuse it on transport retry; never pick for the user.")
+OTHER = {"label": "Other", "means": "Your own words"}
+
+
+class Selection(TypedDict):
+    groupId: str
+    optionId: str
+    text: NotRequired[str]
 
 
 class Refusal(ValueError):
@@ -50,6 +64,10 @@ def running(store):
         return True
 
 
+def grouped(waiting):
+    return "groups" in waiting.get("ask", {})
+
+
 def state(run: str):
     """Show canonical progress, the displayed request, and where the next words go."""
     with opened(run) as store:
@@ -57,16 +75,26 @@ def state(run: str):
         active = running(store)
         waiting = ({"request": cursor.decision, **store.read(cursor.decision)}
                    if cursor.decision and cursor.state not in TERMINAL else None)
+        relay = RELAY
         if waiting:
+            is_round = grouped(waiting)
             ask = waiting.get("ask")
             waiting = {key: waiting[key] for key in ("request", "gate", "subject")}
-            if ask:
+            if is_round:
+                relay = ROUND_RELAY
+                waiting["ask"] = {**ask, "groups": [
+                    {**group, "options": group["options"] + (
+                        [] if any(o["id"] == "other" for o in group["options"])
+                        else [{"id": "other", **OTHER}])}
+                    for group in ask["groups"]
+                ]}
+            elif ask:
                 waiting["ask"] = {"question": ask["question"], "options": [
                     {"label": option["label"], "means": option["means"]} for option in ask["options"]
-                ] + [{"label": "Other", "means": "Your own words"}]}
+                ] + [OTHER]}
         outcomes = store.records("outcome")
         next_step = ("Use start with a new folder for your next dream." if cursor.state in TERMINAL else
-                     f"{RELAY} Use answer with request {cursor.decision}." if waiting else
+                     f"{relay} Use answer with request {cursor.decision}." if waiting else
                      "Use pause to pause this run." if active else "Use resume to continue this run.")
         status = ("ACCEPTED" if cursor.state in ("ACCEPTED", "SCRIPTED_C") else
                   "STOPPED" if cursor.state == "STOPPED" else
@@ -123,6 +151,25 @@ def pause(run: str):
     return state(run)
 
 
+def read_answer(path):
+    try:
+        return json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return None
+
+
+def acknowledged(store, response):
+    """growLoop acknowledges a delivery in user_words when it durably folds that reply."""
+    return any(row["request"] == response["request"] and row.get("replyId") == response["replyId"]
+               for _, _, row in store.records("user_words"))
+
+
+def save_answer(path, response):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(response), encoding="utf-8")
+    temporary.replace(path)
+
+
 def drive(run):
     root = side(run)
     for key in ("TEMP", "TMP", "TMPDIR"):
@@ -134,12 +181,18 @@ def drive(run):
 
     def user(request):
         answer = root / "answer.json"
-        if answer.exists():
-            response = json.loads(answer.read_text("utf-8"))
-            if response["request"] == request["request"]:
-                # Keep the carrier until the decision commits and a different request is shown.
+        response = read_answer(answer)
+        if response and response["request"] == request["request"]:
+            if grouped(request):
+                # Return the stable envelope after interruption, until its fold commits.
+                if "replyId" in response:
+                    with opened(run) as store:
+                        if not acknowledged(store, response):
+                            return response
+            else:
                 return response["words"]
-            answer.unlink()
+        elif response and "replyId" not in response:
+            answer.unlink(missing_ok=True)
         raise Waiting()
 
     deadline = time.monotonic() + 2
@@ -199,8 +252,9 @@ def server(setup=providers.setup_facts):
         return value
 
     @tool
-    def answer(run: str, request: str, words: str):
-        """Relay the picked label or the user's own words verbatim; never pick for the user."""
+    def answer(run: str, request: str, words: str | None = None,
+               replyId: str | None = None, selections: list[Selection] | None = None):
+        """Relay exact words or group/option picks; grouped replies require a stable replyId."""
         value = state(run)
         if value["state"] in TERMINAL:
             raise Refusal("Run is " + value["state"] + "; use start with a new folder")
@@ -210,9 +264,28 @@ def server(setup=providers.setup_facts):
         if request != waiting["request"]:
             raise Refusal("Use answer request " + waiting["request"])
         target = side(run) / "answer.json"
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"request": request, "words": words}), encoding="utf-8")
-        temporary.replace(target)
+        if grouped(waiting):
+            if not replyId or (words is None) == (not selections):
+                raise Refusal(f"Use answer request {request} with a replyId and either words or selections")
+            response = {"request": request, "replyId": replyId,
+                        **({"words": words} if words is not None else {"selections": selections})}
+            with opened(run) as store, store.transaction():
+                current = store.cursor().decision
+                if current != request:
+                    raise Refusal(f"Use answer request {current}" if current
+                                  else "No request is waiting; use state")
+                if acknowledged(store, response):
+                    return state(run)
+                prior = read_answer(target)
+                if (prior and prior["request"] == request and prior != response
+                        and "replyId" in prior and not acknowledged(store, prior)):
+                    raise Refusal(f"Request {request} already has a pending reply; use resume")
+                save_answer(target, response)
+            value = state(run)
+        else:
+            if words is None or replyId is not None or selections is not None:
+                raise Refusal(f"Use answer request {request} with the picked label or your own words")
+            save_answer(target, {"request": request, "words": words})
         return state(run) if value["controller"] == "running" else spawn(run)
 
     @tool
@@ -220,8 +293,14 @@ def server(setup=providers.setup_facts):
         """Continue an idle run; a displayed request needs answer with the user's words."""
         pause(run)
         value = available(run)
-        if value["waitingFor"] and not (side(run) / "answer.json").exists():
-            raise Refusal("Use answer request " + value["waitingFor"]["request"])
+        waiting = value["waitingFor"]
+        if waiting:
+            response = read_answer(side(run) / "answer.json")
+            with opened(run) as store:
+                if (not response or response["request"] != waiting["request"]
+                        or (grouped(waiting) and (
+                            "replyId" not in response or acknowledged(store, response)))):
+                    raise Refusal("Use answer request " + waiting["request"])
         return spawn(run)
 
     @tool

@@ -232,7 +232,7 @@ def stop(store, words):
         advance(store, "stop", outcome, decision=None, failure="")
 
 
-def request(store, gate, subject):
+def request(store, gate, subject, *, ask=None):
     with store.transaction():
         cursor = store.cursor()
         waived = gate == "CHECK-IN" and cursor.waived
@@ -243,7 +243,7 @@ def request(store, gate, subject):
         key = None
         if gate == "UNIT" or "step" in subject:
             key, subject = recovery.subject(store, gate, subject)
-        ask = gate_ask(store, gate, subject)
+        ask = ask if ask is not None else gate_ask(store, gate, subject)
         ref = store.record("decision_request", {"gate": gate, "subject": subject,
             **({"ask": ask} if ask else {}),
             "origin": store.read(cursor.kickoff)["setup"].get("userOrigin", "user")})
@@ -260,6 +260,131 @@ def request(store, gate, subject):
             store.recovery(key, state)
 
 
+def round_ask(answer):
+    def group(key, question, options, affects):
+        return {"id": key, "question": question, "default": options[0]["id"],
+                "options": options, "affects": affects}
+
+    groups = [group(f"q{i}", item["question"],
+                    [{"id": f"o{j}", **o} for j, o in enumerate(item["options"], 1)], item["affects"])
+              for i, item in enumerate(answer["questions"], 1)]
+    size = answer["vision"]["size"]
+    groups.append(group("size", "What size should Seldon plan for?",
+        [{"id": s, "label": s.capitalize(),
+          "means": answer["vision"]["sizeWhy"] if s == size else f"Plan for a {s} dream"}
+         for s in (size, *(s for s in ("tiny", "small", "medium", "large") if s != size))], "size"))
+    options = [
+        {"id": "revise", "label": "Keep shaping this", "means": "Review another proposal before locking A"},
+        {"id": "done", "label": "This is it", "means": "Lock the displayed vision with its displayed defaults"},
+    ]
+    if answer["recommendation"] == "done":
+        options.reverse()
+    groups.append(group("round", "Are alignment and expansion done?", options, "vision"))
+    return {"delta": answer["changed"], "why": answer["why"], "groups": groups, "retained": []}
+
+
+def picked_options(groups, selections):
+    if not selections:
+        raise ValueError("Expected at least one selected option; got an empty reply.")
+    options = {g["id"]: {o["id"]: o for o in g["options"]} for g in groups}
+    picked = {}
+    for selection in selections:
+        group, choice, text = (selection.get(k, "") for k in ("groupId", "optionId", "text"))
+        valid = (isinstance(text, str) and bool(text.strip()) if choice == "other"
+                 else text == "" and choice in options.get(group, {}))
+        if group not in options or group in picked or not valid:
+            raise ValueError(f"Expected one displayed option per group or nonempty Other text. "
+                             f"Got group {group!r}, option {choice!r}, text {text!r}.")
+        picked[group] = {"optionId": choice, "text": text}
+    return picked
+
+
+def fold_round(store, ref, item, receipt, picked, interpretation=None):
+    # For prose this is nested inside inference's answer transaction.
+    with store.transaction():
+        cursor = store.cursor()
+        if cursor.decision != ref:
+            return
+        ask = item["ask"]
+        groups = {g["id"]: g for g in ask["groups"]}
+        selected = []
+        for key, selection in picked.items():
+            choice, text = selection["optionId"], selection["text"]
+            if choice == "unclear":
+                continue
+            group = groups[key]
+            option = next((o for o in group["options"] if o["id"] == choice), None)
+            selected.append({"groupId": key, "question": group["question"], "affects": group["affects"],
+                "default": group["default"], **selection, "label": option["label"] if option else "Other",
+                "means": option["means"] if option else text})
+        words = receipt.get("words", "\n".join(s["text"] or s["label"] for s in selected))
+        raw = store.record("user_words", {**receipt, "words": words, "origin": item["origin"],
+                                          "interpretation": interpretation})
+        retained = ask["retained"] + [{**s, "source": raw} for s in selected]
+        round_choice = next((s["optionId"] for s in retained if s["groupId"] == "round"), None)
+        if not round_choice:
+            answered = {s["groupId"] for s in retained}
+            failure = "A is still open. Answer the remaining choices or explicitly lock the displayed defaults."
+            if selected:
+                store.cursor(replace(cursor, decision=None, failure=failure))
+                request(store, "A", item["subject"], ask={**ask, "retained": retained,
+                    "groups": [g for g in ask["groups"] if g["id"] not in answered]})
+            else:
+                store.cursor(replace(cursor, failure=failure))
+            return
+
+        approve = round_choice == "done" and all(s["optionId"] == s["default"]
+                  for s in retained if s["groupId"] != "round")
+        approval = store.record("approval", {"request": ref, "subject": item["subject"],
+            "words": raw, "userWords": raw, "interpretation": interpretation, "selections": retained,
+            "scripted": store.read(cursor.kickoff)["setup"].get("scriptedUser", False),
+            "choice": "done" if approve else "revise", "effect": "approve" if approve else "direct"})
+        if approve:
+            advance(store, "approve", approval, decision=None, failure="", A=approval,
+                    vision=item["subject"]["round"])
+        else:
+            advance(store, "revise", approval, decision=None, failure="", requestedChange=raw)
+
+
+def decide_round(store, provider, ref, item, reply):
+    if not isinstance(reply, dict) or reply.get("request") != ref or not reply.get("replyId"):
+        with store.transaction():
+            store.cursor(replace(store.cursor(), failure=f"A is still open. Use answer request {ref} "
+                                 "with a fresh replyId and your words or selected options."))
+        raise Waiting()
+    if any(row["request"] == ref and row.get("replyId") == reply["replyId"]
+           for _, _, row in store.records("user_words")):
+        raise Waiting()
+
+    groups = item["ask"]["groups"]
+    try:
+        if ("words" in reply) == ("selections" in reply):
+            raise ValueError("Expected either verbatim words or selections; got both or neither.")
+        if "words" in reply:
+            words = reply["words"]
+            if not isinstance(words, str) or not words.strip():
+                raise ValueError("Expected the user's words; got an empty or non-text reply.")
+            brief = questions.batch_decide_brief(groups, words)
+            brief["prompt"] += (" A request to change the proposal belongs in a product group, or in "
+                "the round's Other when it fits no product group. If a material request or the user's "
+                "intent to accept the remaining defaults is ambiguous, do not select done.")
+            brief["facts"]["Retained choices"] = item["ask"]["retained"]
+            inference.call(store, provider, brief, check=lambda a: questions.check_batch_decide(a, words),
+                consume=lambda source, a: fold_round(store, ref, item, reply, a["selections"], source),
+                binding=ref, field="selections")
+        else:
+            fold_round(store, ref, item, reply, picked_options(groups, reply["selections"]))
+    except ValueError as error:
+        with store.transaction():
+            store.record("user_words", {**reply, "words": reply.get("words", ""), "origin": item["origin"],
+                                       "rejected": True})
+            store.cursor(replace(store.cursor(), failure=f"Could not use the A reply: {error} "
+                                 f"Use answer request {ref} with a fresh replyId and the displayed selections."))
+        raise Waiting() from error
+    if store.cursor().state == "A":
+        raise Waiting()
+
+
 def decide(store, provider, user):
     cursor = store.cursor()
     ref = cursor.decision
@@ -273,6 +398,8 @@ def decide(store, provider, user):
             request(store, item["gate"], subject)
         return decide(store, provider, user)
     words = user({"request": ref, **item})
+    if "groups" in item["ask"]:
+        return decide_round(store, provider, ref, item, words)
     scripted = store.read(cursor.kickoff)["setup"].get("scriptedUser", False)
     if scripted and item["gate"] not in ("A", "B", "CHECK-IN", "C") and isinstance(words, dict):
         raise Waiting()

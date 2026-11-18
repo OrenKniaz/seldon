@@ -8,6 +8,7 @@ from . import (
     architecture,
     decisions,
     detail,
+    features,
     fixups,
     flow_review,
     gitwork,
@@ -129,12 +130,7 @@ class Run:
                 return store.cursor().state
         cursor = store.cursor()
         if state == "ALIGN":
-            kickoff = store.read(cursor.kickoff)
-            facts = {**questions.user_words(store), "Runtime": questions.runtime(kickoff["setup"])}
-            if cursor.requestedChange:
-                facts["Requested change"] = store.read(cursor.requestedChange)
-            inference.call(store, self.provider, questions.build("ALIGN", facts),
-                consume=lambda ref, a: advance(store, "aligned", ref, vision=ref, requestedChange=None))
+            self.align()
         elif state == "CHECK-IN":
             waves = plan.execution(store)["architecture"]["waves"]
             more = cursor.wave < len(waves)
@@ -152,14 +148,14 @@ class Run:
                 cursor = advance(store, "steer", cursor.requestedChange or cursor.candidate,
                                  wave=finished + 1, waveStart=cursor.candidate, repairs=0)
             replan = cursor.wave == finished  # a plan gap re-plans the unverified wave in place
-            vision = store.read(cursor.vision)["answer"]
+            vision = questions.vision_body(store.read(cursor.vision)["answer"])
             previous = store.plan(cursor.revision) if cursor.revision else None
             built = plan.built(store) if cursor.wave > 1 and not replan else None
             outline = previous["architecture"] if previous else None
             gaps = [b for _, _, b in store.records("architecture_gap") if b["vision"] == cursor.vision]
             def consume(result, answer):
                 if "scope" in answer:
-                    advance(store, "scope", result, requestedChange=result)
+                    advance(store, "scope", result, requestedChange=result, A=None, B=None)
                     return
                 document = dict(previous) if built or replan else {
                     "nodes": {"vision": {"kind": "vision", "body": vision}}}
@@ -220,6 +216,57 @@ class Run:
             with store.transaction():
                 store.cursor(replace(cursor, failure=""))
         return cursor.state
+
+    def align(self):
+        store = self.store
+        cursor = store.cursor()
+        kickoff = store.read(cursor.kickoff)
+        facts = {**questions.user_words(store), "Runtime": questions.runtime(kickoff["setup"])}
+        if cursor.requestedChange:
+            facts["Requested change"] = store.read(cursor.requestedChange)
+        # The question is recorded before the provider runs. Its shape survives an interrupted
+        # call as well as a switch change between a displayed round and its revision.
+        last = next((q for _, _, q in reversed(store.records("question")) if q["kind"] == "ALIGN"), None)
+        grown = ("vision" in last["schema"]["properties"]["answer"].get("properties", {})
+                 if last else features.enabled("growAlign"))
+        if not grown:
+            inference.call(store, self.provider, questions.build("ALIGN", facts),
+                consume=lambda ref, _: advance(store, "aligned", ref, vision=ref, requestedChange=None))
+            return
+
+        sources = {"kickoff": kickoff["words"], **{ref: row["words"]
+            for ref, _, row in store.records("user_words") if isinstance(row["words"], str)
+            and not row.get("rejected")}}
+        previous = next((r for _, _, r in reversed(store.records("decision_request"))
+                         if "groups" in r.get("ask", {})), None)
+        size = None
+        if previous:
+            draft = previous["subject"]["round"]
+            facts["Previous proposal"] = store.read(draft)["answer"]
+            approvals = [a for _, _, a in reversed(store.records("approval")) if "selections" in a]
+            revision = next((a for a in approvals
+                             if a["subject"].get("round") == draft and a["choice"] == "revise"), None)
+            if revision:
+                facts["Selected choices"] = revision["selections"]
+            size = next((s["optionId"] for a in approvals for s in a["selections"]
+                         if s["groupId"] == "size"), None)
+            if size and size != "other":
+                facts["Owner size override"] = size
+
+        def check(answer):
+            questions.check_align_round(answer, sources)
+            actual = answer["vision"]["size"]
+            if size and size != "other" and actual != size:
+                raise ValueError(f"Expected the owner's size {size!r}; got {actual!r}. "
+                                 "Send the proposal with the selected size.")
+
+        def display(ref, answer):
+            advance(store, "aligned", ref, requestedChange=None)
+            decisions.request(store, "A", {"round": ref, "vision": questions.vision_body(answer)},
+                              ask=decisions.round_ask(answer))
+
+        inference.call(store, self.provider, questions.align_round_brief(facts, sources=sources),
+                       check=check, consume=display, field="vision/questions")
 
     def run(self, wait=None):
         import time

@@ -4,7 +4,7 @@ from copy import deepcopy
 
 from . import plan
 from .answers import Mismatch
-from .schema import ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT
+from .schema import ARCHITECT, DETAIL_PLAN, DETAIL_SPLIT, GROWN_DETAIL_PLAN, vision_body
 from .schema import validate as validate_schema
 
 
@@ -85,6 +85,11 @@ def index(items, field="areas/contracts"):
 
 
 def commitments(vision):
+    vision = vision_body(vision)
+    if "stories" in vision:
+        return {f"{prefix}:{handle}": value
+                for field, prefix in (("stories", "scopeIn"), ("quality", "quality"))
+                for handle, value in index(vision[field], f"vision.{field}").items()}
     return {f"{field}:{i}": value for field in ("scopeIn", "improvements", "quality")
             for i, value in enumerate(vision[field], 1)}
 
@@ -137,9 +142,13 @@ def outline(answer, vision=None):
     areas, contracts = index(answer["areas"], "areas"), index(answer["contracts"], "contracts")
     answer["areas"], answer["contracts"] = list(areas.values()), list(contracts.values())
     assigned = {r for a in areas.values() for r in a["commitments"]}
-    if vision is not None and assigned != set(commitments(vision)):
+    if vision is not None and assigned != accepted.keys():
         raise Mismatch("areas.commitments", f"Seldon expected the accepted commitment handles "
             f"{list(accepted)}; got {sorted(assigned)}. Send every accepted handle assigned to an area.")
+    extra = assigned_waves - accepted.keys()
+    if extra and vision is not None and "stories" in vision_body(vision):
+        raise Mismatch("waves.commitments", f"Unknown wave commitments {sorted(extra)}. "
+                       f"Use accepted handles from {list(accepted)}.")
     if vision is not None and not detail_areas(answer, 1):
         first, *later = answer["waves"]
         later_work = ", ".join(f"wave {i} has {w['commitments']}" for i, w in enumerate(later, 2))
@@ -175,13 +184,22 @@ def outline(answer, vision=None):
 
 def local_plan(area, contracts, answer, vision):
     """Check ownership before merging; canonical trace validation runs on the merged document."""
-    validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_PLAN)
+    vision = vision_body(vision)
+    grown = "stories" in vision
+    validate_schema({k: v for k, v in answer.items() if k != "why"},
+                    GROWN_DETAIL_PLAN if grown else DETAIL_PLAN)
     handles = {e["targetHandle"]: e["kind"] for e in answer["edits"]}
     if len(handles) != len(answer["edits"]):
         raise Mismatch("edits.targetHandle", f"Seldon expected distinct local record handles; got "
             f"{[e['targetHandle'] for e in answer['edits']]}. Send each local handle once.")
     relations = {"requirement": ("features", "feature")}
     for edit in answer["edits"]:
+        if grown and edit["kind"] == "feature":
+            refs = edit["typedBody"]["commitments"]
+            if set(refs) - set(area["commitments"]):
+                raise Mismatch("edits.typedBody.commitments",
+                    f"Feature {edit['targetHandle']!r} cites {refs}. "
+                    f"Use this area's accepted handles {area['commitments']}.")
         if edit["kind"] in relations:
             field, kind = relations[edit["kind"]]
             if any(handles.get(r) != kind and not (kind == "requirement" and r in contracts
@@ -206,10 +224,8 @@ def local_plan(area, contracts, answer, vision):
             raise Mismatch("units.dependencies", f"Seldon expected positions 1 through "
                 f"{len(answer['units'])}; got {unit['dependencies']}. Send one-based positions "
                 "of the units this unit depends on.")
-    nodes = {"vision": {"kind": "vision", "body": {
-        k: v for k, v in vision.items() if k != "why"}}}
-    nodes.update({e["targetHandle"]: {"kind": e["kind"], "body": {
-        **e["typedBody"], **({"vision": ["vision"]} if e["kind"] == "feature" else {})}}
+    nodes = {"vision": {"kind": "vision", "body": vision}}
+    nodes.update({e["targetHandle"]: {"kind": e["kind"], "body": plan.edit_body(e, grown)}
         for e in answer["edits"]})
     units = {f"unit:{i}": {**{k: v for k, v in u.items() if k != "provides"}, "area": area["handle"],
              "dependencies": [f"unit:{d}" for d in u["dependencies"]]}

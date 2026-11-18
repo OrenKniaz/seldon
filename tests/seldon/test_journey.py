@@ -15,6 +15,201 @@ from seldon.run import Run
 
 
 @pytest.mark.fast
+def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
+    """A partial reply and a replayed mixed done/change cannot lock an unseen vision.
+
+    Scalar approval tests miss the interruption between receiving several choices and
+    folding them, and cannot catch a draft reaching ARCHITECT or B as the accepted vision.
+    """
+    from seldon import architecture, decisions, frontdoor, schema
+
+    monkeypatch.delenv("SELDON_OFF", raising=False)
+    # Verbatim excerpts from Quiet Bench d56dc7b call-f5f75800. At r10 the recorded
+    # simulator said "Build this". The grouped planner and owner replies are counterfactual.
+    launch = "python server.py --port PORT --data DIR"
+    dream = (f"Every session is saved on a small local storage server (`{launch}`) with its "
+             "settings and results, and a web page on that server lets me start a run, browse "
+             "saved sessions, reload one and compare two.")
+    stopped = ("Report stopped and limited runs truthfully, including how many samples were processed; "
+               "do not present a partial run as completed.")
+    first = questions.consequential_round_example()
+    first["vision"]["size"] = "large"  # The recorded three-wave bench was rated large.
+    first["vision"]["stories"][1].update(outcome=stopped, sources=[])
+    first["questions"].append({"affects": "scopeIn:inspect", "question": "How can a colleague inspect it?",
+        "options": [{"label": "Reopen a saved run", "means": "Open it on this PC"},
+                    {"label": "Export a copy", "means": "Open it on another bench"}]})
+    mixed = "This is it, except I need a printable result"
+    changed = "Compare only the shared measured interval and label the printable result partial."
+    revised = deepcopy(first)
+    revised.update(changed=changed, questions=[], recommendation="done")
+    display = {}
+    architect = []
+    seen = []
+
+    def provider(q):
+        strict_schema(q["schema"])
+        kind, facts = q["kind"], q["facts"]
+        seen.append(kind)
+        if kind == "ALIGN":
+            if seen.count("ALIGN") == 1:
+                assert facts["Dream"] == dream
+                answer = first
+            else:
+                assert facts["Previous proposal"]["vision"] == first["vision"]
+                assert facts["Owner size override"] == "medium"
+                assert mixed in facts["Sources"].values()
+                replies = {s["label"]: s["source"] for s in facts["Selected choices"]}
+                interval = replies["Compare shared interval"]
+                printing = replies["Other"]
+                assert "Compare shared interval" in facts["Sources"][interval]
+                assert facts["Sources"][printing] == mixed
+                revised["vision"].update(size="medium", sizeWhy="The owner chose a medium split")
+                revised["vision"]["stories"][0].update(outcome=changed, sources=[interval, printing])
+                answer = revised
+        elif kind == "DECIDE":
+            assert facts["User's verbatim words"] == mixed
+            picks = {g["id"]: {"optionId": "unclear", "text": ""} for g in facts["Displayed groups"]}
+            picks[display["handoff"]] = {"optionId": "other", "text": "printable result"}
+            picks["round"] = {"optionId": "done", "text": ""}
+            answer = {"selections": picks, "why": "Explicit done and a changed handoff"}
+        elif kind == "ARCHITECT":
+            architect.append(facts["Approved vision"])
+            assert facts["Approved vision"] == revised["vision"]
+            goals = list(facts["Commitment handles"])
+            answer = {"areas": [{"handle": "bench", "responsibility": "Compare and print",
+                                "scope": ["bench/**"], "commitments": goals}],
+                      "contracts": [], "decisions": [],
+                      "waves": [{"goal": "A printable partial comparison", "commitments": goals}]}
+        elif kind == "DETAIL":
+            goal = facts["Accepted commitments"]["scopeIn:compare"]
+            assert goal["outcome"] == changed
+            answer = {"verdict": "planned", "edits": [
+                {"kind": "feature", "targetHandle": "f", "typedBody": {
+                    "story": goal["story"], "acceptance": goal["outcome"],
+                    "commitments": ["scopeIn:compare"]}},
+                {"kind": "requirement", "targetHandle": "r", "typedBody": {
+                    "acceptance": goal["outcome"], "features": ["f"]}}],
+                "units": [{"scope": ["bench/**"], "requirements": ["r"], "dependencies": [],
+                           "instructions": "Show and print the shared measured interval"}]}
+        else:
+            assert kind == "REVIEW"
+            answer = {"verdict": "adequate", "gaps": []}
+        response = {"answer": {**answer, "why": answer.get("why", "Trace the accepted bench outcome")}}
+        schema.validate(response, q["schema"])
+        return json.dumps(response)
+
+    product = tmp_path / "product"
+    setup = {"userOrigin": "counterfactual owner"}
+    run = Run(product, tmp_path / "workers", dream, setup, provider, lambda _: None)
+    try:
+        assert run.step() == "A"
+        initial = frontdoor.state(product)["waitingFor"]
+        assert initial and initial["subject"]["vision"] == first["vision"]
+        assert run.store.cursor().vision is None and not architect
+        comparison, handoff = initial["ask"]["groups"][:2]
+        display["handoff"] = handoff["id"]
+        run.user = lambda _: {"request": initial["request"], "replyId": "invalid",
+                              "selections": [{"groupId": comparison["id"], "optionId": "missing"}]}
+        with pytest.raises(decisions.Waiting):
+            run.step()
+        invalid = frontdoor.state(product)
+        assert invalid["waitingFor"] == initial
+        assert all(part in invalid["reason"] for part in
+                   ("Expected one displayed option", "'missing'", f"Use answer request {initial['request']}"))
+        run.user = lambda _: {"request": initial["request"], "replyId": "interval",
+            "selections": [{"groupId": comparison["id"], "optionId": comparison["options"][1]["id"]},
+                           {"groupId": "size", "optionId": "medium"}]}
+        with pytest.raises(decisions.Waiting):
+            run.step()
+        partial = frontdoor.state(product)["waitingFor"]
+        assert comparison["id"] not in [g["id"] for g in partial["ask"]["groups"]]
+        assert partial["ask"]["retained"][0]["label"] == "Compare shared interval"
+
+        reply = {"request": partial["request"], "replyId": "print", "words": mixed}
+        run.user = lambda _: reply
+        record = run.store.record
+
+        def interrupt_after_receipt(kind, body):
+            ref = record(kind, body)
+            if kind == "user_words" and body.get("replyId") == "print":
+                raise KeyboardInterrupt
+            return ref
+
+        run.store.record = interrupt_after_receipt
+        with pytest.raises(KeyboardInterrupt):
+            run.step()
+        run.close()
+        monkeypatch.setenv("SELDON_OFF", "growAlign")  # An open round keeps its stored shape.
+        run = Run.reopen(product, provider, lambda _: reply)
+        assert frontdoor.state(product)["waitingFor"] == partial
+        assert run.step() == "ALIGN"
+        assert run.step() == "A"
+        shown = frontdoor.state(product)["waitingFor"]
+        assert shown["subject"]["vision"] == revised["vision"]
+        with pytest.raises(decisions.Waiting):
+            run.step()  # Transport redelivery of the superseded request.
+        assert shown["request"] in frontdoor.state(product)["reason"]
+        assert run.store.cursor().A is None and run.store.cursor().vision is None and not architect
+        receipts = [r for _, _, r in run.store.records("user_words") if r.get("replyId") == "print"]
+        assert len(receipts) == 1 and receipts[0]["words"] == mixed and receipts[0]["origin"] == setup["userOrigin"]
+
+        run.user = lambda _: {"request": shown["request"], "replyId": "lock",
+                              "selections": [{"groupId": "round", "optionId": "done"}]}
+        for phase in ("ARCHITECT", "DETAIL", "REVIEW", "B"):
+            assert run.step() == phase
+        run.user = lambda _: (_ for _ in ()).throw(decisions.Waiting())
+        with pytest.raises(decisions.Waiting):
+            run.step()
+        b = frontdoor.state(product)["waitingFor"]["subject"]["plan"]
+        locked = b["nodes"]["vision"]["body"]
+        assert architect == [locked] == [shown["subject"]["vision"]]
+        feature = next(f for f in plan.select(b, "feature").values() if f["acceptance"] == changed)
+        story = architecture.commitments(locked)[feature["commitments"][0]]
+        assert run.store.read(story["sources"][1]) == receipts[0]
+        approval = run.store.read(run.store.cursor().A)
+        assert approval["request"] == shown["request"] and approval["subject"]["vision"] == locked
+        assert seen.count("ALIGN") == 2
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+def test_grow_align_tiny_first_done_journey(tmp_path, monkeypatch):
+    """A complete tiny proposal locks immediately; revision-only journeys miss forced extra turns."""
+    from seldon import decisions, frontdoor, schema
+
+    monkeypatch.delenv("SELDON_OFF", raising=False)
+    calls = []
+
+    def provider(q):
+        strict_schema(q["schema"])
+        calls.append(q["kind"])
+        response = {"answer": questions.tiny_round_example()}
+        schema.validate(response, q["schema"])
+        return json.dumps(response)
+
+    def user(item):
+        return {"request": item["request"], "replyId": "tiny-lock",
+                "selections": [{"groupId": "round", "optionId": "done"}]}
+
+    product = tmp_path / "greeting"
+    run = Run(product, tmp_path / "workers", "Greet a visitor by name", {}, provider, user)
+    try:
+        assert run.step() == "A"
+        shown = frontdoor.state(product)["waitingFor"]
+        assert shown["subject"]["vision"]["size"] == "tiny"
+        run.user = lambda item: (_ for _ in ()).throw(decisions.Waiting())
+        with pytest.raises(decisions.Waiting):
+            run.step()
+        run.user = user
+        assert run.step() == "ARCHITECT"
+        assert calls == ["ALIGN"]
+        assert run.store.read(run.store.cursor().A)["request"] == shown["request"]
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("repeat", [False, True])
 def test_quietbench_skeleton_commitments_journey(tmp_path, repeat):
     """Replay the real skeleton with a goal but no work through approval and into EXECUTE.
@@ -168,10 +363,7 @@ def test_consumption_crash_rollback_and_switch_journey(tmp_path, monkeypatch, of
     Existing input-error twins fail before writing and miss partial plan publication.
     The off twin proves the cohort switch routes directly to existing planner recovery.
     """
-    if off:
-        monkeypatch.setenv("SELDON_OFF", "answerRepair")
-    else:
-        monkeypatch.delenv("SELDON_OFF", raising=False)
+    monkeypatch.setenv("SELDON_OFF", "growAlign,answerRepair" if off else "growAlign")
     slot = tmp_path / "consumption-crash"
     run, _ = prepare(slot)
     original = run.store.revision

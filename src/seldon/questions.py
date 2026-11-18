@@ -3,7 +3,8 @@
 import json
 
 from . import architecture, fixups, gitwork, plan
-from .schema import answer_schema, validate
+from .answers import Mismatch
+from .schema import ALIGN_ROUND, answer_schema, batch_decision, obj, validate, vision_body
 from . import features
 
 # Owner decision: ALIGN improves craft within scope, with observable quality and a distinctive UI direction.
@@ -114,7 +115,15 @@ PROMPTS = {
 }
 
 
-def build(kind, facts, targets=(), execution=None, images=(), owners=()):
+def question(kind, prompt, facts, schema, examples, targets=(), execution=None, images=()):
+    for example in examples:
+        validate({"answer": example}, schema)
+    return {"kind": kind, "prompt": prompt, "facts": facts, "targets": list(targets), "schema": schema,
+            "examples": [{"answer": example} for example in examples],
+            "execution": execution or {}, "images": list(images)}
+
+
+def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grown=False):
     if kind in ("ARCHITECT", "DETAIL", "WORK", "COACH") and not (kind == "WORK" and execution.get("session") and facts.get("Exact failure")):
         facts = {**facts, "Available tools and skills": AVAILABLE_TOOLS}
     if kind == "ALIGN":
@@ -127,7 +136,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
                   "scopeIn": ["Greet a supplied name"], "scopeOut": [], "improvements": [],
                   "quality": [{"criterion": "Clear output", "verification": "Run with a name"}],
                   "alternatives": [{"label": "Greet everyone", "means": "Use a greeting without a name"}]},
-        "ARCHITECT": example_architecture(), "DETAIL": example_detail(),
+        "ARCHITECT": example_architecture(grown), "DETAIL": example_detail(grown),
         "REVIEW": {"verdict": "adequate", "gaps": []},
         "DECIDE": {"choice": next(iter(targets), "Unclear")},
         "COACH": {"guidance": "Use the declared contract and write a check of the acceptance sentence."},
@@ -140,11 +149,119 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=()):
     example["why"] = ("The responsibilities, agreements and waves cover the accepted promises"
                       if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
                       "The observed interaction and check sources support this answer")
-    schema = answer_schema(kind, targets, owners)
-    validate({"answer": example}, schema)
-    return {"kind": kind, "prompt": PROMPTS[kind],
-            "facts": facts, "targets": list(targets), "schema": schema,
-            "examples": [{"answer": example}], "execution": execution or {}, "images": list(images)}
+    prompt = PROMPTS[kind]
+    if grown and kind == "DETAIL":
+        prompt += ("\nCite the Accepted commitments that each feature implements. Carry the applicable "
+                   "constraints into requirements, and plan only the work due here in this wave.")
+    if grown and kind == "ARCHITECT":
+        prompt += ("\nUse the supplied commitment handles across the full wave horizon. Start with a "
+                   "working slice of the highest-value outcomes and preserve the exact constraints.")
+    return question(kind, prompt, facts, answer_schema(kind, targets, owners, grown=grown),
+                    [example], targets, execution, images)
+
+
+def align_round_brief(facts, *, sources):
+    """Build one ALIGN round. Sources maps recorded handles to their exact user words."""
+    return question("ALIGN",
+        "What product would you put in front of this person now? Name who makes what decision, "
+        "what could mislead them, and what they would need tomorrow to repeat it. Rank the stories "
+        "by value. Keep a story's handle as it moves or changes so its earlier choices stay traceable. "
+        "Keep exact required values once, linked to their source and affected outcomes. Runtime "
+        "inventory tells you what is available. Carry values into scope only when the user required them. "
+        "Cite the supplied Sources for choices that introduced or changed a story, criterion or exclusion. "
+        "Keep earlier citations while they explain the current outcome. "
+        "Ask together only the choices whose answers materially change the proposed product. "
+        "Name the affected commitment or scope, show the proposed default first and explain what each "
+        "option changes for the user. Give two to four concrete options; Seldon supplies Other. "
+        "Give the changed outcome and why. Recommend done when the displayed defaults settle the product. "
+        + ALIGN_DESIGN,
+        {**facts, "Sources": sources, "Design guidance used by UI workers": CRAFT},
+        obj(answer=ALIGN_ROUND), [tiny_round_example(), consequential_round_example()])
+
+
+def check_align_round(answer, sources):
+    vision = vision_body(answer)
+    constraints = architecture.index(vision["constraints"], "vision.constraints")
+    for constraint in constraints.values():
+        source = constraint["source"]
+        if source not in sources or constraint["value"] not in sources[source]:
+            raise Mismatch("vision.constraints", f"Constraint {constraint['value']!r} is absent "
+                           f"from source {source!r}. Copy an exact required value from the supplied Sources.")
+    goals = architecture.commitments(vision)
+    for entry in [*goals.values(), *vision["scopeOut"]]:
+        if unknown := set(entry.get("constraints", [])) - constraints.keys():
+            raise Mismatch("vision.constraints", f"Unknown constraint handles {sorted(unknown)}. "
+                           f"Use these declared handles: {list(constraints)}.")
+        if unknown := set(entry["sources"]) - sources.keys():
+            raise Mismatch("vision.sources", f"Unknown source handles {sorted(unknown)}. "
+                           f"Use these supplied handles: {list(sources)}.")
+    subjects = {"vision", "size", "scopeOut", *goals, *constraints}
+    for ask in answer["questions"]:
+        if ask["affects"] not in subjects:
+            raise Mismatch("questions.affects", f"{ask['question']!r} cites {ask['affects']!r}. "
+                           f"Use an affected part of this proposal: {sorted(subjects)}.")
+
+
+def batch_decide_brief(groups, words):
+    """Map verbatim chat to request-bound group IDs and actual option IDs in one DECIDE."""
+    example = {"selections": {group["id"]: {"optionId": "unclear", "text": ""} for group in groups},
+               "why": "The words do not settle these choices"}
+    return question("DECIDE",
+        "What selections do the user's exact words make in the displayed groups? "
+        "Resolve each unambiguous choice using its option ID. Use 'other' with the exact quoted "
+        "direction, or 'unclear' for an unanswered or ambiguous group. Leave text empty except for 'other'. "
+        "Only an explicit answer to the round decision can select done.",
+        {"Displayed groups": groups, "User's verbatim words": words},
+        obj(answer=batch_decision(groups)), [example])
+
+
+def check_batch_decide(answer, words):
+    for group, selection in answer["selections"].items():
+        text = selection["text"]
+        if selection["optionId"] == "other":
+            if text.strip() and text in words:
+                continue
+            raise Mismatch("selections", f"Other for {group!r} contains {text!r}. "
+                           "Copy the exact direction from the user's words, or use Unclear.")
+        if text:
+            raise Mismatch("selections", f"Selection {selection['optionId']!r} for {group!r} "
+                           "needs empty text. Copy the user's words only for Other.")
+
+
+def tiny_round_example():
+    return {"vision": {"understanding": "Greet the supplied name", "size": "tiny",
+        "sizeWhy": "One interaction and one visible result", "users": ["CLI user"], "scopeOut": [],
+        "stories": [{"handle": "greeting", "feature": "Personal greeting", "story": "Greet a visitor by name",
+                     "outcome": "The reply contains the supplied name", "constraints": [], "sources": []}],
+        "constraints": [], "quality": [{"handle": "clear", "criterion": "Readable greeting",
+            "verification": "Run with a name and read the greeting", "constraints": [], "sources": []}]},
+        "changed": "The supplied name appears in the greeting.", "questions": [],
+        "recommendation": "done", "why": "One clear interaction covers the dream"}
+
+
+def consequential_round_example():
+    return {"vision": {"understanding": "Compare two noise filters on repeatable input", "size": "medium",
+        "sizeWhy": "Saving reference runs and measuring them share the same local workflow",
+        "users": ["Audio engineer choosing a filter"], "constraints": [{"handle": "launch",
+            "value": "python server.py --port PORT --data DIR", "meaning": "Start the local bench",
+            "source": "kickoff"}], "scopeOut": [{"outcome": "Hardware playback", "sources": []}],
+        "stories": [{"handle": "compare", "feature": "Filter comparison",
+            "story": "Choose a filter after comparing two runs of yesterday's reference input",
+            "outcome": "The engineer sees the band differences and which measurements span unequal intervals",
+            "constraints": ["launch"], "sources": []},
+            {"handle": "inspect", "feature": "Saved runs",
+             "story": "An engineer can reopen a stopped run and see what was measured",
+             "outcome": "A saved run shows its settings and measured interval",
+             "constraints": ["launch"], "sources": ["example-reply"]}],
+        "quality": [{"handle": "repeatable", "criterion": "Repeatable band readings",
+            "verification": "Reopen a saved input with identical settings and compare the readings",
+            "constraints": [], "sources": []}]},
+        "changed": "A stopped run retains the measured interval so a colleague can inspect it.",
+        "questions": [{"affects": "scopeIn:compare", "question": "How may stopped runs be compared?",
+            "options": [{"label": "Inspect only", "means": "Only complete runs contribute a band comparison"},
+                        {"label": "Compare shared interval",
+                         "means": "Compare overlapping measurements and mark the result partial"}]}],
+        "recommendation": "revise", "why": "A partial comparison trades measurement time for confidence"}
 
 
 def example_plan():
@@ -161,7 +278,12 @@ def example_plan():
                    "area": "new:a"}]}
 
 
-def example_architecture():
+def example_architecture(grown=False):
+    if grown:
+        goals = list(architecture.commitments(tiny_round_example()["vision"]))
+        return {"areas": [{"handle": "cli", "responsibility": "Greet the visitor", "scope": ["greeting/**"],
+                           "commitments": goals}], "contracts": [], "decisions": [],
+                "waves": [{"goal": "A visitor receives a readable greeting", "commitments": goals}]}
     return {"areas": [
         {"handle": "api", "responsibility": "Serve greetings",
          "scope": ["api/**"], "commitments": ["scopeIn:1"]},
@@ -175,16 +297,18 @@ def example_architecture():
                                     "commitments": ["scopeIn:1", "quality:1"]}]}
 
 
-def example_detail():
+def example_detail(grown=False):
     example = example_plan()
+    if grown:
+        example["edits"][0]["typedBody"]["commitments"] = ["scopeIn:greeting"]
     return {"verdict": "planned", "edits": [e for e in example["edits"] if e["kind"] != "area"],
             "units": [{k: v for k, v in u.items() if k != "area"} for u in example["units"]]}
 
 
 def user_words(store):
     cursor = store.cursor()
-    if cursor.vision:
-        answer = store.read(cursor.vision)
+    answer = store.read(cursor.vision) if cursor.vision else None
+    if answer and "scopeIn" in answer["answer"]:
         attempt = store.read(answer["attempt"])
         dream = store.read(attempt["question"])["facts"]["Dream"]
     else:
@@ -195,7 +319,8 @@ def user_words(store):
 
 
 def architect_brief(vision, words, gap=None, previous=None, built=None):
-    facts = {"Approved vision": {k: v for k, v in vision.items() if k != "why"},
+    vision = vision_body(vision)
+    facts = {"Approved vision": vision,
              "User's words": words,
              "Commitment handles": architecture.commitments(vision),
              "Ownership": "Each area owns disjoint paths, with room for its own checks. "
@@ -207,12 +332,12 @@ def architect_brief(vision, words, gap=None, previous=None, built=None):
         facts["Previous architecture"] = previous
     if built is not None:
         facts.update(built)
-    return build("ARCHITECT", facts)
+    return build("ARCHITECT", facts, grown="stories" in vision)
 
 
 def detail_brief(store, outline, area):
     cursor = store.cursor()
-    vision = store.read(cursor.vision)["answer"]
+    vision = vision_body(store.read(cursor.vision)["answer"])
     participants = [area["handle"], *area.get("ancestors", [])]
     contracts = {c["handle"]: c for c in outline["contracts"]
                  if c["provider"] in participants or set(participants).intersection(c["consumers"])}
@@ -220,7 +345,12 @@ def detail_brief(store, outline, area):
     files = [p for p in listing if plan.matches(p, area["scope"])]
     goals = architecture.commitments(vision)
     active = set(outline["waves"][cursor.wave - 1]["commitments"])
+    grown = "stories" in vision
+    area_goals = set(area["commitments"])
     commitments = [r for r in area["commitments"] if r in active]
+    if grown:
+        # A changed agreement can bring an area into DETAIL without a wave commitment.
+        commitments = [r for r in goals if r in (area_goals & active or area_goals)]
     document = store.plan(cursor.revision)
     existing = {}
     for ref, unit in plan.select(document, "unit").items():
@@ -246,7 +376,13 @@ def detail_brief(store, outline, area):
                            if area["handle"] in d["areas"]],
              "Product in this area": {"files": files},
              "Runtime": runtime(store.read(cursor.kickoff)["setup"])}
-    return build("DETAIL", facts)
+    if grown:
+        facts["Approved scope"].pop("scopeIn")
+        attached = {handle for goal in goals.values() for handle in goal["constraints"]}
+        relevant = {handle for r in commitments for handle in goals[r]["constraints"]}
+        facts["Applicable constraints"] = {c["handle"]: c for c in vision["constraints"]
+                                           if c["handle"] in relevant or c["handle"] not in attached}
+    return build("DETAIL", facts, grown=grown)
 
 
 def labelled(facts):
