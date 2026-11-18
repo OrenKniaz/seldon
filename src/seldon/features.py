@@ -5,6 +5,7 @@ Switches: severity (judge gap severity; off = every gap blocks, as before 11-17)
 answerRepair (one exact correction for answer consumption failures; off = report immediately).
 contractGap (a judge gap owned by a contract goes to the planner as a contract correction; off = the
 unit itself, or the contract's provider, is sent the gap as before 11-18).
+checkContract (cross-unit check disputes go to the planner; repeated product checks get a plain question).
 """
 import os
 

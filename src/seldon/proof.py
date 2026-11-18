@@ -5,7 +5,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from . import gitwork, plan
+from . import features, gitwork, plan
 from .processes import execute
 from .providers import ROLES
 
@@ -97,6 +97,8 @@ def explain(failed):
 def gaps(store, candidate, observations):
     """Return observed check failures to the fixup owner; never change a unit or the run."""
     document = plan.execution(store)
+    units = plan.select(document, "unit")
+    contracts = plan.select(document, "contract") if features.enabled("checkContract") else {}
     result = []
     for ref in observations:
         body = store.read(ref)
@@ -104,16 +106,29 @@ def gaps(store, candidate, observations):
             raise ValueError("Check gaps require observations from the candidate commit")
         if failures(store, [ref]):
             writer = plan.select(document, "check")[body["check"]]["owner"]
-            units = plan.select(document, "unit")
             handed = units[writer]["handed"]
             # Work its writer hands to no unit of this wave is a plan gap, never a wrong owner's fixup.
             # An area named before the planner gave it a unit now means that unit.
             owners = [r for o in handed for r in [u for u, b in units.items()
                                                   if b["area"] == o and u != "guide"] or [o]]
             unowned = [o for o in owners if o not in units]
-            result.append({"subject": body["check"], "kind": "plan" if unowned else "check",
-                           "commit": candidate, "units": unowned or owners or [writer],
-                           "correction": "\n".join([*handed.values(), explain([body])]), "source": ref})
+            # A writer's handoff alone can be an ordinary defect. If its fixer hands work
+            # across a provider/consumer edge, let the planner settle the reported disagreement.
+            evidence = [f"{writer} → {owner}: {text}" for owner, text in handed.items()]
+            agreements = {}
+            for fixer in owners if contracts and not unowned else ():
+                for peer, correction in units[fixer]["handed"].items():
+                    shared = {r: c for r, c in contracts.items()
+                              if (c["provider"] == fixer and peer in c["consumers"])
+                              or (c["provider"] == peer and fixer in c["consumers"])}
+                    if shared:
+                        agreements.update(shared)
+                        evidence.append(f"{fixer} → {peer}: {correction}")
+            result.append({"subject": body["check"],
+                           "kind": "contract" if agreements else "plan" if unowned else "check",
+                           "commit": candidate, "units": sorted(agreements) or unowned or owners or [writer],
+                           "correction": "\n".join([*(evidence if agreements else handed.values()),
+                                                     explain([body])]), "source": ref})
     return result
 
 

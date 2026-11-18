@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import traceback
 
-from . import inference, plan, questions, recovery
+from . import features, inference, plan, questions, recovery
 from .answers import ConsumptionFailure
 from .providers import ProviderFailure
 from .states import advance
@@ -79,10 +79,16 @@ def coach(store, provider, subject, frame=False):
                     "words": direction, "choice": "revise", "origin": "planner"})
                 store.cursor(replace(store.cursor(), decision=None, requestedChange=direction, failure=""))
             return None
+        label = ("Change the agreement or approach" if subject.get("checkFailure")
+                 else "Try the planner's new approach")
         ask = answer.get("ask") or {"question": subject.get("question", "How should we continue?"),
-            "options": [{"label": "Try the planner's new approach", "means": answer["guidance"]}]}
+            "options": [{"label": label, "means": answer["guidance"]}]}
         ask = {"question": ask["question"], "options": [
             {**o, "effect": "direct"} for o in ask["options"]]}
+        if frame and subject.get("checkFailure"):
+            ask["question"] = subject["question"]
+            ask["options"] = [o for o in ask["options"]
+                              if o["label"].casefold() not in ("leave this out", "pause")][:2]
         if ref:
             ask["options"].append(option("Leave this out", "Leave out this unit and its dependents", "drop"))
         elif "guidance" in answer:
@@ -114,6 +120,16 @@ def ask_unit(store, provider, ref):
                 "How should we continue?")
             if subject := coach(store, provider, subject, frame=True):
                 request(store, "UNIT", subject)
+        elif checks and features.enabled("checkContract") and check_failure(store, ref):
+            subject["checkFailure"] = True
+            subject["question"] = (
+                f"The builders could not make these checks pass for {ref} after trying the chosen approach: "
+                f"{', '.join(checks)}. Expected them to pass. The same checks failed again. "
+                "What should we change so the builders can continue?")
+            subject["recommendation"] = (
+                "Offer a concrete change to the agreement or approach based on the observed failure.")
+            if subject := coach(store, provider, subject, frame=True):
+                request(store, "UNIT", subject)
         elif checks:
             # Like a repeated step fault: the same approach again would only loop (R15, R17).
             subject["ask"] = {"question": f"This is Seldon's fault: {ref} failed the same checks again "
@@ -136,6 +152,13 @@ def judged(store, ref):
     sources = [store.read(g["source"]) for g in body.get("gaps", []) if g["kind"] != "check"]
     return " ".join(f"{g['target']}: {g['correction']}" for b in sources
                     for g in questions.must_fix(b.get("answer", {"gaps": []}))) or None
+
+
+def check_failure(store, ref):
+    """Repeated proof failures carry check IDs or a check gap, unlike controller faults."""
+    attempt = store.recovery(recovery.lineage(store, ref))["attempts"][-1]
+    body = store.read(attempt)
+    return body.get("checks") or any(g["kind"] == "check" for g in body.get("gaps", []))
 
 
 def option(label, means, effect):

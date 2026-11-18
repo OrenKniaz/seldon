@@ -43,7 +43,7 @@ def active(store, ref):
     return None
 
 
-def apply(store, gaps):
+def apply(store, gaps, *, agreement=False):
     """Atomically admit local rework; filesystem preparation happens in the resumable unit loop."""
     assignments = plan(store, gaps)
     if not assignments:
@@ -54,13 +54,18 @@ def apply(store, gaps):
             cause = store.record("unit_fixup", assignment)
             refs.append(cause)
             failure = "\n".join(g["correction"] for g in assignment["gaps"])
-            gap = assignment["gaps"][0]
-            acceptance = ("check" if gap["kind"] == "check" or store.cursor().state == "WAVE-VERIFY"
-                          else store.cursor().state.split("-")[0])
-            origin = "gap:" + acceptance + ":" + gap["subject"] + ":" + ref
-            recovery.recover(store, ref, failure, key=origin, cause=cause,
-                             base=assignment["base"], wave=store.cursor().wave,
-                             worktree=None, callFolder=None, callAttempt=None)
+            updates = dict(base=assignment["base"], wave=store.cursor().wave,
+                           worktree=None, callFolder=None, callAttempt=None)
+            if agreement:
+                # The correction is new work from the planner, not another failed worker attempt.
+                advance(store, "recover", cause, unit=ref, failure=failure, thread=None,
+                        report=None, T=None, P=None, observations=[], judgment=None, **updates)
+            else:
+                gap = assignment["gaps"][0]
+                state = store.cursor().state
+                acceptance = "check" if gap["kind"] == "check" or state == "WAVE-VERIFY" else state.split("-")[0]
+                origin = "gap:" + acceptance + ":" + gap["subject"] + ":" + ref
+                recovery.recover(store, ref, failure, key=origin, cause=cause, **updates)
         cursor = store.cursor()
         if cursor.state != "EXECUTE":
             event = "rework" if cursor.state == "WAVE-VERIFY" else "gap"
@@ -82,6 +87,12 @@ def replan(store, gaps):
                     f"{', '.join(g['units'])}, which no unit of this wave holds. Give the work an owner in "
                     "this wave: bring the commitment that owns it into this wave so a unit builds it. "
                     "Writer's report and failure: " + g["correction"])
+        if store.read(g["source"]).get("purpose") == "final":
+            return (f"Wave {cursor.wave} check {g['subject']} failed on the integrated product. "
+                    f"The worker handoffs point to the provider and consumer of {', '.join(g['units'])}. "
+                    "Identify and correct only the disputed agreement within the accepted scope. "
+                    "Both sides will build against the corrected text. Handoffs and failure:\n"
+                    + g["correction"])
         row = units.get(g["subject"])
         handed = store.read(row.report)["answer"]["discoveries"] if row and row.report else []
         return (f"Wave {cursor.wave}: the judge found {g['subject']} and contract {', '.join(g['units'])} "
@@ -92,10 +103,46 @@ def replan(store, gaps):
                 + (f" Worker's discoveries: {handed}" if handed else ""))
 
     text = "\n".join(explain(g) for g in gaps)
+    checks = [g for g in gaps if g["kind"] == "contract"
+              and store.read(g["source"]).get("purpose") == "final"]
     ref = store.record("architecture_gap", {"vision": cursor.vision, "source": [g["source"] for g in gaps],
                                             "outline": store.plan(cursor.revision)["architecture"],
-                                            "gap": text})
+                                            "gap": text, **({"checks": checks} if checks else {})})
     contracted = any(g["kind"] == "contract" for g in gaps)
     # A contract correction changes the outline, so its repeat is the same subject and agreement.
     recovery.planning(store, ref, sorted([g["kind"], g["subject"], *g["units"]] for g in gaps), "plan-gap",
                       outline=not contracted, finalCommit=None)
+
+
+def corrected_checks(store):
+    """Rework both sides of a corrected check agreement once, when its revised plan is reviewed."""
+    from .architecture import index
+
+    for _, _, transition in reversed(store.records("transition")):
+        if transition["unit"] is not None:
+            continue
+        if transition["next"] == "EXECUTE":
+            return []
+        if transition["input"] == "WAVE-VERIFY" and transition["event"] == "plan-gap":
+            correction = store.read(transition["cause"])
+            break
+    else:
+        return []
+    if not correction.get("checks"):
+        return []
+    document = planning.execution(store)
+    before = index(correction["outline"]["contracts"])
+    contracts = planning.select(document, "contract")
+    rows = store.units()
+    gaps = []
+    for gap in correction["checks"]:
+        for ref in gap["units"]:
+            if ref not in contracts or before.get(ref, {}).get("text") == contracts[ref]["text"]:
+                continue
+            contract = contracts[ref]
+            endpoints = [r for r in [contract["provider"], *contract["consumers"]]
+                         if r in rows and rows[r].state == "DONE"]
+            if endpoints:
+                gaps.append({**gap, "kind": "flow", "units": endpoints,
+                             "correction": f"Implement the corrected {ref} agreement.\n" + gap["correction"]})
+    return gaps

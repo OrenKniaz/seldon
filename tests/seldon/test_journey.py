@@ -2292,7 +2292,7 @@ def test_later_wave_piece_journey(tmp_path, forced):
 
 @pytest.mark.fast
 def test_repeated_unit_failure_pauses_journey(tmp_path):
-    """The same failing check after the user's chosen approach recommends a pause, not that approach.
+    """A repeated product assertion reaches the planner for a plain user question.
 
     ShelfLife t01 offered "Try the planner's new approach" five times for one unchanged failure;
     the step-fault twin covers planning steps only.
@@ -2323,11 +2323,12 @@ def test_repeated_unit_failure_pauses_journey(tmp_path):
         first, again = shown[0], shown[-1]
         assert first["ask"]["options"][0]["label"] == "Try the planner's new approach"
         ask = again["ask"]
-        assert ask["options"][0] == {"label": "Pause", "means": "Pause here; your work is saved and can resume",
-                                     "effect": "pause"}
-        assert "Seldon's fault" in ask["question"] and ":check:1" in ask["question"]
+        assert "could not make" in ask["question"] and ":check:1" in ask["question"]
+        assert "Seldon's fault" not in ask["question"]
         assert "reader unavailable" in again["subject"]["failure"]
-        assert provider.calls.count("COACH") == 2  # planner once, then the user; never the same approach again
+        assert ask["options"][0]["label"] == "Change the agreement or approach"
+        assert [o["effect"] for o in ask["options"]] == ["direct", "drop", "pause"]
+        assert provider.calls.count("COACH") == 3
         assert run.store.cursor().decision == again["request"]
     finally:
         run.close()
@@ -2372,12 +2373,84 @@ class ContractGap(Scripted):
 
 
 @pytest.mark.fast
+def test_check_contract_journey(tmp_path):
+    """Quiet Bench r1025/r1158: a check writer sends a failure to service, which needs a
+    guarantee from engine. A worker-only fix repeats; the judge-gap twin never exercises
+    a failing executable check or requires both endpoint patches to pass it.
+    """
+    from seldon.decisions import Waiting
+
+    slot = tmp_path / "check-contract"
+    run, _ = prepare(slot, "contracts", 3)
+    native = slot / "native.py"
+    native.write_text(native.read_text(encoding="utf-8").replace(
+        "    if mode == 'contracts':", "    if mode == 'check-contract':\n"
+        "        if number in (1, 2):\n"
+        "            side = 'Contracts provided' if number == 1 else 'Contracts consumed'\n"
+        "            corrected = 'Publish ready during processing' in str(facts.get(side, {}))\n"
+        "            Path(name, 'callback.txt').write_text(('ready' if corrected else 'terminal')\n"
+        "                if number == 1 else ('ready' if corrected else 'progress'))\n"
+        "        if number == 3:\n"
+        "            source += \"assert Path('unit-001/callback.txt').read_text() == \"\n"
+        "            source += \"Path('unit-002/callback.txt').read_text() == 'ready', \"\n"
+        "            source += \"'POST /api/runs could not return an active session'\\n\"\n"
+        "    if mode == 'contracts':").replace(
+        "    answer['checkPaths'] = [name+'/check.py']",
+        "    if mode == 'check-contract' and number == 3:\n"
+        "        answer['discoveries'] = [{'owner': owner(2), 'correction': 'Return an active session'}]\n"
+        "    if mode == 'check-contract' and number == 2 and not corrected:\n"
+        "        answer['discoveries'] = [{'owner': owner(1), 'correction': 'Guarantee when callbacks fire'}]\n"
+        "    answer['checkPaths'] = [name+'/check.py']"), encoding="utf-8")
+    (slot / "mode").write_text("check-contract")
+
+    class CheckContract(Scripted):
+        def __call__(self, q):
+            answer = json.loads(super().__call__(q))["answer"]
+            if q["kind"] == "ARCHITECT" and "Architecture correction" in q["facts"]:
+                correction = q["facts"]["Architecture correction"]
+                assert "POST /api/runs could not return an active session" in correction
+                assert "Guarantee when callbacks fire" in correction and "Return an active session" in correction
+                answer["contracts"][0]["text"] += " Publish ready during processing."
+            return json.dumps({"answer": answer})
+
+    run.provider = CheckContract(slot, "contracts", 3)
+    shown = []
+
+    def user(item):
+        if item["gate"] != "UNIT":
+            return approve(item)
+        shown.append(item)
+        if len(shown) == 1:
+            return item["ask"]["options"][0]["label"]
+        raise Waiting()
+
+    run.user = user
+    store = run.store
+    try:
+        try:
+            finish(run)
+        except Waiting:
+            owners = [b["owner"] for _, _, b in store.records("unit_fixup")]
+            pytest.fail(f"Contract disagreement still asks the user after fixups to {owners}: "
+                        f"{[item['ask']['question'] for item in shown]}")
+        assert not shown
+        assert len(store.records("architecture_gap")) == 1
+        assert "Publish ready during processing" in plan.select(plan.execution(store), "contract")["values"]["text"]
+        assert (slot / "product" / "unit-001" / "callback.txt").read_text() == "ready"
+        assert (slot / "product" / "unit-002" / "callback.txt").read_text() == "ready"
+        assert any(store.read(r)["check"] == f"{unit_ref(run, 3)}:check:1"
+                   for r in store.cursor().finalObservations)
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("case", ["contract", "unfixable"])
 def test_contract_gap_journey(tmp_path, case):
     """A judged disagreement with a contract becomes one planner correction, not a worker loop.
 
     Recorded u01 (2026-11-17) looped one worker on a cross-unit gap and then blamed Seldon; the
-    repeated-check twin proves code failures only. contract: the planner extends the contract,
+    repeated-check twin covers executable failures. contract: the planner extends the contract,
     the provider is reworked and the wave verifies with no user question. unfixable: a judged gap
     no worker fixes reaches the user in plain words with planner-framed options.
     """

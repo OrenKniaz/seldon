@@ -1,6 +1,6 @@
 """C11/R2: one bounded review of each wave, one repair, remaining gaps visible in its review."""
 
-from . import architecture, inference, plan, questions
+from . import architecture, fixups, inference, plan, questions
 from .states import advance
 from . import features
 
@@ -17,12 +17,12 @@ def step(store, provider, capacity):
         units = {r: u for r, u in plan.select(document, "unit").items()
                  if u["area"] == area_ref and r != "guide"}
         requirements = {r for u in units.values() for r in u["requirements"]}
-        features = {f for r in requirements for f in document["nodes"][r]["body"]["features"]}
+        feature_refs = {f for r in requirements for f in document["nodes"][r]["body"]["features"]}
         pending[area_ref] = questions.build("REVIEW", {
             "Review subject": area_ref, "User's words": questions.user_words(store),
             "Accepted commitments": {r: goals[r] for r in area["commitments"]},
             "Area": area, "Units": units,
-            "Plan": {r: document["nodes"][r] for r in requirements | features},
+            "Plan": {r: document["nodes"][r] for r in requirements | feature_refs},
             "Contracts": {r: c for u in units for r, c in architecture.contracts_for(document, u).items()}})
     projections = {}
     def consume(area, source, answer):
@@ -37,7 +37,11 @@ def step(store, provider, capacity):
         "answer": {"verdict": "gap" if questions.must_fix({"gaps": gaps}) else "not judged" if unknown else "adequate", "gaps": gaps},
         "notJudged": unknown, "reviewTier": "same-provider review"})
     event = "gap" if questions.must_fix({"gaps": gaps}) and not cursor.repairs else "reviewed" if not cursor.B else "planned"
-    advance(store, event, ref, review=ref)
+    with store.transaction():
+        corrections = (fixups.corrected_checks(store)
+                       if event == "planned" and features.enabled("checkContract") else [])
+        advance(store, event, ref, review=ref)
+        fixups.apply(store, corrections, agreement=True)
 
 
 def repair(store):
