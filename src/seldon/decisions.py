@@ -58,6 +58,7 @@ def coach(store, provider, subject, frame=False):
              "User answers": [b for _, _, b in store.records("user_words")]}
     if ref:
         facts.update({"Execution facts": questions.execution_facts(store, ref),
+            "Runtime": questions.runtime(store.read(store.cursor().kickoff)["setup"]),
             "Requirements": questions.requirement_facts(document,
                 plan.select(document, "unit")[ref]["requirements"]),
             **questions.agreement_facts(document, ref)})

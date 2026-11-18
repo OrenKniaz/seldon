@@ -9,17 +9,10 @@ from .states import advance
 
 
 def folded_owner(store, document):
-    setup = store.read(store.cursor().kickoff)["setup"]
-    units = plan.select(document, "unit")
-    outline = document["architecture"]
-    owner = plan.guide_owner(document)
-    if (setup.get("sizeFirst") is True and setup.get("split") == "auto"
-            and len(units) == len(outline["areas"]) == len(outline["waves"]) == 1
-            and not outline["contracts"] and owner in units):
+    if owner := plan.sole_owner(document):
         row = store.unit(owner)
-        if row and row.state != "DROPPED" and units[owner]["requirements"]:
+        if row and row.state != "DROPPED" and plan.select(document, "unit")[owner]["requirements"]:
             return owner
-    return None
 
 
 def folded_subjects(document):

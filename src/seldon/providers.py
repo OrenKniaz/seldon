@@ -69,6 +69,14 @@ def session_id(output):
 def setup_facts():
     """CODE observes installed tools; no model discovery or installation."""
     node, codex, claude_exe = shutil.which("node"), shutil.which("codex"), shutil.which("claude")
+    node_version = ""
+    if node:
+        try:
+            probe = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=5)
+            if probe.returncode == 0:
+                node_version = probe.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # The discovered path is still a fact; its version is unknown.
     provider = os.environ.get("SELDON_PROVIDER", "codex")
     command, version = None, None
     if codex:
@@ -82,6 +90,7 @@ def setup_facts():
         version = claude_exe and subprocess.run([claude_exe, "--version"], capture_output=True, text=True,
                                                 timeout=60).stdout.strip()
     return {"python": {"path": sys.executable, "version": sys.version}, "node": node,
+            **({"nodeVersion": node_version} if node_version else {}),
             "codexCommand": command, "claudeCommand": [claude_exe] if claude_exe else None,
             "providers": {"worker_first_effort": "high", **{
                 role: {**label, "version": version, "freshCall": True,

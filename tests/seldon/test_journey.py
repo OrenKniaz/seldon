@@ -862,7 +862,7 @@ else:
     Path(name).mkdir(exist_ok=True)
     number = int(name.split('-')[1])
     execution = facts['Execution facts']
-    for peer, state in execution['Units'].items():
+    for peer, state in execution.get('Units', {}).items():
         if peer != owner(int(name.split('-')[1])) and state['state'] == 'DONE':
             paths = [p for p in execution['Paths present'] if p.startswith('unit-') and p.endswith('value.txt')]
             assert paths and all(Path(p).read_text().startswith('value-') for p in paths)
@@ -1105,7 +1105,7 @@ class Scripted:
             answer = {"guidance": "Yes. Write a scoped Python check that reads the saved value "
                       "and asserts its contents."}
             if self.mode == "coach-facts":
-                answer["guidance"] = questions.labelled(facts["Execution facts"])
+                answer["guidance"] = questions.labelled({**facts["Execution facts"], "Runtime": facts["Runtime"]})
         elif kind == "DECIDE":
             words = facts["User's words"]
             answer = {"choice": "Waive" if words == "Go on and do not stop again" and "Waive" in q["targets"]

@@ -10,17 +10,12 @@ from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
 GUIDE_SCOPE = (GUIDE_PATH, "docs/try-it/**")
-GUIDE_WORK = ("The page is absent from your worktree and no contract names its fields. "
-              "Write docs/try-it.md and declare a docs/try-it/ WAVE-VERIFY check from contracts: start with "
-              "temporary data, use the product as this wave's commitments promise, check the promised text, "
-              "save a screenshot to SELDON_EVIDENCE_DIR, and stop what you started; leave unseen forms to the "
-              "page owner's check. Walk through only this wave's commitments; a later wave extends the guide.")
-OWNED_GUIDE_WORK = ("Write or extend docs/try-it.md for the person trying the delivered product. "
-                    "From a fresh checkout, follow the exact documented steps with clean temporary data. "
-                    "Ship the example inputs or show how to create them, including any required settings. "
-                    "Declare a walkthrough check whose command names its file under docs/try-it/. "
-                    "Have it exercise the documented steps and assert the promised result. "
-                    "Capture relevant evidence and stop anything the walkthrough starts.")
+GUIDE_WALKTHROUGH = ("In docs/try-it.md, show how to try every accepted user surface, with one runnable "
+                     "example per CLI command when there is a CLI. Supply inputs or show how to create them. "
+                     "Declare a check under docs/try-it/ that runs those documented steps from a clean "
+                     "checkout, checks the promised results and stops anything it starts.")
+GUIDE_WORK = (GUIDE_WALKTHROUGH + " Use the contracts to walk through this wave's commitments. "
+              "Leave unseen forms to the page owner's check and capture relevant visual evidence.")
 
 
 def safe_path(value):
@@ -80,6 +75,12 @@ def guide_owner(document):
     """The approved write scope owns the guide for the lifetime of the plan."""
     return next((ref for ref, unit in select(document, "unit").items()
                  if GUIDE_PATH in unit["scope"]), None)
+
+
+def sole_owner(document):
+    owner = guide_owner(document)
+    if owner and owner != "guide" and len(select(document, "unit")) == 1:
+        return owner
 
 
 def guide_checks(document):
@@ -280,7 +281,6 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
                                                          *(local_units[d] for d in unit["dependencies"])])))
             if ref == folded:
                 body["scope"].extend(GUIDE_SCOPE)
-                body["instructions"] += "\n" + OWNED_GUIDE_WORK
             nodes[ref] = {"kind": "unit", "body": body}
             units[ref] = body
             for handle, contract in local_contracts.items():
@@ -294,7 +294,6 @@ def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=Fal
     if guide is None and fold_guide and len(units) == len(architecture["areas"]) == len(architecture["waves"]) == 1:
         guide, = units
         units[guide]["scope"].extend(GUIDE_SCOPE)
-        units[guide]["instructions"] += "\n" + OWNED_GUIDE_WORK
     for area in architecture["areas"]:
         ref = area["handle"]
         nodes[ref] = {"kind": "area", "body": {

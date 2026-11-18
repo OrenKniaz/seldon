@@ -102,8 +102,6 @@ if name != 'docs':
         'command': [sys.executable, '-B', 'checks/bench.py'], 'expectedEvidence': 'JSON error and exit 1'}}]
 if name == 'docs' or 'docs/try-it.md' in facts['Write scope']:
     folded = name != 'docs'
-    if folded:
-        assert 'fresh checkout' in facts['Unit'], facts['Unit']
     Path('docs/try-it').mkdir(parents=True, exist_ok=True)
     guide = {fixed!r} if folded else {broken!r}
     Path('docs/try-it.md').write_text(guide, encoding='utf-8')

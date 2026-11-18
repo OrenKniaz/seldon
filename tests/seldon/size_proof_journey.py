@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from seldon import gitwork, plan
+from seldon import features, gitwork, plan
 from seldon.run import Run, eligible
 from test_journey import Scripted, approve, strict_schema
 
@@ -49,10 +49,16 @@ class QuietBenchProof(Scripted):
         self.settings = raw.split("\x60\x60\x60json\n", 1)[1].splitlines()[0]
         self.folded = []
         self.fixes = []
+        self.work_briefs = []
+        self.extend = False
+        self.setup["python"]["version"] = sys.version
+        self.setup.update(node=r"C:\Program Files\LM Studio\resources\app\.webpack\bin\node.exe",
+                          nodeVersion="v20.18.0")
 
     def invoke(self, q, started):
         strict_schema(q["schema"])
         if q["kind"] == "WORK":
+            self.work_briefs.append(q)
             return self.write(q), "quiet-bench-owner"
         if q["kind"] == "ALIGN" and "vision" in q["schema"]["properties"]["answer"]["properties"]:
             answer = q["examples"][0]["answer"]
@@ -69,7 +75,9 @@ class QuietBenchProof(Scripted):
             return json.dumps({"answer": {
                 "areas": [{"handle": "cli", "responsibility": "Deliver the saved CLI run",
                            "scope": ["bench.py", "backend/**", "simulation/**"], "commitments": goals}],
-                "waves": [{"goal": "Run and reload the example", "commitments": goals}],
+                "waves": [{"goal": "Run and reload the example", "commitments": goals}]
+                         + ([{"goal": "Label exported sample indices", "commitments": goals}]
+                            if self.extend else []),
                 "contracts": [], "decisions": [], "why": "The saved CLI example has one owner."}}), None
         if q["kind"] == "DETAIL":
             facts = q["facts"]
@@ -79,7 +87,8 @@ class QuietBenchProof(Scripted):
                     "story": "Reload a saved Quiet Bench run", "acceptance": "Reload the same 8192 samples",
                     "commitments": commitments}},
                 {"kind": "requirement", "targetHandle": "reload", "typedBody": {
-                    "features": ["saved-run"], "acceptance": "The documented CLI run reloads unchanged."}}],
+                    "features": ["saved-run"], "acceptance": ("CSV begins with the sample_index column."
+                        if self.extend else "The documented CLI run reloads unchanged.")}}],
                 "units": [{"scope": facts["Area"]["scope"], "requirements": ["reload"], "dependencies": [],
                            "instructions": "Ship the saved CLI run and its walkthrough."}],
                 "why": "One reader can exercise the documented CLI commands."}}), None
@@ -110,6 +119,30 @@ class QuietBenchProof(Scripted):
         checks = []
         if "Exact failure" in facts:
             self.fixes.append(facts["Exact failure"])
+        elif self.extend:
+            bench = root / "bench.py"
+            bench.write_text(bench.read_text("utf-8").replace("'sample', 'desired'", "'sample_index', 'desired'"),
+                             encoding="utf-8")
+            guide = root / plan.GUIDE_PATH
+            guide.write_text(guide.read_text("utf-8") +
+                             "python bench.py list --data $Data\npython bench.py export ID --data $Data\n",
+                             encoding="utf-8")
+            path = root / "docs/try-it/export.py"
+            path.write_text(WALKTHROUGH + """
+assert "python bench.py list --data $Data" in guide
+assert "python bench.py export ID --data $Data" in guide
+assert any(row["id"] == saved["id"] for row in json.loads(
+    subprocess.check_output(command + ["list", "--data", "scratch-data"])))
+csv = subprocess.check_output(command + ["export", saved["id"], "--data", "scratch-data"])
+assert csv.startswith(b"sample_index,")
+""", encoding="utf-8")
+            return json.dumps({"answer": {"outcome": "done", "summary": "Label the exported sample index.",
+                "checkPaths": ["docs/try-it/export.py"], "checks": [{
+                    "purpose": "Export the saved run as CSV",
+                    "command": [sys.executable, "-B", "docs/try-it/export.py"],
+                    "expectedEvidence": "The CSV labels its sample index.",
+                    "requirements": [r for r in facts["Requirements"] if r.startswith("2.")]}],
+                "discoveries": [], "why": "The first CSV column has an explicit index label."}})
         else:
             for name in ("bench.py", "backend/core.py", "simulation/__init__.py", "simulation/run.py"):
                 target = root / name
@@ -130,20 +163,22 @@ class QuietBenchProof(Scripted):
 
 @pytest.mark.fast
 def test_size_proof_recorded_walkthrough(tmp_path, monkeypatch):
-    """Separate judges miss false reuse across final subjects; the retained guide breaks on a literal argument."""
+    """A same-owner check-in change keeps candidate-bound findings; a first-wave-only twin misses split review."""
     oracle = json.loads((RETAINED / "oracle.json").read_bytes())
     browser, guide = [r for r in oracle["checks"] if r["name"] in (
         "page start/browse/reload/compare parity", "fresh-copy guide commands start and stop")]
     assert browser["status"] == guide["status"] == "fail"
     assert "OverflowError" in browser["evidence"] and "<settings JSON>" in guide["evidence"]
-    monkeypatch.delenv("SELDON_OFF", raising=False)
-    monkeypatch.setenv("SELDON_SPLIT", "auto")
+    monkeypatch.setattr(features, "planning_setup", lambda: {"sizeFirst": True, "split": "auto"})
     provider = QuietBenchProof(tmp_path, RETAINED / "fresh-copy")
 
     def user(item):
         if item["gate"] == "A" and "groups" in item["ask"]:
             return {"request": item["request"], "replyId": "align-done",
                     "selections": [{"groupId": "round", "optionId": "done"}]}
+        if item["gate"] == "CHECK-IN" and item["subject"]["wave"] == 1:
+            provider.extend = True
+            return "Revise the CSV export to label the sample index."
         return approve(item)
 
     run = Run(tmp_path / "product", tmp_path / "workers", "Run and reload a Quiet Bench example",
@@ -170,7 +205,6 @@ def test_size_proof_recorded_walkthrough(tmp_path, monkeypatch):
         assert "<settings JSON>" in failed["stderr"]
         assert not provider.folded
         run.close()
-        monkeypatch.setenv("SELDON_SPLIT", "force")
         run = Run.reopen(tmp_path / "product", provider, user)
         store = run.store
         for _ in range(10):
@@ -195,28 +229,40 @@ def test_size_proof_recorded_walkthrough(tmp_path, monkeypatch):
                 run.step()
             assert store.cursor().state == "FLOW-JUDGE"
         store.unit(owner, original)
-        for _ in range(8):
+        for _ in range(20):
             if store.cursor().state == "SCRIPTED_C":
                 break
             run.step()
         cursor = store.cursor()
         assert cursor.state == "SCRIPTED_C"
         eligible(store)
-        assert not {"FLOW", "PRODUCT"}.intersection(provider.calls)
-        feature, = [store.read(r) for r in cursor.demoVerdicts]
-        requirement, = [store.read(r) for r in cursor.requirementVerdicts]
-        assert feature["scopeTrees"] == requirement["scopeTrees"] == {owner: row["scopeTree"]}
-        assert feature["observations"] == cursor.finalObservations
-        assert original.judgment in requirement["sources"] and cursor.demoVerdicts[0] in requirement["sources"]
+        assert cursor.wave == 2 and cursor.candidate != row["commit"]
+        assert tuple(store.units()) == (owner,)
+        assert [k for k in provider.calls if k in ("JUDGE", "FLOW", "PRODUCT")] == ["JUDGE", "JUDGE"]
+        assert len(provider.folded) == 2
+        current = store.unit(owner).judgment
+        assert current != original.judgment
+        tree = store.read(current)["scopeTree"]
+        features_seen = [store.read(r) for r in cursor.demoVerdicts]
+        requirements = [store.read(r) for r in cursor.requirementVerdicts]
+        assert all(f["scopeTrees"] == {owner: tree} and f["observations"] for f in features_seen)
+        assert {r for f in features_seen for r in f["observations"]} == set(cursor.finalObservations)
+        assert all(r["scopeTrees"] == {owner: tree} and current in r["sources"] for r in requirements)
         document = plan.execution(store)
-        traced = document["nodes"][feature["feature"]]["body"]["commitments"]
-        assert traced == ["scopeIn:saved-cli"]
+        assert all(document["nodes"][f["feature"]]["body"]["commitments"] == ["scopeIn:saved-cli"]
+                   for f in features_seen)
         story, = document["nodes"]["vision"]["body"]["stories"]
         assert story["outcome"] == "Reload the same 8192 samples"
         assert story["sources"] == ["kickoff"]
         assert store.read(cursor.kickoff)["words"] == "Run and reload a Quiet Bench example"
-        assert store.read(cursor.finalObservations[0])["requirements"] == [requirement["subject"]]
-        assert all(store.read(r)["source"] == original.judgment for r in cursor.qualityVerdicts)
+        assert {r for o in cursor.finalObservations for r in store.read(o)["requirements"]} == {
+            r["subject"] for r in requirements}
+        assert all(store.read(r)["source"] == current for r in cursor.qualityVerdicts)
         assert any(store.read(r)["answer"]["verdict"] == "not judged" for r in cursor.qualityVerdicts)
+        # A retained WORK session used to lose the supplied Node 20 path and version on repair.
+        runtime = {key: provider.setup[key] for key in ("python", "node", "nodeVersion")}
+        assert any(q["execution"]["session"] and "Exact failure" in q["facts"] for q in provider.work_briefs)
+        assert all(q["facts"]["Runtime"] == runtime for q in provider.work_briefs)
+        assert "one runnable example per CLI command" in provider.work_briefs[0]["facts"]["Try-it guide"]
     finally:
         run.close()

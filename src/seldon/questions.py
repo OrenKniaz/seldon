@@ -53,6 +53,13 @@ DEFECT_HANDOFF = (
     "keep your check honest, name the owner and the correction in discoveries and return done. "
     "Seldon delivers it and reruns your checks on the integrated product.")
 
+SOLE_WORK = (
+    "Deliver the accepted product within your scope. Use real user paths to check each requirement's "
+    "observable behavior. The walkthrough can also serve as a requirement check. Declare the commands "
+    "with the requirement handles they prove and list check files and helpers in checkPaths. "
+    "Keep existing declarations unless updating or retiring one by handle. Save visual evidence in "
+    "SELDON_EVIDENCE_DIR. Seldon runs the declared checks; run locally as needed to build or debug.")
+
 SIZE_ESTIMATE = (
     "Estimate how long one capable plain agent would need to build and verify the grown scope and quality "
     "bar with the same starting repo, tools and access. Micro means minutes in one session: a single-file "
@@ -138,7 +145,7 @@ def question(kind, prompt, facts, schema, examples, targets=(), execution=None, 
 
 
 def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grown=False,
-          coach_contracts=False):
+          coach_contracts=False, sole_work=False):
     if kind in ("ARCHITECT", "DETAIL", "WORK", "COACH") and not (kind == "WORK" and execution.get("session") and facts.get("Exact failure")):
         facts = {**facts, "Available tools and skills": AVAILABLE_TOOLS}
     if kind == "ALIGN":
@@ -161,12 +168,15 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
     example["why"] = ("The responsibilities, agreements and waves cover the accepted promises"
                       if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
                       "The observed interaction and check sources support this answer")
-    prompt = PROMPTS[kind]
+    prompt = SOLE_WORK if sole_work else PROMPTS[kind]
     if kind == "DETAIL" and ("Planning approach" in facts or "Steering policy" in facts):
         prompt += ("\nKeep the requested stages, and implement only the current wave's commitments. "
                    "When the area fits one session, give one unit the work and its checks. "
                    "Subdivide for a concrete ownership seam. Preserve the feature-to-requirement trace. "
                    "The compiled plan assigns the try-it guide and its runnable walkthrough.")
+    if kind == "DETAIL" and "Contracts" in facts and not facts["Contracts"]:
+        prompt += ("\nKeep unit instructions focused on the product and its real-path acceptance. "
+                   "Leave check implementation and local verification order to the builder.")
     if grown and kind == "DETAIL":
         prompt += ("\nCite the Accepted commitments that each feature implements. Carry the applicable "
                    "constraints into requirements, and plan only the work due here in this wave.")
@@ -418,7 +428,7 @@ def labelled(facts):
 
 
 def runtime(setup):
-    return {k: setup[k] for k in ("python", "node") if k in setup}
+    return {k: setup[k] for k in ("python", "node", "nodeVersion") if k in setup}
 
 
 def requirement_facts(document, refs):
@@ -463,11 +473,13 @@ def work_brief(store, ref):
     unit = store.unit(ref)
     document = plan.execution(store)
     contract = plan.select(document, "unit")[ref]
+    sole = plan.sole_owner(document) == ref
+    setup = store.read(store.cursor().kickoff)["setup"]
     facts = {"User's words": user_words(store),
              "Unit": contract["instructions"], "Write scope": contract["scope"],
              "Requirements": requirement_facts(document, contract["requirements"]),
              "Existing checks": plan.assigned(document)[ref],
-             "Execution facts": execution_facts(store, ref),
+             "Execution facts": execution_facts(store, ref, sole=sole),
              "Quality bar": [c["criterion"] for c in plan.select(document, "criterion").values()]}
     # A sole owner builds the whole experience, page included; never gate its craft on criterion wording.
     if len(plan.select(document, "unit")) == 1 or any(
@@ -488,8 +500,6 @@ def work_brief(store, ref):
         facts.update({"Guide path": plan.GUIDE_PATH, "Readers": vision["users"],
                       "This wave's commitments": {r: goals[r] for r in wave if not r.startswith("quality:")},
                       "Quality bar": [goals[r]["criterion"] for r in wave if r.startswith("quality:")]})
-    elif store.read(store.cursor().kickoff)["setup"].get("sizeFirst") and plan.guide_owner(document) == ref:
-        facts.update({"Guide path": plan.GUIDE_PATH, "Readers": document["nodes"]["vision"]["body"]["users"]})
     if unit.failure:
         facts["Exact failure"] = unit.failure
         facts["Read current patch"] = ["git", "diff", "--binary", unit.base]
@@ -497,9 +507,13 @@ def work_brief(store, ref):
     if unit.thread and unit.failure:
         facts = {k: facts[k] for k in ("Exact failure", "Write scope", "Correction owners", "Existing checks",
                                      "Correction observations") if k in facts}
-    facts.update(agreement_facts(document, ref))
+    facts["Runtime"] = runtime(setup)
+    if ref != "guide" and plan.guide_owner(document) == ref:
+        facts["Try-it guide"] = plan.GUIDE_WALKTHROUGH
+    if not sole:
+        facts.update(agreement_facts(document, ref))
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
-                 images=images(store, refs), owners=facts["Correction owners"])
+                 images=images(store, refs), owners=facts["Correction owners"], sole_work=sole)
 
 
 def owners(document):
@@ -513,17 +527,19 @@ def owners(document):
             "none": "No listed scope holds the fix: " + planner}
 
 
-def execution_facts(store, ref, peers=()):
+def execution_facts(store, ref, *, sole=False):
     document, unit = plan.execution(store), store.unit(ref)
     units = plan.select(document, "unit")
-    peers = {ref, *peers, *units[ref]["dependencies"]}
+    peers = {ref, *units[ref]["dependencies"]}
     scopes = [p for u in peers for p in units[u]["scope"]]
     files = [p for p in gitwork.git(store.root.parent, "ls-tree", "-r", "--name-only", unit.base).splitlines()
              if plan.matches(p, scopes)]
-    return {"Base": unit.base, "Worktree": unit.worktree, "Paths present": files,
+    facts = {"Base": unit.base, "Worktree": unit.worktree, "Paths present": files}
+    if sole:
+        return facts
+    return {**facts,
         "Units": {u: {"scope": units[u]["scope"], "state": store.unit(u).state,
                        "commit": store.unit(u).integrated} for u in peers},
-        "Runtime": runtime(store.read(store.cursor().kickoff)["setup"]),
         "Proof owner": "WAVE-VERIFY" if (wave := plan.wave_requirements(document, ref)) or units[ref]["handed"] or ref == "guide" else ref,
         "Wave requirements": wave,
         "Execution": "Your peers are building their units right now from the same contracts; their files "
