@@ -1,4 +1,4 @@
-"""C9/C10/C12; R4/R6: canonical endpoints, ownership and bounded agreement projections."""
+"""C5/C9/C10/C12; R4/R6/R19: planning policy, ownership and canonical agreements."""
 
 from copy import deepcopy
 
@@ -92,6 +92,25 @@ def commitments(vision):
                 for handle, value in index(vision[field], f"vision.{field}").items()}
     return {f"{field}:{i}": value for field in ("scopeIn", "improvements", "quality")
             for i, value in enumerate(vision[field], 1)}
+
+
+def planning_approach(setup, vision, *, continuing):
+    if not setup.get("sizeFirst"):
+        return {}
+    if continuing:
+        return {"Steering policy": "Use the recorded outline. Settle the named gap or plan the unfinished "
+                "horizon from the built result. Keep finished work and its owners. Add a writer only for "
+                "a named responsibility on disjoint paths. Preserve accepted scope."}
+    split = setup.get("split", "auto")
+    guidance = ("Plan a split with runnable waves or independently writable areas and real agreements. "
+                "Keep the accepted effort and all product commitments."
+                if split == "force" else
+                "When the accepted work fits one session, start with one area, one wave and one builder, "
+                "with scoped product paths and no peer agreements. Add an owner only for a named "
+                "independent responsibility. "
+                "Use runnable checkpoints when the owner requests staging or the work spans sessions.")
+    return {"Planning approach": {"size": vision["size"], "split": split, "starting shape":
+            "Use the accepted single-agent effort. Follow the user's explicit staging. " + guidance}}
 
 
 def merge(previous, answer, completed=()):

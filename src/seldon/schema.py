@@ -95,6 +95,17 @@ DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
 CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
 
 
+def folded_judge_schema(subjects, owner):
+    def finding(subject):
+        gap = obj(target=choice(subject), correction=TEXT, owners=array(choice(owner), 1), severity=SEVERITY)
+        return {"anyOf": [
+            obj(verdict=choice("satisfied"), gaps=array(gap), why=TEXT),
+            obj(verdict=choice("gap"), gaps=array(gap, 1), why=TEXT),
+            obj(verdict=choice("uncertain"), neededFacts=array(TEXT, 1), why=TEXT),
+        ]}
+    return obj(answer=obj(findings=obj(**{s: finding(s) for s in subjects}), why=TEXT))
+
+
 def answer_schema(kind, targets=(), owners=(), *, grown=False, coach_contracts=False):
     gap = obj(target=choice(*targets), correction=TEXT, owners=array(choice(*owners), 1), severity=SEVERITY)
     payload = {

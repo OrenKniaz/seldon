@@ -5,7 +5,7 @@ from seldon.run import Run
 from test_journey import approve, finish, prepare
 
 @pytest.mark.fast
-def test_final_check_fixup_reopens_without_redoing_siblings(tmp_path):
+def test_final_check_fixup_reopens_without_redoing_siblings(tmp_path, scalar_align):
     """Protect admitted final fixups across reopen; golden wave faults never restart at admission."""
     slot = tmp_path/'repair'
     run, provider = prepare(slot,'wave-fault',2)

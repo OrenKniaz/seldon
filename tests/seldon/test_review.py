@@ -7,7 +7,7 @@ from test_journey import Scripted, approve, finish, prepare
 
 @pytest.mark.fast
 @pytest.mark.parametrize('verdict', ['gap','uncertain'])
-def test_review_leftovers_survive_b_and_reopen(tmp_path, verdict):
+def test_review_leftovers_survive_b_and_reopen(tmp_path, scalar_align, verdict):
     """Protect honest unresolved review after its repair; adequate golden misses false completion."""
     slot = tmp_path/verdict
     run, _ = prepare(slot)

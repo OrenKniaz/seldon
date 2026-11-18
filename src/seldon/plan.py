@@ -8,11 +8,18 @@ from .schema import BODIES, GROWN_FEATURE, vision_body, vision_contract
 from .schema import validate as validate_schema
 
 GUIDE_PATH = "docs/try-it.md"
+GUIDE_SCOPE = (GUIDE_PATH, "docs/try-it/**")
 GUIDE_WORK = ("The page is absent from your worktree and no contract names its fields. "
               "Write docs/try-it.md and declare a docs/try-it/ WAVE-VERIFY check from contracts: start with "
               "temporary data, use the product as this wave's commitments promise, check the promised text, "
               "save a screenshot to SELDON_EVIDENCE_DIR, and stop what you started; leave unseen forms to the "
               "page owner's check. Walk through only this wave's commitments; a later wave extends the guide.")
+OWNED_GUIDE_WORK = ("Write or extend docs/try-it.md for the person trying the delivered product. "
+                    "From a fresh checkout, follow the exact documented steps with clean temporary data. "
+                    "Ship the example inputs or show how to create them, including any required settings. "
+                    "Declare a walkthrough check whose command names its file under docs/try-it/. "
+                    "Have it exercise the documented steps and assert the promised result. "
+                    "Capture relevant evidence and stop anything the walkthrough starts.")
 
 
 def safe_path(value):
@@ -51,6 +58,20 @@ def overlaps(left, right):
 
 def select(document, kind):
     return {ref: n["body"] for ref, n in document["nodes"].items() if n["kind"] == kind}
+
+
+def guide_owner(document):
+    """The approved write scope owns the guide for the lifetime of the plan."""
+    return next((ref for ref, unit in select(document, "unit").items()
+                 if GUIDE_PATH in unit["scope"]), None)
+
+
+def guide_checks(document):
+    """Find the declared walkthrough without borrowing the folded owner's product checks."""
+    owner = guide_owner(document)
+    return {ref: check for ref, check in select(document, "check").items()
+            if check["owner"] == owner and (owner == "guide"
+                or any(matches(arg, GUIDE_SCOPE[1:]) for arg in check["command"]))}
 
 
 def saved_checks(declaration, ref, requirements):
@@ -181,7 +202,7 @@ def edit_body(edit, grown):
     return body
 
 
-def merge(vision, architecture, leaves, previous=None, wave=1):
+def merge(vision, architecture, leaves, previous=None, wave=1, *, fold_guide=False):
     """Accumulate one wave; a scope keeps its owner and its earlier requirements."""
     from copy import deepcopy
     from . import architecture as owner
@@ -193,6 +214,8 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
     nodes["vision"] = {"kind": "vision", "body": vision}
     goals = owner.commitments(vision)
     units = select(document, "unit")
+    guide = guide_owner(document)
+    folded = guide if guide != "guide" else None
     endpoints = {r: {"provides": [c["provider"]], "consumes": [u for u in c["consumers"] if u != "guide"]}
                  for r, c in select(document, "contract").items()}
     feature_handles = {}
@@ -222,7 +245,9 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
             nodes[ref] = {"kind": edit["kind"], "body": body}
         local_units = {}
         for i, unit in enumerate(answer["units"], 1):
-            ref = next((r for r, u in units.items() if set(u["scope"]) == set(unit["scope"])), None)
+            ref = next((r for r, u in units.items()
+                        if set(u["scope"]) - (set(GUIDE_SCOPE) if r == folded else set())
+                        == set(unit["scope"])), None)
             if ref is None:
                 number = 1
                 while (ref := f"{wave}.{area['handle']}.{number}") in units or ref in local_units.values():
@@ -237,6 +262,9 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
                                                          *(handles[r] for r in unit["requirements"])])),
                         dependencies=list(dict.fromkeys([*before["dependencies"],
                                                          *(local_units[d] for d in unit["dependencies"])])))
+            if ref == folded:
+                body["scope"].extend(GUIDE_SCOPE)
+                body["instructions"] += "\n" + OWNED_GUIDE_WORK
             nodes[ref] = {"kind": "unit", "body": body}
             units[ref] = body
             for handle, contract in local_contracts.items():
@@ -247,12 +275,16 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
                         and (len(answer["units"]) == 1 or handle in unit.get("provides", []))
                         and ref not in bound["provides"]):
                     bound["provides"].append(ref)
+    if guide is None and fold_guide and len(units) == len(architecture["areas"]) == len(architecture["waves"]) == 1:
+        guide, = units
+        units[guide]["scope"].extend(GUIDE_SCOPE)
+        units[guide]["instructions"] += "\n" + OWNED_GUIDE_WORK
     for area in architecture["areas"]:
         ref = area["handle"]
         nodes[ref] = {"kind": "area", "body": {
             "responsibility": area["responsibility"], "scope": list(area["scope"])}}
-        if "guide" in units and units["guide"]["area"] == ref:
-            nodes[ref]["body"]["scope"].extend(units["guide"]["scope"])
+        if guide and units[guide]["area"] == ref:
+            nodes[ref]["body"]["scope"].extend(GUIDE_SCOPE)
         for commitment, criterion in goals.items():
             if commitment.startswith("quality:") and commitment in area["commitments"]:
                 handle = commitment if grown else f"quality:{int(commitment.split(':')[1]):03}"
@@ -287,7 +319,7 @@ def merge(vision, architecture, leaves, previous=None, wave=1):
         raise owner.DetailCorrection(corrections)
     document["architecture"] = deepcopy(architecture)
     validate(document)
-    return document
+    return add_guide(document, wave) if guide in (None, "guide") else document
 
 
 def validate_records(document):
@@ -319,7 +351,7 @@ def validate_records(document):
                 raise ValueError(f"{ref}.{relation}: wrong trace target kind")
 
 
-def validate_owned_work(document):
+def validate_owned_work(document, *, guide=None):
     """The same area-owned rules serve DETAIL exact-fix and canonical plan validation."""
     features, requirements, units = (
         select(document, k) for k in ("feature", "requirement", "unit"))
@@ -330,8 +362,8 @@ def validate_owned_work(document):
             safe_path(pattern)
         if any(d not in units or d == ref for d in unit["dependencies"]):
             raise ValueError(f"{ref}: unknown or self dependency")
-        if ref != "guide" and overlaps(unit["scope"], [GUIDE_PATH, "docs/try-it/**"]):
-            raise ValueError(f"{ref}: {GUIDE_PATH} belongs to the guide unit")
+        if ref != guide and overlaps(unit["scope"], GUIDE_SCOPE):
+            raise ValueError(f"{ref}: {GUIDE_PATH} and docs/try-it/ are reserved for the walkthrough owner")
         for other, owner in units.items():
             if (ref < other and unit["area"] == owner["area"]
                     and overlaps(unit["scope"], owner["scope"])):
@@ -348,7 +380,7 @@ def validate_owned_work(document):
 
 def validate(document):
     validate_records(document)
-    validate_owned_work(document)
+    validate_owned_work(document, guide=guide_owner(document))
     units = select(document, "unit")
     for ref, unit in units.items():
         for other, owner in units.items():
@@ -365,7 +397,8 @@ def add_guide(document, wave=1):
     from copy import deepcopy
     result = deepcopy(document)
     area = next(iter(select(result, "area")))
-    result["nodes"][area]["body"]["scope"].extend([GUIDE_PATH, "docs/try-it/**"])
+    area_scope = result["nodes"][area]["body"]["scope"]
+    area_scope.extend(p for p in GUIDE_SCOPE if p not in area_scope)
     current = {r for r, u in select(result, "unit").items()
                if any(q.startswith(f"{wave}.") for q in u["requirements"])}
     readers = {c["handle"]: c["consumers"] for c in document["architecture"]["contracts"]}
@@ -376,7 +409,7 @@ def add_guide(document, wave=1):
         if current.intersection([contract["provider"], *contract["consumers"]]) and not later:
             contract["consumers"].append("guide")
     result["nodes"]["guide"] = {"kind": "unit", "body": {
-        "scope": [GUIDE_PATH, "docs/try-it/**"], "requirements": [],
+        "scope": list(GUIDE_SCOPE), "requirements": [],
         "area": area, "dependencies": [],
         "instructions": GUIDE_WORK + "\nThis wave: " + document["architecture"]["waves"][wave - 1]["goal"]}}
     return result

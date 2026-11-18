@@ -23,7 +23,7 @@ class RequirementFlow(Scripted):
         return json.dumps(reply)
 
 @pytest.mark.fast
-def test_requirement_gap_preserves_other_feature_owner_to_c(tmp_path):
+def test_requirement_gap_preserves_other_feature_owner_to_c(tmp_path, scalar_align):
     """Protect shared-feature ownership; disjoint golden flows miss feature-wide over-repair."""
     slot = tmp_path/'delivery'
     run, _ = prepare(slot, count=2)

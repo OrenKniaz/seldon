@@ -5,7 +5,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, features, fixups, gitwork, inference, plan, proof, questions, recovery
+from . import decisions, features, fixups, gitwork, inference, judgment, plan, proof, questions, recovery
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, recorded
 from .schema import validate
 from .states import advance
@@ -145,7 +145,8 @@ def run_unit(store, provider, ref):
                         result = store.record("guide_written", {"commit": unit.P, "path": plan.GUIDE_PATH,
                             "scopeTree": gitwork.scope_tree(unit.worktree, unit.P, contract["scope"],
                                                             store.cursor().scratch)})
-                    elif plan.wave_requirements(document, ref) or contract["handed"]:
+                    elif (judgment.folded_owner(store, document) == ref
+                          or plan.wave_requirements(document, ref) or contract["handed"]):
                         advance(store, "approved", unit.P, unit=ref, judgment=None)
                         continue
                     else:
@@ -193,17 +194,32 @@ def run_unit(store, provider, ref):
 def judge_wave(store, provider, observations):
     """Judge deferred source with its integrated proof; route concrete gaps to its owner."""
     cursor, document = store.cursor(), plan.execution(store)
+    if owner := judgment.folded_owner(store, document):
+        tree = judgment.folded_evidence(store, document, owner, observations)
+        question = judgment.folded_brief(store, document, owner, observations)
+
+        gaps = []
+
+        def consume(ref, source, answer):
+            result, combined = judgment.record_folded(
+                store, ref, source, answer, tree, observations, question)
+            gaps.extend(judgment.corrections(store, ref, result, combined))
+
+        inference.batch(store, provider, {owner: question}, consume=consume, field="findings")
+        return gaps
     batch, trees = {}, {}
     for ref, contract in plan.select(document, "unit").items():
         # The guide has no source verdict: PRODUCT compares its walkthrough with the product.
         # A unit judged alone is judged again here once a contract change cleared its verdict.
         row = store.unit(ref)
-        if row.state == "DROPPED" or ref == "guide" or row.judgment and not (
-                plan.wave_requirements(document, ref) or contract["handed"]):
+        if row.state == "DROPPED" or ref == "guide":
+            continue
+        previous = store.read(row.judgment) if row.judgment else None
+        reusable = previous and "findings" not in previous
+        if reusable and not (plan.wave_requirements(document, ref) or contract["handed"]):
             continue
         tree = gitwork.scope_tree(store.root.parent, cursor.candidate, contract["scope"], cursor.scratch)
-        if (row.judgment and store.read(row.judgment)["scopeTree"] == tree
-                and store.read(row.judgment)["answer"]["verdict"] != "gap"):
+        if reusable and previous["scopeTree"] == tree and previous["answer"]["verdict"] != "gap":
             continue
         trees[ref] = tree
         refs = [r for r in observations if store.read(r)["unit"] == ref]

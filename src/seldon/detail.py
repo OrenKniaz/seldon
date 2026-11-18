@@ -37,6 +37,9 @@ def step(store, provider, capacity):
             store.cursor(cursor)
         previous = updated
     vision = store.read(cursor.vision)["answer"]
+    setup = store.read(cursor.kickoff)["setup"]
+    fold_guide = setup.get("sizeFirst") is True and setup.get("split") == "auto"
+    guide = plan.guide_owner(previous)
     resumed = next((b["words"] for _, _, b in reversed(store.records("approval"))
                     if "step" in b["subject"] and b["choice"] in ("approve", "revise")), None)
     done, refs = {}, []
@@ -47,6 +50,8 @@ def step(store, provider, capacity):
     def ask(area, correction=None):
         try:
             question = questions.detail_brief(store, outline, area)
+            if existing := question["facts"]["What exists here"].get(guide):
+                existing["scope"] = [p for p in existing["scope"] if p not in plan.GUIDE_SCOPE]
             local = {r: {**c,
                 "provider": area["handle"] if c["provider"] in area.get("ancestors", []) else c["provider"],
                 "consumers": [area["handle"] if a in area.get("ancestors", []) else a
@@ -137,7 +142,7 @@ def step(store, provider, capacity):
         try:
             if failures:
                 raise architecture.DetailCorrection(failures)
-            compiled = plan.add_guide(plan.merge(vision, outline, leaves, previous, cursor.wave), cursor.wave)
+            compiled = plan.merge(vision, outline, leaves, previous, cursor.wave, fold_guide=fold_guide)
             compiled["areaDetails"] = {**previous.get("areaDetails", {}),
                 **{a["handle"]: done[a["handle"]]["answer"] for a, _ in leaves}}
             break

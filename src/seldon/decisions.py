@@ -272,7 +272,15 @@ def request(store, gate, subject, *, ask=None):
             store.recovery(key, state)
 
 
-def round_ask(answer):
+SIZE_CHOICES = {
+    "tiny": ("Micro", "Minutes in one plain-agent session. Start with one builder and one runnable delivery."),
+    "small": ("Small", "Days of single-agent effort. Keep one owner where possible, with runnable milestones."),
+    "medium": ("Medium", "Weeks of single-agent effort. Plan in waves with owners and agreements at real seams."),
+    "large": ("Big", "Months of single-agent effort. Plan the full work with staged delivery and named owners."),
+}
+
+
+def round_ask(answer, *, size_first=False):
     def group(key, question, options, affects):
         return {"id": key, "question": question, "default": options[0]["id"],
                 "options": options, "affects": affects}
@@ -281,10 +289,16 @@ def round_ask(answer):
                     [{"id": f"o{j}", **o} for j, o in enumerate(item["options"], 1)], item["affects"])
               for i, item in enumerate(answer["questions"], 1)]
     size = answer["vision"]["size"]
-    groups.append(group("size", "What size should Seldon plan for?",
-        [{"id": s, "label": s.capitalize(),
-          "means": answer["vision"]["sizeWhy"] if s == size else f"Plan for a {s} dream"}
-         for s in (size, *(s for s in ("tiny", "small", "medium", "large") if s != size))], "size"))
+    options = []
+    for key in (size, *(key for key in SIZE_CHOICES if key != size)):
+        rationale = answer["vision"]["sizeWhy"] if key == size else ""
+        label, means = SIZE_CHOICES[key] if size_first else (key.capitalize(), f"Plan for a {key} dream")
+        if rationale:
+            means = f"{means} {rationale}" if size_first else rationale
+        options.append({"id": key, "label": label, "means": means})
+    question = ("How much coordination should Seldon plan for? You can override the recommendation. "
+                "Requested delivery checkpoints still apply." if size_first else "What size should Seldon plan for?")
+    groups.append(group("size", question, options, "size"))
     options = [
         {"id": "revise", "label": "Keep shaping this", "means": "Review another proposal before locking A"},
         {"id": "done", "label": "This is it", "means": "Lock the displayed vision with its displayed defaults"},
@@ -334,13 +348,17 @@ def fold_round(store, ref, item, receipt, picked, interpretation=None):
                                           "interpretation": interpretation})
         retained = ask["retained"] + [{**s, "source": raw} for s in selected]
         round_choice = next((s["optionId"] for s in retained if s["groupId"] == "round"), None)
-        if not round_choice:
-            answered = {s["groupId"] for s in retained}
+        setup = store.read(cursor.kickoff)["setup"]
+        answered = {s["groupId"] for s in retained}
+        remaining = [g for g in ask["groups"] if g["id"] not in answered]
+        reestimate = (setup.get("sizeFirst", False) and [g["id"] for g in remaining] == ["round"]
+                      and any(s["groupId"] == "size" and s["optionId"] != s["default"] for s in retained))
+        if not round_choice and not reestimate:
             failure = "A is still open. Answer the remaining choices or explicitly lock the displayed defaults."
             if selected:
                 store.cursor(replace(cursor, decision=None, failure=failure))
                 request(store, "A", item["subject"], ask={**ask, "retained": retained,
-                    "groups": [g for g in ask["groups"] if g["id"] not in answered]})
+                    "groups": remaining})
             else:
                 store.cursor(replace(cursor, failure=failure))
             return
@@ -349,7 +367,7 @@ def fold_round(store, ref, item, receipt, picked, interpretation=None):
                   for s in retained if s["groupId"] != "round")
         approval = store.record("approval", {"request": ref, "subject": item["subject"],
             "words": raw, "userWords": raw, "interpretation": interpretation, "selections": retained,
-            "scripted": store.read(cursor.kickoff)["setup"].get("scriptedUser", False),
+            "scripted": setup.get("scriptedUser", False),
             "choice": "done" if approve else "revise", "effect": "approve" if approve else "direct"})
         if approve:
             advance(store, "approve", approval, decision=None, failure="", A=approval,

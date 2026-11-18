@@ -127,12 +127,29 @@ def requirement_verdicts(store, verdicts):
 def step(store, provider):
     cursor = store.cursor()
     document = plan.execution(store)
+    if owner := judgment.folded_owner(store, document):
+        source, trees, findings = judgment.folded_answer(store, document, owner)
+        with store.transaction():
+            features = {}
+            for feature in plan.select(document, "feature"):
+                _, checks = trace(document, feature)
+                refs = [r for r in cursor.finalObservations if store.read(r)["check"] in checks]
+                features[feature] = store.record("feature_verdict", {
+                    "feature": feature, "commit": cursor.candidate, "answer": findings[feature],
+                    "source": source, "scopeTrees": trees, "observations": refs, "foldedFrom": source})
+            requirements = [store.record("subject_verdict", {"subject": subject, "kind": "FLOW",
+                "commit": cursor.candidate, "sources": [source, *(features[f] for f in row["features"])],
+                "scopeTrees": trees, "answer": findings[subject], "foldedFrom": source})
+                for subject, row in judgment.subjects(document, "FLOW").items()]
+            verdicts = list(features.values())
+            advance(store, "satisfied", verdicts, demoVerdicts=verdicts, requirementVerdicts=requirements)
+        return
     trees = judgment.scope_trees(store, plan.select(document, "unit"))
     with store.transaction():
         refs = []
         for ref in cursor.demoVerdicts:
             row = store.read(ref)
-            if judgment.current(row, trees):
+            if not row.get("foldedFrom") and judgment.current(row, trees):
                 refs.append(ref if row["commit"] == cursor.candidate else store.record(
                     "feature_verdict", {**row, "commit": cursor.candidate, "reusedFrom": ref}))
         store.cursor(replace(cursor, demoVerdicts=refs))

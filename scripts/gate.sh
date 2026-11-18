@@ -12,4 +12,5 @@ export PYTHONPATH='src;tests/seldon'
 export TEMP="$root/temp" TMP="$root/temp"
 export PYTHONDONTWRITEBYTECODE=1
 # Parallel journeys (16 cores; Oren 11-14 "gates keep slowing us down"): the floor is the longest single journey.
-python -B -m pytest tests/seldon -q -p no:cacheprovider -n "${GATE_WORKERS:-8}" --dist load --basetemp="$root/pytest"
+python -B -m pytest tests/seldon -o 'python_files=test_*.py size_*_journey.py' -q \
+  -p no:cacheprovider -n "${GATE_WORKERS:-8}" --dist load --basetemp="$root/pytest"

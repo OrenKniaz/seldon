@@ -45,7 +45,7 @@ else:
 
 
 @pytest.mark.fast
-def test_chat_controls_and_continuity_golden(tmp_path, capsys):
+def test_chat_controls_and_continuity_golden(tmp_path, scalar_align, capsys):
     """Words reach DECIDE, stale A cannot answer B, and pause preserves completed work.
 
     Catches a chat server driving transitions or losing work on disconnect; the golden journey
@@ -327,7 +327,7 @@ def test_recorded_quiet_bench_round_chat_journey(tmp_path, monkeypatch):
 
 @pytest.mark.fast
 @pytest.mark.parametrize('fault', ['live', 'restart'])
-def test_answer_file_continuity_journey(tmp_path, fault):
+def test_answer_file_continuity_journey(tmp_path, scalar_align, fault):
     """An answer preserves live work and survives a controller loss before its decision commits.
 
     Catches SIGTERM-on-answer and destructive reads of the answer carrier. The existing chat journey

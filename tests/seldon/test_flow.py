@@ -9,17 +9,17 @@ from lineage_journey import unit_lineage
 @pytest.mark.fast
 @pytest.mark.parametrize('stage,case', [('FLOW','restart'),('PRODUCT','restart'),
                                        ('FLOW','uncertain'),('PRODUCT','uncertain')])
-def test_final_subject_dispatch(tmp_path,stage,case):
+def test_final_subject_dispatch(tmp_path, scalar_align,stage,case):
     """Protect saved subject replies and honest uncertainty; clean golden never interrupts final dispatch."""
     final_fanout_journey(tmp_path/'dispatch',stage,case)
 
 @pytest.mark.fast
-def test_repeated_unit_failure_reopens_with_user_direction(tmp_path):
+def test_repeated_unit_failure_reopens_with_user_direction(tmp_path, scalar_align):
     """Protect durable recurrence after user direction; finite golden repairs miss renewed retry loops."""
     unit_lineage(tmp_path/'recurrence')
 
 @pytest.mark.fast
-def test_failed_integrated_candidate_routes_its_check_owner(tmp_path):
+def test_failed_integrated_candidate_routes_its_check_owner(tmp_path, scalar_align):
     """Protect observed candidate-bound failures; semantic FLOW gaps cannot expose stale proof reuse."""
     run,_ = prepare(tmp_path/'candidate',count=2)
     try:

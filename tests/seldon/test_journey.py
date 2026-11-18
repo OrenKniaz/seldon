@@ -211,7 +211,7 @@ def test_grow_align_tiny_first_done_journey(tmp_path, monkeypatch):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("repeat", [False, True])
-def test_quietbench_skeleton_commitments_journey(tmp_path, repeat):
+def test_quietbench_skeleton_commitments_journey(tmp_path, scalar_align, repeat):
     """Replay the real skeleton with a goal but no work through approval and into EXECUTE.
 
     Unlike duplicate-handle cases, every handle in the saved answer is valid. The bug
@@ -287,7 +287,7 @@ def test_quietbench_skeleton_commitments_journey(tmp_path, repeat):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("repeat", [False, True])
-def test_answer_consumption_repair_golden(tmp_path, repeat):
+def test_answer_consumption_repair_golden(tmp_path, scalar_align, repeat):
     """An unusable but schema-valid architecture is corrected before asking the user.
 
     Duplicate handles used to spend schema retries with no consumption record or useful
@@ -363,7 +363,7 @@ def test_consumption_crash_rollback_and_switch_journey(tmp_path, monkeypatch, of
     Existing input-error twins fail before writing and miss partial plan publication.
     The off twin proves the cohort switch routes directly to existing planner recovery.
     """
-    monkeypatch.setenv("SELDON_OFF", "growAlign,answerRepair" if off else "growAlign")
+    monkeypatch.setenv("SELDON_OFF", "growAlign,sizeFirst,answerRepair" if off else "growAlign,sizeFirst")
     slot = tmp_path / "consumption-crash"
     run, _ = prepare(slot)
     original = run.store.revision
@@ -402,7 +402,7 @@ def test_consumption_crash_rollback_and_switch_journey(tmp_path, monkeypatch, of
 
 
 @pytest.mark.fast
-def test_coach_consumption_failure_parks_golden(tmp_path, monkeypatch):
+def test_coach_consumption_failure_parks_golden(tmp_path, scalar_align, monkeypatch):
     """If Seldon cannot consume COACH either, its saved question recommends pause.
 
     Ordinary step-fault twins assume coaching works; a bug applying its guidance used
@@ -448,7 +448,7 @@ def test_coach_consumption_failure_parks_golden(tmp_path, monkeypatch):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("fault", [False, True])
-def test_wave_loop_golden(tmp_path, fault):
+def test_wave_loop_golden(tmp_path, scalar_align, fault):
     """An unanswered check-in allows planning but holds new work; its answer grows the product.
 
     The fault twin breaks an old reader with a new format and repairs its owner, then steers
@@ -464,7 +464,7 @@ def test_wave_loop_golden(tmp_path, fault):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("missing_object", [False, True])
-def test_recorded_shelflife_repair_coaching_journey(tmp_path, missing_object):
+def test_recorded_shelflife_repair_coaching_journey(tmp_path, scalar_align, missing_object):
     """A reopened repair without a worktree reaches its UNIT question on the recorded base.
 
     ShelfLife r439 failed before COACH because cwd=None queried Seldon's repo. Existing
@@ -550,7 +550,7 @@ def test_recorded_shelflife_repair_coaching_journey(tmp_path, missing_object):
 
 
 @pytest.mark.fast
-def test_architect_scope_returns_to_vision_journey(tmp_path):
+def test_architect_scope_returns_to_vision_journey(tmp_path, scalar_align):
     """An architect's scope discovery reaches ALIGN and A before any worker can start.
 
     Ordinary wave journeys keep the vision fixed and miss scope text lost at the ALIGN boundary.
@@ -1228,7 +1228,7 @@ def journey(slot, mode="normal", count=1):
         ("scale50", 50),
     ],
 )
-def test_thin_plan_golden(tmp_path, mode, count):
+def test_thin_plan_golden(tmp_path, scalar_align, mode, count):
     """Real worker checks reach C through thin intent, local recovery and strict integrated reviews.
 
     The parallel-contract twin catches a guide waiting on product work or proving its
@@ -1350,7 +1350,7 @@ def test_quietbench_peer_agreements_journey(tmp_path, route, monkeypatch):
 
 
 @pytest.mark.fast
-def test_repeating_worker_question_journey(tmp_path):
+def test_repeating_worker_question_journey(tmp_path, scalar_align):
     """Repeated handoff questions reach one user wait while siblings finish, then resume.
 
     The finite question journey misses the uncounted loop that caused T-184; the
@@ -1385,7 +1385,7 @@ def test_repeating_worker_question_journey(tmp_path):
 
 
 @pytest.mark.fast
-def test_hermetic_golden(tmp_path):
+def test_hermetic_golden(tmp_path, scalar_align):
     """Runtime writes cannot corrupt final source; read-only checks never exercise this isolation."""
     from test_proof import hermetic_journey
 
@@ -1393,7 +1393,7 @@ def test_hermetic_golden(tmp_path):
 
 
 @pytest.mark.fast
-def test_guide_walkthrough_journey(tmp_path):
+def test_guide_walkthrough_journey(tmp_path, scalar_align):
     """A reader's never-exiting server fence cannot block C; value-only guides miss prose execution.
 
     The real kit walk also checks ordering, delivered sources and observations in PRODUCT.
@@ -1405,7 +1405,7 @@ def test_guide_walkthrough_journey(tmp_path):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("surface", ["browser", "broken-guide"])
-def test_check_kit_golden(tmp_path, surface, monkeypatch):
+def test_check_kit_golden(tmp_path, scalar_align, surface, monkeypatch):
     """Worker-authored real browser/server checks retain baseline helpers and clean descendants.
 
     Value-file journeys cannot expose absent browser skills, screenshots or server leaks.
@@ -1421,7 +1421,7 @@ def test_check_kit_golden(tmp_path, surface, monkeypatch):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("outcome", ["done", "question", "fails"])
-def test_defect_reaches_owner_journey(tmp_path, outcome):
+def test_defect_reaches_owner_journey(tmp_path, scalar_align, outcome):
     """A real failing peer check delivers its writer's correction to the named file owner.
 
     Existing wave faults repair their writer and miss lost discoveries, premature local
@@ -1475,7 +1475,7 @@ def test_defect_reaches_owner_journey(tmp_path, outcome):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("retire", [False, True])
-def test_shortened_work_report_keeps_checks_at_c(tmp_path, retire):
+def test_shortened_work_report_keeps_checks_at_c(tmp_path, scalar_align, retire):
     """ShelfLife's import-only repair must still run the previously passing interface check.
 
     Other repair journeys resend their whole check list and miss lost proofs, shifted check
@@ -1577,7 +1577,7 @@ if name == 'unit-002':
 @pytest.mark.fast
 @pytest.mark.parametrize("fault", ["criterion-gap", "area-uncertain", "outside-unit",
                                    "outside-contract", "resume-unavailable"])
-def test_judge_once_golden(tmp_path, fault):
+def test_judge_once_golden(tmp_path, scalar_align, fault):
     """Protect area-to-criterion truth and real correction recovery through C.
 
     Single-criterion golden misses a lost second verdict or uncertainty promoted to success;
@@ -1686,7 +1686,7 @@ def test_judge_once_golden(tmp_path, fault):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("steering", ["partial", "resent"])
-def test_progressive_wave_plan_journey(tmp_path, steering):
+def test_progressive_wave_plan_journey(tmp_path, scalar_align, steering):
     """Preserve built ownership while detailing new commitments and changed consumers.
 
     One-wave journeys miss renumbered worker rows, lost requirements, full-horizon DETAIL,
@@ -1814,7 +1814,7 @@ def test_progressive_wave_plan_journey(tmp_path, steering):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("fail_through", [2, 3, "live"])
-def test_planner_first_recovery_journey(tmp_path, fail_through):
+def test_planner_first_recovery_journey(tmp_path, scalar_align, fail_through):
     """Real failing checks get planner direction before spending the user's time.
 
     A persistent failure keeps its request across restart; an independent reader finishes
@@ -1900,7 +1900,7 @@ def test_planner_first_recovery_journey(tmp_path, fail_through):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("steer_gate", ["CHECK-IN", "C"])
-def test_options_and_unclear_golden(tmp_path, steer_gate):
+def test_options_and_unclear_golden(tmp_path, scalar_align, steer_gate):
     """Unclear words cannot approve A or C; a visible option can, without a model.
 
     Scripted approvals never exercise interpretation, alternatives or acceptance ambiguity.
@@ -1973,7 +1973,7 @@ def test_options_and_unclear_golden(tmp_path, steer_gate):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("kept_gap", [False, True])
-def test_planner_asks_and_drop_journey(tmp_path, kept_gap):
+def test_planner_asks_and_drop_journey(tmp_path, scalar_align, kept_gap):
     """A planner's open choice can omit a blocked branch while independent work finishes.
 
     Repair twins never drop a unit, so they miss transitive dependents being stranded or
@@ -2048,7 +2048,7 @@ def test_planner_asks_and_drop_journey(tmp_path, kept_gap):
 
 
 @pytest.mark.fast
-def test_step_fault_and_waiver_journey(tmp_path):
+def test_step_fault_and_waiver_journey(tmp_path, scalar_align):
     """An identical invocation fault after planner guidance recommends a resumable Stop.
 
     Worker-failure twins miss controller faults that encourage endless user retries,
@@ -2120,7 +2120,7 @@ def test_step_fault_and_waiver_journey(tmp_path):
 
 
 @pytest.mark.fast
-def test_planning_gap_coaching_journey(tmp_path):
+def test_planning_gap_coaching_journey(tmp_path, scalar_align):
     """A real repeated DETAIL gap consumes planner guidance, then resumes on a user choice.
 
     Worker coaching cannot catch lost planning guidance or reuse of the rejected area answer.
@@ -2166,7 +2166,7 @@ def test_planning_gap_coaching_journey(tmp_path):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("missing", [False, True])
-def test_cross_area_commitment_golden(tmp_path, missing):
+def test_cross_area_commitment_golden(tmp_path, scalar_align, missing):
     """Catch a promise lost between passing features, absent from area-only journeys.
 
     The real guide reads the carried path; only its consumer owner repairs a missing path.
@@ -2321,7 +2321,7 @@ def test_saved_area_order_does_not_reassign_review_or_validation_journey(tmp_pat
 
 
 @pytest.mark.fast
-def test_no_check_final_judgment_journey(tmp_path):
+def test_no_check_final_judgment_journey(tmp_path, scalar_align):
     """Retain a source-judged unit without final observations through the C presentation.
 
     Existing workers always declare checks, hiding scope-tree lookup and lost FLOW evidence.
@@ -2370,7 +2370,7 @@ def test_no_check_final_judgment_journey(tmp_path):
 
 
 @pytest.mark.fast
-def test_scale_five_wave_golden(tmp_path):
+def test_scale_five_wave_golden(tmp_path, scalar_align):
     """Fifty values survive progressive steering, local questions and a wave-3 process kill.
 
     Catches one-wave early C, failure escalation before the planner, answers that kill
@@ -2429,7 +2429,7 @@ def test_scale_five_wave_golden(tmp_path):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("severity", ["nit", "pre-existing"])
-def test_judge_notes_reach_c_without_rework(tmp_path, severity):
+def test_judge_notes_reach_c_without_rework(tmp_path, scalar_align, severity):
     """Nonblocking findings survive REVIEW, source, flow and product to C with no repairs.
 
     Catches polish or a peer's old defect reopening a healthy owner; existing must-fix
@@ -2523,7 +2523,7 @@ class LaterWave(Scripted):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("forced", [False, True])
-def test_later_wave_piece_journey(tmp_path, forced):
+def test_later_wave_piece_journey(tmp_path, scalar_align, forced):
     """A wave's walkthrough proves that wave; work no unit of the wave owns goes to the planner.
 
     ShelfLife t01: the wave-1 guide walked the wave-2 importer, its check was routed to the
@@ -2575,7 +2575,7 @@ def test_later_wave_piece_journey(tmp_path, forced):
 
 
 @pytest.mark.fast
-def test_repeated_unit_failure_pauses_journey(tmp_path):
+def test_repeated_unit_failure_pauses_journey(tmp_path, scalar_align):
     """A repeated product assertion reaches the planner for a plain user question.
 
     ShelfLife t01 offered "Try the planner's new approach" five times for one unchanged failure;
@@ -2657,7 +2657,7 @@ class ContractGap(Scripted):
 
 
 @pytest.mark.fast
-def test_check_contract_journey(tmp_path):
+def test_check_contract_journey(tmp_path, scalar_align):
     """Quiet Bench r1025/r1158: a check writer sends a failure to service, which needs a
     guarantee from engine. A worker-only fix repeats; the judge-gap twin never exercises
     a failing executable check or requires both endpoint patches to pass it.
@@ -2730,7 +2730,7 @@ def test_check_contract_journey(tmp_path):
 
 @pytest.mark.fast
 @pytest.mark.parametrize("case", ["contract", "unfixable"])
-def test_contract_gap_journey(tmp_path, case):
+def test_contract_gap_journey(tmp_path, scalar_align, case):
     """A judged disagreement with a contract becomes one planner correction, not a worker loop.
 
     Recorded u01 (2026-11-17) looped one worker on a cross-unit gap and then blamed Seldon; the

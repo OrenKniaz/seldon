@@ -27,7 +27,7 @@ def test_persona_requests_handoff_once_then_finishes_at_b(tmp_path, monkeypatch)
     A fixed first-option runner approves the omitted handoff. Existing golden journeys use
     predetermined gate consent and do not exercise the development runner's reply carrier.
     """
-    monkeypatch.setenv("SELDON_OFF", "growAlign")
+    monkeypatch.setenv("SELDON_OFF", "growAlign,sizeFirst")
     monkeypatch.setenv("SELDON_STOP_AT_B", "1")
     for key in ("TEMP", "TMP", "TMPDIR", "SELDON_EVIDENCE_DIR"):
         monkeypatch.setenv(key, str(tmp_path))

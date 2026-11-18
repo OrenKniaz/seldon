@@ -53,6 +53,13 @@ DEFECT_HANDOFF = (
     "keep your check honest, name the owner and the correction in discoveries and return done. "
     "Seldon delivers it and reruns your checks on the integrated product.")
 
+SIZE_ESTIMATE = (
+    "Estimate the grown scope and quality bar for one capable plain agent with the same starting repo, "
+    "tools and access. Micro means minutes in one session, small means days, medium means weeks, and "
+    "big means months. In sizeWhy state the closest comparable work or its absence, expected effort, "
+    "and the biggest uncertainty. Follow an Owner size override and explain its planning consequences. "
+    "Keep explicitly requested delivery stages and exact constraints at every size.")
+
 PROMPTS = {
     "ALIGN": "What improved dream should we agree to? Recommend size and an observable quality bar. "
              "Keep every exact value the user stated verbatim in the scopeIn item it belongs to; "
@@ -60,10 +67,13 @@ PROMPTS = {
              "Name 1-3 alternatives the user may prefer to this vision: smaller, bigger, or another "
              "answer to what their words leave open. "
              + ALIGN_DESIGN,
-    "ARCHITECT": 'What areas, agreements and wave goals deliver the accepted vision? Split it the way a '
-                 'small team would start on the same morning: each area is work one builder finishes alone, '
-                 'at the same time as the others, from the contract text. Put into contracts everything two '
-                 'areas must agree on. Wave 1 is the thinnest path that runs end to end. Assign '
+    "ARCHITECT": 'What areas, agreements and wave goals deliver the accepted vision? '
+                 'Follow the Planning approach or Steering policy when supplied. Preserve the user’s '
+                 'requested checkpoints and use owned product paths with room for checks. '
+                 'Without a supplied policy, give each area work one builder can finish alongside the '
+                 'others using the contract text. '
+                 'Put into contracts everything two areas must agree on. Wave 1 is the thinnest path that '
+                 'runs end to end when the horizon has multiple waves. Assign '
                  'commitments to waves; write in full only the contracts the next wave needs, '
                  'leaving later contracts as a handle and one line. Give every commitment to an area '
                  'and give areas disjoint path scopes. With built results, name only what changes; '
@@ -129,9 +139,6 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
         facts = {**facts, "Available tools and skills": AVAILABLE_TOOLS}
     if kind == "ALIGN":
         facts = {**facts, "Design guidance used by UI workers": CRAFT}
-    if kind in ("DETAIL", "REVIEW"):
-        facts = {**facts, "Delivery work supplied by Seldon after the product units": {
-            "path": plan.GUIDE_PATH, "work": plan.GUIDE_WORK, "owner": "Seldon's final guide unit"}}
     example = {
         "ALIGN": {"size": "tiny", "understanding": "A personal greeting", "users": ["CLI user"],
                   "scopeIn": ["Greet a supplied name"], "scopeOut": [], "improvements": [],
@@ -151,6 +158,11 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
                       if kind == "REVIEW" and facts.get("Review subject") == "architecture" else
                       "The observed interaction and check sources support this answer")
     prompt = PROMPTS[kind]
+    if kind == "DETAIL" and ("Planning approach" in facts or "Steering policy" in facts):
+        prompt += ("\nKeep the requested stages, and implement only the current wave's commitments. "
+                   "When the area fits one session, give one unit the work and its checks. "
+                   "Subdivide for a concrete ownership seam. Preserve the feature-to-requirement trace. "
+                   "The compiled plan assigns the try-it guide and its runnable walkthrough.")
     if grown and kind == "DETAIL":
         prompt += ("\nCite the Accepted commitments that each feature implements. Carry the applicable "
                    "constraints into requirements, and plan only the work due here in this wave.")
@@ -167,7 +179,7 @@ def build(kind, facts, targets=(), execution=None, images=(), owners=(), *, grow
                     [example], targets, execution, images)
 
 
-def align_round_brief(facts, *, sources):
+def align_round_brief(facts, *, sources, size_first=False):
     """Build one ALIGN round. Sources maps recorded handles to their exact user words."""
     return question("ALIGN",
         "What product would you put in front of this person now? Name who makes what decision, "
@@ -181,7 +193,7 @@ def align_round_brief(facts, *, sources):
         "Name the affected commitment or scope, show the proposed default first and explain what each "
         "option changes for the user. Give two to four concrete options; Seldon supplies Other. "
         "Give the changed outcome and why. Recommend done when the displayed defaults settle the product. "
-        + ALIGN_DESIGN,
+        + ALIGN_DESIGN + ("\n" + SIZE_ESTIMATE if size_first else ""),
         {**facts, "Sources": sources, "Design guidance used by UI workers": CRAFT},
         obj(answer=ALIGN_ROUND), [tiny_round_example(), consequential_round_example()])
 
@@ -367,6 +379,7 @@ def detail_brief(store, outline, area):
                 document["nodes"][r]["body"]["acceptance"] for r in unit["requirements"]],
                 "last worker summary": store.read(row.report)["answer"]["summary"]
                 if row and row.report else ""}
+    setup = store.read(cursor.kickoff)["setup"]
     facts = {"User's words": user_words(store),
              "Approved scope": {"scopeIn": [goals[r] for r in commitments
                                            if not r.startswith("quality:")],
@@ -382,7 +395,9 @@ def detail_brief(store, outline, area):
              "Decisions": [{k: d[k] for k in ("choice", "reason")} for d in outline["decisions"]
                            if area["handle"] in d["areas"]],
              "Product in this area": {"files": files},
-             "Runtime": runtime(store.read(cursor.kickoff)["setup"])}
+             "Runtime": runtime(setup)}
+    if setup.get("sizeFirst"):
+        facts.update(architecture.planning_approach(setup, vision, continuing=cursor.wave > 1))
     if grown:
         facts["Approved scope"].pop("scopeIn")
         attached = {handle for goal in goals.values() for handle in goal["constraints"]}
@@ -466,6 +481,8 @@ def work_brief(store, ref):
         facts.update({"Guide path": plan.GUIDE_PATH, "Readers": vision["users"],
                       "This wave's commitments": {r: goals[r] for r in wave if not r.startswith("quality:")},
                       "Quality bar": [goals[r]["criterion"] for r in wave if r.startswith("quality:")]})
+    elif store.read(store.cursor().kickoff)["setup"].get("sizeFirst") and plan.guide_owner(document) == ref:
+        facts.update({"Guide path": plan.GUIDE_PATH, "Readers": document["nodes"]["vision"]["body"]["users"]})
     if unit.failure:
         facts["Exact failure"] = unit.failure
         facts["Read current patch"] = ["git", "diff", "--binary", unit.base]

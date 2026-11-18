@@ -79,7 +79,8 @@ class Run:
             raise ValueError("Capacity must be a positive integer")
         candidate = gitwork.init(self.project)
         with self.store.transaction():
-            kickoff = self.store.record("kickoff", {"words": dream, "setup": setup,
+            kickoff = self.store.record("kickoff", {"words": dream,
+                                                    "setup": {**setup, **features.planning_setup()},
                                                     "capacity": self.capacity})
             self.store.cursor(RunRow(kickoff=kickoff, scratch=str(Path(scratch).resolve()),
                                      candidate=candidate, waveStart=candidate))
@@ -163,10 +164,13 @@ class Run:
                 revision = store.revision(document, cursor.revision)
                 advance(store, "outlined", result, revision=revision)
 
-            inference.call(store, self.provider,
-                questions.architect_brief(vision, questions.user_words(store),
-                                         gaps[-1]["gap"] if gaps else None,
-                                         outline if gaps or built else None, built=built),
+            brief = questions.architect_brief(
+                vision, questions.user_words(store), gaps[-1]["gap"] if gaps else None,
+                outline if gaps or built else None, built=built)
+            setup = store.read(cursor.kickoff)["setup"]
+            brief["facts"].update(architecture.planning_approach(
+                setup, vision, continuing=bool(gaps or built)))
+            inference.call(store, self.provider, brief,
                 check=lambda a: architecture.outline(a, vision),
                 consume=consume, field="areas/contracts/decisions/waves")
         elif state == "DETAIL":
@@ -223,7 +227,9 @@ class Run:
         store = self.store
         cursor = store.cursor()
         kickoff = store.read(cursor.kickoff)
-        facts = {**questions.user_words(store), "Runtime": questions.runtime(kickoff["setup"])}
+        setup = kickoff["setup"]
+        size_first = setup.get("sizeFirst", False)
+        facts = {**questions.user_words(store), "Runtime": questions.runtime(setup)}
         if cursor.requestedChange:
             facts["Requested change"] = store.read(cursor.requestedChange)
         # The question is recorded before the provider runs. Its shape survives an interrupted
@@ -265,9 +271,9 @@ class Run:
         def display(ref, answer):
             advance(store, "aligned", ref, requestedChange=None)
             decisions.request(store, "A", {"round": ref, "vision": questions.vision_body(answer)},
-                              ask=decisions.round_ask(answer))
+                              ask=decisions.round_ask(answer, size_first=size_first))
 
-        inference.call(store, self.provider, questions.align_round_brief(facts, sources=sources),
+        inference.call(store, self.provider, questions.align_round_brief(facts, sources=sources, size_first=size_first),
                        check=check, consume=display, field="vision/questions")
 
     def run(self, wait=None):

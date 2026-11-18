@@ -10,7 +10,7 @@ from test_journey import Scripted, approve, finish, prepare, strict_schema
 
 
 @pytest.mark.fast
-def test_quiet_bench_choice_trace_at_b(tmp_path):
+def test_quiet_bench_choice_trace_at_b(tmp_path, scalar_align):
     """Protect choice lineage at B after reorder; fixed-vision journeys miss crossed or lost sources."""
     # Quiet Bench d56dc7b: exact launch literal and verbatim excerpt from the saved ALIGN reply.
     launch = "python server.py --port PORT --data DIR"
@@ -160,7 +160,7 @@ def test_quiet_bench_choice_trace_at_b(tmp_path):
         run.close()
 
 @pytest.mark.fast
-def test_area_product_journey(tmp_path):
+def test_area_product_journey(tmp_path, scalar_align):
     """Protect interrupted DETAIL; worker-only reopen misses lost completed planning answers."""
     slot = tmp_path/'areas'
     run, _ = prepare(slot, 'contracts', 2)
