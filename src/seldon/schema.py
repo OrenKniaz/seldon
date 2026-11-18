@@ -57,6 +57,7 @@ DETAIL_PLAN = obj(verdict=choice("planned"),
     units=array({"anyOf": [PLANNED_UNIT, obj(**PLANNED_UNIT["properties"], provides=REFS)]}, 1))
 DETAIL_SPLIT = obj(verdict=choice("subdivide"), subareas=array(AREA, 2), contracts=array(AREA_CONTRACT))
 DETAIL_GAP = obj(verdict=choice("contract_gap"), need=TEXT)
+CHECK = dict(purpose=TEXT, command=array(TEXT, 1), expectedEvidence=TEXT, requirements=REFS)
 
 
 def answer_schema(kind, targets=(), owners=()):
@@ -69,11 +70,12 @@ def answer_schema(kind, targets=(), owners=()):
                                     "Other", "Stop", "Unclear")),
         "REVIEW": obj(verdict=choice("adequate", "gap"), gaps=array(GAP)),
         "WORK": obj(outcome=choice("done", "question"), summary=TEXT,
-                    checkPaths=REFS, checks=array(obj(purpose=TEXT, command=array(TEXT, 1),
-                        expectedEvidence=TEXT)),
+                    checkPaths=REFS, checks=array({"anyOf": [
+                        obj(**CHECK), obj(update=TEXT, **CHECK), obj(retire=TEXT)]}),
                     discoveries=array(obj(owner=choice(*owners), correction=TEXT))),
         "COACH": obj(guidance=TEXT),
-        "JUDGE": obj(verdict=choice("satisfied", "gap"), gaps=array(GAP)),
+        "JUDGE": obj(verdict=choice("satisfied", "gap"),
+                     gaps=array(obj(**GAP["properties"], owners=gap["properties"]["owners"]))),
         "FLOW": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
         "PRODUCT": obj(verdict=choice("satisfied", "gap"), gaps=array(gap)),
     }[kind]

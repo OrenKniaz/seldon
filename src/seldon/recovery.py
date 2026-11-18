@@ -67,11 +67,11 @@ def repeated(store, unit):
     return last if last and last in earlier else None
 
 
-def planning(store, cause, shape, event=None, **updates):
+def planning(store, cause, shape, event=None, outline=True, **updates):
     with store.transaction():
         cursor = store.cursor()
-        shape = {"subject": shape, "outline": store.plan(cursor.revision).get("architecture"),
-                 "answer": store.recovery(lineage(store))["answer"]}
+        shape = {"subject": shape, "outline": store.plan(cursor.revision).get("architecture") if outline
+                 else None, "answer": store.recovery(lineage(store))["answer"]}
         if not failed(store, cause, shape=shape):
             if event:
                 advance(store, event, cause, **updates)

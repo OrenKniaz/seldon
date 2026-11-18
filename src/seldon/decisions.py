@@ -45,8 +45,10 @@ def again(store, subject, source, direction):
                     failure=unit.failure + "\nDirection: " + direction)
 
 
-def coach(store, provider, subject):
-    """Runs outside integration and database locks, including when submitted by the scheduler."""
+def coach(store, provider, subject, frame=False):
+    """Runs outside integration and database locks, including when submitted by the scheduler.
+
+    frame: the planner writes the user's options; its guidance becomes one of them (R17)."""
     ref = subject.get("unit")
     document = plan.execution(store) if store.cursor().revision else {}
     facts = {"Unresolved work": subject, "Earlier user answers": questions.user_words(store),
@@ -65,7 +67,7 @@ def coach(store, provider, subject):
         nonlocal subject, response
         key, subject = recovery.subject(store, "UNIT" if ref else subject["step"], subject)
         history = store.recovery(key)
-        if "guidance" in answer and not history["coached"]:
+        if "guidance" in answer and not history["coached"] and not frame:
             history.update(coached=True, waiting=False)
             store.recovery(key, history)
             direction = store.record("planner_answer", {"subject": subject, "source": source,
@@ -77,14 +79,16 @@ def coach(store, provider, subject):
                     "words": direction, "choice": "revise", "origin": "planner"})
                 store.cursor(replace(store.cursor(), decision=None, requestedChange=direction, failure=""))
             return None
-        ask = answer.get("ask") or {"question": "How should we continue?", "options": [
-            {"label": "Try the planner's new approach", "means": answer["guidance"]}]}
+        ask = answer.get("ask") or {"question": subject.get("question", "How should we continue?"),
+            "options": [{"label": "Try the planner's new approach", "means": answer["guidance"]}]}
         ask = {"question": ask["question"], "options": [
             {**o, "effect": "direct"} for o in ask["options"]]}
         if ref:
             ask["options"].append(option("Leave this out", "Leave out this unit and its dependents", "drop"))
         elif "guidance" in answer:
             ask["options"].append(option("Stop", "Stop the dream", "stop"))
+        if frame and "Pause" not in [o["label"] for o in ask["options"]]:
+            ask["options"].append(option("Pause", "Pause here; your work is saved and can resume", "pause"))
         response = {**subject, "ask": ask, "planner": source}
     try:
         inference.call(store, provider, questions.build("COACH", facts), consume=consume, field="guidance/ask")
@@ -101,7 +105,16 @@ def ask_unit(store, provider, ref):
         tried = [b["failure"] for _, _, b in store.records("unit_failure") if b["unit"] == ref]
         subject = {"unit": ref, "tried": tried, "failure": row.failure,
                    "affects": sorted(affected(store, ref) - {ref}), "recommendation": row.failure}
-        if checks := recovery.repeated(store, ref):
+        checks = recovery.repeated(store, ref)
+        if checks and (missing := judged(store, ref)):
+            # Builders could not fix what a judge found missing; that is a product choice, not a fault.
+            subject["question"] = (f"The builders could not fix what the judge found missing in {ref}, "
+                f"even after the approach you chose: {missing} Tried: "
+                f"{len(store.recovery(recovery.lineage(store, ref))['attempts'])} rounds of corrections. "
+                "How should we continue?")
+            if subject := coach(store, provider, subject, frame=True):
+                request(store, "UNIT", subject)
+        elif checks:
             # Like a repeated step fault: the same approach again would only loop (R15, R17).
             subject["ask"] = {"question": f"This is Seldon's fault: {ref} failed the same checks again "
                 f"({', '.join(checks)}) after the approach you chose. Expected them to pass; got the "
@@ -114,6 +127,15 @@ def ask_unit(store, provider, ref):
             request(store, "UNIT", subject)
     finally:
         store.close()
+
+
+def judged(store, ref):
+    """What a judge found missing in the unit's latest correction; None for a check or code failure."""
+    attempts = store.recovery(recovery.lineage(store, ref))["attempts"]
+    body = store.read(attempts[-1]) if attempts else {}
+    sources = [store.read(g["source"]) for g in body.get("gaps", []) if g["kind"] != "check"]
+    return " ".join(f"{g['target']}: {g['correction']}" for b in sources
+                    for g in questions.must_fix(b.get("answer", {"gaps": []}))) or None
 
 
 def option(label, means, effect):

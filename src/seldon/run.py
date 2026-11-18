@@ -36,9 +36,10 @@ def eligible(store):
             or any(u.state not in ("DONE", "DROPPED") for u in store.units().values())):
         raise ValueError("C requires every unit DONE or DROPPED and final proof after check-in")
     observations = [store.read(r) for r in cursor.finalObservations]
-    checks = set(plan.select(document, "check"))
-    green = {o["check"] for o in observations if o["commit"] == cursor.candidate and o["exitCode"] == 0}
-    if checks != green or proof.failures(store, cursor.finalObservations):
+    declarations = {r: (c["command"], c["requirements"]) for r, c in plan.select(document, "check").items()}
+    observed = {o["check"]: (o["command"], o["requirements"]) for o in observations
+                if o["commit"] == cursor.candidate}
+    if declarations != observed or proof.failures(store, cursor.finalObservations):
         raise ValueError("Every declared check needs passing execution on the final commit")
     if any(not row.judgment for row in store.units().values() if row.state != "DROPPED"):
         raise ValueError("C requires current unit judgments after contract changes")
@@ -203,7 +204,7 @@ class Run:
             gaps = proof.gaps(store, cursor.candidate, observations)
             if not gaps:
                 gaps = units.judge_wave(store, self.provider, observations)
-            if planned := [g for g in gaps if g["kind"] == "plan"]:
+            if planned := [g for g in gaps if g["kind"] in ("plan", "contract")]:
                 fixups.replan(store, planned)
             elif gaps:
                 fixups.apply(store, gaps)

@@ -454,6 +454,8 @@ else:
             Path(name, 'peer.txt').write_text('correct' if turn > 1 and mode != 'defect-fails' else 'broken')
     Path(name, 'check.py').write_text(source)
     Path(name, 'value.txt').write_text(value)
+    if mode == 'contract-gap' and name == 'unit-001' and 'today.txt' in facts.get('Exact failure', ''):
+        Path(name, 'today.txt').write_text('2026-11-18')
     if mode == 'scope' and turn == 1 and name == 'unit-001':
         Path('unowned.txt').write_text('outside scope')
     if mode == 'scope' and turn > 1:
@@ -467,6 +469,15 @@ else:
     answer['checks'] = [{'purpose':'Read the actual persistent value',
         'command':[sys.executable,'-B',name+'/check.py'],
         'expectedEvidence':'Observed exact saved value'}]
+if 'Existing checks' in facts and not (mode == 'schema-fix' and name == 'unit-001' and turn == 1):
+    requirements = facts['Requirements']
+    latest = max((int(r.split('.')[0]) for r in requirements), default=0)
+    for check in answer['checks']:
+        links = [r for r in requirements if r.startswith(str(latest) + '.')]
+        check['requirements'] = links
+        for handle, prior in facts['Existing checks'].items():
+            if check['command'] == prior['command'] and set(links) - set(prior['requirements']):
+                check.update(update=handle, requirements=list(dict.fromkeys(prior['requirements'] + links)))
 print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({'answer':answer})}}), flush=True)
 print(json.dumps({'type':'turn.completed'}), flush=True)
 """
@@ -488,6 +499,12 @@ def strict_schema(schema, path="schema"):
         strict_schema(schema["items"], path + ".items")
     for index, child in enumerate(schema.get("anyOf", [])):
         strict_schema(child, f"{path}.anyOf.{index}")
+
+
+def judge_owners(q):
+    """The owners a JUDGE gap may name (the judged unit first, then its contracts); [] before 11-18."""
+    gap = q["schema"]["properties"]["answer"]["anyOf"][0]["properties"]["gaps"]["items"]
+    return gap["properties"]["owners"]["items"]["enum"] if "owners" in gap["properties"] else []
 
 
 class Scripted:
@@ -537,7 +554,7 @@ class Scripted:
                 [[n] for n in range(1, self.count + 1)] if self.mode == "contracts" else
                 [[1], [2], [3]] if self.mode == "coach-facts" else
                 [[1, 2], [3, 4]] if self.mode == "contract-fanout" else [[1], [2]]
-                if self.mode in ("contracts", "parallel-contract", "wave-gap", "see-proof", "see-proof-gap", "contract-fanout")
+                if self.mode in ("contracts", "parallel-contract", "wave-gap", "contract-gap", "see-proof", "see-proof-gap", "contract-fanout")
                 else [list(range(i, min(i + 10, self.count + 1))) for i in range(1, self.count + 1, 10)]
             )
             self.refs = {n: f"1.area-{i}.{j}" for i, group in enumerate(groups, 1)
@@ -558,7 +575,7 @@ class Scripted:
                 "waves": [{"goal": "Deliver the complete values",
                            "commitments": ["scopeIn:1", "quality:1"]}],
             }
-            if self.mode in ("contracts", "parallel-contract", "coach-facts", "wave-gap", "see-proof", "see-proof-gap", "contract-fanout"):
+            if self.mode in ("contracts", "parallel-contract", "coach-facts", "wave-gap", "contract-gap", "see-proof", "see-proof-gap", "contract-fanout"):
                 answer["contracts"] = [
                     {
                         "handle": "values",
@@ -656,7 +673,7 @@ class Scripted:
                             verdict="gap",
                             gaps=[
                                 {"severity": "must-fix",
-                                    "target": r,
+                                    "target": r, "owners": judge_owners(q)[:1],
                                     "correction": facts["Requirements"][r]["acceptance"]
                                     + (" The observed RED does not demonstrate this requirement."
                                        if self.mode == "unit-rework" else " The check is incomplete."),
@@ -668,7 +685,7 @@ class Scripted:
                     if any("unlabelled value-002" in o["stdout"] for o in observations
                            if o["purpose"] == "final"):
                         answer.update(verdict="gap", gaps=[{"severity": "must-fix", "target": q["targets"][0],
-                            "correction": "The reader output omits the saved value label"}])
+                            "owners": judge_owners(q)[:1], "correction": "The reader output omits the saved value label"}])
             else:
                 obs = facts["Final observations"]
                 assert obs and all(o["exitCode"] == 0 for o in obs)
@@ -1099,6 +1116,107 @@ def test_defect_reaches_owner_journey(tmp_path, outcome):
 
 
 @pytest.mark.fast
+@pytest.mark.parametrize("retire", [False, True])
+def test_shortened_work_report_keeps_checks_at_c(tmp_path, retire):
+    """ShelfLife's import-only repair must still run the previously passing interface check.
+
+    Other repair journeys resend their whole check list and miss lost proofs, shifted check
+    identities and incorrect FLOW links. The retirement twin confirms that omission and
+    naming the check for retirement have different effects on real integrated execution.
+    """
+    slot = tmp_path / "check-identity"
+    run, _ = prepare(slot, "wave-gap", 2)
+
+    class ShelfLife(Scripted):
+        def __call__(self, q):
+            answer = json.loads(super().__call__(q))["answer"]
+            if q["kind"] == "DETAIL" and q["facts"]["Area"]["handle"] == "area-2":
+                answer["edits"] += [
+                    {"kind": "feature", "targetHandle": "interface", "typedBody": {
+                        "story": "Read the interface", "acceptance": "See the saved label"}},
+                    {"kind": "requirement", "targetHandle": "label", "typedBody": {
+                        "acceptance": "Show the saved label.", "features": ["interface"]}},
+                ]
+                answer["units"][0]["requirements"].append("label")
+            return json.dumps({"answer": answer})
+
+    run.provider = ShelfLife(slot, "wave-gap", 2)
+    native = slot / "native.py"
+    source = native.read_text()
+    script = r"""
+if name == 'unit-002':
+    path = name + '/interface.py'
+    if 'Existing checks' in facts:
+        imported = answer['checks'][0]
+        imported.pop('update', None)
+        imported['requirements'] = [r for r, b in facts['Requirements'].items()
+                                    if b['acceptance'] != 'Show the saved label.']
+    if turn == 1:
+        Path(name, 'label.txt').write_text('Saved items')
+        Path(path).write_text("from pathlib import Path\n"
+            "assert Path('unit-002/label.txt').read_text() == 'Saved items'\n"
+            "print('observed interface label')\n")
+        interface = {'purpose': 'Read the interface label', 'command': [sys.executable, '-B', path],
+                     'expectedEvidence': 'The saved label is visible'}
+        if 'Existing checks' in facts:
+            interface['requirements'] = [r for r, b in facts['Requirements'].items()
+                                         if b['acceptance'] == 'Show the saved label.']
+        answer['checkPaths'].append(path)
+        answer['checks'].insert(0, interface)
+    elif RETIRE:
+        handle = next(r for r, c in facts['Existing checks'].items()
+                      if c['purpose'] == 'Read the interface label')
+        imported['update'] = next(r for r, c in facts['Existing checks'].items()
+                                  if c['command'] == imported['command'])
+        imported['requirements'] = list(facts['Requirements'])
+        check_path = Path(name, 'check.py')
+        check_path.write_text(check_path.read_text()
+                              + "assert Path('unit-002/label.txt').read_text() == 'Saved items'\n")
+        if 'Exact corrections' not in facts:
+            handle = 'interface.py'
+        else:
+            correction = str(facts['Exact corrections'])
+            assert "Check 'interface.py' is not owned" in correction
+            assert 'Use an Existing checks handle' in correction
+        answer['checks'].append({'retire': handle})
+    elif 'Existing checks' in facts:
+        if 'Exact corrections' not in facts:
+            imported['requirements'] = ['label.txt']
+        else:
+            correction = str(facts['Exact corrections'])
+            assert "unassigned requirements ['label.txt']" in correction
+            assert 'Use the handles under Requirements' in correction
+"""
+    native.write_text(source.replace("print(json.dumps({'type':'item.completed'",
+        script.replace("RETIRE", repr(retire)) + "\nprint(json.dumps({'type':'item.completed'"), encoding="utf-8")
+    try:
+        while run.store.cursor().state != "WAVE-VERIFY":
+            run.step()
+        run.step()
+        gap, = [b["gaps"][0] for _, _, b in run.store.records("unit_fixup")]
+        first_commit = run.store.read(gap["source"])["commit"]
+        first_interface, = [b for _, _, b in run.store.records("observation")
+                            if b["commit"] == first_commit and b["purpose"] == "final"
+                            and "observed interface label" in b["stdout"]]
+        finish(run)
+        final = [run.store.read(r) for r in run.store.cursor().finalObservations]
+        imported, = [b for b in final if "unit-002/check.py" in b["command"]]
+        interface = [b for b in final if "observed interface label" in b["stdout"]]
+        assert bool(interface) is not retire
+        assert imported["check"] == gap["subject"]
+        if interface:
+            assert interface[0]["check"] == first_interface["check"]
+            label, = interface[0]["requirements"]
+            saved, = imported["requirements"]
+            assert label != saved
+            declared = plan.select(run.store.plan(run.store.cursor().revision), "requirement")
+            assert declared[label]["acceptance"] == "Show the saved label."
+            assert declared[saved]["acceptance"] == "Running the reader displays saved value-002."
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 @pytest.mark.parametrize("fault", ["criterion-gap", "area-uncertain", "outside-unit",
                                    "outside-contract", "resume-unavailable"])
 def test_judge_once_golden(tmp_path, fault):
@@ -1123,7 +1241,7 @@ def test_judge_once_golden(tmp_path, fault):
                 if "Exact failure" in facts:
                     if q["execution"].get("session"):
                         assert set(facts) == {"Exact failure", "Write scope", "Correction owners",
-                                              "Correction observations"}
+                                              "Correction observations", "Existing checks"}
                         assert facts["Correction observations"]
                         resumed.append(q)
                         if fault == "resume-unavailable":
@@ -1189,11 +1307,15 @@ def test_judge_once_golden(tmp_path, fault):
                     assert rows[r]["answer"]["verdict"] == "not judged"
                     assert "Visual observation unavailable" in judgment.not_judged(run.store)[r]
             assert not run.store.records("outcome")[-1][2]["verification_complete"]
+        elif fault == "outside-contract":
+            # A contract owner is the planner's agreement to correct, never its provider's fixup.
+            gaps = [b["gap"] for _, _, b in run.store.records("architecture_gap")]
+            assert len(gaps) == 1 and f"contract {planted[0][2]} disagree" in gaps[0]
+            assert not run.store.records("unit_fixup")
+            assert all(r["answer"]["verdict"] == "satisfied" for r in rows.values())
         else:
             assignments = [b for _,_,b in run.store.records("unit_fixup")]
-            owner = planted[0][2]
-            expected = plan.select(document, "contract")[owner]["provider"] if fault == "outside-contract" else owner
-            assert {b["owner"] for b in assignments} == {expected}
+            assert {b["owner"] for b in assignments} == {planted[0][2]}
             assert resumed
             assert all(r["answer"]["verdict"] == "satisfied" for r in rows.values())
             if fault == "resume-unavailable":
@@ -1749,6 +1871,96 @@ def test_cross_area_commitment_golden(tmp_path, missing):
 
 
 @pytest.mark.fast
+def test_saved_area_order_does_not_reassign_review_or_validation_journey(tmp_path):
+    """A reopened ShelfLife plan must brief the named owner after outline reordering.
+
+    Ordered scripted plans and promises spanning every area can hide an owner swap.
+    Replay u01's saved plan and worker declarations through both question producers.
+    """
+    from seldon import judgment, plan_review
+    from seldon.store import RunRow, Store, UnitRow
+
+    fixture = json.loads((Path(__file__).parent / "fixtures/shelflife-u01-area-join.json").read_text())
+    areas = fixture["architecture"]["areas"]
+    expected_subjects = {
+        "backend": ("scopeIn:1 scopeIn:2 scopeIn:3 scopeIn:4 scopeIn:5 scopeIn:6 scopeIn:11", "quality:3"),
+        "interface": ("scopeIn:7 scopeIn:8 improvements:1", "quality:1 quality:2 quality:5"),
+        "import": ("scopeIn:9 scopeIn:10 improvements:2", "quality:4"),
+    }
+    declarations = {row["unit"]: row for row in fixture["workerChecks"]}
+    expected_review, expected_validation = {}, {}
+    guide_checks = {"guide:check:1"}
+    for area, (commitments, quality) in expected_subjects.items():
+        unit = f"1.{area}.1"
+        local_checks = {f"{unit}:check:{i}" for i, _ in enumerate(declarations[unit]["checks"], 1)}
+        expected_review[area] = ({unit}, set((commitments + " " + quality).split()))
+        for commitment in commitments.split():
+            checks = local_checks | guide_checks
+            expected_validation[commitment] = ({unit}, checks, checks)
+        for criterion in quality.split():
+            check_ids = local_checks | (guide_checks if area == "backend" else set())
+            expected_validation[f"quality:{int(criterion.split(':')[1]):03}:{area}"] = (
+                {unit}, check_ids, check_ids)
+    expected_validation["tryItGuide"] = (set(), guide_checks, guide_checks)
+
+    actual = {}
+    for name, order in (("recorded", areas), ("permuted", areas[1:] + areas[:1])):
+        project = tmp_path / name
+        project.mkdir()
+        gitwork.git(project, "init", "--quiet")
+        guide = gitwork.git(project, "hash-object", "-w", "--stdin", data=b"Open the ShelfLife walkthrough.\n")
+        candidate, = gitwork.import_commits(project, None, [[(plan.GUIDE_PATH, "100644", guide)]])
+        document = {"architecture": {"areas": order}, "nodes": fixture["nodes"]}
+        store = Store(project)
+        try:
+            revision = store.revision(document)
+            kickoff = store.record("kickoff", {"setup": {}, "capacity": 3, "words": "Build ShelfLife"})
+            cursor = RunRow(state="REVIEW", revision=revision, kickoff=kickoff, candidate=candidate)
+            store.cursor(cursor)
+            store.close()
+            store = Store(project)
+            provider = Scripted(project)
+            plan_review.step(store, provider, 3)
+            assert store.cursor().state == "B"
+
+            # u01 stopped before final validation. Supply candidate-bound observations for
+            # its saved check declarations so this replay tests routing, not product proof.
+            for ref, declaration in declarations.items():
+                store.record("worker_checks", declaration)
+                evidence = {"scopeTree": candidate, "commit": candidate}
+                if ref != "guide":
+                    evidence["answer"] = {"verdict": "satisfied", "gaps": []}
+                verdict = store.record("unit_verdict", evidence)
+                store.unit(ref, UnitRow(state="DONE", judgment=verdict))
+            observations = [store.record("observation", {
+                "commit": candidate, "scopeTree": candidate, "unit": check["owner"], "check": ref,
+                "requirements": check["requirements"], "purpose": "final", "command": check["command"],
+                "exitCode": 0, "stdout": ref, "stderr": "", "cwd": str(project), "evidenceFiles": [],
+                "executionStarted": True, "cleanupVerified": True, "timedOut": False,
+            }) for ref, check in plan.select(plan.execution(store), "check").items()]
+            from dataclasses import replace
+            store.cursor(replace(cursor, state="PRODUCT-JUDGE", finalCommit=candidate, finalObservations=observations))
+            judgment.step(store, provider)
+            assert store.cursor().state == "C"
+
+            review, validation = {}, {}
+            for _, _, question in store.records("question"):
+                facts = question["facts"]
+                if question["kind"] == "REVIEW":
+                    review[facts["Review subject"]] = (set(facts["Units"]), set(facts["Accepted commitments"]))
+                elif question["kind"] == "PRODUCT":
+                    for subject in facts["Criteria"]:
+                        validation[subject] = ({row["unit"] for row in facts["Source judgment"]},
+                                               set(facts["Checks"]),
+                                               {row["check"] for row in facts["Final observations"]})
+            actual[name] = {"REVIEW": review, "PRODUCT": validation}
+        finally:
+            store.close()
+    expected = {"REVIEW": expected_review, "PRODUCT": expected_validation}
+    assert actual == {"recorded": expected, "permuted": expected}
+
+
+@pytest.mark.fast
 def test_no_check_final_judgment_journey(tmp_path):
     """Retain a source-judged unit without final observations through the C presentation.
 
@@ -1876,6 +2088,8 @@ def test_judge_notes_reach_c_without_rework(tmp_path, severity):
                            "The peer's old unit-002 file has a pre-existing formatting issue")}
                 if q["kind"] in ("FLOW", "PRODUCT"):
                     gap["owners"] = [self.refs[2]]
+                elif q["kind"] == "JUDGE":
+                    gap["owners"] = judge_owners(q)[:1]
                 answer.update(verdict="gap", gaps=[gap])
             return json.dumps({"answer": answer})
 
@@ -2039,5 +2253,100 @@ def test_repeated_unit_failure_pauses_journey(tmp_path):
         assert "reader unavailable" in again["subject"]["failure"]
         assert provider.calls.count("COACH") == 2  # planner once, then the user; never the same approach again
         assert run.store.cursor().decision == again["request"]
+    finally:
+        run.close()
+
+
+class ContractGap(Scripted):
+    """Recorded ShelfLife u01 shape: the consumer relies on what the agreed contract does not define.
+
+    The page required an X-Pantry-Today header that the pantry API contract never named; the
+    interface worker could not fix that alone and the run paused on "This is Seldon's fault".
+    """
+    def __init__(self, slot, case):
+        super().__init__(slot, "contract-gap", 1)
+        self.case = case
+
+    def __call__(self, q):
+        if q["kind"] == "ARCHITECT" and "Architecture correction" in q["facts"]:
+            assert "values" in q["facts"]["Architecture correction"]
+            answer = json.loads(super().__call__(q))["answer"]
+            answer["contracts"][0]["text"] += " The provider also writes the date to unit-001/today.txt."
+            return json.dumps({"answer": answer})
+        if q["kind"] != "JUDGE":
+            return super().__call__(q)
+        answer = json.loads(super().__call__(q))["answer"]
+        facts, owners = q["facts"], judge_owners(q)
+        agreed = str(facts.get("Contracts consumed", {})) + str(facts.get("Contracts provided", {}))
+        consumer = "value-002" in str(facts["Requirements"])
+        gap = None
+        if consumer and (self.case == "unfixable" or "today.txt" not in agreed):
+            gap = {"correction": "Make the reader work with the agreed values contract without "
+                   "requiring a date the contract does not define", "owners": (
+                       ["values"] if self.case == "contract" and "values" in owners else owners[:1])}
+        elif not consumer and "today.txt" in agreed and "unit-001/today.txt" not in facts["Product files"]:
+            gap = {"correction": "Write unit-001/today.txt as the corrected values contract says",
+                   "owners": owners[:1]}
+        if gap:
+            gap = {"severity": "must-fix", "target": q["targets"][0], **gap}
+            if not owners:
+                del gap["owners"]  # The base schema had no JUDGE owners.
+            answer.update(verdict="gap", gaps=[gap])
+        return json.dumps({"answer": answer})
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("case", ["contract", "unfixable"])
+def test_contract_gap_journey(tmp_path, case):
+    """A judged disagreement with a contract becomes one planner correction, not a worker loop.
+
+    Recorded u01 (2026-11-17) looped one worker on a cross-unit gap and then blamed Seldon; the
+    repeated-check twin proves code failures only. contract: the planner extends the contract,
+    the provider is reworked and the wave verifies with no user question. unfixable: a judged gap
+    no worker fixes reaches the user in plain words with planner-framed options.
+    """
+    from seldon.decisions import Waiting
+
+    slot = tmp_path / case
+    run, _ = prepare(slot, "contract-gap")
+    run.provider = provider = ContractGap(slot, case)
+    shown = []
+
+    def user(item):
+        if item["gate"] != "UNIT":
+            return approve(item)
+        shown.append(item)
+        if len(shown) == 1 and case == "unfixable":
+            return item["ask"]["options"][0]["label"]
+        raise Waiting()
+
+    run.user = user
+    store = run.store
+    try:
+        if case == "contract":
+            finish(run)
+            assert not shown and not [b for _, _, b in store.records("decision_request") if b["gate"] == "UNIT"]
+            gaps = [b["gap"] for _, _, b in store.records("architecture_gap")]
+            assert len(gaps) == 1 and "contract values disagree" in gaps[0]
+            assert "requiring a date the contract does not define" in gaps[0]
+            assert "today.txt" in plan.select(plan.execution(store), "contract")["values"]["text"]
+            fixed = {b["owner"] for _, _, b in store.records("unit_fixup")}
+            assert fixed == {unit_ref(run, 1)}  # the provider was reworked; the consumer was never looped
+            assert (slot / "product" / "unit-001" / "today.txt").read_text() == "2026-11-18"
+            assert provider.calls.count("COACH") == 0
+        else:
+            with pytest.raises(Waiting):
+                while True:
+                    run.step()
+            first, last = shown[0], shown[-1]
+            assert first is not last and first["ask"]["options"][0]["label"] == "Try the planner's new approach"
+            ask = last["ask"]
+            assert "Seldon's fault" not in ask["question"]
+            assert "could not fix what the judge found missing" in ask["question"]
+            assert "requiring a date the contract does not define" in ask["question"]
+            labels = [o["label"] for o in ask["options"]]
+            assert labels == ["Try the planner's new approach", "Leave this out", "Pause"]
+            assert provider.calls.count("COACH") == 3  # coached once, asked once, then framed the options
+            assert not store.records("architecture_gap")
     finally:
         run.close()

@@ -15,8 +15,8 @@ RUN = {
     "EXECUTE": {"finished": "WAVE-VERIFY"},
     "WAVE-VERIFY": {"passed": "FLOW-JUDGE", "rework": "EXECUTE", "plan-gap": "ARCHITECT"},
     "CHECK-IN": {"next": "ARCHITECT", "last": "PRODUCT-JUDGE"},
-    "FLOW-JUDGE": {"satisfied": "CHECK-IN", "gap": "EXECUTE"},
-    "PRODUCT-JUDGE": {"satisfied": "C", "gap": "EXECUTE"},
+    "FLOW-JUDGE": {"plan-gap": "ARCHITECT", "satisfied": "CHECK-IN", "gap": "EXECUTE"},
+    "PRODUCT-JUDGE": {"plan-gap": "ARCHITECT", "satisfied": "C", "gap": "EXECUTE"},
     "C": {"approve": "ACCEPTED", "scripted": "SCRIPTED_C"},
     "ACCEPTED": {}, "SCRIPTED_C": {}, "STOPPED": {},
 }

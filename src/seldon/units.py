@@ -5,7 +5,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import decisions, fixups, gitwork, inference, plan, proof, questions, recovery
+from . import decisions, features, fixups, gitwork, inference, plan, proof, questions, recovery
 from .providers import Deadline, ProviderFailure, ResumeUnavailable, recorded
 from .schema import validate
 from .states import advance
@@ -48,9 +48,7 @@ def work(store, provider, ref):
         store.record("writer_end", {"unit": ref, "report": report, "finishedAt": time.time()})
         if answer["outcome"] == "question" and not any(d["owner"] != ref for d in answer["discoveries"]):
             return
-        store.record("worker_checks", {"unit": ref, "report": report,
-            "checkPaths": answer["checkPaths"], "checks": answer["checks"],
-            "discoveries": answer["discoveries"]})
+        plan.work_checks(store, ref, report, answer)
         advance(store, "returned", report, unit=ref, report=report)
 
     report = recovered_report(store, ref)
@@ -198,9 +196,11 @@ def judge_wave(store, provider, observations):
     batch, trees = {}, {}
     for ref, contract in plan.select(document, "unit").items():
         # The guide has no source verdict: PRODUCT compares its walkthrough with the product.
-        if store.unit(ref).state == "DROPPED" or ref == "guide" or not (plan.wave_requirements(document, ref) or contract["handed"]):
-            continue
+        # A unit judged alone is judged again here once a contract change cleared its verdict.
         row = store.unit(ref)
+        if row.state == "DROPPED" or ref == "guide" or row.judgment and not (
+                plan.wave_requirements(document, ref) or contract["handed"]):
+            continue
         tree = gitwork.scope_tree(store.root.parent, cursor.candidate, contract["scope"], cursor.scratch)
         if (row.judgment and store.read(row.judgment)["scopeTree"] == tree
                 and store.read(row.judgment)["answer"]["verdict"] != "gap"):
@@ -218,7 +218,13 @@ def judge_wave(store, provider, observations):
         with store.transaction():
             store.unit(ref, replace(store.unit(ref), judgment=result))
         if not questions.satisfied(answer) and answer["verdict"] != "not judged":
-            gaps.append({"subject": ref, "kind": "flow", "commit": cursor.candidate,
-                         "units": [ref], "correction": str(answer), "source": result})
+            # A disagreement with an agreement is the planner's to correct, never one worker's (R4).
+            agreements = [o for g in questions.must_fix(answer) for o in g["owners"] if o != ref]
+            contracted = bool(agreements) and features.enabled("contractGap")
+            gaps.append({"subject": ref, "kind": "contract" if contracted else "flow",
+                         "commit": cursor.candidate, "units": list(dict.fromkeys(agreements)) if contracted
+                         else [ref], "source": result, "correction": "; ".join(
+                             f"{g['target']}: {g['correction']}" for g in questions.must_fix(answer))
+                         + " Judge: " + answer["why"] if contracted else str(answer)})
     inference.batch(store, provider, batch, consume=consume, field="verdict/gaps")
     return gaps

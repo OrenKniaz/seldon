@@ -70,15 +70,32 @@ def apply(store, gaps):
 
 
 def replan(store, gaps):
-    """A failure whose fix no unit of this wave can hold is a plan gap: the planner gives it an owner."""
+    """A fix no unit of this wave can hold alone is a plan gap: the planner gives it an owner,
+    or corrects the agreement two sides disagree on (R4)."""
     cursor = store.cursor()
-    text = "\n".join(
-        f"Wave {cursor.wave} check {g['subject']} failed on the integrated product. Expected: a unit of "
-        f"this wave owns the work it needs; got: its writer hands that work to {', '.join(g['units'])}, "
-        "which no unit of this wave holds. Give the work an owner in this wave: bring the commitment "
-        "that owns it into this wave so a unit builds it. Writer's report and failure: " + g["correction"]
-        for g in gaps)
+    units = store.units()
+
+    def explain(g):
+        if g["kind"] != "contract":
+            return (f"Wave {cursor.wave} check {g['subject']} failed on the integrated product. Expected: "
+                    f"a unit of this wave owns the work it needs; got: its writer hands that work to "
+                    f"{', '.join(g['units'])}, which no unit of this wave holds. Give the work an owner in "
+                    "this wave: bring the commitment that owns it into this wave so a unit builds it. "
+                    "Writer's report and failure: " + g["correction"])
+        row = units.get(g["subject"])
+        handed = store.read(row.report)["answer"]["discoveries"] if row and row.report else []
+        return (f"Wave {cursor.wave}: the judge found {g['subject']} and contract {', '.join(g['units'])} "
+                f"disagree on the integrated product, so no single worker can fix it in its scope. "
+                "Correct or extend that contract text so its provider and consumers agree; name only the "
+                "changed contract. Seldon then checks the provider and consumers against the corrected "
+                f"text and reworks the side that differs. Judged gap: {g['correction']}"
+                + (f" Worker's discoveries: {handed}" if handed else ""))
+
+    text = "\n".join(explain(g) for g in gaps)
     ref = store.record("architecture_gap", {"vision": cursor.vision, "source": [g["source"] for g in gaps],
                                             "outline": store.plan(cursor.revision)["architecture"],
                                             "gap": text})
-    recovery.planning(store, ref, sorted([g["subject"], *g["units"]] for g in gaps), "plan-gap")
+    contracted = any(g["kind"] == "contract" for g in gaps)
+    # A contract correction changes the outline, so its repeat is the same subject and agreement.
+    recovery.planning(store, ref, sorted([g["kind"], g["subject"], *g["units"]] for g in gaps), "plan-gap",
+                      outline=not contracted, finalCommit=None)

@@ -1,4 +1,4 @@
-"""C9/C12/I6/I7; R6/R14: scoped unit ownership and CODE-assigned check coverage."""
+"""C9/C12/I6/I7; R6/R14: scoped unit ownership and check declarations."""
 
 import fnmatch
 from graphlib import TopologicalSorter
@@ -53,6 +53,46 @@ def select(document, kind):
     return {ref: n["body"] for ref, n in document["nodes"].items() if n["kind"] == kind}
 
 
+def saved_checks(declaration, ref, requirements):
+    checks = declaration["checks"]
+    if isinstance(checks, dict):
+        return checks.copy(), declaration["nextCheck"]
+    # Older records have only the last list and positional observation IDs.
+    return {f"{ref}:check:{i}": {**check, "requirements": requirements}
+            for i, check in enumerate(checks, 1)}, len(checks) + 1
+
+
+def work_checks(store, ref, report, answer):
+    document = store.plan(store.cursor().revision)
+    requirements = select(document, "unit")[ref]["requirements"]
+    prior = next((b for _, _, b in reversed(store.records("worker_checks")) if b["unit"] == ref),
+                 {"checks": [], "checkPaths": []})
+    checks, next_check = saved_checks(prior, ref, requirements)
+    known = set(checks)
+    for edit in answer["checks"]:
+        handle = edit.get("retire") or edit.get("update")
+        if handle and handle not in known:
+            raise ValueError(f"Check {handle!r} is not owned by this unit. Use an Existing checks handle "
+                             "to update or retire it, or omit the handle to add a check.")
+        if "retire" in edit:
+            checks.pop(handle, None)
+            continue
+        links = list(dict.fromkeys(edit["requirements"] if "requirements" in edit else acceptance(document, ref)))
+        if unknown := set(links) - set(requirements):
+            raise ValueError(f"Check {edit['purpose']!r} names unassigned requirements {sorted(unknown)}. "
+                             "Use the handles under Requirements for the behaviour it proves.")
+        check = {k: v for k, v in edit.items() if k != "update"}
+        check["requirements"] = links
+        if handle:
+            checks[handle] = check
+        elif not any(c["command"] == check["command"] for c in checks.values()):
+            checks[f"{ref}:check:{next_check}"] = check
+            next_check += 1
+    store.record("worker_checks", {"unit": ref, "report": report, "checks": checks, "nextCheck": next_check,
+        "checkPaths": list(dict.fromkeys([*prior["checkPaths"], *answer["checkPaths"]])),
+        "discoveries": answer["discoveries"]})
+
+
 def execution(store):
     """Worker declarations are canonical records; execution projects them onto the approved intent."""
     from copy import deepcopy
@@ -65,9 +105,13 @@ def execution(store):
         unit["handed"] = {d["owner"]: d["correction"] for d in declaration.get("discoveries", [])
                           if d["owner"] != ref}
         unit["checkPaths"] = [p for p in declaration["checkPaths"] if matches(p, unit["scope"])]
-        for i, check in enumerate(declaration["checks"], 1):
-            document["nodes"][f"{ref}:check:{i}"] = {"kind": "check", "body": {
-                **check, "owner": ref, "requirements": unit["requirements"]}}
+        checks, _ = saved_checks(declaration, ref, unit["requirements"])
+        for handle, check in checks.items():
+            links = [r for r in check["requirements"] if r in unit["requirements"]
+                     and document["nodes"].get(r, {}).get("kind") == "requirement"]
+            if links or not check["requirements"]:
+                document["nodes"][handle] = {"kind": "check", "body": {
+                    **check, "owner": ref, "requirements": links}}
     return document
 
 

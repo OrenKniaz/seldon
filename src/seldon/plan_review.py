@@ -12,13 +12,14 @@ def step(store, provider, capacity):
     outline = document["architecture"]
     goals = architecture.commitments(vision)
     pending = {}
-    for area_ref, area in zip(plan.select(document, "area"), outline["areas"], strict=True):
+    for area in outline["areas"]:
+        area_ref = area["handle"]
         units = {r: u for r, u in plan.select(document, "unit").items()
                  if u["area"] == area_ref and r != "guide"}
         requirements = {r for u in units.values() for r in u["requirements"]}
         features = {f for r in requirements for f in document["nodes"][r]["body"]["features"]}
-        pending[area["handle"]] = questions.build("REVIEW", {
-            "Review subject": area["handle"], "User's words": questions.user_words(store),
+        pending[area_ref] = questions.build("REVIEW", {
+            "Review subject": area_ref, "User's words": questions.user_words(store),
             "Accepted commitments": {r: goals[r] for r in area["commitments"]},
             "Area": area, "Units": units,
             "Plan": {r: document["nodes"][r] for r in requirements | features},

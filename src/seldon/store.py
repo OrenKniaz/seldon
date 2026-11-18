@@ -203,7 +203,7 @@ class Store:
             row = self.db.execute("INSERT INTO plan_revision(parent,document) VALUES (?,?)",
                                   (parent, encode(document)))
             if parent is not None:
-                affected = architecture.stale_consumers(self.plan(parent), document) & self.units().keys()
+                affected = architecture.stale_units(self.plan(parent), document) & self.units().keys()
                 if affected:
                     cursor = self.cursor()
                     self.record("contract_change", {"revision": row.lastrowid, "parent": parent,

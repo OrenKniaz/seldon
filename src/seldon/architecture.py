@@ -68,10 +68,11 @@ def validate(document):
             raise ValueError(f"{ref}: keep unit scopes inside its named area scopes")
 
 
-def stale_consumers(before, after):
+def stale_units(before, after):
+    """A changed contract is judged again at both sides: its provider and its consumers (C10)."""
     old, new = (plan.select(d, "contract") for d in (before, after))
     return {u for r in old.keys() | new.keys() if old.get(r) != new.get(r)
-            for c in (old.get(r), new.get(r)) if c for u in c["consumers"]}
+            for c in (old.get(r), new.get(r)) if c for u in [c["provider"], *c["consumers"]]}
 
 
 def index(items, field="areas/contracts"):

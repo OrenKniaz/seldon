@@ -93,10 +93,15 @@ PROMPTS = {
             "with it. Return a question in summary for missing facts or requirement meaning. Save visual evidence "
             "in SELDON_EVIDENCE_DIR.\n"
             "checkPaths: paths of checks and helpers inside your scope; Seldon uses them to run checks without product.\n"
+            "checks: declare commands with the Requirements handles each proves. Existing checks keep running "
+            "when omitted. Name an Existing checks handle in update to revise its declaration, or return "
+            '{"retire":"handle"} to stop running it.\n'
             "discoveries: Seldon sends each correction to its named owner, then reruns your checks. " + DEFECT_HANDOFF,
     "JUDGE": "Judge only the supplied acceptance sentences by their meaning: delivered, exercised by "
              "a meaningful check with the supplied execution observations, and no stub replacing that behaviour? "
              "A gap quotes the acceptance sentence it breaks; other suggestions are notes. "
+             "Its owners: this unit when it can fix the gap in its scope, or a contract when this "
+             "unit and that agreement disagree and the contract text must change. "
              + JUDGMENT_LEEWAY,
     "FLOW": "Does this feature's observed user flow meet each requirement across its contracts? "
             "Name only responsible correction owners for each gap; name a crossed contract "
@@ -280,6 +285,7 @@ def work_brief(store, ref):
     facts = {"User's words": user_words(store),
              "Unit": contract["instructions"], "Write scope": contract["scope"],
              "Requirements": requirement_facts(document, contract["requirements"]),
+             "Existing checks": plan.assigned(document)[ref],
              "Execution facts": execution_facts(store, ref),
              "Quality bar": [c["criterion"] for c in plan.select(document, "criterion").values()]}
     if any("visual direction" in c["criterion"].lower() for c in plan.select(document, "criterion").values()
@@ -305,7 +311,7 @@ def work_brief(store, ref):
         facts["Read current patch"] = ["git", "diff", "--binary", unit.base]
     facts["Correction owners"] = owners(document)
     if unit.thread and unit.failure:
-        facts = {k: facts[k] for k in ("Exact failure", "Write scope", "Correction owners",
+        facts = {k: facts[k] for k in ("Exact failure", "Write scope", "Correction owners", "Existing checks",
                                      "Correction observations") if k in facts}
     return build("WORK", facts, execution={"cwd": unit.worktree, "session": unit.thread},
                  images=images(store, refs), owners=facts["Correction owners"])
@@ -383,8 +389,8 @@ def judge_brief(store, ref, commit=None, observations=None):
              "Product files": product,
              "Observations": observed(store, refs)}
     facts.update(agreement_facts(document, ref))
-    return build("JUDGE", facts, requirements,
-                 images=images(store, refs))
+    return build("JUDGE", facts, requirements, images=images(store, refs),
+                 owners=[ref, *architecture.contracts_for(document, ref)])
 
 
 class AnswerRejected(ValueError):

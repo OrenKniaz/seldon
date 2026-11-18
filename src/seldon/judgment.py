@@ -12,12 +12,9 @@ from . import features
 def subjects(document, kind):
     if kind == "FLOW":
         return plan.select(document, "requirement")
-    areas = dict(zip((a["handle"] for a in document["architecture"]["areas"]),
-                     plan.select(document, "area"), strict=True))
     commitments = {ref: {"criterion": text,
         "verification": "Trace the accepted experience end to end across its areas",
-        "areas": [areas[a["handle"]] for a in document["architecture"]["areas"]
-                  if ref in a["commitments"]]}
+        "areas": [a["handle"] for a in document["architecture"]["areas"] if ref in a["commitments"]]}
         for ref, text in architecture.commitments(document["nodes"]["vision"]["body"]).items()
         if ref.startswith(("scopeIn:", "improvements:"))}
     return {**plan.select(document, "criterion"), **commitments, "tryItGuide": {
@@ -146,9 +143,12 @@ def corrections(store, subject, source, answer):
     for gap in questions.must_fix(answer):
         for owner in gap["owners"]:
             owners.setdefault(owner, []).append(gap["correction"])
-    return [{"subject": owner if owner in contracts else subject, "kind": "flow",
+    # A contract owner means the agreement itself needs correction: the planner's work (R4).
+    planner = features.enabled("contractGap")
+    return [{"subject": subject if planner or owner not in contracts else owner,
+             "kind": "contract" if planner and owner in contracts else "flow",
              "commit": store.cursor().candidate,
-             "units": [contracts[owner]["provider"] if owner in contracts else owner],
+             "units": [contracts[owner]["provider"] if owner in contracts and not planner else owner],
              "correction": "; ".join(items), "source": source} for owner, items in owners.items()]
 
 
@@ -233,6 +233,8 @@ def step(store, provider):
     inference.batch(store, provider, {
         area: brief(store, kind, ss, trees=trees) for area, ss in selected.items()},
         consume=consume, field="gaps.target/owners")
+    if contracted := [g for g in gaps if g["kind"] == "contract"]:
+        return fixups.replan(store, contracted)
     with store.transaction():
         if gaps:
             fixups.apply(store, gaps)

@@ -151,8 +151,11 @@ def step(store, provider):
             if not result["gaps"]:
                 verdicts.append(result["verdict"])
         store.cursor(replace(store.cursor(), demoVerdicts=verdicts))
-        if gaps:
+        contracted = [g for g in gaps if g["kind"] == "contract"]
+        if gaps and not contracted:
             fixups.apply(store, gaps)
-        else:
+        elif not gaps:
             closures = requirement_verdicts(store, verdicts)
             advance(store, "satisfied", verdicts, requirementVerdicts=closures)
+    if contracted:
+        fixups.replan(store, contracted)
