@@ -1,0 +1,130 @@
+{
+  "r239": {
+    "edits": [
+      {
+        "kind": "feature",
+        "targetHandle": "new:local-bench-page",
+        "typedBody": {
+          "acceptance": "The local page provides the default-run and saved-session reload slice with truthful session information and an accessible visual foundation, supported by a practical walkthrough.",
+          "commitments": [
+            "quality:visual"
+          ],
+          "story": "As an audio engineer, I can try and revisit a local bench measurement using a clear, accessible interface."
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:run-reload",
+        "typedBody": {
+          "acceptance": "The locally served page accepts the supplied default settings in a labelled JSON textarea, starts a run, lists saved sessions, and reloads a selected session with its ID, status, processed count, limiter intervention and available band numbers without presenting partial results as completed.",
+          "features": [
+            "new:local-bench-page"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:stop",
+        "typedBody": {
+          "acceptance": "The page lets a user request that a running session stop and displays its actual returned or polled status and processed count.",
+          "features": [
+            "new:local-bench-page"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:page-foundation",
+        "typedBody": {
+          "acceptance": "The page uses local assets and keyboard-operable labelled controls with reduced-motion support and a clear, high-contrast instrument-like foundation without external network or third-party runtime dependencies.",
+          "features": [
+            "new:local-bench-page"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:walkthrough",
+        "typedBody": {
+          "acceptance": "The try-it guide and runnable walkthrough exercise the default page run and reload, explain actual service and run stopping steps, and document the working CLI run, list, show, export and comparison commands and the Windows CSV row check.",
+          "features": [
+            "new:local-bench-page"
+          ]
+        }
+      }
+    ],
+    "units": [
+      {
+        "dependencies": [],
+        "instructions": "Implement the wave-one page, guide and scoped checks against the supplied session API, commands and page-assets contracts; handle asynchronous runs and clear errors. Exercise the real default-run-to-saved-session reload and stop integration, and check exported CSV has one header and one row per processed sample without doubled Windows line endings. Use the CLI comparison invocation supplied by its owner. Use Python 3.12 standard library for the application and Node 20 only for page checks, with no external network or third-party runtime packages. Keep remaining comparison controls and full visual acceptance in wave two; report unperformed browser or integration checks and blockers rather than claiming success.",
+        "requirements": [
+          "new:run-reload",
+          "new:stop",
+          "new:page-foundation",
+          "new:walkthrough"
+        ],
+        "scope": [
+          "web/**",
+          "docs/try-it.md",
+          "checks/page/**"
+        ]
+      }
+    ],
+    "verdict": "planned",
+    "why": "The page, guide and runnable checks form one session-sized ownership surface. The supplied service and command contracts define the external integration, while full visual acceptance and remaining controls stay in wave two."
+  },
+  "r385": {
+    "edits": [
+      {
+        "kind": "feature",
+        "targetHandle": "new:session-walkthrough",
+        "typedBody": {
+          "acceptance": "The engineer can follow the guide and its runnable walkthrough to revisit and compare local sessions using the page and command line.",
+          "commitments": [
+            "scopeIn:sessions"
+          ],
+          "story": "As an audio engineer, I can follow a local walkthrough to save, reload and compare bench sessions."
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:guide-commands",
+        "typedBody": {
+          "acceptance": "The guide gives the actual server start command, page run and stop steps, and CLI run, list, show, export and compare commands, including the B-minus-A direction of per-band comparison.",
+          "features": [
+            "new:session-walkthrough"
+          ]
+        }
+      },
+      {
+        "kind": "requirement",
+        "targetHandle": "new:walkthrough-checks",
+        "typedBody": {
+          "acceptance": "The runnable walkthrough checks the default tone run and saved-session reload, honest status, processed count and limiter information, CLI and stop paths, and Windows CSV export with one header and one row per processed sample.",
+          "features": [
+            "new:session-walkthrough"
+          ]
+        }
+      }
+    ],
+    "units": [
+      {
+        "dependencies": [],
+        "instructions": "This is the existing walkthrough owner's unit. Maintain only the guide and its checks; use python server.py --port PORT --data DIR and python bench.py compare ID_A ID_B --data DIR, with the agreed page, API, CLI and legacy session interfaces. Run the affected walkthrough checks against the integrated product and report mismatches to the responsible owner without editing their files or claiming unverified behavior.",
+        "provides": [
+          "walkthrough-owner"
+        ],
+        "requirements": [
+          "new:guide-commands",
+          "new:walkthrough-checks"
+        ],
+        "scope": [
+          "docs/try-it.md",
+          "docs/try-it/**"
+        ]
+      }
+    ],
+    "verdict": "planned",
+    "why": "The reserved walkthrough surface and its checks fit one owner and one session; the supplied operator interface supplies the comparison agreement without a file-creation dependency."
+  }
+}

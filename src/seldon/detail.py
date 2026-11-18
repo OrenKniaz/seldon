@@ -80,9 +80,9 @@ def step(store, provider, capacity):
 
             def validate(answer):
                 if answer.get("verdict") == "subdivide":
-                    architecture.expand(outline, area, answer)
+                    architecture.expand(outline, area, answer, record=store.record)
                 elif answer.get("verdict") == "planned":
-                    architecture.local_plan(area, local, answer, vision)
+                    architecture.local_plan(area, local, answer, vision, record=store.record)
 
             body = {"revision": cursor.revision, "area": area["handle"], "basis": basis, "resume": resumed,
                     "correction": correction[0] if correction else None}

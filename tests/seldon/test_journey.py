@@ -15,6 +15,199 @@ from seldon.run import Run
 
 
 @pytest.mark.fast
+def test_quiet_bench_size_calibration_journey(tmp_path, monkeypatch):
+    """ALIGN coaches effort on the recorded unstaged bench and honors the owner's size at A.
+
+    The staged override journey checks checkpoint retention, so it misses a prompt
+    that treats several local surfaces as weeks of work for one agent.
+    """
+    from seldon import features, frontdoor, schema
+
+    monkeypatch.setattr(features, "enabled", lambda name: True)
+    monkeypatch.setattr(features, "planning_setup", lambda: {"sizeFirst": True, "split": "auto"})
+    fixture = Path(__file__).with_name("fixtures") / "quietbench-q01-align.json"
+    recorded = json.loads(fixture.read_text(encoding="utf-8"))
+    facts, medium = recorded["facts"], recorded["answer"]
+    micro = deepcopy(medium)
+    micro["vision"].update(size="tiny", sizeWhy="The owner chose one plain session for the local bench.")
+    approved = []
+
+    def provider(q):
+        strict_schema(q["schema"])
+        if q["kind"] == "ALIGN":
+            assert q["facts"]["Dream"] == facts["Dream"]
+            assert q["facts"]["Runtime"] == facts["Runtime"]
+            assert q["facts"]["Sources"]["kickoff"] == facts["Sources"]["kickoff"]
+            prompt = q["prompt"].lower()
+            assert "how long one capable plain agent" in prompt
+            micro_anchor = prompt.split("micro means minutes", 1)[1].split("small means days", 1)[0]
+            assert all(example in micro_anchor for example in
+                       ("single-file cli", "sqlite and an importer", "signal-processing bench"))
+            medium_anchor = prompt.split("medium means weeks", 1)[1].split("big means months", 1)[0]
+            assert "multi-service product with auth and migrations" in medium_anchor
+            assert "what would make it bigger" in prompt
+            example = next(e["answer"]["vision"] for e in q["examples"]
+                           if "noise filters" in e["answer"]["vision"]["understanding"])
+            assert example["size"] == "tiny"
+            override = q["facts"].get("Owner size override")
+            assert override in (None, "tiny")
+            answer = micro if override else medium
+        else:
+            assert q["kind"] == "ARCHITECT"
+            approved.append(q["facts"]["Approved vision"])
+            commitments = list(q["facts"]["Commitment handles"])
+            answer = {"areas": [{"handle": "bench", "responsibility": "Deliver the local bench",
+                                "scope": ["bench/**"], "commitments": commitments}],
+                      "waves": [{"goal": "Deliver the local bench", "commitments": commitments}],
+                      "contracts": [], "decisions": [], "why": "One owner can deliver the bench."}
+        response = {"answer": answer}
+        schema.validate(response, q["schema"])
+        return json.dumps(response)
+
+    def choose(item, group, option):
+        return {"request": item["request"], "replyId": option,
+                "selections": [{"groupId": group, "optionId": option}]}
+
+    product = tmp_path / "quiet-bench"
+    run = Run(product, tmp_path / "workers", facts["Dream"], facts["Runtime"], provider, lambda _: None)
+    try:
+        assert run.step() == "A"
+        waiting = frontdoor.state(product)["waitingFor"]
+        size = next(g for g in waiting["ask"]["groups"] if g["id"] == "size")
+        assert size["default"] == "medium" and size["options"][0]["label"] == "Medium"
+        assert medium["vision"]["sizeWhy"] in size["options"][0]["means"]
+        run.user = lambda item: choose(item, "size", "tiny")
+        assert run.step() == "ALIGN"
+        run.close()
+        run = Run.reopen(product, provider, lambda item: choose(item, "round", "done"))
+        assert run.step() == "A"
+        revised = frontdoor.state(product)["waitingFor"]
+        assert revised["subject"]["vision"] == micro["vision"]
+        size = next(g for g in revised["ask"]["groups"] if g["id"] == "size")
+        assert size["default"] == "tiny" and size["options"][0]["label"] == "Micro"
+        assert not approved
+        assert run.step() == "ARCHITECT"
+        assert run.step() == "DETAIL"
+        assert approved == [micro["vision"]]
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("guide_only", [False, True])
+def test_recorded_quiet_bench_guide_scope_journey(tmp_path, monkeypatch, guide_only):
+    """Replay q01's mixed scope and guide-only replies through progressive planning.
+
+    Clean scopes in the existing wave journey miss lost page work and a repeated guide
+    claim with no product paths to keep. Replay the wave-one replan replies at the
+    wave-two planning boundary, where the established guide owner must survive.
+    """
+    from dataclasses import replace
+    from seldon import decisions, features, schema
+
+    monkeypatch.setattr(features, "enabled", lambda _: True)
+    replies = json.loads((Path(__file__).parent / "fixtures/quietbench-q01-guide-scopes.json")
+                         .read_text(encoding="utf-8"))
+    round_answer = questions.tiny_round_example()
+    vision = round_answer["vision"]
+    vision.update(understanding="Run and revisit a local bench measurement", size="small")
+    vision["quality"][0]["handle"] = "visual"
+    vision["stories"][0].update(handle="sessions", outcome="Save the local bench session")
+    page_scope = ["web/**", "checks/page/**"]
+    guide_scope = ["docs/try-it.md", "docs/try-it/**"]
+    exact, coached, asked = [], [], []
+
+    def provider(q):
+        strict_schema(q["schema"])
+        kind, facts = q["kind"], q["facts"]
+        if kind == "ALIGN":
+            answer = round_answer
+        elif kind == "ARCHITECT":
+            answer = {"areas": [
+                {"handle": "session", "responsibility": "Save bench sessions",
+                 "scope": ["bench/**"], "commitments": ["scopeIn:sessions"]},
+                {"handle": "page", "responsibility": "Display and revisit the session",
+                 "scope": page_scope + (guide_scope if "Previous architecture" in facts else []),
+                 "commitments": ["quality:visual"]}],
+                "contracts": [], "decisions": [],
+                "waves": [{"goal": "Save the session", "commitments": ["scopeIn:sessions"]},
+                          {"goal": "Revisit the session", "commitments": ["quality:visual"]}]}
+            if "Previous architecture" in facts:
+                answer["areas"][1]["commitments"].append("scopeIn:sessions")
+                answer["waves"] = []
+        elif kind == "DETAIL" and facts["Current wave"]["goal"] == "Save the session":
+            answer = {"verdict": "planned", "edits": [
+                {"kind": "feature", "targetHandle": "session", "typedBody": {
+                    "story": "Save a bench run", "acceptance": "The run can be reopened",
+                    "commitments": ["scopeIn:sessions"]}},
+                {"kind": "requirement", "targetHandle": "save",
+                 "typedBody": {"acceptance": "Reload the stored settings", "features": ["session"]}}],
+                "units": [{"scope": ["bench/**"], "requirements": ["save"], "dependencies": [],
+                           "instructions": "Persist the session"}]}
+        elif kind == "DETAIL":
+            if "Exact corrections" in facts:
+                exact.extend(facts["Exact corrections"][0]["Errors"])
+            answer = replies["r385" if guide_only else "r239"]
+        elif kind == "COACH":
+            coached.append(str(facts["Unresolved work"]))
+            answer = {"guidance": "Give the page builder a product scope."}
+        else:
+            assert kind == "REVIEW"
+            answer = {"verdict": "adequate", "gaps": []}
+        response = {"answer": {"why": "Plan the accepted bench experience", **answer}}
+        schema.validate(response, q["schema"])
+        return json.dumps(response)
+
+    def user(item):
+        if "groups" in item["ask"]:
+            return {"request": item["request"], "replyId": "guide-scope-lock",
+                    "selections": [{"groupId": "round", "optionId": "done"}]}
+        if "step" in item["subject"]:
+            asked.append(item["ask"])
+            return item["ask"]["options"][0]["label"]
+        return approve(item)
+
+    run = Run(tmp_path / "product", tmp_path / "workers", "Save and revisit a bench measurement",
+              {}, provider, user)
+    try:
+        for phase in ("A", "ARCHITECT", "DETAIL", "REVIEW", "B", "EXECUTE"):
+            assert run.step() == phase
+        cursor = run.store.cursor()
+        before = run.store.plan(cursor.revision)
+        owner = plan.guide_owner(before)
+        original = plan.select(before, "unit")[owner]
+        run.store.cursor(replace(cursor, state="CHECK-IN"))
+        assert run.step() == "ARCHITECT"
+        run.step()  # Consume the check-in reply.
+        assert run.step() == "DETAIL"
+        if guide_only:
+            stopped = run.run()
+            assert stopped.state == "DETAIL" and stopped.decision
+            assert len(exact) == 2 and exact[0] == exact[1]
+            assert all(word in exact[0] for word in (
+                "unit:1", "expected", "got", *guide_scope, "Send", "walkthrough owner"))
+            assert len(coached) == 1 and exact[0] in coached[0]
+            request, = asked
+            assert exact[0] in request["question"]
+            assert request["options"][0]["effect"] == "pause"
+            assert run.store.cursor().B == cursor.B
+            return
+        assert run.step() == "REVIEW"
+        assert run.step() == "EXECUTE"
+        assert not exact and not asked
+        after = plan.execution(run.store)
+        assert plan.guide_owner(after) == owner
+        units = plan.select(after, "unit")
+        assert (units[owner]["area"], units[owner]["scope"]) == (original["area"], original["scope"])
+        page, = [unit for unit in units.values() if unit["area"] == "page"]
+        assert page["scope"] == page_scope
+        assert [(row["field"], row["removed"]) for _, _, row in run.store.records("scope_normalisation")] == [
+            ("areas.scope", guide_scope), ("units.scope", ["docs/try-it.md"])]
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
 def test_grow_align_receipt_and_lock_journey(tmp_path, monkeypatch):
     """A partial reply and a replayed mixed done/change cannot lock an unseen vision.
 

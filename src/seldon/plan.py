@@ -4,6 +4,7 @@ import fnmatch
 from graphlib import TopologicalSorter
 from pathlib import PurePosixPath
 
+from .answers import Mismatch
 from .schema import BODIES, GROWN_FEATURE, vision_body, vision_contract
 from .schema import validate as validate_schema
 
@@ -54,6 +55,21 @@ def overlaps(left, right):
             return matches(b, [a])
         return prefix(a).startswith(prefix(b)) or prefix(b).startswith(prefix(a))
     return any(intersect(a, b) for a in left for b in right)
+
+
+def product_scope(scope, field, subject, record=None):
+    """Reserve the guide before checking or binding planner-proposed ownership."""
+    guide_dir = GUIDE_SCOPE[1].removesuffix("**")
+    remaining = [p for p in scope if p not in (guide_dir, guide_dir.rstrip("/"))
+                 and not overlaps([safe_path(p)], GUIDE_SCOPE)]
+    if not remaining:
+        raise Mismatch(field, f"{subject}: expected a product write scope; got {scope}, "
+                       f"which overlaps {GUIDE_PATH} or docs/try-it/ reserved for the walkthrough owner. "
+                       "Send at least one project-relative product path or narrower pattern outside the guide.")
+    if record and remaining != scope:
+        record("scope_normalisation", {"field": field, "subject": subject,
+            "removed": [p for p in scope if p not in remaining], "remaining": remaining})
+    return remaining
 
 
 def select(document, kind):
@@ -351,7 +367,7 @@ def validate_records(document):
                 raise ValueError(f"{ref}.{relation}: wrong trace target kind")
 
 
-def validate_owned_work(document, *, guide=None):
+def validate_owned_work(document):
     """The same area-owned rules serve DETAIL exact-fix and canonical plan validation."""
     features, requirements, units = (
         select(document, k) for k in ("feature", "requirement", "unit"))
@@ -362,8 +378,6 @@ def validate_owned_work(document, *, guide=None):
             safe_path(pattern)
         if any(d not in units or d == ref for d in unit["dependencies"]):
             raise ValueError(f"{ref}: unknown or self dependency")
-        if ref != guide and overlaps(unit["scope"], GUIDE_SCOPE):
-            raise ValueError(f"{ref}: {GUIDE_PATH} and docs/try-it/ are reserved for the walkthrough owner")
         for other, owner in units.items():
             if (ref < other and unit["area"] == owner["area"]
                     and overlaps(unit["scope"], owner["scope"])):
@@ -380,7 +394,7 @@ def validate_owned_work(document, *, guide=None):
 
 def validate(document):
     validate_records(document)
-    validate_owned_work(document, guide=guide_owner(document))
+    validate_owned_work(document)
     units = select(document, "unit")
     for ref, unit in units.items():
         for other, owner in units.items():
@@ -396,7 +410,8 @@ def validate(document):
 def add_guide(document, wave=1):
     from copy import deepcopy
     result = deepcopy(document)
-    area = next(iter(select(result, "area")))
+    previous = select(result, "unit").get("guide")
+    area = previous["area"] if previous else next(iter(select(result, "area")))
     area_scope = result["nodes"][area]["body"]["scope"]
     area_scope.extend(p for p in GUIDE_SCOPE if p not in area_scope)
     current = {r for r, u in select(result, "unit").items()

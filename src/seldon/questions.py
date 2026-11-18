@@ -54,10 +54,14 @@ DEFECT_HANDOFF = (
     "Seldon delivers it and reruns your checks on the integrated product.")
 
 SIZE_ESTIMATE = (
-    "Estimate the grown scope and quality bar for one capable plain agent with the same starting repo, "
-    "tools and access. Micro means minutes in one session, small means days, medium means weeks, and "
-    "big means months. In sizeWhy state the closest comparable work or its absence, expected effort, "
-    "and the biggest uncertainty. Follow an Owner size override and explain its planning consequences. "
+    "Estimate how long one capable plain agent would need to build and verify the grown scope and quality "
+    "bar with the same starting repo, tools and access. Micro means minutes in one session: a single-file "
+    "CLI, a local web app with a small API, SQLite and an importer, or a standard-library signal-processing "
+    "bench with a page, CLI and local storage server. Small means days. Medium means weeks with decisions "
+    "to carry across sessions, as in a multi-service product with auth and migrations. Big means months. "
+    "A technical-sounding domain or several local interfaces alone do not imply more effort. In sizeWhy "
+    "state the closest comparable work or its absence, expected effort, and what would make it bigger. "
+    "Follow an Owner size override and explain its planning consequences. "
     "Keep explicitly requested delivery stages and exact constraints at every size.")
 
 PROMPTS = {
@@ -249,7 +253,7 @@ def check_batch_decide(answer, words):
 
 def tiny_round_example():
     return {"vision": {"understanding": "Greet the supplied name", "size": "tiny",
-        "sizeWhy": "One interaction and one visible result", "users": ["CLI user"], "scopeOut": [],
+        "sizeWhy": "A single-file CLI takes one plain agent minutes", "users": ["CLI user"], "scopeOut": [],
         "stories": [{"handle": "greeting", "feature": "Personal greeting", "story": "Greet a visitor by name",
                      "outcome": "The reply contains the supplied name", "constraints": [], "sources": []}],
         "constraints": [], "quality": [{"handle": "clear", "criterion": "Readable greeting",
@@ -259,8 +263,9 @@ def tiny_round_example():
 
 
 def consequential_round_example():
-    return {"vision": {"understanding": "Compare two noise filters on repeatable input", "size": "medium",
-        "sizeWhy": "Saving reference runs and measuring them share the same local workflow",
+    return {"vision": {"understanding": "Compare two noise filters on repeatable input", "size": "tiny",
+        "sizeWhy": "Like a local simulation bench, one agent can build and verify it in minutes using shared "
+                   "local data; adding live hardware calibration would increase the effort.",
         "users": ["Audio engineer choosing a filter"], "constraints": [{"handle": "launch",
             "value": "python server.py --port PORT --data DIR", "meaning": "Start the local bench",
             "source": "kickoff"}], "scopeOut": [{"outcome": "Hardware playback", "sources": []}],

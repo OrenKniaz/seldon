@@ -171,7 +171,7 @@ class Run:
             brief["facts"].update(architecture.planning_approach(
                 setup, vision, continuing=bool(gaps or built)))
             inference.call(store, self.provider, brief,
-                check=lambda a: architecture.outline(a, vision),
+                check=lambda a: architecture.outline(a, vision, record=store.record),
                 consume=consume, field="areas/contracts/decisions/waves")
         elif state == "DETAIL":
             detail.step(store, self.provider, self.capacity)

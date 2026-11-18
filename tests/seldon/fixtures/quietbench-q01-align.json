@@ -1,0 +1,189 @@
+{
+  "facts": {
+    "Dream": "Build Quiet Bench, a noise-cancelling test bench that runs on this PC with no audio hardware. Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network. I can generate a noise signal (tones, band noise) or import a WAV\nfile; the bench simulates the acoustic path from the noise source to the ear, runs an adaptive canceller (LMS family) against it and\ntells me how much was cancelled in each frequency band. Every session is saved on a small local storage server\n(`python server.py --port PORT --data DIR`) with its settings and results, and a web page on that server lets me start a run, browse\nsaved sessions, reload one and compare two. A command line (`python bench.py run|list|show|export`) does the same without the page.\nA limiter must hold the output inside a safe level when the filter diverges, and a stop switch ends a run at once.\n\nAudience and preferences:\n{\"audience\": \"an audio engineer trying ideas before buying hardware\", \"care\": \"numbers I can trust and a bench that never blasts\", \"tone\": \"calm, exact, instrument-like\", \"platform\": \"local Windows, Python 3.12 stdlib, modern desktop browser\", \"defaults\": \"no accounts, network, deployment or paid assets; ask before scope changes\"}\n\nShared black-box interface:\n{\"note\": \"Black-box fight interface, supplied equally to both contenders; message above is verbatim. No extra runtime dependencies.\", \"cli\": \"bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV.\", \"api\": \"POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a.\", \"settings\": {\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}, \"wav\": \"signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate.\", \"session\": \"id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input.\", \"page\": \"Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands.\"}",
+    "Runtime": {
+      "node": "C:\\nvm4w\\nodejs\\node.EXE",
+      "python": {
+        "path": "C:\\Users\\oren\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+        "version": "3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]"
+      }
+    },
+    "Sources": {
+      "kickoff": "Build Quiet Bench, a noise-cancelling test bench that runs on this PC with no audio hardware. Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network. I can generate a noise signal (tones, band noise) or import a WAV\nfile; the bench simulates the acoustic path from the noise source to the ear, runs an adaptive canceller (LMS family) against it and\ntells me how much was cancelled in each frequency band. Every session is saved on a small local storage server\n(`python server.py --port PORT --data DIR`) with its settings and results, and a web page on that server lets me start a run, browse\nsaved sessions, reload one and compare two. A command line (`python bench.py run|list|show|export`) does the same without the page.\nA limiter must hold the output inside a safe level when the filter diverges, and a stop switch ends a run at once.\n\nAudience and preferences:\n{\"audience\": \"an audio engineer trying ideas before buying hardware\", \"care\": \"numbers I can trust and a bench that never blasts\", \"tone\": \"calm, exact, instrument-like\", \"platform\": \"local Windows, Python 3.12 stdlib, modern desktop browser\", \"defaults\": \"no accounts, network, deployment or paid assets; ask before scope changes\"}\n\nShared black-box interface:\n{\"note\": \"Black-box fight interface, supplied equally to both contenders; message above is verbatim. No extra runtime dependencies.\", \"cli\": \"bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV.\", \"api\": \"POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a.\", \"settings\": {\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}, \"wav\": \"signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate.\", \"session\": \"id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input.\", \"page\": \"Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands.\"}"
+    }
+  },
+  "answer": {
+    "changed": "Kept the ranked local test instrument and corrected the runtime constraint to quote the required value exactly from its source.",
+    "questions": [],
+    "recommendation": "done",
+    "vision": {
+      "constraints": [
+        {
+          "handle": "runtime",
+          "meaning": "Required runtimes and dependency boundary; Node is for page checks.",
+          "source": "kickoff",
+          "value": "Python 3.12 standard library plus Node 20\nfor the page checks; no third-party runtime packages, no network."
+        },
+        {
+          "handle": "launch",
+          "meaning": "Required local storage server entry point.",
+          "source": "kickoff",
+          "value": "python server.py --port PORT --data DIR"
+        },
+        {
+          "handle": "cli",
+          "meaning": "Required command-line interface and output formats.",
+          "source": "kickoff",
+          "value": "bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV."
+        },
+        {
+          "handle": "api",
+          "meaning": "Required server interface and comparison direction.",
+          "source": "kickoff",
+          "value": "POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a."
+        },
+        {
+          "handle": "default-settings",
+          "meaning": "Supplied settings for a reproducible starting run.",
+          "source": "kickoff",
+          "value": "{\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}"
+        },
+        {
+          "handle": "wav",
+          "meaning": "Required imported-signal format.",
+          "source": "kickoff",
+          "value": "signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate."
+        },
+        {
+          "handle": "session",
+          "meaning": "Required saved and emitted session shape, including wave-1 legacy input compatibility.",
+          "source": "kickoff",
+          "value": "id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input."
+        },
+        {
+          "handle": "page-contract",
+          "meaning": "Required accessible page controls, result hooks and usage documentation.",
+          "source": "kickoff",
+          "value": "Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands."
+        }
+      ],
+      "quality": [
+        {
+          "constraints": [
+            "runtime",
+            "default-settings",
+            "wav",
+            "session"
+          ],
+          "criterion": "Results distinguish simulated performance from real-world acoustic performance and explain band attenuation, signal levels and limiter intervention without presenting incomplete runs as completed.",
+          "handle": "trust",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run known tone and WAV cases, independently check band calculations against saved samples, and inspect completed and stopped session displays."
+        },
+        {
+          "constraints": [
+            "runtime",
+            "session",
+            "api"
+          ],
+          "criterion": "The simulated output never exceeds the configured limiter magnitude, including during divergence; stopping promptly ends processing and preserves an honest stopped status and processed sample count.",
+          "handle": "safety",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run a deliberately unstable configuration and inspect every output sample; stop a long-running session and verify processing ends and its saved status and count agree."
+        },
+        {
+          "constraints": [
+            "runtime",
+            "page-contract"
+          ],
+          "criterion": "A calm, exact bench-instrument visual direction uses strong contrast, deliberate offline typography, clear hierarchy and accessible controls; interaction remains usable with keyboard and reduced motion.",
+          "handle": "visual",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Inspect the served page in a modern desktop browser, navigate and operate it by keyboard, check reduced-motion behavior and confirm a clean console."
+        },
+        {
+          "constraints": [
+            "launch",
+            "cli",
+            "api",
+            "session",
+            "page-contract"
+          ],
+          "criterion": "A saved session can be found, reloaded and compared consistently through the page and command line; invalid inputs and unavailable data produce clear errors rather than misleading results.",
+          "handle": "repeatable",
+          "sources": [
+            "kickoff"
+          ],
+          "verification": "Run, restart the server, reload and compare saved sessions through the page and API, and list, show and export them through the CLI; exercise invalid settings and missing IDs."
+        }
+      ],
+      "scopeOut": [
+        {
+          "outcome": "Audio hardware playback, physical safety guarantees, accounts, deployment and paid assets.",
+          "sources": [
+            "kickoff"
+          ]
+        }
+      ],
+      "size": "medium",
+      "sizeWhy": "No comparable starting implementation is established. A local signal-processing application with persistent sessions, an interruptible run path, CLI, HTTP API and accessible browser interface is expected to take one capable agent weeks. The biggest uncertainty is proving trustworthy band measurements and prompt stopping while preserving the required legacy session contract.",
+      "stories": [
+        {
+          "constraints": [
+            "runtime",
+            "default-settings",
+            "wav",
+            "session"
+          ],
+          "feature": "Simulate and measure cancellation",
+          "handle": "measure",
+          "outcome": "The engineer can judge whether an idea reduces noise by band, with the settings and samples needed to understand the result; simulation is not a promise of hardware performance.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, generate tones or band noise or import a WAV, simulate the acoustic path and run an LMS-family canceller."
+        },
+        {
+          "constraints": [
+            "session",
+            "api"
+          ],
+          "feature": "Limit and stop safely",
+          "handle": "safety-control",
+          "outcome": "The engineer can interrupt a run and see whether limiting occurred, rather than mistake divergence or partial processing for a valid completed result.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, limit simulated anti-noise output and stop a run immediately when a configuration misbehaves."
+        },
+        {
+          "constraints": [
+            "launch",
+            "cli",
+            "api",
+            "session",
+            "page-contract"
+          ],
+          "feature": "Save, reload and compare",
+          "handle": "sessions",
+          "outcome": "The engineer can revisit the decision tomorrow from saved settings and results, and see per-band change as B minus A.",
+          "sources": [
+            "kickoff"
+          ],
+          "story": "As an audio engineer, browse and reload saved sessions and compare two runs on the local page or without it from the command line."
+        }
+      ],
+      "understanding": "Quiet Bench is a local, hardware-free test instrument for an audio engineer deciding which cancellation ideas merit further investigation. Band metrics can mislead if treated as real-world performance, if limiter intervention is hidden, or if a stopped run looks complete. Tomorrow the engineer needs the saved settings, status, processed count, band results and sample arrays, plus documented commands, to inspect and repeat the experiment.",
+      "users": [
+        "Audio engineer evaluating cancellation ideas before buying hardware"
+      ]
+    },
+    "why": "The supplied interface and defaults settle the product without a material unanswered choice. The proposal preserves the required local interfaces and makes simulation limits, intervention and repeatability central to the engineer’s decision."
+  }
+}

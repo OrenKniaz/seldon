@@ -147,7 +147,7 @@ def detail_areas(outline, wave, previous=None):
             or changed.intersection([a["handle"], *a.get("ancestors", [])])]
 
 
-def outline(answer, vision=None):
+def outline(answer, vision=None, *, record=None):
     if "scope" in answer:
         return answer
     assigned_waves = {r for w in answer["waves"] for r in w["commitments"]}
@@ -181,8 +181,8 @@ def outline(answer, vision=None):
     if areas.keys() & contracts.keys():
         raise ValueError("Area and contract handles must be distinct")
     for ref, area in areas.items():
-        for path in area["scope"]:
-            plan.safe_path(path)
+        area["scope"] = plan.product_scope(area["scope"], "areas.scope", ref, record)
+    for ref, area in areas.items():
         for other, sibling in areas.items():
             if ref < other and plan.overlaps(area["scope"], sibling["scope"]):
                 raise Mismatch("areas.scope", f"Seldon expected disjoint write scopes; got "
@@ -201,7 +201,7 @@ def outline(answer, vision=None):
     return areas, contracts
 
 
-def local_plan(area, contracts, answer, vision):
+def local_plan(area, contracts, answer, vision, *, record=None):
     """Check ownership before merging; canonical trace validation runs on the merged document."""
     vision = vision_body(vision)
     grown = "stories" in vision
@@ -227,9 +227,8 @@ def local_plan(area, contracts, answer, vision):
                 raise Mismatch(f"edits.typedBody.{field}", f"Seldon expected this area's {kind} "
                     f"handles {[h for h, k in handles.items() if k == kind]}; got {edit['typedBody'][field]}. "
                     "Send the matching local handles from this answer's edits.")
-    for unit in answer["units"]:
-        for path in unit["scope"]:
-            plan.safe_path(path)
+    for i, unit in enumerate(answer["units"], 1):
+        unit["scope"] = plan.product_scope(unit["scope"], "units.scope", f"{area['handle']} unit:{i}", record)
         missing = [p for p in unit["scope"]
                    if not any(plan.contains(s, p) for s in area["scope"])]
         if missing:
@@ -255,7 +254,7 @@ def local_plan(area, contracts, answer, vision):
     plan.validate_owned_work(document)
 
 
-def subdivision(parent, answer, known_contracts):
+def subdivision(parent, answer, known_contracts, *, record=None):
     validate_schema({k: v for k, v in answer.items() if k != "why"}, DETAIL_SPLIT)
     children = index(answer["subareas"])
     if {r for c in children.values() for r in c["commitments"]} != set(parent["commitments"]):
@@ -264,6 +263,7 @@ def subdivision(parent, answer, known_contracts):
         raise ValueError("Sub-areas need new distinct handles")
     # A split must narrow every child's ownership, preserving every parent path scope.
     for child in children.values():
+        child["scope"] = plan.product_scope(child["scope"], "subareas.scope", child["handle"], record)
         if (child["scope"] == parent["scope"] or not all(
                 any(plan.contains(s, p) for s in parent["scope"]) for p in child["scope"])):
             raise ValueError("Sub-area scopes must narrow the parent area")
@@ -276,10 +276,10 @@ def subdivision(parent, answer, known_contracts):
     return children
 
 
-def expand(architecture, parent, answer):
+def expand(architecture, parent, answer, *, record=None):
     """Preserve parent agreements across a split; merge resolves the unique implementing unit."""
     result = deepcopy(architecture)
-    children = subdivision(parent, answer, index(result["contracts"]))
+    children = subdivision(parent, answer, index(result["contracts"]), record=record)
     if children.keys() & index(result["areas"]).keys():
         raise ValueError("Sub-area handles must be distinct from existing areas")
     result["areas"] = [a for a in result["areas"] if a["handle"] != parent["handle"]]
