@@ -75,6 +75,18 @@ def call(store, provider, question, unit=None, check=lambda answer: None, retrie
                     finished = len(previous["waves"]) - len(facts.get("Remaining waves", previous["waves"]))
                     answer = {**architecture.merge(previous, answer, completed=previous["waves"][:finished]),
                               "why": answer["why"]}
+                    current = store.cursor().wave
+                    if len(answer["waves"]) < current:
+                        # Steering after closed waves needs a next wave. Normalise when the answer
+                        # carries commitments no wave holds; otherwise ask once in plain words.
+                        planned = {c for w in answer["waves"] for c in w["commitments"]}
+                        open_ = sorted({c for a in answer["areas"] for c in a["commitments"]} - planned)
+                        if open_:
+                            answer["waves"].append({"goal": "Deliver the requested change", "commitments": open_})
+                        else:
+                            raise Mismatch("waves", f"Seldon has closed {current - 1} wave(s) and is planning "
+                                f"wave {current}, but your waves list has {len(answer['waves'])}. Add the "
+                                "next wave: its goal and the commitments it delivers for the requested change.")
                 if answer.get("verdict") != "uncertain":
                     if answer.get("verdict") == "gap" and not answer["gaps"]:
                         raise Mismatch("gaps", "Seldon expected the corrections behind a gap verdict; "
