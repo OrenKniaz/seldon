@@ -342,6 +342,9 @@ def installed_codex():
             "browserReadPaths": browser}
 
 
+FULL_ACCESS = False
+
+
 def native_options(workspace, inputs, scratch, setup, denied):
     # Use the provider's local permission profile. No full-access fallback or global config changes.
     prefix = "permissions.replay.filesystem"
@@ -393,27 +396,33 @@ def invoke(setup, input_dir, workspace, result_dir, record, private, worker):
     command = [*setup["codexCommand"], *options, "sandbox", "--permission-profile", "replay",
                "--include-managed-config", "--cd", str(workspace), "--", setup["python"],
                "-I", "-B", "-c", PROBE, str(input_dir / "schema.json"), *map(str, denied)]
-    probe = providers.execute(command, workspace, 60, env=env, output_dir=result_dir)
-    if (probe["exitCode"] != 0 or not probe["cleanupVerified"]
+    probe = None if FULL_ACCESS else providers.execute(command, workspace, 60, env=env, output_dir=result_dir)
+    if probe is not None and (probe["exitCode"] != 0 or not probe["cleanupVerified"]
             or b"replay sandbox verified" not in probe["stdout"]):
         put(result_dir / "sandbox.log", probe["stdout"] + b"\n" + probe["stderr"])
         raise RuntimeError("Native sandbox did not verify private reads are denied and work is writable")
     config = {"cwd": workspace, "model": MODEL, "effort": EFFORT}
     images = sorted(input_dir.glob("image-*.png"))
     command = providers.codex_command(setup, config, input_dir, worker, None, images)
-    command.remove('sandbox_mode="danger-full-access"')
-    # Remove that option's flag as well, preserving all other provider defaults.
-    approval_option = command.index('approval_policy="never"')
-    del command[approval_option + 1]
-    command[-1:-1] = ["--ephemeral", *options] if worker else options
+    if not FULL_ACCESS:
+        command.remove('sandbox_mode="danger-full-access"')
+        # Remove that option's flag as well, preserving all other provider defaults.
+        approval_option = command.index('approval_policy="never"')
+        del command[approval_option + 1]
+        command[-1:-1] = ["--ephemeral", *options] if worker else options
+    elif worker:
+        command[-1:-1] = ["--ephemeral"]
     result = providers.execute(command, workspace, TIMEOUT, input_dir / "prompt.txt", env, result_dir)
     stdout = result.pop("stdout")
-    put(result_dir / "stdout.bin", stdout)
-    put(result_dir / "stderr.bin", result.pop("stderr"))
+    # providers.execute may already have stored the streams in result_dir; keep its copy.
+    for name, data in (("stdout.bin", stdout), ("stderr.bin", result.pop("stderr"))):
+        if not (result_dir / name).exists():
+            put(result_dir / name, data)
     output = stdout.decode(errors="replace")
     usage = [event.get("usage") for line in output.splitlines() if (event := stream_event(line))
              and event.get("type") == "turn.completed"]
-    result.update(promptBytes=(input_dir / "prompt.txt").stat().st_size, retries=0,
+    result.update(confinement="full-access (same as Seldon runs; Oren 11-14)" if FULL_ACCESS else "native sandbox",
+                  promptBytes=(input_dir / "prompt.txt").stat().st_size, retries=0,
                   tokens=usage[-1] if usage else None)
     put_json(result_dir / "runtime.json", result)
     if not result["cleanupVerified"]:
@@ -754,6 +763,8 @@ def main():
     gen.add_argument("root", type=Path)
     gen.add_argument("--run-terra", required=True, action="store_true")
     gen.add_argument("--semantic", action="store_true", help="Generate semantic pairs instead of WORK")
+    gen.add_argument("--full-access", action="store_true",
+                     help="Skip the native sandbox preflight and run like Seldon's own calls (Windows elevated sandbox cannot deny :root)")
     sample = commands.add_parser("import-samples", help="Import sample outcomes by private label")
     sample.add_argument("root", type=Path)
     sample.add_argument("outputs", type=Path)
@@ -788,6 +799,8 @@ def main():
         if args.command == "prepare":
             prepare(args.root.resolve(), args.recordings.resolve(), tuple(args.case or CASES))
         elif args.command == "generate":
+            global FULL_ACCESS
+            FULL_ACCESS = args.full_access
             generate(args.root.resolve(), args.semantic)
         elif args.command == "import-samples":
             import_samples(args.root, args.outputs)
