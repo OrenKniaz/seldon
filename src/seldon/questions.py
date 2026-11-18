@@ -464,8 +464,10 @@ def work_brief(store, ref):
              "Existing checks": plan.assigned(document)[ref],
              "Execution facts": execution_facts(store, ref),
              "Quality bar": [c["criterion"] for c in plan.select(document, "criterion").values()]}
-    if any("visual direction" in c["criterion"].lower() for c in plan.select(document, "criterion").values()
-           if c["area"] == contract["area"]):
+    # A sole owner builds the whole experience, page included; never gate its craft on criterion wording.
+    if len(plan.select(document, "unit")) == 1 or any(
+            "visual direction" in c["criterion"].lower() for c in plan.select(document, "criterion").values()
+            if c["area"] == contract["area"]):
         facts["Design guidance used by UI workers"] = CRAFT
     refs = []
     if assignment := fixups.active(store, ref):
