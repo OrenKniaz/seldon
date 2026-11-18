@@ -16,6 +16,82 @@ from seldon.run import Run
 
 @pytest.mark.fast
 @pytest.mark.parametrize("repeat", [False, True])
+def test_quietbench_skeleton_commitments_journey(tmp_path, repeat):
+    """Replay the real skeleton with a goal but no work through approval and into EXECUTE.
+
+    Unlike duplicate-handle cases, every handle in the saved answer is valid. The bug
+    is that DETAIL would ask nobody. The repeated reply must reach planner and user.
+    """
+    from seldon import decisions
+
+    recorded = json.loads((Path(__file__).parent / "fixtures/quietbench-a01-planning.json")
+                          .read_text(encoding="utf-8"))
+    scopes = {"simulation": ("simulation/**", "scopeIn:2", "Run a tone through a fixed filter"),
+              "service": ("server.py", "scopeIn:10", "Save the session and reopen it after restart"),
+              "experience": ("web/**", "scopeIn:5", "Show the saved tone run in the page")}
+    slot = tmp_path / "quietbench"
+    run, _ = prepare(slot)
+    corrections, detailed, recovery = [], {}, []
+
+    class QuietBench(Scripted):
+        def __call__(self, q):
+            strict_schema(q["schema"])
+            kind, facts = q["kind"], q["facts"]
+            if kind == "ALIGN":
+                return json.dumps(recorded[kind])
+            if kind == "ARCHITECT":
+                body = deepcopy(recorded[kind])
+                if "Exact corrections" in facts:
+                    corrections.append(facts["Exact corrections"][0]["Errors"][0])
+                    if not repeat:
+                        body["answer"]["waves"][0]["commitments"] = [c for _, c, _ in scopes.values()]
+                return json.dumps(body)
+            if kind == "DETAIL":
+                area = facts["Area"]["handle"]
+                scope, _, behavior = scopes[area]
+                detailed[area] = list(facts["Accepted commitments"])
+                return json.dumps({"answer": {"verdict": "planned", "edits": [
+                    {"kind": "feature", "targetHandle": "slice",
+                     "typedBody": {"story": behavior, "acceptance": behavior}},
+                    {"kind": "requirement", "targetHandle": "proof",
+                     "typedBody": {"features": ["slice"], "acceptance": behavior}}],
+                    "units": [{"scope": [scope], "requirements": ["proof"], "dependencies": [],
+                               "instructions": behavior}], "why": "Deliver the fixed-tone skeleton."}})
+            if kind == "COACH":
+                recovery.append(str(facts["Unresolved work"]))
+            return super().__call__(q)
+
+    def user(item):
+        if "step" in item["subject"]:
+            recovery.append(item["ask"]["question"])
+            assert item["ask"]["options"][0]["effect"] == "pause"
+            raise decisions.Waiting()
+        return approve(item)
+
+    run.provider, run.user = QuietBench(slot), user
+    try:
+        if repeat:
+            assert run.run().state == "ARCHITECT"
+            assert len(corrections) == 2
+            assert len(recovery) == 2 and all(corrections[0] in message for message in recovery)
+            assert not detailed
+        else:
+            for _ in range(12):
+                if run.step() == "EXECUTE":
+                    break
+            assert run.store.cursor().state == "EXECUTE"
+            assert plan.approved(run.store) and not run.store.records("step_failure")
+            assert detailed == {area: [commitment] for area, (_, commitment, _) in scopes.items()}
+            assert len(corrections) == 1 and not recovery
+        reason = corrections[0]
+        assert all(word in reason for word in ("wave 1", "wave 2", "wave 3", "expected", "got []",
+                                               "Send", "scopeIn:2", *scopes))
+    finally:
+        run.close()
+
+
+@pytest.mark.fast
+@pytest.mark.parametrize("repeat", [False, True])
 def test_answer_consumption_repair_golden(tmp_path, repeat):
     """An unusable but schema-valid architecture is corrected before asking the user.
 

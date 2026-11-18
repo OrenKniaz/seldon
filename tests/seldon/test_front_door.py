@@ -111,7 +111,8 @@ def test_chat_controls_and_continuity_golden(tmp_path, capsys):
                 b = await wait(run, 'B')
                 await call('answer', run=run, request=b['waitingFor']['request'], words='Build this plan')
                 slot = tmp_path / 'continue'
-                with anyio.fail_after(40):
+                # The marker follows the first unit's integration, which shares the parallel gate.
+                with anyio.fail_after(90):
                     while not (slot / 'kill-ready').exists():
                         await anyio.sleep(.05)
                 pid = int((slot / 'kill-ready').read_text())
@@ -245,7 +246,7 @@ def test_answer_file_continuity_journey(tmp_path, fault):
                         approvals = [row for _, _, row in store.records('approval') if row['request'] == a]
                         assert len(approvals) == 1
                     await call('answer', request=b, words='Build this plan')
-                    with anyio.fail_after(40):
+                    with anyio.fail_after(90):
                         while not (slot / 'kill-ready').exists():
                             await anyio.sleep(.02)
                     if fault == 'live':

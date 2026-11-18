@@ -140,6 +140,16 @@ def outline(answer, vision=None):
     if vision is not None and assigned != set(commitments(vision)):
         raise Mismatch("areas.commitments", f"Seldon expected the accepted commitment handles "
             f"{list(accepted)}; got {sorted(assigned)}. Send every accepted handle assigned to an area.")
+    if vision is not None and not detail_areas(answer, 1):
+        first, *later = answer["waves"]
+        later_work = ", ".join(f"wave {i} has {w['commitments']}" for i, w in enumerate(later, 2))
+        owners = {ref: area["commitments"] for ref, area in areas.items()}
+        raise Mismatch("waves.commitments", f"For wave 1 ({first['goal']}), Seldon expected "
+            "commitment handles owned by an area so it can plan the first working slice. "
+            f"It got {first['commitments']} with no match among these areas: {owners}. "
+            + (f"Later assignments: {later_work}. " if later else "")
+            + "Send wave 1 with the area-owned commitments it starts, and keep them in later waves "
+            "when those waves still have work on them.")
     if areas.keys() & contracts.keys():
         raise ValueError("Area and contract handles must be distinct")
     for ref, area in areas.items():

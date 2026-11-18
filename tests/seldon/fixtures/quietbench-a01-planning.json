@@ -1,0 +1,231 @@
+{
+  "ALIGN": {
+    "answer": {
+      "alternatives": [
+        {
+          "label": "Thinner bench",
+          "means": "Deliver only Wave 1 now, then agree on the adaptive and safety behavior after seeing it."
+        },
+        {
+          "label": "One final delivery",
+          "means": "Build all three waves but review only the finished bench rather than showing each wave."
+        },
+        {
+          "label": "More signal analysis",
+          "means": "Agree separately on richer plots or additional analysis beyond the specified band results."
+        }
+      ],
+      "improvements": [
+        "Make the signal flow and measurement conventions understandable so an engineer can interpret results rather than just see numbers.",
+        "Keep the page focused on setting up a run, inspecting its outcome, and comparing saved work; make running, stopped, and completed states unmistakable."
+      ],
+      "quality": [
+        {
+          "criterion": "The local interface has a calm, exact, instrument-like visual direction: high-contrast measurement readouts, deliberate offline typography, and restrained controls.",
+          "verification": "Open the served page in a modern desktop browser; inspect hierarchy, contrast, labelled controls, keyboard operation, reduced-motion behavior, and the browser console."
+        },
+        {
+          "criterion": "Each wave demonstrates its promised working behavior, with sessions surviving a server restart and remaining accessible through the applicable interfaces.",
+          "verification": "Run the documented wave examples, restart the server, and inspect saved sessions using the page and CLI."
+        },
+        {
+          "criterion": "Cancellation numbers are reproducible and interpretable, including their band boundaries and the calculation convention used.",
+          "verification": "Run known tone and fixed-filter cases, independently check the reported band attenuation, and compare identical runs for zero delta."
+        },
+        {
+          "criterion": "The limiter bounds every reported output sample, and stopping an active run promptly records its actual processed length and stopped status.",
+          "verification": "Run a deliberately divergent case and inspect the output array and limited flag; stop a sufficiently long active run and inspect its persisted status and processed_samples."
+        },
+        {
+          "criterion": "The documented local workflow works without audio hardware, network access, or third-party runtime packages.",
+          "verification": "Follow docs/try-it.md on the supplied Windows runtime with network access disabled, including a generated signal and a compatible WAV import."
+        }
+      ],
+      "scopeIn": [
+        "Build Quiet Bench, a noise-cancelling test bench that runs on this PC with no audio hardware. Python 3.12 standard library plus Node 20 for the page checks; no third-party runtime packages, no network.",
+        "Generate a noise signal (tones, band noise) or import a WAV file; simulate the acoustic path from the noise source to the ear, run an adaptive canceller (LMS family), and report cancellation in each frequency band.",
+        "Every session is saved on a small local storage server (`python server.py --port PORT --data DIR`) with its settings and results. Its web page starts runs, browses saved sessions, reloads one and compares two. A command line (`python bench.py run|list|show|export`) does the same without the page.",
+        "A limiter must hold the output inside a safe level when the filter diverges, and a stop switch ends a run at once.",
+        "Build and show three waves: Wave 1: the thinnest thing that runs end to end, one tone through a fixed filter, saved and shown. Wave 2: the adaptive filter, attenuation per band, browse and reload. Wave 3: compare runs, limiter and stop switch, WAV import.",
+        "CLI contract: bench.py run --data DIR --settings JSON; list --data DIR; show ID --data DIR; export ID --data DIR. run/show emit session JSON; list emits an array; export emits CSV.",
+        "API contract: POST /api/runs with settings -> session (asynchronous allowed); GET /api/sessions -> array; GET /api/sessions/ID -> session; POST /api/runs/ID/stop; GET /api/compare?a=ID&b=ID -> array of bands with low, high, delta_db = b minus a.",
+        "Settings example: {\"sample_rate\": 8000, \"samples\": 8192, \"signal\": {\"kind\": \"tones\", \"frequencies\": [500, 1500], \"amplitude\": 0.2}, \"path\": [0.8, 0, 0.2], \"filter\": \"lms\", \"step_size\": 0.05, \"limit\": 0.8, \"block_size\": 128, \"bands\": [[0, 1000], [1000, 4000]]}.",
+        "WAV contract: signal = {kind: wav, path: absolute WAV path}; 16-bit mono, same sample rate.",
+        "Session contract: id, settings, status (running/completed/stopped), limited (boolean), processed_samples, bands [{low, high, attenuation_db}], desired/residual/output sample arrays (before cancellation, error, limited anti-noise). Preserve this JSON as wave-1 legacy input.",
+        "Page contract: Accessible labelled textarea[name=settings] (JSON), Start run button, [data-session-id=ID] saved session buttons, select[name=compare-a], select[name=compare-b], Compare button and [data-comparison] result. Show session id and band numbers. docs/try-it.md gives actual start/stop and CLI commands."
+      ],
+      "scopeOut": [
+        "Audio hardware playback or real-world acoustic safety certification.",
+        "Accounts, network access, deployment, paid assets, and third-party runtime packages.",
+        "Additional analysis or scope changes not agreed with the user."
+      ],
+      "size": "large",
+      "understanding": "A local, offline acoustic simulation and adaptive-cancellation workbench, delivered visibly in three waves, with trustworthy measurements and bounded simulated output.",
+      "users": [
+        "An audio engineer trying ideas before buying hardware."
+      ],
+      "why": "The staged delivery is intentionally thin at first, but signal processing, durable shared sessions, interoperable CLI and API contracts, and observable stopping and limiting make the complete outcome a large piece of work."
+    }
+  },
+  "ARCHITECT": {
+    "answer": {
+      "areas": [
+        {
+          "commitments": [
+            "scopeIn:2",
+            "scopeIn:4",
+            "scopeIn:8",
+            "scopeIn:9",
+            "quality:3",
+            "quality:4"
+          ],
+          "handle": "simulation",
+          "responsibility": "Implement deterministic signal generation, acoustic simulation, cancellation, measurements, limiting and cooperative stopping.",
+          "scope": [
+            "simulation/**",
+            "checks/simulation/**"
+          ]
+        },
+        {
+          "commitments": [
+            "scopeIn:1",
+            "scopeIn:3",
+            "scopeIn:6",
+            "scopeIn:7",
+            "scopeIn:10",
+            "quality:2"
+          ],
+          "handle": "service",
+          "responsibility": "Own the local server, CLI, run lifecycle and durable session storage.",
+          "scope": [
+            "server.py",
+            "bench.py",
+            "service/**",
+            "checks/service/**"
+          ]
+        },
+        {
+          "commitments": [
+            "scopeIn:5",
+            "scopeIn:11",
+            "improvements:1",
+            "improvements:2",
+            "quality:1",
+            "quality:5"
+          ],
+          "handle": "experience",
+          "responsibility": "Build the accessible local page and document and demonstrate each wave's offline workflow.",
+          "scope": [
+            "web/**",
+            "docs/**",
+            "checks/experience/**"
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "consumers": [
+            "service"
+          ],
+          "handle": "simulation-run",
+          "kind": "python interface",
+          "provider": "simulation",
+          "text": "Wave 1: simulation.run(settings) returns a JSON-serializable object with limited, processed_samples, bands, desired, residual and output; it raises ValueError for invalid settings. The service supplies id, original settings and completed status. The supported Wave 1 settings are sample_rate, samples, signal {kind: 'tones', frequencies: [one frequency], amplitude}, path (FIR coefficients), filter: 'fixed', and fixed_filter (FIR coefficients). Generate x[n] = amplitude*sin(2*pi*frequency*n/sample_rate), with zero initial history; desired is path convolved causally with x, output is the negated fixed_filter convolution with x, and residual is desired + output. Return exactly samples values in each array, processed_samples = samples and limited = false. Return one band covering 0 through Nyquist, with attenuation_db = 10*log10(sum(desired²)/sum(residual²)); reject a case with zero energy in either sum in this wave. Later waves extend this interface for adaptive processing, band measurements, limiting and stopping."
+        },
+        {
+          "consumers": [
+            "experience"
+          ],
+          "handle": "local-http",
+          "kind": "http and page integration",
+          "provider": "service",
+          "text": "Wave 1: serve the page and its assets from web/ on the same localhost origin. POST /api/runs accepts a settings JSON object and synchronously returns the saved completed session as JSON; GET /api/sessions returns a JSON array and GET /api/sessions/ID returns the saved session. Invalid settings return HTTP 400 with JSON {\"error\":\"message\"}; unknown IDs return 404 with the same error shape. A session contains id, settings, status, limited, processed_samples, bands, desired, residual and output as specified by simulation-run. The page submits the labelled settings textarea, shows errors, session ID and band numbers, and can reopen the saved session after restart. Later endpoint additions are specified by compare-stop."
+        },
+        {
+          "consumers": [
+            "experience"
+          ],
+          "handle": "cli-and-storage",
+          "kind": "cli and persistence",
+          "provider": "service",
+          "text": "Wave 1: python server.py --port PORT --data DIR starts the local server; python bench.py run --data DIR --settings JSON prints the completed session JSON, and python bench.py show ID --data DIR prints that same persisted session JSON. Both use the same data directory and session representation; completed runs survive server restart and can be read through either interface. Errors go to stderr with a nonzero exit status. Later waves add list and CSV export while preserving Wave 1 session JSON as readable legacy input."
+        },
+        {
+          "consumers": [
+            "simulation",
+            "experience"
+          ],
+          "handle": "measurement-conventions",
+          "kind": "measurement",
+          "provider": "service",
+          "text": "Wave 2 agreement: define reproducible band boundaries, spectral energy and zero-energy conventions consistently across computation, persisted sessions and documentation."
+        },
+        {
+          "consumers": [
+            "experience"
+          ],
+          "handle": "compare-stop",
+          "kind": "http and lifecycle",
+          "provider": "service",
+          "text": "Wave 3 agreement: asynchronous run status and prompt stop, plus band-aligned comparison with delta_db equal to B minus A."
+        }
+      ],
+      "decisions": [
+        {
+          "areas": [
+            "simulation",
+            "service",
+            "experience"
+          ],
+          "choice": "Use a synchronous fixed-filter run for the first end-to-end slice; introduce asynchronous lifecycle only when stop is implemented.",
+          "origin": "architecture",
+          "reason": "It makes the first demonstration small without precluding the required later stop behavior."
+        },
+        {
+          "areas": [
+            "simulation",
+            "service"
+          ],
+          "choice": "Use the same local session store for CLI and server, retaining the Wave 1 session JSON as readable legacy input.",
+          "origin": "user",
+          "reason": "Saved work must survive restarts and remain accessible from both interfaces."
+        }
+      ],
+      "waves": [
+        {
+          "commitments": [],
+          "goal": "Show one generated tone through a fixed filter, saved and displayed through the page and CLI; restart the server and reopen it. This establishes the first slice of the cross-wave commitments."
+        },
+        {
+          "commitments": [
+            "scopeIn:2",
+            "scopeIn:8",
+            "scopeIn:10",
+            "quality:3",
+            "improvements:1"
+          ],
+          "goal": "Add tone and band-noise generation, LMS cancellation, interpretable per-band attenuation, and saved-session browsing and reload; demonstrate the documented cases and persistence."
+        },
+        {
+          "commitments": [
+            "scopeIn:1",
+            "scopeIn:3",
+            "scopeIn:4",
+            "scopeIn:5",
+            "scopeIn:6",
+            "scopeIn:7",
+            "scopeIn:9",
+            "scopeIn:11",
+            "improvements:2",
+            "quality:1",
+            "quality:2",
+            "quality:4",
+            "quality:5"
+          ],
+          "goal": "Complete comparison, limiter, prompt stop, compatible WAV import, full CLI and page contracts, and the offline documented workflow; demonstrate bounded output, actual stopped length, comparison and restart recovery."
+        }
+      ],
+      "why": "Three disjoint owners can start from the Wave 1 simulation, HTTP and persistence agreements in parallel. Commitments spanning waves are assigned to the wave where their full promise is complete; earlier slices are explicit in the wave goals. Later shared agreements are intentionally deferred until their wave is next."
+    }
+  }
+}
